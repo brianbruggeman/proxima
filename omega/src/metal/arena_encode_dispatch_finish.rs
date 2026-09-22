@@ -384,33 +384,12 @@ pub(super) fn cached_attention_scratch_len(bound: &BoundOp, numeric_policy: Nume
         head_dim,
         query_rows,
         cached_key_rows,
-        query_groups,
         new_key_rows,
-        two_pass,
         ..
     } = &bound.kind
     else {
         return None;
     };
-    // Part E (item 1): `render_cached_attention_two_pass`'s own `device
-    // float* scratch` layout (`omega/src/msl/cached_attention_two_pass.rs`'s
-    // own `two_pass_scratch_elements`) is a COMPLETELY different shape from
-    // the online-softmax split path's below -- one flat region backing
-    // 134/135/139/142/154/162/164 at compile-time offsets, sized off
-    // `query_groups`/`head_dim`/`cached_key_rows` alone, never `splits`
-    // (a two_pass op never splits its context range across threadgroups --
-    // `grid_threads`'s own `two_pass` arm). Checked first so this stays the
-    // ONE size formula both `attention_scratch_buffer`'s lazy builder and
-    // `encode_op`'s own cold-path fallback allocation read, for either
-    // scratch shape.
-    if *two_pass {
-        return Some(crate::msl::two_pass_scratch_elements(
-            *query_groups,
-            *head_dim,
-            *cached_key_rows,
-            false,
-        ));
-    }
     let total_elements = bound
         .extents
         .iter()
@@ -847,30 +826,20 @@ pub(super) fn encode_op(
     };
     // `Some` only from `execute_plan_with_placements` (a `Plan`-owned,
     // call-to-call-reused buffer via `attention_scratch_buffer`). Every
-    // other caller with a merge dispatch to satisfy, OR a `two_pass: true`
-    // `CachedAttention` op (Part E item 1: its own `Binding::Scratch` slot,
-    // never a merge dispatch) falls back to a fresh, throwaway one, sized by
-    // the SAME formula the plan-owned path uses (`cached_attention_
-    // scratch_len`, which now branches on `two_pass` itself) -- correctness
-    // first, plan-owned reuse is that call site's own optimization, not a
-    // requirement this function imposes on every caller.
-    let bound_is_two_pass = matches!(
-        bound.kind,
-        BoundOpKind::CachedAttention {
-            two_pass: true,
-            ..
-        }
-    );
-    let owned_scratch: Option<MetalBuffer> =
-        if scratch.is_none() && (merge.is_some() || bound_is_two_pass) {
-            Some(allocate_buffer(
-                device,
-                cached_attention_scratch_len(bound, numeric_policy).unwrap_or(0) as usize,
-                DType::Float32,
-            )?)
-        } else {
-            None
-        };
+    // other caller with a merge dispatch to satisfy falls back to a fresh,
+    // throwaway one, sized by the SAME formula the plan-owned path uses
+    // (`cached_attention_scratch_len`) -- correctness first, plan-owned
+    // reuse is that call site's own optimization, not a requirement this
+    // function imposes on every caller.
+    let owned_scratch: Option<MetalBuffer> = if scratch.is_none() && merge.is_some() {
+        Some(allocate_buffer(
+            device,
+            cached_attention_scratch_len(bound, numeric_policy).unwrap_or(0) as usize,
+            DType::Float32,
+        )?)
+    } else {
+        None
+    };
     let scratch: Option<(&MetalBuffer, usize)> = match &owned_scratch {
         Some(buffer) => Some((buffer, 0)),
         None => scratch,
@@ -1044,6 +1013,47 @@ pub(super) fn encode_op(
             device_buffers.insert(*extra_node, (extra_buffer, extra_offset));
         }
     }
+    // `render_cached_softmax_weights`'s own three extra outputs (buffers 5,
+    // 6, 7 -- `bindings.len()` is already 5: three operand inputs, the
+    // primary output, the uniforms slot): same "resolve from `device_
+    // buffers`, or allocate fresh" shape as `MoeTopK`'s own arm just above,
+    // but each buffer's real element count (not a placeholder `1`) --
+    // `cached_weight_sum`/`new_weight_sum` are one value per attention row,
+    // `new_attended` is `attention_rows * head_dim` (this op's own doc).
+    if let BoundOpKind::CachedSoftmaxWeights {
+        cached_weight_sum,
+        new_weight_sum,
+        new_attended,
+        attention_rows,
+        head_dim,
+        ..
+    } = &bound.kind
+    {
+        let extra_nodes_and_counts: [(NodeId, usize); 3] = [
+            (*cached_weight_sum, *attention_rows as usize),
+            (*new_weight_sum, *attention_rows as usize),
+            (*new_attended, (*attention_rows * *head_dim) as usize),
+        ];
+        for (offset, (extra_node, element_count)) in extra_nodes_and_counts.iter().enumerate() {
+            let buffer_index = bindings.len() + offset;
+            let existing = device_buffers.get(extra_node).cloned();
+            let (extra_buffer, extra_offset) = match existing {
+                Some(buffer) => buffer,
+                None => (allocate_buffer(device, *element_count, bound.dtype)?, 0),
+            };
+            unsafe {
+                encoder.setBuffer_offset_atIndex(
+                    Some(&extra_buffer),
+                    extra_offset,
+                    buffer_index,
+                );
+            }
+            if let Some(tracker) = hazard.as_deref_mut() {
+                tracker.record(&[], Some(Retained::as_ptr(&extra_buffer)));
+            }
+            device_buffers.insert(*extra_node, (extra_buffer, extra_offset));
+        }
+    }
     // `splice_round_batched_reduce_base_table`'s own `round_table [[buffer(N)]]`
     // parameter, bound OUTSIDE `bindings` at the exact slot the splice's own
     // MSL text names (`kernel.bindings.len()` at splice time, i.e.
@@ -1070,61 +1080,6 @@ pub(super) fn encode_op(
                 (group.output_buffer.clone(), round * group.output_member_bytes),
             );
         }
-    }
-    // Part E (item 1): a two_pass op's own kernel treats `scratch` as
-    // write-only working memory (134/135/139/142/154/162/164, synchronized
-    // internally by its own `threadgroup_barrier(mem_device|mem_threadgroup)`
-    // calls -- `staged_two_pass_source`'s own doc) -- unlike the split/merge
-    // pair below, there is no SECOND dispatch reading it back here, so the
-    // only cross-op hazard is a fresh WAW/WAR on `scratch` ITSELF (a
-    // plan-owned buffer reused call-to-call via `attention_scratch_buffer`,
-    // or an arena-recycled pointer) from BEFORE this op's own single
-    // dispatch writes it. Checked here, not at the caller's own `hazard_step`
-    // (`placements_execute_named.rs`, which only knows this op's real
-    // `bound.node` output, never its scratch identity), and only under
-    // `DispatchType::Concurrent` -- `Serial` orders every prior use of this
-    // buffer for free, the same reason `hazard` stays `None` there.
-    if matches!(
-        bound.kind,
-        BoundOpKind::CachedAttention {
-            two_pass: true,
-            ..
-        }
-    ) && let (Some(tracker), Some((scratch_buffer, _))) = (&mut hazard, scratch)
-    {
-        let scratch_pointer = Retained::as_ptr(scratch_buffer);
-        if tracker.needs_barrier(&[], Some(scratch_pointer)) {
-            encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-            counter!(BARRIERS_EMITTED, 1);
-            // A barrier is a full flush, so `reset` is correct -- but the
-            // caller's OWN `hazard_step`, before this op was ever
-            // encoded, already recorded this op's real output as
-            // written; restore that record so a later sibling op's own
-            // hazard check still sees it, exactly as if this intra-op
-            // check had never touched the tracker (same restore the
-            // split/merge pair below performs for the identical reason).
-            let output_pointer = Retained::as_ptr(&output);
-            tracker.reset();
-            tracker.record(&[], Some(output_pointer));
-        }
-        tracker.record(&[], Some(scratch_pointer));
-    }
-    // step 2d (width/launch-admission review): once-per-dispatch, not
-    // once-per-shape -- `two_pass` ops recompile per `(head_dim,
-    // cached_key_rows)` bucket, so this line is cheap relative to the
-    // dispatch itself and gives a coverage run a direct requested-vs-limit
-    // trace without a second measurement pass.
-    #[cfg(feature = "instrument")]
-    if let BoundOpKind::CachedAttention { two_pass: true, .. } = &bound.kind
-        && std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some()
-    {
-        let requested = grid.threadgroup_width.unwrap_or(grid.threads);
-        let limit = pipeline.maxTotalThreadsPerThreadgroup() as u64;
-        eprintln!(
-            "two_pass_threadgroup_width node={} requested={requested} pipeline_max_threads={limit} within_limit={}",
-            bound.node.0,
-            requested <= limit
-        );
     }
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
@@ -3133,7 +3088,6 @@ pub(super) mod attention_scratch_len_tests {
                 scale: 0.5,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
-                two_pass: false,
             },
         }
     }
@@ -3257,7 +3211,6 @@ pub(super) mod plan_query_rows_tests {
                 scale: 0.5,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
-                two_pass: false,
             },
         }
     }

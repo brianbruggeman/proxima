@@ -243,6 +243,67 @@ pub(super) fn constant_value(program: &[Op], node: NodeId) -> Option<f32> {
     }
 }
 
+/// The real [`Layout`] `reader`'s own resolved operand list already carries
+/// for `source` — a plain lookup, never reconstructed by hand. Candidate B's
+/// integration (`R9/PROGRESS.md`'s own "Candidate B" sections) uses this to
+/// copy a materialized node's read-side addressing VERBATIM from whichever
+/// still-standing resolved consumer already reads it correctly, rather than
+/// re-deriving a stride convention that risks disagreeing with the real one
+/// (the mistake this same module's own CPU evaluator caught last slice: a
+/// naive row-major guess for `cached_scores` had the key/row axes swapped
+/// relative to the real R9 dump).
+#[cfg(feature = "metal-fuse-attn-decode")]
+pub(super) fn find_operand_layout(reader: &BoundOp, source: NodeId) -> Option<Layout> {
+    reader
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == source)
+        .map(|(_, layout, _)| layout.clone())
+}
+
+/// [`find_operand_layout`]'s own reader's [`Layout`] for `source`, collapsed
+/// from `reader`'s full iteration-space rank down to exactly `wanted_axes`
+/// — one output axis per entry, in STRUCTURAL POSITION order (never by
+/// matching a SIZE, which risks picking the wrong axis whenever two axes
+/// coincide numerically — `cached_key_rows == attention_rows` is a real
+/// collision this fusion hit on a small synthetic fixture's own later
+/// decode step, caught by `two_range_cached_gemma4_all_positions_one_shot_
+/// matches_incremental_single_position_decode`) — reads the REAL stride
+/// recorded at each named axis (never assumed dense, since a broadcast axis
+/// legitimately carries stride `0` — the exact shape
+/// [`BoundOpKind::CachedSoftmaxWeights`]'s own `new_value` operand needs
+/// whenever `query_groups > 1`: V has no per-group copy, so `reader`'s own
+/// recorded stride at the attention-row axis is genuinely `0`, not
+/// `head_dim`). Every node in this family (`139`/`142`/`146`/`149`/`151`/
+/// `152`/`154`/`156`/`157`/`158`/`162`/`164` in the design's own numbering)
+/// shares ONE fixed axis convention (`build_reduce_op`'s own consistent
+/// ordering): `[batch, cached_key_rows_or_1, new_key_rows_or_1, attention_
+/// rows, head_dim_or_pair_dim]` — axis 1 is always the key axis, axis 3 is
+/// always the attention-row axis, axis 4 (when present) is always head_dim,
+/// regardless of their runtime SIZES. Returns `None` if `source` is not one
+/// of `reader`'s own operands, or if a wanted axis does not exist at
+/// `reader`'s own rank (a shape this fusion was never meant to admit —
+/// declined by the caller, not guessed).
+#[cfg(feature = "metal-fuse-attn-decode")]
+pub(super) fn collapsed_operand_layout(
+    reader: &BoundOp,
+    source: NodeId,
+    wanted_axes: &[u16],
+) -> Option<Layout> {
+    let full = find_operand_layout(reader, source)?;
+    if wanted_axes
+        .iter()
+        .any(|&axis| axis as usize >= reader.extents.len())
+    {
+        return None;
+    }
+    let strides = wanted_axes.iter().map(|&axis| full.stride(axis)).collect();
+    Some(Layout {
+        base: full.base,
+        strides,
+    })
+}
+
 #[cfg(feature = "cached-attention-streaming")]
 pub(super) fn decode_rotary_terms(
     program: &[Op],
@@ -1042,9 +1103,15 @@ pub(super) fn cached_attention_candidates(
         // [`unwrap_cached_padding_select`]'s unwindowed bare shape, so none
         // of qwen35's existing accepted candidates can be reached by them.
         #[cfg(feature = "metal-fuse-attn-decode")]
-        let two_pass_eligible;
+        let softmax_weights_eligible;
+        // unread off this feature: the sole reader below is itself
+        // `#[cfg(feature = "metal-fuse-attn-decode")]` -- a plain
+        // `-p proxima-tensor` check never reaches this (its own default
+        // features exclude `cached-attention-streaming`), but a workspace
+        // build that unifies `cached-attention-streaming` in transitively
+        // (`cargo check --workspace --features metal`) does.
         #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let two_pass_eligible = false;
+        let _softmax_weights_eligible = false;
         #[cfg(feature = "metal-fuse-attn-decode")]
         {
             if local_row_bound != u64::MAX && new_key_shape[0] > local_row_bound {
@@ -1109,9 +1176,11 @@ pub(super) fn cached_attention_candidates(
             // `false` when `unwrap_cached_padding_select`'s qwen bare-Select
             // arm matched first; `cached_padding_matched` alone conflated
             // the two and wrongly gated these declines on qwen's own
-            // accepted shape too). The staged two-pass kernel
-            // (`omega/src/msl/cached_attention_two_pass.rs`) is proven
-            // byte-exact against `R9/vectors_relaxed` for decode
+            // accepted shape too). The softmax-weights arm
+            // (`BoundOpKind::CachedSoftmaxWeights`, built below) is proven
+            // byte-exact against a real two-step incremental decode
+            // (`two_range_cached_gemma4_all_positions_one_shot_matches_
+            // incremental_single_position_decode`) for decode
             // (`new_key_rows == 1`) at unity scale only -- a gemma
             // candidate that fails either check DECLINES here (its
             // surrounding ops stay fully unfused, byte-exact by
@@ -1125,9 +1194,9 @@ pub(super) fn cached_attention_candidates(
                 #[cfg(feature = "instrument")]
                 debug!(
                     node = output.0,
-                    stage = "staged_decode_only",
+                    stage = "softmax_weights_decode_only",
                     new_key_rows = new_key_shape[0],
-                    "cached_attention decline -- staged two-pass kernel is decode-only (new_key_rows must be 1)"
+                    "cached_attention decline -- softmax-weights arm is decode-only (new_key_rows must be 1)"
                 );
                 continue;
             }
@@ -1135,13 +1204,13 @@ pub(super) fn cached_attention_candidates(
                 #[cfg(feature = "instrument")]
                 debug!(
                     node = output.0,
-                    stage = "staged_scale_not_unity",
+                    stage = "softmax_weights_scale_not_unity",
                     scale_value,
-                    "cached_attention decline -- staged two-pass kernel is proven at unity scale only"
+                    "cached_attention decline -- softmax-weights arm is proven at unity scale only"
                 );
                 continue;
             }
-            two_pass_eligible = via_gemma_template;
+            softmax_weights_eligible = via_gemma_template;
         }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
             continue;
@@ -1239,6 +1308,246 @@ pub(super) fn cached_attention_candidates(
                 got = ?operands[..8].iter().map(|(_, layout, _)| layout.strides.clone()).collect::<Vec<_>>(),
                 "cached_attention decline -- the base 8 operands do not carry the fused kernel's assumed GEMM strides"
             );
+            continue;
+        }
+        // Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
+        // sections): on this SAME gemma decode-only, unity-scale arm, push
+        // the partial-fusion pair instead of the monolithic online-softmax
+        // `CachedAttention` the code below this branch still builds for
+        // every OTHER arm (qwen35/mistral/prefill/non-unity-scale gemma).
+        // Reuses every local this walk already validated above -- no
+        // separate re-derivation of the mask/scale/shape checks, so this
+        // branch shares 100% of the existing matcher's own correctness
+        // instead of risking a second, independently-wrong copy.
+        //
+        // LIVE (`R9/PROGRESS.md`'s own "Root cause of bug 5, PROVEN"
+        // section): `two_range_cached_gemma4_all_positions_one_shot_
+        // matches_incremental_single_position_decode` (a real, multi-step,
+        // growing-cache CPU-eval test) caught a genuine, non-NaN numerical
+        // divergence at decode position 1 (~0.078 max abs) that traced to
+        // `bind_cached_attention_fusion`'s own splice-at-replaced-position
+        // rewrite (`cached_attention_epilogue_liveness.rs`): this arm's
+        // fused softmax op reads `new_value` (V), an operand the node it
+        // replaced (152/`cached_weights`) never needed, so the splice left
+        // it scheduled BEFORE V's own producer ever ran, reading a
+        // zero-initialized buffer. Fixed by routing `rewritten` through
+        // `topological_order_by_read_sources` before returning it — the
+        // ordering violation this arm was the first fusion in this file to
+        // trigger.
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        if softmax_weights_eligible {
+            if pass.is_some() {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "softmax_weights_pass_plane_unsupported",
+                    "cached_softmax_weights decline -- partial-rotary pass plane not supported"
+                );
+                continue;
+            }
+            // An empty cache (`cached_key_shape[0] == 0`, the very first
+            // decode step before any token is cached — the same edge case
+            // `cached_attention_candidates`'s own ninth-operand push
+            // guards against elsewhere in this file) folds 152's own real
+            // reduce from `NegativeInfinity` over ZERO elements, staying
+            // at `NegativeInfinity` — `new_weight_sum = exp(new_score -
+            // (-inf)) = exp(+inf) = +inf`, an Infinity this op's own math
+            // would carry forward byte-for-byte identically to what
+            // production's unfused 152/156 already do, but downstream
+            // arithmetic (`166`'s own `1 / (157+158)`) can turn that into
+            // a NaN this fusion has no way to verify against a real R9
+            // capture yet. Declines here — the unfused path is byte-exact
+            // by construction regardless.
+            if cached_key_shape[0] == 0 {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "softmax_weights_empty_cache",
+                    "cached_softmax_weights decline -- empty cache (cached_key_rows == 0) not yet verified"
+                );
+                continue;
+            }
+            let attention_rows = query_shape[1] * query_shape[2];
+            let Some(softmax_node) = resolved.iter().find(|bound| bound.node == cached_weights)
+            else {
+                #[cfg(feature = "instrument")]
+                debug!(node = output.0, stage = "softmax_weights_node_unresolved", "cached_softmax_weights decline -- node 154's own role is not separately resolved");
+                continue;
+            };
+            let Some(new_shift_node) = resolved.iter().find(|bound| bound.node == new_weights)
+            else {
+                continue;
+            };
+            let Some(new_av_node) = resolved
+                .iter()
+                .find(|bound| bound.node == attended_parts[1])
+            else {
+                continue;
+            };
+            let Some(cached_av_node) = resolved
+                .iter()
+                .find(|bound| bound.node == attended_parts[0])
+            else {
+                continue;
+            };
+            let Some(combine_node) = resolved.iter().find(|bound| bound.node == output) else {
+                continue;
+            };
+            let BoundOpKind::Reduce {
+                element_body: av_element_body,
+                reduce_op: av_reduce_op,
+                init: av_init,
+                keep: av_keep,
+                operands: av_operands,
+                output_axes: av_output_axes,
+                out_layout: av_out_layout,
+                out_scatter: av_out_scatter,
+                ..
+            } = &cached_av_node.kind
+            else {
+                continue;
+            };
+            // Axis 1 = key, axis 3 = attention-row, axis 4 = head_dim --
+            // fixed STRUCTURAL positions (`collapsed_operand_layout`'s own
+            // doc), never a value-matched search: `cached_key_rows ==
+            // attention_rows` is a real collision at some real decode
+            // step, and matching by size alone silently picks the wrong
+            // axis on that step.
+            let Some(cached_scores_layout) =
+                collapsed_operand_layout(softmax_node, cached_score_parts[0], &[1, 3])
+            else {
+                continue;
+            };
+            let Some(new_scores_layout) =
+                collapsed_operand_layout(new_shift_node, new_masked, &[3])
+            else {
+                continue;
+            };
+            let Some(new_value_layout) =
+                collapsed_operand_layout(new_av_node, new_value, &[3, 4])
+            else {
+                continue;
+            };
+            let Some(sum_a_layout) = find_operand_layout(combine_node, sum_parts[0]) else {
+                continue;
+            };
+            let Some(sum_b_layout) = find_operand_layout(combine_node, sum_parts[1]) else {
+                continue;
+            };
+            let Some(attended_layout) = find_operand_layout(combine_node, attended_parts[1])
+            else {
+                continue;
+            };
+
+            let softmax_op = BoundOp {
+                node: cached_weights,
+                dtype: DType::Float32,
+                extents: softmax_node.extents.clone(),
+                kind: BoundOpKind::CachedSoftmaxWeights {
+                    operands: alloc::vec![
+                        (cached_score_parts[0], cached_scores_layout, None),
+                        (new_masked, new_scores_layout, None),
+                        (new_value, new_value_layout, None),
+                    ],
+                    cached_weight_sum: sum_parts[0],
+                    new_weight_sum: sum_parts[1],
+                    new_attended: attended_parts[1],
+                    cached_key_rows: cached_key_shape[0],
+                    new_key_rows: new_key_shape[0],
+                    query_rows: query_shape[0],
+                    attention_rows,
+                    head_dim: total_head_dim,
+                },
+            };
+
+            // 166's own real operand/statement order (verified against the
+            // real R9 dump's own entry name,
+            // `omega_elementwise_r4_n4_fused_add_o0_o1__reciprocal_s0__add_o2_o3__multiply_s1_s2`):
+            // step0 = Add(157, 158); step1 = Reciprocal(step0);
+            // step2 = Add(<162's own fold result>, 164); step3 (result) =
+            // Multiply(step1, step2). `epilogue_operands` carries [157, 158,
+            // 164] — 162's own result is the implicit slot at index 3
+            // (`BoundOpKind::Reduce::epilogue_body`'s own doc).
+            let epilogue_operands: BoundOperands = alloc::vec![
+                (sum_parts[0], sum_a_layout, None),
+                (sum_parts[1], sum_b_layout, None),
+                (attended_parts[1], attended_layout, None),
+            ];
+            let epilogue_body = ComposedBody {
+                steps: alloc::vec![
+                    BodyStep {
+                        op: ScalarOp::Add,
+                        args: alloc::vec![StepArg::Operand(0), StepArg::Operand(1)],
+                    },
+                    BodyStep {
+                        op: ScalarOp::Reciprocal,
+                        args: alloc::vec![StepArg::Step(0)],
+                    },
+                    BodyStep {
+                        op: ScalarOp::Add,
+                        args: alloc::vec![StepArg::Operand(3), StepArg::Operand(2)],
+                    },
+                    BodyStep {
+                        op: ScalarOp::Multiply,
+                        args: alloc::vec![StepArg::Step(1), StepArg::Step(2)],
+                    },
+                ],
+            };
+            let combine_op = BoundOp {
+                node: output,
+                dtype: DType::Float32,
+                extents: cached_av_node.extents.clone(),
+                kind: BoundOpKind::Reduce {
+                    element_body: av_element_body.clone(),
+                    reduce_op: *av_reduce_op,
+                    init: *av_init,
+                    keep: *av_keep,
+                    operands: av_operands.clone(),
+                    output_axes: av_output_axes.clone(),
+                    out_layout: av_out_layout.clone(),
+                    out_scatter: av_out_scatter.clone(),
+                    epilogue_body,
+                    epilogue_operands,
+                    epilogue_broadcast_axes: SmallVec::new(),
+                },
+            };
+
+            // absorbed = {151, 152, 156, 157, 158, 164} for the softmax op
+            // (151 is 152's own epilogue operand, if 152 carries one --
+            // both die once nothing reads 152's buffer anymore) plus {162}
+            // for the combine op -- 7 nodes total, per the coordinator's
+            // own count.
+            let mut softmax_absorbed: BTreeSet<NodeId> = [
+                cached_score_parts[1],
+                new_weights,
+                sum_parts[0],
+                sum_parts[1],
+                attended_parts[1],
+            ]
+            .into_iter()
+            .collect();
+            if let Some(max_bound) = resolved
+                .iter()
+                .find(|bound| bound.node == cached_score_parts[1])
+                && let BoundOpKind::Reduce {
+                    epilogue_operands, ..
+                } = &max_bound.kind
+            {
+                for (node, _, _) in epilogue_operands {
+                    softmax_absorbed.insert(*node);
+                }
+            }
+            let combine_absorbed: BTreeSet<NodeId> =
+                core::iter::once(attended_parts[0]).collect();
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                softmax_node = cached_weights.0,
+                combine_node = output.0,
+                "cached_softmax_weights candidate accepted"
+            );
+            candidates.push((softmax_op, softmax_absorbed));
+            candidates.push((combine_op, combine_absorbed));
             continue;
         }
         if let Some((_, pass_cached_key, pass_new_key)) = pass {
@@ -1366,12 +1675,12 @@ pub(super) fn cached_attention_candidates(
         if let Some(pass_operands) = pass_operands {
             operands.extend(pass_operands);
         }
-        // true only for the gemma4 arm's decode-unity-scale candidates
-        // (`two_pass_eligible`, set above) -- every other caller (qwen35,
-        // mistral, prefill, non-unity scale) stays `false` and renders the
-        // existing online-softmax kernel; this candidate is ACCEPTED
-        // either way, never declined by this axis.
-        let two_pass = two_pass_eligible;
+        // Reached only when `softmax_weights_eligible` is `false` (every
+        // branch above that sets it `true` also `continue`s, accepted or
+        // declined, before falling through here) -- this is the plain
+        // online-softmax `CachedAttention` kernel, unconditionally, for
+        // every caller the softmax-weights arm does not claim (qwen35,
+        // mistral, prefill, non-unity-scale gemma).
         let fused = BoundOp {
             node: output,
             dtype: DType::Float32,
@@ -1392,7 +1701,6 @@ pub(super) fn cached_attention_candidates(
                 scale: scale_value,
                 cached_lower_inclusive,
                 new_upper_inclusive: 0,
-                two_pass,
             },
         };
         #[cfg(feature = "instrument")]
@@ -1688,7 +1996,6 @@ pub(super) fn cached_attention_single_range_candidates(
                 scale: scale_value,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
-                two_pass: false,
             },
         };
         candidates.push((fused, absorbed));

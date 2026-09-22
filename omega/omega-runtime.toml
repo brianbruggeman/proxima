@@ -78,23 +78,6 @@ block_k = 32
 # (SIMD_WIDTH) — see sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH.
 max_width = 256
 
-[two_pass]
-# conservative floor on `maxTotalThreadsPerThreadgroup` (feature =
-# "metal-fuse-attn-decode" only) — the two-pass attention kernel packs
-# `query_groups` independent folds into ONE physical threadgroup
-# (`query_groups * two_pass_threadgroup_width` threads); once that product
-# exceeds the compiled pipeline's real limit, `crate::metal::dispatch`
-# silently clamps the physical group narrower than the kernel's own
-# addressing assumes, stranding the tail query groups with no physical
-# threads (unwritten scratch/mask, read back as whatever the allocator left
-# there — real GPU heap reuse, hence run-to-run NONDETERMINISM, not a fixed
-# wrong answer). `two_pass_groups_per_wave` uses this to pick the largest
-# divisor of `query_groups` whose physical width stays under it, looping the
-# kernel body over waves instead of relying on the clamp. 1024 is the same
-# real-hardware floor `require_split_k_headroom` already documents for
-# `packed_row_split_k` — every Apple GPU family this crate targets.
-max_threadgroup_threads = 1024
-
 [cooperative_reduce]
 # below this many elements in the reduced axis, `msl::reduce_is_cooperative`
 # routes to the one-thread-per-output serial fold (`push_serial_reduce_body`)

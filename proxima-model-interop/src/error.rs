@@ -257,6 +257,19 @@ pub enum InteropError {
     #[error(transparent)]
     Metal(#[from] omega::metal::MetalError),
 
+    /// `write_attn_read_source_vectors`'s (`PROXIMA_ATTN_VECTORS_DIR`)
+    /// per-node kernel dump: `omega::emit` or `omega::metal::
+    /// pack_uniforms_for` failed for one of the 15 target nodes' own
+    /// `BoundOp` from the real per-step bound plan.
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-fuse-attn-decode",
+        feature = "metal-output-placement",
+        target_os = "macos"
+    ))]
+    #[error("attn node dump: node {node} emit failed: {reason}")]
+    AttnNodeDumpFailed { node: u32, reason: String },
+
     /// [`crate::serving::apply_serving_config`]'s prompt-length precondition:
     /// `sequence` (the tokenized prompt length) exceeds the caller's own
     /// configured `context_length` (`-c`).

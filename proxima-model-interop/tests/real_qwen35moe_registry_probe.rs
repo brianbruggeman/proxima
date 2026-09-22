@@ -207,6 +207,9 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
                     "RoundBatchedReduce"
                 }
                 proxima_tensor::bind::BoundOpKind::CachedAttention { .. } => "CachedAttention",
+                proxima_tensor::bind::BoundOpKind::CachedSoftmaxWeights { .. } => {
+                    "CachedSoftmaxWeights"
+                }
                 proxima_tensor::bind::BoundOpKind::GatedDeltaNet { .. } => "GatedDeltaNet",
                 proxima_tensor::bind::BoundOpKind::MoeTopK { .. } => "MoeTopK",
                 proxima_tensor::bind::BoundOpKind::Iota => "Iota",

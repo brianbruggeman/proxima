@@ -568,11 +568,7 @@ name = "attn_node_gate"
 required-features = ["metal"]
 
 [[example]]
-name = "attn_staged_replay"
-required-features = ["metal"]
-
-[[example]]
-name = "attn_contraction_replay"
+name = "attn_partial_fusion_chain"
 required-features = ["metal"]
 
 [dev-dependencies]

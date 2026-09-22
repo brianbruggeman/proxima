@@ -284,7 +284,6 @@ fn name_reports_the_variant_backends_render_error_messages_with() {
         scale: 0.0,
         cached_lower_inclusive: 0,
         new_upper_inclusive: 0,
-        two_pass: false,
     };
     let elementwise = BoundOpKind::Elementwise {
         body: ComposedBody::leaf(ScalarOp::Identity),
@@ -329,6 +328,85 @@ fn name_reports_the_variant_backends_render_error_messages_with() {
     assert_eq!(reduce_scan.name(), "keep::scan fold");
     assert_eq!(BoundOpKind::Iota.name(), "iota");
     assert_eq!(BoundOpKind::Constant { value: 0.0 }.name(), "constant");
+}
+
+/// `bind_cached_attention_fusion`'s own splice-at-replaced-position rewrite
+/// (`cached_attention_epilogue_liveness.rs`) is only safe when a fused op's
+/// operands are a SUBSET of what the node it replaces needed -- the shape
+/// `R9/PROGRESS.md`'s own "Root cause of bug 5" section proves was never
+/// covered: a fused op whose operand's OWN producer sits AFTER the fused
+/// op's position in the pre-fusion order (the node it replaced never
+/// needed that operand, so the producer was free to sit downstream).
+/// `topological_order_by_read_sources` must move the producer ahead of it.
+#[test]
+#[cfg(feature = "cached-attention-streaming")]
+fn topological_order_by_read_sources_moves_a_late_producer_ahead_of_its_consumer() {
+    let producer_source = NodeId(0);
+    let replaced_consumer = NodeId(1);
+    let late_producer = NodeId(2);
+
+    let leaf = |node: NodeId| BoundOp {
+        node,
+        dtype: DType::Float32,
+        extents: alloc::vec![1],
+        kind: BoundOpKind::Elementwise {
+            body: ComposedBody::leaf(ScalarOp::Identity),
+            operands: Vec::new(),
+        },
+    };
+    let reader = |node: NodeId, reads: NodeId| BoundOp {
+        node,
+        dtype: DType::Float32,
+        extents: alloc::vec![1],
+        kind: BoundOpKind::Elementwise {
+            body: ComposedBody::leaf(ScalarOp::Identity),
+            operands: alloc::vec![(
+                reads,
+                Layout {
+                    base: 0,
+                    strides: SmallVec::new(),
+                },
+                None,
+            )],
+        },
+    };
+
+    // Pre-fusion order: the fused consumer sits BEFORE its own late-bound
+    // operand's producer, exactly the shape a splice-at-old-position
+    // rewrite leaves behind once a fusion widens a node's read set.
+    let nodes = alloc::vec![
+        leaf(producer_source),
+        reader(replaced_consumer, late_producer),
+        reader(late_producer, producer_source),
+    ];
+    let consumer_position_before = nodes
+        .iter()
+        .position(|bound| bound.node == replaced_consumer)
+        .expect("consumer present");
+    let producer_position_before = nodes
+        .iter()
+        .position(|bound| bound.node == late_producer)
+        .expect("producer present");
+    assert!(
+        consumer_position_before < producer_position_before,
+        "fixture must start with the consumer BEFORE its own late operand's producer"
+    );
+
+    let ordered = topological_order_by_read_sources(nodes);
+
+    let consumer_position_after = ordered
+        .iter()
+        .position(|bound| bound.node == replaced_consumer)
+        .expect("consumer still present");
+    let producer_position_after = ordered
+        .iter()
+        .position(|bound| bound.node == late_producer)
+        .expect("producer still present");
+    assert!(
+        producer_position_after < consumer_position_after,
+        "the late producer must run before the consumer that reads it -- found producer at \
+         {producer_position_after}, consumer at {consumer_position_after}"
+    );
 }
 
 /// Whether `bound`'s `epilogue_body` differs from the identity leaf every
@@ -1698,7 +1776,8 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
             BoundOpKind::Iota
             | BoundOpKind::Constant { .. }
             | BoundOpKind::GatedDeltaNet { .. }
-            | BoundOpKind::MoeTopK { .. } => continue,
+            | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::CachedSoftmaxWeights { .. } => continue,
         };
         for (node, layout, lookup) in operands.iter_mut() {
             if *node == gathered_source {

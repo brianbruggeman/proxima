@@ -1667,7 +1667,6 @@ fn cached_attention_bound_step_runs_online_softmax() {
             scale: 1.0,
             cached_lower_inclusive: -1,
             new_upper_inclusive: 0,
-            two_pass: false,
         },
     };
     let mut output = vec![0.0; 2];
@@ -1676,6 +1675,200 @@ fn cached_attention_bound_step_runs_online_softmax() {
     let cached_weight = 1.0f32.exp() / (1.0f32.exp() + 1.0);
     assert!((output[0] - (2.0 * cached_weight + 4.0 * (1.0 - cached_weight))).abs() < 1e-6);
     assert!((output[1] - (3.0 * cached_weight + 5.0 * (1.0 - cached_weight))).abs() < 1e-6);
+}
+
+/// [`BoundOpKind::CachedSoftmaxWeights`]'s whole computation
+/// (`run_cached_softmax_weights`), hand-computed the same way
+/// [`cached_attention_bound_step_runs_online_softmax`] cross-checks
+/// [`BoundOpKind::CachedAttention`] — TWO attention rows (so a row-vs-key
+/// axis transposition bug cannot hide behind a degenerate rank-1 shape),
+/// two cached keys, head_dim 2. `cached_scores`' own storage is KEY-outer/
+/// ROW-inner (`stride(key) == attention_rows`, `stride(row) == 1`) --
+/// verified against the real R9 dump (`157.grid.txt`/`162.grid.txt`, both
+/// read node 154 with exactly this stride pattern), not assumed row-major.
+///
+/// `cached_scores[key][row]`: `[[1.0, 3.0], [2.0, 4.0]]` (row0 reads
+/// {1.0, 2.0}, row1 reads {3.0, 4.0}); `new_scores = [0.5, 0.6]`;
+/// `new_value[row][dim]`: row0 `[4.0, 5.0]`, row1 `[6.0, 7.0]`.
+/// row0: `group_max = max(0.5, max(1.0, 2.0)) = 2.0`.
+/// row1: `group_max = max(0.6, max(3.0, 4.0)) = 4.0`.
+#[test]
+fn cached_softmax_weights_bound_step_matches_hand_computed_softmax() {
+    let attention_rows = 2usize;
+    // flat index = key * attention_rows + row -- the verified real layout.
+    let cached_scores = vec![1.0f32, 3.0, 2.0, 4.0];
+    let new_scores = vec![0.5f32, 0.6];
+    let new_value = vec![4.0f32, 5.0, 6.0, 7.0];
+    let buffers: Vec<Option<&[f32]>> = vec![
+        Some(cached_scores.as_slice()),
+        Some(new_scores.as_slice()),
+        Some(new_value.as_slice()),
+    ];
+    let operands = vec![
+        (
+            NodeId(0),
+            bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![attention_rows as i64, 1],
+            },
+            None,
+        ),
+        (
+            NodeId(1),
+            bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![1],
+            },
+            None,
+        ),
+        (
+            NodeId(2),
+            bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![2, 1],
+            },
+            None,
+        ),
+    ];
+    let resolved = BoundOp {
+        node: NodeId(3),
+        dtype: DType::Float32,
+        extents: vec![2, 2],
+        kind: BoundOpKind::CachedSoftmaxWeights {
+            operands,
+            cached_weight_sum: NodeId(4),
+            new_weight_sum: NodeId(5),
+            new_attended: NodeId(6),
+            cached_key_rows: 2,
+            new_key_rows: 1,
+            query_rows: 1,
+            attention_rows: attention_rows as u64,
+            head_dim: 2,
+        },
+    };
+    let mut output = vec![0.0f32; 4];
+    let mut extra_sink = Vec::new();
+    run_cached_softmax_weights(&resolved, &buffers, &mut output, Some(&mut extra_sink))
+        .expect("cached softmax weights bound step runs");
+
+    let group_max = [2.0f32, 4.0];
+    let expected_output = [
+        (1.0f32 - group_max[0]).exp(), // key0, row0
+        (3.0f32 - group_max[1]).exp(), // key0, row1
+        (2.0f32 - group_max[0]).exp(), // key1, row0
+        (4.0f32 - group_max[1]).exp(), // key1, row1
+    ];
+    for (index, expected) in expected_output.iter().enumerate() {
+        assert!(
+            (output[index] - expected).abs() < 1e-6,
+            "output[{index}] = {}, expected {expected}",
+            output[index]
+        );
+    }
+
+    let expected_cached_weight_sum = [
+        expected_output[0] + expected_output[2],
+        expected_output[1] + expected_output[3],
+    ];
+    let expected_new_weight_sum = [
+        (0.5f32 - group_max[0]).exp(),
+        (0.6f32 - group_max[1]).exp(),
+    ];
+    let expected_new_attended = [
+        expected_new_weight_sum[0] * 4.0,
+        expected_new_weight_sum[0] * 5.0,
+        expected_new_weight_sum[1] * 6.0,
+        expected_new_weight_sum[1] * 7.0,
+    ];
+    assert_eq!(extra_sink.len(), 8);
+    assert!((extra_sink[0] - expected_cached_weight_sum[0]).abs() < 1e-6);
+    assert!((extra_sink[1] - expected_cached_weight_sum[1]).abs() < 1e-6);
+    assert!((extra_sink[2] - expected_new_weight_sum[0]).abs() < 1e-6);
+    assert!((extra_sink[3] - expected_new_weight_sum[1]).abs() < 1e-6);
+    for (index, expected) in expected_new_attended.iter().enumerate() {
+        assert!((extra_sink[4 + index] - expected).abs() < 1e-6);
+    }
+}
+
+/// [`run_cached_softmax_weights`]'s own `group_max` regression: `new_scores`
+/// MUST participate in the max when it is the LARGEST value in the row --
+/// production's own 152 folds `cached_scores` alone in its OWN reduce, but
+/// 151's own `max(new_scores)` is combined in via 152's own EPILOGUE
+/// (`attn_partial_fusion_chain.rs:968`'s reference stage,
+/// `epi_step2 = max(epi_step1, epi0_value)`) -- the harness's byte-exact
+/// production oracle, proven against a real captured decode-step payload
+/// (`gate3/REPORT.md`/`gate3/row_max_table.txt`, the omega renderer's own
+/// root-cause session for the identical divergence in the GPU kernel).
+/// One row, one cached key, the REAL production values this row produced
+/// (ctx3, layer 0, capacity 512, row 1): `cached_scores = [9.406132]`
+/// (this row's own cached-only max, at key 0), `new_scores = [9.509211]`
+/// (the decode step's own new-token score, which exceeds the cached max) --
+/// `group_max` must become `9.509211`, not `9.406132`, so `node[0]` comes
+/// out `exp(9.406132 - 9.509211) = 0.902056`, matching the harness's own
+/// captured reference byte for byte (to host-`exp` rounding).
+#[test]
+fn cached_softmax_weights_group_max_folds_in_new_scores_when_larger() {
+    let cached_scores = vec![9.406132f32];
+    let new_scores = vec![9.509211f32];
+    let new_value = vec![4.0f32];
+    let buffers: Vec<Option<&[f32]>> = vec![
+        Some(cached_scores.as_slice()),
+        Some(new_scores.as_slice()),
+        Some(new_value.as_slice()),
+    ];
+    let operands = vec![
+        (
+            NodeId(0),
+            bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![1, 1],
+            },
+            None,
+        ),
+        (
+            NodeId(1),
+            bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![1],
+            },
+            None,
+        ),
+        (
+            NodeId(2),
+            bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![1, 1],
+            },
+            None,
+        ),
+    ];
+    let resolved = BoundOp {
+        node: NodeId(3),
+        dtype: DType::Float32,
+        extents: vec![1, 1],
+        kind: BoundOpKind::CachedSoftmaxWeights {
+            operands,
+            cached_weight_sum: NodeId(4),
+            new_weight_sum: NodeId(5),
+            new_attended: NodeId(6),
+            cached_key_rows: 1,
+            new_key_rows: 1,
+            query_rows: 1,
+            attention_rows: 1,
+            head_dim: 1,
+        },
+    };
+    let mut output = vec![0.0f32; 1];
+    run_cached_softmax_weights(&resolved, &buffers, &mut output, None)
+        .expect("cached softmax weights bound step runs");
+    // group_max == 9.509211 (new_scores, since it exceeds the cached-only
+    // max) -> node[0] = exp(9.406132 - 9.509211) = 0.902056
+    let expected = (9.406132f32 - 9.509211f32).exp();
+    assert!(
+        (output[0] - expected).abs() < 1e-6,
+        "output[0] = {}, expected {expected} (group_max must fold in new_scores)",
+        output[0]
+    );
 }
 
 /// [`cached_attention_bound_step_runs_online_softmax`]'s counterpart for
@@ -1734,7 +1927,6 @@ fn cached_attention_bound_step_scores_the_partial_rotary_pass_plane() {
             scale: 1.0,
             cached_lower_inclusive: -1,
             new_upper_inclusive: 0,
-            two_pass: false,
         },
     };
     let mut output = vec![0.0; 4];
