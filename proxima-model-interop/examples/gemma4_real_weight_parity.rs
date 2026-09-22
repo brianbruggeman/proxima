@@ -160,8 +160,8 @@ fn dequant_tensor(
         // already raw f32 on disk -- no quant codec to dispatch, just a
         // byte reinterpret, the same convention `gguf_tensor_as_f32`
         // (`crate::bind`) uses for this exact tensor family.
-        for (chunk, value) in source.chunks_exact(4).zip(out.iter_mut()) {
-            *value = f32::from_le_bytes(chunk.try_into().expect("4-byte f32 chunk"));
+        for (chunk, value) in source.as_chunks::<4>().0.iter().zip(out.iter_mut()) {
+            *value = f32::from_le_bytes(*chunk);
         }
     } else {
         proxima_gguf::quant::dispatch::dequantize(tensor.ggml_type, source, &mut out)
