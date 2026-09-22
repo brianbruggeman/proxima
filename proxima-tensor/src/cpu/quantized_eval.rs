@@ -232,15 +232,6 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
             | BoundOpKind::Constant { .. } => &[],
         };
         for (operand, ..) in sources {
-            if operand.0 == 6540 {
-                eprintln!(
-                    "DIAG node6540 reader={} in_quantized_weights={} in_expert_sources={} buffer_some_before={}",
-                    computed.node.0,
-                    quantized_weights.contains_key(operand),
-                    expert_sources.is_some_and(|sources| sources.contains_key(operand)),
-                    buffers[operand.0 as usize].is_some(),
-                );
-            }
             if expert_sources.is_some_and(|sources| sources.contains_key(operand)) {
                 continue;
             }
