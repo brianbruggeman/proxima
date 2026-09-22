@@ -4,23 +4,25 @@ use std::path::Path;
 
 use proxima_gguf::value::MetadataValue;
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let candidate = Path::new(
         "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129",
     );
-    let mut file = File::open(candidate).expect("open gemma4 gguf");
+    let mut file = File::open(candidate)?;
     let mut header_buf = Vec::new();
-    let parsed = 'grow: {
-        for cap in [4usize << 20, 16 << 20, 64 << 20, 256 << 20] {
-            header_buf.resize(cap, 0);
-            file.seek(SeekFrom::Start(0)).expect("seek");
-            let read = file.read(&mut header_buf).expect("read");
-            header_buf.truncate(read);
-            if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
-                break 'grow parsed;
-            }
+    let mut grown = None;
+    for cap in [4usize << 20, 16 << 20, 64 << 20, 256 << 20] {
+        header_buf.resize(cap, 0);
+        file.seek(SeekFrom::Start(0))?;
+        let read = file.read(&mut header_buf)?;
+        header_buf.truncate(read);
+        if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+            grown = Some(parsed);
+            break;
         }
-        panic!("gguf metadata region did not fit");
+    }
+    let Some(parsed) = grown else {
+        return Err(std::io::Error::other("gguf metadata region did not fit"));
     };
 
     println!("metadata entries = {}", parsed.metadata.len());
@@ -87,4 +89,6 @@ fn main() {
             println!("literal {wanted:?} -> {found:?}");
         }
     }
+
+    Ok(())
 }
