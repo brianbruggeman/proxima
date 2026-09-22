@@ -27,6 +27,8 @@ const DEFAULT_PROMPT: &str = "The capital of France is";
 const MAX_TOKENS: usize = 8;
 
 fn main() {
+    #[cfg(feature = "instrument")]
+    let _ = proxima_telemetry::export::install_console_recorder();
     let prompt = std::env::var("PROXIMA_PROMPT").unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
 
     let file = File::open(MODEL_PATH).expect("open gemma4-E2B blob");

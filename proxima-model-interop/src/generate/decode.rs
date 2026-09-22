@@ -129,6 +129,93 @@ fn first_diff_f32(unfused: &[f32], fused: &[f32]) -> Option<(usize, u32, u32)> {
         })
 }
 
+/// One fused decoder layer's attended (166-role) node, plus -- under
+/// Candidate B's shape only -- its softmax op's own node (154-role) and its
+/// three named outputs (`cached_weight_sum`/`new_weight_sum`/`new_attended`
+/// at 157/158/164). `None` for the pre-Candidate-B shape, where the
+/// `CachedAttention` node IS the attended output and there is no separate
+/// softmax op to report.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+type AttnFuseProbeLayer = (NodeId, Option<(NodeId, NodeId, NodeId, NodeId)>);
+
+/// Enumerates one attended (166-role) node per fused decoder layer, under
+/// either recognizer shape `resolved` may contain: the pre-Candidate-B
+/// shape, one [`proxima_tensor::BoundOpKind::CachedAttention`] op per layer
+/// whose own node IS the attended output; or Candidate B's shape, one
+/// [`proxima_tensor::BoundOpKind::CachedSoftmaxWeights`] op per layer (the
+/// 154-role node, carrying named outputs `cached_weight_sum`/
+/// `new_weight_sum`/`new_attended` at 157/158/164) plus a plain-looking
+/// `Reduce` whose epilogue reads those outputs (the 166-role node, located
+/// by scanning [`proxima_tensor::BoundOp::all_read_sources`] rather than
+/// assumed at a fixed offset -- the per-layer template puts it at
+/// `softmax_node + 12` and this function asserts (diagnostically) that the
+/// template holds rather than trusting it blind). Returns `(attended_node,
+/// None)` for the first shape, `(attended_node, Some((softmax_node,
+/// cached_weight_sum, new_weight_sum, new_attended)))` for the second.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+fn attn_fuse_probe_layers(
+    step: usize,
+    resolved: &[proxima_tensor::BoundOp],
+) -> Vec<AttnFuseProbeLayer> {
+    let cached_attention_nodes: Vec<NodeId> = resolved
+        .iter()
+        .filter(|bound| {
+            matches!(
+                bound.kind,
+                proxima_tensor::BoundOpKind::CachedAttention { .. }
+            )
+        })
+        .map(|bound| bound.node)
+        .collect();
+    if !cached_attention_nodes.is_empty() {
+        return cached_attention_nodes
+            .into_iter()
+            .map(|node| (node, None))
+            .collect();
+    }
+
+    resolved
+        .iter()
+        .filter_map(|bound| match bound.kind {
+            proxima_tensor::BoundOpKind::CachedSoftmaxWeights {
+                cached_weight_sum,
+                new_weight_sum,
+                new_attended,
+                ..
+            } => Some((bound.node, cached_weight_sum, new_weight_sum, new_attended)),
+            _ => None,
+        })
+        .filter_map(|(softmax_node, cached_weight_sum, new_weight_sum, new_attended)| {
+            let combine = resolved.iter().find(|bound| {
+                bound.all_read_sources().any(|(operand, _, _)| {
+                    *operand == new_attended || *operand == cached_weight_sum
+                })
+            })?;
+            let expected = NodeId((softmax_node.0 as i32 + 12) as u32);
+            if combine.node != expected {
+                eprintln!(
+                    "parity_layer_offset_mismatch step={step} softmax_node={} combine_node={} expected={}",
+                    softmax_node.0, combine.node.0, expected.0
+                );
+            }
+            Some((
+                combine.node,
+                Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)),
+            ))
+        })
+        .collect()
+}
+
 /// Builds two throwaway plans for THIS step's `program`/`outputs` -- one
 /// with [`proxima_tensor::bind_with_fusion`]'s `fuse_cached_attention` set,
 /// one cleared -- and diffs every [`proxima_tensor::BoundOpKind::CachedAttention`]
@@ -160,20 +247,32 @@ fn run_attn_fuse_parity_probe(
     let shapes = proxima_tensor::infer(program, symbols)?;
     let resolved =
         proxima_tensor::bind_with_fusion(program, &shapes, roots, true, runtime.numeric_policy)?;
-    let candidates: Vec<NodeId> = resolved
-        .iter()
-        .filter(|bound| {
-            matches!(
-                bound.kind,
-                proxima_tensor::BoundOpKind::CachedAttention { .. }
-            )
-        })
-        .map(|bound| bound.node)
-        .collect();
+    let layers = attn_fuse_probe_layers(step, &resolved);
+    let candidates: Vec<NodeId> = layers.iter().map(|(attended, _)| *attended).collect();
     eprintln!("parity_candidates step={step} n={}", candidates.len());
+    for (layer, (attended, softmax)) in layers.iter().enumerate() {
+        match softmax {
+            None => eprintln!(
+                "parity_layer_ops step={step} layer={layer} shape=cached_attention attended={}",
+                attended.0
+            ),
+            Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)) => eprintln!(
+                "parity_layer_ops step={step} layer={layer} shape=candidate_b attended={} softmax={} cached_weight_sum={} new_weight_sum={} new_attended={}",
+                attended.0, softmax_node.0, cached_weight_sum.0, new_weight_sum.0, new_attended.0
+            ),
+        }
+    }
 
     let mut parity_outputs: Vec<NodeId> = roots.to_vec();
-    parity_outputs.extend(candidates.iter().copied());
+    for (attended, softmax) in &layers {
+        parity_outputs.push(*attended);
+        if let Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)) = softmax {
+            parity_outputs.push(*softmax_node);
+            parity_outputs.push(*cached_weight_sum);
+            parity_outputs.push(*new_weight_sum);
+            parity_outputs.push(*new_attended);
+        }
+    }
     let placed_input_nodes: Vec<NodeId> =
         input_placements.iter().map(|(node, _, _)| *node).collect();
 
@@ -261,7 +360,7 @@ fn run_attn_fuse_parity_probe(
     let leaf_extent = symbols.get(1).copied().unwrap_or_default();
     let cached_len = live_cached_len(named_blocks);
     let cached_len_display = cached_len.map_or("MISSING".to_string(), |value| value.to_string());
-    for (layer, node) in candidates.iter().enumerate() {
+    for (layer, (node, softmax)) in layers.iter().enumerate() {
         let (fused_values, _) = fused_evaluated
             .get(*node)
             .ok_or(InteropError::MissingEvaluatedNode { node: *node })?;
@@ -277,6 +376,35 @@ fn run_attn_fuse_parity_probe(
                 "parity step={step} layer={layer} node={} cached_len={cached_len_display} leaf_extent={leaf_extent} first_diff=({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})",
                 node.0
             ),
+        }
+        if let Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)) = softmax {
+            for (role, role_node) in [
+                ("154", softmax_node),
+                ("157", cached_weight_sum),
+                ("158", new_weight_sum),
+                ("164", new_attended),
+            ] {
+                let fused_role = fused_evaluated.get(*role_node);
+                let unfused_role = unfused_evaluated.get(*role_node);
+                match (fused_role, unfused_role) {
+                    (Some((fused_values, _)), Some((unfused_values, _))) => {
+                        match first_diff_f32(unfused_values, fused_values) {
+                            None => eprintln!(
+                                "parity_softmax step={step} layer={layer} role={role} node={} first_diff=none",
+                                role_node.0
+                            ),
+                            Some((element, unfused_bits, fused_bits)) => eprintln!(
+                                "parity_softmax step={step} layer={layer} role={role} node={} first_diff=({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})",
+                                role_node.0
+                            ),
+                        }
+                    }
+                    _ => eprintln!(
+                        "parity_softmax step={step} layer={layer} role={role} node={} MISSING",
+                        role_node.0
+                    ),
+                }
+            }
         }
     }
 
@@ -294,7 +422,7 @@ fn run_attn_fuse_parity_probe(
     }
 
     if step == 1
-        && let Some(&layer0_node) = candidates.get(attn_fuse_parity_target_layer())
+        && let Some(&(layer0_node, _)) = layers.get(attn_fuse_parity_target_layer())
     {
         let metal_unfused_full: Vec<u32> = unfused_evaluated
             .get(layer0_node)
@@ -369,7 +497,20 @@ fn write_attn_layer0_failure_report(
         .ok_or(InteropError::MissingEvaluatedNode {
             node: attended_node,
         })?;
-    let (
+    // Candidate B's recognizer shape (`dead_code_cached_attention.rs`'s own
+    // `BoundOpKind::CachedSoftmaxWeights` doc) makes `attended_node`'s own
+    // `BoundOpKind` a plain `Reduce` epilogue-combine, never `CachedAttention`
+    // directly -- this report's element-0 chain walk below reads fields
+    // (kv_heads/query_groups/rotary_dim/cached_lower_inclusive/
+    // new_upper_inclusive/scale) that exist only on the pre-Candidate-B
+    // shape, so there is no way to build the SAME report for this node
+    // under Candidate B. This is a diagnostic dump only
+    // (`PROXIMA_ATTN_PAYLOAD_PATH`) with no bearing on decode correctness --
+    // degrading to "report skipped" is correct; raising
+    // `MissingEvaluatedNode` here previously aborted the whole decode call
+    // over a report-writer gap, not an actually missing node (`fused_bound`
+    // above already proves the node WAS found and evaluated).
+    let proxima_tensor::BoundOpKind::CachedAttention {
         kv_heads,
         query_groups,
         head_dim,
@@ -379,34 +520,16 @@ fn write_attn_layer0_failure_report(
         scale,
         cached_key_rows,
         new_key_rows,
-    ) = match fused_bound.kind {
-        proxima_tensor::BoundOpKind::CachedAttention {
-            kv_heads,
-            query_groups,
-            head_dim,
-            rotary_dim,
-            cached_lower_inclusive,
-            new_upper_inclusive,
-            scale,
-            cached_key_rows,
-            new_key_rows,
-            ..
-        } => (
-            kv_heads,
-            query_groups,
-            head_dim,
-            rotary_dim,
-            cached_lower_inclusive,
-            new_upper_inclusive,
-            scale,
-            cached_key_rows,
-            new_key_rows,
-        ),
-        _ => {
-            return Err(InteropError::MissingEvaluatedNode {
-                node: attended_node,
-            });
-        }
+        ..
+    } = fused_bound.kind
+    else {
+        #[cfg(feature = "instrument")]
+        debug!(
+            node = attended_node.0,
+            "attn_layer0_failure_report: skipping, attended node's BoundOpKind is not \
+             CachedAttention (Candidate B's Reduce-epilogue shape has no equivalent report)"
+        );
+        return Ok(());
     };
     let operand_nodes: Vec<NodeId> = fused_bound
         .operands()
@@ -900,6 +1023,7 @@ fn write_attn_layer0_failure_report(
         named_blocks,
         &shapes,
         &by_node,
+        fused_resolved,
         resident_names,
         input_placements,
         runtime,
@@ -955,6 +1079,7 @@ fn write_attn_read_source_vectors(
     named_blocks: &[(&str, QuantizedBlock<'_>)],
     shapes: &proxima_tensor::Shapes,
     by_node: &alloc::collections::BTreeMap<NodeId, &proxima_tensor::BoundOp>,
+    fused_resolved: &[proxima_tensor::BoundOp],
     resident_names: &alloc::collections::BTreeSet<&str>,
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     runtime: &BackendRuntime,
@@ -1011,6 +1136,38 @@ fn write_attn_read_source_vectors(
         execute_plan_named_with_placements(&plan, named_blocks, input_placements, &[])?;
 
     std::fs::create_dir_all(&dir)?;
+
+    // `PROXIMA_ATTN_DUMP_FUSED=1` -- candidate B's own fused ops (the
+    // `CachedSoftmaxWeights` node plus the 166 `Reduce` whose epilogue reads
+    // it), dumped from the FUSED bind (`fused_resolved`) rather than
+    // `by_node` (which is the unfused chain-walk bind and never contains
+    // either op). No-op under the pre-candidate-B shape, where neither kind
+    // appears in `fused_resolved` at all.
+    if std::env::var("PROXIMA_ATTN_DUMP_FUSED").as_deref() == Ok("1") {
+        let mut fused_manifest = String::new();
+        for bound in fused_resolved.iter().filter(|bound| {
+            matches!(
+                bound.kind,
+                proxima_tensor::BoundOpKind::CachedSoftmaxWeights { .. }
+            ) || matches!(
+                &bound.kind,
+                proxima_tensor::BoundOpKind::Reduce { epilogue_operands, .. }
+                    if !epilogue_operands.is_empty()
+            )
+        }) {
+            let manifest_line = format!(
+                "node={} kind={} extents={:?} operands={:?}",
+                bound.node.0,
+                bound.kind.name(),
+                bound.extents,
+                bound.operands()
+            );
+            eprintln!("attn_node_dump_fused {manifest_line}");
+            fused_manifest.push_str(&manifest_line);
+            fused_manifest.push('\n');
+        }
+        std::fs::write(format!("{dir}/fused_manifest.txt"), &fused_manifest)?;
+    }
 
     let mut manifest = String::new();
     for &node in &outputs {
