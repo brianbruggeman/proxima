@@ -104,7 +104,8 @@ use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(feature = "metal")]
 use omega::backend::{
     Engine, Plan, clear_expert_source_cache, execute_plan_named_with_expert_sources, mark_resident,
-    plan_named, plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
+    mark_plan_time_constants_resident, plan_named, plan_named_exact, release_resident_names,
+    unregister_checkpoint_mapping,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same

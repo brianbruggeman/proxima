@@ -115,6 +115,7 @@ pub(super) fn build_buffer_arena(
     resolved: &[BoundOp],
     retires: &[Vec<NodeId>],
     effective_outputs: &[NodeId],
+    resident_nodes: &BTreeSet<NodeId>,
 ) -> Result<BufferArena, MetalError> {
     let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
     let naive_transient_bytes: usize = resolved
@@ -148,7 +149,19 @@ pub(super) fn build_buffer_arena(
 
     for (position, bound) in resolved.iter().enumerate() {
         let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
-        let slot = match free_by_size.get_mut(&byte_length).and_then(Vec::pop) {
+        // A resident position's slot is written once, on the plan's cold
+        // call, and never rewritten again (`resident_skip`) -- so it can
+        // never share a slot with an ordinary position that keeps writing
+        // every call. `resident_pinned_retires` already stops this position's
+        // OWN slot from being handed FORWARD once resident; this stops the
+        // opposite direction, a resident position being handed a slot an
+        // ordinary, every-call position still owns, by refusing the shared
+        // free list on its own allocation.
+        let is_resident = resident_nodes.contains(&bound.node);
+        let slot = match (!is_resident)
+            .then(|| free_by_size.get_mut(&byte_length).and_then(Vec::pop))
+            .flatten()
+        {
             Some(reused) => reused,
             None => {
                 let index = slots.len();
@@ -312,6 +325,7 @@ pub(super) fn arena_placement(
             &plan.prepared.resolved,
             &pinned_retires,
             &plan.prepared.effective_outputs,
+            &plan.resident_nodes,
         )?;
         // a fresh, still-empty `OnceCell` can only fail to accept this set
         // if another call already raced it in -- impossible here since

@@ -594,6 +594,33 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
     }
 }
 
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(
+        unused_variables,
+        reason = "only the metal arm below reads this in this build"
+    )
+)]
+pub fn mark_plan_time_constants_resident(plan: &mut Plan) {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => {}
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.mark_plan_time_constants_resident(),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => {}
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => {}
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
+        )))]
+        _ => match *plan {},
+    }
+}
+
 /// Returns the physical output-slot bytes retained by a resolved plan's
 /// Metal arena. Other backends have no persistent device arena and return
 /// zero; the caller uses this only for an allocation census.

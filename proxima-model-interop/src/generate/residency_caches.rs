@@ -1518,6 +1518,9 @@ impl BackendRuntime {
                     )?
                 };
                 mark_resident(&mut plan, resident_names);
+                if self.plan_time_constants {
+                    mark_plan_time_constants_resident(&mut plan);
+                }
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 {
                     set_math_mode(&mut plan, self.math_mode)?;
@@ -1596,6 +1599,9 @@ impl BackendRuntime {
                     )?
                 };
                 mark_resident(&mut plan, resident_names);
+                if self.plan_time_constants {
+                    mark_plan_time_constants_resident(&mut plan);
+                }
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 {
                     set_math_mode(&mut plan, self.math_mode)?;
@@ -1720,6 +1726,9 @@ impl BackendRuntime {
                     )?
                 };
                 mark_resident(&mut plan, resident_names);
+                if self.plan_time_constants {
+                    mark_plan_time_constants_resident(&mut plan);
+                }
                 set_math_mode(&mut plan, self.math_mode)?;
                 set_dispatch_type(&mut plan, omega::metal::DispatchType::Serial);
                 Ok(plan)
@@ -2300,6 +2309,9 @@ impl BackendRuntime {
                     self.numeric_policy,
                 )?;
                 mark_resident(&mut plan, resident_names);
+                if self.plan_time_constants {
+                    mark_plan_time_constants_resident(&mut plan);
+                }
                 set_math_mode(&mut plan, self.math_mode)?;
                 set_dispatch_type(&mut plan, self.dispatch_type);
                 Ok(plan)
@@ -2360,6 +2372,9 @@ impl BackendRuntime {
                     self.numeric_policy,
                 )?;
                 mark_resident(&mut plan, resident_names);
+                if self.plan_time_constants {
+                    mark_plan_time_constants_resident(&mut plan);
+                }
                 set_math_mode(&mut plan, self.math_mode)?;
                 set_dispatch_type(&mut plan, self.dispatch_type);
                 Ok(plan)

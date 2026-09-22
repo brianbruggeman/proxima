@@ -1486,14 +1486,14 @@ impl Plan {
             .collect();
     }
 
-    /// Extends `Self::resident_nodes` with every `Op::Iota`/`Op::Constant`
-    /// leaf this plan's own `prepared.resolved` dispatches -- both are pure
-    /// functions of their own `extent`/`value` (op.rs's own doc: "nothing
-    /// external binds to it"), so the first call's real dispatch computes a
-    /// value good for the plan's whole life, the same durability promise
-    /// [`Self::mark_resident`] already gives a checkpoint weight. Joining the
-    /// SAME `resident_nodes` set (not a second one) means both consumers of
-    /// that set for free: the retirement loop's own `resident_nodes` check
+    /// Extends `Self::resident_nodes` with every `Op::Constant` leaf this
+    /// plan's own `prepared.resolved` dispatches -- it is a pure function of
+    /// its own `value` (op.rs's own doc: "nothing external binds to it"), so
+    /// the first call's real dispatch computes a value good for the plan's
+    /// whole life, the same durability promise [`Self::mark_resident`]
+    /// already gives a checkpoint weight. Joining the SAME `resident_nodes`
+    /// set (not a second one) means both consumers of that set for free: the
+    /// retirement loop's own `resident_nodes` check
     /// (`execute_plan_with_placements`'s own doc) stops dropping this node's
     /// `device_buffers` entry after the call that computed it, and
     /// `resident_pinned_retires` stops handing its `BufferArena` slot back
@@ -1504,7 +1504,9 @@ impl Plan {
             self.prepared
                 .resolved
                 .iter()
-                .filter(|bound| matches!(bound.kind, BoundOpKind::Iota | BoundOpKind::Constant { .. }))
+                // iota excluded until shown call-invariant: its `extent` can
+                // differ per call in a way `Constant`'s `value` cannot.
+                .filter(|bound| matches!(bound.kind, BoundOpKind::Constant { .. }))
                 .map(|bound| bound.node),
         );
     }
