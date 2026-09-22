@@ -549,7 +549,7 @@ pub fn run() {
     let diag139_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
     let diag139_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
     let diag139_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag139_reduced = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 4]));
+    let diag139_reduced = shared_buffer(&device, &f32_bytes(&[0.0_f32; 4]));
 
     let pipeline139 = compile(&device, NODE139_DIAG_KERNEL, "diag_node139", MTLMathMode::Safe);
     dispatch(
@@ -588,8 +588,8 @@ pub fn run() {
     let diag142_q = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
     let diag142_product = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
     let diag142_accum = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 128]));
-    let diag142_reduced = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 4]));
-    let diag142_epi = shared_buffer(&device, &f32_bytes(&vec![0.0_f32; 8]));
+    let diag142_reduced = shared_buffer(&device, &f32_bytes(&[0.0_f32; 4]));
+    let diag142_epi = shared_buffer(&device, &f32_bytes(&[0.0_f32; 8]));
 
     let pipeline142 = compile(&device, NODE142_DIAG_KERNEL, "diag_node142", MTLMathMode::Safe);
     dispatch(
