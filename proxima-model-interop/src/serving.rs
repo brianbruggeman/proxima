@@ -472,14 +472,16 @@ pub struct ServingConfig<'model> {
     /// has no effect when that feature is absent.
     pub moe_topk_fusion: bool,
     /// Not an upstream llama-server flag -- marks every plan's own
-    /// `Op::Iota`/`Op::Constant` leaf (`omega::metal::Plan::
+    /// `Op::Constant` leaf (`omega::metal::Plan::
     /// mark_plan_time_constants_resident`'s own doc) resident the same way
     /// `crate::generate::BackendRuntime::build_placed_plan`'s
     /// `resident_names` already marks checkpoint weights: computed once by
     /// its first real dispatch, then read back from `Plan::device_buffers`
     /// on every later call against that plan instead of re-dispatching a
-    /// kernel for it every token. `false` (this field's default) is today's
-    /// shipped behavior, unchanged.
+    /// kernel for it every token. `true` (this field's default) is the
+    /// shipped behavior -- a resident position is written once, on the
+    /// plan's cold call, and never rewritten again, so it can never take a
+    /// slot from the arena's free list (`build_buffer_arena`'s own doc).
     pub plan_time_constants: bool,
     /// Not an upstream llama-server flag -- a hard ceiling on
     /// `omega::metal::MetalStageTotals::gpu_exec_calls` (Metal command
@@ -602,7 +604,7 @@ impl Default for ServingConfig<'static> {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
-            plan_time_constants: false,
+            plan_time_constants: true,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -928,7 +930,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
-            plan_time_constants: false,
+            plan_time_constants: true,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1097,7 +1099,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
-            plan_time_constants: false,
+            plan_time_constants: true,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1194,7 +1196,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
-            plan_time_constants: false,
+            plan_time_constants: true,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1281,7 +1283,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
-            plan_time_constants: false,
+            plan_time_constants: true,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1358,7 +1360,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
-            plan_time_constants: false,
+            plan_time_constants: true,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
