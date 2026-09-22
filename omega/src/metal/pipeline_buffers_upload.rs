@@ -553,6 +553,12 @@ pub static PIPELINE_LOOKUP_TICKS: Counter = Counter::new("omega.metal.pipeline_l
 pub static ENCODE_DISPATCH_CALLS: Counter = Counter::new("omega.metal.encode_dispatch_calls");
 #[cfg(feature = "instrument")]
 pub static ENCODE_DISPATCH_TICKS: Counter = Counter::new("omega.metal.encode_dispatch_ticks");
+/// The sole physical `dispatchThreads_threadsPerThreadgroup` call site --
+/// `resident_nocopy_cache::dispatch` -- fires once per PHYSICAL GPU launch,
+/// while [`ENCODE_DISPATCH_CALLS`] counts `encode_op` calls, which can each
+/// emit more than one physical dispatch (a split-reduce merge pass).
+#[cfg(feature = "instrument")]
+pub static PHYSICAL_DISPATCH_CALLS: Counter = Counter::new("omega.metal.physical_dispatch_calls");
 #[cfg(feature = "instrument")]
 pub static GPU_EXEC_CALLS: Counter = Counter::new("omega.metal.gpu_exec_calls");
 #[cfg(feature = "instrument")]
@@ -618,6 +624,8 @@ pub struct MetalStageTotals {
     pub pipeline_lookup_ticks: u64,
     pub encode_dispatch_calls: u64,
     pub encode_dispatch_ticks: u64,
+    /// [`PHYSICAL_DISPATCH_CALLS`]'s own per-step delta.
+    pub physical_dispatch_calls: u64,
     pub gpu_exec_calls: u64,
     pub gpu_exec_ticks: u64,
     pub readback_calls: u64,
@@ -736,6 +744,7 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         pipeline_lookup_ticks: PIPELINE_LOOKUP_TICKS.snapshot_and_reset(),
         encode_dispatch_calls: ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
         encode_dispatch_ticks: ENCODE_DISPATCH_TICKS.snapshot_and_reset(),
+        physical_dispatch_calls: PHYSICAL_DISPATCH_CALLS.snapshot_and_reset(),
         gpu_exec_calls: GPU_EXEC_CALLS.snapshot_and_reset(),
         gpu_exec_ticks: GPU_EXEC_TICKS.snapshot_and_reset(),
         readback_calls: READBACK_CALLS.snapshot_and_reset(),

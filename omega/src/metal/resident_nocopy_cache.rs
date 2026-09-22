@@ -1331,5 +1331,7 @@ pub(super) fn dispatch(
         depth: 1,
     };
     encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
+    #[cfg(feature = "instrument")]
+    counter!(PHYSICAL_DISPATCH_CALLS, 1);
 }
 
