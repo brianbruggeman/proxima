@@ -183,7 +183,7 @@ fn parse_uniforms_hex(path: &Path) -> Vec<u8> {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let hex = text.trim();
-    assert!(hex.len() % 2 == 0, "{} carries an even number of hex digits", path.display());
+    assert!(hex.len().is_multiple_of(2), "{} carries an even number of hex digits", path.display());
     (0..hex.len())
         .step_by(2)
         .map(|index| {
