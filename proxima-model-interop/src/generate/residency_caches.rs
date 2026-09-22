@@ -1304,6 +1304,13 @@ pub(super) struct PlanNumerics {
     /// `ServingConfig::plan_time_constants` -- [`BackendRuntime::build_placed_plan`]'s
     /// own doc for how this reaches [`omega::metal::Plan::mark_plan_time_constants_resident`].
     pub(super) plan_time_constants: bool,
+    /// Forwarded to `proxima_tensor::bind::bind_with_fusion`'s
+    /// `fuse_cached_attention` argument -- see that function's own doc for
+    /// what the bool controls. `true` at every construction site below
+    /// except the `metal-fuse-attn-decode` parity probe, which builds one
+    /// [`PlanNumerics`] with `false` to render the unfused chain for the
+    /// same program/outputs.
+    pub(super) fuse_cached_attention: bool,
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1766,6 +1773,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            fuse_cached_attention: true,
         };
         let plan = Self::resolve_segment_plan(
             &mut self.placed_segment_plans,
@@ -1822,6 +1830,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: omega::metal::DispatchType::Serial,
             plan_time_constants: self.plan_time_constants,
+            fuse_cached_attention: true,
         };
         let plan = Self::resolve_segment_plan(
             &mut self.placed_segment_plans,
@@ -1881,6 +1890,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            fuse_cached_attention: true,
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -1962,6 +1972,7 @@ impl BackendRuntime {
             outputs,
             numerics.numeric_policy,
             &placed_input_nodes,
+            numerics.fuse_cached_attention,
         )?;
         plan.mark_resident(resident_names);
         if numerics.plan_time_constants {
@@ -2005,6 +2016,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            fuse_cached_attention: true,
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -2076,6 +2088,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            fuse_cached_attention: true,
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,

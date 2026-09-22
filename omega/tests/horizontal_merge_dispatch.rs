@@ -194,6 +194,7 @@ fn build_fixture() -> Fixture {
         &output_nodes,
         NumericPolicy::default(),
         &placed_input_nodes,
+        true,
     )
     .expect("plans the eight independent matvecs");
 
@@ -493,6 +494,7 @@ fn raw_split_member_forces_its_own_dispatch() {
         &output_nodes,
         NumericPolicy::default(),
         &placed_input_nodes,
+        true,
     )
     .expect("plans the four raw-split matvecs");
 
@@ -704,6 +706,7 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
         &output_nodes,
         NumericPolicy::default(),
         &placed_input_nodes,
+        true,
     )
     .expect("plans the lazy-activation matvecs");
 

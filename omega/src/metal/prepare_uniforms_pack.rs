@@ -58,6 +58,7 @@ pub(super) fn prepare(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
     placed_input_nodes: &[NodeId],
+    fuse_cached_attention: bool,
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
 
@@ -128,7 +129,13 @@ pub(super) fn prepare(
         outputs.to_vec()
     };
 
-    let mut resolved = bind(program, &shapes, &effective_outputs, numeric_policy)?;
+    let mut resolved = bind_with_fusion(
+        program,
+        &shapes,
+        &effective_outputs,
+        fuse_cached_attention,
+        numeric_policy,
+    )?;
     #[cfg(feature = "instrument")]
     debug!(
         cached_attention_count = resolved
