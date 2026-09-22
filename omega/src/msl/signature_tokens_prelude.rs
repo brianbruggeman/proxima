@@ -7,6 +7,32 @@ pub(super) fn grid_threads(
     expert_source_mode: bool,
 ) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
+        // Part D: `render_cached_attention_two_pass`'s own kernel dispatches
+        // ONE threadgroup per `(query_row, kv_head)` -- unlike the
+        // online-softmax path above, a two-pass threadgroup never splits its
+        // own key range across simdgroups or threadgroups (`chunks`/`splits`
+        // both stay `1` by construction: the whole `CACHED_CAPACITY` range is
+        // walked serially, per simdgroup, inside the one threadgroup --
+        // `staged_two_pass_source`'s own `for (uint key = 0u; key <
+        // CACHED_CAPACITY; key++)` loops). `tiled_gemm_threadgroup_width`'s
+        // own `CachedAttention` arm must agree exactly (`query_groups *
+        // SIMD_WIDTH` threads per threadgroup) or `dispatchThreads_
+        // threadsPerThreadgroup` splits threads across MORE threadgroups
+        // than the kernel's own `thread_position_in_threadgroup`-only
+        // addressing assumes.
+        BoundOpKind::CachedAttention {
+            query_rows,
+            kv_heads,
+            query_groups,
+            head_dim,
+            cached_key_rows,
+            two_pass: true,
+            ..
+        } => {
+            *query_rows
+                * *kv_heads
+                * two_pass_physical_threadgroup_width(*query_groups, *head_dim, *cached_key_rows)
+        }
         BoundOpKind::CachedAttention {
             head_dim,
             cached_key_rows,
@@ -236,6 +262,7 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             scale,
             cached_lower_inclusive,
             new_upper_inclusive,
+            two_pass,
             ..
         } => {
             // `operand_count == 9` names a runtime ninth operand, but that
@@ -256,6 +283,14 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             } else {
                 signed_name_part(*new_upper_inclusive)
             };
+            // `_tp` marks a `two_pass` op's compiled pipeline as distinct
+            // from the online-softmax kernel of the identical shape --
+            // `render_cached_attention` renders GENUINELY different MSL
+            // text for the two (the staged two-pass kernel vs. the
+            // register-resident online kernel), so they must never share a
+            // `PIPELINE_CACHE` entry even when every other token here is
+            // identical.
+            let two_pass_token = if *two_pass { "_tp" } else { "" };
             if single_range_dynamic {
                 // `_b{width}` names the build-time block-staging width
                 // (`block_width_for`) -- a build-time constant, so a build
@@ -281,7 +316,7 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
                 let per_query_head_grid =
                     cached_attention_per_query_head_grid(true, *cached_key_rows + *new_key_rows);
                 format!(
-                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_qh{}",
+                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_qh{}{two_pass_token}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                     effective_context_chunk_cap(*query_groups, *head_dim),
@@ -298,13 +333,13 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
                 // different generated statement for `cached_key_rows`, so
                 // the two must never share a compiled pipeline.
                 format!(
-                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_cb",
+                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_cb{two_pass_token}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                 )
             } else {
                 format!(
-                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}",
+                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}{two_pass_token}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                 )
@@ -1193,7 +1228,13 @@ pub(super) fn msl_literal(value: f32) -> String {
 /// than failing the whole plan -- the same "reject/fallback at bind time"
 /// shape `fuse_cached_attention: false` gives wgpu/cuda
 /// (`proxima_tensor::bind::bind_with_fusion`'s own doc).
-pub(crate) fn context_chunks_for(
+/// `pub`, not `pub(crate)` -- the attention fuse/unfuse parity harness
+/// (`proxima-model-interop`'s `decode.rs`) calls this with the SAME
+/// `cached_key_rows`/`query_groups`/`head_dim`/`numeric_policy` the real
+/// step's own `render_cached_attention` call used, to report the actual
+/// `context_chunks` a production run selected instead of inferring it from
+/// the `cached_len <= ATTENTION_CONTEXT_KEYS_PER_CHUNK` relationship.
+pub fn context_chunks_for(
     context_length: u64,
     query_groups: u64,
     head_dim: u64,

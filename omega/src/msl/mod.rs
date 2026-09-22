@@ -111,6 +111,7 @@ mod emit_and_classify;
 mod signature_tokens_prelude;
 #[macro_use]
 mod cached_attention_render;
+mod cached_attention_two_pass;
 #[macro_use]
 mod elementwise_reduce_core;
 #[macro_use]
@@ -120,6 +121,7 @@ mod tiled_gemm_cooperative_scan;
 pub use kernel_types_identity::*;
 pub use emit_and_classify::*;
 pub(crate) use signature_tokens_prelude::*;
+pub use signature_tokens_prelude::context_chunks_for;
 // plain (non-pub) reexports: `render_cached_attention`/
 // `render_cached_attention_merge` only need to reach `msl`'s own child
 // modules (`emit_and_classify`'s and `tests`'s `use super::*`), which
@@ -137,6 +139,15 @@ pub(crate) use signature_tokens_prelude::*;
 // wider leaves it unused in a plain (non-test) `metal`+macos lib build,
 // since nothing else ever names it through `msl`'s namespace.
 use cached_attention_render::render_cached_attention;
+// `pub` so `omega/examples/attn_staged_replay.rs` reaches it as
+// `omega::msl::render_cached_attention_two_pass` -- the standalone R9
+// gates (`stage_gates.log`, `staged_final_gate.log`) keep exercising the
+// SAME text `render_cached_attention` now selects for real `two_pass` ops,
+// rather than a second copy that could drift.
+pub use cached_attention_two_pass::{
+    ScratchRegion, render_cached_attention_two_pass, two_pass_groups_per_wave, two_pass_physical_threadgroup_width,
+    two_pass_scratch_elements, two_pass_scratch_layout, two_pass_threadgroup_width,
+};
 #[cfg(test)]
 use cached_attention_render::render_cached_attention_merge;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]

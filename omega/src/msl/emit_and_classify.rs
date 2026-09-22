@@ -1281,6 +1281,21 @@ pub(super) fn bindings(resolved: &BoundOp) -> Vec<Binding> {
             bindings.push(Binding::Indices(gather_access.indices));
         }
     }
+    // Part C (`cached_attention_two_pass.rs`'s own doc): the two-pass
+    // kernel's `device float* scratch` parameter sits right after the nine
+    // leaf inputs and before `out` in its own buffer-index comments -- one
+    // more `Binding::Scratch` slot than a two_pass=false `CachedAttention`
+    // ever needed, so this is additive to every other `BoundOpKind` and to
+    // `two_pass: false` candidates of this same kind.
+    if matches!(
+        resolved.kind,
+        BoundOpKind::CachedAttention {
+            two_pass: true,
+            ..
+        }
+    ) {
+        bindings.push(Binding::Scratch);
+    }
     bindings.push(Binding::Output(resolved.node));
     bindings.push(Binding::Uniforms);
     if gather_count(resolved) > 0 {

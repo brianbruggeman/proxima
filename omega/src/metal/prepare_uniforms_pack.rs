@@ -1195,6 +1195,7 @@ pub(super) fn pack_cached_attention_uniforms(
         query_groups,
         cached_key_rows,
         new_key_rows,
+        two_pass,
         ..
     } = &bound.kind
     else {
@@ -1204,6 +1205,21 @@ pub(super) fn pack_cached_attention_uniforms(
             found: bound.kind.name(),
         });
     };
+    // Part D: `render_cached_attention_two_pass`'s own kernel reads
+    // `thread_index` off `[[thread_position_in_threadgroup]]` -- a LOCAL
+    // index, `0..query_groups*two_pass_threadgroup_width(..)`, the same
+    // regardless of how many `(query_row, kv_head)` threadgroups the grid
+    // dispatches -- never the
+    // GLOBAL thread total the online-softmax kernel's own early-return
+    // check below compares against. `staged_two_pass_source`'s emitted
+    // `Uniforms` struct has no extra fields (its `two_pass` op is never
+    // `dynamic_cached_len` -- see that branch's own guard), so this returns
+    // before it.
+    if *two_pass {
+        let physical_threads = crate::msl::two_pass_physical_threadgroup_width(*query_groups, *head_dim, *cached_key_rows);
+        push_i64(bytes, physical_threads as i64);
+        return Ok(());
+    }
     // Same `cached_key_rows == 0` discriminator as `crate::msl::render_
     // cached_attention` / `grid_threads` -- `two_range_cached_bound` (nine
     // operands, `cached_key_rows != 0`) reads its live bound off `in8`
