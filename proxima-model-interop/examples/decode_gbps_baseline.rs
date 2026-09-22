@@ -15,18 +15,53 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::fs::File;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig};
+use proxima_telemetry::export::Exporter;
+use proxima_telemetry::recorder::Recorder;
 
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
 const MAX_TOKENS: usize = 48;
 
+// mirrors `gemma4_dispatch_profile_widths.rs`'s `install_console_telemetry` --
+// `report_encoder_split`/`report_op_timings` emit via `info!`, which is
+// otherwise silent: this example had no console sink, so those events never
+// reached stderr even with PROXIMA_METAL_ENCODER_SPLIT_AT/DISPATCH_PROFILE_STEP set.
+fn install_console_telemetry() -> Arc<AtomicUsize> {
+    proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse("debug"));
+    let recorder = Recorder::builder()
+        .ring_capacity(65536)
+        .export(Exporter::std())
+        .expect("console exporter installs")
+        .install()
+        .expect("telemetry recorder installs");
+    let drained_total = Arc::new(AtomicUsize::new(0));
+    let pump_recorder = Arc::clone(&recorder);
+    let pump_total = Arc::clone(&drained_total);
+    thread::Builder::new()
+        .name("dispatch-profile-drain".to_string())
+        .spawn(move || {
+            loop {
+                let drained = pump_recorder.drain();
+                pump_total.fetch_add(drained, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .expect("spawn telemetry drain thread");
+    drained_total
+}
+
 fn main() {
+    let _drained_total = install_console_telemetry();
     if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_none() {
         eprintln!(
             "decode_gbps_baseline: PROXIMA_DEBUG_METAL_STAGES not set -- \
