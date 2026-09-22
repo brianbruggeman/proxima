@@ -555,6 +555,26 @@ required-features = ["cuda-driver"]
 name = "wgpu_smoke"
 required-features = ["wgpu-backend"]
 
+[[example]]
+name = "attn_fused_replay"
+required-features = ["metal"]
+
+[[example]]
+name = "attn_unfused_reduce_replay"
+required-features = ["metal"]
+
+[[example]]
+name = "attn_node_gate"
+required-features = ["metal"]
+
+[[example]]
+name = "attn_staged_replay"
+required-features = ["metal"]
+
+[[example]]
+name = "attn_contraction_replay"
+required-features = ["metal"]
+
 [dev-dependencies]
 conflaguration = { workspace = true, features = ["toml"] }
 criterion.workspace = true
