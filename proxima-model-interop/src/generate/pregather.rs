@@ -2955,6 +2955,7 @@ mod gemma4_single_range_exclusion_tests {
     /// layer. Proves the exclusion at `Self::load` is load-bearing, not
     /// dead code guarding against a case that could not occur anyway.
     #[test]
+    #[allow(clippy::expect_used)]
     fn build_single_range_program_declares_blk15_attn_k_for_gemma4_shaped_architecture() {
         let architecture = gemma4_e2b_shaped_model_architecture();
         let single_range = build_single_range_program(&architecture, false)
