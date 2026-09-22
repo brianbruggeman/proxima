@@ -160,6 +160,17 @@ cached-attention-streaming = [
     "proxima-tensor/cached-attention-streaming",
     "omega?/cached-attention-streaming",
 ]
+# Default-off passthrough to `proxima-tensor/metal-fuse-attn-decode` and
+# `omega/metal-fuse-attn-decode` -- the gemma4-shaped windowed/padded
+# cached-attention recognizer extension. Deliberately NOT in `metal`'s
+# default shape above: the byte-equivalence acceptance bar against the
+# feature-off Metal oracle is not yet met.
+metal-fuse-attn-decode = [
+    "dep:omega",
+    "cached-attention-streaming",
+    "proxima-tensor/metal-fuse-attn-decode",
+    "omega?/metal-fuse-attn-decode",
+]
 # Passthrough to `proxima-tensor/gated-delta-net-fusion` and
 # `omega/gated-delta-net-fusion` -- same shape as `cached-attention-streaming`
 # above: default-off, individually selectable so a caller can exercise the

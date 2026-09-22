@@ -570,6 +570,10 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
+        // the CPU evaluator computes identical values regardless of which
+        // GPU kernel text `two_pass` would select -- see
+        // `BoundOpKind::CachedAttention::two_pass`'s own doc.
+        two_pass: _,
     } = &resolved.kind
     else {
         return Err(TensorError::NotLowerable {
