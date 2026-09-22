@@ -95,6 +95,16 @@ pub enum EmitError {
     )]
     CachedAttentionPartialRotaryNotSupported { node: NodeId },
 
+    /// `BoundOpKind::CachedAttention::two_pass` is only ever set `true` by
+    /// the gemma4 recognizer arm's `staged_scale_not_unity` decline stage
+    /// (`proxima-tensor/src/bind/dead_code_cached_attention.rs`), which
+    /// already guarantees `scale == 1.0` before this op reaches the
+    /// emitter -- this is a defense-in-depth rejection for a hand-built
+    /// `BoundOp` that sets `two_pass: true` directly, not a reachable path
+    /// through the recognizer.
+    #[error("node {node} is a two_pass cached attention bind with scale bits 0x{scale_bits:08x} != 1.0, which the staged emitter has not verified")]
+    CachedAttentionTwoPassScaleNotUnity { node: NodeId, scale_bits: u32 },
+
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
     /// in practice, but [`crate::msl::emit`] is a public entry point a

@@ -64,6 +64,7 @@ pub(super) fn render_cached_attention(
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
+        two_pass,
         ..
     } = &resolved.kind
     else {
@@ -73,6 +74,18 @@ pub(super) fn render_cached_attention(
             found: resolved.kind.name(),
         });
     };
+    // the gemma4 recognizer's own `staged_decode_only`/
+    // `staged_scale_not_unity` decline stages
+    // (`proxima-tensor/src/bind/dead_code_cached_attention.rs`) already
+    // guarantee `two_pass` ops are decode-only at unity scale before this
+    // op can exist -- select the staged emitter BEFORE any of the
+    // online-softmax text below is built.
+    #[cfg(feature = "metal-fuse-attn-decode")]
+    if *two_pass {
+        return crate::msl::render_cached_attention_two_pass(resolved, entry, false);
+    }
+    #[cfg(not(feature = "metal-fuse-attn-decode"))]
+    let _ = two_pass;
     // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
     // qwen35's partial-rotary shape: the trailing `pass_query`/
     // `pass_cached_key`/`pass_new_key` operands carry one un-rotated plane

@@ -143,3 +143,10 @@ pub const SIMD_WIDTH: u64 = 32;
 // source of truth for a byte constant the fit gate compares against those
 // facts -- not a parallel default the interop crate would otherwise have to
 // keep in sync by hand.
+
+// `TWO_PASS_MAX_THREADGROUP_THREADS` comes in through the `include!` above
+// (feature = "metal-fuse-attn-decode" only) -- see `omega-runtime.toml`'s
+// `[two_pass]` doc: the conservative real-hardware floor
+// `crate::msl::two_pass_groups_per_wave` divides `query_groups` against so
+// the two-pass attention kernel never requests a physical threadgroup wider
+// than a real device honors.

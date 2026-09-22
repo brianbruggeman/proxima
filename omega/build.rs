@@ -265,6 +265,16 @@ fn emit_sizing_consts() {
         ));
     }
 
+    if env::var_os("CARGO_FEATURE_METAL_FUSE_ATTN_DECODE").is_some() {
+        let max_threadgroup_threads = require_nonzero(
+            "two_pass.max_threadgroup_threads",
+            resolve_int(&root, "two_pass", "max_threadgroup_threads"),
+        );
+        out.push_str(&format!(
+            "pub const TWO_PASS_MAX_THREADGROUP_THREADS: u64 = {max_threadgroup_threads};\n"
+        ));
+    }
+
     if env::var_os("CARGO_FEATURE_METAL_Q4K_SPLIT_K").is_some() {
         let target_simdgroups = require_nonzero(
             "packed_row_split_k.target_simdgroups",
