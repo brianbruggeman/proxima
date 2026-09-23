@@ -198,6 +198,15 @@ reduce-epilogue-fusion = [
     "proxima-tensor/reduce-epilogue-fusion",
     "omega?/reduce-epilogue-fusion",
 ]
+# Passthrough to `proxima-tensor/identity-copy-alias` and
+# `omega/identity-copy-alias` -- default-off until a real-model A/B lands
+# (this crate's own attn-parity/decode-gbps example arms flip it on to
+# measure), same shape `reduce-epilogue-fusion` used before it joined
+# `metal`'s default.
+identity-copy-alias = [
+    "proxima-tensor/identity-copy-alias",
+    "omega?/identity-copy-alias",
+]
 # passthrough to `omega/metal-tiled-gemm` (default-off there, ROW `eeadc2d`)
 # so this crate's own op-timed profiling tests can compare the row-blocked
 # and tiled-GEMM paths' operand-byte traffic without a second harness.

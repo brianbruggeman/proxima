@@ -140,25 +140,40 @@ pub fn bind_with_fusion(
         apply_moe_round_group_fusion(built, program, shapes)?
     };
     #[cfg(feature = "reduce-epilogue-fusion")]
-    {
+    let built = {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
         #[cfg(feature = "std")]
-        if env::var_os("PROXIMA_DISABLE_REDUCE_EPILOGUE_FUSION").is_some() {
-            return Ok(built);
+        let skip = env::var_os("PROXIMA_DISABLE_REDUCE_EPILOGUE_FUSION").is_some();
+        #[cfg(not(feature = "std"))]
+        let skip = false;
+        if skip {
+            built
+        } else {
+            let epilogued = reduce_epilogue_fusion(built, outputs, numeric_policy)?;
+            #[cfg(feature = "instrument")]
+            debug!(
+                stage = "after_reduce_epilogue_fusion",
+                cached_attention_count = epilogued
+                    .iter()
+                    .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+                    .count() as u64,
+                "bind_with_fusion: fused-op-kind count per stage, catches a later stage silently discarding an earlier fusion"
+            );
+            epilogued
         }
-        let epilogued = reduce_epilogue_fusion(built, outputs, numeric_policy)?;
-        #[cfg(feature = "instrument")]
-        debug!(
-            stage = "after_reduce_epilogue_fusion",
-            cached_attention_count = epilogued
-                .iter()
-                .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
-                .count() as u64,
-            "bind_with_fusion: fused-op-kind count per stage, catches a later stage silently discarding an earlier fusion"
-        );
-        Ok(epilogued)
-    }
-    #[cfg(not(feature = "reduce-epilogue-fusion"))]
+    };
+    #[cfg(feature = "identity-copy-alias")]
+    #[cfg(feature = "std")]
+    let identity_copy_alias_disabled = env::var_os("PROXIMA_DISABLE_IDENTITY_COPY_ALIAS").is_some();
+    #[cfg(feature = "identity-copy-alias")]
+    #[cfg(not(feature = "std"))]
+    let identity_copy_alias_disabled = false;
+    #[cfg(feature = "identity-copy-alias")]
+    let built = if identity_copy_alias_disabled {
+        built
+    } else {
+        apply_identity_copy_alias(built, outputs)
+    };
     Ok(built)
 }
 

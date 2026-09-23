@@ -97,6 +97,18 @@ epilogue-profile-probe = ["std"]
 # default shape. This feature stays selectable standalone for CPU-only
 # callers.
 reduce-epilogue-fusion = []
+# Bind-time identity-copy aliasing (decode census: 105 pure-copy
+# `omega_elementwise_r{2,4}_n1_identity` dispatches/token): drops any
+# `BoundOpKind::Elementwise` whose body is a single-step `ScalarOp::Identity`
+# reading its one operand in the canonical, contiguous, base-0 layout -- the
+# identity's output buffer is then byte-identical to the source buffer, so
+# every reader is redirected to read the source directly with its own
+# layout/lookup, base-shifted only. No op, no dispatch, no bytes moved;
+# bit-exact by construction. Declines per-identity when its output is a
+# requested output or any reader addresses it through a `Lookup`. Alloc-tier
+# only (a structural `BoundOp` walk plus a `BTreeMap` rebuild, no platform
+# dependency) -- see `bind::identity_copy_alias`.
+identity-copy-alias = []
 # Bind-time gated-delta-net fusion (Slice F part 1, decode/n_tokens=1 only):
 # collapses `append_qwen35_delta_net_step`'s ~12-op recurrence chain into one
 # `BoundOpKind::GatedDeltaNet`, matching the structural shape a matcher walks

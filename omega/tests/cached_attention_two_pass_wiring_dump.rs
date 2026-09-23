@@ -29,9 +29,29 @@ fn dump_qwen35_partial_rotary_op_text() {
     let kernel = omega::emit(fused, &PackedOperands::new(), policy)
         .unwrap_or_else(|error| panic!("emit failed: {error}"));
 
-    let path = std::env::var("CACHED_ATTENTION_TWO_PASS_WIRING_DUMP_PATH")
-        .expect("CACHED_ATTENTION_TWO_PASS_WIRING_DUMP_PATH must be set to the output file path");
+    // default gate must never depend on a caller-supplied env var (guiding
+    // principles: a test needing a manual knob to run is broken on the
+    // default gate) -- a diffing caller still sets the env var to get a
+    // stable path across two builds; unset falls back to a scratch tempdir
+    // this process owns, so the assertion below (the dump actually wrote
+    // non-empty MSL text) still runs on every `cargo nextest run`.
+    let _keep_dir;
+    let path = match std::env::var("CACHED_ATTENTION_TWO_PASS_WIRING_DUMP_PATH") {
+        Ok(value) => value,
+        Err(_) => {
+            let dir = tempfile::tempdir().expect("scratch tempdir for wiring dump");
+            let path = dir
+                .path()
+                .join("qwen35_partial_rotary.msl")
+                .to_string_lossy()
+                .into_owned();
+            _keep_dir = dir;
+            path
+        }
+    };
     std::fs::write(&path, format!("entry={}\n{}", kernel.entry, kernel.source))
         .unwrap_or_else(|error| panic!("write {path}: {error}"));
+    let written = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read back {path}: {error}"));
+    assert!(!written.is_empty(), "wiring dump must not be empty");
     println!("dump_qwen35_partial_rotary_op_text entry={} path={path}", kernel.entry);
 }
