@@ -871,6 +871,55 @@ pub(super) fn packed_row_block_grouped_axes(
     }
 }
 
+/// Whether [`push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast arm
+/// (`push_packed_row_multi_row_q4_0_body`) would actually render for this
+/// op -- the same structural gates that function's own `fast_q4_0` local
+/// checks, minus `expert_source_mode` (not available at cache-key time; see
+/// below) and `token_total > 1` (folded in via `packed_row_block`'s own
+/// `PackedRowBlock` match, same as every other packed-row cache-key
+/// predicate on this page). Every structural axis this depends on --
+/// codec, `element_type`/dtype, gather state -- is already folded into
+/// [`crate::identity::kernel_identity`] independently (`_c` codec token,
+/// `_half`/`_wide`, `gather_bits`), so the ONLY new information this
+/// contributes is the `PROXIMA_Q4_0_MULTI_ROW_HOIST` env bit itself --
+/// matching [`Self`]'s sibling `packed_row_block_rows_override` posture one
+/// line up.
+///
+/// `expert_source_mode` (a caller-supplied bool `kernel_cache_key` itself
+/// has no parameter for) is assumed here to coincide with `weight_gathered`
+/// (`push_packed_row_multi_row_body`'s own doc: a routed expert's weight
+/// base is ALWAYS gathered once per token) -- so checking `!weight_gathered`
+/// alone reproduces `!expert_source_mode` without threading a fifth
+/// parameter through every `kernel_cache_key` caller. If a future MoE shape
+/// breaks that coincidence (routes an expert without gathering the weight
+/// operand), this predicate would need `expert_source_mode` threaded through
+/// explicitly -- named here as the residual, not silently assumed away.
+fn q4_0_multi_row_hoist_active(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+    let Some(block) = packed_row_block(resolved, quantized) else {
+        return false;
+    };
+    if block.codec != Codec::Q4_0 {
+        return false;
+    }
+    let Ok(element_type) = type_token(resolved.node, resolved.dtype) else {
+        return false;
+    };
+    if element_type != "float" {
+        return false;
+    }
+    if quantized[block.weight] != Some(Codec::Q4_0) || quantized[block.other].is_some() {
+        return false;
+    }
+    if gather_slots(resolved)[block.weight].is_some() {
+        return false;
+    }
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return false;
+    };
+    is_plain_product_reduce(resolved, *reduce_op, block.weight, block.other)
+        && q4_0_multi_row_hoist_override()
+}
+
 /// Cheap structural + compile-option identity for the kernel [`emit`] would
 /// produce from `resolved` — built without ever rendering the MSL body
 /// text, so a caller can decide whether a pipeline compile is needed before
@@ -926,6 +975,7 @@ pub(crate) fn kernel_cache_key(
             let rows = codec_rows_per_simdgroup(block.codec);
             (rows != codec_rows_per_simdgroup_default(block.codec)).then_some(rows)
         }),
+        q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized),
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,

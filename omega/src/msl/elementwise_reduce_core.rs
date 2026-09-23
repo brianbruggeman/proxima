@@ -1108,6 +1108,20 @@ pub(super) fn push_packed_row_multi_row_body(
         && quantized[weight] == Some(Codec::Q4K)
         && quantized[other].is_none()
         && is_plain_product_reduce(resolved, reduce_op, weight, other);
+    // `Q4_0` sibling of the `fast_q4k` gate above (`docs/discipline.md`,
+    // prefill header-decode hoist): same admission shape (plain product,
+    // unquantized activation, un-gathered weight), plus the
+    // `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` A/B switch so the unset-env emit stays
+    // byte-identical to today's generic loop -- see
+    // `push_packed_row_multi_row_q4_0_body`'s own doc for what it changes.
+    let fast_q4_0 = !expert_source_mode
+        && !weight_gathered
+        && block.codec == Codec::Q4_0
+        && element_type == "float"
+        && quantized[weight] == Some(Codec::Q4_0)
+        && quantized[other].is_none()
+        && is_plain_product_reduce(resolved, reduce_op, weight, other)
+        && q4_0_multi_row_hoist_override();
     if fast_q4k {
         push_packed_row_multi_row_q4k_body(
             source,
@@ -1116,6 +1130,18 @@ pub(super) fn push_packed_row_multi_row_body(
             rows,
             cap,
             codec_block_bytes(block.codec),
+        );
+    } else if fast_q4_0 {
+        push_packed_row_multi_row_q4_0_body(
+            source,
+            resolved,
+            reduce_op,
+            weight,
+            other,
+            rows,
+            cap,
+            element_type,
+            operand_count,
         );
     } else {
         source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
@@ -1275,6 +1301,99 @@ pub(super) fn push_packed_row_multi_row_q4k_body(
         "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
     ));
     source.push_str("        other_ib_offset += y4_step;\n");
+    source.push_str("    }\n");
+}
+
+/// Renders [`push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast-path
+/// reduction loop, gated by `PROXIMA_Q4_0_MULTI_ROW_HOIST=1`
+/// (`q4_0_multi_row_hoist_override`). Byte-for-byte the SAME `for k = lane;
+/// k < reduction_total; k += 32` walk, `q`/`s` nesting, `scratch`/
+/// `push_body_steps`/`sumf[s][q] = sumf[s][q] + value` accumulation and
+/// activation-load placement (inside the per-token `s` loop) the generic
+/// `else` arm above renders -- `PREFILL_KERNEL_BOUND.md`'s own repair option
+/// (a): this changes NEITHER the order of `sumf[s][q] += weight * activation`
+/// terms NOR which terms are summed, only how many times the header bytes
+/// are read and converted to `d`.
+///
+/// The ONLY change: at a fixed `k`-loop iteration every lane of the 32-wide
+/// simdgroup addresses the SAME 18-byte `Q4_0` block (`weight_base[q]+k`
+/// differs only in `k % 32`, i.e. the lane, since `weight_base[q]` is always
+/// block-aligned -- every `Q4_0` row starts at a multiple of 32 elements).
+/// Today's `q4_0_element` (called once per lane per iteration, unchanged in
+/// the generic arm) re-derives the 2-byte header's `d` independently on all
+/// 32 lanes even though they read the identical bytes -- the measured 32x
+/// redundant header-decode factor. This arm has lane 0 (always active,
+/// unmasked, for this grid) do that decode once and shares it to the other
+/// 31 lanes via `simd_broadcast_first`, the same cooperative-broadcast
+/// primitive `signature_tokens_prelude.rs`'s gathered-weight fetch already
+/// uses. Each lane's own nibble extraction stays per-lane -- that byte and
+/// bit position differ by lane, nothing to hoist there -- so every
+/// `scratch[weight]` value this renders is `(float)(nibble - 8) * d`,
+/// byte-identical to what [`Q4_0_UNPACK_MSL`]'s `q4_0_element` computes at
+/// the same `(weight_base[q]+k)` offset: same operations on the same bytes,
+/// no reassociation, just computed once per block instead of once per lane.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_packed_row_multi_row_q4_0_body(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    cap: usize,
+    element_type: &str,
+    operand_count: usize,
+) {
+    source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "            {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
+    source.push_str("            long q4_0_index = weight_base[q] + k;\n");
+    source.push_str(&format!(
+        "            device const uchar *q4_0_block = in{weight} + (q4_0_index / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES};\n"
+    ));
+    source.push_str(&format!(
+        "            uint q4_0_local = (uint)(q4_0_index % {Q4_0_BLOCK_ELEMENTS});\n"
+    ));
+    // lane 0 always participates unmasked in this grid, so its decode of
+    // `q4_0_block[0..2]` is valid for every lane at this iteration -- the
+    // block address is shared, only `q4_0_local` (the nibble position)
+    // differs per lane.
+    source.push_str("            ushort q4_0_d_bits = 0u;\n");
+    source.push_str(
+        "            if (lane == 0u) { q4_0_d_bits = (ushort)((uint)q4_0_block[0] | ((uint)q4_0_block[1] << 8)); }\n",
+    );
+    source.push_str("            q4_0_d_bits = simd_broadcast_first(q4_0_d_bits);\n");
+    source.push_str("            float q4_0_d = (float)as_type<half>(q4_0_d_bits);\n");
+    source.push_str(
+        "            uchar q4_0_byte = q4_0_block[2u + (q4_0_local % 16u)];\n",
+    );
+    source.push_str(
+        "            int q4_0_nibble = (q4_0_local < 16u) ? (int)(q4_0_byte & 0x0Fu) : (int)(q4_0_byte >> 4u);\n",
+    );
+    source.push_str(&format!(
+        "            scratch[{weight}] = (float)(q4_0_nibble - 8) * q4_0_d;\n"
+    ));
+    source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str(&format!(
+        "                scratch[{other}] = {};\n",
+        operand_read(other, "(other_base[s] + k * other_stride)", None)
+    ));
+    let value_expr = push_body_steps(
+        source,
+        resolved.element_body(),
+        "                ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "                {element_type} value = {value_expr};\n"
+    ));
+    let combine_expr = scalar_op_expr(reduce_op, &["sumf[s][q]", "value"]);
+    source.push_str(&format!("                sumf[s][q] = {combine_expr};\n"));
+    source.push_str("            }\n");
+    source.push_str("        }\n");
     source.push_str("    }\n");
 }
 

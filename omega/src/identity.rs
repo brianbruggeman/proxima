@@ -159,6 +159,18 @@ pub(crate) struct MetalOnlyExtras {
     /// `_pr{rows}` suffix below so the 4-row and 8-row variants compile as
     /// two distinct pipelines and coexist in the same binary.
     pub packed_row_block_rows_override: Option<usize>,
+    /// `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` (`docs/discipline.md`, prefill
+    /// header-decode hoist): `true` only when
+    /// [`crate::msl::push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast
+    /// arm actually rendered for this op (env on AND every structural gate
+    /// `push_packed_row_multi_row_body`'s own `fast_q4_0` checks passed) --
+    /// so the unset-env default folds no new token and the cache key, and
+    /// every emitted byte, stays identical to before this field existed.
+    /// Feeds the `_q0h` suffix below so the hoisted and generic `Q4_0`
+    /// variants compile as two distinct pipelines and coexist in the same
+    /// binary, matching [`Self::packed_row_block_rows_override`]'s own
+    /// same-binary A/B posture.
+    pub q4_0_multi_row_hoist: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -611,6 +623,9 @@ pub(crate) fn kernel_identity(
     if let Some(rows) = metal.packed_row_block_rows_override {
         identity.push_str("_pr");
         identity.push_str(&rows.to_string());
+    }
+    if metal.q4_0_multi_row_hoist {
+        identity.push_str("_q0h");
     }
 
     identity
