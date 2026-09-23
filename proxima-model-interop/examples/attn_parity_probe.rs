@@ -39,6 +39,16 @@ fn main() {
     let parsed = parse_complete(&bytes).expect("parse gemma4-E2B header");
     let model = LoadedModel::load(&parsed, &bytes).expect("bind gemma4-E2B");
 
+    // attribution3 followon, intervention 3: same `PROXIMA_DISPATCH` knob
+    // `decode_gbps_baseline.rs` carries, so this probe's byte-equivalence
+    // corpus can be run under the candidate dispatch type without a
+    // separate binary.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    let dispatch_type = match std::env::var("PROXIMA_DISPATCH").as_deref() {
+        Ok("concurrent") => omega::DispatchType::Concurrent,
+        Ok("serial") | Err(_) => omega::DispatchType::Serial,
+        Ok(other) => panic!("PROXIMA_DISPATCH={other}: expected `serial` or `concurrent`"),
+    };
     let serving_config = ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
         kv_cache_key_quant: GgmlType::F32,
@@ -47,6 +57,8 @@ fn main() {
         batch_size: 0,
         ubatch_size: 0,
         reasoning_budget: 0,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        dispatch_type,
         ..ServingConfig::default()
     };
 

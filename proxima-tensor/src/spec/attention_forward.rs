@@ -1732,7 +1732,7 @@ pub fn lfm2_forward_program_with_experts(
     logit_softcap: Option<f32>,
     last_row_only: bool,
     ple_dim: Option<u32>,
-) -> Result<(Vec<Op>, NodeId, MoeSites), TensorError> {
+) -> Result<(Vec<Op>, NodeId, MoeSites, alloc::vec::Vec<NodeId>), TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
             expected: block_count,
@@ -2060,48 +2060,79 @@ pub fn lfm2_forward_program_with_experts(
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
-    let logits_product = elementwise(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
-    )?;
-    let logits = reduce(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        logits_product,
-        "sdv->sdv",
-        "sv->sdv",
-    )?;
 
-    let logits = match logit_softcap {
-        Some(cap) => {
-            let cap_node = scalar_constant(&mut program, cap);
-            let scaled = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Divide,
-                &[(logits, "sv->sv"), (cap_node, "->sv")],
-            )?;
-            let tanh = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Tanh,
-                &[(scaled, "sv->sv")],
-            )?;
-            elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(tanh, "sv->sv"), (cap_node, "->sv")],
-            )?
+    // attn_parity followon (2026-09-22): factored out of the single
+    // production call site below so `PROXIMA_HEAD_REPEATS` (instrument-gated,
+    // read once below) can append N-1 byte-identical duplicate head
+    // dispatches after it -- same `normed_last`/`lm_head` operands, same
+    // binding, same softcap epilogue, each producing its own terminal
+    // `NodeId` (`reduce`/`elementwise` always allocate a fresh node, so no
+    // buffer aliasing is possible at the IR level). Nothing downstream reads
+    // a duplicate; the caller is responsible for keeping it live as a
+    // requested output (`prune_dead`) if it wants the dispatch to execute.
+    let append_head = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
+        let logits_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
+        )?;
+        let logits = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            logits_product,
+            "sdv->sdv",
+            "sv->sdv",
+        )?;
+        match logit_softcap {
+            Some(cap) => {
+                let cap_node = scalar_constant(program, cap);
+                let scaled = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Divide,
+                    &[(logits, "sv->sv"), (cap_node, "->sv")],
+                )?;
+                let tanh = elementwise(program, DType::Float32, ScalarOp::Tanh, &[(scaled, "sv->sv")])?;
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(tanh, "sv->sv"), (cap_node, "->sv")],
+                )
+            }
+            None => Ok(logits),
         }
-        None => logits,
     };
 
-    Ok((program, logits, MoeSites(moe_sites)))
+    let logits = append_head(&mut program)?;
+
+    // attn_parity followon: `PROXIMA_HEAD_REPEATS=1|2|3` (default 1, i.e. no
+    // duplicates) is a measurement-only knob for the Gemma4 head cost
+    // campaign -- see `OWNER_BRIEF_gemma_head.md`. Gated on `instrument` so
+    // the knob and its `std::env` read compile out of every non-instrumented
+    // build; the duplicates themselves are ordinary program nodes any
+    // evaluator can run, but nothing outside this measurement harness asks
+    // for them (no caller reads `duplicate_head_roots` today).
+    #[cfg(feature = "instrument")]
+    let duplicate_head_roots: alloc::vec::Vec<NodeId> = {
+        let repeats: u32 = std::env::var("PROXIMA_HEAD_REPEATS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1)
+            .clamp(1, 3);
+        let mut extra = alloc::vec::Vec::with_capacity((repeats.saturating_sub(1)) as usize);
+        for _ in 1..repeats {
+            extra.push(append_head(&mut program)?);
+        }
+        extra
+    };
+    #[cfg(not(feature = "instrument"))]
+    let duplicate_head_roots: alloc::vec::Vec<NodeId> = alloc::vec::Vec::new();
+
+    Ok((program, logits, MoeSites(moe_sites), duplicate_head_roots))
 }
 
 /// [`mistral_forward_program`]'s key/value-cached counterpart: the same

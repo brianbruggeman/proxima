@@ -206,7 +206,7 @@ cuda-driver = [
 # already uses. Default-off and additive only: every wrap is
 # `#[cfg(feature = "instrument")]`, so an instrument-off build never pays the
 # `read_ticks()` call it would otherwise cost.
-instrument = ["metal", "proxima-tensor/instrument"]
+instrument = ["metal", "proxima-tensor/instrument", "dep:sha2"]
 # Gates `omega/tests/plan_pipeline_alloc_count.rs`'s `#[global_allocator]`
 # proof that `execute_plan_with_placements` allocates zero times per step on
 # a plan-cache HIT. `proxima-test` (below, in `[dev-dependencies]`) is a
@@ -472,6 +472,7 @@ wgpu = { version = "30.0.1", default-features = false, features = [
     "vulkan",
 ], optional = true }
 proxima-primitives = { version = "0.1.0", path = "../proxima-primitives", default-features = false }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal

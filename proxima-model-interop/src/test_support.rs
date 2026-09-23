@@ -23,11 +23,14 @@ pub(crate) fn math_mode_from_env() -> omega::MathMode {
 
 /// `PROXIMA_DISPATCH` read the same way [`math_mode_from_env`] reads
 /// `PROXIMA_MATH_MODE`: `"serial"` selects [`omega::DispatchType::Serial`],
-/// unset or `"concurrent"` selects [`omega::DispatchType::Concurrent`]
-/// (`ServingConfig::default`'s own `Concurrent` remains the default so a
-/// test that never sets this env var keeps behaving exactly as it did before
-/// this knob existed), and any other value panics naming what it saw rather
-/// than silently falling back to a mode the caller did not ask for.
+/// unset or `"concurrent"` selects [`omega::DispatchType::Concurrent`].
+/// `ServingConfig::default`'s own `dispatch_type` flipped to `Serial` at
+/// 3afb3db37 (a qwen35moe residency-boundary side effect, not a per-model
+/// measurement); this function's own unset-is-`Concurrent` default predates
+/// that flip and was not updated to match, so a caller of this function
+/// still gets `Concurrent` unless it opts into `serial` explicitly, and any
+/// other value panics naming what it saw rather than silently falling back
+/// to a mode the caller did not ask for.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn dispatch_type_from_env() -> omega::DispatchType {
     match std::env::var("PROXIMA_DISPATCH").as_deref() {

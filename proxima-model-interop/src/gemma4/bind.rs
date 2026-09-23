@@ -965,7 +965,7 @@ fn bind_gemma4_with_last_row_only<'file>(
             paired_gate_up_reduce: false,
             fused_qkv_reduce: false,
         };
-        let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden) =
+        let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
             build_forward(&descriptor, last_row_only)?;
         let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
             CacheStrategy::TwoRange => {
@@ -1037,6 +1037,7 @@ fn bind_gemma4_with_last_row_only<'file>(
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
+            duplicate_head_roots,
             single_position_step: false,
         })
 }
@@ -1066,6 +1067,18 @@ impl ArchitectureTrait for Gemma4Arch {
 
     fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
         crate::architecture::KvCacheShape::Custom
+    }
+
+    /// Intervention 6's measured decode configuration (RUN.md "Intervention
+    /// 6" / "INTEGRATION"): whole-token latency 18.83 -> 16.60 ms (-11.9%) at
+    /// K=8, bytes identical to K=1 on the six-prompt corpus, uninstrumented
+    /// rollout check confirming the same order of magnitude
+    /// (-1.98 ms/token). Scoped to gemma4 alone -- every other architecture
+    /// keeps [`Architecture::command_buffer_chunks`]'s own default of `1`;
+    /// this measurement does not establish a universal placements-path
+    /// default (the owner's own integration recommendation).
+    fn command_buffer_chunks(&self) -> u32 {
+        8
     }
 
     #[cfg(feature = "std")]
@@ -1353,7 +1366,7 @@ mod declared_leaves_match_bound_leaves_tests {
         suffix: &str,
     ) -> alloc::collections::BTreeSet<String> {
         let schedule = gemma4_layer_schedule(architecture);
-        let (program, _logits, _moe_sites) = lfm2_forward_program_with_experts(
+        let (program, _logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,

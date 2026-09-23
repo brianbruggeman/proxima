@@ -762,6 +762,7 @@ impl Architecture for MultiRowLogitsArch {
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
+            duplicate_head_roots: Vec::new(),
             single_position_step: false,
         })
     }
@@ -952,6 +953,7 @@ impl Architecture for EmptyLayerRootsArch {
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
+            duplicate_head_roots: Vec::new(),
             single_position_step: false,
         })
     }

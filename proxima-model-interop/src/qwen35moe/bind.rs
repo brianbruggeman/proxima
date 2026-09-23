@@ -281,6 +281,7 @@ impl ArchitectureTrait for Qwen35MoeArch {
                 .map(|diagnostic| diagnostic.router_logits)
                 .collect(),
             moe_sites,
+            duplicate_head_roots: Vec::new(),
             single_position_step: true,
         })
     }

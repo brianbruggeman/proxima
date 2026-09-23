@@ -1927,9 +1927,10 @@ impl<'file> LoadedModel<'file> {
         max_tokens: usize,
         serving_config: ServingConfig,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
         let serving_config = {
             let mut serving_config = serving_config;
+            self.apply_command_buffer_chunks_default(&mut serving_config);
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut serving_config)?;
             serving_config
         };
@@ -1964,14 +1965,13 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         serving_config: &ServingConfig,
     ) -> Result<PrefixState, InteropError> {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
         let effective_serving_config = {
             let mut effective_serving_config = *serving_config;
+            self.apply_command_buffer_chunks_default(&mut effective_serving_config);
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut effective_serving_config)?;
             effective_serving_config
         };
-        #[cfg(not(all(feature = "metal", target_os = "macos")))]
-        let effective_serving_config = *serving_config;
         let mut runtime = BackendRuntime::new(&effective_serving_config);
         let (_generated_ids, _text, _stopped_by_eos, prefix_state) = self
             .run_decode_loop_observed_seeded(
@@ -2020,18 +2020,17 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
         let effective_serving_config = {
             let mut effective_serving_config = *serving_config;
+            self.apply_command_buffer_chunks_default(&mut effective_serving_config);
             // Prefix-resume reaches the same device allocator as ordinary
             // generation. Apply the identical load-time budget before the
             // resumed step, otherwise a caller can bypass the hard memory
             // ceiling simply by supplying a PrefixState.
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut effective_serving_config)?;
             effective_serving_config
         };
-        #[cfg(not(all(feature = "metal", target_os = "macos")))]
-        let effective_serving_config = *serving_config;
         let mut runtime = BackendRuntime::new(&effective_serving_config);
         let seed = PrefixState {
             ids: prefix.ids.clone(),
@@ -2052,6 +2051,23 @@ impl<'file> LoadedModel<'file> {
                 true,
             )?;
         Ok((generated_ids, text, stopped_by_eos))
+    }
+
+    /// Applies this checkpoint's own resolved
+    /// [`crate::architecture::Architecture::command_buffer_chunks`] as
+    /// `serving_config.command_buffer_chunks`'s default -- only when the
+    /// caller left that field at [`ServingConfig`]'s own type default of
+    /// `1`, never overriding an explicit non-default caller value. `self
+    /// .architecture_impl` is `None` for every non-registry load entry point
+    /// (`Self::architecture_impl`'s own doc), which leaves this a no-op:
+    /// every field this method could write is already `1`.
+    pub(super) fn apply_command_buffer_chunks_default(&self, serving_config: &mut ServingConfig) {
+        if serving_config.command_buffer_chunks != 1 {
+            return;
+        }
+        if let Some(architecture) = self.architecture_impl {
+            serving_config.command_buffer_chunks = architecture.command_buffer_chunks();
+        }
     }
 
     /// The first auto-tune step (`crate::memory_fit`'s own module doc):
@@ -2246,9 +2262,10 @@ impl<'file> LoadedModel<'file> {
         serving_config: ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
         let serving_config = {
             let mut serving_config = serving_config;
+            self.apply_command_buffer_chunks_default(&mut serving_config);
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut serving_config)?;
             serving_config
         };
@@ -2880,6 +2897,8 @@ impl<'file> LoadedModel<'file> {
             max_tokens,
             prompt_token_count,
             |_step| {
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                omega::set_capture_step(_step as u64);
                 if let Some(queued) = pending.pop_front() {
                     if std::env::var_os("PROXIMA_DEBUG_SPECULATIVE").is_some() {
                         eprintln!("speculative_pending_pop step={_step}");
@@ -3215,6 +3234,13 @@ impl<'file> LoadedModel<'file> {
                     let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
                     #[cfg(feature = "instrument")]
                     let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
+                    // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
+                    // roots vector build + program/logits-root selection between
+                    // named_blocks_kv ending here and evaluate_started below --
+                    // previously unattributed against wall_ms, see the followon
+                    // attribution report.
+                    #[cfg(feature = "instrument")]
+                    let root_select_started = read_ticks();
 
                     let mut roots: Vec<NodeId> =
                         Vec::with_capacity(1 + active_layer_roots.len() * 3);
@@ -3228,6 +3254,30 @@ impl<'file> LoadedModel<'file> {
                         && serving_config.qwen35moe_monolithic_all_low;
                     if step_batch_needs_logits(split_prefill, is_last_step_batch) {
                         roots.push(active_logits_root);
+                    }
+                    // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head):
+                    // `PROXIMA_HEAD_REPEATS=1|2|3` head-cost measurement knob.
+                    // `lfm2_two_range_cached_forward_program_with_experts`
+                    // (the builder gemma4's `CacheStrategy::TwoRange` production
+                    // path calls) appends its `repeats - 1` duplicate head
+                    // chains when the same env var is set at build time
+                    // (`append_head`'s own doc), and returns their real
+                    // `NodeId`s as `duplicate_head_roots`
+                    // (`crate::architecture::BoundProgram::duplicate_head_roots`),
+                    // threaded through `self.duplicate_head_roots` at load time --
+                    // `NodeId(program.len() - offset)` is wrong for a chain (each
+                    // duplicate head appends multiple ops, not one), so this reads
+                    // the builder's own roots instead of reconstructing them.
+                    // `prune_dead` only keeps a node reachable from a requested
+                    // root, so pushing them here is what keeps the duplicate
+                    // dispatches alive on the bound plan at all. Unconditional --
+                    // this keeps `PROXIMA_HEAD_REPEATS` duplicate-head chains
+                    // reachable from `prune_dead` on every build, not only one
+                    // compiled with the unrelated `instrument` telemetry
+                    // feature; `duplicate_head_roots` is `Vec::new()` (a no-op
+                    // extend) on every checkpoint that never sets that env var.
+                    if step_batch_needs_logits(split_prefill, is_last_step_batch) {
+                        roots.extend(self.duplicate_head_roots.iter().copied());
                     }
                     roots.extend_from_slice(node_values_sink.nodes());
                     if monolithic_prefill_requested {
@@ -3792,6 +3842,8 @@ impl<'file> LoadedModel<'file> {
                         };
 
                     #[cfg(feature = "instrument")]
+                    let root_select_ticks = elapsed_ticks(root_select_started);
+                    #[cfg(feature = "instrument")]
                     let evaluate_started = read_ticks();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     #[cfg(feature = "instrument")]
@@ -4222,6 +4274,13 @@ impl<'file> LoadedModel<'file> {
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                     let metal_stage = metal_stage_totals();
+                    // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
+                    // brackets everything between evaluate() returning and the
+                    // KV-append host memcpy starting -- expert-routing telemetry
+                    // notify plus bookkeeping, previously folded into wall's
+                    // unattributed remainder.
+                    #[cfg(feature = "instrument")]
+                    let post_evaluate_started = read_ticks();
                     // ROW 329's own two-range twin: the dispatch_profile_target
                     // arm above stores its `execute_plan_with_placements_dispatch_timed`
                     // split into `encoder_split_ns` instead of dropping it, so
@@ -4518,6 +4577,8 @@ impl<'file> LoadedModel<'file> {
                     // host `extend_from_slice` memcpy cost, distinct from the GPU
                     // readback `metal_stage_totals` already reports.
                     #[cfg(feature = "instrument")]
+                    let post_evaluate_ticks = elapsed_ticks(post_evaluate_started);
+                    #[cfg(feature = "instrument")]
                     let layer_cache_append_started = read_ticks();
                     #[cfg(feature = "instrument")]
                     let mut layer_cache_append_elements: u64 = 0;
@@ -4686,7 +4747,22 @@ impl<'file> LoadedModel<'file> {
                     }
                     #[cfg(feature = "instrument")]
                     let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
+                    // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
+                    // brackets the readout-branch selection + eager debug! field
+                    // evaluation (non_finite_count scans vocab_size unconditionally
+                    // -- tracing macros evaluate field expressions before the
+                    // level check) between append ending and logits_hash starting.
+                    #[cfg(feature = "instrument")]
+                    let pre_logits_started = read_ticks();
                     let cached_len_before_step = cached_len;
+                    // attribution slice 2 (2026-09-22, OWNER_BRIEF_dominant_cost):
+                    // splits pre_logits into the cache-checksum debug! block,
+                    // the logits-fetch + shape-check debug! block, and the
+                    // unconditional argmax debug! block, to find which
+                    // sub-interval carries the 1.26ms the scan-disabled race
+                    // left unattributed.
+                    #[cfg(feature = "instrument")]
+                    let checksum_started = read_ticks();
                     #[cfg(feature = "instrument")]
                     {
                         let (layer0_after_len, layer0_after_checksum) =
@@ -4709,6 +4785,8 @@ impl<'file> LoadedModel<'file> {
                             "decode_loop_step_trace: layer 0/3 cache state before/after this step's append"
                         );
                     }
+                    #[cfg(feature = "instrument")]
+                    let checksum_ticks = elapsed_ticks(checksum_started);
                     // Cacheless (`active_layer_roots.is_empty()`) architectures have
                     // no `LayerCache` to advance -- `cached_len` stays 0 so next
                     // step's `build_position_inputs`/`apply_serving_config` above
@@ -4810,6 +4888,16 @@ impl<'file> LoadedModel<'file> {
                         return Ok(emitted[0]);
                     }
                     if is_last_step_batch {
+                        // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
+                        // one runtime knob, off by default and independent of
+                        // PROXIMA_DEBUG_METAL_STAGES, gates both the O(vocab_size)
+                        // non-finite scan below and the logits_hash FNV fold --
+                        // neither feeds sample_next_token (it reads `last_position`
+                        // directly).
+                        #[cfg(feature = "instrument")]
+                        let fetch_started = read_ticks();
+                        #[cfg(any(feature = "instrument", feature = "metal"))]
+                        let logits_diag_enabled = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
                         let (logits, _shape) = evaluated.get(active_logits_root).ok_or(
                             InteropError::MissingEvaluatedNode {
                                 node: active_logits_root,
@@ -4821,14 +4909,19 @@ impl<'file> LoadedModel<'file> {
                         // that hands back the full `[new_count, vocab]` buffer is
                         // rejected here rather than silently sampled at row 0.
                         #[cfg(feature = "instrument")]
+                        let non_finite_count = if logits_diag_enabled {
+                            logits.iter().filter(|value| !value.is_finite()).count() as u64
+                        } else {
+                            0
+                        };
+                        #[cfg(feature = "instrument")]
                         debug!(
                             step = _step as u64,
                             batch_index = batch_index as u64,
                             new_count = new_count as u64,
                             logits_len = logits.len() as u64,
                             vocab_size = vocab_size as u64,
-                            non_finite_count =
-                                logits.iter().filter(|value| !value.is_finite()).count() as u64,
+                            non_finite_count,
                             first_five = ?&logits[..logits.len().min(5)],
                             "one_evaluation_prefill_batch: logits shape before sampling"
                         );
@@ -4840,6 +4933,67 @@ impl<'file> LoadedModel<'file> {
                             });
                         }
                         let last_position = &logits[..vocab_size];
+                        // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head):
+                        // per-step bytes verification for the
+                        // `PROXIMA_HEAD_REPEATS` duplicate head dispatches --
+                        // every duplicate must read back identical bytes to the
+                        // production head, since both read the same operands,
+                        // same `output.weight` range, same epilogue. Gated on
+                        // `PROXIMA_HEAD_REPEATS_VERIFY` (separate from the
+                        // repeats knob itself) so the memcmp cost never lands
+                        // on a measurement run that only wants timing.
+                        #[cfg(feature = "instrument")]
+                        if std::env::var_os("PROXIMA_HEAD_REPEATS_VERIFY").is_some() {
+                            eprintln!(
+                                "head_repeats_verify step={_step} production_node={}",
+                                active_logits_root.0,
+                            );
+                            for (offset, duplicate_node) in
+                                self.duplicate_head_roots.iter().copied().enumerate()
+                            {
+                                let offset = offset + 1;
+                                match evaluated.get(duplicate_node) {
+                                    Some((duplicate_logits, _duplicate_shape)) => {
+                                        let matches = duplicate_logits.len() == last_position.len()
+                                            && duplicate_logits
+                                                .iter()
+                                                .zip(last_position.iter())
+                                                .all(|(left, right)| left.to_bits() == right.to_bits());
+                                        const SENTINEL_BITS: u32 = 0x7fc0_0000;
+                                        let sentinel_survived = duplicate_logits
+                                            .iter()
+                                            .any(|value| value.to_bits() == SENTINEL_BITS);
+                                        let max_abs_diff = duplicate_logits
+                                            .iter()
+                                            .zip(last_position.iter())
+                                            .map(|(left, right)| (left - right).abs())
+                                            .fold(0.0_f32, f32::max);
+                                        let nan_count = duplicate_logits
+                                            .iter()
+                                            .filter(|value| value.is_nan())
+                                            .count();
+                                        eprintln!(
+                                            "head_repeats_verify step={_step} duplicate_offset={offset} \
+                                             node={} bytes_match={matches} sentinel_survived={sentinel_survived} \
+                                             max_abs_diff={max_abs_diff} nan_count={nan_count} \
+                                             dup_first_three={:?} prod_first_three={:?}",
+                                            duplicate_node.0,
+                                            &duplicate_logits[..duplicate_logits.len().min(3)],
+                                            &last_position[..last_position.len().min(3)],
+                                        );
+                                    }
+                                    None => {
+                                        eprintln!(
+                                            "head_repeats_verify step={_step} duplicate_offset={offset} \
+                                             node={} MISSING_FROM_EVALUATED",
+                                            duplicate_node.0,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        #[cfg(feature = "instrument")]
+                        let fetch_ticks = elapsed_ticks(fetch_started);
                         if std::env::var_os("PROXIMA_DEBUG_GDN_LOGITS").is_some() {
                             let mut ranked: Vec<usize> = (0..vocab_size).collect();
                             ranked.sort_unstable_by(|left, right| {
@@ -4860,13 +5014,23 @@ impl<'file> LoadedModel<'file> {
                             );
                         }
                         #[cfg(feature = "instrument")]
-                        {
+                        let argmax_started = read_ticks();
+                        // intervention 2 (2026-09-22, OWNER_BRIEF_dominant_cost):
+                        // the O(vocab_size) argmax scan and its `debug!` line feed
+                        // no consumer other than this diagnostic -- `sample_next_token`
+                        // below reads `last_position` directly. Gate both on the same
+                        // `logits_diag_enabled` knob that already gates the logits_hash
+                        // fold, so the default (unset) path pays neither cost.
+                        #[cfg(feature = "instrument")]
+                        let (scan_ticks, debug_ticks) = if logits_diag_enabled {
                             let (argmax_token, argmax_logit) = last_position
                                 .iter()
                                 .copied()
                                 .enumerate()
                                 .max_by(|left, right| left.1.total_cmp(&right.1))
                                 .unwrap_or((0, f32::NEG_INFINITY));
+                            let scan_ticks = elapsed_ticks(argmax_started);
+                            let debug_started = read_ticks();
                             debug!(
                                 step = _step as u64,
                                 batch_index = batch_index as u64,
@@ -4875,7 +5039,25 @@ impl<'file> LoadedModel<'file> {
                                 argmax_logit,
                                 "decode_loop_step_trace: logits before sampling"
                             );
+                            let debug_ticks = elapsed_ticks(debug_started);
+                            (scan_ticks, debug_ticks)
+                        } else {
+                            (0_u64, 0_u64)
+                        };
+                        #[cfg(feature = "instrument")]
+                        if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+                            let ms = |ticks: u64| {
+                                proxima_tensor::instrument::ticks_to_nanos(ticks) as f64 / 1e6
+                            };
+                            eprintln!(
+                                "token_breakdown_argmax_split step={} scan_ms={} debug_ms={}",
+                                _step,
+                                ms(scan_ticks),
+                                ms(debug_ticks),
+                            );
                         }
+                        #[cfg(feature = "instrument")]
+                        let argmax_ticks = elapsed_ticks(argmax_started);
                         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                         let barriers_step = metal_stage.barriers_emitted;
                         #[cfg(not(all(
@@ -4885,12 +5067,44 @@ impl<'file> LoadedModel<'file> {
                         )))]
                         let barriers_step = 0_u64;
                         logits_sink.observe(last_position, barriers_step);
+                        // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
+                        // this eprintln is gated on PROXIMA_LOGITS_DIAG, not on
+                        // PROXIMA_DEBUG_METAL_STAGES or "instrument" -- off by
+                        // default. When set, one FNV1a64 fold over vocab_size f32
+                        // elements (4 bytes/element) plus an unbuffered stderr
+                        // write runs every decode step, same format as before so
+                        // the existing corpus tooling keeps working.
+                        #[cfg(feature = "instrument")]
+                        let pre_logits_ticks = elapsed_ticks(pre_logits_started);
+                        #[cfg(feature = "instrument")]
+                        let logits_hash_started = read_ticks();
                         #[cfg(feature = "metal")]
-                        eprintln!(
-                            "logits_hash step={} hash=0x{:016x}",
-                            _step,
-                            logits_bits_hash(last_position)
-                        );
+                        if logits_diag_enabled {
+                            eprintln!(
+                                "logits_hash step={} hash=0x{:016x}",
+                                _step,
+                                logits_bits_hash(last_position)
+                            );
+                        }
+                        #[cfg(feature = "instrument")]
+                        let logits_hash_ticks = elapsed_ticks(logits_hash_started);
+                        #[cfg(feature = "instrument")]
+                        if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+                            let ms = |ticks: u64| {
+                                proxima_tensor::instrument::ticks_to_nanos(ticks) as f64 / 1e6
+                            };
+                            eprintln!(
+                                "token_breakdown_gaps step={} root_select_ms={} post_evaluate_ms={} pre_logits_ms={} checksum_ms={} fetch_ms={} argmax_ms={} logits_hash_ms={}",
+                                _step,
+                                ms(root_select_ticks),
+                                ms(post_evaluate_ticks),
+                                ms(pre_logits_ticks),
+                                ms(checksum_ticks),
+                                ms(fetch_ticks),
+                                ms(argmax_ticks),
+                                ms(logits_hash_ticks),
+                            );
+                        }
 
                         #[cfg(feature = "instrument")]
                         let greedy_pick_started = read_ticks();
@@ -5240,6 +5454,8 @@ impl<'file> LoadedModel<'file> {
             |_step| {
                 #[cfg(feature = "instrument")]
                 proxima_tensor::instrument::reset_step();
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                omega::set_capture_step(_step as u64);
                 #[cfg(feature = "instrument")]
                 let step_started = read_ticks();
 
@@ -5592,12 +5808,16 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
                 let barriers_step = 0_u64;
                 logits_sink.observe(last_position, barriers_step);
+                // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost): same
+                // PROXIMA_LOGITS_DIAG gate as the batch decode path's logits_hash.
                 #[cfg(feature = "metal")]
-                eprintln!(
-                    "logits_hash step={} hash=0x{:016x}",
-                    _step,
-                    logits_bits_hash(last_position)
-                );
+                if std::env::var_os("PROXIMA_LOGITS_DIAG").is_some() {
+                    eprintln!(
+                        "logits_hash step={} hash=0x{:016x}",
+                        _step,
+                        logits_bits_hash(last_position)
+                    );
+                }
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();

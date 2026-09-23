@@ -2261,6 +2261,7 @@ pub(super) mod placed_plan_mode_tests {
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
                 plan_time_constants: false,
+                command_buffer_chunks: 1,
                 fuse_cached_attention: true,
             },
         )
@@ -2314,6 +2315,7 @@ pub(super) mod placed_plan_mode_tests {
                 numeric_policy: proxima_tensor::NumericPolicy::llama_relaxed(),
                 dispatch_type: omega::metal::DispatchType::Serial,
                 plan_time_constants: false,
+                command_buffer_chunks: 1,
                 fuse_cached_attention: true,
             },
         )
@@ -2350,6 +2352,7 @@ pub(super) mod placed_plan_mode_tests {
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
                 plan_time_constants: false,
+                command_buffer_chunks: 1,
                 fuse_cached_attention: true,
             },
         ) {
@@ -2446,6 +2449,7 @@ pub(super) mod memory_fit_gate_tests {
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
+            duplicate_head_roots: Vec::new(),
             single_position_step: false,
             qwen35moe_hparams: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

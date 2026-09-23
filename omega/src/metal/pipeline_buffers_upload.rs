@@ -164,6 +164,65 @@ impl DispatchType {
     }
 }
 
+/// [`pipeline_for`]/[`pipeline_for_kernel`]'s own creation record for a
+/// compiled pipeline -- the identity a dispatch-site capture must reuse on
+/// a cache HIT instead of recomputing `msl_sha256` from a different string.
+/// See [`super::device_buffers_arena_plan::PIPELINE_CAPTURE`]'s own doc for
+/// why this is keyed by pointer, not by [`PIPELINE_CACHE`]'s string key.
+#[cfg(feature = "instrument")]
+#[derive(Debug, Clone)]
+pub(super) struct PipelineCaptureRecord {
+    pub(super) cache_key: String,
+    pub(super) entry: String,
+    pub(super) msl_sha256: String,
+}
+
+/// `PROXIMA_PIPELINE_CAPTURE=<dir>` writes the exact MSL source text this
+/// process submitted to `newLibraryWithSource_options_error` to
+/// `<dir>/pipeline_<sha256-16hex>.metal`, prints the `pipeline_create`
+/// record, and returns the full sha256 hex digest so the caller can register
+/// a [`PipelineCaptureRecord`] against the compiled pipeline's pointer. A
+/// no-op (returns `None`) when the env var is unset, so a plain `instrument`
+/// build with no capture directory pays one `env::var_os` lookup per miss.
+#[cfg(feature = "instrument")]
+fn capture_pipeline_source(kernel: &Kernel, cache_key: &str, math_mode: MathMode) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(kernel.source.as_bytes());
+    let full_hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    if let Some(dir) = std::env::var_os("PROXIMA_PIPELINE_CAPTURE") {
+        let path = std::path::Path::new(&dir).join(format!("pipeline_{}.metal", &full_hex[..16]));
+        if let Err(error) = std::fs::write(&path, &kernel.source) {
+            eprintln!("pipeline_capture_write_failed path={path:?} error={error}");
+        }
+    }
+    eprintln!(
+        "pipeline_create key={cache_key:?} entry={} msl_sha256={full_hex} compile_options=mathMode={math_mode:?} len={}",
+        kernel.entry,
+        kernel.source.len(),
+    );
+    full_hex
+}
+
+#[cfg(feature = "instrument")]
+fn register_pipeline_capture(
+    pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    cache_key: &str,
+    entry: &str,
+    msl_sha256: String,
+) {
+    let pointer = Retained::as_ptr(pipeline) as usize;
+    super::device_buffers_arena_plan::PIPELINE_CAPTURE.with(|capture| {
+        capture.borrow_mut().insert(
+            pointer,
+            PipelineCaptureRecord {
+                cache_key: cache_key.to_string(),
+                entry: entry.to_string(),
+                msl_sha256,
+            },
+        );
+    });
+}
+
 pub(super) fn compile_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     kernel: &Kernel,
@@ -273,11 +332,44 @@ pub(super) fn pipeline_for(
             bound.node, kernel.source
         );
     }
+    #[cfg(feature = "instrument")]
+    let captured_sha256 = capture_pipeline_source(&kernel, cache_key, math_mode);
+    // Owner addition to Intervention 5 (RUN.md "Intervention 5"): one line
+    // per DISTINCT packed-row pipeline at creation, so the selected
+    // rows-per-simdgroup variant and its launch geometry are provable from
+    // the log rather than inferred -- `PIPELINE_CACHE`'s own miss gate above
+    // already means this only fires once per distinct `cache_key`, never per
+    // dispatch. Checked once here (a genuine cache miss, not a hot path),
+    // not per dispatch, per the owner's own zero-per-dispatch-work
+    // constraint. Gated on `instrument`, exactly like `token_breakdown_gpu`
+    // (`placements_execute_named.rs`) -- the env-var check nests inside the
+    // feature gate rather than standing alone, so this diagnostic never
+    // compiles into a non-instrument build.
+    #[cfg(feature = "instrument")]
+    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+        let quantized = crate::identity::operand_codecs(bound, packed_operands);
+        if let Some(block) = crate::msl::packed_row_block(bound, &quantized) {
+            let rows = crate::msl::codec_rows_per_simdgroup(block.codec);
+            if let Ok((_, grid)) = crate::msl::kernel_dispatch_shape(bound, packed_operands, numeric_policy) {
+                let feature_total: u64 = block
+                    .feature_axes
+                    .iter()
+                    .map(|&axis| bound.extents[axis as usize])
+                    .product();
+                let k_extent = bound.extents[block.reduce_dim];
+                eprintln!(
+                    "packed_rows_pipeline entry={} rows_per_simdgroup={rows} grid_threads={} threadgroup={:?} shape=(rows={feature_total}, K={k_extent})",
+                    kernel.entry, grid.threads, grid.threadgroup_width,
+                );
+            }
+        }
+    }
     let pipeline = compile_pipeline(device, &kernel, math_mode)?;
     #[cfg(feature = "instrument")]
     {
         counter!(PIPELINE_MISSES, 1);
         counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
+        register_pipeline_capture(&pipeline, cache_key, &kernel.entry, captured_sha256);
     }
     PIPELINE_CACHE.with(|cache| {
         cache
@@ -303,7 +395,11 @@ pub(super) fn pipeline_for_kernel(
     if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
         return Ok(pipeline);
     }
+    #[cfg(feature = "instrument")]
+    let captured_sha256 = capture_pipeline_source(kernel, cache_key, math_mode);
     let pipeline = compile_pipeline(device, kernel, math_mode)?;
+    #[cfg(feature = "instrument")]
+    register_pipeline_capture(&pipeline, cache_key, &kernel.entry, captured_sha256);
     PIPELINE_CACHE.with(|cache| {
         cache
             .borrow_mut()
@@ -559,6 +655,11 @@ pub static ENCODE_DISPATCH_TICKS: Counter = Counter::new("omega.metal.encode_dis
 /// emit more than one physical dispatch (a split-reduce merge pass).
 #[cfg(feature = "instrument")]
 pub static PHYSICAL_DISPATCH_CALLS: Counter = Counter::new("omega.metal.physical_dispatch_calls");
+/// Number of `MTLCommandBuffer`s committed for the call, not number of
+/// `execute` calls -- `PROXIMA_COMMAND_BUFFER_CHUNKS=K` (K=1 by default)
+/// splits one token's dispatch sequence into K buffers on the placements
+/// path (`placements_execute_named.rs`), so this counts K there instead of
+/// the flat 1 every other execution path still records.
 #[cfg(feature = "instrument")]
 pub static GPU_EXEC_CALLS: Counter = Counter::new("omega.metal.gpu_exec_calls");
 #[cfg(feature = "instrument")]
@@ -584,6 +685,28 @@ pub static EXPERT_BUFFERS_LOOKUP_CALLS: Counter =
 #[cfg(feature = "instrument")]
 pub static EXPERT_BUFFERS_LOOKUP_TICKS: Counter =
     Counter::new("omega.metal.expert_buffers_lookup_ticks");
+/// `execute_plan_with_placements_inner`'s own per-position residual, never
+/// wired to [`RETIRE_SCAN_TICKS`]/[`EXPERT_BUFFERS_LOOKUP_TICKS`]'s ROW-13ms
+/// attribution: `arena_placement`, `plan_uniform_buffer`, and
+/// `attention_scratch_buffer` -- the three lookups between `output_placed`
+/// resolution and the `encode_op` call, on the placements path only.
+#[cfg(feature = "instrument")]
+pub static PLACEMENT_RESOLVE_CALLS: Counter = Counter::new("omega.metal.placement_resolve_calls");
+#[cfg(feature = "instrument")]
+pub static PLACEMENT_RESOLVE_TICKS: Counter = Counter::new("omega.metal.placement_resolve_ticks");
+/// `execute_plan_with_placements_inner`'s per-position loop head: the
+/// unconditional `trace!`-gate `BTreeMap` lookups over `bound.operands()`
+/// plus `arena_placement` -- both run before [`PLACEMENT_RESOLVE_TICKS`]
+/// starts.
+#[cfg(feature = "instrument")]
+pub static LOOP_HEAD_CALLS: Counter = Counter::new("omega.metal.loop_head_calls");
+#[cfg(feature = "instrument")]
+pub static LOOP_HEAD_TICKS: Counter = Counter::new("omega.metal.loop_head_ticks");
+/// `execute_plan_with_placements_inner`'s own `encoder.finish()` call --
+/// the sole real Metal API call between the last per-position dispatch and
+/// [`GPU_EXEC_TICKS`]' own `commit()`.
+#[cfg(feature = "instrument")]
+pub static ENCODER_FINISH_TICKS: Counter = Counter::new("omega.metal.encoder_finish_ticks");
 
 /// One [`execute_plan`] call's worth of the split-4019 counters above,
 /// snapshot-and-reset so a caller (the metal decode test) can read a
@@ -717,6 +840,16 @@ pub struct MetalStageTotals {
     pub expert_buffers_lookup_calls: u64,
     /// [`EXPERT_BUFFERS_LOOKUP_TICKS`]'s own per-step delta.
     pub expert_buffers_lookup_ticks: u64,
+    /// [`PLACEMENT_RESOLVE_CALLS`]'s own per-step delta.
+    pub placement_resolve_calls: u64,
+    /// [`PLACEMENT_RESOLVE_TICKS`]'s own per-step delta.
+    pub placement_resolve_ticks: u64,
+    /// [`LOOP_HEAD_CALLS`]'s own per-step delta.
+    pub loop_head_calls: u64,
+    /// [`LOOP_HEAD_TICKS`]'s own per-step delta.
+    pub loop_head_ticks: u64,
+    /// [`ENCODER_FINISH_TICKS`]'s own per-step delta.
+    pub encoder_finish_ticks: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -783,6 +916,11 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         retire_scan_ticks: RETIRE_SCAN_TICKS.snapshot_and_reset(),
         expert_buffers_lookup_calls: EXPERT_BUFFERS_LOOKUP_CALLS.snapshot_and_reset(),
         expert_buffers_lookup_ticks: EXPERT_BUFFERS_LOOKUP_TICKS.snapshot_and_reset(),
+        placement_resolve_calls: PLACEMENT_RESOLVE_CALLS.snapshot_and_reset(),
+        placement_resolve_ticks: PLACEMENT_RESOLVE_TICKS.snapshot_and_reset(),
+        loop_head_calls: LOOP_HEAD_CALLS.snapshot_and_reset(),
+        loop_head_ticks: LOOP_HEAD_TICKS.snapshot_and_reset(),
+        encoder_finish_ticks: ENCODER_FINISH_TICKS.snapshot_and_reset(),
     }
 }
 

@@ -137,7 +137,7 @@ impl Architecture for DenseArch {
             false,
             rope_pairing,
         );
-        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root) =
+        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
             build_forward(&descriptor, last_row_only)?;
         Ok(BoundProgram {
             weights,
@@ -153,6 +153,7 @@ impl Architecture for DenseArch {
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
+            duplicate_head_roots: Vec::new(),
             single_position_step: false,
         })
     }

@@ -51,7 +51,7 @@ pub(super) fn plan_with_placed_inputs(
     let block_dtypes = prepared
         .block_nodes
         .iter()
-        .map(|node| gpu_dtype(program, &prepared.index_nodes, *node))
+        .map(|node| gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, *node))
         .collect();
     Ok(Plan {
         program: program.to_vec(),
@@ -62,6 +62,8 @@ pub(super) fn plan_with_placed_inputs(
         math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
         numeric_policy,
         dispatch_type: DispatchType::default(),
+        command_buffer_chunks: 0,
+        command_buffer_chunks_decode_shaped: false,
         #[cfg(feature = "instrument")]
         encoder_split_at: None,
         #[cfg(feature = "metal-plan-stable-buffers")]

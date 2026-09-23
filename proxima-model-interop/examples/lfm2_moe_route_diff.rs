@@ -63,7 +63,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
     }
     let full_schedule = uniform_lfm2_schedule(architecture);
     let shallow_schedule = &full_schedule[..depth as usize];
-    let (shallow, _, _) = lfm2_forward_program_with_experts(
+    let (shallow, _, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -84,7 +84,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
 
     let mut deep_schedule = shallow_schedule.to_vec();
     deep_schedule.push(full_schedule[(depth - 1) as usize]);
-    let (deep, _, _) = lfm2_forward_program_with_experts(
+    let (deep, _, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -277,7 +277,7 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
         .expect("tokenize prompt");
 
-    let (full_program, _logits_root, _moe_sites) = lfm2_forward_program_with_experts(
+    let (full_program, _logits_root, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,

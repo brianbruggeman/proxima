@@ -115,7 +115,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
         .collect();
     let logit_softcap = (architecture.final_logit_softcapping > 0.0)
         .then_some(architecture.final_logit_softcapping);
-    let (program, logits, _moe_sites) = lfm2_forward_program_with_experts(
+    let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,

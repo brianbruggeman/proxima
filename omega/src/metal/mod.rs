@@ -225,6 +225,8 @@ use proxima_tensor::{
 };
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
 use proxima_tensor::node_last_reader;
+#[cfg(feature = "instrument")]
+use proxima_tensor::apply_repeat_nodes;
 
 use crate::error::EmitError;
 #[cfg(feature = "instrument")]

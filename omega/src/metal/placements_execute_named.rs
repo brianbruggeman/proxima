@@ -1,5 +1,298 @@
 use super::*;
 
+/// `PROXIMA_COMMAND_BUFFER_CHUNKS=K`, parsed and cached once per process
+/// (matching every other `PROXIMA_*` knob this crate reads, e.g.
+/// `packed_rows_override` in `kernel_types_identity.rs`) -- unlike the
+/// config/plan-shape tier below, the env override is a genuine per-process
+/// A/B switch, so caching it once is correct. Only a positive integer
+/// literal is honored; unset, empty, zero, or unparsable is `None`, falling
+/// through to the per-call config/default tier.
+fn command_buffer_chunk_env_override() -> Option<usize> {
+    static CACHED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("PROXIMA_COMMAND_BUFFER_CHUNKS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|parsed| *parsed >= 1)
+    })
+}
+
+/// `PROXIMA_COMMAND_BUFFER_CHUNKS=K` (OWNER_BRIEF_structural_difference,
+/// Intervention 6): same-binary A/B for how many `MTLCommandBuffer`s one
+/// [`execute_plan_with_placements_inner`] call splits its dispatch sequence
+/// into. Resolved PER CALL, not cached -- the owner's own integration
+/// scoping: the measured win covers only the single-new-token decode plan,
+/// never prefill, so `plan_chunks`/`decode_shaped`
+/// ([`Plan::command_buffer_chunks`]/[`Plan::command_buffer_chunks_decode_shaped`],
+/// both threaded through `BackendRuntime`/`PlanNumerics` the same path
+/// `ServingConfig::plan_time_constants` takes to
+/// [`Plan::mark_plan_time_constants_resident`]) can legitimately differ
+/// between two calls against the SAME process, one per new-token-count
+/// plan shape. `decode_shaped == false` (prefill, or a plan built outside
+/// the config-threading call sites) always resolves to `1`
+/// (`source=default`) regardless of `plan_chunks`. `decode_shaped == true`
+/// resolves `plan_chunks` through `config_or_default_chunks`
+/// (`source=config` when a caller threaded a nonzero value, `source=default`
+/// otherwise). The env var (`source=env`, [`command_buffer_chunk_env_override`])
+/// wins unconditionally over both.
+fn command_buffer_chunk_count(plan_chunks: u32, decode_shaped: bool) -> usize {
+    let (chunks, source) = match command_buffer_chunk_env_override() {
+        Some(parsed) => (parsed, "env"),
+        None if decode_shaped => config_or_default_chunks(plan_chunks),
+        None => (1, "default"),
+    };
+    #[cfg(feature = "instrument")]
+    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+        let plan_shape = if decode_shaped { "decode" } else { "prefill" };
+        eprintln!("command_buffer_chunks={chunks} source={source} plan_shape={plan_shape}");
+    }
+    chunks
+}
+
+/// `plan_chunks == 0` (no caller threaded a config value) falls back to the
+/// internal default of `1`; a nonzero value is the config-sourced tier.
+/// Only consulted for a decode-shaped plan -- see
+/// [`command_buffer_chunk_count`]'s own doc.
+fn config_or_default_chunks(plan_chunks: u32) -> (usize, &'static str) {
+    if plan_chunks == 0 {
+        (1, "default")
+    } else {
+        (plan_chunks as usize, "config")
+    }
+}
+
+/// Chunk boundary positions (program-order op indices) splitting
+/// `total_ops` resolved ops into `chunk_count` contiguous groups as evenly
+/// as an integer split allows: boundary `i` sits at
+/// `floor(i * total_ops / chunk_count)`. Returns the empty vector for
+/// `chunk_count <= 1` or `total_ops == 0` -- a `1..1` range has a
+/// `(0, Some(0))` size hint, so `.collect()` never allocates, which is what
+/// makes the default `PROXIMA_COMMAND_BUFFER_CHUNKS` unset path provably
+/// free of the extra command-buffer machinery below rather than merely
+/// untested. Duplicate boundary values (K exceeding `total_ops`) collapse
+/// to fewer than `chunk_count - 1` entries instead of producing an empty
+/// chunk.
+fn command_buffer_chunk_boundaries(total_ops: usize, chunk_count: usize) -> Vec<usize> {
+    if chunk_count <= 1 || total_ops == 0 {
+        return Vec::new();
+    }
+    let mut boundaries = Vec::with_capacity(chunk_count - 1);
+    let mut previous = 0usize;
+    for i in 1..chunk_count {
+        let boundary = (i * total_ops) / chunk_count;
+        if boundary > previous && boundary < total_ops {
+            boundaries.push(boundary);
+            previous = boundary;
+        }
+    }
+    boundaries
+}
+
+/// `PROXIMA_CHUNK_AUDIT=1` (OWNER_BRIEF_chunked_submission_audit): a per-thread
+/// record of every CPU-side write into a Metal buffer's contents and every
+/// dispatch's bound ranges, tagged with which K-chunk each belongs to --
+/// built specifically to answer the audit's own question (does a chunked
+/// commit let the CPU write memory an already-committed, possibly still
+/// in-flight, chunk reads) from EXECUTION DATA rather than from reading the
+/// encode loop alone. Read once per process like every other `PROXIMA_*`
+/// knob this module already caches (`command_buffer_chunk_count`'s own doc).
+#[cfg(feature = "instrument")]
+struct ChunkAuditWrite {
+    buffer_ptr: usize,
+    offset: usize,
+    len: usize,
+    position: usize,
+    committed_chunks: usize,
+}
+
+#[cfg(feature = "instrument")]
+struct ChunkAuditDispatch {
+    buffer_ptr: usize,
+    offset: usize,
+    len: usize,
+    position: usize,
+    chunk_index: usize,
+    is_write: bool,
+}
+
+#[cfg(feature = "instrument")]
+#[derive(Default)]
+struct ChunkAuditState {
+    current_chunk: usize,
+    committed_chunks: usize,
+    writes: Vec<ChunkAuditWrite>,
+    dispatches: Vec<ChunkAuditDispatch>,
+}
+
+#[cfg(feature = "instrument")]
+thread_local! {
+    static CHUNK_AUDIT_ENABLED: core::cell::Cell<Option<bool>> = const { core::cell::Cell::new(None) };
+    static CHUNK_AUDIT_STATE: core::cell::RefCell<ChunkAuditState> = const {
+        core::cell::RefCell::new(ChunkAuditState {
+            current_chunk: 1,
+            committed_chunks: 0,
+            writes: Vec::new(),
+            dispatches: Vec::new(),
+        })
+    };
+}
+
+#[cfg(feature = "instrument")]
+pub(super) fn chunk_audit_enabled() -> bool {
+    CHUNK_AUDIT_ENABLED.with(|flag| {
+        if let Some(value) = flag.get() {
+            return value;
+        }
+        let value = std::env::var_os("PROXIMA_CHUNK_AUDIT").is_some();
+        flag.set(Some(value));
+        value
+    })
+}
+
+/// Resets per-step audit state -- called once at the top of
+/// [`execute_plan_with_placements_inner`], before this step's chunk
+/// boundaries are even computed, so a warm call's leftover records from the
+/// PRIOR decode step never bleed into this step's hazard intersection.
+#[cfg(feature = "instrument")]
+fn chunk_audit_begin_step() {
+    if !chunk_audit_enabled() {
+        return;
+    }
+    CHUNK_AUDIT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.current_chunk = 1;
+        state.committed_chunks = 0;
+        state.writes.clear();
+        state.dispatches.clear();
+    });
+}
+
+/// Called right after an intermediate chunk's `commit()` -- marks that
+/// chunk's dispatches as "already submitted to the queue" for every write
+/// recorded from this point on, and advances `current_chunk` for every
+/// dispatch recorded from this point on.
+#[cfg(feature = "instrument")]
+fn chunk_audit_on_commit() {
+    if !chunk_audit_enabled() {
+        return;
+    }
+    CHUNK_AUDIT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.committed_chunks = state.current_chunk;
+        state.current_chunk += 1;
+    });
+}
+
+/// Records one CPU write range into a Metal buffer's `contents()`. Writes
+/// before the first commit (`committed_chunks == 0`) are dropped, matching
+/// the audit brief's own scope ("every CPU write range... performed after
+/// the FIRST commit") -- a write with nothing yet in flight cannot race
+/// anything, and recording it would only pad `writes=` with noise the
+/// hazard intersection below never uses (`committed_chunks == 0` can never
+/// satisfy `dispatch.chunk_index <= write.committed_chunks` for a real
+/// dispatch, since chunks are numbered from 1).
+#[cfg(feature = "instrument")]
+pub(super) fn chunk_audit_record_write(buffer_ptr: usize, offset: usize, len: usize, position: usize) {
+    if !chunk_audit_enabled() {
+        return;
+    }
+    CHUNK_AUDIT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.committed_chunks == 0 {
+            return;
+        }
+        let committed_chunks = state.committed_chunks;
+        state.writes.push(ChunkAuditWrite {
+            buffer_ptr,
+            offset,
+            len,
+            position,
+            committed_chunks,
+        });
+    });
+}
+
+/// Records one dispatch's bound range (an input/indices read or the op's own
+/// output write), tagged with the chunk it was encoded into.
+#[cfg(feature = "instrument")]
+pub(super) fn chunk_audit_record_dispatch(
+    buffer_ptr: usize,
+    offset: usize,
+    len: usize,
+    position: usize,
+    is_write: bool,
+) {
+    if !chunk_audit_enabled() {
+        return;
+    }
+    CHUNK_AUDIT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let chunk_index = state.current_chunk;
+        state.dispatches.push(ChunkAuditDispatch {
+            buffer_ptr,
+            offset,
+            len,
+            position,
+            chunk_index,
+            is_write,
+        });
+    });
+}
+
+/// Intersects this step's recorded writes against this step's recorded
+/// dispatches: a write recorded after chunk `c` committed, overlapping a
+/// range some dispatch belonging to chunk `<= c` binds (read OR write --
+/// both are a race, a WAR as much as a RAW), is a hazard. Printed
+/// unconditionally when the audit is enabled, `hazards=0` included, so a
+/// clean run is a MEASURED zero (`writes=`/`dispatches=` prove the counts
+/// were non-trivial) rather than an absence of output.
+#[cfg(feature = "instrument")]
+pub(super) fn chunk_audit_finish(step: u64) {
+    if !chunk_audit_enabled() {
+        return;
+    }
+    CHUNK_AUDIT_STATE.with(|state| {
+        let state = state.borrow();
+        let mut hazards: Vec<String> = Vec::new();
+        for write in &state.writes {
+            for dispatch in &state.dispatches {
+                if dispatch.chunk_index > write.committed_chunks {
+                    continue;
+                }
+                let overlaps = dispatch.buffer_ptr == write.buffer_ptr
+                    && dispatch.offset < write.offset + write.len
+                    && write.offset < dispatch.offset + dispatch.len;
+                if overlaps {
+                    hazards.push(format!(
+                        "write_position={} write_committed_chunks={} dispatch_position={} \
+                         dispatch_chunk={} dispatch_is_write={} buffer_ptr={:#x} \
+                         write_offset={} write_len={} dispatch_offset={} dispatch_len={}",
+                        write.position,
+                        write.committed_chunks,
+                        dispatch.position,
+                        dispatch.chunk_index,
+                        dispatch.is_write,
+                        write.buffer_ptr,
+                        write.offset,
+                        write.len,
+                        dispatch.offset,
+                        dispatch.len,
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "chunk_audit step={step} writes={} dispatches={} hazards={}",
+            state.writes.len(),
+            state.dispatches.len(),
+            hazards.len()
+        );
+        for hazard in hazards.iter().take(3) {
+            eprintln!("chunk_audit_hazard step={step} {hazard}");
+        }
+    });
+}
+
 /// `recycle` is the same pool [`proxima_tensor::cpu::evaluate_with_scratch`]
 /// takes: a caller done reading a PREVIOUS call's `Evaluated` hands its
 /// storage back with [`Evaluated::into_scratch`], and this call pops one
@@ -222,7 +515,9 @@ pub(super) fn execute_plan_with_placements_inner(
         validate_kind_filter(filter, prepared, packed_operands, &plan.program)?;
     }
 
-    let command_buffer = queue
+    #[cfg(feature = "instrument")]
+    chunk_audit_begin_step();
+    let mut command_buffer = queue
         .commandBuffer()
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
@@ -233,13 +528,68 @@ pub(super) fn execute_plan_with_placements_inner(
     // below to insert the barriers `Serial` gives for free by never
     // overlapping any two dispatches in the first place.
     let dispatch_type = plan.dispatch_type;
-    let encoder = EncoderGuard::new(
+    let mut encoder = EncoderGuard::new(
         command_buffer
             .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
             .ok_or_else(|| MetalError::CompileFailed {
                 log: "command buffer refused to hand out a compute encoder".to_string(),
             })?,
     );
+    // attn_parity followon (2026-09-22, OWNER_BRIEF_structural_difference):
+    // command buffers submitted on one `MTLCommandQueue` execute in commit
+    // order (Apple's Metal Programming Guide, "Command Queue" -- a queue
+    // schedules the command buffers committed to it in the order `commit`
+    // was called), so splitting one token's dispatch sequence into K
+    // buffers, each committed as soon as it is encoded, needs no hazard or
+    // barrier change: chunk i+1's dispatches still run only after every
+    // dispatch chunk i wrote finishes, exactly as today's single buffer
+    // orders them. `chunk_boundaries` is empty for the default K=1 (the
+    // `1..1` range below has a `(0, Some(0))` size hint, so `.collect()`
+    // allocates nothing), so the boundary check inside the loop never
+    // matches and this call sequence is provably identical to before this
+    // change for every existing caller.
+    let total_ops = prepared.resolved.len();
+    let chunk_count = command_buffer_chunk_count(
+        plan.command_buffer_chunks,
+        plan.command_buffer_chunks_decode_shaped,
+    );
+    let chunk_boundaries = command_buffer_chunk_boundaries(total_ops, chunk_count);
+    let mut next_boundary = 0usize;
+    #[cfg(feature = "instrument")]
+    let mut first_command_buffer: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = None;
+    #[cfg(feature = "instrument")]
+    let mut first_commit_call_start_s: Option<f64> = None;
+    #[cfg(feature = "instrument")]
+    let mut post_first_commit_encode_started: Option<std::time::Instant> = None;
+    // Deliverable 2 (OWNER_BRIEF_chunked_submission_audit): one record per
+    // committed command buffer, host-clock start/end for the encode work
+    // and commit call, GPU-clock start/end read from the buffer itself --
+    // all `command_buffer`s stay alive (cloned `Retained` handles) until
+    // AFTER the step's one `waitUntilCompleted`, so `GPUStartTime`/
+    // `GPUEndTime` are valid to read for every chunk, not only the last
+    // one waited on directly (Metal fills them in as each buffer completes;
+    // completion happens in commit order on one serial queue, so the final
+    // wait returning proves every earlier chunk already finished too).
+    #[cfg(feature = "instrument")]
+    let step_encode_start = std::time::Instant::now();
+    #[cfg(feature = "instrument")]
+    let step_encode_start_ticks = read_ticks();
+    #[cfg(feature = "instrument")]
+    let mut chunk_command_buffers: Vec<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = Vec::new();
+    #[cfg(feature = "instrument")]
+    struct ChunkHostTiming {
+        first_op: usize,
+        last_op: usize,
+        encode_start_ms: f64,
+        encode_end_ms: f64,
+        commit_ms: f64,
+    }
+    #[cfg(feature = "instrument")]
+    let mut chunk_host_timings: Vec<ChunkHostTiming> = Vec::new();
+    #[cfg(feature = "instrument")]
+    let mut current_chunk_first_op = 0usize;
+    #[cfg(feature = "instrument")]
+    let mut current_chunk_encode_start_ms = 0.0f64;
     // plan-owned, reused across every call against this `Plan` (`HazardState`'s
     // own doc) -- `reset` clears both the tracker's sets and the input scratch
     // without releasing their capacity, so a warm call after the first never
@@ -269,6 +619,80 @@ pub(super) fn execute_plan_with_placements_inner(
     // a caller raises `RUST_LOG` to `trace` for this target.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
+        if next_boundary < chunk_boundaries.len() && chunk_boundaries[next_boundary] == position {
+            let new_command_buffer =
+                queue
+                    .commandBuffer()
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "command queue refused to hand out a command buffer".to_string(),
+                    })?;
+            let new_encoder = EncoderGuard::new(
+                new_command_buffer
+                    .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "command buffer refused to hand out a compute encoder".to_string(),
+                    })?,
+            );
+            #[cfg(feature = "instrument")]
+            if first_command_buffer.is_none() {
+                first_command_buffer = Some(command_buffer.clone());
+            }
+            let closing_encoder = core::mem::replace(&mut encoder, new_encoder);
+            let closing_command_buffer =
+                core::mem::replace(&mut command_buffer, new_command_buffer);
+            closing_encoder.finish();
+            #[cfg(feature = "instrument")]
+            let closing_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
+            #[cfg(feature = "instrument")]
+            chunk_command_buffers.push(closing_command_buffer.clone());
+            // Same clock-correlation argument as the single-buffer
+            // `gpu_exec_started`/`commit_call_start_s` pair below: a tick
+            // read immediately before `commit()`, converted through the
+            // same `ticks_to_nanos`, is what's comparable to
+            // `GPUStartTime`'s `mach_absolute_time`-based clock.
+            #[cfg(feature = "instrument")]
+            let this_commit_ticks = read_ticks();
+            #[cfg(feature = "instrument")]
+            let commit_call_started = std::time::Instant::now();
+            closing_command_buffer.commit();
+            #[cfg(feature = "instrument")]
+            let closing_commit_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
+            #[cfg(feature = "instrument")]
+            {
+                chunk_host_timings.push(ChunkHostTiming {
+                    first_op: current_chunk_first_op,
+                    last_op: position.saturating_sub(1),
+                    encode_start_ms: current_chunk_encode_start_ms,
+                    encode_end_ms: closing_encode_end_ms,
+                    commit_ms: closing_commit_ms,
+                });
+                current_chunk_first_op = position;
+                current_chunk_encode_start_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
+            }
+            #[cfg(feature = "instrument")]
+            chunk_audit_on_commit();
+            #[cfg(feature = "instrument")]
+            if first_commit_call_start_s.is_none() {
+                first_commit_call_start_s = Some(
+                    proxima_tensor::instrument::ticks_to_nanos(this_commit_ticks.as_raw()) as f64
+                        / 1e9,
+                );
+                post_first_commit_encode_started = Some(std::time::Instant::now());
+            }
+            next_boundary += 1;
+        }
+        // attribution2 followon: the trace-gate loop below unconditionally
+        // walks `bound.operands()` and does an `input_placed`/`output_placed`
+        // `BTreeMap::contains_key` per operand on EVERY `instrument` build,
+        // regardless of whether `trace` level is enabled -- `trace!`'s own
+        // callsite check is inside the `if`, not around it, so the lookup
+        // cost is paid unconditionally at `debug`-level filtering
+        // (`decode_gbps_baseline`'s own hardcoded `EnvFilter::parse("debug")`
+        // excludes `trace`). Timed as `LOOP_HEAD_TICKS` together with the
+        // `arena_placement` resolution just below, since both run before
+        // `PLACEMENT_RESOLVE_TICKS` starts and neither has its own counter.
+        #[cfg(feature = "instrument")]
+        let loop_head_started = read_ticks();
         #[cfg(feature = "instrument")]
         {
             if output_placed.contains_key(&bound.node) {
@@ -292,6 +716,73 @@ pub(super) fn execute_plan_with_placements_inner(
             Some(placement) => Some(placement),
             None => arena_placement(plan, position)?,
         };
+        // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head): per-node
+        // pre-dispatch buffer identity + sentinel fill for the
+        // `PROXIMA_HEAD_REPEATS` duplicate-head investigation. Placed here,
+        // BEFORE the `merged_this_position`/`ablation_skip`/`resident_skip`
+        // branch below, so a duplicate that takes one of those skip arms
+        // still gets its identity printed and its buffer still gets
+        // sentinel-filled -- an early exit is exactly the case this must
+        // catch, and every one of those arms is reached only further down.
+        #[cfg(feature = "instrument")]
+        if let (Some(target_nodes), Some((buffer, offset))) =
+            (head_debug_target_nodes(), placement)
+            && let Some(target_index) = target_nodes.iter().position(|node| *node == bound.node)
+        {
+            let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+            let (_, grid) = kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy)?;
+            debug!(
+                target_index = target_index as u64,
+                node = bound.node.0 as u64,
+                position = position as u64,
+                buffer_pointer = Retained::as_ptr(buffer) as u64,
+                offset = offset as u64,
+                byte_length = byte_length as u64,
+                output_total = bound_output_len(bound) as u64,
+                grid_threads = grid.threads,
+                grid_threadgroup_width = grid.threadgroup_width.unwrap_or(0),
+                grid_depth = grid.depth,
+                "head_debug: pre-dispatch buffer identity and dispatch shape"
+            );
+            if target_index > 0 && std::env::var_os("PROXIMA_HEAD_SENTINEL_FILL").is_some() {
+                chunk_audit_record_write(
+                    Retained::as_ptr(buffer) as usize,
+                    offset,
+                    byte_length,
+                    position,
+                );
+                head_debug_fill_sentinel(buffer, offset, byte_length);
+            }
+        }
+        // attn_parity followon (2026-09-22): `PROXIMA_REPEAT_VERIFY`'s own
+        // pre-dispatch sentinel fill for every `PROXIMA_REPEAT_NODES` copy --
+        // reuses `head_debug_fill_sentinel` unmodified (same quiet-NaN
+        // pattern, same "write survives iff the dispatch actually ran"
+        // contract `PROXIMA_HEAD_SENTINEL_FILL` established); the post-wait
+        // compare lives in `arena_encode_dispatch_finish::finish`.
+        #[cfg(feature = "instrument")]
+        if let Some((buffer, offset)) = placement
+            && std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some()
+            && plan
+                .prepared
+                .repeat_verify_pairs
+                .iter()
+                .any(|(_, copies)| copies.contains(&bound.node))
+        {
+            let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+            chunk_audit_record_write(
+                Retained::as_ptr(buffer) as usize,
+                offset,
+                byte_length,
+                position,
+            );
+            head_debug_fill_sentinel(buffer, offset, byte_length);
+        }
+        #[cfg(feature = "instrument")]
+        {
+            counter!(LOOP_HEAD_CALLS, 1);
+            counter!(LOOP_HEAD_TICKS, elapsed_ticks(loop_head_started));
+        }
         // row 555: `bound.node` above is the fused op's primary "out" node,
         // never the absorbed `state_out` node it also owns -- a caller's
         // `state_out` placement lives under a DIFFERENT key in the same
@@ -482,6 +973,17 @@ pub(super) fn execute_plan_with_placements_inner(
                 Some((buffer, offset)) => Some((buffer, *offset)),
                 None => placement,
             };
+            // attribution2 followon: the placements path never wired
+            // `PLACEMENT_RESOLVE_TICKS`/`EXPERT_BUFFERS_LOOKUP_TICKS` the
+            // sibling `execute_plan_inner` (`execute_and_hazards.rs`) already
+            // has under its own ROW-13ms attribution -- these three lookups
+            // plus `expert_buffers_for` below ran, per position, entirely
+            // outside `OP_SETUP_TICKS`/`ENCODE_DISPATCH_TICKS` (both start
+            // inside `encode_op` itself), which is exactly the gap between
+            // `evaluate_ms` and the four counters `token_breakdown_metal`
+            // already reports.
+            #[cfg(feature = "instrument")]
+            let placement_resolve_started = read_ticks();
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
             // Redesign §4c: the ONE call site that resolves a scratch
             // buffer for `encode_op`'s two-dispatch `CachedAttention` form
@@ -489,13 +991,31 @@ pub(super) fn execute_plan_with_placements_inner(
             // `Binding::Scratch` kernel instead (that function's own doc).
             let attention_scratch =
                 attention_scratch_buffer(plan, position)?.map(|buffer| (buffer, 0usize));
+            #[cfg(feature = "instrument")]
+            {
+                counter!(PLACEMENT_RESOLVE_CALLS, 1);
+                counter!(
+                    PLACEMENT_RESOLVE_TICKS,
+                    elapsed_ticks(placement_resolve_started)
+                );
+            }
             // Only `Concurrent` needs the intra-op scratch write -> read edge
             // routed through the tracker (see `encode_op`'s own doc for
             // `hazard`) -- `Serial` orders the split before the merge for
             // free, the same reason `resolved_output` above is `None` there.
             let hazard =
                 (dispatch_type == DispatchType::Concurrent).then_some(&mut hazard_state.tracker);
+            #[cfg(feature = "instrument")]
+            let expert_buffers_started = read_ticks();
             let bound_expert_buffers = expert_buffers_for(bound, &effective_expert_buffers)?;
+            #[cfg(feature = "instrument")]
+            {
+                counter!(EXPERT_BUFFERS_LOOKUP_CALLS, 1);
+                counter!(
+                    EXPERT_BUFFERS_LOOKUP_TICKS,
+                    elapsed_ticks(expert_buffers_started)
+                );
+            }
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -525,6 +1045,8 @@ pub(super) fn execute_plan_with_placements_inner(
         // buffer is live for the plan's whole life, and leaving its entry in
         // [`Plan::device_buffers`] across calls is exactly what lets
         // `block_buffer_reusable` skip re-uploading it next call.
+        #[cfg(feature = "instrument")]
+        let retire_scan_started = read_ticks();
         for retired in &prepared.retires[position] {
             if input_placed.contains_key(retired)
                 || output_placed.contains_key(retired)
@@ -541,17 +1063,168 @@ pub(super) fn execute_plan_with_placements_inner(
             // identity cannot leak across submissions.
             device_buffers.remove(retired);
         }
+        #[cfg(feature = "instrument")]
+        {
+            counter!(RETIRE_SCAN_CALLS, prepared.retires[position].len() as u64);
+            counter!(RETIRE_SCAN_TICKS, elapsed_ticks(retire_scan_started));
+        }
     }
+    #[cfg(feature = "instrument")]
+    chunk_audit_finish(CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed));
+    // attribution2 followon: `encoder.finish()` is a real Metal API call
+    // (closes the command encoder) that ran entirely outside any timer --
+    // between the last `RETIRE_SCAN_TICKS` sample and `GPU_EXEC_TICKS`'
+    // own `commit()`/`waitUntilCompleted()` start.
+    #[cfg(feature = "instrument")]
+    let encoder_finish_started = read_ticks();
     encoder.finish();
+    #[cfg(feature = "instrument")]
+    counter!(ENCODER_FINISH_TICKS, elapsed_ticks(encoder_finish_started));
+    // Deliverable 2: the LAST chunk's own encode_start/encode_end -- pushed
+    // here (its `commit_ms` filled in right after the `commit()` call below)
+    // so `chunk_host_timings.len() == chunk_command_buffers.len() ==
+    // chunk_count` always holds, the same invariant every earlier chunk's
+    // push already established.
+    #[cfg(feature = "instrument")]
+    let last_chunk_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
+    #[cfg(feature = "instrument")]
+    chunk_command_buffers.push(command_buffer.clone());
+    // "encode time elapsed after the first commit" (OWNER_BRIEF_structural_
+    // difference): the host wall-clock span from the first chunk's `commit()`
+    // call to the last chunk's `encoder.finish()`, i.e. the encode work the
+    // GPU could in principle overlap with chunk 1's execution. `None` on the
+    // default K=1 path (no swap ever set `post_first_commit_encode_started`),
+    // so this reads 0.0 there, unchanged from before this change.
+    #[cfg(feature = "instrument")]
+    let encode_overlap_ms = post_first_commit_encode_started
+        .map(|started| started.elapsed().as_secs_f64() * 1e3)
+        .unwrap_or(0.0);
 
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
+    #[cfg(feature = "instrument")]
+    let commit_call_started = std::time::Instant::now();
     command_buffer.commit();
+    #[cfg(feature = "instrument")]
+    let commit_call_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
+    #[cfg(feature = "instrument")]
+    chunk_host_timings.push(ChunkHostTiming {
+        first_op: current_chunk_first_op,
+        last_op: total_ops.saturating_sub(1),
+        encode_start_ms: current_chunk_encode_start_ms,
+        encode_end_ms: last_chunk_encode_end_ms,
+        commit_ms: commit_call_ms,
+    });
+    #[cfg(feature = "instrument")]
+    let wait_started = std::time::Instant::now();
     command_buffer.waitUntilCompleted();
     #[cfg(feature = "instrument")]
     {
-        counter!(GPU_EXEC_CALLS, 1);
+        counter!(GPU_EXEC_CALLS, chunk_count as u64);
         counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
+        // attribution3 followon (Part A): `GPUStartTime`/`GPUEndTime` are
+        // read only by the diagnostic `execute_plan_timed` today (this
+        // file's own doc there); this is the first read on the production
+        // placements path. Apple's docs state both use the same time base
+        // as `CACurrentMediaTime`, which is itself `mach_absolute_time`
+        // scaled by the same `mach_timebase_info` `ticks_to_nanos` already
+        // applies -- so `gpu_exec_started`'s tick, converted to seconds via
+        // `ticks_to_nanos`, is directly comparable to `GPUStartTime`. That
+        // correlation is asserted here, not proven; if the two clocks
+        // disagree by more than noise the print below carries both raw
+        // readings so a reader can judge without rerunning.
+        if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+            let wait_return_ms = wait_started.elapsed().as_secs_f64() * 1e3;
+            let gpu_exec_ms =
+                proxima_tensor::instrument::ticks_to_nanos(elapsed_ticks(gpu_exec_started)) as f64
+                    / 1e6;
+            let commit_call_start_s = proxima_tensor::instrument::ticks_to_nanos(
+                gpu_exec_started.as_raw(),
+            ) as f64
+                / 1e9;
+            // Intervention 6 (OWNER_BRIEF_structural_difference): with
+            // `chunks > 1` this is no longer one command buffer -- `gpu_busy`
+            // must span the FIRST chunk's `GPUStartTime` to the LAST
+            // chunk's `GPUEndTime` (the `command_buffer` binding here is
+            // always the last chunk, waited on above; `first_command_buffer`
+            // is `None` on the default K=1 path, so the fallback keeps this
+            // read identical to before this change).
+            let leading_command_buffer = first_command_buffer.as_ref().unwrap_or(&command_buffer);
+            let gpu_start_s = leading_command_buffer.GPUStartTime();
+            let gpu_end_s = command_buffer.GPUEndTime();
+            let commit_to_gpu_start_ms = ((gpu_start_s - commit_call_start_s) * 1e3).max(0.0);
+            let gpu_busy_ms = ((gpu_end_s - gpu_start_s) * 1e3).max(0.0);
+            let gpu_end_to_wait_return_ms =
+                (gpu_exec_ms - commit_call_ms - commit_to_gpu_start_ms - gpu_busy_ms).max(0.0);
+            let leading_commit_start_s = first_commit_call_start_s.unwrap_or(commit_call_start_s);
+            let first_commit_to_first_gpu_start_ms =
+                ((gpu_start_s - leading_commit_start_s) * 1e3).max(0.0);
+            eprintln!(
+                "token_breakdown_gpu commit_call_ms={commit_call_ms} \
+                 commit_to_gpu_start_ms={commit_to_gpu_start_ms} \
+                 gpu_busy_ms={gpu_busy_ms} \
+                 gpu_end_to_wait_return_ms={gpu_end_to_wait_return_ms} \
+                 sum_ms={} gpu_exec_ms={gpu_exec_ms} \
+                 gpu_start_raw_s={gpu_start_s} gpu_end_raw_s={gpu_end_s} \
+                 commit_call_start_raw_s={commit_call_start_s} \
+                 wait_return_extra_ms={wait_return_ms} \
+                 chunks={chunk_count} \
+                 first_commit_to_first_gpu_start_ms={first_commit_to_first_gpu_start_ms} \
+                 encode_overlap_ms={encode_overlap_ms}",
+                commit_call_ms + commit_to_gpu_start_ms + gpu_busy_ms + gpu_end_to_wait_return_ms,
+            );
+            // Deliverable 2 (OWNER_BRIEF_chunked_submission_audit): one
+            // `chunk_record` per committed command buffer -- every
+            // `GPUStartTime`/`GPUEndTime` read here is valid because this
+            // runs AFTER `waitUntilCompleted` above, which (Serial commit
+            // order on one queue) proves every earlier chunk's GPU work
+            // completed too, not only the last one waited on directly.
+            let step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed);
+            let step_epoch_s = proxima_tensor::instrument::ticks_to_nanos(
+                step_encode_start_ticks.as_raw(),
+            ) as f64
+                / 1e9;
+            let mut sum_gpu_exec_ms = 0.0f64;
+            let mut gpu_starts_ends: Vec<(f64, f64)> = Vec::with_capacity(chunk_command_buffers.len());
+            for (index, buffer) in chunk_command_buffers.iter().enumerate() {
+                let timing = &chunk_host_timings[index];
+                let gpu_start_ms = ((buffer.GPUStartTime() - step_epoch_s) * 1e3).max(0.0);
+                let gpu_end_ms = ((buffer.GPUEndTime() - step_epoch_s) * 1e3).max(0.0);
+                sum_gpu_exec_ms += (gpu_end_ms - gpu_start_ms).max(0.0);
+                gpu_starts_ends.push((gpu_start_ms, gpu_end_ms));
+                eprintln!(
+                    "chunk_record step={step} chunk={}/{chunk_count} ops={}..{} \
+                     encode_start_ms={} encode_end_ms={} commit_ms={} \
+                     gpu_start_ms={gpu_start_ms} gpu_end_ms={gpu_end_ms}",
+                    index + 1,
+                    timing.first_op,
+                    timing.last_op,
+                    timing.encode_start_ms,
+                    timing.encode_end_ms,
+                    timing.commit_ms,
+                );
+            }
+            let mut inter_buffer_gaps_ms = 0.0f64;
+            for window in gpu_starts_ends.windows(2) {
+                inter_buffer_gaps_ms += (window[1].0 - window[0].1).max(0.0);
+            }
+            let first_start_to_last_end_ms = gpu_starts_ends
+                .last()
+                .zip(gpu_starts_ends.first())
+                .map(|((_, last_end), (first_start, _))| last_end - first_start)
+                .unwrap_or(0.0);
+            let encode_total_ms: f64 = chunk_host_timings
+                .iter()
+                .map(|timing| timing.encode_end_ms - timing.encode_start_ms)
+                .sum();
+            eprintln!(
+                "chunk_summary step={step} chunks={chunk_count} \
+                 sum_gpu_exec_ms={sum_gpu_exec_ms} \
+                 first_start_to_last_end_ms={first_start_to_last_end_ms} \
+                 inter_buffer_gaps_ms={inter_buffer_gaps_ms} \
+                 encode_total_ms={encode_total_ms}",
+            );
+        }
     }
 
     for (bound, fault_buffer, gathers) in &pending_faults {
@@ -961,7 +1634,7 @@ pub(super) fn check_op_output_finite(
         return Ok(None);
     };
     let shape = prepared.shapes.of(node).to_vec();
-    let dtype = gpu_dtype(program, &prepared.index_nodes, node);
+    let dtype = gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, node);
     let data = read_back(buffer, *offset, element_count(&shape), node, dtype)?;
     let nan_count = data.iter().filter(|value| value.is_nan()).count();
     if nan_count == 0 {
@@ -1017,7 +1690,7 @@ pub(super) fn compare_op_output_to_cpu(
         return Ok(None);
     };
     let shape = prepared.shapes.of(node).to_vec();
-    let dtype = gpu_dtype(program, &prepared.index_nodes, node);
+    let dtype = gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, node);
     let metal_values = read_back(buffer, *offset, element_count(&shape), node, dtype)?;
     let max_rel_diff = metal_values
         .iter()
@@ -1103,7 +1776,7 @@ pub(super) fn validate_selected_expert_routes(
             *lookup_offset,
             element_count(prepared.shapes.of(lookup.indices)),
             lookup.indices,
-            gpu_dtype(program, &prepared.index_nodes, lookup.indices),
+            gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, lookup.indices),
         )?;
         eprintln!(
             "metal_expert_lookup node={:?} values={:?}",
@@ -1215,7 +1888,7 @@ pub(super) fn evaluate_selected_bound_cpu(
             .get(&source)
             .ok_or(MetalError::UnresolvedHazardOperand { node: source })?;
         let shape = prepared.shapes.of(source);
-        let dtype = gpu_dtype(program, &prepared.index_nodes, source);
+        let dtype = gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, source);
         owned_buffers[source.0 as usize] = Some(read_back(
             buffer,
             *offset,
@@ -1310,7 +1983,7 @@ pub(super) fn report_bound_operands(
                 *offset,
                 element_count(prepared.shapes.of(*source)),
                 *source,
-                gpu_dtype(program, &prepared.index_nodes, *source),
+                gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, *source),
             )
         {
             let source_offset = layout.offset_of(coordinate);
@@ -1332,7 +2005,7 @@ pub(super) fn report_bound_operands(
             *lookup_offset,
             element_count(prepared.shapes.of(lookup.indices)),
             lookup.indices,
-            gpu_dtype(program, &prepared.index_nodes, lookup.indices),
+            gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, lookup.indices),
         )
         && let Some(route) = route_values.first().copied().map(|value| value as usize)
         && let Some(descriptor) = expert_buffers.descriptor_records.get(route)
@@ -1346,7 +2019,7 @@ pub(super) fn report_bound_operands(
             *activation_offset,
             element_count(prepared.shapes.of(*activation_source)),
             *activation_source,
-            gpu_dtype(program, &prepared.index_nodes, *activation_source),
+            gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, *activation_source),
         )
     {
         let payload_pointer = expert_buffers.payloads.contents().as_ptr().cast::<u8>();
@@ -1396,6 +2069,62 @@ pub(super) fn report_bound_operands(
             );
         }
         let _ = weight_source;
+    }
+}
+
+/// `PROXIMA_HEAD_DEBUG_NODES` (comma-separated `NodeId` integers) parsed
+/// once per process -- the ordered target set `OWNER_BRIEF_gemma_head`'s
+/// per-position identity print and `PROXIMA_HEAD_SENTINEL_FILL` both key
+/// against. Index 0 is the production head root; every later index is a
+/// `PROXIMA_HEAD_REPEATS` duplicate, per the caller's own convention when
+/// setting the env var. `None` (the ordinary, non-debugging run) short-
+/// circuits both call sites to a single `is_none()` check.
+#[cfg(feature = "instrument")]
+fn head_debug_target_nodes() -> Option<&'static [NodeId]> {
+    static TARGETS: std::sync::OnceLock<Vec<NodeId>> = std::sync::OnceLock::new();
+    let targets = TARGETS.get_or_init(|| {
+        std::env::var("PROXIMA_HEAD_DEBUG_NODES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|entry| entry.trim().parse::<u32>().ok())
+                    .map(NodeId)
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    (!targets.is_empty()).then_some(targets.as_slice())
+}
+
+/// Overwrites `buffer[offset..offset + byte_length]` with the IEEE-754
+/// quiet-NaN bit pattern `0x7fc0_0000`, repeated per `f32` lane -- the same
+/// host-visible `contents()` write path `write_plan_uniform_bytes` uses to
+/// seed a plan-owned uniform buffer, applied here to a duplicate head's own
+/// output range BEFORE this command buffer is committed. If the encoded
+/// dispatch for that position genuinely writes this range, `commit` +
+/// `waitUntilCompleted` overwrites every sentinel byte; if the dispatch is
+/// skipped, aliases an already-written range, or never reaches this buffer,
+/// the sentinel survives the wait and the caller's post-wait bytes check
+/// catches it directly rather than inferring non-execution from timing.
+#[cfg(feature = "instrument")]
+fn head_debug_fill_sentinel(buffer: &MetalBuffer, offset: usize, byte_length: usize) {
+    const SENTINEL_BITS: u32 = 0x7fc0_0000;
+    let pointer = buffer.contents();
+    // SAFETY: `buffer` is `storageModeShared` (every arena/output-placed
+    // buffer this module hands `encode_op` is), and `offset + byte_length`
+    // is the exact range `arena_placement`/`output_placed` already resolved
+    // for this position's own output -- the same range `encode_op`'s later
+    // write targets.
+    let destination = unsafe {
+        core::slice::from_raw_parts_mut(
+            pointer.as_ptr().cast::<u8>().add(offset),
+            byte_length,
+        )
+    };
+    let (chunks, _remainder) = destination.as_chunks_mut::<4>();
+    for chunk in chunks {
+        *chunk = SENTINEL_BITS.to_ne_bytes();
     }
 }
 

@@ -33,6 +33,13 @@ pub(super) struct Prepared {
     /// program — see [`gpu_dtype`]'s doc for why upload/read-back both
     /// need this set alongside a node's own declared dtype.
     pub(super) index_nodes: BTreeSet<NodeId>,
+    /// `PROXIMA_REPEAT_NODES`'s own pairing table (original node -> its
+    /// copies' ids), threaded from [`apply_repeat_nodes`] so
+    /// `arena_encode_dispatch_finish::finish`'s own `PROXIMA_REPEAT_VERIFY`
+    /// post-wait byte compare knows which buffer to diff against which,
+    /// without re-parsing env vars a second time or guessing a copy's id.
+    #[cfg(feature = "instrument")]
+    pub(super) repeat_verify_pairs: Vec<(NodeId, Vec<NodeId>)>,
 }
 
 /// Raw host bytes one [`QuantizedBlock`] hands [`upload_block`]/
@@ -60,7 +67,8 @@ pub(super) fn prepare(
     placed_input_nodes: &[NodeId],
     fuse_cached_attention: bool,
 ) -> Result<Prepared, MetalError> {
-    let shapes = infer(program, symbols)?;
+    #[allow(unused_mut)]
+    let mut shapes = infer(program, symbols)?;
 
     // ROW 327: `block_nodes[i]` is the ONLY node `blocks[i]` may be
     // attributed to -- this crate's positional contract, identical to
@@ -123,7 +131,11 @@ pub(super) fn prepare(
             return Err(TensorError::UnknownOutput(*output).into());
         }
     }
-    let effective_outputs = if outputs.is_empty() {
+    // `mut` is only exercised under `instrument` (`PROXIMA_REPEAT_NODES`
+    // appends duplicate outputs below); a non-`instrument` build never
+    // mutates it, hence the blanket allow rather than two parallel bindings.
+    #[allow(unused_mut)]
+    let mut effective_outputs = if outputs.is_empty() {
         alloc::vec![root]
     } else {
         outputs.to_vec()
@@ -136,6 +148,81 @@ pub(super) fn prepare(
         fuse_cached_attention,
         numeric_policy,
     )?;
+    // attn_parity followon (2026-09-22): the duplicate-dispatch attribution
+    // harness, generalized from `PROXIMA_HEAD_REPEATS` (spec-graph level, LM
+    // head only) to any already-bound node. Runs on the fully fused program
+    // this driver is about to dispatch, mirroring `PROXIMA_HEAD_REPEATS`'s
+    // own "duplicate reads the same upstream sources, never the original's
+    // own output" rule -- see `proxima_tensor::bind::apply_repeat_nodes`'s
+    // own doc. `instrument`-gated because it appends dispatches to a
+    // production program; default-off (`PROXIMA_REPEAT_NODES` unset) is a
+    // no-op allocation-free pass-through.
+    #[cfg(feature = "instrument")]
+    let mut repeat_verify_pairs: alloc::vec::Vec<(NodeId, alloc::vec::Vec<NodeId>)> =
+        alloc::vec::Vec::new();
+    #[cfg(feature = "instrument")]
+    {
+        let targets: alloc::vec::Vec<NodeId> = std::env::var("PROXIMA_REPEAT_NODES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|entry| entry.trim().parse::<u32>().ok())
+                    .map(NodeId)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let repeat_count: u32 = std::env::var("PROXIMA_REPEAT_COUNT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
+        if !targets.is_empty() {
+            let (repeated, refusals, pairs) = apply_repeat_nodes(
+                resolved,
+                &targets,
+                repeat_count,
+                &mut effective_outputs,
+                &mut shapes,
+            );
+            resolved = repeated;
+            repeat_verify_pairs = pairs;
+            // `PROXIMA_REPEAT_VERIFY`'s own post-wait compare needs the
+            // ORIGINAL's bytes too, and an original is usually an internal
+            // node the arena retires (buffer reused for a later op) the
+            // moment its real last reader executes -- promoting it to a
+            // requested output keeps that buffer alive through readback the
+            // same way `apply_repeat_nodes` already keeps every copy alive.
+            if std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some() {
+                for (original, _) in &repeat_verify_pairs {
+                    if !effective_outputs.contains(original) {
+                        effective_outputs.push(*original);
+                    }
+                }
+            }
+            for refusal in &refusals {
+                debug!(
+                    node = refusal.node.0,
+                    kind = refusal.kind_name,
+                    "PROXIMA_REPEAT_NODES: target declined, not a byte-identical duplicate"
+                );
+            }
+            if std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some() {
+                std::eprintln!(
+                    "repeat_nodes targets={:?} count={} refusals={:?} pairs={:?}",
+                    targets.iter().map(|node| node.0).collect::<alloc::vec::Vec<_>>(),
+                    repeat_count,
+                    refusals,
+                    repeat_verify_pairs
+                        .iter()
+                        .map(|(original, copies)| (
+                            original.0,
+                            copies.iter().map(|copy| copy.0).collect::<alloc::vec::Vec<_>>()
+                        ))
+                        .collect::<alloc::vec::Vec<_>>(),
+                );
+            }
+        }
+    }
     #[cfg(feature = "instrument")]
     debug!(
         cached_attention_count = resolved
@@ -223,6 +310,8 @@ pub(super) fn prepare(
         #[cfg(not(feature = "metal-buffer-pool"))]
         last_reader,
         index_nodes,
+        #[cfg(feature = "instrument")]
+        repeat_verify_pairs,
     })
 }
 
@@ -302,11 +391,31 @@ pub(super) fn reject_unsupported_gpu_dtype(
 /// only have a bare `NodeId`: uploading a block input and reading back a
 /// requested output, either of which may name a plain `Op::Input` node
 /// this driver never resolves into a `BoundOp` at all.
-pub(super) fn gpu_dtype(program: &[Op], index_nodes: &BTreeSet<NodeId>, node: NodeId) -> DType {
+// attn_parity followon (2026-09-22): `node` used to always be a spec-level
+// id (`program.len()`-bounded) -- `PROXIMA_REPEAT_NODES` (`bind::
+// apply_repeat_nodes`) now also hands this a bound-level DUPLICATE id that
+// exists only in `resolved`, never in `program`; every reader of
+// `program[node.0]` on the resolved path has this same class of gap (see
+// this landing's own grep census, `repeat_attrib/gpu_dtype_grep.txt`).
+// `resolved` fixes it here: a duplicate's own `BoundOp::dtype` is carried
+// verbatim from the original op it copies (`bind::repeat_nodes::
+// duplicate_bound_op`), so this is the exact right answer, not a fallback
+// guess.
+pub(super) fn gpu_dtype(
+    program: &[Op],
+    index_nodes: &BTreeSet<NodeId>,
+    resolved: &[BoundOp],
+    node: NodeId,
+) -> DType {
     if index_nodes.contains(&node) {
         DType::Float32
+    } else if let Some(op) = program.get(node.0 as usize) {
+        op.dtype()
     } else {
-        program[node.0 as usize].dtype()
+        resolved
+            .iter()
+            .find(|bound| bound.node == node)
+            .map_or(DType::Float32, |bound| bound.dtype)
     }
 }
 
@@ -356,7 +465,10 @@ pub(super) fn operand_tensor_bytes(
             elements * crate::msl::codec_block_bytes(*codec) as u64
                 / crate::msl::codec_block_elements(*codec) as u64
         }
-        None => elements * gpu_dtype(program, index_nodes, source).size_bytes() as u64,
+        // `source` is always an OPERAND reference here, never a duplicate's
+        // own primary node -- `apply_repeat_nodes` copies operands
+        // verbatim, so an empty `resolved` slice is exact, not a shortcut.
+        None => elements * gpu_dtype(program, index_nodes, &[], source).size_bytes() as u64,
     }
 }
 

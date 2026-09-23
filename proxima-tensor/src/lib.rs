@@ -255,6 +255,9 @@ pub use bind::{
     correct_packed_matmul_layouts, dead_resolved_nodes, index_node_ids, node_last_reader,
     node_retirement, prune_dead,
 };
+#[cfg(feature = "instrument")]
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use bind::{RepeatNodeRefusal, apply_repeat_nodes};
 pub use convert::{Convert, SimdConvert};
 #[cfg(any(
     feature = "q4k-int8-dot",

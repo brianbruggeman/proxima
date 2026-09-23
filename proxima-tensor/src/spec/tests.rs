@@ -7972,7 +7972,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
         .collect();
 
     let build_start = std::time::Instant::now();
-    let (program, _logits, _moe_sites) = lfm2_forward_program_with_experts(
+    let (program, _logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
         128_000,
         2048,
         7168,
@@ -12877,7 +12877,7 @@ mod gemma4_synthetic_parity {
                 ffn: ffn_config,
             },
         ];
-        let (program, logits, _moe_sites) = lfm2_forward_program_with_experts(
+        let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
             VOCAB as u32,
             EMBEDDING as u32,
             FEED_FORWARD as u32,
@@ -13577,7 +13577,7 @@ mod gemma4_synthetic_parity {
                 ffn: ffn_config,
             },
         ];
-        let (program, logits, _cache_roots, _moe_sites) =
+        let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
             lfm2_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
@@ -13806,7 +13806,7 @@ mod gemma4_synthetic_parity {
                 ffn: LayerFfnConfig::exclusive(),
             },
         ];
-        let (program, logits, _cache_roots, _moe_sites) =
+        let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
             lfm2_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
@@ -14185,7 +14185,7 @@ mod gemma4_synthetic_parity {
             ),
         ];
 
-        let (cacheless_program, cacheless_logits, _cacheless_moe) =
+        let (cacheless_program, cacheless_logits, _cacheless_moe, _cacheless_head_repeats) =
             lfm2_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
@@ -14219,7 +14219,7 @@ mod gemma4_synthetic_parity {
             .0
             .to_vec();
 
-        let (cached_program, cached_logits, cache_roots, _cached_moe) =
+        let (cached_program, cached_logits, cache_roots, _cached_moe, _cached_head_repeats) =
             lfm2_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
@@ -14435,7 +14435,7 @@ mod gemma4_synthetic_parity {
             fused_qkv_reduce: false,
         };
 
-        let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden) =
+        let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden, _head_repeats) =
             build_forward(&descriptor, false)
                 .expect("build_forward's TwoRange path lowers the gemma4-shaped descriptor");
 
@@ -14685,7 +14685,7 @@ mod gemma4_synthetic_parity {
              real-dims construction"
         );
 
-        let (program_a, logits_a, roots_a, moe_a) =
+        let (program_a, logits_a, roots_a, moe_a, _head_repeats_a) =
             lfm2_two_range_cached_forward_program_with_experts(
                 REAL_VOCAB,
                 REAL_EMBEDDING,
@@ -14704,7 +14704,7 @@ mod gemma4_synthetic_parity {
             )
             .expect("direct real-dims build");
 
-        let (program_b, logits_b, roots_b, moe_b, _layer_residuals_b, _hidden_b) =
+        let (program_b, logits_b, roots_b, moe_b, _layer_residuals_b, _hidden_b, _head_repeats_b) =
             build_forward(&descriptor_b, true).expect("build_forward real-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
@@ -14775,7 +14775,7 @@ mod gemma4_synthetic_parity {
         assert_eq!(descriptor_b.block_count, REAL_BLOCK_COUNT);
         assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
 
-        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b) =
+        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b, _head_repeats_b) =
             build_forward(&descriptor_b, true).expect("build_forward real-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
@@ -14868,7 +14868,7 @@ mod gemma4_synthetic_parity {
         );
         assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
 
-        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b) =
+        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b, _head_repeats_b) =
             build_forward(&descriptor_b, true).expect("build_forward real qwen2-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
@@ -15022,7 +15022,7 @@ mod gemma4_synthetic_parity {
                 ffn: ffn_config,
             },
         ];
-        let (program, logits, cache_roots, _moe_sites) =
+        let (program, logits, cache_roots, _moe_sites, _head_repeats) =
             lfm2_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
@@ -15429,7 +15429,7 @@ mod gemma4_synthetic_parity {
         // (`proxima-model-interop::gemma4::bind_gemma4_all_positions_logits`
         // is the same knob threaded one level up). `logits_all` evaluates to
         // `[SEQ, VOCAB]` -- every new position's own row, not just the last.
-        let (program_all, logits_all, _cache_roots_all, _moe_sites_all) =
+        let (program_all, logits_all, _cache_roots_all, _moe_sites_all, _head_repeats_all) =
             lfm2_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
@@ -15486,7 +15486,7 @@ mod gemma4_synthetic_parity {
         // (the registered `Gemma4Arch::bind` shape), cached_len growing
         // 0 -> 1 -> 2 exactly the way `proxima-model-interop`'s decode loop
         // folds one token's own cache output into the next step's input.
-        let (program_last, logits_last, cache_roots, _moe_sites_last) =
+        let (program_last, logits_last, cache_roots, _moe_sites_last, _head_repeats_last) =
             lfm2_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,

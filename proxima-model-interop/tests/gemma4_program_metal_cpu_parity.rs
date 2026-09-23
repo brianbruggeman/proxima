@@ -250,7 +250,7 @@ fn relative_error_at_last_position(found: &[f32], wanted: &[f32], row_length: us
 fn logits_relative_error(layer_count: u32) -> f32 {
     let sliding_pattern = &SLIDING_PATTERN[..layer_count as usize];
     let schedule = gemma4_synthetic_schedule(sliding_pattern);
-    let (program, logits, _moe_sites) = lfm2_forward_program_with_experts(
+    let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,

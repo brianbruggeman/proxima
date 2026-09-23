@@ -51,7 +51,7 @@ interop-bgpool = ["dep:prime", "dep:proxima-core"]
 # per-token attribution counters in `omega::metal` alongside this crate's own
 # generate.rs-side ones, so a single feature flag lights up both halves of
 # the decode-loop split rather than needing two.
-instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-telemetry", "proxima-telemetry/macros", "proxima-telemetry/std"]
+instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-telemetry", "proxima-telemetry/macros", "proxima-telemetry/std", "dep:md-5"]
 # Metal decode path (macOS + Metal only). `generate.rs`'s decode loop runs
 # the cached forward through `omega::backend::plan_named`/`execute_plan_named`
 # instead of `proxima_tensor::cpu::evaluate_quantized_named_with_scratch`
@@ -266,6 +266,7 @@ conflaguration = { workspace = true, optional = true }
 # optional so the alloc-only floor never links it.
 fastrand = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
+md-5 = { version = "0.11.0", optional = true }
 memmap2 = { version = "0.9.11", optional = true }
 omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal", "cpu"], optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
@@ -453,9 +454,13 @@ required-features = ["std"]
 # per-step wall vs the aggregate `metal_stage_totals().gpu_exec_ticks`
 # counter via the already-wired `PROXIMA_DEBUG_METAL_STAGES` env var --
 # no new instrumentation, same shape as `gemma4_dispatch_profile_widths`.
+# `instrument` is additive-only (gates `print_capture_binary`'s md5 line);
+# owner rollout intervention6 builds this example both with and without it
+# to isolate whether the instrumented build's longer encode is itself
+# changing the K=1 vs K=8 comparison.
 [[example]]
 name = "decode_gbps_baseline"
-required-features = ["std", "metal", "instrument"]
+required-features = ["std", "metal"]
 
 # `metal-fuse-attn-decode` byte-equivalence harness: fused vs. unfused
 # `BoundOpKind::CachedAttention` parity on the real gemma4-E2B checkpoint,
