@@ -57,7 +57,7 @@ fn fnv64(text: &str) -> u64 {
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
-const MAX_TOKENS: usize = 48;
+const DEFAULT_MAX_TOKENS: usize = 48;
 
 // mirrors `gemma4_dispatch_profile_widths.rs`'s `install_console_telemetry` --
 // `report_encoder_split`/`report_op_timings` emit via `info!`, which is
@@ -179,15 +179,23 @@ fn main() {
     // chosen because its locked greedy completion runs the full 46-token
     // budget without an early EOS -- a short factual completion like
     // "The capital of France is" hits EOS after ~5 tokens, too few steps
-    // for a steady-state decode average.
-    let prompt = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
+    // for a steady-state decode average. `PROXIMA_PROMPT` overrides it
+    // verbatim -- the caller supplies any chat-template markers, this
+    // example does not add or infer any.
+    let default_prompt = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
+    let prompt_override = std::env::var("PROXIMA_PROMPT").ok();
+    let prompt: &str = prompt_override.as_deref().unwrap_or(default_prompt);
+    let max_tokens: usize = std::env::var("PROXIMA_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS);
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
         .expect("builds vocab via the current gemma4 dispatch");
     let prompt_token_count = proxima_tokenizer::encode(prompt, &vocab)
         .expect("tokenize prompt for cached_len accounting")
         .len();
     eprintln!(
-        "decode_gbps_baseline run=start prompt={prompt:?} prompt_token_count={prompt_token_count} max_tokens={MAX_TOKENS}"
+        "decode_gbps_baseline run=start prompt={prompt:?} prompt_token_count={prompt_token_count} max_tokens={max_tokens}"
     );
 
     // owner rollout check (2026-09-22, intervention6): K=1 vs K=8 chunked
@@ -215,7 +223,7 @@ fn main() {
         };
         let start = Instant::now();
         let (token_ids, text, stopped_by_eos) = model
-            .generate_streaming(prompt, MAX_TOKENS, serving_config, &mut on_token)
+            .generate_streaming(prompt, max_tokens, serving_config, &mut on_token)
             .expect("greedy decode on the real gemma4-E2B checkpoint");
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
         let tokens_generated = token_ids.len();
