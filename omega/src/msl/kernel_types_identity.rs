@@ -1670,10 +1670,70 @@ pub(crate) const fn codec_supports_pair_dot(codec: Codec) -> bool {
 /// lane assignment itself (`ix`/`it`/`slot` spreading all 32 lanes across
 /// the reduction axis) does not depend on this value — it only controls how
 /// many output rows share one activation load.
-pub(crate) const fn codec_rows_per_simdgroup(codec: Codec) -> usize {
+/// [`codec_rows_per_simdgroup`] with any runtime override stripped back
+/// out -- the structural default per codec, so a caller can tell whether an
+/// override actually changed anything for THIS codec (`Q6_K` never does;
+/// `PROXIMA_PACKED_ROWS` only feeds the `_ => PACKED_ROWS_PER_GROUP` arm).
+pub(super) const fn codec_rows_per_simdgroup_default(codec: Codec) -> usize {
     match codec {
         Codec::Q6K => 1,
         _ => PACKED_ROWS_PER_GROUP,
+    }
+}
+
+/// `PROXIMA_PACKED_ROWS=8` A/B switch (RUN.md, Intervention 5): same binary,
+/// env off/on, for the packed row-blocked reduce renderer's rows-per-
+/// simdgroup count. Read once per call, not cached -- this is a cold-path
+/// emit/dispatch-shape decision, not a hot inner loop, matching every other
+/// `PROXIMA_*` knob this crate reads with a bare `std::env::var` (e.g.
+/// `PROXIMA_METAL_KIND_FILTER`, `execute_and_hazards.rs`). Only the literal
+/// `"8"` is recognized; unset, empty, or any other value keeps today's
+/// default untouched, so the unset-env emit stays byte-identical to before
+/// this override existed.
+#[cfg(feature = "std")]
+fn packed_rows_override() -> Option<usize> {
+    let result = match std::env::var("PROXIMA_PACKED_ROWS") {
+        Ok(value) if value.trim() == "8" => Some(8),
+        _ => None,
+    };
+    log_packed_rows_variant_once(result);
+    result
+}
+
+/// Owner addition to Intervention 5 (RUN.md "Intervention 5"): print the
+/// selected variant exactly once per process, at the first row-blocked emit
+/// -- `source=env` when `PROXIMA_PACKED_ROWS=8` was honored, `source=default`
+/// otherwise (unset, empty, or any value other than `"8"`). Gated on
+/// `instrument`, matching every other diagnostic `eprintln!` in this crate
+/// (e.g. `token_breakdown_gpu`, `placements_execute_named.rs`) -- the
+/// override itself (`packed_rows_override`, above) stays `std`-only and
+/// fires regardless of `instrument`, so `PROXIMA_PACKED_ROWS` still changes
+/// behavior on a non-instrument build; only the proof line is instrument-
+/// gated.
+#[cfg(feature = "instrument")]
+fn log_packed_rows_variant_once(override_rows: Option<usize>) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let (rows, source) = match override_rows {
+            Some(rows) => (rows, "env"),
+            None => (PACKED_ROWS_PER_GROUP, "default"),
+        };
+        eprintln!("packed_rows_variant={rows} source={source}");
+    });
+}
+
+#[cfg(all(feature = "std", not(feature = "instrument")))]
+fn log_packed_rows_variant_once(_override_rows: Option<usize>) {}
+
+#[cfg(not(feature = "std"))]
+const fn packed_rows_override() -> Option<usize> {
+    None
+}
+
+pub(crate) fn codec_rows_per_simdgroup(codec: Codec) -> usize {
+    match codec {
+        Codec::Q6K => codec_rows_per_simdgroup_default(codec),
+        _ => packed_rows_override().unwrap_or_else(|| codec_rows_per_simdgroup_default(codec)),
     }
 }
 

@@ -591,6 +591,7 @@ proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-suppo
 proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
 rayon.workspace = true
 rustix.workspace = true
+temp-env.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 

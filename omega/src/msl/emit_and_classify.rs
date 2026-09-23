@@ -922,6 +922,10 @@ pub(crate) fn kernel_cache_key(
         elementwise_addressing: elementwise_addressing_cache_token(resolved),
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
         merged_z: None,
+        packed_row_block_rows_override: packed_row_block(resolved, &quantized).and_then(|block| {
+            let rows = codec_rows_per_simdgroup(block.codec);
+            (rows != codec_rows_per_simdgroup_default(block.codec)).then_some(rows)
+        }),
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
@@ -1467,23 +1471,23 @@ pub(super) const TILED_GEMM_NSG: usize = 4;
 /// from it (dispatch geometry, kernel body), and a disagreement would not
 /// fail to compile — it would silently fold the wrong rows. So it is decided
 /// once, here, from the bound layout.
-pub(super) struct PackedRowBlock {
+pub(crate) struct PackedRowBlock {
     /// operand index of the packed weight
-    pub(super) weight: usize,
+    pub(crate) weight: usize,
     /// operand index of the single non-packed operand (the activation)
-    pub(super) other: usize,
-    pub(super) reduce_dim: usize,
+    pub(crate) other: usize,
+    pub(crate) reduce_dim: usize,
     /// which codec `weight`'s bytes are packed as — decides the block byte
     /// width and which unpack function the emitted body calls.
-    pub(super) codec: Codec,
+    pub(crate) codec: Codec,
     /// output axes the activation owns exclusively, outermost first --
     /// empty when the op's output axes do not split cleanly into a
     /// token/feature ownership partition (every axis then counts as a
     /// feature axis; see `push_packed_row_blocked_body`'s single-row arm).
-    pub(super) token_axes: Vec<u16>,
+    pub(crate) token_axes: Vec<u16>,
     /// output axes the weight owns exclusively, outermost first -- every
     /// output axis when `token_axes` is empty.
-    pub(super) feature_axes: Vec<u16>,
+    pub(crate) feature_axes: Vec<u16>,
 }
 
 /// The token/feature ownership split `push_packed_row_blocked_body` needs to
@@ -1783,7 +1787,7 @@ pub(super) fn classify_packed_row_block(
     })
 }
 
-pub(super) fn packed_row_block(
+pub(crate) fn packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
 ) -> Option<PackedRowBlock> {

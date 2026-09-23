@@ -150,6 +150,15 @@ pub(crate) struct MetalOnlyExtras {
     /// the unmerged N=1 kernel's, nor with a DIFFERENT group size's merged
     /// kernel (a future variable-`k` MoE routing).
     pub merged_z: Option<u32>,
+    /// `PROXIMA_PACKED_ROWS=8` (RUN.md, Intervention 5): `Some(rows)` only
+    /// when [`crate::msl::codec_rows_per_simdgroup`] returned something
+    /// OTHER than [`crate::msl::codec_rows_per_simdgroup_default`] for this
+    /// op's codec -- so the unset-env default folds no new token and the
+    /// cache key, and every emitted byte, stays identical to before this
+    /// field existed. `None` for a non-packed-row-blocked op too. Feeds the
+    /// `_pr{rows}` suffix below so the 4-row and 8-row variants compile as
+    /// two distinct pipelines and coexist in the same binary.
+    pub packed_row_block_rows_override: Option<usize>,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -598,6 +607,10 @@ pub(crate) fn kernel_identity(
     if let Some(group_size) = metal.merged_z {
         identity.push_str("_z");
         identity.push_str(&group_size.to_string());
+    }
+    if let Some(rows) = metal.packed_row_block_rows_override {
+        identity.push_str("_pr");
+        identity.push_str(&rows.to_string());
     }
 
     identity
