@@ -17,6 +17,32 @@ fn command_buffer_chunk_env_override() -> Option<usize> {
     })
 }
 
+/// `PROXIMA_COMMAND_BUFFER_BOUNDARIES=<comma-separated op positions>`
+/// (OWNER_BRIEF_largest_region, Step B): an explicit chunk-boundary list for
+/// coarse per-region GPU timing, read and cached once like every other
+/// `PROXIMA_*` knob this module reads. Only consulted when
+/// `PROXIMA_COMMAND_BUFFER_CHUNKS` is unset (that env var's even-split path
+/// stays authoritative when both are set) and only for decode-shaped plans
+/// -- prefill keeps its existing `1` boundary count, same scoping as
+/// `command_buffer_chunk_count`'s own doc. A boundary at position `p` starts
+/// a new command buffer whose first op is `p`, reusing
+/// [`command_buffer_chunk_boundaries`]'s own convention.
+fn command_buffer_explicit_boundaries_env() -> Option<Vec<usize>> {
+    static CACHED: std::sync::OnceLock<Option<Vec<usize>>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var("PROXIMA_COMMAND_BUFFER_BOUNDARIES")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter_map(|entry| entry.trim().parse::<usize>().ok())
+                        .collect::<Vec<usize>>()
+                })
+        })
+        .clone()
+}
+
 /// `PROXIMA_COMMAND_BUFFER_CHUNKS=K` (OWNER_BRIEF_structural_difference,
 /// Intervention 6): same-binary A/B for how many `MTLCommandBuffer`s one
 /// [`execute_plan_with_placements_inner`] call splits its dispatch sequence
@@ -552,11 +578,46 @@ pub(super) fn execute_plan_with_placements_inner(
     // matches and this call sequence is provably identical to before this
     // change for every existing caller.
     let total_ops = prepared.resolved.len();
-    let chunk_count = command_buffer_chunk_count(
-        plan.command_buffer_chunks,
-        plan.command_buffer_chunks_decode_shaped,
-    );
-    let chunk_boundaries = command_buffer_chunk_boundaries(total_ops, chunk_count);
+    // OWNER_BRIEF_largest_region, Step B: an explicit boundary list wins over
+    // the even-split path only when `PROXIMA_COMMAND_BUFFER_CHUNKS` is unset
+    // and the plan is decode-shaped -- same scoping
+    // `command_buffer_chunk_count` already applies to the config/default
+    // tier, extended to this diagnostic-only env var.
+    // `PROXIMA_BOUNDARIES_PREFILL=1` (OWNER_BRIEF_prefill_correction, coordinator
+    // addition 2026-09-23): lets the explicit-boundary diagnostic also split a
+    // prefill-shaped plan's step-0 command stream -- off by default so the
+    // decode-only scoping above is unchanged for every existing caller.
+    let boundaries_prefill_allowed =
+        plan.command_buffer_chunks_decode_shaped || std::env::var_os("PROXIMA_BOUNDARIES_PREFILL").is_some();
+    let explicit_boundaries = if command_buffer_chunk_env_override().is_none() && boundaries_prefill_allowed {
+        command_buffer_explicit_boundaries_env()
+    } else {
+        None
+    };
+    let (chunk_boundaries, chunk_count, ignored_boundaries) =
+        if let Some(positions) = explicit_boundaries {
+            let mut boundaries: Vec<usize> = positions
+                .iter()
+                .copied()
+                .filter(|position| *position > 0 && *position < total_ops)
+                .collect();
+            boundaries.sort_unstable();
+            boundaries.dedup();
+            let ignored = positions.len().saturating_sub(boundaries.len());
+            let count = boundaries.len() + 1;
+            (boundaries, count, ignored)
+        } else {
+            let count = command_buffer_chunk_count(
+                plan.command_buffer_chunks,
+                plan.command_buffer_chunks_decode_shaped,
+            );
+            (command_buffer_chunk_boundaries(total_ops, count), count, 0)
+        };
+    // read unconditionally so a non-`instrument` build (where the only
+    // consumers are the `chunk_record`/`chunk_summary` prints below) does not
+    // trip `unused_variables`, matching `command_buffer_chunk_count`'s own
+    // `source`.
+    let _ = (chunk_count, ignored_boundaries);
     let mut next_boundary = 0usize;
     #[cfg(feature = "instrument")]
     let mut first_command_buffer: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = None;
@@ -704,6 +765,57 @@ pub(super) fn execute_plan_with_placements_inner(
             for (operand, _, _) in bound.operands() {
                 if input_placed.contains_key(operand) {
                     trace!(position, node = ?bound.node, reads = ?operand, "placed-input node read");
+                }
+            }
+        }
+        // attn_parity followon (2026-09-23, OWNER_BRIEF_largest_region Step C):
+        // `PROXIMA_DEBUG_RESOLVED_OPS=1` prints one `resolved_op` line per
+        // resolved position, ONCE per process (the `AtomicBool` below), not
+        // once per decode step -- the resolved list (node ids, kind, operand
+        // ids, extents) is identical across every decode step against a
+        // fixed-shape plan, so a single dump at the first call already
+        // describes every later step. `entry`/`grid` are NOT included here:
+        // they are only known at encode time (see `capture_dispatch`,
+        // `arena_encode_dispatch_finish.rs`), which this print does not
+        // duplicate -- join on `node` against a `PROXIMA_CAPTURE_NODES`-gated
+        // `dispatch_capture` run instead.
+        #[cfg(feature = "instrument")]
+        if std::env::var_os("PROXIMA_DEBUG_RESOLVED_OPS").is_some() {
+            // separate flags per plan shape -- prefill (step 0) and decode
+            // build/resolve DIFFERENT `Plan`s, so a single shared flag would
+            // let whichever shape resolves first (always prefill, step 0)
+            // starve the other's dump for the rest of the process.
+            static PREFILL_PRINTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            static DECODE_PRINTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            let flag = if plan.command_buffer_chunks_decode_shaped {
+                &DECODE_PRINTED
+            } else {
+                &PREFILL_PRINTED
+            };
+            if !flag.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                let plan_shape = if plan.command_buffer_chunks_decode_shaped {
+                    "decode"
+                } else {
+                    "prefill"
+                };
+                for (dump_position, dump_bound) in prepared.resolved.iter().enumerate() {
+                    let operand_ids: Vec<String> = dump_bound
+                        .operands()
+                        .iter()
+                        .map(|(node, layout, _lookup)| format!("{}:{:?}", node.0, layout.strides))
+                        .collect();
+                    let output_len =
+                        bound_output_len(dump_bound).max(1) * dump_bound.dtype.size_bytes();
+                    eprintln!(
+                        "resolved_op plan_shape={plan_shape} position={dump_position} node={} kind={} extents={:?} dtype={:?} operands=[{}] output_len={output_len}",
+                        dump_bound.node.0,
+                        dump_bound.kind.name(),
+                        dump_bound.extents,
+                        dump_bound.dtype,
+                        operand_ids.join(", "),
+                    );
                 }
             }
         }
@@ -1183,6 +1295,11 @@ pub(super) fn execute_plan_with_placements_inner(
             // order on one queue) proves every earlier chunk's GPU work
             // completed too, not only the last one waited on directly.
             let step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed);
+            let plan_shape = if plan.command_buffer_chunks_decode_shaped {
+                "decode"
+            } else {
+                "prefill"
+            };
             let step_epoch_s = proxima_tensor::instrument::ticks_to_nanos(
                 step_encode_start_ticks.as_raw(),
             ) as f64
@@ -1196,7 +1313,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 sum_gpu_exec_ms += (gpu_end_ms - gpu_start_ms).max(0.0);
                 gpu_starts_ends.push((gpu_start_ms, gpu_end_ms));
                 eprintln!(
-                    "chunk_record step={step} chunk={}/{chunk_count} ops={}..{} \
+                    "chunk_record step={step} plan_shape={plan_shape} chunk={}/{chunk_count} ops={}..{} \
                      encode_start_ms={} encode_end_ms={} commit_ms={} \
                      gpu_start_ms={gpu_start_ms} gpu_end_ms={gpu_end_ms}",
                     index + 1,
@@ -1221,7 +1338,8 @@ pub(super) fn execute_plan_with_placements_inner(
                 .map(|timing| timing.encode_end_ms - timing.encode_start_ms)
                 .sum();
             eprintln!(
-                "chunk_summary step={step} chunks={chunk_count} \
+                "chunk_summary step={step} plan_shape={plan_shape} chunks={chunk_count} \
+                 regions={chunk_count} ignored_boundaries={ignored_boundaries} \
                  sum_gpu_exec_ms={sum_gpu_exec_ms} \
                  first_start_to_last_end_ms={first_start_to_last_end_ms} \
                  inter_buffer_gaps_ms={inter_buffer_gaps_ms} \
