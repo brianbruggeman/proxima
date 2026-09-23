@@ -98,11 +98,15 @@ mod dead_code_cached_attention;
 mod gdn_moe_fusion_apply;
 #[macro_use]
 mod cached_attention_epilogue_liveness;
+#[cfg(feature = "identity-copy-alias")]
+mod identity_copy_alias;
 pub use builder_compose_window::*;
 pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
 pub use types_layout_boundop::*;
+#[cfg(feature = "identity-copy-alias")]
+use identity_copy_alias::apply_identity_copy_alias;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

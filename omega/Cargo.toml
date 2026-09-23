@@ -47,6 +47,12 @@ moe-topk-fusion = ["proxima-tensor/moe-topk-fusion"]
 # a non-identity one; `wgsl`/`cuda` reject a non-identity epilogue with
 # `EmitError::UnsupportedOpKind`/`CudaUnsupportedOpKind` until they render it.
 reduce-epilogue-fusion = ["proxima-tensor/reduce-epilogue-fusion"]
+# Default-off passthrough to `proxima-tensor/identity-copy-alias` (drops
+# pure-copy identity dispatches by redirecting readers at the source buffer)
+# -- same disciplined-component firewall as `gated-delta-net-fusion`/
+# `moe-topk-fusion`: no renderer change needed, the fold happens entirely in
+# `proxima-tensor::bind` before any kernel is emitted.
+identity-copy-alias = ["proxima-tensor/identity-copy-alias"]
 # Backends are MIX-AND-MATCH, the same shape `runtime-prime` and
 # `runtime-tokio` take at the workspace root (`Cargo.toml`): both may be
 # compiled in at once and the choice made at runtime, rather than one
