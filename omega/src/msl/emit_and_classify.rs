@@ -1,4 +1,23 @@
+use alloc::borrow::ToOwned;
+
 use super::*;
+
+/// `PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES` -- a `std`-only escape knob
+/// (env reads do not exist on the alloc-only `metal-core` tier build,
+/// `cargo check -p omega --no-default-features --features metal-core
+/// --target x86_64-unknown-linux-gnu`). The non-`std` path returns the
+/// structural default: the knob is never set, so every caller falls through
+/// to the row-blocked/tiled-gemm classification it would take on a `std`
+/// build with the env var unset.
+#[cfg(feature = "std")]
+pub(super) fn unsafe_metal_expert_sources_enabled() -> bool {
+    std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some()
+}
+
+#[cfg(not(feature = "std"))]
+pub(super) const fn unsafe_metal_expert_sources_enabled() -> bool {
+    false
+}
 
 pub fn emit(
     resolved: &BoundOp,
@@ -510,6 +529,9 @@ pub(super) fn emit_with_expert_sources_mode(
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // `std`-only diagnostic (`eprintln!`, env reads) -- unreachable on
+        // the alloc-only `metal-core` tier build, which has no `env`/stderr.
+        #[cfg(feature = "std")]
         if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
             eprintln!(
                 "qwen35 expert lowering bound_node={:?} source_node={source_node:?} extents={:?} row_block={} multi_row={} gather={} token_total={} source_len={}",
@@ -1079,7 +1101,7 @@ pub(super) fn reduce_is_cooperative_dispatch(
 pub(super) fn packed_row_block_admitted(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
     // The experimental mixed-source path must use the descriptor-aware
     // element reader; row-block pointer hoisting has a separate address ABI.
-    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+    if unsafe_metal_expert_sources_enabled() {
         return false;
     }
     match classify_packed_row_block(resolved, quantized) {
@@ -1767,7 +1789,7 @@ pub(super) fn packed_row_block(
 ) -> Option<PackedRowBlock> {
     // The experimental mixed-source path must use the descriptor-aware
     // element reader; row-block pointer hoisting has a separate address ABI.
-    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+    if unsafe_metal_expert_sources_enabled() {
         return None;
     }
     classify_packed_row_block(resolved, quantized).ok()
@@ -1990,7 +2012,7 @@ pub(super) fn tiled_gemm_block(
     init: ReduceInit,
     output_axes: &[u16],
 ) -> Option<TiledGemmBlock> {
-    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+    if unsafe_metal_expert_sources_enabled() {
         return None;
     }
     classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).ok()

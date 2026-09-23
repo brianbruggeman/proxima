@@ -559,8 +559,10 @@ pub(super) fn q4k_super_block_tiled(
     reduce_dims: &[u16],
 ) -> bool {
     // Mixed expert sources have per-entry codecs and compact payload bases;
-    // this Q4-only specialization cannot represent that ABI.
-    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+    // this Q4-only specialization cannot represent that ABI. Shared with
+    // `emit_and_classify`'s three call sites -- one std-vs-no_std gate, not
+    // four.
+    if super::emit_and_classify::unsafe_metal_expert_sources_enabled() {
         return false;
     }
     if reduce_dims.len() != 1 {
