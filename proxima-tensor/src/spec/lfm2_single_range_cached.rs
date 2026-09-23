@@ -1231,6 +1231,20 @@ struct StoredSharedKv {
 /// contract as the single-range builder (every entry must be
 /// [`LayerKind::Attention`]); the returned roots are the same
 /// `(logits, per_layer_cache_roots, moe_sites)` shape.
+/// [`lfm2_two_range_cached_forward_program_with_experts`]'s own return
+/// shape: the lowered program, its `logits` root, one [`CachedLayerRoots`]
+/// per real cache-owning layer, one [`MoeSite`] per MoE layer, and
+/// `PROXIMA_HEAD_REPEATS`'s own scratch output (`append_head`'s own doc
+/// inside the function body) -- empty outside `instrument` builds or when
+/// the env var is unset/`1`.
+pub(super) type TwoRangeForwardProgram = (
+    Vec<Op>,
+    NodeId,
+    Vec<CachedLayerRoots>,
+    MoeSites,
+    alloc::vec::Vec<NodeId>,
+);
+
 #[allow(clippy::too_many_arguments)]
 pub fn lfm2_two_range_cached_forward_program_with_experts(
     vocab: u32,
@@ -1252,7 +1266,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     // builder's prior callers (none of whom ever passed a PLE-bearing
     // schedule) see no change in the emitted program.
     ple_dim: Option<u32>,
-) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites), TensorError> {
+) -> Result<TwoRangeForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
             expected: block_count,
@@ -1642,46 +1656,82 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
-    let logits_product = elementwise(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
-    )?;
-    let logits = reduce(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        logits_product,
-        "sdv->sdv",
-        "sv->sdv",
-    )?;
 
-    let logits = match logit_softcap {
-        Some(cap) => {
-            let cap_node = scalar_constant(&mut program, cap);
-            let scaled = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Divide,
-                &[(logits, "sv->sv"), (cap_node, "->sv")],
-            )?;
-            let tanh = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Tanh,
-                &[(scaled, "sv->sv")],
-            )?;
-            elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(tanh, "sv->sv"), (cap_node, "->sv")],
-            )?
+    // attn_parity followon (2026-09-22): the same factor-out
+    // `lfm2_forward_program_with_experts` carries -- see that function's own
+    // doc on `append_head`/`PROXIMA_HEAD_REPEATS`/`duplicate_head_roots`.
+    // This is the builder gemma4's real production decode path actually
+    // calls (`CacheStrategy::TwoRange`, `bind_gemma4_with_last_row_only`),
+    // so this copy, not the cacheless one, is what the measurement harness
+    // needs live.
+    let append_head = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
+        let logits_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
+        )?;
+        let logits = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            logits_product,
+            "sdv->sdv",
+            "sv->sdv",
+        )?;
+        match logit_softcap {
+            Some(cap) => {
+                let cap_node = scalar_constant(program, cap);
+                let scaled = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Divide,
+                    &[(logits, "sv->sv"), (cap_node, "->sv")],
+                )?;
+                let tanh =
+                    elementwise(program, DType::Float32, ScalarOp::Tanh, &[(scaled, "sv->sv")])?;
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(tanh, "sv->sv"), (cap_node, "->sv")],
+                )
+            }
+            None => Ok(logits),
         }
-        None => logits,
     };
 
-    Ok((program, logits, cache_roots, MoeSites(moe_sites)))
+    let logits = append_head(&mut program)?;
+
+    #[cfg(feature = "instrument")]
+    let duplicate_head_roots: alloc::vec::Vec<NodeId> = {
+        let repeats: u32 = std::env::var("PROXIMA_HEAD_REPEATS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1)
+            .clamp(1, 3);
+        let mut extra = alloc::vec::Vec::with_capacity((repeats.saturating_sub(1)) as usize);
+        for _ in 1..repeats {
+            extra.push(append_head(&mut program)?);
+        }
+        if std::env::var_os("PROXIMA_HEAD_REPEATS_VERIFY").is_some() {
+            std::eprintln!(
+                "head_repeats_true_roots production={} duplicates={:?}",
+                logits.0,
+                extra.iter().map(|node| node.0).collect::<alloc::vec::Vec<_>>(),
+            );
+        }
+        extra
+    };
+    #[cfg(not(feature = "instrument"))]
+    let duplicate_head_roots: alloc::vec::Vec<NodeId> = alloc::vec::Vec::new();
+
+    Ok((
+        program,
+        logits,
+        cache_roots,
+        MoeSites(moe_sites),
+        duplicate_head_roots,
+    ))
 }

@@ -574,6 +574,15 @@ pub(super) fn emit_token_breakdown_metal(
         checkpoint_mapping_buffer_bytes,
         expert_mapping_buffer_bytes,
         plan_uniform_writes = metal_stage.plan_uniform_writes,
+        retire_scan_calls = metal_stage.retire_scan_calls,
+        retire_scan_ms = ms(metal_stage.retire_scan_ticks),
+        expert_buffers_lookup_calls = metal_stage.expert_buffers_lookup_calls,
+        expert_buffers_lookup_ms = ms(metal_stage.expert_buffers_lookup_ticks),
+        placement_resolve_calls = metal_stage.placement_resolve_calls,
+        placement_resolve_ms = ms(metal_stage.placement_resolve_ticks),
+        loop_head_calls = metal_stage.loop_head_calls,
+        loop_head_ms = ms(metal_stage.loop_head_ticks),
+        encoder_finish_ms = ms(metal_stage.encoder_finish_ticks),
         barriers = metal_stage.barriers_emitted,
         barriers_raw = metal_stage.barriers_raw,
         barriers_waw = metal_stage.barriers_waw,
@@ -598,7 +607,7 @@ pub(super) fn emit_token_breakdown_metal(
     );
     if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
         eprintln!(
-            "token_breakdown_metal step={} prepare_ms={} emit_ms={} op_setup_ms={} encode_dispatch_calls={} physical_dispatch_calls={} encode_dispatch_ms={} readback_ms={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_cache_cold_misses={} expert_source_cache_replacement_misses={} expert_source_buffer_reuses={} expert_source_reuse_copy_bytes={} expert_source_reuse_copy_ms={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} resident_cache_entries={} resident_cache_bytes={} block_upload_calls={} block_upload_ms={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} mapping_offset_uploads={} mapping_rebound_blocks={} mapping_residency_rung={} expert_mapping_candidate_uploads={} expert_mapping_missed_uploads={} resident_uploads={} resident_reuses={} output_buffer_allocations={} output_buffer_allocated_bytes={} checkpoint_mapping_buffer_bytes={} expert_mapping_buffer_bytes={} plan_uniform_writes={} barriers={} barriers_raw={} barriers_waw={} barriers_war={} barriers_waw_war_arena_recycled={} barriers_waw_war_persistent={} plan_cache_len={} plan_hits={} plan_misses={} plan_arena_allocated_bytes={} segment_arena_allocated_bytes={} placed_arena_allocated_bytes={} gpu_exec_calls={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
+            "token_breakdown_metal step={} prepare_ms={} emit_ms={} op_setup_ms={} encode_dispatch_calls={} physical_dispatch_calls={} encode_dispatch_ms={} readback_ms={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_cache_cold_misses={} expert_source_cache_replacement_misses={} expert_source_buffer_reuses={} expert_source_reuse_copy_bytes={} expert_source_reuse_copy_ms={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} resident_cache_entries={} resident_cache_bytes={} block_upload_calls={} block_upload_ms={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} mapping_offset_uploads={} mapping_rebound_blocks={} mapping_residency_rung={} expert_mapping_candidate_uploads={} expert_mapping_missed_uploads={} resident_uploads={} resident_reuses={} output_buffer_allocations={} output_buffer_allocated_bytes={} checkpoint_mapping_buffer_bytes={} expert_mapping_buffer_bytes={} plan_uniform_writes={} retire_scan_calls={} retire_scan_ms={} expert_buffers_lookup_calls={} expert_buffers_lookup_ms={} placement_resolve_calls={} placement_resolve_ms={} loop_head_calls={} loop_head_ms={} encoder_finish_ms={} barriers={} barriers_raw={} barriers_waw={} barriers_war={} barriers_waw_war_arena_recycled={} barriers_waw_war_persistent={} plan_cache_len={} plan_hits={} plan_misses={} plan_arena_allocated_bytes={} segment_arena_allocated_bytes={} placed_arena_allocated_bytes={} gpu_exec_calls={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
             step,
             ms(metal_stage.prepare_ticks),
             ms(metal_stage.emit_ticks),
@@ -636,6 +645,15 @@ pub(super) fn emit_token_breakdown_metal(
             checkpoint_mapping_buffer_bytes,
             expert_mapping_buffer_bytes,
             metal_stage.plan_uniform_writes,
+            metal_stage.retire_scan_calls,
+            ms(metal_stage.retire_scan_ticks),
+            metal_stage.expert_buffers_lookup_calls,
+            ms(metal_stage.expert_buffers_lookup_ticks),
+            metal_stage.placement_resolve_calls,
+            ms(metal_stage.placement_resolve_ticks),
+            metal_stage.loop_head_calls,
+            ms(metal_stage.loop_head_ticks),
+            ms(metal_stage.encoder_finish_ticks),
             metal_stage.barriers_emitted,
             metal_stage.barriers_raw,
             metal_stage.barriers_waw,
@@ -915,6 +933,12 @@ pub struct LoadedModel<'file> {
     /// (`proxima_tensor::instrument::ExpertObserver`, `instrument`-gated)
     /// is registered.
     pub(super) moe_sites: proxima_tensor::spec::MoeSites,
+    /// `crate::architecture::BoundProgram::duplicate_head_roots` off this
+    /// checkpoint's own resolved [`crate::Architecture`] (`Self::load`'s
+    /// registry path) -- empty for every non-gemma4 architecture and for
+    /// every non-registry load entry point below. `Self::run_decode_loop_observed_seeded`
+    /// reads this instead of reconstructing the roots from `program.len()`.
+    pub(super) duplicate_head_roots: Vec<NodeId>,
     /// `crate::architecture::BoundProgram::single_position_step` off this
     /// checkpoint's own resolved [`crate::Architecture`] (`Self::load`'s
     /// `resolved.bind(..)` for the registry path; `false` for every other

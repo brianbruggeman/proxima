@@ -475,7 +475,11 @@ pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
 /// node at all, so there is no value here to forward, not merely one this
 /// function declines to read -- same "degenerate default for an engine
 /// that does not produce this value" precedent `cache_roots` and the
-/// residual `Vec<NodeId>` already set.
+/// residual `Vec<NodeId>` already set. The seventh element,
+/// `duplicate_head_roots`, is `PROXIMA_HEAD_REPEATS`'s own scratch output
+/// (`lfm2_forward_program_with_experts`'s own doc) forwarded through under
+/// [`CacheStrategy::Cacheless`] only -- empty everywhere else, same
+/// degenerate-default precedent.
 pub type BuildForwardProgram = (
     Vec<Op>,
     NodeId,
@@ -483,6 +487,7 @@ pub type BuildForwardProgram = (
     MoeSites,
     Vec<NodeId>,
     Option<NodeId>,
+    Vec<NodeId>,
 );
 
 /// Generalizes [`lfm2_two_range_cached_forward_program_with_experts`] (the
@@ -527,7 +532,7 @@ pub fn build_forward(
 ) -> Result<BuildForwardProgram, TensorError> {
     match descriptor.cache_strategy {
         CacheStrategy::TwoRange => {
-            let (program, logits, cache_roots, moe_sites) =
+            let (program, logits, cache_roots, moe_sites, duplicate_head_roots) =
                 lfm2_two_range_cached_forward_program_with_experts(
                     descriptor.vocab,
                     descriptor.embedding,
@@ -544,10 +549,18 @@ pub fn build_forward(
                     last_row_only,
                     descriptor.ple_dim,
                 )?;
-            Ok((program, logits, cache_roots, moe_sites, Vec::new(), None))
+            Ok((
+                program,
+                logits,
+                cache_roots,
+                moe_sites,
+                Vec::new(),
+                None,
+                duplicate_head_roots,
+            ))
         }
         CacheStrategy::Cacheless => {
-            let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
+            let (program, logits, moe_sites, duplicate_head_roots) = lfm2_forward_program_with_experts(
                 descriptor.vocab,
                 descriptor.embedding,
                 descriptor.feed_forward,
@@ -564,7 +577,15 @@ pub fn build_forward(
                 last_row_only,
                 descriptor.ple_dim,
             )?;
-            Ok((program, logits, Vec::new(), moe_sites, Vec::new(), None))
+            Ok((
+                program,
+                logits,
+                Vec::new(),
+                moe_sites,
+                Vec::new(),
+                None,
+                duplicate_head_roots,
+            ))
         }
         CacheStrategy::SingleRange => {
             if descriptor.layers.len() != descriptor.block_count as usize {
@@ -629,6 +650,7 @@ pub fn build_forward(
                 moe_sites,
                 layer_residuals,
                 Some(roots.hidden),
+                Vec::new(),
             ))
         }
     }

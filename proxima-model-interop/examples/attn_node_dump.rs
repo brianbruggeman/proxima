@@ -122,6 +122,11 @@ fn main() {
         .bind(&parsed, bytes)
         .expect("bind the real gemma4-E2B checkpoint's production decode program");
 
+    println!(
+        "attn_node_dump: logits_root={} program_len={}",
+        bound_program.logits_root.0,
+        bound_program.program.len()
+    );
     let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
 
     let kv_bucket_extent: usize = std::env::var("PROXIMA_ATTN_KV_BUCKET_EXTENT")
@@ -159,15 +164,29 @@ fn main() {
         .filter(|bound| matches!(bound.kind, proxima_tensor::BoundOpKind::CachedAttention { .. }))
         .map(|bound| bound.node.0)
         .collect();
-    let attended_node = *candidates
-        .get(layer_index)
-        .unwrap_or_else(|| panic!("layer {layer_index} out of range: only {} CachedAttention candidates", candidates.len()));
-    let target_node_ids: Vec<u32> = ATTN_ABSORBED_NODE_OFFSETS
-        .iter()
-        .map(|offset| (attended_node as i32 + offset) as u32)
-        .chain(core::iter::once(attended_node))
-        .collect();
-    println!("attn_node_dump: layer={layer_index} attended_node={attended_node} output_dir={output_dir}");
+    let extra_node_ids: Vec<u32> = std::env::var("PROXIMA_ATTN_EXTRA_NODES")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|entry| entry.trim().parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    // this build's recognizer declines the fusion for the real checkpoint's
+    // mask shape (0 candidates); extra-node dumps still work off the
+    // unfused bind, so only require a candidate when no extras were given.
+    let target_node_ids: Vec<u32> = match candidates.get(layer_index) {
+        Some(&attended_node) => ATTN_ABSORBED_NODE_OFFSETS
+            .iter()
+            .map(|offset| (attended_node as i32 + offset) as u32)
+            .chain(core::iter::once(attended_node))
+            .chain(extra_node_ids.clone())
+            .collect(),
+        None if !extra_node_ids.is_empty() => extra_node_ids.clone(),
+        None => panic!("layer {layer_index} out of range: only {} CachedAttention candidates", candidates.len()),
+    };
+    println!("attn_node_dump: layer={layer_index} candidates={candidates:?} output_dir={output_dir}");
 
     let manifest_path = format!("{output_dir}/manifest.txt");
     let mut manifest =
@@ -182,5 +201,26 @@ fn main() {
                 writeln!(manifest, "{missing_line}").expect("write manifest missing line");
             }
         }
+    }
+
+    // consumer census for the extra nodes: who reads them, and are they a
+    // requested output (both gate whether a fold is byte-safe).
+    for extra_node in &extra_node_ids {
+        let is_output = outputs.iter().any(|node| node.0 == *extra_node);
+        let consumers: Vec<(u32, &str, proxima_tensor::Layout, Option<()>)> = bound_ops
+            .iter()
+            .flat_map(|bound| {
+                bound
+                    .all_read_sources()
+                    .filter(|(node, _, _)| node.0 == *extra_node)
+                    .map(move |(_, layout, lookup)| {
+                        (bound.node.0, bound.kind.name(), layout.clone(), lookup.as_ref().map(|_| ()))
+                    })
+            })
+            .collect();
+        println!(
+            "attn_node_dump: consumer_census node={extra_node} is_requested_output={is_output} reader_count={} readers={consumers:?}",
+            consumers.len()
+        );
     }
 }

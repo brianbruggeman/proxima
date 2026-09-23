@@ -347,6 +347,19 @@ thread_local! {
     pub(super) static PIPELINE_CACHE: RefCell<BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>> =
         RefCell::new(BTreeMap::new());
 
+    /// `pipeline_for`/`pipeline_for_kernel`'s own creation record, keyed by
+    /// the compiled pipeline's object pointer (`Retained::as_ptr`) rather
+    /// than `PIPELINE_CACHE`'s string key -- a dispatch site holds only the
+    /// `Retained` pipeline itself (via `ResolvedStep::pipeline` on the
+    /// plan-cache-hit fast path, which never recomputes a cache key), so
+    /// pointer identity is the one thing every caller of a compiled pipeline
+    /// can produce to recover its original creation record without
+    /// recomputing the MSL source hash from a different string.
+    #[cfg(feature = "instrument")]
+    pub(super) static PIPELINE_CAPTURE: RefCell<BTreeMap<usize, PipelineCaptureRecord>> =
+        const { RefCell::new(BTreeMap::new()) };
+
+
     /// Emitted mixed-expert kernels persist beside their compiled pipeline.
     /// The source body depends only on the bound shape, codec policy, math
     /// mode, and source node; the resident payload bytes are bound separately
@@ -379,6 +392,31 @@ thread_local! {
 pub fn current_allocated_size() -> Option<u64> {
     let (device, _queue) = device_and_queue().ok()?;
     Some(device.currentAllocatedSize() as u64)
+}
+
+/// The decode loop's own per-step counter (`_step` in
+/// `proxima_model_interop::generate::decode`'s `decode_until_stop_or_budget`
+/// closure, the SAME value every `token_stages`/`token_breakdown` `eprintln!`
+/// already tags its line with), mirrored here so `encode_op`'s
+/// `dispatch_capture` lines -- printed from whichever thread Metal dispatch
+/// actually runs on, not necessarily the decode loop's own thread -- can
+/// still carry a `step=` field lining up with those diagnostics. A
+/// process-wide atomic, not a `thread_local!`: `PIPELINE_CACHE`'s own
+/// per-thread cache is sound because compiled pipelines never cross a
+/// thread, but the decode loop's step boundary and the encode/dispatch call
+/// it triggers are not guaranteed to share one thread, so a thread-local
+/// counter here silently reads 0 forever on any thread but the one that
+/// calls [`set_capture_step`].
+#[cfg(feature = "instrument")]
+pub(super) static CAPTURE_STEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Mirrors the decode loop's own per-step counter into [`CAPTURE_STEP`] --
+/// see that static's own doc. A no-op call on a non-`instrument` build costs
+/// nothing (compiled out); on `instrument`, one relaxed atomic store per
+/// decode step, off the per-dispatch hot path.
+#[cfg(feature = "instrument")]
+pub fn set_capture_step(step: u64) {
+    CAPTURE_STEP.store(step, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Drops staged HOBBIT payload buffers after an all-expert prefill has handed
@@ -545,6 +583,29 @@ pub struct Plan {
     /// until a caller overrides it with [`Plan::set_dispatch_type`]. See
     /// [`DispatchType`]'s own doc for the measured rationale (ROW 311/312).
     pub(super) dispatch_type: DispatchType,
+    /// This plan's default `MTLCommandBuffer` split count for
+    /// [`execute_plan_with_placements`]'s chunked-submission loop
+    /// (`placements_execute_named.rs`'s `command_buffer_chunk_count`'s own
+    /// doc) -- the config-sourced tier of that function's `env -> config ->
+    /// default` chain. `0` (this field's default, set at [`plan`]/
+    /// [`plan_named`]) means no caller ever threaded a config value here;
+    /// `command_buffer_chunk_count` reads that as the internal default of
+    /// `1` (never splits, matching every plan before Intervention 6), not as
+    /// a literal `0`-way split. `PROXIMA_COMMAND_BUFFER_CHUNKS` still
+    /// overrides this per-process when set, unchanged.
+    pub(super) command_buffer_chunks: u32,
+    /// Whether THIS plan is decode-shaped (new-token count == 1) -- set
+    /// alongside [`Self::command_buffer_chunks`] at the same call site
+    /// (`Plan::set_command_buffer_chunks`'s own doc), from the plan-cache
+    /// key's own `new_count` the caller already resolved
+    /// (`residency_caches.rs`'s `shape = (symbols[0] as usize, ...)`
+    /// convention). `false` (this field's default) means "unmarked" --
+    /// every plan built outside the config-threading call sites keeps
+    /// [`command_buffer_chunk_count`]'s prefill-shaped (`chunks=1`) branch,
+    /// the same fail-safe direction `command_buffer_chunks == 0` already
+    /// takes. The owner's own integration note: this measurement covers
+    /// only the single-new-token decode plan, never prefill.
+    pub(super) command_buffer_chunks_decode_shaped: bool,
     /// ROW 329 diagnostic: when `Some(position)`,
     /// [`execute_plan_with_placements_dispatch_timed`]'s stage-boundary
     /// fallback (the only branch this device's own `AtStageBoundary`-only
@@ -1699,6 +1760,25 @@ impl Plan {
     /// of which encoder dispatch mode runs them.
     pub fn set_dispatch_type(&mut self, dispatch_type: DispatchType) {
         self.dispatch_type = dispatch_type;
+    }
+
+    /// Overrides this plan's default `MTLCommandBuffer` split count from
+    /// `1`, and marks whether this plan is decode-shaped (`new_count == 1`
+    /// at the caller's own plan-cache key). See [`Self::command_buffer_chunks`]/
+    /// [`Self::command_buffer_chunks_decode_shaped`]'s own field docs for
+    /// how these reach `execute_plan_with_placements`'s chunk loop, and
+    /// `PROXIMA_COMMAND_BUFFER_CHUNKS`'s own precedence over both.
+    pub fn set_command_buffer_chunks(&mut self, chunks: u32, decode_shaped: bool) {
+        self.command_buffer_chunks = chunks;
+        self.command_buffer_chunks_decode_shaped = decode_shaped;
+    }
+
+    /// This plan's currently applied command-buffer split count --
+    /// [`Self::dispatch_type`]'s counterpart for
+    /// [`Self::set_command_buffer_chunks`].
+    #[must_use]
+    pub fn command_buffer_chunks(&self) -> u32 {
+        self.command_buffer_chunks
     }
 
     /// This plan's currently applied [`MathMode`] -- the read side of

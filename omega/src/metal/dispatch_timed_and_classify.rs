@@ -152,7 +152,7 @@ pub(super) fn execute_op_timed(
             return Err(MetalError::UnresolvedHazardOperand { node: bound.node });
         };
         let shape = prepared.shapes.of(bound.node).to_vec();
-        let dtype = gpu_dtype(program, &prepared.index_nodes, bound.node);
+        let dtype = gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, bound.node);
         let metal_values = read_back(buffer, *offset, element_count(&shape), bound.node, dtype)?;
         let first_mismatch = compare_bound_f32(bound.node, &metal_values, &cpu_values)?;
         if let Some((element, metal_value, cpu_value, relative, max_rel_diff)) = first_mismatch {
@@ -199,7 +199,7 @@ pub(super) fn execute_op_timed(
             && let Some((buffer, offset)) = device_buffers.get(&bound.node)
         {
             let shape = prepared.shapes.of(bound.node).to_vec();
-            let dtype = gpu_dtype(program, &prepared.index_nodes, bound.node);
+            let dtype = gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, bound.node);
             let metal_values =
                 read_back(buffer, *offset, element_count(&shape), bound.node, dtype)?;
             if let Some((element, metal_value, cpu_value, relative, maximum)) =

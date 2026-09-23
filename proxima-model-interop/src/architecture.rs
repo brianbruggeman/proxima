@@ -159,6 +159,16 @@ pub struct BoundProgram<'file> {
     /// see that module's own doc for why the loop, not this kernel-building
     /// step, decides whether to evaluate them.
     pub moe_sites: proxima_tensor::spec::MoeSites,
+    /// `PROXIMA_HEAD_REPEATS`'s own scratch output
+    /// (`proxima_tensor::spec::BuildForwardProgram`'s own doc on its
+    /// seventh element) -- the extra head-chain roots
+    /// `lfm2_two_range_cached_forward_program_with_experts`/
+    /// `lfm2_forward_program_with_experts` append under
+    /// `PROXIMA_HEAD_REPEATS=2|3` (`instrument`-gated, empty otherwise).
+    /// Every non-gemma4 architecture leaves this empty. Threaded through so
+    /// the decode loop can request/verify these nodes by their real
+    /// [`NodeId`]s instead of reconstructing them from `program.len()`.
+    pub duplicate_head_roots: Vec<NodeId>,
     /// `true` when this architecture's forward program is only correct one
     /// position per evaluation -- `crate::qwen35::Qwen35Arch`'s own
     /// gated-DeltaNet mixer (`proxima_tensor::spec::append_qwen35_ssm_mixer`),
@@ -369,6 +379,22 @@ pub trait Architecture: Send + Sync {
     /// cache the generic single-range fast path already covers.
     fn kv_cache_shape(&self) -> KvCacheShape {
         KvCacheShape::Uniform
+    }
+
+    /// This architecture's own measured default for
+    /// `ServingConfig::command_buffer_chunks` -- consulted by
+    /// `LoadedModel::apply_command_buffer_chunks_default` only when a
+    /// caller left that field at [`ServingConfig`]'s own type default (never
+    /// overriding an explicit caller value), the same capability-method
+    /// shape [`Architecture::speculative_verify_program`]'s own doc argues
+    /// for over a `name() == "gemma4"` comparison at the call site. Default
+    /// `1`: every architecture this crate ships except gemma4 has no
+    /// measured chunked-submission win to default to (`intervention6`'s own
+    /// race data is gemma4-decode-specific, not a universal placements-path
+    /// finding -- see [`crate::gemma4::bind::Gemma4Arch::command_buffer_chunks`]
+    /// for the one override).
+    fn command_buffer_chunks(&self) -> u32 {
+        1
     }
 
     /// This architecture's feed-forward routing shape -- gates
@@ -617,6 +643,7 @@ mod tests {
                 qwen35moe_layer_diagnostics: Vec::new(),
                 router_roots: Vec::new(),
                 moe_sites: proxima_tensor::spec::MoeSites::default(),
+                duplicate_head_roots: Vec::new(),
                 single_position_step: false,
             })
         }

@@ -700,6 +700,28 @@ pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
     }
 }
 
+/// Sets [`metal::Plan::command_buffer_chunks`] on [`Plan::Metal`] --
+/// `ServingConfig::command_buffer_chunks`'s own doc for the config-sourced
+/// default this feeds `execute_plan_with_placements`'s chunked-submission
+/// loop. A no-op on every other arm, same scoping as [`set_dispatch_type`].
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn set_command_buffer_chunks(plan: &mut Plan, chunks: u32, decode_shaped: bool) {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => {}
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.set_command_buffer_chunks(chunks, decode_shaped),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => {}
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend"
+        )))]
+        _ => match *plan {},
+    }
+}
+
 /// Registers the page-aligned, process-lifetime mapping backing a loaded
 /// checkpoint's tensor bytes -- see `metal::register_checkpoint_mapping`'s
 /// own doc for the mechanism this feeds. A no-op unless the Metal backend is

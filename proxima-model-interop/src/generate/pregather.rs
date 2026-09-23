@@ -2651,6 +2651,7 @@ impl<'file> LoadedModel<'file> {
                 qwen35moe_layer_diagnostics: bound.qwen35moe_layer_diagnostics,
                 router_roots: bound.router_roots,
                 moe_sites: bound.moe_sites,
+                duplicate_head_roots: bound.duplicate_head_roots,
                 single_position_step: bound.single_position_step,
                 qwen35moe_hparams: (resolved.ffn_routing() == crate::architecture::FfnRouting::Routed)
                     .then(|| crate::qwen35moe::hparams::from_metadata(parsed).ok())
@@ -2772,6 +2773,7 @@ impl<'file> LoadedModel<'file> {
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
+            duplicate_head_roots: Vec::new(),
             single_position_step: false,
             qwen35moe_hparams: None,
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
@@ -2886,6 +2888,7 @@ impl<'file> LoadedModel<'file> {
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
+            duplicate_head_roots: Vec::new(),
             single_position_step: false,
             qwen35moe_hparams: None,
             // safetensors carries no `general.name`-equivalent key this

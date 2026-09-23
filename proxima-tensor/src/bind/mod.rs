@@ -100,6 +100,8 @@ mod gdn_moe_fusion_apply;
 mod cached_attention_epilogue_liveness;
 #[cfg(feature = "identity-copy-alias")]
 mod identity_copy_alias;
+#[cfg(feature = "instrument")]
+mod repeat_nodes;
 pub use builder_compose_window::*;
 pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
@@ -107,6 +109,8 @@ pub use gdn_moe_fusion_apply::*;
 pub use types_layout_boundop::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;
+#[cfg(feature = "instrument")]
+pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

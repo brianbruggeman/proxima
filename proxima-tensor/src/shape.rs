@@ -62,6 +62,30 @@ impl Shapes {
     fn push(&mut self, resolved: Vec<u64>) {
         self.extents.push(resolved);
     }
+
+    /// Appends a fresh row cloned from `existing`'s own resolved shape,
+    /// under the assumption `existing`'s row sits at the very next unused
+    /// index (`self.extents.len()`) -- the invariant every caller of this
+    /// pass must hold. Used by the duplicate-dispatch attribution harness
+    /// (`bind::apply_repeat_nodes`, `instrument`-gated): a duplicate
+    /// [`BoundOp`](crate::bind::BoundOp) computes the exact same value as
+    /// the node it copies, so its resolved output shape is that node's own
+    /// shape verbatim -- no re-inference needed, and re-running [`infer`]
+    /// over the whole (now longer) program would be the wasteful
+    /// alternative this sidesteps.
+    #[cfg(feature = "instrument")]
+    pub fn push_alias(&mut self, existing: crate::op::NodeId) {
+        let row = self.extents[existing.0 as usize].clone();
+        self.extents.push(row);
+    }
+
+    /// Test-only fixture constructor: one row per entry, in order, so a unit
+    /// test can build a [`Shapes`] without running [`infer`] over a real
+    /// program.
+    #[cfg(test)]
+    pub(crate) fn from_rows(rows: alloc::vec::Vec<alloc::vec::Vec<u64>>) -> Self {
+        Self { extents: rows }
+    }
 }
 
 /// The prefix state of shape inference: every node judged so far.

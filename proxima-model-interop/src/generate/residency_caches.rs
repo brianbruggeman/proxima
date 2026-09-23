@@ -1304,6 +1304,11 @@ pub(super) struct PlanNumerics {
     /// `ServingConfig::plan_time_constants` -- [`BackendRuntime::build_placed_plan`]'s
     /// own doc for how this reaches [`omega::metal::Plan::mark_plan_time_constants_resident`].
     pub(super) plan_time_constants: bool,
+    /// `ServingConfig::command_buffer_chunks` -- reaches
+    /// [`omega::metal::Plan::command_buffer_chunks`] through
+    /// `omega::backend::set_command_buffer_chunks`, applied the same call
+    /// site as `plan_time_constants`/`dispatch_type` above.
+    pub(super) command_buffer_chunks: u32,
     /// Forwarded to `proxima_tensor::bind::bind_with_fusion`'s
     /// `fuse_cached_attention` argument -- see that function's own doc for
     /// what the bool controls. `true` at every construction site below
@@ -1425,6 +1430,12 @@ pub(crate) struct BackendRuntime {
     /// [`Self::build_placed_plan`] reads it.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) plan_time_constants: bool,
+    /// `ServingConfig::command_buffer_chunks`, read once at construction and
+    /// threaded into every freshly-built placed [`omega::metal::Plan`]
+    /// through [`PlanNumerics`] -- same pattern as `plan_time_constants`
+    /// immediately above.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) command_buffer_chunks: u32,
 }
 
 #[cfg(feature = "metal")]
@@ -1449,6 +1460,8 @@ impl BackendRuntime {
             exact_activations: config.exact_activations,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_time_constants: config.plan_time_constants,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            command_buffer_chunks: config.command_buffer_chunks,
         }
     }
 
@@ -1530,6 +1543,11 @@ impl BackendRuntime {
                     // schedule is proven only for the placed single-range
                     // program, not hybrid recurrent graphs.
                     set_dispatch_type(&mut plan, self.dispatch_type);
+                    set_command_buffer_chunks(
+                    &mut plan,
+                    self.command_buffer_chunks,
+                    symbols.first().copied() == Some(1),
+                );
                 }
                 Ok(plan)
             },
@@ -1606,6 +1624,11 @@ impl BackendRuntime {
                 {
                     set_math_mode(&mut plan, self.math_mode)?;
                     set_dispatch_type(&mut plan, self.dispatch_type);
+                    set_command_buffer_chunks(
+                    &mut plan,
+                    self.command_buffer_chunks,
+                    symbols.first().copied() == Some(1),
+                );
                 }
                 Ok(plan)
             },
@@ -1731,6 +1754,11 @@ impl BackendRuntime {
                 }
                 set_math_mode(&mut plan, self.math_mode)?;
                 set_dispatch_type(&mut plan, omega::metal::DispatchType::Serial);
+                set_command_buffer_chunks(
+                    &mut plan,
+                    self.command_buffer_chunks,
+                    symbols.first().copied() == Some(1),
+                );
                 Ok(plan)
             },
         )?;
@@ -1782,6 +1810,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
         };
         let plan = Self::resolve_segment_plan(
@@ -1839,6 +1868,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: omega::metal::DispatchType::Serial,
             plan_time_constants: self.plan_time_constants,
+            command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
         };
         let plan = Self::resolve_segment_plan(
@@ -1899,6 +1929,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
         };
         let plan = Self::resolve_cached_plan(
@@ -1989,6 +2020,14 @@ impl BackendRuntime {
         }
         plan.set_math_mode(numerics.math_mode)?;
         plan.set_dispatch_type(numerics.dispatch_type);
+        // Decode-shaped: this plan's own new-token count (`symbols[0]`, the
+        // same convention `resolve_cached_plan`'s own `shape` key reads) is
+        // exactly `1`. The owner's own integration scoping: the measured
+        // chunked-submission win covers only this shape, never prefill.
+        plan.set_command_buffer_chunks(
+            numerics.command_buffer_chunks,
+            symbols.first().copied() == Some(1),
+        );
         Ok(plan)
     }
 
@@ -2025,6 +2064,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
         };
         let plan = Self::resolve_cached_plan(
@@ -2097,6 +2137,7 @@ impl BackendRuntime {
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
             plan_time_constants: self.plan_time_constants,
+            command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
         };
         let plan = Self::resolve_cached_plan(
@@ -2314,6 +2355,11 @@ impl BackendRuntime {
                 }
                 set_math_mode(&mut plan, self.math_mode)?;
                 set_dispatch_type(&mut plan, self.dispatch_type);
+                set_command_buffer_chunks(
+                    &mut plan,
+                    self.command_buffer_chunks,
+                    symbols.first().copied() == Some(1),
+                );
                 Ok(plan)
             },
         )?;
@@ -2377,6 +2423,11 @@ impl BackendRuntime {
                 }
                 set_math_mode(&mut plan, self.math_mode)?;
                 set_dispatch_type(&mut plan, self.dispatch_type);
+                set_command_buffer_chunks(
+                    &mut plan,
+                    self.command_buffer_chunks,
+                    symbols.first().copied() == Some(1),
+                );
                 Ok(plan)
             },
         )?;

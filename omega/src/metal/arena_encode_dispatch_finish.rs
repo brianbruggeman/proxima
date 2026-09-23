@@ -257,13 +257,15 @@ pub(super) fn build_plan_uniforms(
     numeric_policy: NumericPolicy,
 ) -> Result<PlanUniforms, MetalError> {
     let mut buffers = Vec::with_capacity(resolved.len());
-    for bound in resolved {
+    for (position, bound) in resolved.iter().enumerate() {
         let bytes = pack_uniforms(bound, numeric_policy)?;
         let buffer = device
             .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::CompileFailed {
                 log: "device refused to allocate a plan uniform buffer".to_string(),
             })?;
+        #[cfg(feature = "instrument")]
+        chunk_audit_record_write(Retained::as_ptr(&buffer) as usize, 0, bytes.len(), position);
         write_plan_uniform_bytes(&buffer, &bytes);
         #[cfg(feature = "instrument")]
         counter!(PLAN_UNIFORM_WRITES, 1);
@@ -575,6 +577,170 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
 /// plan-owned `buffer` in place instead -- see [`PlanUniforms`]'s own doc for
 /// why that is sound only because the buffer is keyed by PLAN POSITION, never
 /// by content.
+/// `PROXIMA_CAPTURE_NODES=<comma list>` prints one `dispatch_capture` line
+/// per matched `bound.node`, right before the sole `dispatchThreads` call
+/// site (`resident_nocopy_cache::dispatch`) actually submits it -- the
+/// production launch record: cache key, entry name and MSL sha256 (recovered
+/// from [`pipeline_buffers_upload::PIPELINE_CAPTURE`] by the compiled
+/// pipeline's own pointer, so a plan-cache HIT still reports the ORIGINAL
+/// creation record rather than nothing), the actual grid/threadgroup this op
+/// dispatches, and every bound buffer's identity/offset/length. Reads two
+/// env vars per call (`PROXIMA_CAPTURE_NODES`, parsed once per call rather
+/// than cached, since this only ever fires under `instrument` for a handful
+/// of explicitly named nodes) -- never on the default decode hot path.
+#[cfg(feature = "instrument")]
+fn capture_dispatch(
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    grid: GridSpec,
+    bindings: &[Binding],
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    output: (&MetalBuffer, usize),
+) {
+    let Some(wanted) = std::env::var("PROXIMA_CAPTURE_NODES").ok() else {
+        return;
+    };
+    let matched = wanted.trim() == "all"
+        || wanted
+            .split(',')
+            .filter_map(|token| token.trim().parse::<u32>().ok())
+            .any(|node| node == bound.node.0);
+    if !matched {
+        return;
+    }
+    let step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed);
+    // `PROXIMA_CAPTURE_STEPS=<comma list>`, default (unset) every step --
+    // read every call rather than cached, matching `PROXIMA_CAPTURE_NODES`'s
+    // own "handful of dispatches under `instrument`" cost budget.
+    if let Ok(steps_wanted) = std::env::var("PROXIMA_CAPTURE_STEPS") {
+        let step_matched = steps_wanted
+            .split(',')
+            .filter_map(|token| token.trim().parse::<u64>().ok())
+            .any(|wanted_step| wanted_step == step);
+        if !step_matched {
+            return;
+        }
+    }
+    let operand_records: Vec<String> = bound
+        .operands()
+        .iter()
+        .map(|(node, layout, _lookup)| {
+            let codec = packed_operands
+                .get(node)
+                .map_or("unpacked".to_string(), |codec| format!("{codec:?}"));
+            format!(
+                "({}, {:?}, {:?}, {codec})",
+                node.0, layout.strides, bound.dtype
+            )
+        })
+        .collect();
+    // `BoundOp` carries no separate output `Layout` -- a bound op's own
+    // write is always contiguous into `output`/`state_out` at `encode_op`'s
+    // resolved offset, so `extents` (the iteration-space shape) is the
+    // output-side geometry fact this record has to report, not a stride
+    // vector `BoundOp` never stores.
+    eprintln!(
+        "bound_op node={} kind={} operands=[{}] output=(extents={:?}, dtype={:?})",
+        bound.node.0,
+        bound.kind.name(),
+        operand_records.join(", "),
+        bound.extents,
+        bound.dtype,
+    );
+    let record = PIPELINE_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .get(&(Retained::as_ptr(pipeline) as usize))
+            .cloned()
+    });
+    let (cache_key, entry, msl_sha256) = match &record {
+        Some(record) => (
+            record.cache_key.clone(),
+            record.entry.clone(),
+            record.msl_sha256.clone(),
+        ),
+        None => ("<unrecorded>".to_string(), "<unrecorded>".to_string(), "<unrecorded>".to_string()),
+    };
+    let max_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
+    let threadgroup_width = match grid.threadgroup_width {
+        Some(width) => (width as usize).min(max_threadgroup).max(1),
+        None => (grid.threads as usize).min(max_threadgroup).max(1),
+    };
+    let mut buffers = Vec::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        let resolved: Option<(MetalBuffer, usize)> = match binding {
+            Binding::Input(node) | Binding::Indices(node) => {
+                device_buffers.get(node).cloned()
+            }
+            Binding::Output(_) => Some((output.0.clone(), output.1)),
+            _ => None,
+        };
+        if let Some((buffer, offset)) = resolved {
+            buffers.push(format!(
+                "({index}, {:?}, {offset}, {})",
+                Retained::as_ptr(&buffer),
+                buffer.length()
+            ));
+        } else {
+            buffers.push(format!("({index}, unresolved, 0, 0)"));
+        }
+    }
+    eprintln!(
+        "dispatch_capture step={step} node={} key={cache_key:?} entry={entry} msl_sha256={msl_sha256} grid=({},1,{}) threadgroup=({threadgroup_width},1,1) buffers=[{}]",
+        bound.node.0,
+        grid.threads,
+        grid.depth,
+        buffers.join(", "),
+    );
+}
+
+/// [`chunk_audit_record_dispatch`]'s per-dispatch feed: walks the SAME
+/// `bindings` list [`bind_buffers`] just bound (this call site, right after
+/// that call succeeds, mirrors [`capture_dispatch`]'s own enumeration), so
+/// this dispatch's audit record can never see a different binding set than
+/// what actually got encoded. `Binding::Input`/`Binding::Indices` are reads;
+/// `Binding::Output` is this op's own write, resolved separately from
+/// `output` (there is no `Binding::Output(node)` payload to look up -- the
+/// bound op's output is always `bound.node` itself). Length for a resolved
+/// input is the buffer's own remaining length from `offset` -- a
+/// deliberately conservative (over-inclusive) range, since a missed real
+/// hazard is worse than a false-positive one this audit's own log lets a
+/// reader dismiss by inspection.
+#[cfg(feature = "instrument")]
+fn record_chunk_audit_dispatch(
+    bound: &BoundOp,
+    bindings: &[Binding],
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    output: (&MetalBuffer, usize),
+) {
+    let position = bound.node.0 as usize;
+    let output_len = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+    chunk_audit_record_dispatch(
+        Retained::as_ptr(output.0) as usize,
+        output.1,
+        output_len,
+        position,
+        true,
+    );
+    for binding in bindings {
+        let node = match binding {
+            Binding::Input(node) | Binding::Indices(node) => *node,
+            _ => continue,
+        };
+        if let Some((buffer, offset)) = device_buffers.get(&node) {
+            let remaining = buffer.length().saturating_sub(*offset);
+            chunk_audit_record_dispatch(
+                Retained::as_ptr(buffer) as usize,
+                *offset,
+                remaining,
+                position,
+                false,
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
@@ -903,6 +1069,10 @@ pub(super) fn encode_op(
         );
         return Err(err);
     }
+    #[cfg(feature = "instrument")]
+    if chunk_audit_enabled() {
+        record_chunk_audit_dispatch(bound, bindings, device_buffers, (&output, output_offset));
+    }
     // `render_gated_delta_net`'s own second output (ROW 547,
     // `docs/discipline.md`): `bindings` above only ever names ONE
     // `Binding::Output` (`bind_buffers`'s single `output` parameter cannot
@@ -1095,6 +1265,16 @@ pub(super) fn encode_op(
             );
         }
     }
+    #[cfg(feature = "instrument")]
+    capture_dispatch(
+        bound,
+        packed_operands,
+        &pipeline,
+        grid,
+        bindings,
+        device_buffers,
+        (&output, output_offset),
+    );
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
     // (its own `Binding::Scratch` slot, never `output`); this second
@@ -1379,7 +1559,7 @@ pub(super) fn finish(
             continue;
         }
         let shape = shapes.of(*node).to_vec();
-        let dtype = gpu_dtype(program, index_nodes, *node);
+        let dtype = gpu_dtype(program, index_nodes, &plan.prepared.resolved, *node);
         let data = match device_buffers.get(node) {
             // a plain [`execute_plan`] output's buffer is freshly allocated
             // by `encode_op` at offset 0, but an [`execute_plan_with_placements`]
@@ -1425,6 +1605,70 @@ pub(super) fn finish(
     }
     #[cfg(feature = "instrument")]
     counter!(READBACK_TICKS, elapsed_ticks(readback_started));
+    // attn_parity followon (2026-09-22): `PROXIMA_REPEAT_VERIFY`'s own
+    // post-wait byte compare -- both the original and every copy are
+    // already `effective_outputs`, so their bytes are already sitting in
+    // `results` from the loop above; no second `read_back` pass needed.
+    // `bytes_match`/`max_abs_diff` prove the duplicate computed the same
+    // value the production dispatch did; `sentinel_survived` (every element
+    // still the quiet-NaN fill pattern the pre-dispatch sentinel-fill wrote,
+    // `placements_execute_named::head_debug_fill_sentinel`, reused
+    // unmodified) would mean the copy's own dispatch never actually wrote
+    // its buffer -- a false pass this check exists to catch.
+    // marginal warm-repeat latency harness (owner brief 2026-09-22): labels
+    // below are deliberately `marginal_warm_repeat_ms`-shaped, never a
+    // per-kernel "cost" -- see `run_series.sh`'s own header.
+    // `original` (the target node `PROXIMA_REPEAT_NODES` named) is usually
+    // an INTERNAL node -- read by a later op, never itself a requested
+    // output -- so it is generally absent from `results`/`effective_outputs`
+    // even though its buffer is still live in `device_buffers` (every
+    // resolved node's output lands in the arena regardless of whether a
+    // caller asked to read it back). Each copy IS a requested output
+    // (`apply_repeat_nodes` pushes it), so `results` already has its bytes;
+    // the original still needs its own direct `read_back`.
+    #[cfg(feature = "instrument")]
+    if std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some() {
+        static STEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let step = STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for (original, copies) in &plan.prepared.repeat_verify_pairs {
+            let Some((original_buffer, original_offset)) = device_buffers.get(original) else {
+                continue;
+            };
+            let original_shape = shapes.of(*original).to_vec();
+            let original_dtype = gpu_dtype(program, index_nodes, &plan.prepared.resolved, *original);
+            let Ok(original_bytes) = read_back(
+                original_buffer,
+                *original_offset,
+                element_count(&original_shape),
+                *original,
+                original_dtype,
+            ) else {
+                continue;
+            };
+            let ptr_orig = Retained::as_ptr(original_buffer) as u64;
+            for copy in copies {
+                let Some((_, _, copy_bytes)) = results.iter().find(|(node, _, _)| node == copy)
+                else {
+                    continue;
+                };
+                let ptr_copy = device_buffers
+                    .get(copy)
+                    .map_or(0u64, |(buffer, _)| Retained::as_ptr(buffer) as u64);
+                let max_abs_diff = original_bytes
+                    .iter()
+                    .zip(copy_bytes.iter())
+                    .map(|(reference, candidate)| (reference - candidate).abs())
+                    .fold(0.0_f32, f32::max);
+                let bytes_match = original_bytes.len() == copy_bytes.len() && max_abs_diff == 0.0;
+                let sentinel_survived = !copy_bytes.is_empty() && copy_bytes.iter().all(|value| value.is_nan());
+                std::eprintln!(
+                    "repeat_verify step={step} node={} copy={} bytes_match={bytes_match} sentinel_survived={sentinel_survived} max_abs_diff={max_abs_diff} ptr_orig={ptr_orig} ptr_copy={ptr_copy}",
+                    original.0,
+                    copy.0,
+                );
+            }
+        }
+    }
     // this backend's buffer lifetime is managed by Metal's own
     // retain/release, not counted the way `cpu::evaluate` counts its
     // `Vec<Option<Vec<f32>>>` table, so peak_live_buffers is not tracked

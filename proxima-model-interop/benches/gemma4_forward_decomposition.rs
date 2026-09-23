@@ -462,7 +462,7 @@ fn bench_one_layer(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
     for width in WIDTHS {
         let schedule = sliding_layer_schedule();
-        let (program, logits, _moe_sites) = lfm2_forward_program_with_experts(
+        let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
             LAYER_PROBE_VOCAB,
             EMBEDDING,
             FEED_FORWARD_SWA,

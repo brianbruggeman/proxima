@@ -483,6 +483,23 @@ pub struct ServingConfig<'model> {
     /// plan's cold call, and never rewritten again, so it can never take a
     /// slot from the arena's free list (`build_buffer_arena`'s own doc).
     pub plan_time_constants: bool,
+    /// Not an upstream llama-server flag -- how many `MTLCommandBuffer`s
+    /// [`omega::metal::Plan`]'s placements executor
+    /// (`execute_plan_with_placements_inner`'s own
+    /// `command_buffer_chunk_count` doc) splits one decode step's dispatch
+    /// sequence into, threaded the same way as [`Self::plan_time_constants`]
+    /// above: `BackendRuntime::new` reads this once per call and applies it
+    /// via `omega::backend::set_command_buffer_chunks`. `1` (this field's
+    /// default) never splits, matching every call before Intervention 6.
+    /// `PROXIMA_COMMAND_BUFFER_CHUNKS=K` still overrides this per-process
+    /// when set -- the same A/B escape hatch this field now supplies a
+    /// config-sourced default for, not a replacement for it. A checkpoint
+    /// whose loaded [`crate::architecture::Architecture`] declares its own
+    /// non-default split count (`Architecture::command_buffer_chunks`'s own
+    /// doc -- gemma4's is `8`, the Intervention 6 measured decode
+    /// configuration) uses that value instead of this field's own default,
+    /// but never overrides a caller who set this field explicitly.
+    pub command_buffer_chunks: u32,
     /// Not an upstream llama-server flag -- a hard ceiling on
     /// `omega::metal::MetalStageTotals::gpu_exec_calls` (Metal command
     /// buffers committed) per decode step, checked in
@@ -605,6 +622,7 @@ impl Default for ServingConfig<'static> {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -775,6 +793,15 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
+    if config.command_buffer_chunks < 1 {
+        return Err(InteropError::UnsupportedServingConfig(format!(
+            "command_buffer_chunks={}: must be >= 1 -- omega's `command_buffer_chunk_count` \
+             reads 0 as \"no config value threaded\", not a literal 0-way split; 1 (the \
+             default) keeps today's single command buffer",
+            config.command_buffer_chunks
+        )));
+    }
+
     if config.kv_bucket_tokens < 1 {
         return Err(InteropError::UnsupportedServingConfig(format!(
             "kv_bucket_tokens={}: must be >= 1 -- `generate::kv_extent` divides `merged_len` \
@@ -931,6 +958,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1100,6 +1128,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1197,6 +1226,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1284,6 +1314,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {
@@ -1361,6 +1392,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule {

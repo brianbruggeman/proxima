@@ -93,6 +93,8 @@ pub use metal::{
     execute_plan_with_placements_dispatch_timed, execute_plan_with_placements_op_timed,
     placed_buffer_identity,
 };
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+pub use metal::set_capture_step;
 #[cfg(feature = "alloc")]
 pub use msl::{
     BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, FLOAT16_BLOCK_BYTES,

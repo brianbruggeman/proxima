@@ -695,6 +695,7 @@ impl crate::architecture::Architecture for Qwen35Arch {
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
+            duplicate_head_roots: Vec::new(),
             // gated-DeltaNet's `s`-axis reduce sums positions instead of
             // stepping through them (`BoundProgram::single_position_step`'s
             // own doc). ROW 427: `run_decode_loop_observed_seeded` now
