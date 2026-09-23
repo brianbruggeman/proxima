@@ -1737,6 +1737,45 @@ pub(crate) fn codec_rows_per_simdgroup(codec: Codec) -> usize {
     }
 }
 
+/// `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` A/B switch: same binary, env off/on, for
+/// [`crate::msl::push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast arm
+/// (`docs/discipline.md`, Q4_0 prefill header-decode hoist). Default OFF --
+/// unset, empty, or any value other than `"1"` keeps today's generic
+/// per-element loop, so the unset-env emit stays byte-identical to before
+/// this switch existed. Read once per call, matching `packed_rows_override`'s
+/// own posture (a cold-path emit decision, not a hot inner loop).
+#[cfg(feature = "std")]
+pub(super) fn q4_0_multi_row_hoist_override() -> bool {
+    let active = matches!(std::env::var("PROXIMA_Q4_0_MULTI_ROW_HOIST"), Ok(value) if value.trim() == "1");
+    log_q4_0_multi_row_hoist_once(active);
+    active
+}
+
+/// Print the selected `Codec::Q4_0` multi-row hoist variant exactly once per
+/// process, matching [`log_packed_rows_variant_once`]'s own posture:
+/// `source=env` when `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` was honored,
+/// `source=default` otherwise. Gated on `instrument` alone -- the override
+/// itself stays `std`-only and fires regardless of `instrument`.
+#[cfg(feature = "instrument")]
+fn log_q4_0_multi_row_hoist_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        eprintln!(
+            "q4_0_multi_row_hoist={} source={source}",
+            u8::from(active)
+        );
+    });
+}
+
+#[cfg(all(feature = "std", not(feature = "instrument")))]
+fn log_q4_0_multi_row_hoist_once(_active: bool) {}
+
+#[cfg(not(feature = "std"))]
+pub(super) const fn q4_0_multi_row_hoist_override() -> bool {
+    false
+}
+
 /// Every packed operand a bound program has, keyed by [`NodeId`] to its
 /// codec — the single source of truth [`emit`] (via the `quantized` slice it
 /// derives) and the Metal driver's `correct_packed_matmul_layouts` call both
