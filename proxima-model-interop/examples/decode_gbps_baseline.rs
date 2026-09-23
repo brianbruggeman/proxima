@@ -210,14 +210,34 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);
 
+    // OWNER_BRIEF_prefill_correction (2026-09-23): per-step deltas from the
+    // SAME generation's own `TokenEvent::elapsed_ms` stream, so a caller can
+    // read the first-decode-step cost separately from later steps within one
+    // run instead of fitting it across prompts of different lengths.
+    let step_times = std::env::var_os("PROXIMA_STEP_TIMES").is_some();
+
     for run_index in 0..runs {
         // `generate_streaming`'s own `TokenEvent::elapsed_ms` is Instant-based
         // and compiled on every build that reaches this call, never gated
         // behind `instrument` -- see `TokenEvent`'s own field doc on why.
         let mut prefill_elapsed_ms: u64 = 0;
+        let mut previous_elapsed_ms: u64 = 0;
         let mut on_token = |event: TokenEvent<'_>| {
             if matches!(event.phase, Phase::Prefill { .. }) {
                 prefill_elapsed_ms = event.elapsed_ms;
+            }
+            if step_times {
+                let phase = if matches!(event.phase, Phase::Prefill { .. }) {
+                    "prefill"
+                } else {
+                    "decode"
+                };
+                let step_ms = event.elapsed_ms.saturating_sub(previous_elapsed_ms);
+                eprintln!(
+                    "step_time run_index={run_index} step={} step_ms={step_ms} phase={phase}",
+                    event.step,
+                );
+                previous_elapsed_ms = event.elapsed_ms;
             }
             ControlFlow::Continue(())
         };
