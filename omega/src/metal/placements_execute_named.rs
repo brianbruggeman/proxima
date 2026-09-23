@@ -41,6 +41,9 @@ fn command_buffer_chunk_count(plan_chunks: u32, decode_shaped: bool) -> usize {
         None if decode_shaped => config_or_default_chunks(plan_chunks),
         None => (1, "default"),
     };
+    // read unconditionally so a non-`instrument` build (where the only
+    // consumer below is compiled out) does not trip `unused_variables`.
+    let _ = source;
     #[cfg(feature = "instrument")]
     if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
         let plan_shape = if decode_shaped { "decode" } else { "prefill" };
