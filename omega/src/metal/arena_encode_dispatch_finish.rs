@@ -258,6 +258,9 @@ pub(super) fn build_plan_uniforms(
 ) -> Result<PlanUniforms, MetalError> {
     let mut buffers = Vec::with_capacity(resolved.len());
     for (position, bound) in resolved.iter().enumerate() {
+        // read unconditionally so a non-`instrument` build (where the only
+        // consumer below is compiled out) does not trip `unused_variables`.
+        let _ = position;
         let bytes = pack_uniforms(bound, numeric_policy)?;
         let buffer = device
             .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
