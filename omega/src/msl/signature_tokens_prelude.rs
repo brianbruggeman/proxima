@@ -878,6 +878,73 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
     }
 }
 
+/// [`operand_read`]'s block-origin sibling: same per-codec element decoder,
+/// same `(offset / block_elements, offset % block_elements)` split, but
+/// addressed from a caller-supplied block-ORIGIN pointer expression
+/// (`block_origin`, e.g. `wblk0` -- the packed weight's own base already
+/// advanced past `operand_base`'s whole blocks) plus a RELATIVE index
+/// expression (`relative`, e.g. `weight_base[q] + k`) instead of
+/// [`operand_read`]'s single absolute-offset-from-`in{index}` form. Exists
+/// so `push_packed_row_multi_row_body`'s index32 experiment can narrow
+/// `relative` to `uint` while `block_origin` stays a full-width pointer --
+/// one generic change keyed on the codec's own packing parameters
+/// (`codec_element_fn_name`, [`codec_block_elements`], [`codec_block_bytes`]),
+/// never a per-codec special case in the render site. Codec-required
+/// (unlike `operand_read`'s `Option<Codec>`): this form only makes sense for
+/// a genuinely packed operand, so the caller (already inside the packed-row
+/// weight-decode path) always has a concrete [`Codec`] in hand.
+pub(super) fn operand_read_from_block_origin(block_origin: &str, relative: &str, codec: Codec) -> String {
+    let block_elements = codec_block_elements(codec);
+    let block_bytes = codec_block_bytes(codec);
+    let element_fn = codec_element_fn_name(codec);
+    format!(
+        "{element_fn}({block_origin} + (ulong)(({relative}) / {block_elements}) * {block_bytes}, (uint)(({relative}) % {block_elements}))"
+    )
+}
+
+/// The element-decoder function name [`operand_read`]'s own `Some(codec)`
+/// match calls for each codec it handles via a block-relative read -- pulled
+/// out so [`operand_read_from_block_origin`] can reuse the SAME name table
+/// without re-deriving it. Total over every [`Codec`] `operand_read` accepts
+/// as `Some`; the remaining 18 (no Metal unpack kernel exists for them,
+/// [`operand_read`]'s own doc) are unreachable by construction here too --
+/// `multi_row_index32_active`'s admission only ever calls this for a codec
+/// `classify_packed_row_block` already whitelisted (`Q3_K`/`Q4_K`/`Q5_K`/
+/// `Q6_K`/`Q8_0`/`Q4_0`), so the fallback name is dead code, never rendered.
+fn codec_element_fn_name(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Q2K => "q2k_element",
+        Codec::Q3K => "q3k_element",
+        Codec::Q4K => "q4k_element",
+        Codec::Q5K => "q5k_element",
+        Codec::Q6K => "q6k_element",
+        Codec::Q8_0 => "q8_0_element",
+        Codec::Q4_0 => "q4_0_element",
+        Codec::Q5_1 => "q5_1_element",
+        Codec::Q5_0 => "q5_0_element",
+        Codec::BFloat16 => "bf16_element",
+        Codec::Float16
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2Xs
+        | Codec::Iq2S
+        | Codec::Iq3Xxs
+        | Codec::Iq3S
+        | Codec::Iq4Nl
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => "unreachable_element_fn",
+    }
+}
+
 /// [`BoundOpKind::Iota`]'s kernel: no operand buffers, no gather, no body —
 /// the output value at each position is the thread's own grid coordinate,
 /// which every kernel already computes as `gid`, so there is nothing to

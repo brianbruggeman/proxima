@@ -238,4 +238,22 @@ pub enum EmitError {
         "node {node} head_dim {head_dim} is not a multiple of 8, so the block-staged attention kernel's float4 K/Q loads are not 16-byte aligned"
     )]
     AttentionBlockMisaligned { node: NodeId, head_dim: u64 },
+
+    /// `multi_row_index32_active`'s own doc: the index32 body's `base_blocks
+    /// = operand_base / block_elements` split is only exact (bit-identical
+    /// to the wide/unsplit decode) when `operand_base % block_elements ==
+    /// 0`. Every GGUF-sourced packed tensor satisfies this by construction
+    /// (rows start at a block boundary), so this is a genuine invariant
+    /// violation, not a routing decision -- checked once more here, at
+    /// render time, as defense in depth against admission and render ever
+    /// disagreeing (`push_packed_row_multi_row_body`'s own doc names the
+    /// same posture for its other multi-row experiments).
+    #[error(
+        "node {node} packed weight operand_base {base} is not a multiple of block_elements {block_elements} -- PROXIMA_MULTI_ROW_INDEX32's base_blocks split requires a block-aligned tensor base"
+    )]
+    Index32OperandBaseNotBlockAligned {
+        node: NodeId,
+        base: i64,
+        block_elements: usize,
+    },
 }

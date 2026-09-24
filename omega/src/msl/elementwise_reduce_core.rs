@@ -998,6 +998,7 @@ pub(super) fn push_packed_row_multi_row_body(
     // zero-init, accumulate, and epilogue all index `sumf[s][q]`; all three
     // must unroll to literals or the array never promotes out of memory.
     let unroll_active = multi_row_unroll_active(resolved, quantized, expert_source_mode);
+    let index32_active = multi_row_index32_active(resolved, quantized, expert_source_mode);
 
     source.push_str("    long feature_total = 1;\n");
     for index in 0..feature_axes.len() {
@@ -1039,7 +1040,29 @@ pub(super) fn push_packed_row_multi_row_body(
         source.push_str("        }\n    }\n");
     }
 
-    source.push_str(&format!("    long weight_base[{rows}];\n"));
+    // 64-bit div/rem in the k loop is emulated in 32-bit arithmetic.
+    let weight_base_type = if index32_active { "uint" } else { "long" };
+    if index32_active {
+        // fit proof: block-aligned `operand_base` (checked below) splits out
+        // of the division unchanged, narrowing only `rel`, which fits `uint`.
+        let weight_layout = &resolved.operands()[weight].1;
+        let block_elements = codec_block_elements(block.codec);
+        if weight_layout.base % (block_elements as i64) != 0 {
+            return Err(EmitError::Index32OperandBaseNotBlockAligned {
+                node: resolved.node,
+                base: weight_layout.base,
+                block_elements,
+            });
+        }
+        let block_bytes = codec_block_bytes(block.codec);
+        source.push_str(&format!(
+            "    long base_blocks = u.operand_base[{weight}] / {block_elements}L;\n"
+        ));
+        source.push_str(&format!(
+            "    device const uchar *wblk0 = in{weight} + (ulong)base_blocks * {block_bytes}UL;\n"
+        ));
+    }
+    source.push_str(&format!("    {weight_base_type} weight_base[{rows}];\n"));
     source.push_str(&format!("    long feature_coord[{rows}][{rank_len}];\n"));
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("        long flat = feature_first + q;\n");
@@ -1055,13 +1078,23 @@ pub(super) fn push_packed_row_multi_row_body(
             "        feature_coord[q][{dim}] = remaining % u.output_extents[{full_index}]; remaining /= u.output_extents[{full_index}];\n"
         ));
     }
-    source.push_str(&format!("        long wb = u.operand_base[{weight}];\n"));
+    source.push_str(&format!(
+        "        long wb = {};\n",
+        if index32_active {
+            "0L".to_string()
+        } else {
+            format!("u.operand_base[{weight}]")
+        }
+    ));
     for &dim in feature_axes {
         source.push_str(&format!(
             "        wb += feature_coord[q][{dim}] * u.operand_strides[{weight}][{dim}];\n"
         ));
     }
-    source.push_str("        weight_base[q] = wb;\n");
+    source.push_str(&format!(
+        "        weight_base[q] = {};\n",
+        if index32_active { "(uint)wb" } else { "wb" }
+    ));
     source.push_str("    }\n");
 
     source.push_str(&format!("    long other_base[{cap}];\n"));
@@ -1165,9 +1198,23 @@ pub(super) fn push_packed_row_multi_row_body(
             operand_count,
             quantized[weight],
             quantized[other],
+            index32_active,
         );
     } else {
-        source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+        // `k`'s own declared type: `uint` under index32 (composes with the
+        // plain generic arm, not only with unroll) so `weight_base[q] + k`
+        // -- already `uint` on the `weight_base` side, per this function's
+        // own preamble -- is `uint` arithmetic end to end into the weight
+        // decode's division. The activation side (`other_base[s] + k *
+        // other_stride`) stays whatever type `other_base`/`other_stride`
+        // already are (`long`, unchanged) -- it is never divided
+        // (`multi_row_index32_active`'s own doc), so converting it buys
+        // nothing and is left alone.
+        if index32_active {
+            source.push_str("    for (uint k = (uint)lane; k < (uint)u.reduction_total; k += 32u) {\n");
+        } else {
+            source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+        }
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
         source.push_str(&format!(
             "            {element_type} scratch[{}];\n",
@@ -1175,11 +1222,16 @@ pub(super) fn push_packed_row_multi_row_body(
         ));
         if !weight_gathered {
             // shared across every token slot -- one read per (feature row,
-            // reduce element), reused `cap` times below.
-            source.push_str(&format!(
-                "            scratch[{weight}] = {};\n",
+            // reduce element), reused `cap` times below. Index32: reads from
+            // the block-origin pointer `wblk0` with the narrowed relative
+            // index, never the raw `in{weight}` + absolute-offset form
+            // (`multi_row_index32_active`'s own doc).
+            let decode = if index32_active {
+                operand_read_from_block_origin("wblk0", "(weight_base[q] + k)", block.codec)
+            } else {
                 operand_read(weight, "(weight_base[q] + k)", quantized[weight])
-            ));
+            };
+            source.push_str(&format!("            scratch[{weight}] = {decode};\n"));
         }
         source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
         if weight_gathered {
@@ -1497,8 +1549,16 @@ pub(super) fn push_packed_row_multi_row_unroll_body(
     operand_count: usize,
     weight_codec: Option<Codec>,
     other_codec: Option<Codec>,
+    index32_active: bool,
 ) {
-    source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+    // Same `k`-type branch as the generic (non-unrolled) arm --
+    // `multi_row_index32_active`'s own doc for why only `k` and
+    // `weight_base` change.
+    if index32_active {
+        source.push_str("    for (uint k = (uint)lane; k < (uint)u.reduction_total; k += 32u) {\n");
+    } else {
+        source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+    }
     for q in 0..rows {
         // Each literal `q`/`s` iteration gets its OWN brace scope -- the
         // dynamic-loop generic arm this mirrors gets a fresh block scope
@@ -1511,10 +1571,13 @@ pub(super) fn push_packed_row_multi_row_unroll_body(
             "            {element_type} scratch[{}];\n",
             operand_count.max(1)
         ));
-        source.push_str(&format!(
-            "            scratch[{weight}] = {};\n",
-            operand_read(weight, &format!("(weight_base[{q}] + k)"), weight_codec)
-        ));
+        let weight_decode = match (index32_active, weight_codec) {
+            (true, Some(codec)) => {
+                operand_read_from_block_origin("wblk0", &format!("(weight_base[{q}] + k)"), codec)
+            }
+            _ => operand_read(weight, &format!("(weight_base[{q}] + k)"), weight_codec),
+        };
+        source.push_str(&format!("            scratch[{weight}] = {weight_decode};\n"));
         for s in 0..cap {
             source.push_str("            {\n");
             source.push_str(&format!(

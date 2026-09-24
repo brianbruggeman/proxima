@@ -1745,6 +1745,172 @@ fn multi_row_unroll_27_token_shape_gets_u_suffix_with_unchanged_geometry() {
     );
 }
 
+/// [`multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width`]'s
+/// index32 counterpart: checked both alone and with
+/// `PROXIMA_MULTI_ROW_UNROLL` also on, since index32 composes with unroll.
+#[test]
+fn multi_row_index32_decode_shape_keeps_current_key_source_grid_and_width() {
+    let bound = packed_row_multi_token_op(1, 256, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
+        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline cache key");
+        let source = emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline emits")
+            .source;
+        let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline dispatch shape");
+        (key, source, dispatch)
+    });
+
+    for (label, unroll_env) in [("index32 alone", None), ("unroll+index32", Some("1"))] {
+        let (shared_key, shared_source, shared_dispatch) =
+            temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
+                temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", Some("1"), || {
+                    let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+                        .expect("index32-env cache key");
+                    let source = emit(&bound, &q4_0, NumericPolicy::default())
+                        .expect("index32-env emits")
+                        .source;
+                    let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+                        .expect("index32-env dispatch shape");
+                    (key, source, dispatch)
+                })
+            });
+
+        assert!(
+            !baseline_key.contains("_i32"),
+            "[{label}] a decode-shaped op must never carry the _i32 suffix: {baseline_key}"
+        );
+        assert_eq!(
+            baseline_key, shared_key,
+            "[{label}] decode-shaped cache key must be identical whether PROXIMA_MULTI_ROW_INDEX32 is set"
+        );
+        assert_eq!(
+            baseline_source, shared_source,
+            "[{label}] decode-shaped emitted source must be byte-identical whether the override is set"
+        );
+        assert_eq!(
+            baseline_dispatch.1.threads, shared_dispatch.1.threads,
+            "[{label}] decode-shaped grid_threads must be identical whether the override is set"
+        );
+        assert_eq!(
+            baseline_dispatch.1.threadgroup_width, shared_dispatch.1.threadgroup_width,
+            "[{label}] decode-shaped threadgroup_width must be identical whether the override is set"
+        );
+    }
+}
+
+/// [`multi_row_index32_decode_shape_keeps_current_key_source_grid_and_width`]'s
+/// multi-row counterpart: a real prefill shape (27 tokens) DOES take the
+/// `_i32` cache-key suffix alone, or `_u_i32` with unroll also on, with
+/// UNCHANGED dispatch geometry either way (index32 touches body text only,
+/// same as unroll -- neither changes `grid_threads`/`tiled_gemm_
+/// threadgroup_width`).
+#[test]
+fn multi_row_index32_27_token_shape_gets_i32_suffix_with_unchanged_geometry() {
+    let bound = packed_row_multi_token_op(27, 256, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let baseline_dispatch = with_every_multi_row_env_unset(|| {
+        kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline dispatch shape")
+    });
+
+    for (unroll_env, expected_suffix) in [(None, "_i32"), (Some("1"), "_u_i32")] {
+        let (shared_key, shared_dispatch) =
+            temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
+                temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", Some("1"), || {
+                    let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+                        .expect("index32-env cache key");
+                    let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+                        .expect("index32-env dispatch shape");
+                    (key, dispatch)
+                })
+            });
+
+        assert!(
+            shared_key.contains(expected_suffix),
+            "a 27-token op with unroll_env={unroll_env:?} PROXIMA_MULTI_ROW_INDEX32=1 must carry \
+             the {expected_suffix} suffix: {shared_key}"
+        );
+        assert_eq!(
+            shared_dispatch.1.threads, baseline_dispatch.1.threads,
+            "index32 must not change grid_threads (unroll_env={unroll_env:?})"
+        );
+        assert_eq!(
+            shared_dispatch.1.threadgroup_width, baseline_dispatch.1.threadgroup_width,
+            "index32 must not change threadgroup_width (unroll_env={unroll_env:?})"
+        );
+    }
+}
+
+/// A shape whose packed weight's own flat element count
+/// (`feature_total * reduction_total`) exceeds `u32::MAX` must NEVER be
+/// admitted -- `multi_row_index32_active`'s own doc: `weight_base[q] + k`
+/// ranges over exactly that space, and this admission rejects by that
+/// arithmetic rather than by naming a codec or a hardcoded shape.
+/// `65536 * 65792 = 4_313_157_632 > u32::MAX` (`4_294_967_295`), both
+/// multiples of 256 so `classify_packed_row_block`'s own block-multiple gate
+/// still admits the op structurally -- this is a rejection purely from the
+/// index32 fit check, not from any other admission gate.
+#[test]
+fn multi_row_index32_oversized_shape_not_admitted() {
+    let bound = packed_row_multi_token_op(27, 65792, 65536);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
+        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline cache key");
+        let source = emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline emits")
+            .source;
+        let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline dispatch shape");
+        (key, source, dispatch)
+    });
+
+    let (shared_key, shared_source, shared_dispatch) =
+        temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", Some("1"), || {
+            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+                .expect("index32-env cache key");
+            let source = emit(&bound, &q4_0, NumericPolicy::default())
+                .expect("index32-env emits")
+                .source;
+            let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+                .expect("index32-env dispatch shape");
+            (key, source, dispatch)
+        });
+
+    assert!(
+        !shared_key.contains("_i32"),
+        "an oversized shape must never carry the _i32 suffix even with the override set: {shared_key}"
+    );
+    assert_eq!(
+        baseline_key, shared_key,
+        "an oversized shape's cache key must be identical whether PROXIMA_MULTI_ROW_INDEX32 is set"
+    );
+    assert_eq!(
+        baseline_source, shared_source,
+        "an oversized shape's emitted source must be byte-identical whether the override is set"
+    );
+    assert_eq!(
+        baseline_dispatch.1.threads, shared_dispatch.1.threads,
+        "an oversized shape's grid_threads must be identical whether the override is set"
+    );
+    assert_eq!(
+        baseline_dispatch.1.threadgroup_width, shared_dispatch.1.threadgroup_width,
+        "an oversized shape's threadgroup_width must be identical whether the override is set"
+    );
+}
+
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn many_token_matmul_takes_the_tiled_gemm_path() {

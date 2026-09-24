@@ -267,3 +267,171 @@ fn metal_matmul_on_real_attn_k_q4_0_bytes_matches_the_dequantized_f32_cpu_path()
          relative={relative} max_diff={max_diff}"
     );
 }
+
+/// [`matmul_program`]'s `M > 1` sibling: `[rows, k] x [tokens, k] -> [tokens,
+/// rows]` -- restated here since no such multi-token oracle case existed for
+/// the real-checkpoint Q4_0 fixture before this change (only the `M = 1`
+/// `matmul_program` above did).
+fn matmul_program_multi_token(tokens: u32, k: u32, rows: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: weight_dtype,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(tokens), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("q4_0_real_multi_token_matmul".into()),
+        }),
+    );
+    (program, sum)
+}
+
+/// `blk.0.attn_k.weight`'s full `out_dim` (256) is small enough to run
+/// whole -- no `ROWS_TO_CHECK` truncation needed the way the `M = 1` case
+/// above takes for a larger tensor. Runs the multi-token matmul against the
+/// dequantized-f32 CPU oracle, at the SAME relative tolerance the `M = 1`
+/// case uses.
+fn real_attn_k_multi_token_case(tokens: usize) {
+    let path = std::path::Path::new(REAL_GEMMA4_GGUF_PATH);
+    let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+        proxima_telemetry::debug!(
+            path = REAL_GEMMA4_GGUF_PATH,
+            "real gguf file not found; test skipped"
+        );
+        return;
+    };
+    let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+        &mut file,
+        &parsed,
+        file_len,
+        "blk.0.attn_k.weight",
+        GgmlType::Q4_0,
+    ) else {
+        return;
+    };
+
+    let blocks_per_row = in_dim / q4_0::QK4_0;
+    assert_eq!(
+        blocks_per_row * q4_0::QK4_0,
+        in_dim,
+        "blk.0.attn_k.weight's in_dim is a whole number of Q4_0 blocks"
+    );
+    let row_bytes = blocks_per_row * q4_0::BLOCK_BYTES;
+    assert_eq!(
+        weight_bytes.len(),
+        row_bytes * out_dim,
+        "blk.0.attn_k.weight byte length matches its declared shape"
+    );
+
+    let mut lcg = Lcg(4091);
+    let activation: Vec<f32> = (0..tokens * in_dim)
+        .map(|_| lcg.next_unit() * 4.0 - 2.0)
+        .collect();
+
+    let mut dequantized = vec![0.0f32; out_dim * in_dim];
+    for (row_blocks, row_f32) in weight_bytes
+        .chunks_exact(row_bytes)
+        .zip(dequantized.chunks_exact_mut(in_dim))
+    {
+        q4_0::dequantize(row_blocks, row_f32).expect("a whole number of q4_0 blocks per row");
+    }
+
+    let (packed_program, packed_sum) =
+        matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::UInt8);
+    let metal = omega::execute(
+        &packed_program,
+        &[],
+        &[
+            QuantizedBlock::Packed {
+                codec: Codec::Q4_0,
+                bytes: &weight_bytes,
+            },
+            QuantizedBlock::Float32(&activation),
+        ],
+        &[packed_sum],
+        NumericPolicy::default(),
+    )
+    .expect("metal executes a packed q4_0 multi-token matmul on real blk.0.attn_k.weight bytes");
+
+    let (f32_program, f32_sum) =
+        matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::Float32);
+    let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
+        .expect("dequantized f32 cpu multi-token matmul evaluates");
+
+    let actual = metal.root();
+    let expected = cpu.root();
+    assert_eq!(
+        actual.len(),
+        tokens * out_dim,
+        "degenerate gate: no outputs compared"
+    );
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "metal produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude;
+    proxima_telemetry::debug!(
+        codec = "Q4_0",
+        tokens = tokens as u64,
+        k = in_dim as u64,
+        rows = out_dim as u64,
+        max_diff,
+        max_magnitude,
+        relative,
+        "real blk.0.attn_k.weight metal vs dequantized-f32 cpu"
+    );
+    assert!(
+        relative < 1e-5,
+        "packed multi-token unpack disagrees with the dequantized reference on REAL checkpoint \
+         bytes: tokens={tokens} relative={relative} max_diff={max_diff}"
+    );
+}
+
+#[test]
+fn metal_multi_token27_on_real_attn_k_q4_0_bytes_matches_f32_cpu() {
+    real_attn_k_multi_token_case(27);
+}
+
+#[test]
+fn metal_multi_token600_on_real_attn_k_q4_0_bytes_matches_f32_cpu() {
+    real_attn_k_multi_token_case(600);
+}

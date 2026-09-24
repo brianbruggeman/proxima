@@ -995,6 +995,76 @@ pub(super) fn multi_row_unroll_active(
         && multi_row_unroll_override()
 }
 
+/// admission for `PROXIMA_MULTI_ROW_INDEX32=1`: narrows `weight_base[q] + k`
+/// to `uint` so the weight decode's block/nibble division is 32-bit.
+/// fit proof: `Σ(extent-1)×stride` plus `k`'s max bounds the narrowed value
+/// via `checked_mul`/`checked_add`, rejecting overflow and negative strides.
+/// alignment contract: `operand_base` must be a whole number of blocks.
+pub(super) fn multi_row_index32_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    expert_source_mode: bool,
+) -> bool {
+    let Some((block, codec)) =
+        multi_row_generic_arm_current(resolved, quantized, expert_source_mode)
+    else {
+        return false;
+    };
+    let weight_layout = &resolved.operands()[block.weight].1;
+    if weight_layout.stride(block.reduce_dim as u16) < 0 {
+        return false;
+    }
+    // The `base_blocks = operand_base / block_elements` split
+    // (`push_packed_row_multi_row_body`'s own doc) is only exact when
+    // `operand_base` is itself a whole number of blocks -- true for every
+    // GGUF-sourced packed tensor (rows start at a block boundary), so this
+    // is an admission gate here (silently excludes the arm, matching every
+    // sibling check in this function) with a SECOND, error-returning check
+    // at render time (`EmitError::Index32OperandBaseNotBlockAligned`) as
+    // defense in depth against the two ever disagreeing.
+    let block_elements_i64 = i64::try_from(codec_block_elements(codec)).unwrap_or(i64::MAX);
+    if weight_layout.base % block_elements_i64 != 0 {
+        return false;
+    }
+    let mut weight_base_max: u64 = 0;
+    for &axis in &block.feature_axes {
+        let stride = weight_layout.stride(axis);
+        if stride < 0 {
+            return false;
+        }
+        let extent = resolved.extents[axis as usize];
+        let Some(term) = extent
+            .checked_sub(1)
+            .and_then(|span| span.checked_mul(stride as u64))
+        else {
+            return false;
+        };
+        let Some(sum) = weight_base_max.checked_add(term) else {
+            return false;
+        };
+        weight_base_max = sum;
+    }
+    let reduction_total = resolved.extents[block.reduce_dim];
+    let Some(max_index) = weight_base_max.checked_add(reduction_total.saturating_sub(1)) else {
+        return false;
+    };
+    if max_index > u64::from(u32::MAX) {
+        return false;
+    }
+    let block_elements = u64::try_from(codec_block_elements(codec)).unwrap_or(u64::MAX);
+    let block_bytes = u64::try_from(codec_block_bytes(codec)).unwrap_or(u64::MAX);
+    let Some(scaled) = (max_index / block_elements)
+        .checked_mul(block_bytes)
+        .and_then(|value| value.checked_add(block_bytes))
+    else {
+        return false;
+    };
+    if scaled > u64::from(u32::MAX) {
+        return false;
+    }
+    multi_row_index32_override()
+}
+
 /// [`push_packed_row_multi_row_body`]'s own `fast_q4k` local gate
 /// (`elementwise_reduce_core.rs`), called as a function rather than
 /// re-derived so [`multi_row_generic_arm_current`] can never disagree with the
@@ -1105,6 +1175,7 @@ pub(crate) fn kernel_cache_key(
         // here (the `!weight_gathered` check inside already excludes a
         // routed expert's weight).
         multi_row_unroll: multi_row_unroll_active(resolved, &quantized, false),
+        multi_row_index32: multi_row_index32_active(resolved, &quantized, false),
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
