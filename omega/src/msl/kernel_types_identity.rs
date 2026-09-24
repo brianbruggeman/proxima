@@ -1718,7 +1718,7 @@ fn log_packed_rows_variant_once(override_rows: Option<usize>) {
             Some(rows) => (rows, "env"),
             None => (PACKED_ROWS_PER_GROUP, "default"),
         };
-        eprintln!("packed_rows_variant={rows} source={source}");
+        proxima_telemetry::debug!(rows = rows as u64, source, "packed_rows_variant");
     });
 }
 
@@ -1761,10 +1761,7 @@ fn log_q4_0_multi_row_hoist_once(active: bool) {
     static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     LOGGED.get_or_init(|| {
         let source = if active { "env" } else { "default" };
-        eprintln!(
-            "q4_0_multi_row_hoist={} source={source}",
-            u8::from(active)
-        );
+        proxima_telemetry::debug!(active, source, "q4_0_multi_row_hoist");
     });
 }
 

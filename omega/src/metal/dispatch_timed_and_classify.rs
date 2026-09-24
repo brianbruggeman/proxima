@@ -127,11 +127,16 @@ pub(super) fn execute_op_timed(
             .or_else(|| cpu_reference.and_then(|reference| reference.get(&bound.node)))
             .and_then(|values| values.get(first_index))
             .copied();
-        eprintln!(
-            "metal_nan_bound node={:?} name={:?} kind={kind} element={first_index} metal={} cpu={cpu_value:?} shape={shape:?} bound={bound:?}",
-            bound.node,
-            program[bound.node.0 as usize].name(),
-            metal_values[first_index],
+        debug!(
+            node = ?bound.node,
+            name = ?program[bound.node.0 as usize].name(),
+            kind = %kind,
+            element = first_index as u64,
+            metal = metal_values[first_index],
+            cpu = ?cpu_value,
+            shape = ?shape,
+            bound = ?bound,
+            "metal_nan_bound"
         );
         report_bound_operands(
             bound,
@@ -157,10 +162,19 @@ pub(super) fn execute_op_timed(
         let first_mismatch = compare_bound_f32(bound.node, &metal_values, &cpu_values)?;
         if let Some((element, metal_value, cpu_value, relative, max_rel_diff)) = first_mismatch {
             let absolute = (metal_value - cpu_value).abs();
-            eprintln!(
-                "metal_bound_compare node={:?} name={:?} kind={kind} element={element} metal={metal_value} cpu={cpu_value} abs={absolute} rel={relative} max_rel={max_rel_diff} shape={shape:?} bound={bound:?}",
-                bound.node,
-                program[bound.node.0 as usize].name(),
+            debug!(
+                node = ?bound.node,
+                name = ?program[bound.node.0 as usize].name(),
+                kind = %kind,
+                element = element as u64,
+                metal = metal_value,
+                cpu = cpu_value,
+                abs = absolute,
+                rel = relative,
+                max_rel = max_rel_diff,
+                shape = ?shape,
+                bound = ?bound,
+                "metal_bound_compare"
             );
             report_bound_operands(
                 bound,
@@ -177,11 +191,14 @@ pub(super) fn execute_op_timed(
                 max_rel_diff,
             });
         }
-        eprintln!(
-            "metal_bound_compare node={:?} name={:?} kind={kind} result=within_tolerance elements={} shape={shape:?}",
-            bound.node,
-            program[bound.node.0 as usize].name(),
-            metal_values.len(),
+        debug!(
+            node = ?bound.node,
+            name = ?program[bound.node.0 as usize].name(),
+            kind = %kind,
+            result = "within_tolerance",
+            elements = metal_values.len() as u64,
+            shape = ?shape,
+            "metal_bound_compare"
         );
     }
     if let Some(cpu_reference) = cpu_reference
@@ -206,10 +223,18 @@ pub(super) fn execute_op_timed(
                 compare_bound_f32(bound.node, &metal_values, cpu_values)?
             {
                 let absolute = (metal_value - cpu_value).abs();
-                eprintln!(
-                    "metal_reference_compare node={:?} name={:?} kind={kind} element={element} metal={metal_value} cpu={cpu_value} abs={absolute} rel={relative} max_rel={maximum} shape={shape:?}",
-                    bound.node,
-                    program[bound.node.0 as usize].name(),
+                debug!(
+                    node = ?bound.node,
+                    name = ?program[bound.node.0 as usize].name(),
+                    kind = %kind,
+                    element = element as u64,
+                    metal = metal_value,
+                    cpu = cpu_value,
+                    abs = absolute,
+                    rel = relative,
+                    max_rel = maximum,
+                    shape = ?shape,
+                    "metal_reference_compare"
                 );
                 report_bound_operands(
                     bound,
@@ -317,13 +342,14 @@ pub(super) fn execute_plan_op_timed_inner(
     if let Some(node) = selected_bound
         && !prepared.resolved.iter().any(|bound| bound.node == node)
     {
-        eprintln!(
-            "metal_bound_compare_missing node={node:?} available={:?}",
-            prepared
+        debug!(
+            node = ?node,
+            available = ?prepared
                 .resolved
                 .iter()
                 .map(|bound| (bound.node, bound.kind.name()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            "metal_bound_compare_missing"
         );
         return Err(MetalError::CpuBoundComparisonNodeNotFound { node });
     }
@@ -1854,7 +1880,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
                 }
             ) {
                 let kind = classify_kind(bound, &packed_operands);
-                std::eprintln!("classify_kind: {kind} name={:?}", bound.kind.name());
+                proxima_telemetry::debug!(kind = %kind, name = ?bound.kind.name(), "classify_kind");
                 let touches_expert_weight = bound.operands().iter().any(|(node, _, _)| {
                     *node == expert_w_gate_node
                         || *node == expert_w_up_node
@@ -1867,10 +1893,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
                         .map(|(node, _, _)| packed_operands.get(node).copied())
                         .collect();
                     let verdict = diagnose_packed_row_block(bound, &quantized);
-                    std::eprintln!(
-                        "diagnose_packed_row_block: node={:?} kind={kind} verdict={verdict:?}",
-                        bound.node
-                    );
+                    proxima_telemetry::debug!(node = ?bound.node, kind = %kind, verdict = ?verdict, "diagnose_packed_row_block");
                     expert_reduce_kinds.push(kind);
                 }
             }

@@ -113,7 +113,6 @@ pub(super) fn execute_plan_inner(
     blocks: &[QuantizedBlock<'_>],
     expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
 ) -> Result<Evaluated, MetalError> {
-    let debug_timing = std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some();
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
 
@@ -134,14 +133,12 @@ pub(super) fn execute_plan_inner(
             }
         }
     }
-    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-        eprintln!(
-            "effective expert source nodes={:?}",
-            effective_expert_buffers.keys().collect::<Vec<_>>()
-        );
-        for index in 0..plan.program.len().min(24) {
-            eprintln!("plan op {} name={:?}", index, plan.program[index].name());
-        }
+    debug!(
+        expert_source_nodes = ?effective_expert_buffers.keys().collect::<Vec<_>>(),
+        "effective_expert_source_nodes"
+    );
+    for index in 0..plan.program.len().min(24) {
+        debug!(op = index as u64, name = ?plan.program[index].name(), "plan_op");
     }
 
     let (device, queue) = device_and_queue()?;
@@ -217,11 +214,11 @@ pub(super) fn execute_plan_inner(
         device_buffers.insert(node, buffer);
     }
     #[cfg(feature = "instrument")]
-    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-        eprintln!(
-            "metal ordinary uploads blocks={ordinary_upload_blocks} bytes={ordinary_upload_bytes}"
-        );
-    }
+    debug!(
+        blocks = ordinary_upload_blocks as u64,
+        bytes = ordinary_upload_bytes as u64,
+        "metal_ordinary_uploads"
+    );
     #[cfg(feature = "instrument")]
     counter!(BLOCK_UPLOAD_TICKS, elapsed_ticks(block_upload_started));
 
@@ -279,62 +276,59 @@ pub(super) fn execute_plan_inner(
     // buffer is not CPU-visible until the command buffer it was written in
     // completes. See the module doc's "Gather fault reporting" section.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
-    if debug_timing {
-        eprintln!(
-            "metal expert prepared_nodes={:?}",
-            prepared
-                .resolved
-                .iter()
-                .map(|bound| bound.node)
-                .collect::<Vec<_>>()
-        );
-        for (position, retired) in prepared.retires.iter().enumerate() {
-            if retired.contains(&NodeId(16))
-                || retired.contains(&NodeId(18))
-                || retired.contains(&NodeId(22))
-            {
-                eprintln!(
-                    "metal expert retirement node16_or_18 position={position} nodes={retired:?}"
-                );
-            }
-        }
-        for (position, bound) in prepared.resolved.iter().enumerate() {
-            if bound.all_read_sources().any(|(source, _, lookup)| {
-                *source == NodeId(22)
-                    || lookup
-                        .as_ref()
-                        .is_some_and(|item| item.indices == NodeId(22))
-            }) {
-                eprintln!(
-                    "metal expert node22 read_at_position={position} bound={:?}",
-                    bound.node
-                );
-            }
-            if matches!(bound.node, NodeId(16) | NodeId(18)) {
-                eprintln!(
-                    "metal expert retirement position={} node={:?} retires={:?}",
-                    position, bound.node, prepared.retires[position]
-                );
-            }
+    debug!(
+        prepared_nodes = ?prepared.resolved.iter().map(|bound| bound.node).collect::<Vec<_>>(),
+        "metal_expert_prepared_nodes"
+    );
+    for (position, retired) in prepared.retires.iter().enumerate() {
+        if retired.contains(&NodeId(16))
+            || retired.contains(&NodeId(18))
+            || retired.contains(&NodeId(22))
+        {
+            debug!(
+                position = position as u64,
+                nodes = ?retired,
+                "metal_expert_retirement_node16_or_18"
+            );
         }
     }
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-            eprintln!(
-                "resolved bound node={:?} kind={} operands={:?}",
-                bound.node,
-                bound.kind.name(),
-                bound
-                    .operands()
-                    .iter()
-                    .map(|(node, _, lookup)| (
-                        *node,
-                        lookup.is_some(),
-                        plan.program.get(node.0 as usize).and_then(Op::name)
-                    ))
-                    .collect::<Vec<_>>()
+        if bound.all_read_sources().any(|(source, _, lookup)| {
+            *source == NodeId(22)
+                || lookup
+                    .as_ref()
+                    .is_some_and(|item| item.indices == NodeId(22))
+        }) {
+            debug!(
+                position = position as u64,
+                bound = ?bound.node,
+                "metal_expert_node22_read_at_position"
             );
         }
+        if matches!(bound.node, NodeId(16) | NodeId(18)) {
+            debug!(
+                position = position as u64,
+                node = ?bound.node,
+                retires = ?prepared.retires[position],
+                "metal_expert_retirement"
+            );
+        }
+    }
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        debug!(
+            node = ?bound.node,
+            kind = bound.kind.name(),
+            operands = ?bound
+                .operands()
+                .iter()
+                .map(|(node, _, lookup)| (
+                    *node,
+                    lookup.is_some(),
+                    plan.program.get(node.0 as usize).and_then(Op::name)
+                ))
+                .collect::<Vec<_>>(),
+            "resolved_bound"
+        );
         #[cfg(feature = "instrument")]
         let expert_buffers_started = read_ticks();
         let expert_buffers = expert_buffers_for(bound, &effective_expert_buffers)?;
@@ -365,12 +359,12 @@ pub(super) fn execute_plan_inner(
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
         }
-        if debug_timing && matches!(bound.node, NodeId(22) | NodeId(30)) {
-            eprintln!(
-                "metal expert post_encode node={:?} has_buffer={} buffer_keys={:?}",
-                bound.node,
-                device_buffers.contains_key(&bound.node),
-                device_buffers.keys().copied().collect::<Vec<_>>()
+        if matches!(bound.node, NodeId(22) | NodeId(30)) {
+            debug!(
+                node = ?bound.node,
+                has_buffer = device_buffers.contains_key(&bound.node),
+                buffer_keys = ?device_buffers.keys().copied().collect::<Vec<_>>(),
+                "metal_expert_post_encode"
             );
         }
         // `metal-buffer-pool` off: identical to this function before the
@@ -512,22 +506,20 @@ pub(super) fn expert_buffers_for<'a>(
             .then_some((*node, buffers))
     });
     let Some((first_node, first_buffers)) = matched.next() else {
-        if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-            eprintln!(
-                "expert source not matched bound={:?} kind={} source_nodes={:?}",
-                bound.node,
-                bound.kind.name(),
-                expert_buffers.keys().collect::<Vec<_>>()
-            );
-            eprintln!(
-                "expert source bound_operands={:?}",
-                bound
-                    .operands()
-                    .iter()
-                    .map(|(node, _, lookup)| (*node, lookup.is_some()))
-                    .collect::<Vec<_>>()
-            );
-        }
+        debug!(
+            bound = ?bound.node,
+            kind = bound.kind.name(),
+            source_nodes = ?expert_buffers.keys().collect::<Vec<_>>(),
+            "expert_source_not_matched"
+        );
+        debug!(
+            bound_operands = ?bound
+                .operands()
+                .iter()
+                .map(|(node, _, lookup)| (*node, lookup.is_some()))
+                .collect::<Vec<_>>(),
+            "expert_source_bound_operands"
+        );
         return Ok(None);
     };
     if matched.next().is_some() {
@@ -567,28 +559,27 @@ pub(super) fn stage_expert_source_reusing(
             reason: "expert source produced no payload bytes",
         })?;
     let descriptor_records = descriptors;
-    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-        eprintln!(
-            "metal expert source node={node:?} entries={} selected_experts={} selected_payload_bytes={}",
-            source.entries().len(),
-            source
-                .selected_expert_ids()
-                .map_or(source.entries().len(), <[_]>::len),
-            payload_bytes.len()
-        );
-        if let Some(selected) = source.selected_expert_ids() {
-            eprintln!("metal selected expert ids={selected:?}");
-            for expert in selected {
-                if let Some(descriptor) = descriptor_records.get(*expert as usize) {
-                    eprintln!(
-                        "metal selected descriptor expert={} codec={:?} epoch={} offset={} length={}",
-                        descriptor.expert_index,
-                        descriptor.codec,
-                        descriptor.epoch,
-                        descriptor.byte_offset,
-                        descriptor.byte_length
-                    );
-                }
+    debug!(
+        node = ?node,
+        entries = source.entries().len() as u64,
+        selected_experts = source
+            .selected_expert_ids()
+            .map_or(source.entries().len(), <[_]>::len) as u64,
+        selected_payload_bytes = payload_bytes.len() as u64,
+        "metal_expert_source"
+    );
+    if let Some(selected) = source.selected_expert_ids() {
+        debug!(ids = ?selected, "metal_selected_expert");
+        for expert in selected {
+            if let Some(descriptor) = descriptor_records.get(*expert as usize) {
+                debug!(
+                    expert = descriptor.expert_index,
+                    codec = ?descriptor.codec,
+                    epoch = descriptor.epoch,
+                    offset = descriptor.byte_offset,
+                    length = descriptor.byte_length,
+                    "metal_selected_descriptor"
+                );
             }
         }
     }
@@ -631,24 +622,23 @@ pub(super) fn stage_expert_source_reusing(
             elapsed_ticks(stage_ticks_started)
         );
     }
-    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-        eprintln!(
-            "metal expert source staged node={node:?} payload_bytes={} descriptor_bytes={} elapsed_us={}",
-            payload_bytes.len(),
-            descriptor_bytes.len(),
-            stage_started.elapsed().as_micros()
+    debug!(
+        node = ?node,
+        payload_bytes = payload_bytes.len() as u64,
+        descriptor_bytes = descriptor_bytes.len() as u64,
+        elapsed_us = stage_started.elapsed().as_micros() as u64,
+        "metal_expert_source_staged"
+    );
+    for descriptor in descriptor_records.iter().take(8) {
+        debug!(
+            expert = descriptor.expert_index,
+            codec = ?descriptor.codec,
+            offset = descriptor.byte_offset,
+            length = descriptor.byte_length,
+            out_dim = descriptor.out_dim,
+            in_dim = descriptor.in_dim,
+            "metal_expert_descriptor"
         );
-        for descriptor in descriptor_records.iter().take(8) {
-            eprintln!(
-                "metal expert descriptor expert={} codec={:?} offset={} length={} shape={}x{}",
-                descriptor.expert_index,
-                descriptor.codec,
-                descriptor.byte_offset,
-                descriptor.byte_length,
-                descriptor.out_dim,
-                descriptor.in_dim,
-            );
-        }
     }
     Ok(StagedExpertSource {
         payload_alias_address: payload_alias_address(payload_bytes),
@@ -846,14 +836,12 @@ pub fn execute_plan_with_expert_sources(
     #[cfg(feature = "instrument")]
     let upload_elapsed = expert_stage_started.elapsed();
     #[cfg(feature = "instrument")]
-    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
-        eprintln!(
-            "expert_source_stage_ms={} source_nodes={} staged_nodes={}",
-            upload_elapsed.as_secs_f64() * 1e3,
-            expert_sources.len(),
-            buffers.len(),
-        );
-    }
+    debug!(
+        expert_source_stage_ms = upload_elapsed.as_secs_f64() * 1e3,
+        source_nodes = expert_sources.len() as u64,
+        staged_nodes = buffers.len() as u64,
+        "expert_source_stage"
+    );
     #[cfg(feature = "instrument")]
     let dispatch_started = std::time::Instant::now();
     let result = execute_plan_inner(plan, blocks, &buffers);
@@ -940,25 +928,25 @@ pub(super) fn stage_expert_sources(
                 let previous = cache.remove(&cache_key).map(|(_, staged)| staged);
                 let staged = stage_expert_source_reusing(&device, *node, source, previous)?;
                 cache.insert(cache_key, (signature, staged));
-                if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_CACHE").is_some() {
-                    eprintln!(
-                        "metal expert source cache miss node={node:?} signature={signature} payload_bytes={}",
-                        cache
-                            .get(&cache_key)
-                            .map_or(0, |(_, staged)| staged.buffers.payloads.length())
-                    );
-                }
+                debug!(
+                    node = ?node,
+                    signature,
+                    payload_bytes = cache
+                        .get(&cache_key)
+                        .map_or(0, |(_, staged)| staged.buffers.payloads.length()),
+                    "metal_expert_source_cache_miss"
+                );
             } else {
                 #[cfg(feature = "instrument")]
                 counter!(EXPERT_SOURCE_CACHE_HITS, 1);
-                if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_CACHE").is_some() {
-                    eprintln!(
-                        "metal expert source cache hit node={node:?} signature={signature} payload_bytes={}",
-                        cache
-                            .get(&cache_key)
-                            .map_or(0, |(_, staged)| staged.buffers.payloads.length())
-                    );
-                }
+                debug!(
+                    node = ?node,
+                    signature,
+                    payload_bytes = cache
+                        .get(&cache_key)
+                        .map_or(0, |(_, staged)| staged.buffers.payloads.length()),
+                    "metal_expert_source_cache_hit"
+                );
             }
             let Some((_, staged)) = cache.get(&cache_key) else {
                 return Err(MetalError::ExpertSourceUnsupported {
@@ -988,7 +976,6 @@ pub fn execute_plan_named_with_expert_sources(
     named: &[(&str, QuantizedBlock<'_>)],
     expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
 ) -> Result<Evaluated, MetalError> {
-    let debug_timing = std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some();
     let resolve_started = std::time::Instant::now();
     // Keep the original checkpoint blocks for the reduction guard; the
     // execution path substitutes expert payloads only after this comparison.
@@ -1000,13 +987,11 @@ pub fn execute_plan_named_with_expert_sources(
     let resolve_elapsed_us = resolve_started.elapsed().as_micros();
     let execute_started = std::time::Instant::now();
     let result = execute_plan_with_expert_sources(plan, &blocks, expert_sources);
-    if debug_timing {
-        eprintln!(
-            "metal expert execute resolve_us={} execute_us={}",
-            resolve_elapsed_us,
-            execute_started.elapsed().as_micros(),
-        );
-    }
+    debug!(
+        resolve_us = resolve_elapsed_us as u64,
+        execute_us = execute_started.elapsed().as_micros() as u64,
+        "metal_expert_execute"
+    );
     result
 }
 
