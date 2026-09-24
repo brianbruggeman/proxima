@@ -67,12 +67,21 @@ const DEFAULT_MAX_TOKENS: usize = 48;
 // (`dep:proxima-telemetry`, this crate's own `Cargo.toml`) -- a build
 // without it has no recorder to install, and no `token_breakdown`/
 // `report_*` events compiled anywhere in this crate to drain.
+// Console + file when `PROXIMA_TELEMETRY_FILE=<path>` is set, console alone
+// otherwise -- `Exporter::fan` (`proxima-telemetry/src/export.rs`) composes
+// both through the crate's own `FanExporter`/`fan_exporters` combinator, no
+// bespoke dual-writer here.
 #[cfg(feature = "instrument")]
 fn install_console_telemetry() -> Arc<AtomicUsize> {
     proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse("debug"));
+    let exporter = match std::env::var("PROXIMA_TELEMETRY_FILE") {
+        Ok(path) => Exporter::fan(vec![Exporter::std(), Exporter::file(path)])
+            .expect("console+file fan composes"),
+        Err(_) => Exporter::std(),
+    };
     let recorder = Recorder::builder()
         .ring_capacity(65536)
-        .export(Exporter::std())
+        .export(exporter)
         .expect("console exporter installs")
         .install()
         .expect("telemetry recorder installs");
@@ -104,14 +113,16 @@ fn print_capture_binary() {
     let bytes = std::fs::read(&argv0).expect("read running binary for md5");
     let digest = Md5::digest(&bytes);
     let md5_hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    eprintln!(
-        "capture_binary argv0={argv0:?} md5={md5_hex} features=[metal={}, instrument={}, metal-fuse-attn-decode={}, identity-copy-alias={}, metal-output-placement={}, reduce-epilogue-fusion={}]",
-        cfg!(feature = "metal"),
-        cfg!(feature = "instrument"),
-        cfg!(feature = "metal-fuse-attn-decode"),
-        cfg!(feature = "identity-copy-alias"),
-        cfg!(feature = "metal-output-placement"),
-        cfg!(feature = "reduce-epilogue-fusion"),
+    proxima_telemetry::info!(
+        argv0 = ?argv0,
+        md5 = %md5_hex,
+        metal = cfg!(feature = "metal"),
+        instrument = cfg!(feature = "instrument"),
+        metal_fuse_attn_decode = cfg!(feature = "metal-fuse-attn-decode"),
+        identity_copy_alias = cfg!(feature = "identity-copy-alias"),
+        metal_output_placement = cfg!(feature = "metal-output-placement"),
+        reduce_epilogue_fusion = cfg!(feature = "reduce-epilogue-fusion"),
+        "capture_binary"
     );
 }
 
@@ -130,13 +141,11 @@ fn main() {
     } else {
         Some(install_console_telemetry())
     };
-    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_none() {
-        eprintln!(
-            "decode_gbps_baseline: PROXIMA_DEBUG_METAL_STAGES not set -- \
-             per-step token_breakdown_wall/token_breakdown_metal lines will \
-             not be emitted; set it in the environment before running."
-        );
-    }
+    // `PROXIMA_DEBUG_METAL_STAGES` no longer gates whether
+    // `token_breakdown_wall`/`token_breakdown_metal` fire -- they are
+    // unconditional `info!`/`debug!` events now; RUST_LOG (raised via
+    // `install_console_telemetry`'s `EnvFilter::parse("debug")`) is what
+    // controls visibility.
 
     let file = File::open(MODEL_PATH).expect("open gemma4-E2B blob");
     // SAFETY: `file` is dropped at the end of this scope, but the mapping
@@ -194,6 +203,22 @@ fn main() {
     let prompt_token_count = proxima_tokenizer::encode(prompt, &vocab)
         .expect("tokenize prompt for cached_len accounting")
         .len();
+    // `proxima_telemetry` is only a dependency under `instrument`
+    // (`proxima-model-interop/Cargo.toml`'s own `metal` feature list does not
+    // pull `dep:proxima-telemetry`) -- this example's `required-features =
+    // ["std", "metal"]` means it must build WITHOUT `instrument`, so every
+    // converted event here keeps the pre-existing `eprintln!` as the
+    // `not(instrument)` fallback, matching `decode.rs`'s own established
+    // `prefill_batch`/`token_stages` split.
+    #[cfg(feature = "instrument")]
+    proxima_telemetry::info!(
+        run = "start",
+        prompt = ?prompt,
+        prompt_token_count = prompt_token_count as u64,
+        max_tokens = max_tokens as u64,
+        "decode_gbps_baseline"
+    );
+    #[cfg(not(feature = "instrument"))]
     eprintln!(
         "decode_gbps_baseline run=start prompt={prompt:?} prompt_token_count={prompt_token_count} max_tokens={max_tokens}"
     );
@@ -233,6 +258,15 @@ fn main() {
                     "decode"
                 };
                 let step_ms = event.elapsed_ms.saturating_sub(previous_elapsed_ms);
+                #[cfg(feature = "instrument")]
+                proxima_telemetry::info!(
+                    run_index = run_index as u64,
+                    step = event.step as u64,
+                    step_ms,
+                    phase,
+                    "step_time"
+                );
+                #[cfg(not(feature = "instrument"))]
                 eprintln!(
                     "step_time run_index={run_index} step={} step_ms={step_ms} phase={phase}",
                     event.step,
@@ -256,6 +290,20 @@ fn main() {
         if tokens_generated > 1 {
             let decode_ms_per_token =
                 (wall_ms - prefill_elapsed_ms as f64) / (tokens_generated - 1) as f64;
+            #[cfg(feature = "instrument")]
+            proxima_telemetry::info!(
+                run = "done",
+                run_index = run_index as u64,
+                wall_ms,
+                tokens_generated = tokens_generated as u64,
+                prompt_token_count = prompt_token_count as u64,
+                text_hash = %format!("{text_hash:016x}"),
+                stopped_by_eos,
+                decode_ms_per_token,
+                text = %text,
+                "decode_gbps_baseline"
+            );
+            #[cfg(not(feature = "instrument"))]
             eprintln!(
                 "decode_gbps_baseline run=done run_index={run_index} wall_ms={wall_ms:.3} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
@@ -263,6 +311,19 @@ fn main() {
                  decode_ms_per_token={decode_ms_per_token:.3} text={text:?}"
             );
         } else {
+            #[cfg(feature = "instrument")]
+            proxima_telemetry::info!(
+                run = "done",
+                run_index = run_index as u64,
+                wall_ms,
+                tokens_generated = tokens_generated as u64,
+                prompt_token_count = prompt_token_count as u64,
+                text_hash = %format!("{text_hash:016x}"),
+                stopped_by_eos,
+                text = %text,
+                "decode_gbps_baseline"
+            );
+            #[cfg(not(feature = "instrument"))]
             eprintln!(
                 "decode_gbps_baseline run=done run_index={run_index} wall_ms={wall_ms:.3} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \

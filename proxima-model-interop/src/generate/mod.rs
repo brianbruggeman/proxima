@@ -162,8 +162,10 @@ use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
     execute_plan_named_with_placements_and_expert_sources, plan_named_with_placed_inputs,
 };
+#[cfg(any(feature = "metal", feature = "instrument"))]
+use proxima_telemetry::{debug, trace, warn};
 #[cfg(feature = "instrument")]
-use proxima_telemetry::{debug, info};
+use proxima_telemetry::info;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::TensorError;
 #[cfg(feature = "instrument")]

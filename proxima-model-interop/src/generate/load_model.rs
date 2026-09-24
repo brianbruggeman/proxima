@@ -491,19 +491,6 @@ pub(super) fn emit_token_breakdown(breakdown: &TokenBreakdown) {
         greedy_pick_ms = ms(greedy_pick_ticks),
         "token_breakdown: per-decode-step wall-clock attribution"
     );
-    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
-        eprintln!(
-            "token_breakdown_wall step={} wall_ms={} evaluate_ms={} position_ms={} weights_ms={} kv_ms={} append_ms={} greedy_ms={}",
-            step,
-            ms(step_wall_ticks),
-            ms(evaluate_ticks),
-            ms(build_position_inputs_ticks),
-            ms(named_blocks_weights_ticks),
-            ms(named_blocks_kv_ticks),
-            ms(layer_cache_append_ticks),
-            ms(greedy_pick_ticks),
-        );
-    }
 }
 
 /// [`emit_token_breakdown`]'s Metal-stage counterpart -- same sharing
@@ -605,83 +592,22 @@ pub(super) fn emit_token_breakdown_metal(
         kind_filter,
         "token_breakdown_metal: per-decode-step metal stage attribution"
     );
-    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
-        eprintln!(
-            "token_breakdown_metal step={} prepare_ms={} emit_ms={} op_setup_ms={} encode_dispatch_calls={} physical_dispatch_calls={} encode_dispatch_ms={} readback_ms={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_cache_cold_misses={} expert_source_cache_replacement_misses={} expert_source_buffer_reuses={} expert_source_reuse_copy_bytes={} expert_source_reuse_copy_ms={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} resident_cache_entries={} resident_cache_bytes={} block_upload_calls={} block_upload_ms={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} mapping_offset_uploads={} mapping_rebound_blocks={} mapping_residency_rung={} expert_mapping_candidate_uploads={} expert_mapping_missed_uploads={} resident_uploads={} resident_reuses={} output_buffer_allocations={} output_buffer_allocated_bytes={} checkpoint_mapping_buffer_bytes={} expert_mapping_buffer_bytes={} plan_uniform_writes={} retire_scan_calls={} retire_scan_ms={} expert_buffers_lookup_calls={} expert_buffers_lookup_ms={} placement_resolve_calls={} placement_resolve_ms={} loop_head_calls={} loop_head_ms={} encoder_finish_ms={} barriers={} barriers_raw={} barriers_waw={} barriers_war={} barriers_waw_war_arena_recycled={} barriers_waw_war_persistent={} plan_cache_len={} plan_hits={} plan_misses={} plan_arena_allocated_bytes={} segment_arena_allocated_bytes={} placed_arena_allocated_bytes={} gpu_exec_calls={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
-            step,
-            ms(metal_stage.prepare_ticks),
-            ms(metal_stage.emit_ticks),
-            ms(metal_stage.op_setup_ticks),
-            metal_stage.encode_dispatch_calls,
-            metal_stage.physical_dispatch_calls,
-            ms(metal_stage.encode_dispatch_ticks),
-            ms(metal_stage.readback_ticks),
-            metal_stage.expert_source_cache_hits,
-            metal_stage.expert_source_cache_misses,
-            metal_stage.expert_source_cache_cold_misses,
-            metal_stage.expert_source_cache_replacement_misses,
-            metal_stage.expert_source_buffer_reuses,
-            metal_stage.expert_source_reuse_copy_bytes,
-            ms(metal_stage.expert_source_reuse_copy_ticks),
-            metal_stage.plan_handoff_reuses,
-            metal_stage.expert_source_cache_entries,
-            metal_stage.nocopy_cache_entries,
-            omega::metal::resident_cache_len(),
-            omega::metal::resident_cache_bytes(),
-            metal_stage.block_upload_calls,
-            ms(metal_stage.block_upload_ticks),
-            metal_stage.block_copied_bytes,
-            metal_stage.block_nocopy_bound_bytes,
-            metal_stage.block_offset_bound_bytes,
-            metal_stage.mapping_offset_uploads,
-            metal_stage.mapping_rebound_blocks,
-            mapping_residency_rung.as_str(),
-            metal_stage.expert_mapping_candidate_uploads,
-            metal_stage.expert_mapping_missed_uploads,
-            metal_stage.resident_uploads,
-            metal_stage.resident_reuses,
-            metal_stage.output_buffer_allocations,
-            metal_stage.output_buffer_allocated_bytes,
-            checkpoint_mapping_buffer_bytes,
-            expert_mapping_buffer_bytes,
-            metal_stage.plan_uniform_writes,
-            metal_stage.retire_scan_calls,
-            ms(metal_stage.retire_scan_ticks),
-            metal_stage.expert_buffers_lookup_calls,
-            ms(metal_stage.expert_buffers_lookup_ticks),
-            metal_stage.placement_resolve_calls,
-            ms(metal_stage.placement_resolve_ticks),
-            metal_stage.loop_head_calls,
-            ms(metal_stage.loop_head_ticks),
-            ms(metal_stage.encoder_finish_ticks),
-            metal_stage.barriers_emitted,
-            metal_stage.barriers_raw,
-            metal_stage.barriers_waw,
-            metal_stage.barriers_war,
-            metal_stage.barriers_waw_war_arena_recycled,
-            metal_stage.barriers_waw_war_persistent,
-            plan_cache_len,
-            plan_hits,
-            plan_misses,
-            arena_allocated_bytes.0,
-            arena_allocated_bytes.1,
-            arena_allocated_bytes.2,
-            metal_stage.gpu_exec_calls,
-            ms(metal_stage.gpu_exec_ticks),
-            phys_footprint_bytes(),
-            omega::metal::current_allocated_size().unwrap_or(0),
+    // RUST_LOG (target/level filtering) replaces the old
+    // PROXIMA_DEBUG_METAL_STAGES env gate; the info! event above already
+    // carries every per-step field this block used to duplicate as a second
+    // print (deleted, not converted -- rust.md's own "reuse first").
+    if step == 0 {
+        proxima_telemetry::debug!(
+            nocopy_cache_lengths = ?omega::metal::nocopy_cache_lengths(),
+            "nocopy_cache_lengths"
         );
-        if step == 0 {
-            eprintln!(
-                "nocopy_cache_lengths={:?}",
-                omega::metal::nocopy_cache_lengths()
-            );
-            eprintln!("resident_cache_lengths_top={:?}", {
-                let mut entries = omega::metal::resident_cache_lengths();
-                entries.sort_unstable_by_key(|(_, bytes)| core::cmp::Reverse(*bytes));
-                entries.into_iter().take(24).collect::<Vec<_>>()
-            });
-        }
+        let mut resident_cache_lengths_top = omega::metal::resident_cache_lengths();
+        resident_cache_lengths_top.sort_unstable_by_key(|(_, bytes)| core::cmp::Reverse(*bytes));
+        resident_cache_lengths_top.truncate(24);
+        proxima_telemetry::debug!(
+            resident_cache_lengths_top = ?resident_cache_lengths_top,
+            "resident_cache_lengths_top"
+        );
     }
 }
 
