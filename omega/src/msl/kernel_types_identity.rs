@@ -1773,6 +1773,43 @@ pub(super) const fn q4_0_multi_row_hoist_override() -> bool {
     false
 }
 
+/// `PROXIMA_MULTI_ROW_UNROLL=1` A/B switch: literal indices let the `sumf`
+/// accumulator promote out of private memory instead of surviving as a
+/// dynamically-indexed array. Default off; unset, empty, or any value other
+/// than `"1"` keeps today's dynamic-loop emit.
+#[cfg(feature = "std")]
+pub(super) fn multi_row_unroll_override() -> bool {
+    let active = matches!(std::env::var("PROXIMA_MULTI_ROW_UNROLL"), Ok(value) if value.trim() == "1");
+    log_multi_row_unroll_once(active);
+    active
+}
+
+/// Print whether the unroll experiment fired exactly once per process,
+/// matching [`log_q4_0_multi_row_hoist_once`]'s own posture. Gated on
+/// `instrument` alone -- the override itself stays `std`-only and fires
+/// regardless of `instrument`.
+#[cfg(feature = "instrument")]
+fn log_multi_row_unroll_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(
+            override_name = "multi_row_unroll",
+            active,
+            source,
+            "multi-row override resolved"
+        );
+    });
+}
+
+#[cfg(all(feature = "std", not(feature = "instrument")))]
+fn log_multi_row_unroll_once(_active: bool) {}
+
+#[cfg(not(feature = "std"))]
+pub(super) const fn multi_row_unroll_override() -> bool {
+    false
+}
+
 /// Every packed operand a bound program has, keyed by [`NodeId`] to its
 /// codec — the single source of truth [`emit`] (via the `quantized` slice it
 /// derives) and the Metal driver's `correct_packed_matmul_layouts` call both

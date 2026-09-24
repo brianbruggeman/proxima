@@ -894,6 +894,17 @@ fn q4_0_multi_row_hoist_active(resolved: &BoundOp, quantized: &[Option<Codec>]) 
     let Some(block) = packed_row_block(resolved, quantized) else {
         return false;
     };
+    // `push_packed_row_blocked_body`'s OWN dispatch condition
+    // (`packed_row_blocked_ggml.rs`) for whether
+    // `push_packed_row_multi_row_body` -- the only body this hoist arm ever
+    // renders inside -- runs at all, rather than the single-row body. A
+    // decode-shaped op (`token_total == 1`) never reaches the multi-row
+    // body, so it must never carry this arm's `_q0h` cache-key suffix
+    // either, or the cache key would claim a variant the render never
+    // actually emits.
+    if packed_row_block_token_total(&block, &resolved.extents) <= 1 {
+        return false;
+    }
     if block.codec != Codec::Q4_0 {
         return false;
     }
@@ -913,6 +924,123 @@ fn q4_0_multi_row_hoist_active(resolved: &BoundOp, quantized: &[Option<Codec>]) 
         return false;
     };
     is_plain_product_reduce(resolved, *reduce_op, block.weight, block.other)
+        && q4_0_multi_row_hoist_override()
+}
+
+/// The multi-row-experiment family's ONE shared admission prefix -- every
+/// experiment built on the generic multi-row arm calls this rather than
+/// re-deriving it, so they can never disagree on
+/// which ops even reach their own, arm-specific gate. Returns the
+/// classified [`PackedRowBlock`] and the packed weight's own [`Codec`] only
+/// when EVERY structural condition holds: a real packed-row op
+/// (`packed_row_block`), the SAME multi-row admission
+/// [`push_packed_row_blocked_body`] itself uses to choose
+/// [`crate::msl::push_packed_row_multi_row_body`] over the single-row body
+/// (`packed_row_block_token_total(..) > 1` -- a decode-shaped `M = 1` op is
+/// excluded here for exactly the reason it is excluded there), a `float`
+/// element type, a packed (not merely unquantized) weight with an
+/// unquantized, un-gathered activation, and -- critically -- that the
+/// render site's OWN fast-body gates ([`fast_q4k_active`]/
+/// [`fast_q4_0_active`], called as functions here rather than re-derived)
+/// do NOT admit a codec-specific fast body for this op. A fast body
+/// (`Q4_K`'s pair-dot, `Q4_0`'s header-hoist) reorders the per-lane decode
+/// into a shape whose k-partition and accumulation order differ from the
+/// generic arm every multi-row experiment reproduces -- admitting an
+/// experiment whenever a fast body would instead render means comparing
+/// against the WRONG current generic arm order (measured: `Q4_K`'s `fast_q4k` body
+/// failed the tg-share byte gate this way).
+fn multi_row_generic_arm_current(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    expert_source_mode: bool,
+) -> Option<(PackedRowBlock, Codec)> {
+    if expert_source_mode {
+        return None;
+    }
+    let block = packed_row_block(resolved, quantized)?;
+    if packed_row_block_token_total(&block, &resolved.extents) <= 1 {
+        return None;
+    }
+    let element_type = type_token(resolved.node, resolved.dtype).ok()?;
+    if element_type != "float" {
+        return None;
+    }
+    let codec = quantized[block.weight]?;
+    if quantized[block.other].is_some() {
+        return None;
+    }
+    if gather_slots(resolved)[block.weight].is_some() {
+        return None;
+    }
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return None;
+    };
+    if fast_q4k_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
+        || fast_q4_0_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
+    {
+        return None;
+    }
+    Some((block, codec))
+}
+
+/// admission for `PROXIMA_MULTI_ROW_UNROLL=1`: changes only the generic
+/// arm's body text (literal `q`/`s` indices instead of a dynamic loop),
+/// never dispatch geometry.
+pub(super) fn multi_row_unroll_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    expert_source_mode: bool,
+) -> bool {
+    multi_row_generic_arm_current(resolved, quantized, expert_source_mode).is_some()
+        && multi_row_unroll_override()
+}
+
+/// [`push_packed_row_multi_row_body`]'s own `fast_q4k` local gate
+/// (`elementwise_reduce_core.rs`), called as a function rather than
+/// re-derived so [`multi_row_generic_arm_current`] can never disagree with the
+/// render site about whether the `Q4_K` pair-dot body is what actually
+/// renders for this op.
+pub(super) fn fast_q4k_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
+    reduce_op: ScalarOp,
+    expert_source_mode: bool,
+) -> bool {
+    let Ok(element_type) = type_token(resolved.node, resolved.dtype) else {
+        return false;
+    };
+    !expert_source_mode
+        && gather_slots(resolved)[block.weight].is_none()
+        && block.codec == Codec::Q4K
+        && element_type == "float"
+        && quantized[block.weight] == Some(Codec::Q4K)
+        && quantized[block.other].is_none()
+        && is_plain_product_reduce(resolved, reduce_op, block.weight, block.other)
+}
+
+/// [`push_packed_row_multi_row_body`]'s own `fast_q4_0` local gate
+/// (`elementwise_reduce_core.rs`), called as a function rather than
+/// re-derived so [`multi_row_generic_arm_current`] can never disagree with the
+/// render site about whether the `Q4_0` header-hoist body is what actually
+/// renders for this op.
+pub(super) fn fast_q4_0_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
+    reduce_op: ScalarOp,
+    expert_source_mode: bool,
+) -> bool {
+    let Ok(element_type) = type_token(resolved.node, resolved.dtype) else {
+        return false;
+    };
+    !expert_source_mode
+        && gather_slots(resolved)[block.weight].is_none()
+        && block.codec == Codec::Q4_0
+        && element_type == "float"
+        && quantized[block.weight] == Some(Codec::Q4_0)
+        && quantized[block.other].is_none()
+        && is_plain_product_reduce(resolved, reduce_op, block.weight, block.other)
         && q4_0_multi_row_hoist_override()
 }
 
@@ -972,6 +1100,11 @@ pub(crate) fn kernel_cache_key(
             (rows != codec_rows_per_simdgroup_default(block.codec)).then_some(rows)
         }),
         q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized),
+        // no real `expert_source_mode` at cache-key time -- see
+        // `multi_row_generic_arm_current`'s own doc for why `false` is safe
+        // here (the `!weight_gathered` check inside already excludes a
+        // routed expert's weight).
+        multi_row_unroll: multi_row_unroll_active(resolved, &quantized, false),
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,

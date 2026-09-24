@@ -157,6 +157,87 @@ fn matmul_op(m: u32, k: u32, n: u32) -> BoundOp {
         .expect("one fused bound emitted")
 }
 
+/// `[rows, k] x [tokens, k] -> [tokens, rows]`, reduced over `k`, with the
+/// packed weight and the activation EACH storing `k` as their own innermost
+/// (contiguous, stride-1) dim -- the shape
+/// `packed_row_multi_row_unroll_ab.rs`'s own `matmul_program` builds.
+/// Unlike [`matmul_op`] (a literal `[m,k] x [k,n] -> [m,n]` matrix multiply,
+/// where the SECOND operand's own `k` dim is never contiguous), this is the
+/// shape `push_packed_row_blocked_body`'s multi-row admission
+/// (`split_token_feature_axes`, `classify_packed_row_block`'s own doc) needs
+/// to actually classify a token axis: output axis 0 (`tokens`) depends only
+/// on the activation, axis 1 (`rows`) only on the weight, so `token_axes =
+/// [0]` and `feature_axes = [1]` — the `[token, feature]` output order
+/// `split_token_feature_axes` requires for `reassembled == output_axes` to
+/// hold.
+fn packed_row_multi_token_op(tokens: u32, k: u32, rows: u32) -> BoundOp {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(tokens), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("packed_row_multi_token_matmul".into()),
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("packed row multi-token op infers");
+    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("packed row multi-token op lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
+}
+
+/// Every multi-row-experiment test in this module reads a `PROXIMA_MULTI_
+/// ROW_*` env var, and `cargo test` (unlike `cargo nextest run`, which gives
+/// each test its own process) runs this module's tests as multiple THREADS
+/// sharing one process -- env vars are process-global, so an unguarded
+/// "baseline" read (no override set) can observe a DIFFERENT test's
+/// concurrently-active `temp_env::with_var` override. `temp_env`'s own
+/// internal lock serializes `with_var` calls against each other but not
+/// against an unguarded read, so every baseline capture must ALSO go
+/// through `with_var` (explicitly unset) to take that same lock.
+fn with_every_multi_row_env_unset<T>(closure: impl FnOnce() -> T) -> T {
+    temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", None::<&str>, || {
+        temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", None::<&str>, || {
+            temp_env::with_var("PROXIMA_COORD_INDEX32", None::<&str>, closure)
+        })
+    })
+}
+
 fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
     let mut program = Vec::new();
     let weight = append(
@@ -1565,6 +1646,102 @@ fn decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in() {
     assert!(
         source.contains("sumf["),
         "a one-token dispatch must still take the row-blocked path:\n{source}"
+    );
+}
+
+/// a decode-shaped (`token_total == 1`) op must never carry `_u`, and its
+/// cache key/source/grid/threadgroup_width must be identical regardless of
+/// `PROXIMA_MULTI_ROW_UNROLL`, since unroll changes only body text, never
+/// dispatch geometry.
+#[test]
+fn multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width() {
+    let bound = packed_row_multi_token_op(1, 256, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
+        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline cache key");
+        let source = emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline emits")
+            .source;
+        let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline dispatch shape");
+        (key, source, dispatch)
+    });
+
+    let (shared_key, shared_source, shared_dispatch) =
+        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", Some("1"), || {
+            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+                .expect("unroll-env cache key");
+            let source = emit(&bound, &q4_0, NumericPolicy::default())
+                .expect("unroll-env emits")
+                .source;
+            let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+                .expect("unroll-env dispatch shape");
+            (key, source, dispatch)
+        });
+
+    assert!(
+        !baseline_key.contains("_u"),
+        "a decode-shaped op must never carry the _u suffix: {baseline_key}"
+    );
+    assert_eq!(
+        baseline_key, shared_key,
+        "decode-shaped cache key must be identical whether PROXIMA_MULTI_ROW_UNROLL is set"
+    );
+    assert_eq!(
+        baseline_source, shared_source,
+        "decode-shaped emitted source must be byte-identical whether the override is set"
+    );
+    assert_eq!(
+        baseline_dispatch.1.threads, shared_dispatch.1.threads,
+        "decode-shaped grid_threads must be identical whether the override is set"
+    );
+    assert_eq!(
+        baseline_dispatch.1.threadgroup_width, shared_dispatch.1.threadgroup_width,
+        "decode-shaped threadgroup_width must be identical whether the override is set"
+    );
+}
+
+/// [`multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width`]'s
+/// multi-row counterpart: a real prefill shape (27 tokens) DOES take the
+/// `_u` cache-key suffix, but its dispatch geometry is UNCHANGED (unroll
+/// touches body text only, never `grid_threads`/`tiled_gemm_threadgroup_
+/// width`).
+#[test]
+fn multi_row_unroll_27_token_shape_gets_u_suffix_with_unchanged_geometry() {
+    let bound = packed_row_multi_token_op(27, 256, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let baseline_dispatch = with_every_multi_row_env_unset(|| {
+        kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+            .expect("baseline dispatch shape")
+    });
+
+    let (shared_key, shared_dispatch) =
+        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", Some("1"), || {
+            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+                .expect("unroll-env cache key");
+            let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+                .expect("unroll-env dispatch shape");
+            (key, dispatch)
+        });
+
+    assert!(
+        shared_key.contains("_u"),
+        "a 27-token op with PROXIMA_MULTI_ROW_UNROLL=1 must carry the _u suffix: {shared_key}"
+    );
+    assert_eq!(
+        shared_dispatch.1.threads, baseline_dispatch.1.threads,
+        "unroll must not change grid_threads"
+    );
+    assert_eq!(
+        shared_dispatch.1.threadgroup_width, baseline_dispatch.1.threadgroup_width,
+        "unroll must not change threadgroup_width"
     );
 }
 
