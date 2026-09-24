@@ -59,21 +59,18 @@ sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
 const DEFAULT_MAX_TOKENS: usize = 48;
 
-// mirrors `gemma4_dispatch_profile_widths.rs`'s `install_console_telemetry` --
-// `report_encoder_split`/`report_op_timings` emit via `info!`, which is
-// otherwise silent: this example had no console sink, so those events never
-// reached stderr even with PROXIMA_METAL_ENCODER_SPLIT_AT/DISPATCH_PROFILE_STEP set.
-// `proxima-telemetry` is only pulled in by `instrument`
-// (`dep:proxima-telemetry`, this crate's own `Cargo.toml`) -- a build
-// without it has no recorder to install, and no `token_breakdown`/
-// `report_*` events compiled anywhere in this crate to drain.
-// Console + file when `PROXIMA_TELEMETRY_FILE=<path>` is set, console alone
-// otherwise -- `Exporter::fan` (`proxima-telemetry/src/export.rs`) composes
-// both through the crate's own `FanExporter`/`fan_exporters` combinator, no
-// bespoke dual-writer here.
+// proxima-telemetry is only a dependency under `instrument`, so events
+// otherwise had no console sink to reach.
 #[cfg(feature = "instrument")]
 fn install_console_telemetry() -> (Arc<AtomicUsize>, Arc<Recorder<proxima_telemetry::clock::GlobalClock>>) {
-    proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse("debug"));
+    // result lines stay at info even when RUST_LOG is unset
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+    let filter = if rust_log.is_empty() {
+        "decode_gbps_baseline=info".to_string()
+    } else {
+        format!("{rust_log},decode_gbps_baseline=info")
+    };
+    proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(&filter));
     let exporter = match std::env::var("PROXIMA_TELEMETRY_FILE") {
         Ok(path) => Exporter::fan(vec![Exporter::std(), Exporter::file(path)])
             .expect("console+file fan composes"),
@@ -134,6 +131,7 @@ fn main() {
     // the macro's own field evaluation; unset keeps today's behavior. No-op
     // without `instrument` -- there is no recorder to install and no
     // `token_breakdown`/`report_*` event compiled anywhere in this crate.
+    // the pump is never joined, so drain to empty or the last result line is lost
     #[cfg(feature = "instrument")]
     let _telemetry = if std::env::var_os("PROXIMA_CONSOLE_TELEMETRY").as_deref() == Some(std::ffi::OsStr::new("0"))
     {
