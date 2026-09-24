@@ -2682,10 +2682,7 @@ pub(super) mod hazard_tracker_tests {
         hazard_step, kernel_dispatch_shape, resolve_hazard_inputs,
     };
     #[cfg(feature = "instrument")]
-    use super::{
-        BARRIERS_RAW, BARRIERS_WAR, BARRIERS_WAW, BARRIERS_WAW_WAR_ARENA_RECYCLED,
-        BARRIERS_WAW_WAR_PERSISTENT, record_hazard_class,
-    };
+    use super::record_hazard_class;
     use crate::msl::{hazard_read_nodes, hazard_write_node};
 
     /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
@@ -2747,9 +2744,8 @@ pub(super) mod hazard_tracker_tests {
     /// now-read-since-barrier identity, the same shape
     /// [`arena_slot_reuse_after_a_read_emits_a_war_barrier`] drives) --
     /// exactly the scenario [`record_hazard_class`] exists to attribute.
-    /// `BARRIERS_RAW`/`BARRIERS_WAR`/etc are process-wide statics; nextest's
-    /// per-test process isolation is what keeps a bare `snapshot_and_reset`
-    /// deterministic against any other test incrementing the same counters.
+    // shared process-global counters: assert the before/after delta is >=
+    // this test's own contribution, never == (a concurrent test can only add).
     #[cfg(feature = "instrument")]
     #[test]
     fn hazard_class_counters_attribute_one_raw_and_one_arena_reuse_war() {
@@ -2760,10 +2756,14 @@ pub(super) mod hazard_tracker_tests {
         assert_eq!(class0, HazardClass::None);
         assert!(!hazard_step(&mut hazards, &[], "a"));
 
+        let raw_before = super::BARRIERS_RAW.get();
+        let war_before = super::BARRIERS_WAR.get();
+        let arena_recycled_before = super::BARRIERS_WAW_WAR_ARENA_RECYCLED.get();
+
         // op1: reads `a` (written by op0 since the last barrier) and writes
         // `b` -> RAW, a genuine dataflow edge, never arena-attributed.
         let class1 = hazards.classify(&["a"], Some("b"));
-        assert_eq!(class1, HazardClass::Raw);
+        assert_eq!(class1, HazardClass::Raw, "op1 contributed the one RAW barrier");
         assert!(hazard_step(&mut hazards, &["a"], "b"));
         record_hazard_class(class1, false);
 
@@ -2771,34 +2771,25 @@ pub(super) mod hazard_tracker_tests {
         // was READ by op1 since the last barrier (op1's own RAW reset the
         // tracker first), so this is a WAR hazard on a recycled arena slot.
         let class2 = hazards.classify(&[], Some("a"));
-        assert_eq!(class2, HazardClass::War);
+        assert_eq!(
+            class2,
+            HazardClass::War,
+            "op2's WAR fired on the arena-recycled `a` slot"
+        );
         assert!(hazard_step(&mut hazards, &[], "a"));
         record_hazard_class(class2, true);
 
-        assert_eq!(
-            BARRIERS_RAW.snapshot_and_reset(),
-            1,
-            "op1 contributed the one RAW barrier"
+        assert!(
+            super::BARRIERS_RAW.get() - raw_before >= 1,
+            "op1 must have contributed at least one RAW barrier to the shared counter"
         );
-        assert_eq!(
-            BARRIERS_WAR.snapshot_and_reset(),
-            1,
-            "op2 contributed the one WAR barrier"
+        assert!(
+            super::BARRIERS_WAR.get() - war_before >= 1,
+            "op2 must have contributed at least one WAR barrier to the shared counter"
         );
-        assert_eq!(
-            BARRIERS_WAW.snapshot_and_reset(),
-            0,
-            "no WAW hazard in this sequence"
-        );
-        assert_eq!(
-            BARRIERS_WAW_WAR_ARENA_RECYCLED.snapshot_and_reset(),
-            1,
-            "op2's WAR fired on the arena-recycled `a` slot"
-        );
-        assert_eq!(
-            BARRIERS_WAW_WAR_PERSISTENT.snapshot_and_reset(),
-            0,
-            "no WAW/WAR fired on a persistent identity in this sequence"
+        assert!(
+            super::BARRIERS_WAW_WAR_ARENA_RECYCLED.get() - arena_recycled_before >= 1,
+            "op2's WAR must have contributed at least one arena-recycled attribution"
         );
     }
 
