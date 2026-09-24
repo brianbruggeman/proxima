@@ -171,6 +171,9 @@ pub(crate) struct MetalOnlyExtras {
     /// binary, matching [`Self::packed_row_block_rows_override`]'s own
     /// same-binary A/B posture.
     pub q4_0_multi_row_hoist: bool,
+    /// literal `q`/`s` indices let the accumulator promote out of private
+    /// memory. Feeds the `_u` suffix.
+    pub multi_row_unroll: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -626,6 +629,9 @@ pub(crate) fn kernel_identity(
     }
     if metal.q4_0_multi_row_hoist {
         identity.push_str("_q0h");
+    }
+    if metal.multi_row_unroll {
+        identity.push_str("_u");
     }
 
     identity

@@ -993,6 +993,11 @@ pub(super) fn push_packed_row_multi_row_body(
     let (init_expr, _) = fold_init_tokens(init);
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     let combine_fn = simd_combine_fn(resolved.node, reduce_op)?;
+    let gather_slots = gather_slots(resolved);
+    let weight_gathered = gather_slots[weight].is_some();
+    // zero-init, accumulate, and epilogue all index `sumf[s][q]`; all three
+    // must unroll to literals or the array never promotes out of memory.
+    let unroll_active = multi_row_unroll_active(resolved, quantized, expert_source_mode);
 
     source.push_str("    long feature_total = 1;\n");
     for index in 0..feature_axes.len() {
@@ -1016,12 +1021,23 @@ pub(super) fn push_packed_row_multi_row_body(
     source.push_str(&format!("    long token_first = token_group * {cap};\n"));
 
     source.push_str(&format!("    {element_type} sumf[{cap}][{rows}];\n"));
-    source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
-    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str(&format!(
-        "            sumf[s][q] = (lane == 0u) ? ({init_expr}) : ({identity});\n"
-    ));
-    source.push_str("        }\n    }\n");
+    if unroll_active {
+        // literal indices let the accumulator promote out of private memory.
+        for s in 0..cap {
+            for q in 0..rows {
+                source.push_str(&format!(
+                    "    sumf[{s}][{q}] = (lane == 0u) ? ({init_expr}) : ({identity});\n"
+                ));
+            }
+        }
+    } else {
+        source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str(&format!(
+            "            sumf[s][q] = (lane == 0u) ? ({init_expr}) : ({identity});\n"
+        ));
+        source.push_str("        }\n    }\n");
+    }
 
     source.push_str(&format!("    long weight_base[{rows}];\n"));
     source.push_str(&format!("    long feature_coord[{rows}][{rank_len}];\n"));
@@ -1073,9 +1089,9 @@ pub(super) fn push_packed_row_multi_row_body(
     // A routed expert's weight base depends on WHICH token slot `s` picked
     // it, not on the feature row `q` -- gathered once per token here,
     // alongside the token coordinate `other_base[s]` already decoded above,
-    // never re-fetched per `(s, q, k)` triple below.
-    let gather_slots = gather_slots(resolved);
-    let weight_gathered = gather_slots[weight].is_some();
+    // never re-fetched per `(s, q, k)` triple below. `gather_slots`/
+    // `weight_gathered` are hoisted above the `token_group`/`feature_group`
+    // emission now -- see that hoist's own doc.
     if weight_gathered {
         source.push_str(&format!("    long weight_expert_base[{cap}];\n"));
         source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
@@ -1101,27 +1117,20 @@ pub(super) fn push_packed_row_multi_row_body(
     // decode shared across every token slot, which is only sound when every
     // slot reads the SAME expert row; the generic loop below re-reads per
     // slot instead, which a routed weight requires regardless of codec.
-    let fast_q4k = !expert_source_mode
-        && !weight_gathered
-        && block.codec == Codec::Q4K
-        && element_type == "float"
-        && quantized[weight] == Some(Codec::Q4K)
-        && quantized[other].is_none()
-        && is_plain_product_reduce(resolved, reduce_op, weight, other);
+    // Delegates to [`fast_q4k_active`] rather than repeating its structural
+    // checks inline -- the SAME function [`multi_row_generic_arm_current`]
+    // calls to decide whether THIS op's current body is the pair-dot fast
+    // body rather than the generic arm, so the two can never disagree.
+    let fast_q4k = fast_q4k_active(resolved, quantized, block, reduce_op, expert_source_mode);
     // `Q4_0` sibling of the `fast_q4k` gate above (`docs/discipline.md`,
     // prefill header-decode hoist): same admission shape (plain product,
     // unquantized activation, un-gathered weight), plus the
     // `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` A/B switch so the unset-env emit stays
     // byte-identical to today's generic loop -- see
     // `push_packed_row_multi_row_q4_0_body`'s own doc for what it changes.
-    let fast_q4_0 = !expert_source_mode
-        && !weight_gathered
-        && block.codec == Codec::Q4_0
-        && element_type == "float"
-        && quantized[weight] == Some(Codec::Q4_0)
-        && quantized[other].is_none()
-        && is_plain_product_reduce(resolved, reduce_op, weight, other)
-        && q4_0_multi_row_hoist_override();
+    // Delegates to [`fast_q4_0_active`] for the same reason `fast_q4k` now
+    // delegates to [`fast_q4k_active`].
+    let fast_q4_0 = fast_q4_0_active(resolved, quantized, block, reduce_op, expert_source_mode);
     if fast_q4k {
         push_packed_row_multi_row_q4k_body(
             source,
@@ -1142,6 +1151,20 @@ pub(super) fn push_packed_row_multi_row_body(
             cap,
             element_type,
             operand_count,
+        );
+    } else if unroll_active && !weight_gathered {
+        push_packed_row_multi_row_unroll_body(
+            source,
+            resolved,
+            reduce_op,
+            weight,
+            other,
+            rows,
+            cap,
+            element_type,
+            operand_count,
+            quantized[weight],
+            quantized[other],
         );
     } else {
         source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
@@ -1197,50 +1220,105 @@ pub(super) fn push_packed_row_multi_row_body(
         source.push_str("    }\n");
     }
 
-    source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
-    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str(&format!(
-        "            {element_type} reduced = {combine_fn}(sumf[s][q]);\n"
-    ));
-    source.push_str("            if (lane == 0u) {\n");
-    source.push_str("                long token_flat = token_first + s;\n");
-    source.push_str("                long feature_flat = feature_first + q;\n");
-    source.push_str(
-        "                if (token_flat < token_total && feature_flat < feature_total) {\n",
-    );
-    source.push_str("                    long out_offset = u.out_base;\n");
-    for &dim in feature_axes {
-        source.push_str(&format!(
-            "                    out_offset += feature_coord[q][{dim}] * u.out_strides[{dim}];\n"
-        ));
-    }
-    for &dim in token_axes {
-        source.push_str(&format!(
-            "                    out_offset += token_coord[s][{dim}] * u.out_strides[{dim}];\n"
-        ));
-    }
-    let output_rank = token_axes.len() + feature_axes.len();
-    push_reduce_epilogue_write(
-        source,
-        epilogue_body,
-        epilogue_operands,
-        output_rank,
-        element_type,
-        "                    ",
-        |dim| {
-            if dim < token_axes.len() {
-                format!("token_coord[s][{}]", token_axes[dim])
-            } else {
-                format!("feature_coord[q][{}]", feature_axes[dim - token_axes.len()])
+    if unroll_active {
+        // Literal `s`/`q` at every one of the `cap * rows` epilogue sites --
+        // same reasoning as the zero-init loop above: `sumf[s][q]` here is
+        // the THIRD (and last) site that must be constant-indexed. Per-(s,q)
+        // order, `combine_fn`, the `lane == 0u` guard, and the write
+        // addressing are all byte-identical to the dynamic-loop version --
+        // only the induction variables became literals.
+        for s in 0..cap {
+            for q in 0..rows {
+                source.push_str("    {\n");
+                source.push_str(&format!(
+                    "        {element_type} reduced = {combine_fn}(sumf[{s}][{q}]);\n"
+                ));
+                source.push_str("        if (lane == 0u) {\n");
+                source.push_str(&format!("            long token_flat = token_first + {s};\n"));
+                source.push_str(&format!("            long feature_flat = feature_first + {q};\n"));
+                source.push_str(
+                    "            if (token_flat < token_total && feature_flat < feature_total) {\n",
+                );
+                source.push_str("                long out_offset = u.out_base;\n");
+                for &dim in feature_axes {
+                    source.push_str(&format!(
+                        "                out_offset += feature_coord[{q}][{dim}] * u.out_strides[{dim}];\n"
+                    ));
+                }
+                for &dim in token_axes {
+                    source.push_str(&format!(
+                        "                out_offset += token_coord[{s}][{dim}] * u.out_strides[{dim}];\n"
+                    ));
+                }
+                let output_rank = token_axes.len() + feature_axes.len();
+                push_reduce_epilogue_write(
+                    source,
+                    epilogue_body,
+                    epilogue_operands,
+                    output_rank,
+                    element_type,
+                    "                ",
+                    |dim| {
+                        if dim < token_axes.len() {
+                            format!("token_coord[{s}][{}]", token_axes[dim])
+                        } else {
+                            format!("feature_coord[{q}][{}]", feature_axes[dim - token_axes.len()])
+                        }
+                    },
+                    "reduced",
+                    "out_offset",
+                );
+                source.push_str("            }\n");
+                source.push_str("        }\n");
+                source.push_str("    }\n");
             }
-        },
-        "reduced",
-        "out_offset",
-    );
-    source.push_str("                }\n");
-    source.push_str("            }\n");
-    source.push_str("        }\n");
-    source.push_str("    }\n");
+        }
+    } else {
+        source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str(&format!(
+            "            {element_type} reduced = {combine_fn}(sumf[s][q]);\n"
+        ));
+        source.push_str("            if (lane == 0u) {\n");
+        source.push_str("                long token_flat = token_first + s;\n");
+        source.push_str("                long feature_flat = feature_first + q;\n");
+        source.push_str(
+            "                if (token_flat < token_total && feature_flat < feature_total) {\n",
+        );
+        source.push_str("                    long out_offset = u.out_base;\n");
+        for &dim in feature_axes {
+            source.push_str(&format!(
+                "                    out_offset += feature_coord[q][{dim}] * u.out_strides[{dim}];\n"
+            ));
+        }
+        for &dim in token_axes {
+            source.push_str(&format!(
+                "                    out_offset += token_coord[s][{dim}] * u.out_strides[{dim}];\n"
+            ));
+        }
+        let output_rank = token_axes.len() + feature_axes.len();
+        push_reduce_epilogue_write(
+            source,
+            epilogue_body,
+            epilogue_operands,
+            output_rank,
+            element_type,
+            "                    ",
+            |dim| {
+                if dim < token_axes.len() {
+                    format!("token_coord[s][{}]", token_axes[dim])
+                } else {
+                    format!("feature_coord[q][{}]", feature_axes[dim - token_axes.len()])
+                }
+            },
+            "reduced",
+            "out_offset",
+        );
+        source.push_str("                }\n");
+        source.push_str("            }\n");
+        source.push_str("        }\n");
+        source.push_str("    }\n");
+    }
     Ok(())
 }
 
@@ -1332,6 +1410,8 @@ pub(super) fn push_packed_row_multi_row_q4k_body(
 /// byte-identical to what [`Q4_0_UNPACK_MSL`]'s `q4_0_element` computes at
 /// the same `(weight_base[q]+k)` offset: same operations on the same bytes,
 /// no reassociation, just computed once per block instead of once per lane.
+// the argument list mirrors the current generic arm's fixed signature so
+// the two bodies stay diffable line-for-line against each other.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_packed_row_multi_row_q4_0_body(
     source: &mut String,
@@ -1394,6 +1474,67 @@ pub(super) fn push_packed_row_multi_row_q4_0_body(
     source.push_str(&format!("                sumf[s][q] = {combine_expr};\n"));
     source.push_str("            }\n");
     source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
+/// [`push_packed_row_multi_row_body`]'s generic (`else`) arm, gated by
+/// `PROXIMA_MULTI_ROW_UNROLL=1` (`multi_row_unroll_override`): renders the
+/// same per-`k` body with `q`/`s` fully unrolled to literal integers instead
+/// of loop induction variables, so `sumf`/`weight_base`/`other_base` promote
+/// out of private memory. Never reached when the weight is gathered (the
+/// caller's `!weight_gathered` guard mirrors [`multi_row_unroll_active`]'s
+/// admission, so key and body can never disagree).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_packed_row_multi_row_unroll_body(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    cap: usize,
+    element_type: &str,
+    operand_count: usize,
+    weight_codec: Option<Codec>,
+    other_codec: Option<Codec>,
+) {
+    source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+    for q in 0..rows {
+        // Each literal `q`/`s` iteration gets its OWN brace scope -- the
+        // dynamic-loop generic arm this mirrors gets a fresh block scope
+        // per loop iteration for free (`scratch`/`value`/`step0` all
+        // re-declared each pass); flattening the unroll into one shared
+        // scope would redeclare those same names `rows * cap` times in a
+        // row, which Metal's C++-family front end rejects outright.
+        source.push_str("        {\n");
+        source.push_str(&format!(
+            "            {element_type} scratch[{}];\n",
+            operand_count.max(1)
+        ));
+        source.push_str(&format!(
+            "            scratch[{weight}] = {};\n",
+            operand_read(weight, &format!("(weight_base[{q}] + k)"), weight_codec)
+        ));
+        for s in 0..cap {
+            source.push_str("            {\n");
+            source.push_str(&format!(
+                "                scratch[{other}] = {};\n",
+                operand_read(
+                    other,
+                    &format!("(other_base[{s}] + k * other_stride)"),
+                    other_codec
+                )
+            ));
+            let value_expr =
+                push_body_steps(source, resolved.element_body(), "                ", element_type);
+            source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+            let sumf_expr = format!("sumf[{s}][{q}]");
+            let combine_expr = scalar_op_expr(reduce_op, &[sumf_expr.as_str(), "value"]);
+            source.push_str(&format!("                {sumf_expr} = {combine_expr};\n"));
+            source.push_str("            }\n");
+        }
+        source.push_str("        }\n");
+    }
     source.push_str("    }\n");
 }
 
