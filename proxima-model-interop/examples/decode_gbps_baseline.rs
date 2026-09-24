@@ -72,7 +72,7 @@ const DEFAULT_MAX_TOKENS: usize = 48;
 // both through the crate's own `FanExporter`/`fan_exporters` combinator, no
 // bespoke dual-writer here.
 #[cfg(feature = "instrument")]
-fn install_console_telemetry() -> Arc<AtomicUsize> {
+fn install_console_telemetry() -> (Arc<AtomicUsize>, Arc<Recorder<proxima_telemetry::clock::GlobalClock>>) {
     proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse("debug"));
     let exporter = match std::env::var("PROXIMA_TELEMETRY_FILE") {
         Ok(path) => Exporter::fan(vec![Exporter::std(), Exporter::file(path)])
@@ -98,7 +98,7 @@ fn install_console_telemetry() -> Arc<AtomicUsize> {
             }
         })
         .expect("spawn telemetry drain thread");
-    drained_total
+    (drained_total, recorder)
 }
 
 /// Owner brief item (3): one `capture_binary` line, printed once at process
@@ -135,7 +135,7 @@ fn main() {
     // without `instrument` -- there is no recorder to install and no
     // `token_breakdown`/`report_*` event compiled anywhere in this crate.
     #[cfg(feature = "instrument")]
-    let _drained_total = if std::env::var_os("PROXIMA_CONSOLE_TELEMETRY").as_deref() == Some(std::ffi::OsStr::new("0"))
+    let _telemetry = if std::env::var_os("PROXIMA_CONSOLE_TELEMETRY").as_deref() == Some(std::ffi::OsStr::new("0"))
     {
         None
     } else {
@@ -329,6 +329,14 @@ fn main() {
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} text={text:?}"
             );
+        }
+        // synchronous flush point: the background pump thread above only
+        // wakes every 5ms, and one `drain()` call is one bounded batch pass
+        // (`drain.batch` per ring, not "until empty") -- looping until it
+        // returns 0 is every other example's own drain-to-shutdown idiom.
+        #[cfg(feature = "instrument")]
+        if let Some((_, recorder)) = _telemetry.as_ref() {
+            while recorder.drain() > 0 {}
         }
     }
 }
