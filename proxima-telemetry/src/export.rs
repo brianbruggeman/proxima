@@ -227,6 +227,19 @@ impl Exporter {
         Self::with(Sink::Handle(handle))
     }
 
+    /// Composes N exporters via [`crate::pipes::fan_exporters`] so one record
+    /// reaches every sink.
+    ///
+    /// # Errors
+    /// Propagates the first sink's own lowering error from [`Self::into_handle`].
+    pub fn fan(exporters: alloc::vec::Vec<Exporter>) -> Result<Self, Error> {
+        let handles = exporters
+            .into_iter()
+            .map(Exporter::into_handle)
+            .collect::<Result<alloc::vec::Vec<_>, Error>>()?;
+        Ok(Self::pipe(crate::pipes::fan_exporters(handles)))
+    }
+
     /// Choose the formatter (default [`Formatter::Text`]).
     #[must_use]
     pub fn format(mut self, format: Formatter) -> Self {
@@ -624,6 +637,44 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn fan_delivers_one_record_to_every_composed_sink() {
+        let first = Arc::new(Mutex::new(alloc::vec::Vec::new()));
+        let second = Arc::new(Mutex::new(alloc::vec::Vec::new()));
+        let fan = Exporter::fan(alloc::vec![
+            Exporter::writer(SharedBuf(first.clone())),
+            Exporter::writer(SharedBuf(second.clone())),
+        ])
+        .expect("fan composes two writer exporters");
+        let recorder = Recorder::builder()
+            .export(fan)
+            .expect("builder accepts a fan exporter")
+            .core_count(1)
+            .start()
+            .expect("recorder starts without a global install");
+
+        recorder
+            .log()
+            .level(Level::INFO)
+            .message("fan-out-record")
+            .module_path("proxima::test")
+            .emit();
+        recorder.drain();
+
+        let first_out = String::from_utf8(first.lock().unwrap().clone()).unwrap();
+        let second_out = String::from_utf8(second.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            first_out.matches("fan-out-record").count(),
+            1,
+            "first sink must receive exactly one copy: {first_out}"
+        );
+        assert_eq!(
+            second_out.matches("fan-out-record").count(),
+            1,
+            "second sink must receive exactly one copy: {second_out}"
+        );
     }
 
     // the dead-simple path: one composable `.export()`, `.install()` registers
