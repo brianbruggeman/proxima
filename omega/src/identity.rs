@@ -174,6 +174,11 @@ pub(crate) struct MetalOnlyExtras {
     /// literal `q`/`s` indices let the accumulator promote out of private
     /// memory. Feeds the `_u` suffix.
     pub multi_row_unroll: bool,
+    /// narrows `weight_base[q] + k` to `uint` so the k-loop division is
+    /// 32-bit, not 64-bit. Feeds the `_i32` suffix.
+    /// admitted only when the max reachable byte offset fits `u32` and the
+    /// operand base is block-aligned.
+    pub multi_row_index32: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -632,6 +637,9 @@ pub(crate) fn kernel_identity(
     }
     if metal.multi_row_unroll {
         identity.push_str("_u");
+    }
+    if metal.multi_row_index32 {
+        identity.push_str("_i32");
     }
 
     identity
