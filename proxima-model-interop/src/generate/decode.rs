@@ -364,7 +364,7 @@ fn run_attn_fuse_parity_probe(
             arm,
             layers_with_diff,
             candidates_total = candidates.len() as u64,
-            logits_first_diff = match logits_diff {
+            logits_first_diff = %match logits_diff {
                 None => "none".to_string(),
                 Some((element, first_bits, second_bits)) =>
                     format!("({element}, 0x{first_bits:08x}, 0x{second_bits:08x})"),
