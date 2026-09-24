@@ -1911,6 +1911,114 @@ fn multi_row_index32_oversized_shape_not_admitted() {
     );
 }
 
+/// `PROXIMA_COORD_INDEX32=1` at the GENERIC cooperative-reduce seam
+/// (`coord_index32_active`'s own doc): `matmul_op` with NEITHER operand
+/// quantized takes the plain cooperative-reduce path (not packed-row, not
+/// tiled-GEMM), so this exercises `push_cooperative_reduce_body`'s
+/// coordinate-decomposition branch directly. Override on vs off must differ
+/// in EXACTLY the coordinate-decomposition lines (`remaining`'s declared
+/// type and the two `u.output_extents[N]` divisor casts) -- proved by a
+/// line-level diff, not just "not equal" -- carry the `_c32` suffix alone,
+/// and leave `grid_threads`/`threadgroup_width` unchanged (this experiment
+/// narrows body text only).
+#[test]
+fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
+    let bound = matmul_op(4, 65536, 5);
+    let empty_codecs = BTreeMap::new();
+
+    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
+        let key = kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+            .expect("baseline cache key");
+        let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+            .expect("baseline emits")
+            .source;
+        let dispatch = kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+            .expect("baseline dispatch shape");
+        (key, source, dispatch)
+    });
+
+    let (shared_key, shared_source, shared_dispatch) =
+        temp_env::with_var("PROXIMA_COORD_INDEX32", Some("1"), || {
+            let key = kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                .expect("coord-index32-env cache key");
+            let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                .expect("coord-index32-env emits")
+                .source;
+            let dispatch = kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                .expect("coord-index32-env dispatch shape");
+            (key, source, dispatch)
+        });
+
+    assert!(
+        shared_key.contains("_c32") && !baseline_key.contains("_c32"),
+        "override must add exactly the _c32 suffix: baseline={baseline_key} shared={shared_key}"
+    );
+    assert_eq!(
+        baseline_key.replace("_c32", ""),
+        shared_key.replace("_c32", ""),
+        "the only cache-key difference must be the _c32 suffix"
+    );
+    assert_eq!(
+        baseline_dispatch.1.threads, shared_dispatch.1.threads,
+        "coord_index32 must not change grid_threads"
+    );
+    assert_eq!(
+        baseline_dispatch.1.threadgroup_width, shared_dispatch.1.threadgroup_width,
+        "coord_index32 must not change threadgroup_width"
+    );
+
+    let baseline_lines: Vec<&str> = baseline_source.lines().collect();
+    let shared_lines: Vec<&str> = shared_source.lines().collect();
+    assert_eq!(
+        baseline_lines.len(),
+        shared_lines.len(),
+        "override must not add or remove lines, only change coordinate-decomposition lines"
+    );
+    let mut differing_lines = Vec::new();
+    for (index, (baseline_line, shared_line)) in baseline_lines.iter().zip(shared_lines.iter()).enumerate() {
+        if baseline_line != shared_line {
+            differing_lines.push((index, *baseline_line, *shared_line));
+        }
+    }
+    assert!(
+        !differing_lines.is_empty(),
+        "coord_index32 must change at least one line when admitted"
+    );
+    for (index, baseline_line, shared_line) in &differing_lines {
+        let touches_remaining = baseline_line.contains("remaining") && shared_line.contains("remaining");
+        assert!(
+            touches_remaining,
+            "line {index} differs but is not a coordinate-decomposition line: \
+             baseline={baseline_line:?} shared={shared_line:?}"
+        );
+    }
+}
+
+/// A decode/single-token-shaped op through the SAME generic cooperative-
+/// reduce seam: unlike the `multi_row_*` family (which structurally
+/// excludes `token_total == 1`), `coord_index32_active` has no per-token
+/// concept at all -- it is admitted here (`n = 1` still gives every output
+/// axis an extent in `[1, u32::MAX]`), and the narrowed vs wide decomposition
+/// still produce byte-identical OUTPUT VALUES (this unit test proves the
+/// narrowing is admitted and changes only the same coordinate lines; the
+/// actual output-bit equality is the Metal A/B gate, not reachable from this
+/// no-device unit test).
+#[test]
+fn coord_index32_single_token_shape_is_admitted_with_same_narrowing() {
+    let bound = matmul_op(4, 4096, 1);
+    let empty_codecs = BTreeMap::new();
+
+    let shared_key = temp_env::with_var("PROXIMA_COORD_INDEX32", Some("1"), || {
+        kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+            .expect("coord-index32-env cache key")
+    });
+
+    assert!(
+        shared_key.contains("_c32"),
+        "a single-token op reaching the generic cooperative-reduce seam must still be admitted: {shared_key}"
+    );
+}
+
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn many_token_matmul_takes_the_tiled_gemm_path() {
