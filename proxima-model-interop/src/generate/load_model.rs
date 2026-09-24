@@ -499,10 +499,22 @@ pub(super) fn emit_token_breakdown(breakdown: &TokenBreakdown) {
 /// correct to call from either decode arm as long as it is read exactly
 /// once per step, immediately after that step's `evaluate`/
 /// `evaluate_with_placements` call.
+/// `resolve_plan_ticks` is [`crate::generate::residency_caches::RESOLVE_PLAN_TICKS`]'s
+/// own per-step snapshot-and-reset delta -- the `resolve_cached_plan` `BTreeMap`
+/// lookup GAP.md named as part of the unattributed host residual between
+/// `evaluate_started` and `step_encode_start`, owned by this crate (the plan
+/// cache) rather than `omega`'s [`omega::metal::MetalStageTotals`] (Metal
+/// dispatch), so it stays a separate parameter instead of a struct field.
+// each parameter is an independent per-step diagnostic snapshot (metal
+// stage totals, plan-cache-lookup ticks, cache lengths/hits/misses, arena
+// bytes, residency rung) with no natural grouping struct -- bundling them
+// into one would just relocate the field count, not reduce it.
+#[allow(clippy::too_many_arguments)]
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 pub(super) fn emit_token_breakdown_metal(
     step: usize,
     metal_stage: &omega::metal::MetalStageTotals,
+    resolve_plan_ticks: u64,
     plan_cache_len: usize,
     plan_hits: usize,
     plan_misses: usize,
@@ -570,6 +582,9 @@ pub(super) fn emit_token_breakdown_metal(
         loop_head_calls = metal_stage.loop_head_calls,
         loop_head_ms = ms(metal_stage.loop_head_ticks),
         encoder_finish_ms = ms(metal_stage.encoder_finish_ticks),
+        pre_encode_calls = metal_stage.pre_encode_calls,
+        pre_encode_ms = ms(metal_stage.pre_encode_ticks),
+        resolve_plan_ms = ms(resolve_plan_ticks),
         barriers = metal_stage.barriers_emitted,
         barriers_raw = metal_stage.barriers_raw,
         barriers_waw = metal_stage.barriers_waw,
@@ -592,8 +607,9 @@ pub(super) fn emit_token_breakdown_metal(
         kind_filter,
         "token_breakdown_metal: per-decode-step metal stage attribution"
     );
+    // one-time device-allocation census, emitted once (`step == 0`) --
     // RUST_LOG (target/level filtering) replaces the old
-    // PROXIMA_DEBUG_METAL_STAGES env gate; the info! event above already
+    // `PROXIMA_DEBUG_METAL_STAGES` env gate; the `info!` event above already
     // carries every per-step field this block used to duplicate as a second
     // print (deleted, not converted -- rust.md's own "reuse first").
     if step == 0 {

@@ -715,6 +715,15 @@ pub static LOOP_HEAD_TICKS: Counter = Counter::new("omega.metal.loop_head_ticks"
 /// [`GPU_EXEC_TICKS`]' own `commit()`.
 #[cfg(feature = "instrument")]
 pub static ENCODER_FINISH_TICKS: Counter = Counter::new("omega.metal.encoder_finish_ticks");
+/// `execute_plan_with_placements_inner`'s own function-entry preamble --
+/// expert-buffer merge plus `prepared`/`packed_operands` binds -- the sole
+/// host span between the function's own entry and `step_encode_start`
+/// (GAP.md's residual: unattributed host time between `resolve_cached_plan`
+/// returning and the first `Instant::now()` clock this function starts).
+#[cfg(feature = "instrument")]
+pub static PRE_ENCODE_CALLS: Counter = Counter::new("omega.metal.pre_encode_calls");
+#[cfg(feature = "instrument")]
+pub static PRE_ENCODE_TICKS: Counter = Counter::new("omega.metal.pre_encode_ticks");
 
 /// One [`execute_plan`] call's worth of the split-4019 counters above,
 /// snapshot-and-reset so a caller (the metal decode test) can read a
@@ -858,6 +867,10 @@ pub struct MetalStageTotals {
     pub loop_head_ticks: u64,
     /// [`ENCODER_FINISH_TICKS`]'s own per-step delta.
     pub encoder_finish_ticks: u64,
+    /// [`PRE_ENCODE_CALLS`]'s own per-step delta.
+    pub pre_encode_calls: u64,
+    /// [`PRE_ENCODE_TICKS`]'s own per-step delta.
+    pub pre_encode_ticks: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -929,6 +942,8 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         loop_head_calls: LOOP_HEAD_CALLS.snapshot_and_reset(),
         loop_head_ticks: LOOP_HEAD_TICKS.snapshot_and_reset(),
         encoder_finish_ticks: ENCODER_FINISH_TICKS.snapshot_and_reset(),
+        pre_encode_calls: PRE_ENCODE_CALLS.snapshot_and_reset(),
+        pre_encode_ticks: PRE_ENCODE_TICKS.snapshot_and_reset(),
     }
 }
 
@@ -941,8 +956,15 @@ pub(super) mod host_bookkeeping_instrument_tests {
         RETIRE_SCAN_TICKS, metal_stage_totals,
     };
 
-    // shared process-global counters: asserts a floor, not an exact value,
-    // since a concurrently running test can only add to the count.
+    /// The three new counters travel through [`metal_stage_totals`] the same
+    /// way every other split-4019 counter does — a caller reading the
+    /// snapshot after a run sees them printed in the struct's OWN fields, not
+    /// silently zeroed out. `metal_stage_totals()` snapshot-and-resets
+    /// process-global `Counter` statics that real dispatch code (and other
+    /// concurrently running tests) also increments, so this asserts a FLOOR
+    /// (this test's own contribution can only ever be added to by a
+    /// concurrent writer, never subtracted) instead of an exact value against
+    /// a shared, resettable counter — no lock, no serialization needed.
     #[test]
     fn new_host_bookkeeping_fields_print_in_stage_totals() {
         counter!(RETIRE_SCAN_CALLS, 3);

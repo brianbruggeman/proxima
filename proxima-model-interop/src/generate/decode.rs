@@ -5279,6 +5279,7 @@ impl<'file> LoadedModel<'file> {
                             emit_token_breakdown_metal(
                                 _step,
                                 &metal_stage,
+                                RESOLVE_PLAN_TICKS.snapshot_and_reset(),
                                 runtime.plans_len(),
                                 runtime.plan_hits,
                                 runtime.plan_misses,
@@ -5923,6 +5924,7 @@ impl<'file> LoadedModel<'file> {
                     emit_token_breakdown_metal(
                         _step,
                         &metal_stage,
+                        RESOLVE_PLAN_TICKS.snapshot_and_reset(),
                         runtime.placed_plans_len(),
                         runtime.plan_hits,
                         runtime.plan_misses,
