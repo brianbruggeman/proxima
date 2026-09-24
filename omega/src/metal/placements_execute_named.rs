@@ -780,7 +780,7 @@ pub(super) fn execute_plan_with_placements_inner(
         // duplicate -- join on `node` against a `PROXIMA_CAPTURE_NODES`-gated
         // `dispatch_capture` run instead.
         #[cfg(feature = "instrument")]
-        if std::env::var_os("PROXIMA_DEBUG_RESOLVED_OPS").is_some() {
+        {
             // separate flags per plan shape -- prefill (step 0) and decode
             // build/resolve DIFFERENT `Plan`s, so a single shared flag would
             // let whichever shape resolves first (always prefill, step 0)
@@ -808,13 +808,16 @@ pub(super) fn execute_plan_with_placements_inner(
                         .collect();
                     let output_len =
                         bound_output_len(dump_bound).max(1) * dump_bound.dtype.size_bytes();
-                    eprintln!(
-                        "resolved_op plan_shape={plan_shape} position={dump_position} node={} kind={} extents={:?} dtype={:?} operands=[{}] output_len={output_len}",
-                        dump_bound.node.0,
-                        dump_bound.kind.name(),
-                        dump_bound.extents,
-                        dump_bound.dtype,
-                        operand_ids.join(", "),
+                    debug!(
+                        plan_shape,
+                        position = dump_position as u64,
+                        node = dump_bound.node.0,
+                        kind = dump_bound.kind.name(),
+                        extents = ?dump_bound.extents,
+                        dtype = ?dump_bound.dtype,
+                        operands = %operand_ids.join(", "),
+                        output_len = output_len as u64,
+                        "resolved_op"
                     );
                 }
             }
@@ -1274,19 +1277,21 @@ pub(super) fn execute_plan_with_placements_inner(
             let leading_commit_start_s = first_commit_call_start_s.unwrap_or(commit_call_start_s);
             let first_commit_to_first_gpu_start_ms =
                 ((gpu_start_s - leading_commit_start_s) * 1e3).max(0.0);
-            eprintln!(
-                "token_breakdown_gpu commit_call_ms={commit_call_ms} \
-                 commit_to_gpu_start_ms={commit_to_gpu_start_ms} \
-                 gpu_busy_ms={gpu_busy_ms} \
-                 gpu_end_to_wait_return_ms={gpu_end_to_wait_return_ms} \
-                 sum_ms={} gpu_exec_ms={gpu_exec_ms} \
-                 gpu_start_raw_s={gpu_start_s} gpu_end_raw_s={gpu_end_s} \
-                 commit_call_start_raw_s={commit_call_start_s} \
-                 wait_return_extra_ms={wait_return_ms} \
-                 chunks={chunk_count} \
-                 first_commit_to_first_gpu_start_ms={first_commit_to_first_gpu_start_ms} \
-                 encode_overlap_ms={encode_overlap_ms}",
-                commit_call_ms + commit_to_gpu_start_ms + gpu_busy_ms + gpu_end_to_wait_return_ms,
+            debug!(
+                commit_call_ms,
+                commit_to_gpu_start_ms,
+                gpu_busy_ms,
+                gpu_end_to_wait_return_ms,
+                sum_ms = commit_call_ms + commit_to_gpu_start_ms + gpu_busy_ms + gpu_end_to_wait_return_ms,
+                gpu_exec_ms,
+                gpu_start_raw_s = gpu_start_s,
+                gpu_end_raw_s = gpu_end_s,
+                commit_call_start_raw_s = commit_call_start_s,
+                wait_return_extra_ms = wait_return_ms,
+                chunks = chunk_count as u64,
+                first_commit_to_first_gpu_start_ms,
+                encode_overlap_ms,
+                "token_breakdown_gpu"
             );
             // Deliverable 2 (OWNER_BRIEF_chunked_submission_audit): one
             // `chunk_record` per committed command buffer -- every
@@ -1312,16 +1317,19 @@ pub(super) fn execute_plan_with_placements_inner(
                 let gpu_end_ms = ((buffer.GPUEndTime() - step_epoch_s) * 1e3).max(0.0);
                 sum_gpu_exec_ms += (gpu_end_ms - gpu_start_ms).max(0.0);
                 gpu_starts_ends.push((gpu_start_ms, gpu_end_ms));
-                eprintln!(
-                    "chunk_record step={step} plan_shape={plan_shape} chunk={}/{chunk_count} ops={}..{} \
-                     encode_start_ms={} encode_end_ms={} commit_ms={} \
-                     gpu_start_ms={gpu_start_ms} gpu_end_ms={gpu_end_ms}",
-                    index + 1,
-                    timing.first_op,
-                    timing.last_op,
-                    timing.encode_start_ms,
-                    timing.encode_end_ms,
-                    timing.commit_ms,
+                debug!(
+                    step,
+                    plan_shape,
+                    chunk = (index + 1) as u64,
+                    chunk_count = chunk_count as u64,
+                    op_first = timing.first_op as u64,
+                    op_last = timing.last_op as u64,
+                    encode_start_ms = timing.encode_start_ms,
+                    encode_end_ms = timing.encode_end_ms,
+                    commit_ms = timing.commit_ms,
+                    gpu_start_ms,
+                    gpu_end_ms,
+                    "chunk_record"
                 );
             }
             let mut inter_buffer_gaps_ms = 0.0f64;
@@ -1337,13 +1345,17 @@ pub(super) fn execute_plan_with_placements_inner(
                 .iter()
                 .map(|timing| timing.encode_end_ms - timing.encode_start_ms)
                 .sum();
-            eprintln!(
-                "chunk_summary step={step} plan_shape={plan_shape} chunks={chunk_count} \
-                 regions={chunk_count} ignored_boundaries={ignored_boundaries} \
-                 sum_gpu_exec_ms={sum_gpu_exec_ms} \
-                 first_start_to_last_end_ms={first_start_to_last_end_ms} \
-                 inter_buffer_gaps_ms={inter_buffer_gaps_ms} \
-                 encode_total_ms={encode_total_ms}",
+            debug!(
+                step,
+                plan_shape,
+                chunks = chunk_count as u64,
+                regions = chunk_count as u64,
+                ignored_boundaries = ignored_boundaries as u64,
+                sum_gpu_exec_ms,
+                first_start_to_last_end_ms,
+                inter_buffer_gaps_ms,
+                encode_total_ms,
+                "chunk_summary"
             );
         }
     }

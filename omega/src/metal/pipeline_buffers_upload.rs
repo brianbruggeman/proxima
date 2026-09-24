@@ -192,13 +192,16 @@ fn capture_pipeline_source(kernel: &Kernel, cache_key: &str, math_mode: MathMode
     if let Some(dir) = std::env::var_os("PROXIMA_PIPELINE_CAPTURE") {
         let path = std::path::Path::new(&dir).join(format!("pipeline_{}.metal", &full_hex[..16]));
         if let Err(error) = std::fs::write(&path, &kernel.source) {
-            eprintln!("pipeline_capture_write_failed path={path:?} error={error}");
+            debug!(path = ?path, ?error, "pipeline_capture_write_failed");
         }
     }
-    eprintln!(
-        "pipeline_create key={cache_key:?} entry={} msl_sha256={full_hex} compile_options=mathMode={math_mode:?} len={}",
-        kernel.entry,
-        kernel.source.len(),
+    debug!(
+        cache_key = ?cache_key,
+        entry = %kernel.entry,
+        msl_sha256 = %full_hex,
+        math_mode = ?math_mode,
+        len = kernel.source.len() as u64,
+        "pipeline_create"
     );
     full_hex
 }
@@ -346,7 +349,7 @@ pub(super) fn pipeline_for(
     // feature gate rather than standing alone, so this diagnostic never
     // compiles into a non-instrument build.
     #[cfg(feature = "instrument")]
-    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+    {
         let quantized = crate::identity::operand_codecs(bound, packed_operands);
         if let Some(block) = crate::msl::packed_row_block(bound, &quantized) {
             let rows = crate::msl::codec_rows_per_simdgroup(block.codec);
@@ -357,9 +360,14 @@ pub(super) fn pipeline_for(
                     .map(|&axis| bound.extents[axis as usize])
                     .product();
                 let k_extent = bound.extents[block.reduce_dim];
-                eprintln!(
-                    "packed_rows_pipeline entry={} rows_per_simdgroup={rows} grid_threads={} threadgroup={:?} shape=(rows={feature_total}, K={k_extent})",
-                    kernel.entry, grid.threads, grid.threadgroup_width,
+                debug!(
+                    entry = %kernel.entry,
+                    rows_per_simdgroup = rows as u64,
+                    grid_threads = grid.threads,
+                    threadgroup = ?grid.threadgroup_width,
+                    rows = feature_total,
+                    k_extent,
+                    "packed_rows_pipeline"
                 );
             }
         }
@@ -1035,10 +1043,14 @@ pub(super) fn upload_block(
     block_name: Option<&str>,
     resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
-    if std::env::var_os("PROXIMA_DEBUG_BLOCK_UPLOADS").is_some() && !data.is_empty() {
-        eprintln!(
-            "metal block upload node={node:?} name={block_name:?} dtype={dtype:?} bytes={} resident={resident_name:?}",
-            size_of_val(data),
+    if !data.is_empty() {
+        debug!(
+            node = ?node,
+            name = ?block_name,
+            dtype = ?dtype,
+            bytes = size_of_val(data) as u64,
+            resident = ?resident_name,
+            "metal_block_upload"
         );
     }
     match dtype {
@@ -1148,11 +1160,11 @@ pub(super) fn upload_packed_bytes(
     bytes: &[u8],
     resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
-    if bytes.len() > 100 * 1024 * 1024 && std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some()
-    {
-        eprintln!(
-            "metal large packed upload bytes={} resident={resident_name:?}",
-            bytes.len()
+    if bytes.len() > 100 * 1024 * 1024 {
+        debug!(
+            bytes = bytes.len() as u64,
+            resident = ?resident_name,
+            "metal_large_packed_upload"
         );
     }
     if bytes.is_empty() {

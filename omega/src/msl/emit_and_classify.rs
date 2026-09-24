@@ -529,35 +529,31 @@ pub(super) fn emit_with_expert_sources_mode(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        // `std`-only diagnostic (`eprintln!`, env reads) -- unreachable on
-        // the alloc-only `metal-core` tier build, which has no `env`/stderr.
-        #[cfg(feature = "std")]
-        if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
-            eprintln!(
-                "qwen35 expert lowering bound_node={:?} source_node={source_node:?} extents={:?} row_block={} multi_row={} gather={} token_total={} source_len={}",
-                resolved.node,
-                resolved.extents,
-                row_block_source,
-                kernel.source.contains("token_total"),
-                kernel.source.contains("gather_idx0"),
-                kernel.source.contains("token_total"),
-                kernel.source.len(),
+        // `instrument`-gated structured event -- the previous `std`-only
+        // `eprintln!` compiled out on the alloc-only `metal-core` tier build
+        // (no `env`/stderr there); `debug!` is a no-op off that tier too, via
+        // the same `#[cfg(feature = "instrument")]` this crate already uses
+        // for every other diagnostic (`token_breakdown_gpu`, `pipeline_create`).
+        #[cfg(feature = "instrument")]
+        {
+            proxima_telemetry::debug!(
+                bound_node = ?resolved.node,
+                source_node = ?source_node,
+                extents = ?resolved.extents,
+                row_block = %row_block_source,
+                multi_row = kernel.source.contains("token_total"),
+                gather = kernel.source.contains("gather_idx0"),
+                token_total = kernel.source.contains("token_total"),
+                source_len = kernel.source.len() as u64,
+                "qwen35_expert_lowering"
             );
-            for line in kernel.source.lines().filter(|line| {
-                line.contains("mixed_expert")
-                    || line.contains("expert_route_index")
-                    || line.contains("fetched")
-                    || line.contains("walk0")
-                    || line.contains("base0")
-            }) {
-                eprintln!("qwen35 expert msl: {line}");
-            }
             if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_FULL").is_some()
                 && source_node == NodeId(3)
             {
-                eprintln!(
-                    "qwen35 expert source full begin node={source_node:?}\n{}\nqwen35 expert source full end",
-                    kernel.source
+                proxima_telemetry::debug!(
+                    source_node = ?source_node,
+                    source = %kernel.source,
+                    "qwen35_expert_source_full"
                 );
             }
         }
