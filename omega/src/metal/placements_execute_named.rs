@@ -360,6 +360,14 @@ pub(super) fn execute_plan_with_placements_inner(
     recycle: &mut Vec<Vec<f32>>,
     expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
 ) -> Result<Evaluated, MetalError> {
+    // ROW GAP.md A3: the sole host span between this function's own entry
+    // and `step_encode_start` (:762 below) -- everything the caller's
+    // `resolve_cached_plan` hit already paid for is NOT in this window;
+    // this closes the residual GAP.md named "no printed field" for the
+    // in-function preamble (expert-buffer merge, `prepared`/`packed_operands`
+    // binds) that runs before the first `Instant::now()` clock starts.
+    #[cfg(feature = "instrument")]
+    let pre_encode_started = read_ticks();
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
     let mut effective_expert_buffers = expert_buffers.clone();
@@ -638,6 +646,10 @@ pub(super) fn execute_plan_with_placements_inner(
     let step_encode_start = std::time::Instant::now();
     #[cfg(feature = "instrument")]
     let step_encode_start_ticks = read_ticks();
+    #[cfg(feature = "instrument")]
+    counter!(PRE_ENCODE_CALLS, 1);
+    #[cfg(feature = "instrument")]
+    counter!(PRE_ENCODE_TICKS, elapsed_ticks(pre_encode_started));
     #[cfg(feature = "instrument")]
     let mut chunk_command_buffers: Vec<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = Vec::new();
     #[cfg(feature = "instrument")]

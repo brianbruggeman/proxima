@@ -1,6 +1,22 @@
 use core::ops::ControlFlow;
 
 use super::*;
+#[cfg(feature = "instrument")]
+use proxima_telemetry::metric::Counter;
+
+/// GAP.md's own residual: the `resolve_cached_plan` `BTreeMap` lookup runs
+/// between `evaluate_started` (`decode.rs:3847`) and `step_encode_start`
+/// (`omega/src/metal/placements_execute_named.rs:762`), a span no printed
+/// field covered. Owned here (the plan cache), not folded into
+/// `omega::metal::MetalStageTotals` (Metal dispatch, a different crate's
+/// concern) -- read by [`crate::generate::load_model::emit_token_breakdown_metal`]
+/// as an explicit parameter instead.
+#[cfg(feature = "instrument")]
+pub(super) static RESOLVE_PLAN_CALLS: Counter =
+    Counter::new("proxima_model_interop.residency.resolve_plan_calls");
+#[cfg(feature = "instrument")]
+pub(super) static RESOLVE_PLAN_TICKS: Counter =
+    Counter::new("proxima_model_interop.residency.resolve_plan_ticks");
 
 pub enum NodeValuesSink<'sink> {
     Discard,
@@ -2204,6 +2220,7 @@ impl BackendRuntime {
     /// keeping (an immediate same-shape replay lands as a hit BEFORE the
     /// next miss would evict it) while making superseded entries collectible
     /// instead of retained for the rest of the call.
+    #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
     pub(super) fn resolve_cached_plan<'cache, PlanKey, PlanType>(
         cache: &'cache mut alloc::collections::BTreeMap<PlanKey, PlanType>,
         plan_hits: &mut usize,
@@ -2216,10 +2233,13 @@ impl BackendRuntime {
     {
         use alloc::collections::btree_map::Entry;
 
+        #[cfg(feature = "instrument")]
+        let resolve_plan_started = proxima_tensor::instrument::read_ticks();
+
         if !cache.contains_key(&shape) {
             cache.clear();
         }
-        match cache.entry(shape) {
+        let result = match cache.entry(shape) {
             Entry::Occupied(entry) => {
                 *plan_hits += 1;
                 Ok(entry.into_mut())
@@ -2229,7 +2249,18 @@ impl BackendRuntime {
                 let plan = build()?;
                 Ok(entry.insert(plan))
             }
+        };
+
+        #[cfg(feature = "instrument")]
+        {
+            RESOLVE_PLAN_CALLS.add(1, &[]);
+            RESOLVE_PLAN_TICKS.add(
+                proxima_tensor::instrument::elapsed_ticks(resolve_plan_started),
+                &[],
+            );
         }
+
+        result
     }
 
     pub(super) fn resolve_segment_plan<'cache, PlanType>(
