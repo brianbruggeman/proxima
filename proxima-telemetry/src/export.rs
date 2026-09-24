@@ -677,6 +677,50 @@ mod tests {
         );
     }
 
+    // an un-drained record sits in the ring, not the sink -- a shutdown path
+    // that exits without a final `drain()` (relying only on a background
+    // pump thread's next wake-up) can lose the last event to process exit.
+    #[test]
+    fn drain_before_shutdown_surfaces_the_final_event_a_background_pump_could_miss() {
+        let buf = Arc::new(Mutex::new(alloc::vec::Vec::new()));
+        let recorder = Recorder::builder()
+            .export(Exporter::writer(SharedBuf(buf.clone())))
+            .expect("writer exporter installs")
+            .core_count(1)
+            .start()
+            .expect("recorder starts without a global install");
+
+        for index in 0..10 {
+            recorder
+                .log()
+                .level(Level::DEBUG)
+                .message("debug-flood-record")
+                .module_path("proxima::test")
+                .tag("index", index)
+                .emit();
+        }
+        recorder
+            .log()
+            .level(Level::INFO)
+            .message("run-done-record")
+            .module_path("proxima::test")
+            .emit();
+
+        let before_drain = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            !before_drain.contains("run-done-record"),
+            "un-drained records must not already be at the sink: {before_drain}"
+        );
+
+        recorder.drain();
+
+        let after_drain = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            after_drain.contains("run-done-record"),
+            "an explicit drain before shutdown must surface the final event: {after_drain}"
+        );
+    }
+
     // the dead-simple path: one composable `.export()`, `.install()` registers
     // the global, and a log reaches the sink formatted.
     #[test]
