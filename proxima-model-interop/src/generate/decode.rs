@@ -203,9 +203,12 @@ fn attn_fuse_probe_layers(
             })?;
             let expected = NodeId((softmax_node.0 as i32 + 12) as u32);
             if combine.node != expected {
-                eprintln!(
-                    "parity_layer_offset_mismatch step={step} softmax_node={} combine_node={} expected={}",
-                    softmax_node.0, combine.node.0, expected.0
+                debug!(
+                    step = step as u64,
+                    softmax_node = softmax_node.0,
+                    combine_node = combine.node.0,
+                    expected = expected.0,
+                    "parity_layer_offset_mismatch"
                 );
             }
             Some((
@@ -249,16 +252,26 @@ fn run_attn_fuse_parity_probe(
         proxima_tensor::bind_with_fusion(program, &shapes, roots, true, runtime.numeric_policy)?;
     let layers = attn_fuse_probe_layers(step, &resolved);
     let candidates: Vec<NodeId> = layers.iter().map(|(attended, _)| *attended).collect();
-    eprintln!("parity_candidates step={step} n={}", candidates.len());
+    debug!(step = step as u64, n = candidates.len() as u64, "parity_candidates");
     for (layer, (attended, softmax)) in layers.iter().enumerate() {
         match softmax {
-            None => eprintln!(
-                "parity_layer_ops step={step} layer={layer} shape=cached_attention attended={}",
-                attended.0
+            None => trace!(
+                step = step as u64,
+                layer = layer as u64,
+                shape = "cached_attention",
+                attended = attended.0,
+                "parity_layer_ops"
             ),
-            Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)) => eprintln!(
-                "parity_layer_ops step={step} layer={layer} shape=candidate_b attended={} softmax={} cached_weight_sum={} new_weight_sum={} new_attended={}",
-                attended.0, softmax_node.0, cached_weight_sum.0, new_weight_sum.0, new_attended.0
+            Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)) => trace!(
+                step = step as u64,
+                layer = layer as u64,
+                shape = "candidate_b",
+                attended = attended.0,
+                softmax = softmax_node.0,
+                cached_weight_sum = cached_weight_sum.0,
+                new_weight_sum = new_weight_sum.0,
+                new_attended = new_attended.0,
+                "parity_layer_ops"
             ),
         }
     }
@@ -346,14 +359,17 @@ fn run_attn_fuse_parity_probe(
             .get(logits_root)
             .ok_or(InteropError::MissingEvaluatedNode { node: logits_root })?;
         let logits_diff = first_diff_f32(first_logits, second_logits);
-        eprintln!(
-            "parity_control step={step} arm={arm} layers_with_diff={layers_with_diff}/{} logits_first_diff={}",
-            candidates.len(),
-            match logits_diff {
+        debug!(
+            step = step as u64,
+            arm,
+            layers_with_diff,
+            candidates_total = candidates.len() as u64,
+            logits_first_diff = match logits_diff {
                 None => "none".to_string(),
                 Some((element, first_bits, second_bits)) =>
                     format!("({element}, 0x{first_bits:08x}, 0x{second_bits:08x})"),
-            }
+            },
+            "parity_control"
         );
     }
 
@@ -368,13 +384,23 @@ fn run_attn_fuse_parity_probe(
             .get(*node)
             .ok_or(InteropError::MissingEvaluatedNode { node: *node })?;
         match first_diff_f32(unfused_values, fused_values) {
-            None => eprintln!(
-                "parity step={step} layer={layer} node={} cached_len={cached_len_display} leaf_extent={leaf_extent} first_diff=none",
-                node.0
+            None => trace!(
+                step = step as u64,
+                layer = layer as u64,
+                node = node.0,
+                cached_len = %cached_len_display,
+                leaf_extent,
+                first_diff = "none",
+                "parity"
             ),
-            Some((element, unfused_bits, fused_bits)) => eprintln!(
-                "parity step={step} layer={layer} node={} cached_len={cached_len_display} leaf_extent={leaf_extent} first_diff=({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})",
-                node.0
+            Some((element, unfused_bits, fused_bits)) => trace!(
+                step = step as u64,
+                layer = layer as u64,
+                node = node.0,
+                cached_len = %cached_len_display,
+                leaf_extent,
+                first_diff = %format!("({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})"),
+                "parity"
             ),
         }
         if let Some((softmax_node, cached_weight_sum, new_weight_sum, new_attended)) = softmax {
@@ -389,19 +415,31 @@ fn run_attn_fuse_parity_probe(
                 match (fused_role, unfused_role) {
                     (Some((fused_values, _)), Some((unfused_values, _))) => {
                         match first_diff_f32(unfused_values, fused_values) {
-                            None => eprintln!(
-                                "parity_softmax step={step} layer={layer} role={role} node={} first_diff=none",
-                                role_node.0
+                            None => trace!(
+                                step = step as u64,
+                                layer = layer as u64,
+                                role,
+                                node = role_node.0,
+                                first_diff = "none",
+                                "parity_softmax"
                             ),
-                            Some((element, unfused_bits, fused_bits)) => eprintln!(
-                                "parity_softmax step={step} layer={layer} role={role} node={} first_diff=({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})",
-                                role_node.0
+                            Some((element, unfused_bits, fused_bits)) => trace!(
+                                step = step as u64,
+                                layer = layer as u64,
+                                role,
+                                node = role_node.0,
+                                first_diff = %format!("({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})"),
+                                "parity_softmax"
                             ),
                         }
                     }
-                    _ => eprintln!(
-                        "parity_softmax step={step} layer={layer} role={role} node={} MISSING",
-                        role_node.0
+                    _ => trace!(
+                        step = step as u64,
+                        layer = layer as u64,
+                        role,
+                        node = role_node.0,
+                        missing = true,
+                        "parity_softmax"
                     ),
                 }
             }
@@ -415,9 +453,11 @@ fn run_attn_fuse_parity_probe(
         .get(logits_root)
         .ok_or(InteropError::MissingEvaluatedNode { node: logits_root })?;
     match first_diff_f32(unfused_logits, fused_logits) {
-        None => eprintln!("parity_logits step={step} first_diff=none"),
-        Some((element, unfused_bits, fused_bits)) => eprintln!(
-            "parity_logits step={step} first_diff=({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})"
+        None => debug!(step = step as u64, first_diff = "none", "parity_logits"),
+        Some((element, unfused_bits, fused_bits)) => debug!(
+            step = step as u64,
+            first_diff = %format!("({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})"),
+            "parity_logits"
         ),
     }
 
@@ -1014,8 +1054,14 @@ fn write_attn_layer0_failure_report(
     let path = std::env::var("PROXIMA_ATTN_PAYLOAD_PATH")
         .unwrap_or_else(|_| "attn_parity_payload.txt".to_string());
     std::fs::write(&path, &report)?;
-    eprintln!("attn_layer0_report step=1 layer=0 node={} path={path}", attended_node.0);
-    eprint!("{report}");
+    debug!(
+        step = 1,
+        layer = 0,
+        node = attended_node.0,
+        path = %path,
+        report = %report,
+        "attn_layer0_report"
+    );
 
     write_attn_read_source_vectors(
         program,
@@ -1162,7 +1208,7 @@ fn write_attn_read_source_vectors(
                 bound.extents,
                 bound.operands()
             );
-            eprintln!("attn_node_dump_fused {manifest_line}");
+            trace!(manifest = %manifest_line, "attn_node_dump_fused");
             fused_manifest.push_str(&manifest_line);
             fused_manifest.push('\n');
         }
@@ -1217,9 +1263,11 @@ fn write_attn_read_source_vectors(
     }
     unchanged_report.push_str(&format!("all_unchanged={all_unchanged}\n"));
     std::fs::write(format!("{dir}/attended_unchanged.txt"), &unchanged_report)?;
-    eprintln!(
-        "attn_vectors_dump nodes={} all_unchanged={all_unchanged} dir={dir}",
-        outputs.len()
+    debug!(
+        nodes = outputs.len() as u64,
+        all_unchanged,
+        dir = %dir,
+        "attn_vectors_dump"
     );
 
     Ok(())
@@ -1705,7 +1753,7 @@ impl<'file> LoadedModel<'file> {
             self.architecture.block_count as usize,
             self.architecture.expert_count as usize,
         )?;
-        if std::env::var_os("PROXIMA_DEBUG_MEMORY_OWNERS").is_some() {
+        {
             let owned_bytes = self
                 .weights
                 .owned
@@ -1725,15 +1773,15 @@ impl<'file> LoadedModel<'file> {
                 .map(|(_, bytes, _)| bytes.len())
                 .sum::<usize>();
             let slab_memory = lock_expert_slab(&self.expert_slab).memory();
-            eprintln!(
-                "qwen35 memory owners checkpoint_bytes={} owned_bytes={} packed_bytes={} packed_owned_bytes={} sidecar_mapped_bytes={} sidecar_owned_bytes={} sidecar_descriptors={}",
-                self.checkpoint_bytes,
-                owned_bytes,
-                packed_bytes,
-                packed_owned_bytes,
-                slab_memory.mapped_bytes,
-                slab_memory.owned_bytes,
-                sidecar.descriptor_count(),
+            debug!(
+                checkpoint_bytes = self.checkpoint_bytes,
+                owned_bytes = owned_bytes as u64,
+                packed_bytes = packed_bytes as u64,
+                packed_owned_bytes = packed_owned_bytes as u64,
+                sidecar_mapped_bytes = slab_memory.mapped_bytes,
+                sidecar_owned_bytes = slab_memory.owned_bytes,
+                sidecar_descriptors = sidecar.descriptor_count(),
+                "qwen35_memory_owners"
             );
         }
         // The whole-checkpoint Metal buffer is a convenient zero-copy fast
@@ -2900,9 +2948,7 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 omega::set_capture_step(_step as u64);
                 if let Some(queued) = pending.pop_front() {
-                    if std::env::var_os("PROXIMA_DEBUG_SPECULATIVE").is_some() {
-                        eprintln!("speculative_pending_pop step={_step}");
-                    }
+                    debug!(step = _step as u64, "speculative_pending_pop");
                     return Ok(queued);
                 }
                 // Speculative decode's draft half (`proxima_tokenizer::draft::
@@ -3394,17 +3440,22 @@ impl<'file> LoadedModel<'file> {
                             if let Some(taps) = diagnostic.dense_attention_taps {
                                 if let Some(operation) = active_program.get(taps.q_split.0 as usize)
                                 {
-                                    eprintln!(
-                                        "dense_nodes layer={} normed={} q_split={} q_op={operation:?}",
-                                        layer, taps.normed.0, taps.q_split.0,
+                                    trace!(
+                                        layer = layer as u64,
+                                        normed = taps.normed.0,
+                                        q_split = taps.q_split.0,
+                                        q_op = ?operation,
+                                        "dense_nodes"
                                     );
                                     if let proxima_tensor::Op::Reduce(reduce) = operation
                                         && let Some(product) =
                                             active_program.get(reduce.operand.0 as usize)
                                     {
-                                        eprintln!(
-                                            "dense_nodes_q_product layer={} node={} op={product:?}",
-                                            layer, reduce.operand.0,
+                                        trace!(
+                                            layer = layer as u64,
+                                            node = reduce.operand.0,
+                                            op = ?product,
+                                            "dense_nodes_q_product"
                                         );
                                         if layer == 3
                                             && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH")
@@ -3574,22 +3625,20 @@ impl<'file> LoadedModel<'file> {
                     }
 
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    if std::env::var_os("PROXIMA_DEBUG_EVALUATOR_ROOTS").is_some() {
-                        eprintln!(
-                            "evaluator_roots step={} roots={:?} sink_nodes={:?} ssm_inputs={:?} ssm_outputs={:?}",
-                            cached_len + batch_index,
-                            roots,
-                            node_values_sink.nodes(),
-                            ssm_input_placements
-                                .iter()
-                                .map(|(node, _, _)| *node)
-                                .collect::<Vec<_>>(),
-                            ssm_output_placements
-                                .iter()
-                                .map(|(node, _, _)| *node)
-                                .collect::<Vec<_>>(),
-                        );
-                    }
+                    debug!(
+                        step = (cached_len + batch_index) as u64,
+                        roots = ?roots,
+                        sink_nodes = ?node_values_sink.nodes(),
+                        ssm_inputs = ?ssm_input_placements
+                            .iter()
+                            .map(|(node, _, _)| *node)
+                            .collect::<Vec<_>>(),
+                        ssm_outputs = ?ssm_output_placements
+                            .iter()
+                            .map(|(node, _, _)| *node)
+                            .collect::<Vec<_>>(),
+                        "evaluator_roots"
+                    );
 
                     // The `StepGuard` (shadowing the lock below) closes this
                     // step on every exit -- normal return and an early `?`
@@ -3683,13 +3732,12 @@ impl<'file> LoadedModel<'file> {
                     // borrowed mmap ranges: Metal's expert-source executor
                     // excludes every substituted node from ordinary uploads,
                     // then binds only the routed payload and descriptor tables.
-                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
-                        eprintln!(
-                            "qwen35 pre_gather_enabled={pre_gather} sidecar={} gpu={}",
-                            self.expert_sidecar.is_some(),
-                            runtime.uses_gpu()
-                        );
-                    }
+                    debug!(
+                        pre_gather,
+                        sidecar = self.expert_sidecar.is_some(),
+                        gpu = runtime.uses_gpu(),
+                        "qwen35_pre_gather_enabled"
+                    );
                     if pre_gather
                         && !monolithic_all_low
                         && qwen35moe_pre_gather_plan.as_ref().is_none_or(|plan| {
@@ -3743,14 +3791,12 @@ impl<'file> LoadedModel<'file> {
                             for (index, route) in routes.iter().enumerate() {
                                 selected_experts[index] = route.expert as u32;
                             }
-                            if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-                                eprintln!(
-                                    "qwen35 route layer={} position={} experts={:?}",
-                                    layer,
-                                    position,
-                                    &selected_experts[..routes.len()]
-                                );
-                            }
+                            trace!(
+                                layer = layer as u64,
+                                position,
+                                experts = ?&selected_experts[..routes.len()],
+                                "qwen35_route"
+                            );
                             #[cfg(feature = "qwen35moe-expert-prefetch")]
                             if qwen35moe_expert_prefetch_enabled {
                                 if let Some(previous_history) = qwen35moe_route_history.get(layer) {
@@ -3798,16 +3844,13 @@ impl<'file> LoadedModel<'file> {
                                                     .saturating_add(candidate_bytes);
                                         }
                                         qwen35moe_prefetch_advice_events += 1;
-                                        if advised_bytes > 0
-                                            && std::env::var_os("PROXIMA_DEBUG_EXPERT_PREFETCH")
-                                                .is_some()
-                                        {
-                                            eprintln!(
-                                                "qwen35 expert prefetch layer={} next_layer={} candidates={} advised_bytes={}",
-                                                layer,
-                                                layer.saturating_add(1),
-                                                candidates.as_slice().len(),
-                                                advised_bytes
+                                        if advised_bytes > 0 {
+                                            trace!(
+                                                layer = layer as u64,
+                                                next_layer = layer.saturating_add(1) as u64,
+                                                candidates = candidates.as_slice().len() as u64,
+                                                advised_bytes,
+                                                "qwen35_expert_prefetch"
                                             );
                                         }
                                     }
@@ -4113,19 +4156,19 @@ impl<'file> LoadedModel<'file> {
                                 let row_length = values.len() / row_count;
                                 let row_start =
                                     row_length.saturating_mul(row_count.saturating_sub(1));
-                                eprintln!(
-                                    "gdn_all_digest mode={} layer={} label={} row={} first4={:?}",
-                                    if new_count > 1 { "scan" } else { "cached" },
-                                    layer,
+                                trace!(
+                                    mode = if new_count > 1 { "scan" } else { "cached" },
+                                    layer = layer as u64,
                                     label,
-                                    row_count.saturating_sub(1),
-                                    values
+                                    row = row_count.saturating_sub(1) as u64,
+                                    first4 = ?values
                                         .get(row_start..row_start.saturating_add(row_length))
                                         .unwrap_or_default()
                                         .iter()
                                         .take(4)
                                         .copied()
                                         .collect::<Vec<_>>(),
+                                    "gdn_all_digest"
                                 );
                             }
                         }
@@ -4143,38 +4186,38 @@ impl<'file> LoadedModel<'file> {
                                 .max(1);
                             let row_length = values.len() / row_count;
                             let row_start = row_length.saturating_mul(row_count.saturating_sub(1));
-                            eprintln!(
-                                "gdn_block_digest mode={} layer={} node={} row={} first4={:?}",
-                                if new_count > 1 { "scan" } else { "cached" },
-                                layer,
-                                diagnostic.block_output.0,
-                                row_count.saturating_sub(1),
-                                values
+                            trace!(
+                                mode = if new_count > 1 { "scan" } else { "cached" },
+                                layer = layer as u64,
+                                node = diagnostic.block_output.0,
+                                row = row_count.saturating_sub(1) as u64,
+                                first4 = ?values
                                     .get(row_start..row_start.saturating_add(row_length))
                                     .unwrap_or_default()
                                     .iter()
                                     .take(4)
                                     .copied()
                                     .collect::<Vec<_>>(),
+                                "gdn_block_digest"
                             );
                             if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some()
                                 && row_length > 0
                             {
                                 for row_index in 0..row_count {
                                     let row_start = row_index * row_length;
-                                    eprintln!(
-                                        "gdn_block_row mode={} layer={} node={} row={} first4={:?}",
-                                        if new_count > 1 { "scan" } else { "cached" },
-                                        layer,
-                                        diagnostic.block_output.0,
-                                        row_index,
-                                        values
+                                    trace!(
+                                        mode = if new_count > 1 { "scan" } else { "cached" },
+                                        layer = layer as u64,
+                                        node = diagnostic.block_output.0,
+                                        row = row_index as u64,
+                                        first4 = ?values
                                             .get(row_start..row_start + row_length)
                                             .unwrap_or_default()
                                             .iter()
                                             .take(4)
                                             .copied()
                                             .collect::<Vec<_>>(),
+                                        "gdn_block_row"
                                     );
                                 }
                             }
@@ -4194,11 +4237,13 @@ impl<'file> LoadedModel<'file> {
                                 && let Some((q_product, _)) = operands.first()
                                 && let Some((values, shape)) = evaluated.get(*q_product)
                             {
-                                eprintln!(
-                                    "dense_digest mode={} layer={} label=qg_matmul shape={shape:?} first4={:?}",
-                                    if new_count > 1 { "scan" } else { "cached" },
-                                    layer,
-                                    values.iter().take(4).copied().collect::<Vec<_>>(),
+                                trace!(
+                                    mode = if new_count > 1 { "scan" } else { "cached" },
+                                    layer = layer as u64,
+                                    label = "qg_matmul",
+                                    shape = ?shape,
+                                    first4 = ?values.iter().take(4).copied().collect::<Vec<_>>(),
+                                    "dense_digest"
                                 );
                             }
                             for (label, node) in [
@@ -4220,32 +4265,32 @@ impl<'file> LoadedModel<'file> {
                                         .unwrap_or(1)
                                         .max(1);
                                 let row_length = values.len() / row_count;
-                                eprintln!(
-                                    "dense_digest mode={} layer={} label={} shape={:?} first4={:?}",
-                                    if new_count > 1 { "scan" } else { "cached" },
-                                    layer,
+                                trace!(
+                                    mode = if new_count > 1 { "scan" } else { "cached" },
+                                    layer = layer as u64,
                                     label,
-                                    shape,
-                                    values.iter().take(4).copied().collect::<Vec<_>>(),
+                                    shape = ?shape,
+                                    first4 = ?values.iter().take(4).copied().collect::<Vec<_>>(),
+                                    "dense_digest"
                                 );
                                 if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some()
                                     && row_length > 0
                                 {
                                     for row_index in 0..row_count {
                                         let row_start = row_index * row_length;
-                                        eprintln!(
-                                            "dense_row mode={} layer={} label={} row={} first4={:?}",
-                                            if new_count > 1 { "scan" } else { "cached" },
-                                            layer,
+                                        trace!(
+                                            mode = if new_count > 1 { "scan" } else { "cached" },
+                                            layer = layer as u64,
                                             label,
-                                            row_index,
-                                            values
+                                            row = row_index as u64,
+                                            first4 = ?values
                                                 .get(row_start..row_start + row_length)
                                                 .unwrap_or_default()
                                                 .iter()
                                                 .take(4)
                                                 .copied()
                                                 .collect::<Vec<_>>(),
+                                            "dense_row"
                                         );
                                     }
                                 }
@@ -4259,11 +4304,13 @@ impl<'file> LoadedModel<'file> {
                                     ("qg_weight_scale", NodeId(1232)),
                                 ] {
                                     if let Some((values, shape)) = evaluated.get(node) {
-                                        eprintln!(
-                                            "dense_digest mode={} layer=3 label={} shape={shape:?} first4={:?}",
-                                            if new_count > 1 { "scan" } else { "cached" },
+                                        trace!(
+                                            mode = if new_count > 1 { "scan" } else { "cached" },
+                                            layer = 3,
                                             label,
-                                            values.iter().take(4).copied().collect::<Vec<_>>(),
+                                            shape = ?shape,
+                                            first4 = ?values.iter().take(4).copied().collect::<Vec<_>>(),
+                                            "dense_digest"
                                         );
                                     }
                                 }
@@ -4295,59 +4342,58 @@ impl<'file> LoadedModel<'file> {
                             ticks_to_nanos(metal_stage.gpu_exec_ticks),
                         );
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_PREFILL_BATCHES").is_some()
-                        && _step == 0
-                        && split_prefill
-                    {
+                    if _step == 0 && split_prefill {
                         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                        eprintln!(
-                            "prefill_batch batch_index={} cached_len={} evaluate_ms={:.3} gpu_exec_calls={} gpu_exec_ms={:.3}",
-                            batch_index,
-                            cached_len,
-                            ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
-                            metal_stage.gpu_exec_calls,
-                            ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
+                        debug!(
+                            batch_index = batch_index as u64,
+                            cached_len = cached_len as u64,
+                            evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
+                            gpu_exec_calls = metal_stage.gpu_exec_calls,
+                            gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
+                            "prefill_batch"
                         );
                         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                        eprintln!(
-                            "prefill_batch_stages batch_index={} prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} pipeline_misses={} pipeline_compile_ms={:.3} op_setup_ms={:.3} block_upload_ms={:.3} readback_ms={:.3}",
-                            batch_index,
-                            ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.emit_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.pipeline_lookup_ticks) as f64 / 1e6,
-                            metal_stage.pipeline_misses,
-                            ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
+                        debug!(
+                            batch_index = batch_index as u64,
+                            prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
+                            emit_ms = ticks_to_nanos(metal_stage.emit_ticks) as f64 / 1e6,
+                            pipeline_lookup_ms = ticks_to_nanos(metal_stage.pipeline_lookup_ticks) as f64 / 1e6,
+                            pipeline_misses = metal_stage.pipeline_misses,
+                            pipeline_compile_ms = ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
+                            op_setup_ms = ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
+                            block_upload_ms = ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
+                            readback_ms = ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
+                            "prefill_batch_stages"
                         );
                         #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
-                        eprintln!(
-                            "prefill_batch batch_index={} cached_len={} evaluate_ms=unavailable",
-                            batch_index, cached_len,
+                        debug!(
+                            batch_index = batch_index as u64,
+                            cached_len = cached_len as u64,
+                            evaluate_ms = "unavailable",
+                            "prefill_batch"
                         );
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_TOKEN_STAGES").is_some()
-                        && !(_step == 0 && split_prefill)
-                    {
+                    if !(_step == 0 && split_prefill) {
                         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                        eprintln!(
-                            "token_stages step={} cached_len={} evaluate_ms={:.3} gpu_exec_ms={:.3} prepare_ms={:.3} pipeline_misses={} pipeline_compile_ms={:.3} op_setup_ms={:.3} block_upload_ms={:.3} readback_ms={:.3}",
-                            _step,
-                            cached_len,
-                            ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
-                            metal_stage.pipeline_misses,
-                            ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
-                            ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
+                        debug!(
+                            step = _step as u64,
+                            cached_len = cached_len as u64,
+                            evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
+                            gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
+                            prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
+                            pipeline_misses = metal_stage.pipeline_misses,
+                            pipeline_compile_ms = ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
+                            op_setup_ms = ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
+                            block_upload_ms = ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
+                            readback_ms = ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
+                            "token_stages"
                         );
                         #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
-                        eprintln!(
-                            "token_stages step={} cached_len={} evaluate_ms=unavailable",
-                            _step, cached_len,
+                        debug!(
+                            step = _step as u64,
+                            cached_len = cached_len as u64,
+                            evaluate_ms = "unavailable",
+                            "token_stages"
                         );
                     }
 
@@ -4409,13 +4455,13 @@ impl<'file> LoadedModel<'file> {
                         let row = row_width
                             .and_then(|width| values.get(..width))
                             .unwrap_or(values);
-                        eprintln!(
-                            "qwen35 monolithic block_output layer={} position={} node={:?} shape={:?} first4={:?}",
-                            target_layer,
-                            cached_len + batch_index,
-                            diagnostic.block_output,
-                            shape,
-                            row.iter().take(4).copied().collect::<Vec<_>>(),
+                        trace!(
+                            layer = target_layer as u64,
+                            position = (cached_len + batch_index) as u64,
+                            node = ?diagnostic.block_output,
+                            shape = ?shape,
+                            first4 = ?row.iter().take(4).copied().collect::<Vec<_>>(),
+                            "qwen35_monolithic_block_output"
                         );
                     }
 
@@ -4446,25 +4492,26 @@ impl<'file> LoadedModel<'file> {
                                 };
                                 let row_dump =
                                     std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some();
-                                eprintln!(
-                                    "gdn_compare mode={} node={} id={} shape={:?} first_row={:?}",
-                                    if new_count > 1 { "scan" } else { "cached" },
-                                    label,
-                                    node.0,
-                                    shape,
-                                    &values[..values.len().min(first_row_len)],
+                                trace!(
+                                    mode = if new_count > 1 { "scan" } else { "cached" },
+                                    node = node.0,
+                                    id = label,
+                                    shape = ?shape,
+                                    first_row = ?&values[..values.len().min(first_row_len)],
+                                    "gdn_compare"
                                 );
                                 if row_dump && first_row_len > 0 {
                                     for row_index in 0..new_count {
                                         let start = row_index.saturating_mul(first_row_len);
                                         let end = start.saturating_add(first_row_len);
                                         if let Some(row) = values.get(start..end) {
-                                            eprintln!(
-                                                "gdn_compare_row mode={} node={} label={} row={} values={row:?}",
-                                                if new_count > 1 { "scan" } else { "cached" },
-                                                node.0,
+                                            trace!(
+                                                mode = if new_count > 1 { "scan" } else { "cached" },
+                                                node = node.0,
                                                 label,
-                                                row_index,
+                                                row = row_index as u64,
+                                                values = ?row,
+                                                "gdn_compare_row"
                                             );
                                         }
                                     }
@@ -4478,12 +4525,13 @@ impl<'file> LoadedModel<'file> {
                                         if let Some(row) = values.get(start..end) {
                                             let digest =
                                                 row.iter().take(4).copied().collect::<Vec<_>>();
-                                            eprintln!(
-                                                "gdn_compare_digest mode={} node={} label={} row={} first4={digest:?}",
-                                                if new_count > 1 { "scan" } else { "cached" },
-                                                node.0,
+                                            trace!(
+                                                mode = if new_count > 1 { "scan" } else { "cached" },
+                                                node = node.0,
                                                 label,
-                                                row_index,
+                                                row = row_index as u64,
+                                                first4 = ?digest,
+                                                "gdn_compare_digest"
                                             );
                                         }
                                     }
@@ -4510,12 +4558,14 @@ impl<'file> LoadedModel<'file> {
                                 .copied()
                                 .enumerate()
                                 .max_by(|left, right| left.1.total_cmp(&right.1));
-                            eprintln!(
-                                "gdn_router_layer mode={} layer={} node={} shape={shape:?} rows={} first_top={top:?}",
-                                if new_count > 1 { "scan" } else { "cached" },
-                                layer,
-                                router_node.0,
-                                rows,
+                            trace!(
+                                mode = if new_count > 1 { "scan" } else { "cached" },
+                                layer = layer as u64,
+                                node = router_node.0,
+                                shape = ?shape,
+                                rows = rows as u64,
+                                first_top = ?top,
+                                "gdn_router_layer"
                             );
                         }
                     }
@@ -4847,14 +4897,13 @@ impl<'file> LoadedModel<'file> {
                         let mut emitted: Vec<u32> =
                             speculative_draft[..verified.accepted].to_vec();
                         emitted.push(verified.next);
-                        if std::env::var_os("PROXIMA_DEBUG_SPECULATIVE").is_some() {
-                            eprintln!(
-                                "speculative_verify step={_step} draft_len={} accepted={} emitted={}",
-                                speculative_draft.len(),
-                                verified.accepted,
-                                emitted.len()
-                            );
-                        }
+                        debug!(
+                            step = _step as u64,
+                            draft_len = speculative_draft.len() as u64,
+                            accepted = verified.accepted as u64,
+                            emitted = emitted.len() as u64,
+                            "speculative_verify"
+                        );
 
                         // The append loop above wrote `new_count` positions'
                         // worth of K/V for every layer; only
@@ -4944,9 +4993,10 @@ impl<'file> LoadedModel<'file> {
                         // on a measurement run that only wants timing.
                         #[cfg(feature = "instrument")]
                         if std::env::var_os("PROXIMA_HEAD_REPEATS_VERIFY").is_some() {
-                            eprintln!(
-                                "head_repeats_verify step={_step} production_node={}",
-                                active_logits_root.0,
+                            debug!(
+                                step = _step as u64,
+                                production_node = active_logits_root.0,
+                                "head_repeats_verify"
                             );
                             for (offset, duplicate_node) in
                                 self.duplicate_head_roots.iter().copied().enumerate()
@@ -4972,21 +5022,26 @@ impl<'file> LoadedModel<'file> {
                                             .iter()
                                             .filter(|value| value.is_nan())
                                             .count();
-                                        eprintln!(
-                                            "head_repeats_verify step={_step} duplicate_offset={offset} \
-                                             node={} bytes_match={matches} sentinel_survived={sentinel_survived} \
-                                             max_abs_diff={max_abs_diff} nan_count={nan_count} \
-                                             dup_first_three={:?} prod_first_three={:?}",
-                                            duplicate_node.0,
-                                            &duplicate_logits[..duplicate_logits.len().min(3)],
-                                            &last_position[..last_position.len().min(3)],
+                                        debug!(
+                                            step = _step as u64,
+                                            duplicate_offset = offset as u64,
+                                            node = duplicate_node.0,
+                                            bytes_match = matches,
+                                            sentinel_survived,
+                                            max_abs_diff,
+                                            nan_count = nan_count as u64,
+                                            dup_first_three = ?&duplicate_logits[..duplicate_logits.len().min(3)],
+                                            prod_first_three = ?&last_position[..last_position.len().min(3)],
+                                            "head_repeats_verify"
                                         );
                                     }
                                     None => {
-                                        eprintln!(
-                                            "head_repeats_verify step={_step} duplicate_offset={offset} \
-                                             node={} MISSING_FROM_EVALUATED",
-                                            duplicate_node.0,
+                                        debug!(
+                                            step = _step as u64,
+                                            duplicate_offset = offset as u64,
+                                            node = duplicate_node.0,
+                                            missing_from_evaluated = true,
+                                            "head_repeats_verify"
                                         );
                                     }
                                 }
@@ -5001,16 +5056,16 @@ impl<'file> LoadedModel<'file> {
                                     .total_cmp(&last_position[*left])
                                     .then_with(|| left.cmp(right))
                             });
-                            eprintln!(
-                                "gdn_logits step={} batch_index={} top={:?} first={:?}",
-                                _step,
-                                batch_index,
-                                ranked
+                            debug!(
+                                step = _step as u64,
+                                batch_index = batch_index as u64,
+                                top = ?ranked
                                     .iter()
                                     .take(8)
                                     .map(|index| (*index, last_position[*index]))
                                     .collect::<Vec<_>>(),
-                                &last_position[..last_position.len().min(8)]
+                                first = ?&last_position[..last_position.len().min(8)],
+                                "gdn_logits"
                             );
                         }
                         #[cfg(feature = "instrument")]
@@ -5045,15 +5100,15 @@ impl<'file> LoadedModel<'file> {
                             (0_u64, 0_u64)
                         };
                         #[cfg(feature = "instrument")]
-                        if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+                        {
                             let ms = |ticks: u64| {
                                 proxima_tensor::instrument::ticks_to_nanos(ticks) as f64 / 1e6
                             };
-                            eprintln!(
-                                "token_breakdown_argmax_split step={} scan_ms={} debug_ms={}",
-                                _step,
-                                ms(scan_ticks),
-                                ms(debug_ticks),
+                            debug!(
+                                step = _step as u64,
+                                scan_ms = ms(scan_ticks),
+                                debug_ms = ms(debug_ticks),
+                                "token_breakdown_argmax_split"
                             );
                         }
                         #[cfg(feature = "instrument")]
@@ -5080,29 +5135,29 @@ impl<'file> LoadedModel<'file> {
                         let logits_hash_started = read_ticks();
                         #[cfg(feature = "metal")]
                         if logits_diag_enabled {
-                            eprintln!(
-                                "logits_hash step={} hash=0x{:016x}",
-                                _step,
-                                logits_bits_hash(last_position)
+                            debug!(
+                                step = _step as u64,
+                                hash = %format!("0x{:016x}", logits_bits_hash(last_position)),
+                                "logits_hash"
                             );
                         }
                         #[cfg(feature = "instrument")]
                         let logits_hash_ticks = elapsed_ticks(logits_hash_started);
                         #[cfg(feature = "instrument")]
-                        if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+                        {
                             let ms = |ticks: u64| {
                                 proxima_tensor::instrument::ticks_to_nanos(ticks) as f64 / 1e6
                             };
-                            eprintln!(
-                                "token_breakdown_gaps step={} root_select_ms={} post_evaluate_ms={} pre_logits_ms={} checksum_ms={} fetch_ms={} argmax_ms={} logits_hash_ms={}",
-                                _step,
-                                ms(root_select_ticks),
-                                ms(post_evaluate_ticks),
-                                ms(pre_logits_ticks),
-                                ms(checksum_ticks),
-                                ms(fetch_ticks),
-                                ms(argmax_ticks),
-                                ms(logits_hash_ticks),
+                            debug!(
+                                step = _step as u64,
+                                root_select_ms = ms(root_select_ticks),
+                                post_evaluate_ms = ms(post_evaluate_ticks),
+                                pre_logits_ms = ms(pre_logits_ticks),
+                                checksum_ms = ms(checksum_ticks),
+                                fetch_ms = ms(fetch_ticks),
+                                argmax_ms = ms(argmax_ticks),
+                                logits_hash_ms = ms(logits_hash_ticks),
+                                "token_breakdown_gaps"
                             );
                         }
 
@@ -5266,9 +5321,7 @@ impl<'file> LoadedModel<'file> {
                     // so retained residency actions cannot churn later layers
                     // of the same token.
                     self.reconcile_attached_qwen35moe_residency(policy)?;
-                    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-                        eprintln!("qwen35 residency boundary position={cached_len}");
-                    }
+                    debug!(position = cached_len as u64, "qwen35_residency_boundary");
                 }
 
                 Ok(token_id)
@@ -5287,16 +5340,14 @@ impl<'file> LoadedModel<'file> {
         let (generated_ids, stopped_by_eos) = decode_result?;
 
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        if qwen35moe_expert_prefetch_enabled
-            && std::env::var_os("PROXIMA_DEBUG_EXPERT_PREFETCH").is_some()
-        {
-            eprintln!(
-                "qwen35 expert prefetch stats predictions={} hits={} overfetch={} advice_events={} advised_bytes={}",
-                qwen35moe_prefetch_prediction_count,
-                qwen35moe_prefetch_hit_count,
-                qwen35moe_prefetch_overfetch_count,
-                qwen35moe_prefetch_advice_events,
-                qwen35moe_prefetch_advised_bytes
+        if qwen35moe_expert_prefetch_enabled {
+            debug!(
+                predictions = qwen35moe_prefetch_prediction_count,
+                hits = qwen35moe_prefetch_hit_count,
+                overfetch = qwen35moe_prefetch_overfetch_count,
+                advice_events = qwen35moe_prefetch_advice_events,
+                advised_bytes = qwen35moe_prefetch_advised_bytes,
+                "qwen35_expert_prefetch_stats"
             );
         }
 
@@ -5758,21 +5809,19 @@ impl<'file> LoadedModel<'file> {
                     });
                 }
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                if std::env::var_os("PROXIMA_DEBUG_TOKEN_STAGES").is_some() {
-                    eprintln!(
-                        "token_stages step={} cached_len={} evaluate_ms={:.3} gpu_exec_ms={:.3} prepare_ms={:.3} pipeline_misses={} pipeline_compile_ms={:.3} op_setup_ms={:.3} block_upload_ms={:.3} readback_ms={:.3}",
-                        _step,
-                        cached_len,
-                        ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
-                        ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
-                        ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
-                        metal_stage.pipeline_misses,
-                        ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
-                        ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
-                        ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
-                        ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
-                    );
-                }
+                debug!(
+                    step = _step as u64,
+                    cached_len = cached_len as u64,
+                    evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
+                    gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
+                    prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
+                    pipeline_misses = metal_stage.pipeline_misses,
+                    pipeline_compile_ms = ticks_to_nanos(metal_stage.pipeline_compile_ticks) as f64 / 1e6,
+                    op_setup_ms = ticks_to_nanos(metal_stage.op_setup_ticks) as f64 / 1e6,
+                    block_upload_ms = ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
+                    readback_ms = ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
+                    "token_stages"
+                );
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 if let Some(split_ns) = encoder_split_ns {
                     report_encoder_split(
@@ -5812,10 +5861,10 @@ impl<'file> LoadedModel<'file> {
                 // PROXIMA_LOGITS_DIAG gate as the batch decode path's logits_hash.
                 #[cfg(feature = "metal")]
                 if std::env::var_os("PROXIMA_LOGITS_DIAG").is_some() {
-                    eprintln!(
-                        "logits_hash step={} hash=0x{:016x}",
-                        _step,
-                        logits_bits_hash(last_position)
+                    debug!(
+                        step = _step as u64,
+                        hash = %format!("0x{:016x}", logits_bits_hash(last_position)),
+                        "logits_hash"
                     );
                 }
 

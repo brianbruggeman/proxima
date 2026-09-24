@@ -373,13 +373,13 @@ impl<'file> LoadedModel<'file> {
                     }
                 })?;
             }
-            if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLAN").is_some() && layer < 3 {
-                eprintln!(
-                    "qwen35 plan layer={layer} router_cuts={:?} gather_cuts={:?} router_future={:?} map={:?} op493={:?} gather_ops={:?}",
-                    segments.router.1,
-                    segments.gather.1,
-                    segments.router_future_cuts,
-                    segments
+            if layer < 3 {
+                trace!(
+                    layer = layer as u64,
+                    router_cuts = ?segments.router.1,
+                    gather_cuts = ?segments.gather.1,
+                    router_future = ?segments.router_future_cuts,
+                    map = ?segments
                         .gather
                         .2
                         .iter()
@@ -391,14 +391,15 @@ impl<'file> LoadedModel<'file> {
                             mapped.0 <= maximum
                         })
                         .collect::<Vec<_>>(),
-                    self.program.get(493),
-                    segments
+                    op493 = ?self.program.get(493),
+                    gather_ops = ?segments
                         .gather
                         .0
                         .iter()
                         .enumerate()
                         .map(|(index, operation)| (index, operation.name()))
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>(),
+                    "qwen35_plan"
                 );
             }
         }
@@ -469,14 +470,12 @@ impl<'file> LoadedModel<'file> {
                 .intersection(&consumed_cuts)
                 .copied()
                 .collect::<BTreeSet<_>>();
-            if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLAN").is_some() {
-                eprintln!(
-                    "qwen35 placement candidates produced={} consumed={} placed={:?}",
-                    produced_cuts.len(),
-                    consumed_cuts.len(),
-                    placed_boundary_cuts,
-                );
-            }
+            debug!(
+                produced = produced_cuts.len() as u64,
+                consumed = consumed_cuts.len() as u64,
+                placed = ?placed_boundary_cuts,
+                "qwen35_placement_candidates"
+            );
             let mut placements = BTreeMap::new();
             for node in placed_boundary_cuts {
                 if matches!(
@@ -585,22 +584,20 @@ impl<'file> LoadedModel<'file> {
         let mut router_readback_bytes = 0_u64;
         #[cfg(feature = "instrument")]
         let mut gather_readback_bytes = 0_u64;
-        if std::env::var_os("PROXIMA_DEBUG_QWEN35_ROOTS").is_some() {
-            eprintln!(
-                "qwen35 pre-gather roots nodes={:?}",
-                outputs
-                    .iter()
-                    .map(|node| {
-                        (
-                            node.0,
-                            self.program
-                                .get(node.0 as usize)
-                                .and_then(|operation| operation.name()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            );
-        }
+        debug!(
+            nodes = ?outputs
+                .iter()
+                .map(|node| {
+                    (
+                        node.0,
+                        self.program
+                            .get(node.0 as usize)
+                            .and_then(|operation| operation.name()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            "qwen35_pre_gather_roots"
+        );
         for (index, operation) in self.program.iter().enumerate() {
             if let proxima_tensor::op::Op::Constant { value, .. } = operation {
                 carried.insert(NodeId(index as u32), (Vec::new(), vec![*value]));
@@ -828,15 +825,15 @@ impl<'file> LoadedModel<'file> {
             // boundary whenever either placement is active.
             let fused_boundary_mode =
                 fused_boundary_requested && !has_ssm_placement && !has_dense_attention_placement;
-            if std::env::var_os("PROXIMA_DEBUG_QWEN35_FUSED").is_some() && layer < 3 {
-                eprintln!(
-                    "qwen35 fused boundary layer={} requested={} enabled={} has_segment={} ssm={} dense={}",
-                    layer,
-                    fused_boundary_requested,
-                    fused_boundary_mode,
-                    segments.gather_next_router.is_some(),
-                    has_ssm_placement,
-                    has_dense_attention_placement,
+            if layer < 3 {
+                debug!(
+                    layer = layer as u64,
+                    requested = fused_boundary_requested,
+                    enabled = fused_boundary_mode,
+                    has_segment = segments.gather_next_router.is_some(),
+                    ssm = has_ssm_placement,
+                    dense = has_dense_attention_placement,
+                    "qwen35_fused_boundary"
                 );
             }
             for phase_index in 0..2 {
@@ -925,17 +922,15 @@ impl<'file> LoadedModel<'file> {
                             ),
                         }
                     })?;
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_CARRY").is_some() {
-                        eprintln!(
-                            "gdn_gather_cut layer={} phase={} node={} name={} elements={} first4={:?}",
-                            layer,
-                            if is_router { "router" } else { "gather" },
-                            node.0,
-                            name,
-                            values.len(),
-                            values.iter().take(4).copied().collect::<Vec<_>>(),
-                        );
-                    }
+                    trace!(
+                        layer = layer as u64,
+                        phase = if is_router { "router" } else { "gather" },
+                        node = node.0,
+                        name = %name,
+                        elements = values.len() as u64,
+                        first4 = ?values.iter().take(4).copied().collect::<Vec<_>>(),
+                        "gdn_gather_cut"
+                    );
                     segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
                 }
 
@@ -953,82 +948,79 @@ impl<'file> LoadedModel<'file> {
                     && let Some((q_product, _)) = operands.first()
                     && let Some(mapped_product) = mapping.get(q_product)
                 {
-                    eprintln!(
-                        "dense_segment_qg_layout original_product={} mapped_product={} local_op={:?} original_operands={:?} local_operands={:?} named_q={:?}",
-                        q_product.0,
-                        mapped_product.0,
-                        program.get(mapped_product.0 as usize),
-                        operands,
-                        program
+                    trace!(
+                        original_product = q_product.0,
+                        mapped_product = mapped_product.0,
+                        local_op = ?program.get(mapped_product.0 as usize),
+                        original_operands = ?operands,
+                        local_operands = ?program
                             .get(mapped_product.0 as usize)
                             .and_then(|operation| match operation {
                                 Op::Elementwise { operands, .. } => Some(operands.as_slice()),
                                 _ => None,
                             })
                             .unwrap_or(&[]),
-                        segment_named
+                        named_q = ?segment_named
                             .iter()
                             .map(|(name, block)| (*name, core::mem::discriminant(block)))
                             .filter(|(name, _)| name.contains("attn_q"))
                             .collect::<Vec<_>>(),
+                        "dense_segment_qg_layout"
                     );
                     if let Some(Op::Reduce(local_reduce)) = program.get(mapped_product.0 as usize) {
-                        eprintln!(
-                            "dense_segment_qg_reduce original_operand={} mapped_operand={} original_operand_op={:?} local_operand_op={:?}",
-                            self.program
+                        trace!(
+                            original_operand = self.program
                                 .get(q_product.0 as usize)
                                 .and_then(|operation| match operation {
                                     Op::Reduce(reduce) => Some(reduce.operand.0),
                                     _ => None,
                                 })
                                 .unwrap_or(u32::MAX),
-                            local_reduce.operand.0,
-                            self.program
+                            mapped_operand = local_reduce.operand.0,
+                            original_operand_op = ?self.program
                                 .get(q_product.0 as usize)
                                 .and_then(|operation| match operation {
                                     Op::Reduce(reduce) =>
                                         self.program.get(reduce.operand.0 as usize),
                                     _ => None,
                                 }),
-                            program.get(local_reduce.operand.0 as usize),
+                            local_operand_op = ?program.get(local_reduce.operand.0 as usize),
+                            "dense_segment_qg_reduce"
                         );
-                        eprintln!(
-                            "dense_segment_qg_inputs local_activation={:?} local_weight={:?}",
-                            program.get(39),
-                            program.get(16),
+                        trace!(
+                            local_activation = ?program.get(39),
+                            local_weight = ?program.get(16),
+                            "dense_segment_qg_inputs"
                         );
-                        eprintln!(
-                            "dense_segment_qg_weight original={:?} local={:?}",
-                            self.program.get(1233),
-                            program.get(16),
+                        trace!(
+                            original = ?self.program.get(1233),
+                            local = ?program.get(16),
+                            "dense_segment_qg_weight"
                         );
                         for (index, operation) in program.iter().enumerate() {
                             if let Op::Input { name, .. } = operation {
-                                eprintln!("dense_segment_qg_input_node node={index} name={name:?}");
+                                trace!(node = index as u64, name = ?name, "dense_segment_qg_input_node");
                             }
                         }
                     }
                 }
 
-                if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLAN").is_some()
-                    && !is_router
+                if !is_router
                     && layer == 0
                     && let Some((route_node, route_name)) = cuts
                         .iter()
                         .find(|(node, _)| *node == diagnostic.router_logits)
                     && let Some((route_shape, route_values)) = carried.get(route_node)
                 {
-                    eprintln!(
-                        "qwen35 gather route input original={route_node:?} name={route_name} shape={route_shape:?} first={:?} min={} max={} finite={}",
-                        route_values
-                            .get(..route_values.len().min(8))
-                            .unwrap_or_default(),
-                        route_values.iter().copied().fold(f32::INFINITY, f32::min),
-                        route_values
-                            .iter()
-                            .copied()
-                            .fold(f32::NEG_INFINITY, f32::max),
-                        route_values.iter().all(|value| value.is_finite()),
+                    debug!(
+                        original = ?route_node,
+                        name = %route_name,
+                        shape = ?route_shape,
+                        first = ?route_values.get(..route_values.len().min(8)).unwrap_or_default(),
+                        min = route_values.iter().copied().fold(f32::INFINITY, f32::min),
+                        max = route_values.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+                        finite = route_values.iter().all(|value| value.is_finite()),
+                        "qwen35_gather_route_input"
                     );
                 }
 
@@ -1088,23 +1080,20 @@ impl<'file> LoadedModel<'file> {
                 let mut segment_output_placements = Vec::new();
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 for (node, buffer) in &plan.router_cut_placements {
-                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLACEMENTS").is_some() {
-                        eprintln!(
-                            "qwen35 placement phase={} layer={} original={:?} mapped={:?}",
-                            if is_router { "router" } else { "gather" },
-                            layer,
-                            node,
-                            mapping.get(node),
-                        );
-                    }
+                    trace!(
+                        phase = if is_router { "router" } else { "gather" },
+                        layer = layer as u64,
+                        original = ?node,
+                        mapped = ?mapping.get(node),
+                        "qwen35_placement"
+                    );
                     if let Some(mapped) = mapping.get(node).copied() {
-                        if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLACEMENTS").is_some()
-                            && layer == 39
-                            && *node == NodeId(15)
-                        {
-                            eprintln!(
-                                "qwen35 placement detail original={node:?} mapped={mapped:?} op={:?}",
-                                program.get(mapped.0 as usize),
+                        if layer == 39 && *node == NodeId(15) {
+                            debug!(
+                                original = ?node,
+                                mapped = ?mapped,
+                                op = ?program.get(mapped.0 as usize),
+                                "qwen35_placement_detail"
                             );
                         }
                         if matches!(program.get(mapped.0 as usize), Some(Op::Input { .. })) {
@@ -1122,20 +1111,18 @@ impl<'file> LoadedModel<'file> {
                     }
                 }
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLACEMENTS").is_some()
-                    && layer == 39
-                    && is_router
-                {
-                    eprintln!(
-                        "qwen35 placement bindings layer=39 inputs={:?} outputs={:?}",
-                        segment_input_placements
+                if layer == 39 && is_router {
+                    debug!(
+                        layer = 39,
+                        inputs = ?segment_input_placements
                             .iter()
                             .map(|(node, _, offset)| (*node, *offset))
                             .collect::<Vec<_>>(),
-                        segment_output_placements
+                        outputs = ?segment_output_placements
                             .iter()
                             .map(|(node, _, offset)| (*node, *offset))
                             .collect::<Vec<_>>(),
+                        "qwen35_placement_bindings"
                     );
                 }
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1243,19 +1230,17 @@ impl<'file> LoadedModel<'file> {
                 }
                 requested_nodes.sort_unstable_by_key(|node| node.0);
                 requested_nodes.dedup();
-                if std::env::var_os("PROXIMA_DEBUG_QWEN35_REQUESTS").is_some() {
-                    eprintln!(
-                        "qwen35 segment requests phase={} layer={} program_ops={} named_inputs={} requested_nodes={} future_cuts={} global_cuts={} outputs={}",
-                        if is_router { "router" } else { "gather" },
-                        layer,
-                        program.len(),
-                        segment_named.len(),
-                        requested_nodes.len(),
-                        future_cuts.len(),
-                        plan.global_cut_nodes.len(),
-                        outputs.len(),
-                    );
-                }
+                trace!(
+                    phase = if is_router { "router" } else { "gather" },
+                    layer = layer as u64,
+                    program_ops = program.len() as u64,
+                    named_inputs = segment_named.len() as u64,
+                    requested_nodes = requested_nodes.len() as u64,
+                    future_cuts = future_cuts.len() as u64,
+                    global_cuts = plan.global_cut_nodes.len() as u64,
+                    outputs = outputs.len() as u64,
+                    "qwen35_segment_requests"
+                );
                 if layer == debug_layer
                     && !is_router
                     && std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_PARITY").is_some()
@@ -1382,13 +1367,12 @@ impl<'file> LoadedModel<'file> {
                     {
                         router_elapsed_us += segment_started.elapsed().as_micros() as u64;
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
-                        eprintln!(
-                            "qwen35 segment phase=router layer={} elapsed_us={}",
-                            layer,
-                            segment_started.elapsed().as_micros()
-                        );
-                    }
+                    debug!(
+                        phase = "router",
+                        layer = layer as u64,
+                        elapsed_us = segment_started.elapsed().as_micros() as u64,
+                        "qwen35_segment"
+                    );
                     let evaluated = result?;
                     if layer == 3
                         && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
@@ -1414,32 +1398,32 @@ impl<'file> LoadedModel<'file> {
                             &mut exact_validated,
                             None,
                         )?;
-                        eprintln!(
-                            "dense_segment_qg_compare mapped={} runtime={:?} exact={:?}",
-                            mapped_product.0,
-                            evaluated.get(*mapped_product).map(|(values, _)| values
+                        trace!(
+                            mapped = mapped_product.0,
+                            runtime = ?evaluated.get(*mapped_product).map(|(values, _)| values
                                 .iter()
                                 .take(4)
                                 .copied()
                                 .collect::<Vec<_>>()),
-                            exact.get(*mapped_product).map(|(values, _)| values
+                            exact = ?exact.get(*mapped_product).map(|(values, _)| values
                                 .iter()
                                 .take(4)
                                 .copied()
                                 .collect::<Vec<_>>()),
+                            "dense_segment_qg_compare"
                         );
                         for node in [NodeId(39), NodeId(16), NodeId(14), NodeId(15)] {
-                            eprintln!(
-                                "dense_segment_qg_local node={} runtime={:?} exact={:?}",
-                                node.0,
-                                evaluated.get(node).map(|(values, shape)| (
+                            trace!(
+                                node = node.0,
+                                runtime = ?evaluated.get(node).map(|(values, shape)| (
                                     shape.to_vec(),
                                     values.iter().take(4).copied().collect::<Vec<_>>(),
                                 )),
-                                exact.get(node).map(|(values, shape)| (
+                                exact = ?exact.get(node).map(|(values, shape)| (
                                     shape.to_vec(),
                                     values.iter().take(4).copied().collect::<Vec<_>>(),
                                 )),
+                                "dense_segment_qg_local"
                             );
                         }
                     }
@@ -1474,12 +1458,15 @@ impl<'file> LoadedModel<'file> {
                                 })
                                 .max_by(|left, right| left.1.total_cmp(&right.1))
                                 .unwrap_or((0, 0.0));
-                            eprintln!(
-                                "qwen35 router parity layer={layer} node={} max_abs={maximum} index={index} metal={} cpu={} shape={:?}",
-                                segment_output.0,
-                                actual_values.get(index).copied().unwrap_or_default(),
-                                expected_values.get(index).copied().unwrap_or_default(),
-                                actual_values.len(),
+                            debug!(
+                                layer = layer as u64,
+                                node = segment_output.0,
+                                max_abs = maximum,
+                                index = index as u64,
+                                metal = actual_values.get(index).copied().unwrap_or_default(),
+                                cpu = expected_values.get(index).copied().unwrap_or_default(),
+                                shape = actual_values.len() as u64,
+                                "qwen35_router_parity"
                             );
                         }
                     }
@@ -1501,22 +1488,22 @@ impl<'file> LoadedModel<'file> {
                                 admit_low_copy: qwen35moe_admit_low_copy,
                             },
                         )?;
-                        if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+                        {
                             #[cfg(feature = "instrument")]
                             let sidecar_read_elapsed_us =
                                 ticks_to_nanos(elapsed_ticks(sidecar_read_started)) / 1_000;
                             #[cfg(not(feature = "instrument"))]
                             let sidecar_read_elapsed_us = 0;
-                            eprintln!(
-                                "qwen35 bounded expert reads layer={} ranges={} bytes={} low_ranges={} high_ranges={} high_cache_hits={} high_cache_misses={} elapsed_us={}",
-                                layer,
-                                sidecar_read_scratch.ranges_read,
-                                sidecar_read_scratch.bytes_read,
-                                sidecar_read_scratch.low_ranges_read,
-                                sidecar_read_scratch.high_ranges_read,
-                                sidecar_read_scratch.high_cache_hits,
-                                sidecar_read_scratch.high_cache_misses,
-                                sidecar_read_elapsed_us,
+                            trace!(
+                                layer = layer as u64,
+                                ranges = sidecar_read_scratch.ranges_read,
+                                bytes = sidecar_read_scratch.bytes_read,
+                                low_ranges = sidecar_read_scratch.low_ranges_read,
+                                high_ranges = sidecar_read_scratch.high_ranges_read,
+                                high_cache_hits = sidecar_read_scratch.high_cache_hits,
+                                high_cache_misses = sidecar_read_scratch.high_cache_misses,
+                                elapsed_us = sidecar_read_elapsed_us,
+                                "qwen35_bounded_expert_reads"
                             );
                         }
                         Some(&*sidecar_read_scratch)
@@ -1548,12 +1535,10 @@ impl<'file> LoadedModel<'file> {
                                 &expert_sources,
                             )?
                         };
-                    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-                        eprintln!(
-                            "qwen35 mapped expert source nodes={:?}",
-                            mapped_expert_sources.keys().collect::<Vec<_>>()
-                        );
-                    }
+                    trace!(
+                        nodes = ?mapped_expert_sources.keys().collect::<Vec<_>>(),
+                        "qwen35_mapped_expert_source"
+                    );
                     let segment_started = std::time::Instant::now();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let result = if segment_input_placements.is_empty()
@@ -1673,19 +1658,19 @@ impl<'file> LoadedModel<'file> {
                             &mut exact_validated,
                             Some(&mapped_expert_sources),
                         )?;
-                        eprintln!(
-                            "dense_segment_qg_compare mapped={} runtime={:?} exact={:?}",
-                            mapped_product.0,
-                            result.as_ref().ok().and_then(|values| {
+                        trace!(
+                            mapped = mapped_product.0,
+                            runtime = ?result.as_ref().ok().and_then(|values| {
                                 values.get(*mapped_product).map(|(values, _)| {
                                     values.iter().take(4).copied().collect::<Vec<_>>()
                                 })
                             }),
-                            exact.get(*mapped_product).map(|(values, _)| values
+                            exact = ?exact.get(*mapped_product).map(|(values, _)| values
                                 .iter()
                                 .take(4)
                                 .copied()
                                 .collect::<Vec<_>>()),
+                            "dense_segment_qg_compare"
                         );
                     }
                     if (layer == debug_layer
@@ -1716,14 +1701,17 @@ impl<'file> LoadedModel<'file> {
                                     .get(first.node)
                                     .and_then(|(values, _)| values.get(first.index))
                                     .copied();
-                                eprintln!(
-                                    "qwen35 first nonfinite gather layer={layer} local_node={:?} name={:?} op={:?} element={} value={} shape={:?} metal={metal_counterpart:?} cpu={cpu_counterpart:?}",
-                                    first.node,
-                                    program[first.node.0 as usize].name(),
-                                    program[first.node.0 as usize],
-                                    first.index,
-                                    first.value,
-                                    first.shape,
+                                debug!(
+                                    layer = layer as u64,
+                                    local_node = ?first.node,
+                                    name = ?program[first.node.0 as usize].name(),
+                                    op = ?program[first.node.0 as usize],
+                                    element = first.index as u64,
+                                    value = first.value,
+                                    shape = ?first.shape,
+                                    metal = ?metal_counterpart,
+                                    cpu = ?cpu_counterpart,
+                                    "qwen35_first_nonfinite_gather"
                                 );
                                 if let Some(Op::Elementwise { operands, .. }) =
                                     program.get(first.node.0 as usize)
@@ -1737,16 +1725,21 @@ impl<'file> LoadedModel<'file> {
                                             .get(*operand)
                                             .and_then(|(values, _)| values.get(first.index))
                                             .copied();
-                                        eprintln!(
-                                            "qwen35 nonfinite operand local={operand:?} op={:?} metal={metal_value:?} cpu={cpu_value:?}",
-                                            program.get(operand.0 as usize),
+                                        debug!(
+                                            local = ?operand,
+                                            op = ?program.get(operand.0 as usize),
+                                            metal = ?metal_value,
+                                            cpu = ?cpu_value,
+                                            "qwen35_nonfinite_operand"
                                         );
                                     }
                                 }
                             } else {
-                                eprintln!(
-                                    "qwen35 first nonfinite gather layer={layer} result=none local_nodes={}",
-                                    requested_nodes.len(),
+                                debug!(
+                                    layer = layer as u64,
+                                    result = "none",
+                                    local_nodes = requested_nodes.len() as u64,
+                                    "qwen35_first_nonfinite_gather"
                                 );
                             }
                         }
@@ -1778,14 +1771,17 @@ impl<'file> LoadedModel<'file> {
                                 })
                                 .max_by(|left, right| left.1.total_cmp(&right.1))
                                 .unwrap_or((0, 0.0));
-                            eprintln!(
-                                "qwen35 gather parity layer={layer} node={} original_op={:?} max_abs={maximum} index={index} metal={} cpu={}",
-                                parity_node.0,
-                                self.program
+                            debug!(
+                                layer = layer as u64,
+                                node = parity_node.0,
+                                original_op = ?self.program
                                     .get(parity_node.0 as usize)
                                     .map(|operation| operation.name()),
-                                actual_values.get(index).copied().unwrap_or_default(),
-                                expected_values.get(index).copied().unwrap_or_default(),
+                                max_abs = maximum,
+                                index = index as u64,
+                                metal = actual_values.get(index).copied().unwrap_or_default(),
+                                cpu = expected_values.get(index).copied().unwrap_or_default(),
+                                "qwen35_gather_parity"
                             );
                         }
                         if let Ok(actual) = &result {
@@ -1805,11 +1801,16 @@ impl<'file> LoadedModel<'file> {
                                         .zip(expected_values)
                                         .map(|(actual, expected)| (actual - expected).abs())
                                         .fold(0.0_f32, f32::max);
-                                    eprintln!(
-                                        "qwen35 gather digest layer={layer} node={node:?} name={:?} actual_shape={actual_shape:?} expected_shape={expected_shape:?} max_abs={maximum} actual_first={:?} expected_first={:?}",
-                                        program[node.0 as usize].name(),
-                                        actual_values.iter().take(4).copied().collect::<Vec<_>>(),
-                                        expected_values.iter().take(4).copied().collect::<Vec<_>>(),
+                                    trace!(
+                                        layer = layer as u64,
+                                        node = ?node,
+                                        name = ?program[node.0 as usize].name(),
+                                        actual_shape = ?actual_shape,
+                                        expected_shape = ?expected_shape,
+                                        max_abs = maximum,
+                                        actual_first = ?actual_values.iter().take(4).copied().collect::<Vec<_>>(),
+                                        expected_first = ?expected_values.iter().take(4).copied().collect::<Vec<_>>(),
+                                        "qwen35_gather_digest"
                                     );
                                 }
                             }
@@ -1831,9 +1832,7 @@ impl<'file> LoadedModel<'file> {
                                     };
                                     match operation {
                                         proxima_tensor::op::Op::Input { name, .. } => {
-                                            eprintln!(
-                                                "qwen35 gather graph input node={node:?} name={name:?}"
-                                            );
+                                            trace!(node = ?node, name = ?name, "qwen35_gather_graph_input");
                                         }
                                         proxima_tensor::op::Op::Elementwise {
                                             operands, ..
@@ -1862,10 +1861,13 @@ impl<'file> LoadedModel<'file> {
                                     .map(|(actual, expected)| (actual - expected).abs())
                                     .fold(0.0_f32, f32::max);
                                 if maximum > 1.0e-3 {
-                                    eprintln!(
-                                        "qwen35 first gather divergence layer={layer} node={node:?} name={:?} op={:?} max_abs={maximum}",
-                                        program[node.0 as usize].name(),
-                                        program[node.0 as usize],
+                                    debug!(
+                                        layer = layer as u64,
+                                        node = ?node,
+                                        name = ?program[node.0 as usize].name(),
+                                        op = ?program[node.0 as usize],
+                                        max_abs = maximum,
+                                        "qwen35_first_gather_divergence"
                                     );
                                     if let proxima_tensor::op::Op::Elementwise {
                                         operands, ..
@@ -1886,8 +1888,11 @@ impl<'file> LoadedModel<'file> {
                                                         (actual - expected).abs()
                                                     })
                                                     .fold(0.0_f32, f32::max);
-                                                eprintln!(
-                                                    "qwen35 gather operand node={operand:?} index={operand_index} max_abs={operand_maximum}"
+                                                debug!(
+                                                    node = ?operand,
+                                                    index = operand_index as u64,
+                                                    max_abs = operand_maximum,
+                                                    "qwen35_gather_operand"
                                                 );
                                             }
                                         }
@@ -1901,13 +1906,12 @@ impl<'file> LoadedModel<'file> {
                     {
                         gather_elapsed_us += segment_started.elapsed().as_micros() as u64;
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
-                        eprintln!(
-                            "qwen35 segment phase=gather layer={} elapsed_us={}",
-                            layer,
-                            segment_started.elapsed().as_micros()
-                        );
-                    }
+                    debug!(
+                        phase = "gather",
+                        layer = layer as u64,
+                        elapsed_us = segment_started.elapsed().as_micros() as u64,
+                        "qwen35_segment"
+                    );
                     result?
                 };
                 if layer == 3
@@ -1925,16 +1929,15 @@ impl<'file> LoadedModel<'file> {
                     && let Some(mapped) = mapping.get(q_product)
                     && let Some((values, shape)) = evaluated.get(*mapped)
                 {
-                    eprintln!(
-                        "dense_segment_qg_product mode={} layer=3 phase=router node={} mapped={} shape={shape:?} first4={:?}",
-                        if position_offset > 0 {
-                            "cached"
-                        } else {
-                            "scan"
-                        },
-                        q_product.0,
-                        mapped.0,
-                        values.iter().take(4).copied().collect::<Vec<_>>(),
+                    trace!(
+                        mode = if position_offset > 0 { "cached" } else { "scan" },
+                        layer = 3,
+                        phase = "router",
+                        node = q_product.0,
+                        mapped = mapped.0,
+                        shape = ?shape,
+                        first4 = ?values.iter().take(4).copied().collect::<Vec<_>>(),
+                        "dense_segment_qg_product"
                     );
                 }
                 #[cfg(feature = "instrument")]
@@ -1975,11 +1978,11 @@ impl<'file> LoadedModel<'file> {
                             })
                             .collect::<Vec<_>>();
                         returned.sort_unstable_by_key(|entry| core::cmp::Reverse(entry.2));
-                        eprintln!(
-                            "qwen35 segment returned bytes phase={} layer={} nodes={:?}",
-                            if is_router { "router" } else { "gather" },
-                            layer,
-                            returned,
+                        trace!(
+                            phase = if is_router { "router" } else { "gather" },
+                            layer = layer as u64,
+                            nodes = ?returned,
+                            "qwen35_segment_returned_bytes"
                         );
                     }
                 }
@@ -2029,13 +2032,13 @@ impl<'file> LoadedModel<'file> {
                             let placed = plan.router_cut_placements.contains_key(&original);
                             #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                             let placed = false;
-                            eprintln!(
-                                "qwen35 missing evaluated node phase={} original={:?} mapped={:?} placed={} op={:?}",
-                                if is_router { "router" } else { "gather" },
-                                original,
-                                mapped,
+                            debug!(
+                                phase = if is_router { "router" } else { "gather" },
+                                original = ?original,
+                                mapped = ?mapped,
                                 placed,
-                                self.program.get(original.0 as usize),
+                                op = ?self.program.get(original.0 as usize),
+                                "qwen35_missing_evaluated_node"
                             );
                         }
                         InteropError::MissingEvaluatedNode { node: original }
@@ -2077,17 +2080,17 @@ impl<'file> LoadedModel<'file> {
                     {
                         let row_length = values.len() / rows;
                         let row_start = local_position * row_length;
-                        eprintln!(
-                            "qwen35 block_output layer={} position={} node={:?} shape={:?} first4={:?}",
-                            layer,
-                            selected_position,
-                            segment_output,
-                            shape,
-                            values[row_start..row_start + row_length]
+                        trace!(
+                            layer = layer as u64,
+                            position = selected_position as u64,
+                            node = ?segment_output,
+                            shape = ?shape,
+                            first4 = ?values[row_start..row_start + row_length]
                                 .iter()
                                 .take(4)
                                 .copied()
                                 .collect::<Vec<_>>(),
+                            "qwen35_block_output"
                         );
                     }
                     if !is_router && values.iter().any(|value| !value.is_finite()) {
@@ -2096,30 +2099,33 @@ impl<'file> LoadedModel<'file> {
                             .enumerate()
                             .find(|(_, value)| !value.is_finite())
                             .map(|(index, value)| (index, *value));
-                        eprintln!(
-                            "qwen35 nonfinite gather layer={layer} node={segment_output:?} first={first_nonfinite:?}"
+                        warn!(
+                            layer = layer as u64,
+                            node = ?segment_output,
+                            first = ?first_nonfinite,
+                            "qwen35_nonfinite_gather"
                         );
                         return Err(InteropError::PreGatherExecutionUnsupported {
                             architecture: String::from("qwen35moe"),
                             reason: alloc::format!(
-                                "layer {layer} expert gather produced a non-finite value"
+                                "layer {layer} node {segment_output:?} expert gather produced a non-finite value first={first_nonfinite:?}"
                             ),
                         });
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+                    {
                         let nan_count = values.iter().filter(|value| value.is_nan()).count();
                         let min = values.iter().copied().fold(f32::INFINITY, f32::min);
                         let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                        eprintln!(
-                            "qwen35 segment output layer={} phase={} node={:?} elements={} nan_count={} min={} max={} first={:?}",
-                            layer,
-                            if is_router { "router" } else { "gather" },
-                            segment_output,
-                            values.len(),
-                            nan_count,
+                        trace!(
+                            layer = layer as u64,
+                            phase = if is_router { "router" } else { "gather" },
+                            node = ?segment_output,
+                            elements = values.len() as u64,
+                            nan_count = nan_count as u64,
                             min,
                             max,
-                            values.get(..values.len().min(4)).unwrap_or_default()
+                            first = ?values.get(..values.len().min(4)).unwrap_or_default(),
+                            "qwen35_segment_output"
                         );
                     }
                     carried.insert(segment_output, (shape.to_vec(), values.to_vec()));
@@ -2240,12 +2246,12 @@ impl<'file> LoadedModel<'file> {
             }
             for (mapped, original) in requested {
                 let (values, shape) = evaluated.get(mapped).ok_or_else(|| {
-                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_MISSING_NODE").is_some() {
-                        eprintln!(
-                            "qwen35 missing evaluated node phase=suffix node={:?} mapped={:?}",
-                            original, mapped
-                        );
-                    }
+                    debug!(
+                        phase = "suffix",
+                        node = ?original,
+                        mapped = ?mapped,
+                        "qwen35_missing_evaluated_node"
+                    );
                     InteropError::MissingEvaluatedNode { node: original }
                 })?;
                 results.insert(original, (shape.to_vec(), values.to_vec()));
@@ -2264,19 +2270,17 @@ impl<'file> LoadedModel<'file> {
                 gather_readback_bytes,
                 "qwen35moe pre-gather segment census recorded after requested outputs completed"
             );
-            if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
-                eprintln!(
-                    "qwen35 segment summary position={} layers={} segments={} suffix_executed={} router_elapsed_us={} gather_elapsed_us={} router_readback_bytes={} gather_readback_bytes={}",
-                    position_offset,
-                    plan.layers.len(),
-                    segment_execution_count,
-                    suffix_executed,
-                    router_elapsed_us,
-                    gather_elapsed_us,
-                    router_readback_bytes,
-                    gather_readback_bytes,
-                );
-            }
+            debug!(
+                position = position_offset as u64,
+                layers = plan.layers.len() as u64,
+                segments = segment_execution_count,
+                suffix_executed,
+                router_elapsed_us,
+                gather_elapsed_us,
+                router_readback_bytes,
+                gather_readback_bytes,
+                "qwen35_segment_summary"
+            );
         }
 
         let ordered_results = outputs
@@ -2556,15 +2560,12 @@ impl<'file> LoadedModel<'file> {
         // that DOES read the flags, with one set, falls through to the
         // narrow inline path below.
         let resolved = registry.resolve(parsed)?;
-        if std::env::var_os("PROXIMA_DEBUG_ARCH_ROUTE").is_some() {
-            eprintln!(
-                "architecture route value={:?} diagnostic_reduce_flags_apply={} flags=({}, {})",
-                resolved.name(),
-                resolved.diagnostic_reduce_flags_apply(),
-                paired_gate_up_reduce,
-                fused_qkv_reduce,
-            );
-        }
+        debug!(
+            value = ?resolved.name(),
+            diagnostic_reduce_flags_apply = resolved.diagnostic_reduce_flags_apply(),
+            flags = ?(paired_gate_up_reduce, fused_qkv_reduce),
+            "architecture_route"
+        );
         if !resolved.diagnostic_reduce_flags_apply() || (!paired_gate_up_reduce && !fused_qkv_reduce)
         {
             let bound = resolved.bind(parsed, file_bytes)?;
