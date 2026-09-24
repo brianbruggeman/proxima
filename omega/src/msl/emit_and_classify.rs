@@ -1065,6 +1065,61 @@ pub(super) fn multi_row_index32_active(
     multi_row_index32_override()
 }
 
+/// admission for the generic cooperative-reduce seam's coordinate
+/// decomposition: narrows its divisors to `uint` only when every output
+/// extent fits `u32`.
+pub(super) fn coord_index32_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+) -> bool {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return false;
+    };
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+        return false;
+    }
+    if packed_row_block(resolved, quantized).is_some() {
+        return false;
+    }
+    if !reduce_is_cooperative_dispatch(
+        resolved,
+        quantized,
+        numeric_policy,
+        *reduce_op,
+        *init,
+        output_axes,
+        expert_source_mode,
+    ) {
+        return false;
+    }
+    if !coord_index32_extents_fit(resolved, output_axes) {
+        return false;
+    }
+    coord_index32_override()
+}
+
+/// The shape-only half of [`coord_index32_active`]'s admission, split out so
+/// the render site (`push_cooperative_reduce_body`, already guaranteed on
+/// this exact seam by the time it reaches the coordinate-decomposition
+/// lines -- `tiled_gemm_block`/`packed_row_block` already returned early
+/// above it) can re-check the SAME extent bound without needing
+/// `numeric_policy` (not one of that function's own parameters) or
+/// re-deriving the path-selection checks its caller already made.
+pub(super) fn coord_index32_extents_fit(resolved: &BoundOp, output_axes: &[u16]) -> bool {
+    output_axes.iter().all(|&axis| {
+        let extent = resolved.extents[axis as usize];
+        extent >= 1 && extent <= u64::from(u32::MAX)
+    })
+}
+
 /// [`push_packed_row_multi_row_body`]'s own `fast_q4k` local gate
 /// (`elementwise_reduce_core.rs`), called as a function rather than
 /// re-derived so [`multi_row_generic_arm_current`] can never disagree with the
@@ -1176,6 +1231,13 @@ pub(crate) fn kernel_cache_key(
         // routed expert's weight).
         multi_row_unroll: multi_row_unroll_active(resolved, &quantized, false),
         multi_row_index32: multi_row_index32_active(resolved, &quantized, false),
+        // no real `expert_source_mode` at cache-key time -- see
+        // `coord_index32_active`'s own doc; the same `!weight_gathered`-style
+        // reasoning does not apply here (this seam never gathers), but this
+        // function's own `reduce_is_cooperative_dispatch` call folds
+        // `expert_source_mode` into ITS OWN admission already, matching
+        // every other multi-row/coord experiment's posture at this call site.
+        coord_index32: coord_index32_active(resolved, &quantized, numeric_policy, false),
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,

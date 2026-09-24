@@ -1847,6 +1847,43 @@ pub(super) const fn multi_row_index32_override() -> bool {
     false
 }
 
+/// `PROXIMA_COORD_INDEX32=1` A/B switch: narrows the coordinate
+/// decomposition's divisors to `uint` only when every output extent fits
+/// `u32`. Default off; unset, empty, or any value other than `"1"` keeps
+/// today's `long`-decomposed emit.
+#[cfg(feature = "std")]
+pub(super) fn coord_index32_override() -> bool {
+    let active = matches!(std::env::var("PROXIMA_COORD_INDEX32"), Ok(value) if value.trim() == "1");
+    log_coord_index32_once(active);
+    active
+}
+
+/// Print whether the coordinate-index32 experiment fired exactly once per
+/// process, matching [`log_multi_row_index32_once`]'s own posture. Gated on
+/// `instrument` alone -- the override itself stays `std`-only and fires
+/// regardless of `instrument`.
+#[cfg(feature = "instrument")]
+fn log_coord_index32_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(
+            override_name = "coord_index32",
+            active,
+            source,
+            "coordinate-index32 override resolved"
+        );
+    });
+}
+
+#[cfg(all(feature = "std", not(feature = "instrument")))]
+fn log_coord_index32_once(_active: bool) {}
+
+#[cfg(not(feature = "std"))]
+pub(super) const fn coord_index32_override() -> bool {
+    false
+}
+
 /// Every packed operand a bound program has, keyed by [`NodeId`] to its
 /// codec — the single source of truth [`emit`] (via the `quantized` slice it
 /// derives) and the Metal driver's `correct_packed_matmul_layouts` call both

@@ -804,12 +804,24 @@ pub(super) fn push_cooperative_reduce_body(
 
     if output_rank > 0 {
         source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
-        source.push_str("    long remaining = output_index;\n");
-        for index in (0..output_rank).rev() {
-            source.push_str(&format!(
-                "    output_coord[{index}] = remaining % u.output_extents[{index}]; \
-                 remaining /= u.output_extents[{index}];\n"
-            ));
+        // narrows the coordinate decomposition's divisors to `uint` only
+        // when every output extent fits `u32`.
+        if coord_index32_extents_fit(resolved, output_axes) && coord_index32_override() {
+            source.push_str("    uint remaining = (uint)output_index;\n");
+            for index in (0..output_rank).rev() {
+                source.push_str(&format!(
+                    "    output_coord[{index}] = remaining % (uint)u.output_extents[{index}]; \
+                     remaining /= (uint)u.output_extents[{index}];\n"
+                ));
+            }
+        } else {
+            source.push_str("    long remaining = output_index;\n");
+            for index in (0..output_rank).rev() {
+                source.push_str(&format!(
+                    "    output_coord[{index}] = remaining % u.output_extents[{index}]; \
+                     remaining /= u.output_extents[{index}];\n"
+                ));
+            }
         }
         for (index, dim) in output_axes.iter().enumerate() {
             source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));

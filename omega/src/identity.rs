@@ -179,6 +179,10 @@ pub(crate) struct MetalOnlyExtras {
     /// admitted only when the max reachable byte offset fits `u32` and the
     /// operand base is block-aligned.
     pub multi_row_index32: bool,
+    /// narrows the cooperative-reduce coordinate decomposition's divisors to
+    /// `uint` only when every output extent fits `u32`. Feeds the `_c32`
+    /// suffix.
+    pub coord_index32: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -640,6 +644,9 @@ pub(crate) fn kernel_identity(
     }
     if metal.multi_row_index32 {
         identity.push_str("_i32");
+    }
+    if metal.coord_index32 {
+        identity.push_str("_c32");
     }
 
     identity
