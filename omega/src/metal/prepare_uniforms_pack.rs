@@ -954,6 +954,7 @@ pub(super) mod numeric_policy_construction_tests {
     use proxima_tensor::{DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, append, map};
 
     use super::{MathMode, MetalError, metal_math_mode_as_numeric_policy, plan};
+
     #[cfg(feature = "instrument")]
     use super::{PIPELINE_MISSES, device_and_queue, resolve_steps};
 
@@ -1120,12 +1121,14 @@ pub(super) mod numeric_policy_construction_tests {
              widest-mode-that-covers-any-permission bug would have produced"
         );
 
-        let _ = PIPELINE_MISSES.snapshot_and_reset();
+        // shared process-global counter: never reset another thread's
+        // in-flight contribution, use a before/after delta instead.
+        let before_first = PIPELINE_MISSES.get();
         resolve_steps(&device, &resolved_plan).expect("first resolution compiles under Relaxed");
-        let first_misses = PIPELINE_MISSES.snapshot_and_reset();
-        assert_eq!(
-            first_misses, 1,
-            "the first resolution of a fresh plan is always a miss"
+        let first_misses = PIPELINE_MISSES.get() - before_first;
+        assert!(
+            first_misses >= 1,
+            "the first resolution of a fresh plan is always a miss, got delta {first_misses}"
         );
         let relaxed_key = resolved_plan
             .kernel_keys()
@@ -1135,12 +1138,13 @@ pub(super) mod numeric_policy_construction_tests {
         resolved_plan
             .set_math_mode(MathMode::Safe)
             .expect("Safe needs nothing, llama_relaxed() grants it trivially");
+        let before_second = PIPELINE_MISSES.get();
         resolve_steps(&device, &resolved_plan).expect("second resolution compiles under Safe");
-        let second_misses = PIPELINE_MISSES.snapshot_and_reset();
-        assert_eq!(
-            second_misses, 1,
+        let second_misses = PIPELINE_MISSES.get() - before_second;
+        assert!(
+            second_misses >= 1,
             "set_math_mode(Safe) must force a genuine PIPELINE_CACHE miss, never reuse the \
-             Relaxed-compiled pipeline cached under the SAME numeric_policy token"
+             Relaxed-compiled pipeline cached under the SAME numeric_policy token, got delta {second_misses}"
         );
         let safe_key = resolved_plan
             .kernel_keys()
