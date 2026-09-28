@@ -1238,6 +1238,16 @@ pub(crate) fn kernel_cache_key(
         // `expert_source_mode` into ITS OWN admission already, matching
         // every other multi-row/coord experiment's posture at this call site.
         coord_index32: coord_index32_active(resolved, &quantized, numeric_policy, false),
+        softmax_runtime_rows: softmax_runtime_rows_override(),
+        tiled_gemm_q4_0: match &resolved.kind {
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => tiled_gemm_q4_0_active(resolved, &quantized, *reduce_op, *init, output_axes),
+            _ => false,
+        },
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
@@ -1440,6 +1450,97 @@ pub(super) fn debug_packed_row_block_decline(node: NodeId, reason: &PackedRowBlo
 
 #[cfg(not(feature = "instrument"))]
 pub(super) fn debug_packed_row_block_decline(_node: NodeId, _reason: &PackedRowBlockRejection) {}
+
+/// One row per matmul-shaped `Reduce` op (`reduce_op` `Add` from `init`
+/// `Zero` -- the `multiply_add_zero` kernel-name pattern the prefill599
+/// census keyed its 763-dispatch count on), emitted once per op AT PLAN
+/// RESOLUTION (`crate::metal::resolve_steps`'s own per-position loop, which
+/// runs once per [`Plan`](crate::metal::Plan) build/math-mode change, never
+/// once per decode-step dispatch -- see `feedback_no_per_dispatch_prints_in_
+/// the_dispatch_path`). Reuses [`classify_packed_row_block`] for the token/
+/// feature axis split ([`TiledGemmRejection::NotPackedRowBlock`] leaves
+/// those unset, so K/rows/tokens report `0` for that one rejection class --
+/// the rejection reason itself already names why) and
+/// [`classify_tiled_gemm`] for the admission/decline verdict, so this can
+/// never drift from the two functions it reports on.
+#[cfg(feature = "instrument")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the exact field set BoundOpKind::Reduce carries; bundling into a struct would just relocate the count"
+)]
+pub(crate) fn debug_tiled_gemm_classification(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    epilogue_broadcast_axes: &[u16],
+    cache_key: &str,
+) {
+    if reduce_op != ScalarOp::Add || init != ReduceInit::Zero {
+        return;
+    }
+    let reduction_k: u64 = reduction_dims(resolved, output_axes)
+        .iter()
+        .map(|&axis| resolved.extents[axis as usize])
+        .product();
+    let packed = classify_packed_row_block(resolved, quantized).ok();
+    let codec = packed.as_ref().map(|block| block.codec);
+    let rows_n: u64 = packed
+        .as_ref()
+        .map(|block| {
+            block
+                .feature_axes
+                .iter()
+                .map(|&axis| resolved.extents[axis as usize])
+                .product()
+        })
+        .unwrap_or(0);
+    let tokens_m: u64 = packed
+        .as_ref()
+        .map(|block| {
+            block
+                .token_axes
+                .iter()
+                .map(|&axis| resolved.extents[axis as usize])
+                .product()
+        })
+        .unwrap_or(0);
+    let epilogue = if !epilogue_broadcast_axes.is_empty() {
+        "broadcast"
+    } else if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        "none"
+    } else {
+        "plain"
+    };
+    match classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes) {
+        Ok(_) => proxima_telemetry::debug!(
+            node = resolved.node.0,
+            codec = ?codec,
+            reduction_k = reduction_k,
+            rows_n = rows_n,
+            tokens_m = tokens_m,
+            epilogue = epilogue,
+            kernel_cache_key = %cache_key,
+            admitted = true,
+            "tiled-gemm plan-resolution classification"
+        ),
+        Err(reason) => proxima_telemetry::debug!(
+            node = resolved.node.0,
+            codec = ?codec,
+            reduction_k = reduction_k,
+            rows_n = rows_n,
+            tokens_m = tokens_m,
+            epilogue = epilogue,
+            kernel_cache_key = %cache_key,
+            admitted = false,
+            rejection = ?reason,
+            "tiled-gemm plan-resolution classification"
+        ),
+    }
+}
 
 /// A route selected by the token axis has zero stride in contracted
 /// dimensions, so one fetched expert index can be shared by all lanes. Any
@@ -2154,6 +2255,20 @@ pub enum TiledGemmRejection {
     /// `crate::sized::TILED_GEMM_MIN_TOKENS` -- tiling overhead is not
     /// amortized at this size.
     TokenExtentBelowMinimum { token_extent: u64, min_tokens: u64 },
+    /// `epilogue_broadcast_axes` is non-empty -- the RMSNorm-shaped
+    /// broadcast-reduce epilogue (`BoundOpKind::Reduce::
+    /// epilogue_broadcast_axes`'s own doc) has a Metal renderer only on the
+    /// plain cooperative-reduce path (`render_reduce`'s own broadcast gate),
+    /// never on `push_tiled_gemm_body`'s per-tile write-back. A PLAIN
+    /// (non-broadcast) epilogue is admitted and rendered generically by
+    /// `push_tiled_gemm_body`'s own reuse of `push_reduce_epilogue_write`
+    /// (see that call site's doc) -- this variant is reached only for the
+    /// one epilogue shape the tail still cannot handle, and structurally
+    /// this and `NotPlainProductReduce` should never both be false for the
+    /// same op (a broadcast epilogue's own fold body is never a bare
+    /// `weight * activation` product), but the check is kept independent
+    /// rather than relied upon as a side effect.
+    BroadcastEpilogueNotSupported,
 }
 
 /// The additional narrowing [`push_tiled_gemm_body`]'s `simdgroup_matrix`
@@ -2187,6 +2302,14 @@ pub(super) struct TiledGemmBlock {
     /// `attn_output`'s reduce already folds three axes. The tile loop's M
     /// side walks the flattened product of these.
     pub(super) feature_axes: Vec<u16>,
+    /// the weight operand's codec -- `Q4K` unconditionally, or `Q4_0` when
+    /// [`tiled_gemm_q4_0_override`] admitted it. [`push_tiled_gemm_body`]
+    /// reads this to pick its weight-tile decode arm; every other line of
+    /// that function (tiling, `simdgroup_matrix` staging, write-back) is
+    /// codec-generic, matching the owner's standing rule that only the
+    /// decoder may be codec-specific.
+    #[cfg(feature = "metal-tiled-gemm")]
+    pub(super) codec: Codec,
 }
 
 /// `resolved`/`quantized`/`reduce_op`/`init`/`output_axes` are exactly
@@ -2222,13 +2345,15 @@ pub(super) fn classify_tiled_gemm(
             ..
         } = classify_packed_row_block(resolved, quantized)
             .map_err(TiledGemmRejection::NotPackedRowBlock)?;
-        // Q4_K only -- Q5_K/Q6_K have no batched-unpack helper yet
-        // (`push_packed_row_blocked_body`'s own comment on their arms) and,
-        // more to the point, have never been measured on this path.
+        // Q4_K unconditionally, plus Q4_0 behind `PROXIMA_TILED_GEMM_Q4_0=1`
+        // (default off, so the unset-env admission stays byte-identical to
+        // before this arm existed). Q5_K/Q6_K have no batched-unpack helper
+        // yet (`push_packed_row_blocked_body`'s own comment on their arms)
+        // and, more to the point, have never been measured on this path.
         // Shipping them unmeasured on a correctness-critical GPU kernel
         // would violate the same discipline this landing's own gate
         // demands (principle 18).
-        if codec != Codec::Q4K {
+        if codec != Codec::Q4K && !(codec == Codec::Q4_0 && tiled_gemm_q4_0_override()) {
             return Err(TiledGemmRejection::NotQ4K);
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
@@ -2288,11 +2413,19 @@ pub(super) fn classify_tiled_gemm(
         // uniformly zero across the group, trivially "contiguous") AND for
         // the op's own output layout, since the tile write-back below also
         // walks the flattened group with one stride.
-        let BoundOpKind::Reduce { out_layout, .. } = &resolved.kind else {
+        let BoundOpKind::Reduce {
+            out_layout,
+            epilogue_broadcast_axes,
+            ..
+        } = &resolved.kind
+        else {
             return Err(TiledGemmRejection::NotPackedRowBlock(
                 PackedRowBlockRejection::NotReduceKeepReduce,
             ));
         };
+        if !epilogue_broadcast_axes.is_empty() {
+            return Err(TiledGemmRejection::BroadcastEpilogueNotSupported);
+        }
         let groups_contiguous =
             axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
                 && axes_fold_contiguously(&feature_axes, &resolved.extents, weight_layout)
@@ -2317,8 +2450,43 @@ pub(super) fn classify_tiled_gemm(
             reduce_dim,
             token_axes,
             feature_axes,
+            codec,
         })
     }
+}
+
+/// `true` only when [`push_tiled_gemm_body`] actually renders its `Codec::
+/// Q4_0` decode arm for this op -- `PROXIMA_TILED_GEMM_Q4_0=1` AND
+/// [`classify_tiled_gemm`]'s own admission passed -- so the unset-env
+/// default folds no new token into [`kernel_cache_key`] and the emitted
+/// source stays byte-identical to before this switch existed, matching
+/// [`q4_0_multi_row_hoist_active`]'s own posture one level up.
+#[cfg(feature = "metal-tiled-gemm")]
+fn tiled_gemm_q4_0_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> bool {
+    matches!(
+        classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes),
+        Ok(TiledGemmBlock {
+            codec: Codec::Q4_0,
+            ..
+        })
+    )
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+fn tiled_gemm_q4_0_active(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+) -> bool {
+    false
 }
 
 pub(super) fn tiled_gemm_block(

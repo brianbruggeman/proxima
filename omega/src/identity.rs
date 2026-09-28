@@ -183,6 +183,26 @@ pub(crate) struct MetalOnlyExtras {
     /// `uint` only when every output extent fits `u32`. Feeds the `_c32`
     /// suffix.
     pub coord_index32: bool,
+    /// `PROXIMA_SOFTMAX_RUNTIME_ROWS=1` (default off): [`BoundOpKind::
+    /// CachedSoftmaxWeights`]'s `cached_key_rows` loop bound is read off the
+    /// runtime `Uniforms` buffer (mirrors `render_cached_attention`'s own
+    /// `6c48b22f` `in8[0]` precedent) instead of baked as a compiled
+    /// `constexpr` literal. Only this kind's own [`kernel_identity`] arm
+    /// reads the flag: it drops the `c{cached_key_rows}` token (no longer a
+    /// real specialization axis once the value is runtime) and appends
+    /// `_rtrows` so the runtime-rows pipeline can never collide with the
+    /// per-bucket specialized one. `false` is a no-op for every other kind.
+    pub softmax_runtime_rows: bool,
+    /// `PROXIMA_TILED_GEMM_Q4_0=1`: `true` only when
+    /// [`crate::msl::push_tiled_gemm_body`] actually rendered its `Codec::
+    /// Q4_0` decode arm for this op (env on AND `classify_tiled_gemm`'s own
+    /// admission passed) -- so the unset-env default folds no new token and
+    /// the cache key, and every emitted byte, stays identical to before this
+    /// field existed. Feeds the `_tgq0` suffix below so the `Q4_0` and
+    /// `Q4_K` tiled-GEMM variants compile as two distinct pipelines and
+    /// coexist in the same binary, matching [`Self::q4_0_multi_row_hoist`]'s
+    /// own same-binary A/B posture.
+    pub tiled_gemm_q4_0: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -568,7 +588,13 @@ pub(crate) fn kernel_identity(
             head_dim,
             ..
         } => {
-            format!("{prefix}_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}")
+            if metal.softmax_runtime_rows {
+                format!("{prefix}_cached_softmax_weights_rtrows_a{attention_rows}_d{head_dim}")
+            } else {
+                format!(
+                    "{prefix}_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
+                )
+            }
         }
     };
 
@@ -638,6 +664,9 @@ pub(crate) fn kernel_identity(
     }
     if metal.q4_0_multi_row_hoist {
         identity.push_str("_q0h");
+    }
+    if metal.tiled_gemm_q4_0 {
+        identity.push_str("_tgq0");
     }
     if metal.multi_row_unroll {
         identity.push_str("_u");

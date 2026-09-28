@@ -67,9 +67,15 @@ pub(super) fn prepare(
     placed_input_nodes: &[NodeId],
     fuse_cached_attention: bool,
 ) -> Result<Prepared, MetalError> {
+    #[cfg(feature = "instrument")]
+    let infer_started = read_ticks();
     #[allow(unused_mut)]
     let mut shapes = infer(program, symbols)?;
+    #[cfg(feature = "instrument")]
+    counter!(PREPARE_INFER_TICKS, elapsed_ticks(infer_started));
 
+    #[cfg(feature = "instrument")]
+    let validate_started = read_ticks();
     // ROW 327: `block_nodes[i]` is the ONLY node `blocks[i]` may be
     // attributed to -- this crate's positional contract, identical to
     // `proxima_tensor::cpu::evaluate`'s (see `execute`'s own doc). Every
@@ -141,6 +147,11 @@ pub(super) fn prepare(
         outputs.to_vec()
     };
 
+    #[cfg(feature = "instrument")]
+    counter!(PREPARE_VALIDATE_TICKS, elapsed_ticks(validate_started));
+
+    #[cfg(feature = "instrument")]
+    let bind_started = read_ticks();
     let mut resolved = bind_with_fusion(
         program,
         &shapes,
@@ -148,6 +159,8 @@ pub(super) fn prepare(
         fuse_cached_attention,
         numeric_policy,
     )?;
+    #[cfg(feature = "instrument")]
+    counter!(PREPARE_BIND_TICKS, elapsed_ticks(bind_started));
     // attn_parity followon (2026-09-22): the duplicate-dispatch attribution
     // harness, generalized from `PROXIMA_HEAD_REPEATS` (spec-graph level, LM
     // head only) to any already-bound node. Runs on the fully fused program
@@ -251,6 +264,8 @@ pub(super) fn prepare(
     // execution-time skip set) -- the only way to avoid dispatching a kernel
     // nobody reads is to drop it from `resolved` before it ever reaches a
     // dispatch list. See `prune_dead`'s own doc.
+    #[cfg(feature = "instrument")]
+    let optimize_started = read_ticks();
     resolved = prune_dead(resolved, &effective_outputs);
     // `bind`'s `gated-delta-net-fusion` matcher (default-off in this crate's
     // own `proxima-tensor` dependency, but reachable through Cargo feature
@@ -293,11 +308,18 @@ pub(super) fn prepare(
     // stride -- see `correct_packed_matmul_layouts`'s own doc (already
     // codec-agnostic: it takes any `packed_operands` node set).
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
+    #[cfg(feature = "instrument")]
+    counter!(PREPARE_OPTIMIZE_TICKS, elapsed_ticks(optimize_started));
+
+    #[cfg(feature = "instrument")]
+    let retire_started = read_ticks();
     let retires = node_retirement(&resolved, &effective_outputs);
     #[cfg(not(feature = "metal-buffer-pool"))]
     let last_reader = node_last_reader(&resolved, program.len());
     let index_nodes = index_node_ids(program);
     let live_block_inputs = live_block_inputs(&block_nodes, &resolved, &effective_outputs);
+    #[cfg(feature = "instrument")]
+    counter!(PREPARE_RETIRE_TICKS, elapsed_ticks(retire_started));
     Ok(Prepared {
         root,
         shapes,
@@ -748,7 +770,18 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
         // leaf shape `MoeTopK` packs below -- every other field this kind
         // carries (`cached_key_rows`/`attention_rows`/`head_dim`/...) is
         // baked `constexpr` into the kernel text by whatever renderer lands.
-        BoundOpKind::CachedSoftmaxWeights { .. } => WORD,
+        // `PROXIMA_SOFTMAX_RUNTIME_ROWS=1` widens this by one word
+        // (`cached_key_rows`) to match `render_cached_softmax_weights`'s own
+        // runtime-uniform `Uniforms` struct -- structural on the switch
+        // alone, never on the row count's own value, so a bucket crossing
+        // never changes this length.
+        BoundOpKind::CachedSoftmaxWeights { .. } => {
+            if crate::msl::softmax_runtime_rows_override() {
+                2 * WORD
+            } else {
+                WORD
+            }
+        }
         BoundOpKind::Elementwise { .. } => {
             (1 + rank_len + operand_count + operand_count * rank_len) * WORD
                 + gather_uniform_byte_len(gather, rank_len)
@@ -913,6 +946,13 @@ pub(super) fn pack_uniforms_into(
         } => {
             let width = crate::msl::wide_cooperative_reduce_width(*cached_key_rows);
             push_i64(scratch, (*attention_rows * width) as i64);
+            // Mirrors `render_cached_softmax_weights`'s own runtime-`Uniforms`
+            // struct: the loop-bound field appends ONLY when the switch is
+            // on, matching `pack_uniforms_byte_len`'s own structural widening
+            // above.
+            if crate::msl::softmax_runtime_rows_override() {
+                push_i64(scratch, *cached_key_rows as i64);
+            }
             Ok(())
         }
     }

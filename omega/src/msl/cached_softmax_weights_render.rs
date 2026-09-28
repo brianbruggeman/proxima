@@ -66,9 +66,33 @@ pub(super) fn render_cached_softmax_weights(
     let value_stride_row = value_layout.strides[0];
     let value_stride_dim = value_layout.strides[1];
 
+    // `PROXIMA_SOFTMAX_RUNTIME_ROWS=1`: reads `cached_key_rows` off the
+    // runtime `Uniforms` buffer (mirrors `render_cached_attention`'s own
+    // `6c48b22f` `in8[0]` precedent) instead of baking it as a `constexpr`
+    // loop bound -- `width` (this op's own dispatch/threadgroup sizing) stays
+    // a compiled token either way, computed above from the Rust-side value,
+    // never from this runtime read. Default off keeps every emitted byte
+    // identical to before this switch existed.
+    let runtime_rows = softmax_runtime_rows_override();
+    let uniforms_struct = if runtime_rows {
+        "struct Uniforms { long total_elements; long cached_key_rows; };\n\n"
+    } else {
+        "struct Uniforms { long total_elements; };\n\n"
+    };
+    let uniforms_use = if runtime_rows {
+        "\tlong cached_key_rows = u.cached_key_rows;\n"
+    } else {
+        "\t(void)u;\n"
+    };
+    let cached_key_rows_bound = if runtime_rows {
+        "cached_key_rows".to_string()
+    } else {
+        cached_key_rows.to_string()
+    };
+
     let mut source = String::new();
     preamble(&mut source);
-    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    source.push_str(uniforms_struct);
     let _ = write!(
         source,
         "kernel void {entry}(\n\
@@ -83,7 +107,7 @@ pub(super) fn render_cached_softmax_weights(
          \tuint local [[thread_position_in_threadgroup]],\n\
          \tuint tg [[threadgroup_position_in_grid]])\n\
          {{\n\
-         \t(void)u;\n\
+         {uniforms_use}\
          \tlong row = (long)tg;\n\n"
     );
 
@@ -106,7 +130,7 @@ pub(super) fn render_cached_softmax_weights(
         source,
         "\tfloat accumulator0 = -INFINITY;\n\
          \tbool seeded0 = false;\n\
-         \tfor (long key = (long)local; key < {cached_key_rows}; key += {width}) {{\n\
+         \tfor (long key = (long)local; key < {cached_key_rows_bound}; key += {width}) {{\n\
          \t\tlong offset = {cached_base} + key * {cached_stride_key} + row * {cached_stride_row};\n\
          \t\tfloat value = cached_scores[offset];\n\
          \t\taccumulator0 = seeded0 ? max(accumulator0, value) : value;\n\
@@ -141,7 +165,7 @@ pub(super) fn render_cached_softmax_weights(
     // -- 154 (this op's own primary output): node[row,key] = exp(cached_scores[key,row] - group_max) --
     let _ = write!(
         source,
-        "\tfor (long key = (long)local; key < {cached_key_rows}; key += {width}) {{\n\
+        "\tfor (long key = (long)local; key < {cached_key_rows_bound}; key += {width}) {{\n\
          \t\tlong offset = {cached_base} + key * {cached_stride_key} + row * {cached_stride_row};\n\
          \t\tfloat step0 = (cached_scores[offset] - group_max);\n\
          \t\tout[key * {attention_rows} + row] = exp(step0);\n\
@@ -165,7 +189,7 @@ pub(super) fn render_cached_softmax_weights(
         source,
         "\tfloat accumulator1 = 0.0f;\n\
          \tbool seeded1 = false;\n\
-         \tfor (long key = (long)local; key < {cached_key_rows}; key += {width}) {{\n\
+         \tfor (long key = (long)local; key < {cached_key_rows_bound}; key += {width}) {{\n\
          \t\tfloat value = out[key * {attention_rows} + row];\n\
          \t\taccumulator1 = seeded1 ? (accumulator1 + value) : value;\n\
          \t\tseeded1 = true;\n\

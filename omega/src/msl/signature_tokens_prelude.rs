@@ -423,9 +423,15 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             attention_rows,
             head_dim,
             ..
-        } => format!(
-            "omega_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
-        ),
+        } => {
+            if softmax_runtime_rows_override() {
+                format!("omega_cached_softmax_weights_rtrows_a{attention_rows}_d{head_dim}")
+            } else {
+                format!(
+                    "omega_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
+                )
+            }
+        }
     };
     let gather_bits: String = resolved
         .operands()
@@ -783,6 +789,8 @@ pub(super) fn preamble(source: &mut String) {
     source.push_str(Q4_0_SUPER_ELEMENT_MSL);
     source.push('\n');
     source.push_str(Q4_0_PAIR_DOT_MSL);
+    source.push('\n');
+    source.push_str(Q4_0_RUN8_MSL);
     source.push('\n');
     source.push_str(Q5_1_UNPACK_MSL);
     source.push('\n');

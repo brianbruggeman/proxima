@@ -157,6 +157,12 @@ use tiled_gemm_cooperative_scan::*;
 // `CachedSoftmaxWeights::Uniforms::total_elements` as `attention_rows *
 // width`, matching `grid_threads`'s own total exactly.
 pub(crate) use tiled_gemm_cooperative_scan::wide_cooperative_reduce_width;
+// Same "sibling needs a `pub(crate)` reexport" shape as
+// `wide_cooperative_reduce_width` immediately above --
+// `crate::metal::prepare_uniforms_pack` needs this to size and pack the
+// `CachedSoftmaxWeights` uniforms blob identically to what `render_cached_
+// softmax_weights` itself emits.
+pub(crate) use kernel_types_identity::softmax_runtime_rows_override;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

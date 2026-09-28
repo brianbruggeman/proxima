@@ -1902,6 +1902,37 @@ impl Plan {
             })
             .collect()
     }
+
+    /// prefill599 retarget: one row per resolved position -- the minimal
+    /// signature a bucket-crossing diagnostic diffs against the PRIOR
+    /// miss's plan to answer "how much of the plan actually changed", not
+    /// just "did it change". Kind name ([`BoundOpKind::name`]), the op's own
+    /// iteration-space extents, and its first REAL operand's layout strides
+    /// (a KV-bucket resize's own stride mover; `bind_matmul_weight`'s
+    /// transpose is the only other one, and that never depends on token
+    /// count) -- cheap enough to compute on every miss (`instrument`-gated,
+    /// never on the default decode path) without re-deriving [`kernel_keys`]'s
+    /// own per-position cache-key derivation, which the caller reads
+    /// separately for the "identical kernel" question this signature does
+    /// not answer.
+    #[cfg(feature = "instrument")]
+    #[must_use]
+    pub fn shape_footprint(
+        &self,
+    ) -> alloc::vec::Vec<(u32, &'static str, alloc::vec::Vec<u64>, alloc::vec::Vec<i64>)> {
+        self.prepared
+            .resolved
+            .iter()
+            .map(|bound| {
+                let strides = bound
+                    .operands()
+                    .first()
+                    .map(|(_, layout, _)| layout.strides.iter().copied().collect())
+                    .unwrap_or_default();
+                (bound.node.0, bound.kind.name(), bound.extents.clone(), strides)
+            })
+            .collect()
+    }
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
