@@ -1850,6 +1850,104 @@ pub(super) const fn tiled_gemm_q4_0_override() -> bool {
     false
 }
 
+/// `PROXIMA_TILED_GEMM_DENSE=1`: admits a dense (neither operand quantized)
+/// batched matmul -- gemma4's GQA attention score (`Q.K^T`) and value
+/// (`P.V`) folds -- onto the same `simdgroup_matrix` tiled path
+/// [`tiled_gemm_q4_0_override`] admits `Codec::Q4_0` onto, plus a z-grid
+/// batch axis for the head-broadcast dimension `classify_dense_batched_gemm`
+/// resolves from the bound layout. Unset default keeps every emitted byte
+/// and cache key identical to before this switch existed, matching
+/// [`tiled_gemm_q4_0_override`]'s own posture.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_dense_override() -> bool {
+    let active = matches!(std::env::var("PROXIMA_TILED_GEMM_DENSE"), Ok(value) if value.trim() == "1");
+    log_tiled_gemm_dense_once(active);
+    active
+}
+
+/// Print the selected dense-batched tiled-GEMM admission exactly once per
+/// process, matching [`log_tiled_gemm_q4_0_once`]'s own posture.
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_tiled_gemm_dense_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_dense");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_tiled_gemm_dense_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_dense_override() -> bool {
+    false
+}
+
+/// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=1` (item 3c, `STAGING.md` §5.3): the
+/// activation-tile load for an interior (fully-in-bounds) column tile reads
+/// one `float4` (16 bytes) per thread per trip instead of one scalar
+/// `float` per trip -- a quarter the loop trips and bounds checks for the
+/// same bytes moved. The LAST column tile (the only one that can carry any
+/// `a_tok >= token_extent` element) keeps the existing scalar,
+/// bounds-checked loop. Default off; unset, empty, or any value other than
+/// `"1"` keeps today's scalar-per-element load for every tile.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn wide_activation_load_override() -> bool {
+    let active =
+        matches!(std::env::var("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD"), Ok(value) if value.trim() == "1");
+    log_wide_activation_load_once(active);
+    active
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_wide_activation_load_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_wide_act_load");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_wide_activation_load_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn wide_activation_load_override() -> bool {
+    false
+}
+
+/// `PROXIMA_TILED_GEMM_SLIM_TGMEM=1` (phase 2, `S/nb/port2/RESULTS.md`):
+/// aliases the epilogue `out_tile` staging bytes onto the same backing array
+/// `weight_tile`/`act_tile` already occupy instead of declaring a third,
+/// separately-sized `threadgroup` array -- see [`crate::identity::
+/// MetalOnlyExtras::tiled_gemm_slim_tgmem`]'s own doc for why this is safe.
+/// Default off; unset, empty, or any value other than `"1"` keeps today's
+/// three-array layout.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn slim_tgmem_override() -> bool {
+    let active = matches!(std::env::var("PROXIMA_TILED_GEMM_SLIM_TGMEM"), Ok(value) if value.trim() == "1");
+    log_slim_tgmem_once(active);
+    active
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_slim_tgmem_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_slim_tgmem");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_slim_tgmem_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn slim_tgmem_override() -> bool {
+    false
+}
+
 /// `PROXIMA_MULTI_ROW_UNROLL=1` A/B switch: literal indices let the `sumf`
 /// accumulator promote out of private memory instead of surviving as a
 /// dynamically-indexed array. Default off; unset, empty, or any value other

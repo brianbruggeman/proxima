@@ -219,6 +219,34 @@ pub(crate) struct MetalOnlyExtras {
     /// folds no new token and every emitted byte stays identical to before
     /// this field existed.
     pub reduction_literal: Option<u64>,
+    /// `PROXIMA_TILED_GEMM_DENSE=1`'s `(feature_axis, token_axis,
+    /// batch_axes)` -- the three literals
+    /// [`crate::msl::push_dense_batched_gemm_body`] bakes into its source
+    /// text (mirrors [`Self::packed_row_block_direct_axis`]'s own doc: two
+    /// bindings sharing every other axis here but disagreeing on which axis
+    /// plays which role render different addressing source and must never
+    /// share a cache entry). `None` for every op
+    /// [`crate::msl::dense_batched_gemm_block`] does not admit, so the
+    /// unset-env default folds no new token and every emitted byte stays
+    /// identical to before this field existed.
+    pub dense_batched_gemm_axes: Option<(u16, u16, Vec<u16>)>,
+    /// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=1`: `true` only when
+    /// [`crate::msl::push_tiled_gemm_body`] renders the vectorized
+    /// `float4` activation-tile load for this op. Feeds the `_wal` suffix.
+    pub tiled_gemm_wide_act_load: bool,
+    /// `PROXIMA_TILED_GEMM_SLIM_TGMEM=1` (phase 2, `S/nb/port2/RESULTS.md`):
+    /// `true` only when [`crate::msl::push_tiled_gemm_body`]/[`crate::msl::
+    /// push_dense_batched_gemm_body`] alias `out_tile`'s epilogue-staging
+    /// bytes onto the SAME backing `threadgroup` array `weight_tile`/
+    /// `act_tile` already occupy (safe because the K-loop's own trailing
+    /// `threadgroup_barrier` already fences every last read of
+    /// `weight_tile`/`act_tile` before any thread can reach the aliased
+    /// write) instead of declaring a third, separately-sized array --
+    /// mirrors ggml's own `kernel_mul_mm` (`ggml-metal.metal:330`, `sa`/`sb`
+    /// and its boundary-tile `temp_str` sharing one `shmem` allocation).
+    /// Unset default folds no new token and keeps the three
+    /// separately-sized arrays. Feeds the `_slim` suffix.
+    pub tiled_gemm_slim_tgmem: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -725,6 +753,22 @@ mod gated {
         if let Some(literal) = metal.reduction_literal {
             identity.push_str("_rl");
             identity.push_str(&literal.to_string());
+        }
+        if let Some((feature_axis, token_axis, batch_axes)) = metal.dense_batched_gemm_axes {
+            identity.push_str("_dbg");
+            identity.push_str(&feature_axis.to_string());
+            identity.push('_');
+            identity.push_str(&token_axis.to_string());
+            for axis in batch_axes {
+                identity.push('_');
+                identity.push_str(&axis.to_string());
+            }
+        }
+        if metal.tiled_gemm_wide_act_load {
+            identity.push_str("_wal");
+        }
+        if metal.tiled_gemm_slim_tgmem {
+            identity.push_str("_slim");
         }
 
         identity
