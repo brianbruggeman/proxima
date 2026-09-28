@@ -17,6 +17,112 @@ These are behavioral smoke tests, not substitutes for reference-logit or
 gold-text tests; a pass only proves the model did not obviously lose task
 semantics.
 
+## C4 — gemma4-E2B end-to-end latency vs Ollama (OPEN)
+
+Objective (owner, 2026-09-25): close 100% of the end-to-end gap to Ollama on
+whole-generation latency, telemetry off, with byte-identical output. Decode
+target 7 ms/token. Levers count only through the e2e number.
+
+**Incumbent:** Ollama (llama.cpp Metal) on the same machine, the same weights
+file, and byte-identical prompts. Its design point is quantized mat-mat
+prefill using simdgroup matrices, and bandwidth-bound decode mat-vec. The
+design-favors=incumbent arm is the whole generation on the corpus prompts; no
+micro arm substitutes for it.
+**Frequency bands:** prefill runs once per request, decode runs once per
+output token (the 80% case for long outputs), and bucket-growth stalls hit
+one step in every 32 at the default bucket.
+**Oracle (owner, 2026-09-25): Ollama.** "the oracle at this point is ollama.
+it is SIGNIFICANTLY FASTER." Ollama is the reference for both speed and
+output; bit-identity with proxima's previous output is no longer the gate.
+Output is compared against Ollama on the same blob and the same prompt token
+IDs. Precondition, open: the live scoreboard shows prompt token counts
+differing by one (26 vs 27, 510 vs 511) and different greedy text, so the
+tokenization/BOS mismatch must be closed before any output comparison means
+anything.
+**Superseded byte contract:** logits_hash (FNV over the full vocab vector) per
+step from step 0, arm vs defaults, on the six corpus prompts plus the
+150-token hippo continuation. Kept as a determinism check, not a gate.
+**Re-prove commands:** the scripts and raw logs under the session scratchpad
+`prefill599/{e2e,bucket,softmax_rt,kvcost,score}/`, specifically
+`e2e/run_timing.sh`, `e2e/run_bytes.sh` and `bucket/runs/`. These are not yet
+in-repo; moving the scoreboard harness in-repo is open.
+
+| Lever | Gate (default-off) | Tests (N) | Lint | E2E arm | Bytes | Δ whole-gen (hippo, 105 tok) | State |
+|---|---|---|---|---|---|---|---|
+| C4.1 checked 32-bit index lowering | env `PROXIMA_MULTI_ROW_UNROLL` / `_INDEX32` / `PROXIMA_COORD_INDEX32` + identity suffixes | see omega/tests/*index32_ab.rs | clean | yes | 0/150 steps differ | 5363 → 2258 ms (prefill 3326 → 362) | measured; default flip awaits owner |
+| C4.2 KV bucket width | env `PROXIMA_KV_BUCKET_TOKENS` (example only) | n/a (config) | clean | yes | 0/150 (in arm D) | 2258 → 2209 ms at width 128 | measured; policy awaits owner |
+| C4.3 concurrent dispatch | env `PROXIMA_DISPATCH` | 1 (byte gate) | clean | yes | 0/150 | 2209 → 2160 ms | measured; default flip awaits owner |
+| C4.4 softmax runtime row count | env `PROXIMA_SOFTMAX_RUNTIME_ROWS` + `_rtrows` identity | 2 + 370 regression | clean | yes | 0/150 | no signal (5378 vs 5368 median, arms overlap) | kept off, no signal, simpler form |
+| C4.5 retained-plan refresh | none (tests only) | 61 shape + 8 crossing | clean | no | refresh vs fresh bind: 0 mismatches, 38/179 refreshed | not measurable (141/179 refuse) | PARKED, see below |
+| C4.7 packed-row reduction-length literal ("nb") | feature `metal-reduction-literal`, env `PROXIMA_REDUCTION_LITERAL` = unset / `1` / `decode`, `_rl{n}` identity | root: omega 372 passed / 12 skipped (`metal`), 427 / 18 (`metal,metal-reduction-literal,instrument`), default parallelism (no `-j1`), 3 consecutive clean runs each, 0 failures; doctests 1; `chunked_command_buffer_status` added -- K=1 vs K=3 command-buffer split bitwise identical output, `COMMAND_BUFFER_STATUS_CHECKS` delta 1 (K=1) / 3 (K=3), real device; device gate `gemma4_e2b_answers_all_four_correctness_checks_greedy` (`metal,metal-reduction-literal`) 3 arms (unset/`=1`/`=decode`) all 4 checks pass, `actual` token-id streams byte-identical across all 3 arms; 27 word-compare cells, 0 differing; key audit 3261/3255/3258 hits, 0 mismatch | clean | yes (default base, no C4.1 flags) | text_hash identical all runs | `=1`: prefill +85..+100 ms (0/8), wall 5321 → 5418 ms; `=decode`: prefill -3..+4 ms, wall 5321 → 5330 ms, decode 18.819 → 18.832 ms/tok | measured; no speed gain; `=1` a loss; kept off. Design: `c4-7-reduction-literal.md` |
+
+**Owner direction (2026-09-25):** "serial is not correct. nor is scalar. we
+need to matrix mul and simd." The prefill projections run the decode mat-vec
+kernel widened to 8 tokens (per-lane serial k walk + `simd_sum`); on the
+captured [600,1536,12288] Q4_0 projection the arithmetic-only arm of that
+schedule is 25.9 ms vs llama `mul_mm` 2.82 ms. The tiled simdgroup path
+matches proxima's own f32 CPU evaluator bit for bit, where the serial path
+differs by up to 3.16e-3 relative; that is agreement in summation order with
+the CPU evaluator, not measured accuracy (no f64 reference exists). Decode
+(M=1) stays mat-vec: llama itself uses `mul_mv` below 5 tokens. Prefill lowering is matrix-multiply on simdgroup matrices; the
+serial scalar schedule is not the reference. Implementation not started.
+
+**Honest read:** C4.1 alone accounts for about 94% of the measured
+whole-generation reduction, and it is a defect repair (emulated 64-bit
+index math), not an optimization. C4.2 and C4.3 are 2-3% each. No lever yet
+touches the steady decode step: 17.25 ms → 16.09 ms non-crossing mean
+across arms A→D, against 7 ms.
+**Implication:** the remaining gap is decode GPU execution (~13.5 ms/token
+busy for ~1.41 GB of logical weights, ~100 GB/s), and attention scales with
+KV slots at ~6-10 µs/slot/step. The next component is per-dispatch
+attribution inside the real chunked window (Metal System Trace). The per-op
+command-buffer profile is inflated 53.7x, gave 0 ms for the 330 MB head, and
+its class ranking is unusable.
+
+**C4.7 notes.** Design and every number: `c4-7-reduction-literal.md`
+(sections 1, 5b, 6). Abandoned designs: (a) appending the baked value to the
+cache key as a separate token computed beside the renderer — the repro's arm
+D shows a second value derivation still diverges from the uniform (385 wrong
+bakes with a clean key); (b) baking `extents[reduce_dim]` — the uniform is
+the product over every folded reduce axis. What the constraint forced: the
+baked value is a field of the one `MetalOnlyExtras` record that both the key
+and the renderer read (`metal_specialization`), taken from `reduction_len`,
+the same product `pack_reduce_uniforms` writes; threadgroup width moved onto
+the same record. The key audit (`PROXIMA_PIPELINE_KEY_AUDIT=1`, `instrument`)
+re-renders every cache hit and compared 3255-3261 hits per 16-token decode
+with 0 mismatches — the only mechanical check covering the 16 record fields
+still derived in parallel with the renderer. Skills: `/algorithm-development`
+worked example (spec section 4) before code; no security surface. Next,
+from the graph census (spec section 6): contiguous `Identity` elision, 106
+copies per decode step; open before building: whether any copy is also a
+KV-cache write-back.
+
+### Changelog
+| Date | Change | Δ vs prior | Runs | Host loadout |
+|---|---|---|---|---|
+| 2026-09-24 | concurrent vs serial (hippo 48 tok, steady-step mean) | −0.48 ms/token, 8/8 pairs | 8 pairs interleaved | box_quiet, Ollama quit, background services stopped |
+| 2026-09-24 | softmax runtime rows | wall 5378 → 5368 ms, per-pair range −195..+19 | 8 fresh-process pairs | box_quiet; an outside `cargo check` finished before run 1 |
+| 2026-09-25 | retained-plan refresh, local recompose | release CPU: full bind 22.2 ms vs partial refresh 106.7 ms (38/179 covered) | median of 20 | n/a (CPU) |
+| 2026-09-25 | KV bucket sweep 32/64/128/192/256 | wall 5366/5330/5329/5409/5514 ms; padding costs ~6-10 µs/slot/step of GPU execution; host pad-copy flat, upload is no-copy | 4 rounds rotated | box_quiet each run |
+| 2026-09-25 | cumulative arms A→D | wall 5363 → 2258 → 2209 → 2160 ms | 4 rounds rotated | box_quiet each run |
+| 2026-09-25 | LIVE SCOREBOARD vs Ollama (same blob, byte-identical raw prompts, 4 runs each, alternated) | hippo 26 tok, 105 out: TTFT 380.5 vs 49.0 ms (7.8x), decode 16.53 vs 9.33 ms/token (1.77x), whole-gen 2098.8 vs 1031.9 ms (2.03x). p5 510 tok: TTFT 7772.5 vs 299.5 ms (26x); decode not comparable (1-3 tokens to EOS). Prompt tokens differ by 1 (26 vs 27, 510 vs 511), and greedy text differs | 4+4 per prompt | box_quiet each proxima run; Ollama unloaded during proxima |
+| 2026-09-25 | C4.6 tiled simdgroup GEMM admits Q4_0 (`PROXIMA_TILED_GEMM_Q4_0`, `metal-tiled-gemm`, `_tgq0`), batched run8 decode, generic epilogue tail | isolated 44.8-45.8x per projection; e2e p5 prefill 7760 → 5835 ms (19.5x Ollama); hippo prefill 383 → 355 ms, whole-gen 2168 → 2147 ms; only 275 of 763 prefill matmuls admitted; text identical; logits_hash byte contract NOT run for this arm; per projection vs the f32 CPU oracle (real blk.0 attn_q/ffn_gate, T=8/64/510) tiled max_abs 0 while the current row-blocked path differs by up to 3.16e-3 relative, and 94-95% of words differ between the two (session scratchpad mm/SLICE3.md) | 4 per arm, alternated | box_quiet; Ollama held off; Firefox GPU contamination re-run |
+| 2026-09-25 | per-op timed budget (decode step 20) | INVALID: 53.7x inflation, head at 0 ms; ranking not used | 1 | quiet |
+| 2026-09-25 | ROLLBACK of the killed `metal-q4_0-execfix` (nb baked from `extents[reduce_dim]`), reproduced | gate 0/4 with the key extended, 1/4 without; 682/3025 op resolutions reused another K's pipeline, 385/3025 baked the innermost axis instead of the folded product; first differing token = generated index 1 on all 4 prompts | 4 gate arms | n/a (correctness) |
+| 2026-09-25 | C4.7 decode probe, 6 real shapes, literal vs runtime | paired median -175..+80 ns/dispatch, sign flips between 2 runs, ranges span 0 | 12 samples x 2 runs, >= 2 GB each | box_quiet |
+| 2026-09-25 | C4.7 prefill probe, attn_k 1536 / ffn_down 12288 at t 26 / 510 | literal +1.02% / +6.76% / +2.24% / +4.91%, 0/48 pairs faster | 12 samples per cell | box_quiet |
+| 2026-09-25 | C4.7 e2e A/B/C, prompt4 warm | prefill +85..+100 ms (`=1`), -3..+4 ms (`=decode`); decode 18.819 / 18.802 / 18.832 ms/tok | 8 triples interleaved | box_quiet, Ollama stopped |
+| 2026-09-25 | C4.7 e2e A/B/C, prompt5 (510 tok) | prefill +2.8..+3.4 s (`=1`, 0/6); `=decode` +4175 / +4 / -26 ms cold, +810 / -1 / +1271 ms warm (unexplained outliers) | 3 triples | box_quiet, Ollama stopped |
+| 2026-09-26 | command-buffer status-check fix (`commit_and_wait`/`check_command_buffer_status` on every `metal/*.rs` commit/wait pair) + `.config/nextest.toml` override (`package(omega) and binary(packed_row_multi_row_index32_ab)` -> `threads-required = "num-test-threads"`) | default-parallelism `nextest run -p omega --features metal`: 370/371 passed (1 bit-mismatch) pre-fix -> 369/371 (2 clean `CommandBufferFailed` errors, same driver fault now surfaced instead of silently corrupting output) with the status check alone -> 372/372, 0 failures, 3 consecutive runs, once the nextest override also reserved `packed_row_multi_row_index32_ab` to run with no other GPU binary in flight (root cause: index32 passes alone and with its own 19 cases in parallel at any `-j`, fails only when other omega GPU test binaries contend for the one Metal device -- driver returns `MTLCommandBufferStatus::Error` status 5, "Internal Error (0000000e)") | 3 consecutive full-suite runs each for `--features metal` (372/372 x3) and `--features metal,metal-reduction-literal,instrument` (427/427 x3) | default `-j`, real GPU, Ollama stopped during the run |
+
+**Parked, C4.5:** a measured −4.8x CPU regression relative to a full bind, at
+38/179 coverage. The binder discards the three fusion decisions a refresh
+needs: the epilogue fixpoint, the attention recognizer node, and broadcast
+quarantine. Named claim it gates: removing the ~40 ms rebuild at every bucket
+crossing. Un-park condition: a bucket-growth stall remains in the top three
+e2e components after C4.2's width policy is set, and binding decisions are
+returned by bind_with_fusion.
+
 ## C3 — Metal gemma4 generation correctness (RESIDENCY EVICTION — FIXED, mlock pin)
 
 gemma4 (26B MoE, 128-expert/8-used, ollama blob `sha256-ea549b...24129`) runs
