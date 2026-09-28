@@ -32,7 +32,7 @@ use proxima_primitives::pipe::Pipe;
 use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::map::{AxisIndex, IndexMap, IndexPattern};
-use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
+use crate::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 
 /// The largest integer an f32 can represent exactly — its 24-bit mantissa's
 /// width. Gather indices ride in f32 buffers (see `IndexMap::Computed` and
@@ -83,6 +83,10 @@ impl Shapes {
     /// test can build a [`Shapes`] without running [`infer`] over a real
     /// program.
     #[cfg(test)]
+    #[cfg_attr(
+        not(feature = "instrument"),
+        allow(dead_code, reason = "only called by bind::repeat_nodes's tests, gated on identity-copy-alias+instrument")
+    )]
     pub(crate) fn from_rows(rows: alloc::vec::Vec<alloc::vec::Vec<u64>>) -> Self {
         Self { extents: rows }
     }
@@ -667,6 +671,239 @@ pub fn infer(program: &[Op], symbols: &[u64]) -> Result<Shapes, TensorError> {
         inference.push(expr)?;
     }
     Ok(inference.finish())
+}
+
+/// One symbol's bit, or `0` if the symbol index is past bit 63 — dropped
+/// rather than panicking on the shift, since no real program today declares
+/// more than a handful (kv-length, new-token-count).
+fn extent_symbol_mask(extent: &Extent) -> u64 {
+    match extent {
+        Extent::Symbolic(symbol) => 1u64.checked_shl(u32::from(*symbol)).unwrap_or(0),
+        Extent::Static(_) => 0,
+    }
+}
+
+/// One [`Extent`] per axis, each folded down to its own symbol bit — a
+/// leaf's ([`Op::Input`]/[`Op::Iota`]/[`Op::Constant`]) per-axis mask is
+/// exactly its own declared shape, axis for axis.
+fn leaf_axis_masks(shape: &[Extent]) -> Vec<u64> {
+    shape.iter().map(extent_symbol_mask).collect()
+}
+
+/// Which target iteration axis an operand axis DEFINES, and the mask it
+/// contributes there — the mask-provenance twin of
+/// [`ShapeTable::unify_iteration_space`]'s own "defines" step (that
+/// function's `defines` local), reusing the identical two cases so a future
+/// change to either cannot silently diverge from the other:
+///
+/// - a declared [`AxisIndex::len`] names its own target via
+///   [`AxisIndex::len_target_axis`] and contributes the `len` [`Extent`]'s
+///   OWN symbol (not the operand's — `unify_iteration_space` resolves `len`
+///   independently of the operand's on-disk width, so a `len`-marked axis's
+///   symbolism must come from `len` itself, never from `operand_axis_masks`).
+/// - a pure, unshifted, unit-coefficient single term borrows the operand's
+///   own mask at that axis.
+///
+/// Any other shape (zero terms, multiple terms, a nonzero offset without a
+/// declared `len`) does not define a target here — same as
+/// `unify_iteration_space`, which leaves it to another operand or the out_map
+/// instead.
+fn axis_definition_mask(axis: &AxisIndex, operand_axis_mask: u64) -> Option<(u16, u64)> {
+    if let Some(len) = &axis.len {
+        let target = axis.len_target_axis()?;
+        return Some((target, extent_symbol_mask(len)));
+    }
+    if let [term] = axis.terms.as_slice()
+        && term.coeff == 1
+        && axis.offset == 0
+    {
+        return Some((term.axis, operand_axis_mask));
+    }
+    None
+}
+
+/// Folds one flattened operand reference's axes into `target`, the
+/// iteration-space mask table being built — the mask-provenance twin of
+/// [`ShapeTable::unify_iteration_space`]'s first loop (the one that resolves
+/// `resolved[target]`), walking the exact same [`MapRef`] shape
+/// [`flatten_operand_maps`] already produces so a `Computed` map's
+/// `index_map` (the fetched-indices tensor's own shape) and `base` (the
+/// gathered operand, `skip_axis` excluded) both contribute the same way they
+/// do to a resolved extent.
+fn fold_operand_into_iteration_masks(entry: &MapRef<'_>, operand_axis_masks: &[u64], target: &mut [u64]) {
+    for (axis_index, axis) in entry.pattern.axes.iter().enumerate() {
+        if entry.skip_axis == Some(axis_index as u16) {
+            continue;
+        }
+        let operand_axis_mask = operand_axis_masks.get(axis_index).copied().unwrap_or(0);
+        if let Some((axis, mask)) = axis_definition_mask(axis, operand_axis_mask) {
+            target[axis as usize] |= mask;
+        }
+    }
+}
+
+/// One [`Op::Elementwise`]'s per-OUTPUT-axis mask: output rank always equals
+/// iteration rank for an elementwise expression
+/// ([`ShapeTable::infer_elementwise`] returns `unify_iteration_space`
+/// directly), so the iteration-space table this builds IS the output table,
+/// no further projection needed — unlike a [`Reduce`], which projects.
+fn elementwise_axis_masks(operands: &[(NodeId, IndexMap)], output_masks: &[Vec<u64>]) -> Vec<u64> {
+    let iter_rank = operands
+        .iter()
+        .map(|(_, map)| combined_iter_rank(map))
+        .max()
+        .unwrap_or(0);
+    let mut target = vec![0u64; iter_rank as usize];
+    let refs: Vec<(NodeId, &IndexMap)> = operands.iter().map(|(node, map)| (*node, map)).collect();
+    for entry in flatten_operand_maps(&refs) {
+        let operand_axis_masks = &output_masks[entry.node.0 as usize];
+        fold_operand_into_iteration_masks(&entry, operand_axis_masks, &mut target);
+    }
+    target
+}
+
+/// A [`Reduce`]'s full pre-reduction iteration-space mask, one entry per
+/// iteration axis — the mask-provenance twin of [`fold_iteration_extents`],
+/// which this mirrors exactly down to the same restriction: only
+/// `reduce.in_map.affine()`'s pure, unshifted, unit-coefficient axes
+/// contribute (see that function's own doc for why a `len`-marked axis or a
+/// data-dependent `in_map`'s `index_map` side is not honored here). This is
+/// deliberately WIDER than the reduce's own output mask
+/// ([`reduce_output_axis_masks`]) whenever [`Keep::Reduce`] drops an axis —
+/// callers needing "does this bound op's iteration space depend on symbol
+/// K" (a kernel's loop bound, not its output shape) want this, not the
+/// output table.
+fn reduce_iteration_axis_masks(reduce: &Reduce, output_masks: &[Vec<u64>]) -> Vec<u64> {
+    let pattern = reduce.in_map.affine();
+    let operand_axis_masks = &output_masks[reduce.operand.0 as usize];
+    let mut resolved = vec![0u64; pattern.iter_rank as usize];
+    for (axis_index, axis) in pattern.axes.iter().enumerate() {
+        if let [term] = axis.terms.as_slice()
+            && term.coeff == 1
+        {
+            let operand_mask = operand_axis_masks.get(axis_index).copied().unwrap_or(0);
+            resolved[term.axis as usize] |= operand_mask;
+        }
+    }
+    resolved
+}
+
+/// A [`Reduce`]'s per-OUTPUT-axis mask, projected from its full iteration
+/// space the same way [`ShapeTable::infer_reduce`] projects a resolved
+/// extent: [`scatter_output_shape`]'s shape for a data-dependent `out_map`,
+/// the full iteration space unchanged for [`Keep::Scan`] (a scan drops no
+/// axis), or [`project_output_shape`]'s shape for [`Keep::Reduce`] — which is
+/// exactly where a reduced axis's mask stops propagating: an axis
+/// `out_map` does not name is simply absent from the returned table, not
+/// unioned in.
+fn reduce_output_axis_masks(reduce: &Reduce, iteration_masks: &[u64]) -> Vec<u64> {
+    if let IndexMap::Computed {
+        base, gathered_dim, ..
+    } = &reduce.out_map
+    {
+        return base
+            .axes
+            .iter()
+            .enumerate()
+            .map(|(axis_index, axis)| {
+                if axis_index as u16 == *gathered_dim {
+                    return 0;
+                }
+                match axis.terms.as_slice() {
+                    [term] if term.coeff == 1 && axis.offset == 0 => iteration_masks
+                        .get(term.axis as usize)
+                        .copied()
+                        .unwrap_or(0),
+                    _ => 0,
+                }
+            })
+            .collect();
+    }
+    match reduce.keep {
+        Keep::Scan => iteration_masks.to_vec(),
+        Keep::Reduce => reduce
+            .out_map
+            .affine()
+            .axes
+            .iter()
+            .map(|axis| match axis.terms.as_slice() {
+                [term] if term.coeff == 1 => {
+                    iteration_masks.get(term.axis as usize).copied().unwrap_or(0)
+                }
+                _ => 0,
+            })
+            .collect(),
+    }
+}
+
+/// Which symbols each node's shape depends on, per OUTPUT axis, one
+/// `Vec<u64>` per [`NodeId`] in program order — mirrors [`infer`]'s own
+/// per-[`Op`] dispatch exactly (same five arms, same operand walk
+/// [`ShapeTable::infer_elementwise`]/[`ShapeTable::infer_reduce`] use to
+/// resolve a shape), but tracks axis-level *provenance* (which symbol, on
+/// which axis) instead of a *resolved value*, which is what
+/// [`ShapeTable`]/[`Shapes`] deliberately do not keep once a symbol is
+/// looked up (see [`resolve_extent`]).
+///
+/// Axis-level, not whole-node, is the fix over this function's own earlier
+/// shape (a single `u64` per node, unioning every operand's mask
+/// unconditionally): that version over-approximated past a [`Keep::Reduce`]
+/// fold, because a fold's OUTPUT can drop the very axis a symbol lived on
+/// (a softmax/AV reduce over a symbolic kv axis, say) while the whole-node
+/// union kept propagating the bit to every downstream consumer regardless.
+/// Tracking per output axis and projecting through [`reduce_output_axis_masks`]
+/// the same way [`ShapeTable::infer_reduce`] itself projects a resolved shape
+/// is what lets the dropped axis's bit actually disappear from what
+/// downstream ops inherit.
+///
+/// A plain `Vec<Vec<u64>>` indexed by [`NodeId`] then by axis, mirroring
+/// [`Shapes`]'s own `extents: Vec<Vec<u64>>` shape rather than a newtype:
+/// `NodeId` is already the "id is index" idiom
+/// ([`crate::op::append`]'s own doc), and a caller composes this with
+/// ordinary indexing exactly as it would [`Shapes`] itself.
+#[must_use]
+pub fn symbol_dependency_output_masks(program: &[Op]) -> Vec<Vec<u64>> {
+    let mut masks: Vec<Vec<u64>> = Vec::with_capacity(program.len());
+    for op in program {
+        let resolved = match op {
+            Op::Input { shape, .. } | Op::Constant { shape, .. } => leaf_axis_masks(shape),
+            Op::Iota { extent, .. } => leaf_axis_masks(core::slice::from_ref(extent)),
+            Op::Elementwise { operands, .. } => elementwise_axis_masks(operands, &masks),
+            Op::Reduce(reduce) => {
+                let iteration_masks = reduce_iteration_axis_masks(reduce, &masks);
+                reduce_output_axis_masks(reduce, &iteration_masks)
+            }
+        };
+        masks.push(resolved);
+    }
+    masks
+}
+
+/// One [`Reduce`]'s full pre-reduction iteration-space mask, aggregated —
+/// what a caller derives a bound op's loop-bound/refresh dependency from,
+/// since [`symbol_dependency_output_masks`] only keeps the narrower,
+/// [`Keep::Reduce`]-projected OUTPUT mask once binding is done. `output_masks`
+/// is [`symbol_dependency_output_masks`]'s own return value — `reduce.operand`
+/// is a backwards reference, so its entry is already resolved by the time any
+/// caller has a full table to pass in.
+#[must_use]
+pub fn symbol_dependency_iteration_mask(reduce: &Reduce, output_masks: &[Vec<u64>]) -> u64 {
+    reduce_iteration_axis_masks(reduce, output_masks)
+        .into_iter()
+        .fold(0, |mask, axis| mask | axis)
+}
+
+/// The whole-node aggregate of [`symbol_dependency_output_masks`] — every
+/// axis unioned into one bit set per node. Kept as the simple, node-level
+/// question ("does this node's shape depend on symbol K at all") for callers
+/// that do not need per-axis precision, built from the same axis-precise
+/// pass rather than a second, separately-maintained walk.
+#[must_use]
+pub fn symbol_dependency_masks(program: &[Op]) -> Vec<u64> {
+    symbol_dependency_output_masks(program)
+        .into_iter()
+        .map(|axis_masks| axis_masks.into_iter().fold(0, |mask, axis| mask | axis))
+        .collect()
 }
 
 #[cfg(test)]
@@ -2094,5 +2331,273 @@ mod tests {
             fused_data[6144 + start],
             "row 1, column 0 of the chunk"
         );
+    }
+
+    #[test]
+    fn a_leaf_mask_carries_exactly_its_own_symbolic_extents() {
+        let mut program = Vec::new();
+        let mixed = leaf(
+            &mut program,
+            &[Extent::Symbolic(2), Extent::Static(8), Extent::Symbolic(0)],
+        );
+        let masks = symbol_dependency_masks(&program);
+        assert_eq!(masks[mixed.0 as usize], (1 << 2) | (1 << 0));
+    }
+
+    #[test]
+    fn an_all_static_leaf_has_an_empty_mask() {
+        let mut program = Vec::new();
+        let static_leaf = leaf(&mut program, &[Extent::Static(4), Extent::Static(8)]);
+        let masks = symbol_dependency_masks(&program);
+        assert_eq!(masks[static_leaf.0 as usize], 0);
+    }
+
+    #[test]
+    fn matmul_program_propagates_the_symbolic_operands_mask_through_reduce() {
+        let (program, product, sum) = matmul_program();
+        let masks = symbol_dependency_masks(&program);
+        assert_eq!(masks[product.0 as usize], 1 << 0, "elementwise inherits lhs's symbol 0");
+        assert_eq!(masks[sum.0 as usize], 1 << 0, "reduce inherits its operand's mask");
+    }
+
+    #[test]
+    fn a_node_with_no_symbolic_ancestor_has_an_empty_mask() {
+        let mut program = Vec::new();
+        let lhs = leaf(&mut program, &[Extent::Static(4), Extent::Static(768)]);
+        let rhs = leaf(&mut program, &[Extent::Static(768), Extent::Static(3072)]);
+        let lhs_map = IndexMap::Affine(map::projection(3, &[0, 2]));
+        let rhs_map = IndexMap::Affine(map::projection(3, &[2, 1]));
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(lhs, lhs_map), (rhs, rhs_map)],
+                name: None,
+            },
+        );
+        let masks = symbol_dependency_masks(&program);
+        assert_eq!(masks[product.0 as usize], 0);
+    }
+
+    #[test]
+    fn an_iota_mask_carries_its_own_symbolic_extent() {
+        let mut program = Vec::new();
+        let position = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Int32,
+                extent: Extent::Symbolic(1),
+            },
+        );
+        let masks = symbol_dependency_masks(&program);
+        assert_eq!(masks[position.0 as usize], 1 << 1);
+    }
+
+    /// The whole reason axis-level tracking replaced the old whole-node
+    /// union: a `Keep::Reduce` fold that CONTRACTS a symbolic axis (a
+    /// softmax/AV reduce over a symbolic kv length, say) must drop that
+    /// symbol from its own OUTPUT mask, and a downstream consumer of that
+    /// fold's output must not inherit it either — the exact over-approximation
+    /// `SLICE1.md` measured (179 changed positions inside a 1090-position
+    /// mask on the real gemma4-E2B checkpoint).
+    #[test]
+    fn a_keep_reduce_fold_that_contracts_a_symbolic_axis_drops_it_from_the_output_mask() {
+        let mut program = Vec::new();
+        let matrix = leaf(
+            &mut program,
+            &[Extent::Static(4), Extent::Symbolic(0)],
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: matrix,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: Some("row_sum".into()),
+            }),
+        );
+        let consumer_map = IndexMap::Affine(map::projection(1, &[0]));
+        let consumer = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(sum, consumer_map)],
+                name: None,
+            },
+        );
+
+        let masks = symbol_dependency_masks(&program);
+        assert_eq!(
+            masks[sum.0 as usize], 0,
+            "the reduced axis carried symbol 0; the surviving output axis (axis 0, static \
+             extent 4) never did, so the fold's own output mask must be empty"
+        );
+        assert_eq!(
+            masks[consumer.0 as usize], 0,
+            "a downstream consumer of a fold's output must not inherit a symbol the fold's \
+             own output already dropped"
+        );
+    }
+
+    /// The per-axis table itself, not just its whole-node aggregate: a
+    /// leaf's mask is exactly its own declared extents, axis for axis, and a
+    /// `Keep::Reduce` fold's per-axis output table has exactly as many
+    /// entries as its `out_map` names — the reduced axis is genuinely
+    /// ABSENT, not present with a zero bit.
+    #[test]
+    fn symbol_dependency_output_masks_are_indexed_per_axis_not_per_node() {
+        let mut program = Vec::new();
+        let matrix = leaf(&mut program, &[Extent::Symbolic(2), Extent::Static(8)]);
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: matrix,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let masks = symbol_dependency_output_masks(&program);
+        assert_eq!(masks[matrix.0 as usize], alloc::vec![1u64 << 2, 0]);
+        assert_eq!(
+            masks[sum.0 as usize],
+            alloc::vec![1u64 << 2],
+            "row axis survives Keep::Reduce's projection and carries its symbol"
+        );
+    }
+
+    /// [`symbol_dependency_iteration_mask`] is the WIDER, pre-projection
+    /// counterpart the output table above deliberately narrows away from —
+    /// a caller sizing a fold's own loop (not its output shape) needs the
+    /// contracted axis's symbol back, even though the output mask correctly
+    /// dropped it.
+    #[test]
+    fn symbol_dependency_iteration_mask_keeps_the_axis_the_output_mask_drops() {
+        let mut program = Vec::new();
+        let matrix = leaf(&mut program, &[Extent::Static(4), Extent::Symbolic(1)]);
+        let reduce = Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: matrix,
+            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: None,
+        };
+        let sum = append(&mut program, Op::Reduce(reduce.clone()));
+
+        let output_masks = symbol_dependency_output_masks(&program);
+        assert_eq!(
+            output_masks[sum.0 as usize],
+            alloc::vec![0u64],
+            "column axis (symbol 1) was contracted away"
+        );
+        let iteration_mask = symbol_dependency_iteration_mask(&reduce, &output_masks);
+        assert_eq!(
+            iteration_mask,
+            1 << 1,
+            "the full pre-reduction iteration space still walks the contracted column axis"
+        );
+    }
+
+    proptest::proptest! {
+        /// A node's mask equals the union of its own operands' masks OR-ed
+        /// with any symbols it declares itself — the invariant
+        /// [`symbol_dependency_masks`]'s own doc states, checked over
+        /// randomly generated symbol assignments on the fixed
+        /// `matmul_program` shape (varying WHICH symbols the two leaves
+        /// declare, not the program's topology, keeps every generated case a
+        /// well-formed program without a bespoke random-program generator).
+        #[test]
+        fn masks_compose_as_the_union_of_operand_masks(
+            lhs_symbol in 0u16..8,
+            rhs_symbol in 0u16..8,
+        ) {
+            let mut program = Vec::new();
+            let lhs = leaf(&mut program, &[Extent::Symbolic(lhs_symbol), Extent::Static(768)]);
+            let rhs = leaf(&mut program, &[Extent::Static(768), Extent::Symbolic(rhs_symbol)]);
+            let lhs_map = IndexMap::Affine(map::projection(3, &[0, 2]));
+            let rhs_map = IndexMap::Affine(map::projection(3, &[2, 1]));
+            let product = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(lhs, lhs_map), (rhs, rhs_map)],
+                    name: None,
+                },
+            );
+            let sum = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: product,
+                    in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                    out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            );
+
+            let masks = symbol_dependency_masks(&program);
+            let expected_leaf_union = (1u64 << lhs_symbol) | (1u64 << rhs_symbol);
+            proptest::prop_assert_eq!(masks[product.0 as usize], expected_leaf_union);
+            proptest::prop_assert_eq!(
+                masks[sum.0 as usize],
+                masks[product.0 as usize],
+                "reduce's mask must equal its sole operand's mask"
+            );
+        }
+
+        /// The axis-drop property, generalized over WHICH axis carries the
+        /// symbol: a `Keep::Reduce` fold over a two-axis matrix, contracting
+        /// axis 1, must carry the symbol in its output mask exactly when the
+        /// symbol lives on axis 0 (the surviving axis) and never when it
+        /// lives on axis 1 (the contracted one) — the property the fix in
+        /// this slice exists to establish, independent of any one hand-picked
+        /// axis assignment.
+        #[test]
+        fn a_reduce_output_mask_carries_a_symbol_iff_it_lives_on_a_surviving_axis(
+            symbol in 0u16..8,
+            symbol_on_row_axis in proptest::bool::ANY,
+        ) {
+            let mut program = Vec::new();
+            let shape = if symbol_on_row_axis {
+                [Extent::Symbolic(symbol), Extent::Static(8)]
+            } else {
+                [Extent::Static(4), Extent::Symbolic(symbol)]
+            };
+            let matrix = leaf(&mut program, &shape);
+            let sum = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: matrix,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[0])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            );
+
+            let masks = symbol_dependency_masks(&program);
+            let expected = if symbol_on_row_axis { 1u64 << symbol } else { 0 };
+            proptest::prop_assert_eq!(masks[sum.0 as usize], expected);
+        }
     }
 }

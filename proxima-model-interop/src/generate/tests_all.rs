@@ -4300,4 +4300,553 @@ pub(super) mod memory_fit_gate_tests {
             );
         }
     }
+
+    /// The decisive differential for `proxima_tensor::shape::symbol_dependency_masks`:
+    /// on the REAL gemma4-E2B decode program, the set of bound-op positions
+    /// that actually change across a KV-capacity bucket crossing must equal
+    /// the set of positions whose mask carries the KV symbol bit -- no
+    /// position changes without a mask, and no masked position fails to
+    /// change. Runs entirely on CPU (`proxima_tensor::infer`/`bind_with_fusion`
+    /// directly), no Metal/GPU involved -- the mask is a property of
+    /// `program: &[Op]` plus the two `Shapes`, not of any backend.
+    mod symbol_dependency_kv_bucket_crossing {
+        use memmap2::Mmap;
+        use proxima_gguf::parse_complete;
+        use proxima_tensor::bind::{BoundOp, BoundOpKind};
+        use proxima_tensor::op::{Keep, Op};
+        use proxima_tensor::shape::{symbol_dependency_iteration_mask, symbol_dependency_output_masks};
+        use proxima_tensor::{NumericPolicy, bind_with_fusion, infer};
+
+        use super::super::LoadedModel;
+        use crate::architecture::symbols;
+
+        const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+
+        /// Positions where the two binds disagree at all -- `BoundOp`'s own
+        /// derived `PartialEq` already covers extents, operand layouts,
+        /// epilogue operands and every `BoundOpKind` scalar (`cached_key_rows`/
+        /// `new_key_rows` included) in one comparison, so this is the union
+        /// the brief's four categories name, not a narrower check.
+        fn changed_positions(low: &[BoundOp], high: &[BoundOp]) -> std::collections::BTreeSet<usize> {
+            low.iter()
+                .zip(high.iter())
+                .enumerate()
+                .filter(|(_, (left, right))| left != right)
+                .map(|(index, _)| index)
+                .collect()
+        }
+
+        /// One `BoundOp`'s own refresh mask, the union of every source this
+        /// op's compiled shape could vary with (step 2 of this slice's
+        /// brief): its own OUTPUT shape, every operand/epilogue-operand it
+        /// reads (`all_read_sources`, the same accessor liveness passes
+        /// already use — no new operand walk), and, for a `Keep::Reduce`
+        /// fold whose own node is still literally an `Op::Reduce` in the
+        /// source program (epilogue fusion can replace `node` with a
+        /// consumer's id, in which case the fold's iteration space is not
+        /// separately recoverable from `BoundOp` alone), the WIDER
+        /// pre-reduction iteration space `symbol_dependency_output_masks`
+        /// itself does not keep once it has projected through the fold's
+        /// `out_map`.
+        ///
+        /// This does not special-case `CachedAttention`/`CachedSoftmaxWeights`'s
+        /// own `cached_key_rows`/`new_key_rows` scalars by tracing back to the
+        /// exact bind-internal leaf (`cached_key_even`) that produced them --
+        /// that node is a match-recognizer intermediate, never itself one of
+        /// `BoundOp::operands()`, so it is not reachable from a `BoundOp`
+        /// alone. Every real construction site sources those scalars from an
+        /// operand that shares the SAME kv-length axis by construction
+        /// (rotary/even-odd splitting only ever divides the head-dim axis,
+        /// never the row axis), so the row axis's own symbol already surfaces
+        /// through `all_read_sources`'s ordinary operand union.
+        fn aggregate(masks: &[Vec<u64>], node: proxima_tensor::op::NodeId) -> u64 {
+            masks[node.0 as usize].iter().fold(0, |mask, axis| mask | axis)
+        }
+
+        fn refresh_mask(program: &[Op], masks: &[Vec<u64>], bound_op: &BoundOp) -> u64 {
+            let mut mask = aggregate(masks, bound_op.node);
+            for (node, _, _) in bound_op.all_read_sources() {
+                mask |= aggregate(masks, *node);
+            }
+            let widens_past_output = matches!(
+                &bound_op.kind,
+                BoundOpKind::Reduce { keep: Keep::Reduce, .. }
+                    | BoundOpKind::RoundBatchedReduce { keep: Keep::Reduce, .. }
+            );
+            if widens_past_output
+                && let Some(Op::Reduce(reduce)) = program.get(bound_op.node.0 as usize)
+            {
+                mask |= symbol_dependency_iteration_mask(reduce, masks);
+            }
+            mask
+        }
+
+        /// Positions whose refresh mask carries the KV-bound bit, keyed by
+        /// the LOW bind's own bound-op node id (`op_count_identical`/
+        /// `kinds_sequence_identical` at this crossing means position `i`'s
+        /// node is the same on both sides, confirmed by this function's own
+        /// `assert_eq!` on lengths before either set is built).
+        fn kv_masked_positions(program: &[Op], bound: &[BoundOp]) -> std::collections::BTreeSet<usize> {
+            let masks = symbol_dependency_output_masks(program);
+            let kv_bit = 1u64 << symbols::KV_BOUND;
+            bound
+                .iter()
+                .enumerate()
+                .filter(|(_, op)| refresh_mask(program, &masks, op) & kv_bit != 0)
+                .map(|(index, _)| index)
+                .collect()
+        }
+
+        /// Which of a mismatched position's own fields actually differ,
+        /// coarse-grained to what `BoundOp`'s derived `PartialEq` groups —
+        /// `operands()` covers every real operand's `(NodeId, Layout,
+        /// Option<Lookup>)`, `all_read_sources` additionally covers
+        /// `epilogue_operands`, and anything left over once both of those and
+        /// `extents` agree must be a kind-specific scalar field (`cached_key_rows`,
+        /// `round_count`, `weight_total`, ...) reachable only by destructuring
+        /// each of `BoundOpKind`'s own variants — named generically here
+        /// rather than duplicating that whole match a second time.
+        fn field_diff(low: &BoundOp, high: &BoundOp) -> alloc::vec::Vec<&'static str> {
+            let mut diffs = alloc::vec::Vec::new();
+            if low.extents != high.extents {
+                diffs.push("extents");
+            }
+            if low.operands() != high.operands() {
+                diffs.push("operands (layout/lookup)");
+            }
+            let low_sources: alloc::vec::Vec<_> = low.all_read_sources().collect();
+            let high_sources: alloc::vec::Vec<_> = high.all_read_sources().collect();
+            if low_sources != high_sources {
+                diffs.push("epilogue_operands (all_read_sources beyond operands())");
+            }
+            if low.kind.name() != high.kind.name() {
+                diffs.push("kind discriminant");
+            }
+            if diffs.is_empty() && low != high {
+                diffs.push("kind-specific scalar field");
+            }
+            diffs
+        }
+
+        /// `omega::metal::device_buffers_arena_plan::Plan::shape_footprint`'s
+        /// own narrower signature, reproduced here (CPU-only, no Metal, no
+        /// `omega` dependency) so this reconciliation runs in the same
+        /// process as the decisive differential above: kind name, iteration
+        /// extents, and the FIRST real operand's own stride list only —
+        /// no other operand, no epilogue operand, no kind-specific scalar.
+        fn shape_footprint_of(bound_op: &BoundOp) -> (&'static str, alloc::vec::Vec<u64>, alloc::vec::Vec<i64>) {
+            let strides = bound_op
+                .operands()
+                .first()
+                .map(|(_, layout, _)| layout.strides.iter().copied().collect())
+                .unwrap_or_default();
+            (bound_op.kind.name(), bound_op.extents.clone(), strides)
+        }
+
+        fn assert_mask_matches_change_at_crossing(low_kv: usize, high_kv: usize) -> (usize, usize) {
+            let Ok(file) = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
+                return (0, 0);
+            };
+            // SAFETY: the checkpoint file is not written or truncated by any
+            // other process for the duration of this read-only mapping.
+            let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
+            let bytes: &[u8] = &mapping;
+            let parsed =
+                parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
+            let model =
+                LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
+
+            let symbols_low = alloc::vec![1u64, low_kv as u64];
+            let symbols_high = alloc::vec![1u64, high_kv as u64];
+
+            let shapes_low =
+                infer(&model.program, &symbols_low).expect("infer at the low kv bucket");
+            let shapes_high =
+                infer(&model.program, &symbols_high).expect("infer at the high kv bucket");
+
+            let bound_low = bind_with_fusion(
+                &model.program,
+                &shapes_low,
+                &[model.logits_root],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("bind at the low kv bucket");
+            let bound_high = bind_with_fusion(
+                &model.program,
+                &shapes_high,
+                &[model.logits_root],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("bind at the high kv bucket");
+
+            assert_eq!(
+                bound_low.len(),
+                bound_high.len(),
+                "this crossing must not add or drop a bound op (op_count_identical)"
+            );
+
+            let changed = changed_positions(&bound_low, &bound_high);
+            let masked = kv_masked_positions(&model.program, &bound_low);
+
+            let symmetric_difference: alloc::vec::Vec<(usize, &'static str, bool, bool, alloc::vec::Vec<&'static str>)> = changed
+                .symmetric_difference(&masked)
+                .map(|position| {
+                    let low_op = &bound_low[*position];
+                    let high_op = &bound_high[*position];
+                    (
+                        *position,
+                        low_op.kind.name(),
+                        changed.contains(position),
+                        masked.contains(position),
+                        field_diff(low_op, high_op),
+                    )
+                })
+                .collect();
+
+            assert_eq!(
+                changed, masked,
+                "changed positions must equal kv-masked positions at kv={low_kv}->{high_kv}: \
+                 mismatches (position, kind, in_changed, in_masked, fields)={symmetric_difference:?}"
+            );
+
+            (changed.len(), masked.len())
+        }
+
+        #[test]
+        fn masked_positions_equal_changed_positions_at_32_to_64() {
+            assert_mask_matches_change_at_crossing(32, 64);
+        }
+
+        #[test]
+        fn masked_positions_equal_changed_positions_at_96_to_128() {
+            assert_mask_matches_change_at_crossing(96, 128);
+        }
+
+        #[test]
+        fn masked_positions_equal_changed_positions_at_128_to_160() {
+            assert_mask_matches_change_at_crossing(128, 160);
+        }
+
+        /// Reconciles this slice's own 179-position `changed_positions` (full
+        /// `BoundOp::eq`) against the 144-position count `residency_caches.rs`'s
+        /// `emit_plan_footprint_diff` reported for the SAME 32->64 crossing on
+        /// an earlier session, by reproducing that narrower signature
+        /// (`shape_footprint_of`) here and reporting exactly which of the 179
+        /// positions it does not count, and why (`field_diff`).
+        #[test]
+        fn footprint_signature_undercounts_the_full_boundop_diff_at_32_to_64() {
+            let Ok(file) = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
+                return;
+            };
+            // SAFETY: the checkpoint file is not written or truncated by any
+            // other process for the duration of this read-only mapping.
+            let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
+            let bytes: &[u8] = &mapping;
+            let parsed =
+                parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
+            let model =
+                LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
+
+            let shapes_low = infer(&model.program, &[1u64, 32]).expect("infer at kv=32");
+            let shapes_high = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+            let bound_low = bind_with_fusion(
+                &model.program,
+                &shapes_low,
+                &[model.logits_root],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("bind at kv=32");
+            let bound_high = bind_with_fusion(
+                &model.program,
+                &shapes_high,
+                &[model.logits_root],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("bind at kv=64");
+
+            let full_changed = changed_positions(&bound_low, &bound_high);
+            let footprint_changed: std::collections::BTreeSet<usize> = bound_low
+                .iter()
+                .zip(bound_high.iter())
+                .enumerate()
+                .filter(|(_, (left, right))| shape_footprint_of(left) != shape_footprint_of(right))
+                .map(|(index, _)| index)
+                .collect();
+
+            let footprint_missed: alloc::vec::Vec<(usize, &'static str, alloc::vec::Vec<&'static str>)> =
+                full_changed
+                    .difference(&footprint_changed)
+                    .map(|position| {
+                        let low_op = &bound_low[*position];
+                        let high_op = &bound_high[*position];
+                        (*position, low_op.kind.name(), field_diff(low_op, high_op))
+                    })
+                    .collect();
+
+            assert!(
+                full_changed.len() >= footprint_changed.len(),
+                "the full BoundOp diff can only be a superset of the narrower footprint diff: \
+                 full={} footprint={} missed=(position, kind, fields)={footprint_missed:?}",
+                full_changed.len(),
+                footprint_changed.len(),
+            );
+        }
+
+        /// Per-position accounting of slice 2b's own `refresh_bound_ops`
+        /// (local window recomposition) against a fresh `bind_with_fusion`,
+        /// at one real-checkpoint crossing. Calls `refresh_bound_ops` once
+        /// PER MASKED POSITION (a mask array with only that position set)
+        /// rather than once for the whole program, so a refusal at one
+        /// position does not hide the outcome at every other -- this is
+        /// test-only accounting, not a change to `refresh_bound_ops`'s own
+        /// whole-vec contract.
+        struct RefreshAccounting {
+            positions_compared: usize,
+            positions_refreshed: usize,
+            mismatches: alloc::vec::Vec<usize>,
+            refusals_by_kind: std::collections::BTreeMap<&'static str, usize>,
+        }
+
+        fn account_local_refresh_at_crossing(low_kv: usize, high_kv: usize) -> Option<RefreshAccounting> {
+            use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops};
+
+            let Ok(file) = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
+                return None;
+            };
+            // SAFETY: the checkpoint file is not written or truncated by any
+            // other process for the duration of this read-only mapping.
+            let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
+            let bytes: &[u8] = &mapping;
+            let parsed =
+                parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
+            let model =
+                LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
+
+            let outputs = [model.logits_root];
+            let shapes_low = infer(&model.program, &[1u64, low_kv as u64]).expect("infer at low kv");
+            let shapes_high = infer(&model.program, &[1u64, high_kv as u64]).expect("infer at high kv");
+            let bound_low = bind_with_fusion(
+                &model.program,
+                &shapes_low,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("bind at low kv");
+            let bound_high = bind_with_fusion(
+                &model.program,
+                &shapes_high,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("bind at high kv");
+
+            let node_masks = symbol_dependency_output_masks(&model.program);
+            let masks: alloc::vec::Vec<u64> = bound_low
+                .iter()
+                .map(|op| refresh_mask(&model.program, &node_masks, op))
+                .collect();
+            let masked = kv_masked_positions(&model.program, &bound_low);
+            let kv_bit = 1u64 << symbols::KV_BOUND;
+
+            let mut positions_refreshed = 0usize;
+            let mut mismatches = alloc::vec::Vec::new();
+            let mut refusals_by_kind: std::collections::BTreeMap<&'static str, usize> =
+                std::collections::BTreeMap::new();
+
+            for &position in &masked {
+                let mut single_position_masks = alloc::vec![0u64; masks.len()];
+                single_position_masks[position] = masks[position];
+                let outcome = refresh_bound_ops(
+                    &bound_low,
+                    &model.program,
+                    &outputs,
+                    &shapes_high,
+                    &single_position_masks,
+                    kv_bit,
+                    NumericPolicy::bit_exact(),
+                );
+                match outcome {
+                    Ok(refreshed) if refreshed[position] == bound_high[position] => {
+                        positions_refreshed += 1;
+                    }
+                    Ok(_) => {
+                        mismatches.push(position);
+                    }
+                    Err(refusal) => {
+                        let kind = match &refusal {
+                            RefreshRefusal::MatcherFusedKind { kind, .. } => kind,
+                            RefreshRefusal::EpilogueFusionNotLocal { .. } => "epilogue_fusion_not_local",
+                            RefreshRefusal::RecomposedBodyMismatch { .. } => "recomposed_body_mismatch",
+                            RefreshRefusal::OpKindMismatch { .. } => "op_kind_mismatch",
+                            RefreshRefusal::ShapeError { .. } => "shape_error",
+                            RefreshRefusal::PositionOutOfRange { .. } => "position_out_of_range",
+                            RefreshRefusal::RecomposedOperandsDiffer { .. } => "recomposed_operands_differ",
+                        };
+                        *refusals_by_kind.entry(kind).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            Some(RefreshAccounting {
+                positions_compared: masked.len(),
+                positions_refreshed,
+                mismatches,
+                refusals_by_kind,
+            })
+        }
+
+        fn assert_local_refresh_at_crossing(low_kv: usize, high_kv: usize) {
+            let Some(accounting) = account_local_refresh_at_crossing(low_kv, high_kv) else {
+                return;
+            };
+            assert!(
+                accounting.mismatches.is_empty(),
+                "every position this module claims to refresh must equal a fresh bind_with_fusion \
+                 exactly at kv={low_kv}->{high_kv}; mismatched positions: {:?}",
+                accounting.mismatches
+            );
+            assert_eq!(
+                accounting.positions_refreshed
+                    + accounting.refusals_by_kind.values().sum::<usize>(),
+                accounting.positions_compared,
+                "every masked position must be accounted for as either refreshed or a named \
+                 refusal at kv={low_kv}->{high_kv}: compared={} refreshed={} refusals_by_kind={:?}",
+                accounting.positions_compared,
+                accounting.positions_refreshed,
+                accounting.refusals_by_kind
+            );
+        }
+
+        #[test]
+        fn local_refresh_matches_a_fresh_bind_or_names_its_refusal_at_32_to_64() {
+            assert_local_refresh_at_crossing(32, 64);
+        }
+
+        #[test]
+        fn local_refresh_matches_a_fresh_bind_or_names_its_refusal_at_96_to_128() {
+            assert_local_refresh_at_crossing(96, 128);
+        }
+
+        #[test]
+        fn local_refresh_matches_a_fresh_bind_or_names_its_refusal_at_128_to_160() {
+            assert_local_refresh_at_crossing(128, 160);
+        }
+
+        /// CPU-only micro-measure, NOT a decode-latency claim: median wall
+        /// time of a fresh `bind_with_fusion` versus `infer` plus a
+        /// completed per-position local refresh (every masked position this
+        /// module can refresh, one call per position, the same shape
+        /// `account_local_refresh_at_crossing` already exercises), at least
+        /// 20 iterations, at the real checkpoint's 32-to-64 crossing.
+        /// Reported release-build numbers are the ones that matter; a
+        /// debug-build run is dominated by unoptimized `compose`/
+        /// shape-inference recursion and is not a timing claim.
+        #[test]
+        fn micro_measure_bind_with_fusion_versus_infer_plus_completed_refresh_at_32_to_64() {
+            use proxima_tensor::bind::refresh_bound_ops;
+
+            let Ok(file) = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
+                return;
+            };
+            // SAFETY: the checkpoint file is not written or truncated by any
+            // other process for the duration of this read-only mapping.
+            let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
+            let bytes: &[u8] = &mapping;
+            let parsed =
+                parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
+            let model =
+                LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
+
+            let outputs = [model.logits_root];
+            let shapes_low = infer(&model.program, &[1u64, 32]).expect("infer at kv=32");
+            let bound_low = bind_with_fusion(
+                &model.program,
+                &shapes_low,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("bind at kv=32");
+            let node_masks = symbol_dependency_output_masks(&model.program);
+            let masks: alloc::vec::Vec<u64> = bound_low
+                .iter()
+                .map(|op| refresh_mask(&model.program, &node_masks, op))
+                .collect();
+            let masked = kv_masked_positions(&model.program, &bound_low);
+            let kv_bit = 1u64 << symbols::KV_BOUND;
+
+            let shapes_probe = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+            let whole_mask: alloc::vec::Vec<u64> = masks.clone();
+            let every_position_refreshes = refresh_bound_ops(
+                &bound_low,
+                &model.program,
+                &outputs,
+                &shapes_probe,
+                &whole_mask,
+                kv_bit,
+                NumericPolicy::bit_exact(),
+            )
+            .is_ok();
+
+            const ITERATIONS: usize = 20;
+            let mut full_bind_micros: alloc::vec::Vec<u128> = alloc::vec::Vec::with_capacity(ITERATIONS);
+            for _ in 0..ITERATIONS {
+                let shapes_high = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+                let started = std::time::Instant::now();
+                let _ = bind_with_fusion(&model.program, &shapes_high, &outputs, true, NumericPolicy::bit_exact())
+                    .expect("bind at kv=64");
+                full_bind_micros.push(started.elapsed().as_micros());
+            }
+            full_bind_micros.sort_unstable();
+            let median_full = full_bind_micros[ITERATIONS / 2];
+
+            assert!(
+                !every_position_refreshes,
+                "expected refusals at 32->64 on the real checkpoint (masked_positions={}); \
+                 (b) infer+refresh IS measurable now that every position refreshes -- a completed \
+                 median_infer_plus_refresh_us arm must be added instead of reporting not-measurable \
+                 (median_bind_with_fusion_us={median_full})",
+                masked.len()
+            );
+
+            let mut refresh_micros: alloc::vec::Vec<u128> = alloc::vec::Vec::with_capacity(ITERATIONS);
+            for _ in 0..ITERATIONS {
+                let shapes_high = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+                let started = std::time::Instant::now();
+                for &position in &masked {
+                    let mut single_position_masks = alloc::vec![0u64; masks.len()];
+                    single_position_masks[position] = masks[position];
+                    let _ = refresh_bound_ops(
+                        &bound_low,
+                        &model.program,
+                        &outputs,
+                        &shapes_high,
+                        &single_position_masks,
+                        kv_bit,
+                        NumericPolicy::bit_exact(),
+                    );
+                }
+                refresh_micros.push(started.elapsed().as_micros());
+            }
+            refresh_micros.sort_unstable();
+            let median_refresh = refresh_micros[ITERATIONS / 2];
+
+            assert!(
+                median_full > 0,
+                "micro_measure (NOT decode latency; run --release for a real number) \
+                 (b) is NOT a completed-refresh measurement -- reported here only because \
+                 every_position_refreshes was false and this per-position loop still exits early \
+                 on the first refusal per masked position: iterations={ITERATIONS} \
+                 masked_positions={} median_bind_with_fusion_us={median_full} \
+                 median_per_position_refresh_call_us_not_a_completed_refresh={median_refresh}",
+                masked.len()
+            );
+        }
+    }
 }
