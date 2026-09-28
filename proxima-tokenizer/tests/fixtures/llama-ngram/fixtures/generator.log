@@ -1,0 +1,15 @@
+spec common_specu: adding speculative implementation 'ngram-mod'
+spec common_specu: - n_match=24, n_max=64, n_min=48
+spec common_specu: - mod size=4194304 (16.000 MB)
+spec        begin: ngram_mod occupancy = 1/4194304 (0.00)
+spec       accept: low acceptance streak (5) - resetting ngram_mod
+spec        begin: ngram_mod occupancy = 3739/4194304 (0.00)
+spec        begin: ngram_mod occupancy = 5457/4194304 (0.00)
+spec        begin: ngram_mod occupancy = 7717/4194304 (0.00)
+spec        begin: ngram_mod occupancy = 12577/4194304 (0.00)
+spec        begin: ngram_mod occupancy = 12988/4194304 (0.00)
+spec common_specu: adding speculative implementation 'ngram-mod'
+spec common_specu: - n_match=24, n_max=64, n_min=48
+spec common_specu: - mod size=4194304 (16.000 MB)
+spec        begin: ngram_mod occupancy = 1186686/4194304 (0.28)
+spec        begin: ngram_mod occupancy 0.28 exceeds threshold (0.25) - resetting
