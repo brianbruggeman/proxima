@@ -9,7 +9,7 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 |---|---|---|---|---|---|---|
 | 1 | sample-and-match verify via one shared per-row selection fn; remove plain-argmax gate; parity example runs greedy + sampled blocks and `--seed-mismatch-control` (includes the std-build fix and verify-step counting already on main uncommitted) | AC1, AC2 | `$EX` then `$EX --seed-mismatch-control` | per AC1, AC2 | [x] | AC1: no-flag run, both blocks identical=true, steps 4/2, exit 0. AC2: `--seed-mismatch-control` (seed 42 vs 4242), sampled identical=false at first_divergence=0, greedy unchanged identical=true steps=4, exit 0 |
 | 2 | fixture generator: C++ harness compiled against llama.cpp `common/ngram-*.cpp` emitting JSON cases from gemma4-tokenized real text; vendored at `proxima-tokenizer/tests/fixtures/llama-ngram/` with upstream commit in each header | AC5-AC9 (inputs) | `for f in proxima-tokenizer/tests/fixtures/llama-ngram/fixtures/ngram_*.json; do jq '.cases \| length' $f; done` | 5 files, each ≥ 200 | [x] | 4346/4395/4546/2081/4800 cases; non-empty 559/391/365/91/137; k vs k4v drafts differ in 24 cases; ngram_mod occupancy_resets=1 low_accept_resets=1; 2.4M; commit f1ea20621. streams 6-11 are constructed from real sentences to force k4v's tie guard (`ngram-map.cpp:495-499`); ngram_mod's low-accept reset uses a constructed stream (streams[5]) |
-| 3 | `draft/ngram_simple.rs`; delete `draft_ngram_lookup` and repoint decode loop | AC5, AC11 | AC5 then AC11 | 1 passed, cases ≥ 200; 0 matches | [ ] | |
+| 3 | `draft/ngram_simple.rs`; delete `draft_ngram_lookup` and repoint decode loop | AC5, AC11 | AC5 then AC11 | 1 passed, cases ≥ 200; 0 matches | [x] | tokenizer 115 passed; fixture cases=4346 non_empty=559; AC11 grep 0 matches; clippy/doctest/model-interop filter all green; found+fixed a real decode.rs bug (`token_history` already held `next_ids[0]` when drafting was called, corrupting every pattern -- speculation silently drafted nothing end-to-end on the real gemma4-E2B checkpoint until fixed); `speculative_decode_parity` (no flag, and `--seed-mismatch-control`) both pass, `speculative_verify_steps` > 0 on greedy AND sampled; `ngram_simple_draft` takes a caller-owned `&mut Vec<u32>` output buffer, zero per-call allocation, per mid-slice owner directive |
 | 4 | `draft/ngram_map.rs` key-only | AC6 | AC6 | 1 passed | [ ] | |
 | 5 | `draft/ngram_map.rs` k4v | AC7 | AC7 | 1 passed | [ ] | |
 | 6 | `draft/ngram_mod.rs` | AC8 | AC8 | 1 passed, resets ≥ 1 each | [ ] | |
@@ -28,8 +28,8 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 
 ## resume
 
-Last landed slice: 2, uncommitted (slice 1 also uncommitted)
-Next action: slice 3 -- port `common_ngram_simple_draft` to `proxima-tokenizer/src/draft/ngram_simple.rs`, test against `tests/fixtures/llama-ngram/fixtures/ngram_simple.json`
+Last landed slice: 3
+Next action: slice 4 -- `draft/ngram_map.rs` key-only (AC6)
 Open question, if any: none
 
 ## struck
