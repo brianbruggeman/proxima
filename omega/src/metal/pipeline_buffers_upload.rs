@@ -446,6 +446,15 @@ pub(super) fn pipeline_for(
         counter!(PIPELINE_MISSES, 1);
         counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
         register_pipeline_capture(&pipeline, cache_key, &kernel.entry, captured_sha256);
+        debug!(
+            entry = %kernel.entry,
+            cache_key = %cache_key,
+            static_threadgroup_memory = pipeline.staticThreadgroupMemoryLength() as u64,
+            max_total_threads = pipeline.maxTotalThreadsPerThreadgroup() as u64,
+            thread_execution_width = pipeline.threadExecutionWidth() as u64,
+            device_max_threadgroup_memory = device.maxThreadgroupMemoryLength() as u64,
+            "pipeline_footprint"
+        );
     }
     PIPELINE_CACHE.with(|cache| {
         cache
