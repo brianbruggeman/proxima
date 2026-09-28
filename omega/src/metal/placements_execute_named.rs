@@ -1,5 +1,73 @@
 use super::*;
 
+#[cfg(feature = "instrument")]
+use objc2_metal::MTLBlitCommandEncoder;
+
+/// reads `PROXIMA_SUBSTITUTE_DUMP_DIR`'s `manifest.txt` back, pairing each
+/// node id with its one captured `.bin` file.
+#[cfg(feature = "instrument")]
+fn read_substitute_manifest(dir: &std::path::Path) -> Vec<(u32, std::path::PathBuf)> {
+    let Ok(contents) = std::fs::read_to_string(dir.join("manifest.txt")) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for line in contents.lines() {
+        let node_id = line
+            .split('\t')
+            .find_map(|field| field.strip_prefix("node="))
+            .and_then(|value| value.parse::<u32>().ok());
+        let Some(node_id) = node_id else { continue };
+        let prefix = format!("node{node_id}_buf");
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix) && name.ends_with(".bin") {
+                result.push((node_id, entry.path()));
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// Uploads every manifest node's dumped output bytes into its own resident
+/// `MTLBuffer`, once, before the main dispatch loop -- the blit substitution
+/// below reads from these, never from the file system again per dispatch.
+/// `newBufferWithBytes_length_options` (StorageModeShared, a real copy, not
+/// the checkpoint's own no-copy mmap path) mirrors
+/// [`device_buffers_arena_plan::upload_base_table`]'s own one-time-upload
+/// pattern.
+#[cfg(feature = "instrument")]
+fn upload_substitute_buffers(
+    device: &ProtocolObject<dyn MTLDevice>,
+    dir: &std::path::Path,
+) -> BTreeMap<NodeId, (MetalBuffer, usize)> {
+    let mut buffers = BTreeMap::new();
+    for (node_id, path) in read_substitute_manifest(dir) {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr().cast_mut().cast::<c_void>()) };
+        let Some(buffer) = (unsafe {
+            device.newBufferWithBytes_length_options(
+                pointer,
+                bytes.len(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }) else {
+            continue;
+        };
+        buffers.insert(NodeId(node_id), (buffer, bytes.len()));
+    }
+    buffers
+}
+
 /// `PROXIMA_COMMAND_BUFFER_CHUNKS=K`, parsed and cached once per process
 /// (matching every other `PROXIMA_*` knob this crate reads, e.g.
 /// `packed_rows_override` in `kernel_types_identity.rs`) -- unlike the
@@ -554,6 +622,14 @@ pub(super) fn execute_plan_with_placements_inner(
 
     #[cfg(feature = "instrument")]
     chunk_audit_begin_step();
+    // plan-owned, reused across calls (`clear` keeps capacity) -- see
+    // [`Plan::chunk_status_buffers`]'s own doc. Every command buffer this
+    // call commits (main-loop chunk boundaries, the diagnostic substitute-
+    // blit path, and the step's own final buffer) is pushed here so
+    // [`check_all_command_buffers`] can prove EVERY one reached a
+    // non-error status before any output is read back, not only the last.
+    let mut chunk_status_buffers = plan.chunk_status_buffers.borrow_mut();
+    chunk_status_buffers.clear();
     let mut command_buffer = queue
         .commandBuffer()
         .ok_or_else(|| MetalError::CompileFailed {
@@ -591,13 +667,30 @@ pub(super) fn execute_plan_with_placements_inner(
     // and the plan is decode-shaped -- same scoping
     // `command_buffer_chunk_count` already applies to the config/default
     // tier, extended to this diagnostic-only env var.
-    // `PROXIMA_BOUNDARIES_PREFILL=1` (OWNER_BRIEF_prefill_correction, coordinator
-    // addition 2026-09-23): lets the explicit-boundary diagnostic also split a
-    // prefill-shaped plan's step-0 command stream -- off by default so the
-    // decode-only scoping above is unchanged for every existing caller.
+    // off by default: lets the explicit-boundary diagnostic also split a
+    // prefill-shaped plan's step-0 command stream.
     let boundaries_prefill_allowed =
         plan.command_buffer_chunks_decode_shaped || std::env::var_os("PROXIMA_BOUNDARIES_PREFILL").is_some();
-    let explicit_boundaries = if command_buffer_chunk_env_override().is_none() && boundaries_prefill_allowed {
+    // `PROXIMA_CAPTURE_NODES=packed-multi-token` matches every projection in
+    // the step, so the boundary list can only be computed here, after the
+    // admission predicate has run.
+    #[cfg(feature = "instrument")]
+    let auto_capture_boundaries = (std::env::var_os("PROXIMA_CAPTURE_DUMP_DIR").is_some()
+        && std::env::var("PROXIMA_CAPTURE_NODES").as_deref() == Ok("packed-multi-token"))
+    .then(|| {
+        prepared
+            .resolved
+            .iter()
+            .enumerate()
+            .filter(|(_, bound)| is_packed_multi_token_projection(bound, packed_operands))
+            .map(|(position, _)| position + 1)
+            .collect::<Vec<usize>>()
+    });
+    #[cfg(not(feature = "instrument"))]
+    let auto_capture_boundaries: Option<Vec<usize>> = None;
+    let explicit_boundaries = if let Some(boundaries) = auto_capture_boundaries {
+        Some(boundaries)
+    } else if command_buffer_chunk_env_override().is_none() && boundaries_prefill_allowed {
         command_buffer_explicit_boundaries_env()
     } else {
         None
@@ -626,6 +719,23 @@ pub(super) fn execute_plan_with_placements_inner(
     // trip `unused_variables`, matching `command_buffer_chunk_count`'s own
     // `source`.
     let _ = (chunk_count, ignored_boundaries);
+    // step-0 only: later steps reuse the same node ids at a smaller
+    // dispatch shape, and blitting a step-0-sized buffer into that
+    // destination is an out-of-bounds copy Metal does not always fault on.
+    #[cfg(feature = "instrument")]
+    let substitute_buffers: BTreeMap<NodeId, (MetalBuffer, usize)> =
+        if CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+            std::env::var_os("PROXIMA_SUBSTITUTE_DUMP_DIR")
+                .map(|dir| upload_substitute_buffers(&device, std::path::Path::new(&dir)))
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+    #[cfg(feature = "instrument")]
+    let substitute_blit_after_kernel =
+        std::env::var("PROXIMA_SUBSTITUTE_MODE").as_deref() == Ok("blit-after-kernel");
+    #[cfg(feature = "instrument")]
+    let mut substitutions_applied: u64 = 0;
     let mut next_boundary = 0usize;
     #[cfg(feature = "instrument")]
     let mut first_command_buffer: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = None;
@@ -716,6 +826,7 @@ pub(super) fn execute_plan_with_placements_inner(
             let closing_encoder = core::mem::replace(&mut encoder, new_encoder);
             let closing_command_buffer =
                 core::mem::replace(&mut command_buffer, new_command_buffer);
+            chunk_status_buffers.push(closing_command_buffer.clone());
             closing_encoder.finish();
             #[cfg(feature = "instrument")]
             let closing_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
@@ -733,6 +844,18 @@ pub(super) fn execute_plan_with_placements_inner(
             closing_command_buffer.commit();
             #[cfg(feature = "instrument")]
             let closing_commit_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
+            // `PROXIMA_CAPTURE_DUMP_DIR` (see `capture_dispatch`'s own doc):
+            // an extra `waitUntilCompleted` a normal run never pays -- this
+            // closing buffer is exactly the one whose LAST op was the
+            // boundary position just below `position`, so waiting on it here
+            // (rather than only on the step's single final wait) is what
+            // proves a queued dump's input arena regions have not yet been
+            // reused by any dispatch encoded after this boundary.
+            #[cfg(feature = "instrument")]
+            if std::env::var_os("PROXIMA_CAPTURE_DUMP_DIR").is_some() {
+                closing_command_buffer.waitUntilCompleted();
+                flush_pending_capture_dumps();
+            }
             #[cfg(feature = "instrument")]
             {
                 chunk_host_timings.push(ChunkHostTiming {
@@ -846,6 +969,66 @@ pub(super) fn execute_plan_with_placements_inner(
             Some(placement) => Some(placement),
             None => arena_placement(plan, position)?,
         };
+        // default mode: skip this op's kernel and blit the captured bytes
+        // into the same destination `encode_op` would have resolved, on a
+        // fresh command buffer independent of the current (still-open) one
+        // -- Metal's "one active encoder" rule is per command buffer, not
+        // global.
+        #[cfg(feature = "instrument")]
+        if !substitute_blit_after_kernel
+            && let Some((source_buffer, source_len)) = substitute_buffers.get(&bound.node)
+        {
+                let (dest_buffer, dest_offset) = match placement {
+                    Some((buffer, offset)) => (buffer.clone(), offset),
+                    None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
+                };
+                let blit_command_buffer =
+                    queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+                        log: "command queue refused to hand out a command buffer for the blit"
+                            .to_string(),
+                    })?;
+                let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
+                    MetalError::CompileFailed {
+                        log: "command buffer refused to hand out a blit encoder".to_string(),
+                    }
+                })?;
+                unsafe {
+                    blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        source_buffer,
+                        0,
+                        &dest_buffer,
+                        dest_offset,
+                        *source_len,
+                    );
+                }
+                blit.endEncoding();
+                let continuation_command_buffer =
+                    queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+                        log: "command queue refused to hand out a command buffer".to_string(),
+                    })?;
+                let continuation_encoder = EncoderGuard::new(
+                    continuation_command_buffer
+                        .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
+                        .ok_or_else(|| MetalError::CompileFailed {
+                            log: "command buffer refused to hand out a compute encoder"
+                                .to_string(),
+                        })?,
+                );
+                let closing_encoder = core::mem::replace(&mut encoder, continuation_encoder);
+                let closing_command_buffer =
+                    core::mem::replace(&mut command_buffer, continuation_command_buffer);
+                closing_encoder.finish();
+                chunk_status_buffers.push(closing_command_buffer.clone());
+                chunk_status_buffers.push(blit_command_buffer.clone());
+                closing_command_buffer.commit();
+                blit_command_buffer.commit();
+                device_buffers.insert(bound.node, (dest_buffer, dest_offset));
+                substitutions_applied += 1;
+                for retired in &prepared.retires[position] {
+                    device_buffers.remove(retired);
+                }
+                continue;
+        }
         // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head): per-node
         // pre-dispatch buffer identity + sentinel fill for the
         // `PROXIMA_HEAD_REPEATS` duplicate-head investigation. Placed here,
@@ -1165,6 +1348,58 @@ pub(super) fn execute_plan_with_placements_inner(
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
             }
+            // blit-after-kernel: the real kernel already ran above; this
+            // blits the identical captured bytes on top of what it wrote,
+            // isolating the blit's own cost from "no kernel at all".
+            #[cfg(feature = "instrument")]
+            if substitute_blit_after_kernel
+                && let (Some((source_buffer, source_len)), Some((dest_buffer, dest_offset))) = (
+                    substitute_buffers.get(&bound.node),
+                    device_buffers.get(&bound.node).cloned(),
+                )
+            {
+                    let blit_command_buffer =
+                        queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+                            log: "command queue refused to hand out a command buffer for the blit"
+                                .to_string(),
+                        })?;
+                    let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
+                        MetalError::CompileFailed {
+                            log: "command buffer refused to hand out a blit encoder".to_string(),
+                        }
+                    })?;
+                    unsafe {
+                        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                            source_buffer,
+                            0,
+                            &dest_buffer,
+                            dest_offset,
+                            *source_len,
+                        );
+                    }
+                    blit.endEncoding();
+                    let continuation_command_buffer =
+                        queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+                            log: "command queue refused to hand out a command buffer".to_string(),
+                        })?;
+                    let continuation_encoder = EncoderGuard::new(
+                        continuation_command_buffer
+                            .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
+                            .ok_or_else(|| MetalError::CompileFailed {
+                                log: "command buffer refused to hand out a compute encoder"
+                                    .to_string(),
+                            })?,
+                    );
+                    let closing_encoder = core::mem::replace(&mut encoder, continuation_encoder);
+                    let closing_command_buffer =
+                        core::mem::replace(&mut command_buffer, continuation_command_buffer);
+                    closing_encoder.finish();
+                    chunk_status_buffers.push(closing_command_buffer.clone());
+                    chunk_status_buffers.push(blit_command_buffer.clone());
+                    closing_command_buffer.commit();
+                    blit_command_buffer.commit();
+                    substitutions_applied += 1;
+                }
         }
         // explicit liveness exclusion (see this function's doc): a placed
         // node, input or output, is externally owned and always live, so it
@@ -1217,6 +1452,7 @@ pub(super) fn execute_plan_with_placements_inner(
     // push already established.
     #[cfg(feature = "instrument")]
     let last_chunk_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
+    chunk_status_buffers.push(command_buffer.clone());
     #[cfg(feature = "instrument")]
     chunk_command_buffers.push(command_buffer.clone());
     // "encode time elapsed after the first commit" (OWNER_BRIEF_structural_
@@ -1248,6 +1484,16 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let wait_started = std::time::Instant::now();
     command_buffer.waitUntilCompleted();
+    // checks EVERY command buffer this call committed, not only the last --
+    // see `Plan::chunk_status_buffers`'s own doc for why one wait already
+    // proves every earlier entry has a terminal status too.
+    check_all_command_buffers(&chunk_status_buffers)?;
+    // `PROXIMA_CAPTURE_DUMP_DIR`: the step's own final wait already proves
+    // every chunk (including one whose boundary this step never crossed,
+    // e.g. the captured node was the plan's very last op) has completed --
+    // catches any dump not already flushed at an explicit boundary above.
+    #[cfg(feature = "instrument")]
+    flush_pending_capture_dumps();
     #[cfg(feature = "instrument")]
     {
         counter!(GPU_EXEC_CALLS, chunk_count as u64);
@@ -1263,9 +1509,18 @@ pub(super) fn execute_plan_with_placements_inner(
         // correlation is asserted here, not proven; if the two clocks
         // disagree by more than noise the print below carries both raw
         // readings so a reader can judge without rerunning.
-        if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+        {
             let wait_return_ms = wait_started.elapsed().as_secs_f64() * 1e3;
-            let gpu_exec_ms =
+            // Host wall-clock span from just-before-the-final-chunk's-own
+            // `commit()` (`gpu_exec_started`, set at this function's own
+            // line above) to `waitUntilCompleted`'s return -- NOT GPU
+            // execution time despite the name this used to carry: it
+            // includes `commit_call_ms`, `commit_to_gpu_start_ms`, and
+            // `gpu_busy_ms` (below) all summed together, one host clock
+            // wrapping the whole commit-to-wait span. `gpu_busy_ms` (this
+            // scope, from `GPUStartTime`/`GPUEndTime`) is the actual GPU
+            // execution reading.
+            let final_commit_to_wait_ms =
                 proxima_tensor::instrument::ticks_to_nanos(elapsed_ticks(gpu_exec_started)) as f64
                     / 1e6;
             let commit_call_start_s = proxima_tensor::instrument::ticks_to_nanos(
@@ -1285,7 +1540,8 @@ pub(super) fn execute_plan_with_placements_inner(
             let commit_to_gpu_start_ms = ((gpu_start_s - commit_call_start_s) * 1e3).max(0.0);
             let gpu_busy_ms = ((gpu_end_s - gpu_start_s) * 1e3).max(0.0);
             let gpu_end_to_wait_return_ms =
-                (gpu_exec_ms - commit_call_ms - commit_to_gpu_start_ms - gpu_busy_ms).max(0.0);
+                (final_commit_to_wait_ms - commit_call_ms - commit_to_gpu_start_ms - gpu_busy_ms)
+                    .max(0.0);
             let leading_commit_start_s = first_commit_call_start_s.unwrap_or(commit_call_start_s);
             let first_commit_to_first_gpu_start_ms =
                 ((gpu_start_s - leading_commit_start_s) * 1e3).max(0.0);
@@ -1295,7 +1551,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 gpu_busy_ms,
                 gpu_end_to_wait_return_ms,
                 sum_ms = commit_call_ms + commit_to_gpu_start_ms + gpu_busy_ms + gpu_end_to_wait_return_ms,
-                gpu_exec_ms,
+                final_commit_to_wait_ms,
                 gpu_start_raw_s = gpu_start_s,
                 gpu_end_raw_s = gpu_end_s,
                 commit_call_start_raw_s = commit_call_start_s,
@@ -1371,6 +1627,20 @@ pub(super) fn execute_plan_with_placements_inner(
             );
         }
     }
+    // unconditional, unlike `chunk_summary` above: the planned boundary
+    // count there predates any substitution, so this is the only place the
+    // actual per-node substitution count is exact.
+    #[cfg(feature = "instrument")]
+    debug!(
+        step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed),
+        substitutions_applied,
+        mode = if substitute_blit_after_kernel {
+            "blit-after-kernel"
+        } else {
+            "blit-only"
+        },
+        "substitute summary"
+    );
 
     for (bound, fault_buffer, gathers) in &pending_faults {
         check_gather_fault(bound, fault_buffer, *gathers)?;
@@ -1652,8 +1922,7 @@ pub fn execute_plan_timed(
     }
     encoder.finish();
 
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
+    commit_and_wait(&command_buffer)?;
     let gpu_ns =
         ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
 

@@ -172,8 +172,8 @@ pub enum MetalError {
     /// partially written. Reading that output back as if the dispatch
     /// succeeded is exactly the silent-wrong-bits failure this variant
     /// exists to turn into a hard error instead.
-    #[error("metal command buffer failed: status={status} error={log}")]
-    CommandBufferFailed { status: u64, log: String },
+    #[error("metal command buffer failed: status={status} code={code} error={log}")]
+    CommandBufferFailed { status: u64, code: i64, log: String },
     /// `build_buffer_arena`'s own reuse pass still needed more transient
     /// bytes live at once than `cap_bytes` budgets -- MG-3's kill condition,
     /// now a typed error a caller can act on rather than a stderr line
@@ -712,6 +712,16 @@ pub struct Plan {
     /// moves and never changes content, the same promise
     /// [`Plan::mark_resident`]'s no-copy upload path already trusts).
     pub(super) block_identity: RefCell<Vec<Option<(usize, usize)>>>,
+    /// Every command buffer [`execute_plan_with_placements`] committed for
+    /// its most recent call, in commit order -- reused call-to-call
+    /// (`clear` keeps capacity) so a warm call's status sweep costs no heap
+    /// allocation, the same reuse argument as [`Plan::device_buffers`]'s own
+    /// doc. `mod.rs`'s own module doc: command buffers submitted to one
+    /// `MTLCommandQueue` execute (and therefore reach a terminal `status()`)
+    /// in commit order, so once the LAST entry's `waitUntilCompleted`
+    /// returns, every earlier entry already has a terminal status too --
+    /// checking them is a synchronous read, not an additional wait.
+    pub(super) chunk_status_buffers: RefCell<Vec<Retained<ProtocolObject<dyn MTLCommandBuffer>>>>,
 }
 
 /// [`Plan::resolved_steps`]'s payload -- the [`MathMode`] it was built

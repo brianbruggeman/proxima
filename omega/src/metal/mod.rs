@@ -284,6 +284,14 @@ fn commit_and_wait(
     check_command_buffer_status(command_buffer)
 }
 
+/// One per [`check_command_buffer_status`] call, pass or fail -- lets a test
+/// prove a chunked (`PROXIMA_COMMAND_BUFFER_CHUNKS`-shaped, K>1) call
+/// checked EVERY committed command buffer's status, not only the last one
+/// [`execute_plan_with_placements`] waits on directly. Unconditional, same
+/// always-on shape as [`NOCOPY_BUFFER_UPLOADS`]/[`COPYING_BUFFER_UPLOADS`].
+pub static COMMAND_BUFFER_STATUS_CHECKS: Counter =
+    Counter::new("omega.metal.command_buffer_status_checks");
+
 /// [`commit_and_wait`]'s status check alone, for the handful of call sites
 /// that split `commit()`/`waitUntilCompleted()` apart to bracket host-side
 /// instrumentation timing between them -- same failure this guards against,
@@ -291,15 +299,34 @@ fn commit_and_wait(
 fn check_command_buffer_status(
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
 ) -> Result<(), MetalError> {
+    counter!(COMMAND_BUFFER_STATUS_CHECKS, 1);
     if command_buffer.status() == MTLCommandBufferStatus::Error {
-        let log = command_buffer
+        let (code, log) = command_buffer
             .error()
-            .map(|error| nserror_description(&error))
-            .unwrap_or_else(|| "no NSError attached".to_string());
+            .map(|error| (error.code() as i64, nserror_description(&error)))
+            .unwrap_or((0, "no NSError attached".to_string()));
         return Err(MetalError::CommandBufferFailed {
             status: MTLCommandBufferStatus::Error.0 as u64,
+            code,
             log,
         });
+    }
+    Ok(())
+}
+
+/// [`check_command_buffer_status`] over every command buffer a step
+/// committed, in commit order -- the invariant every entry point in this
+/// driver upholds: a step's outputs are read back only after EVERY command
+/// buffer it committed (not only the last one waited on) has a checked,
+/// non-error status. Safe to call synchronously with no additional wait:
+/// command buffers on one `MTLCommandQueue` reach a terminal `status()` in
+/// commit order (this module's own doc), so once the caller's own final
+/// `waitUntilCompleted` has returned, every earlier entry already has one.
+fn check_all_command_buffers(
+    command_buffers: &[Retained<ProtocolObject<dyn MTLCommandBuffer>>],
+) -> Result<(), MetalError> {
+    for command_buffer in command_buffers {
+        check_command_buffer_status(command_buffer)?;
     }
     Ok(())
 }
