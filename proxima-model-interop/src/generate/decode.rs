@@ -1303,6 +1303,41 @@ fn prefill_one_evaluation_requested(serving_config: &ServingConfig) -> bool {
         && std::env::var_os("PROXIMA_PREFILL_SEQUENTIAL").is_none()
 }
 
+/// Resolves `PROXIMA_DISPATCH` (`serial`|`concurrent`, case-insensitive)
+/// against `configured` (`ServingConfig::dispatch_type`'s own doc), read
+/// exactly once at [`LoadedModel::generate_with_serving_config`]'s own entry
+/// -- same one-call-site shape as [`prefill_one_evaluation_requested`]
+/// immediately above. Unset keeps `configured` (today's `Serial` default for
+/// gemma4's MoE graph, `docs/model-interop/discipline.md` C3: `Concurrent`'s
+/// `HazardTracker` schedule is proven only for the placed single-range
+/// program, not the recurrent/MoE graph). An unrecognized value is a
+/// misconfiguration surfaced as [`InteropError::InvalidDispatchTypeOverride`]
+/// rather than a silent fallback to `configured`.
+///
+/// Distinct from `crate::test_support::dispatch_type_from_env`'s
+/// `PROXIMA_DISPATCH`: that helper is test-harness-only (`pub(crate)`,
+/// `panic!`s on an unrecognized value) and selects a bake-off `Plan`'s
+/// dispatch type directly, never through `ServingConfig`. This function is
+/// the production, non-panicking edge for the decode runtime config.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn resolve_dispatch_type_override(
+    configured: omega::metal::DispatchType,
+) -> Result<omega::metal::DispatchType, InteropError> {
+    match std::env::var("PROXIMA_DISPATCH") {
+        Err(std::env::VarError::NotPresent) => Ok(configured),
+        Ok(value) if value.eq_ignore_ascii_case("serial") => Ok(omega::metal::DispatchType::Serial),
+        Ok(value) if value.eq_ignore_ascii_case("concurrent") => {
+            Ok(omega::metal::DispatchType::Concurrent)
+        }
+        Ok(other) => Err(InteropError::InvalidDispatchTypeOverride { value: other }),
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            Err(InteropError::InvalidDispatchTypeOverride {
+                value: raw.to_string_lossy().into_owned(),
+            })
+        }
+    }
+}
+
 impl<'file> LoadedModel<'file> {
     /// [`Self::generate_with_serving_config`] against
     /// [`supported_serving_config`] -- the reachable path every existing
@@ -1980,6 +2015,8 @@ impl<'file> LoadedModel<'file> {
             self.apply_command_buffer_chunks_default(&mut serving_config);
             #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut serving_config)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_dispatch_type_override(&mut serving_config)?;
             serving_config
         };
         #[cfg(feature = "std")]
@@ -2018,6 +2055,8 @@ impl<'file> LoadedModel<'file> {
             self.apply_command_buffer_chunks_default(&mut effective_serving_config);
             #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut effective_serving_config)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_dispatch_type_override(&mut effective_serving_config)?;
             effective_serving_config
         };
         let mut runtime = BackendRuntime::new(&effective_serving_config);
@@ -2077,6 +2116,8 @@ impl<'file> LoadedModel<'file> {
             // ceiling simply by supplying a PrefixState.
             #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut effective_serving_config)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_dispatch_type_override(&mut effective_serving_config)?;
             effective_serving_config
         };
         let mut runtime = BackendRuntime::new(&effective_serving_config);
@@ -2257,6 +2298,33 @@ impl<'file> LoadedModel<'file> {
         Ok(())
     }
 
+    /// The single resolution point for `serving_config.dispatch_type`
+    /// (`ServingConfig::dispatch_type`'s own doc): applies
+    /// [`resolve_dispatch_type_override`] and logs the resolved value once.
+    /// Every production caller that reaches [`BackendRuntime::new`] --
+    /// [`Self::generate_with_serving_config`], [`Self::generate_streaming`],
+    /// [`Self::prefill_prefix`], [`Self::generate_from_prefix`] -- calls this
+    /// first, mirroring [`Self::apply_memory_fit_gate`]'s own shape
+    /// immediately above.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::InvalidDispatchTypeOverride`] when `PROXIMA_DISPATCH`
+    /// is set to a value other than `serial`/`concurrent`.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub(super) fn apply_dispatch_type_override(
+        &self,
+        serving_config: &mut ServingConfig,
+    ) -> Result<(), InteropError> {
+        serving_config.dispatch_type =
+            resolve_dispatch_type_override(serving_config.dispatch_type)?;
+        debug!(
+            dispatch_type = ?serving_config.dispatch_type,
+            "resolved_dispatch_type"
+        );
+        Ok(())
+    }
+
     /// Shared by [`Self::generate_with_serving_config`] and this crate's
     /// own metal-path tests, which need to read `runtime`'s plan-cache
     /// hit/miss counters after the loop finishes -- a caller reachable
@@ -2315,6 +2383,8 @@ impl<'file> LoadedModel<'file> {
             self.apply_command_buffer_chunks_default(&mut serving_config);
             #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_memory_fit_gate(&mut serving_config)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_dispatch_type_override(&mut serving_config)?;
             serving_config
         };
         let mut runtime = BackendRuntime::new(&serving_config);

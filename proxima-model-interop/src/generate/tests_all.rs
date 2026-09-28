@@ -4097,4 +4097,207 @@ pub(super) mod memory_fit_gate_tests {
             );
         }
     }
+
+    /// Relaxed-policy byte gate for `PROXIMA_DISPATCH_TYPE`
+    /// (`super::resolve_dispatch_type_override`'s own doc,
+    /// `docs/model-interop/discipline.md` C3): does `DispatchType::Concurrent`'s
+    /// `HazardTracker` schedule actually diverge from `Serial` on gemma4's
+    /// MoE decode graph, word-for-word, over a real multi-step run -- an
+    /// empirical answer to the question the discipline log's own C3 entry
+    /// raises but does not measure. This gate reports counts (steps
+    /// compared, words compared, differing words); it does not assert
+    /// bit-exact agreement, since the doc's own finding is that Concurrent's
+    /// schedule is UNPROVEN for this graph shape, not proven-wrong -- a
+    /// divergence here is evidence for the owner, not a test failure.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    mod gemma4_dispatch_type_byte_gate {
+        use memmap2::Mmap;
+        use proxima_gguf::parse_complete;
+
+        use super::super::{BackendRuntime, ControlFlow, LoadedModel, LogitsSink, NodeValuesSink};
+        use crate::serving::ServingConfig;
+
+        const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+
+        /// One arm's full per-step logits, run through the SAME
+        /// `run_decode_loop_observed_seeded` entry [`super::super::apply_dispatch_type_override`]'s
+        /// own callers reach, greedy so both arms sample identical ids
+        /// through step 0 regardless of any logits divergence past it.
+        fn run_arm(
+            model: &LoadedModel<'_>,
+            dispatch_type: omega::metal::DispatchType,
+            prompt: &str,
+            steps: usize,
+        ) -> Vec<Vec<f32>> {
+            let serving_config = ServingConfig {
+                dispatch_type,
+                temperature: 0.0,
+                kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
+                kv_cache_value_quant: proxima_gguf::types::GgmlType::F32,
+                flash_attention: false,
+                batch_size: 0,
+                ubatch_size: 0,
+                reasoning_budget: 0,
+                ..ServingConfig::default()
+            };
+            let mut runtime = BackendRuntime::new(&serving_config);
+            let mut logits: Vec<Vec<f32>> = Vec::new();
+            let _ = model
+                .run_decode_loop_observed_seeded(
+                    prompt,
+                    steps,
+                    &serving_config,
+                    &mut runtime,
+                    None,
+                    &mut LogitsSink::Collect(&mut logits),
+                    &mut NodeValuesSink::Discard,
+                    &mut |_event| ControlFlow::Continue(()),
+                    None,
+                    false,
+                )
+                .expect("greedy gemma4-E2B decode for the dispatch-type byte gate");
+            logits
+        }
+
+        /// One prompt's own serial-vs-concurrent comparison -- factored out
+        /// so the corpus prompts below (`p3`/`p4`, the two `<|turn>`
+        /// chat-templated cases the owner's own attribution run named as
+        /// DIFFERING at step 0/prefill) run through the exact same
+        /// counting/reporting as the open-ended narrative prompt. Returns
+        /// `(steps_compared, words_compared, differing_words)`.
+        fn compare_prompt(
+            model: &LoadedModel<'_>,
+            name: &str,
+            prompt: &str,
+            steps: usize,
+        ) -> (usize, usize, usize) {
+            let serial_logits = run_arm(model, omega::metal::DispatchType::Serial, prompt, steps);
+            let concurrent_logits =
+                run_arm(model, omega::metal::DispatchType::Concurrent, prompt, steps);
+
+            let steps_compared = serial_logits.len().min(concurrent_logits.len());
+            let mut words_compared = 0_usize;
+            let mut differing_words = 0_usize;
+            for (step, (serial_step, concurrent_step)) in serial_logits
+                .iter()
+                .zip(concurrent_logits.iter())
+                .enumerate()
+            {
+                let step_words = serial_step.len().min(concurrent_step.len());
+                let mut step_diffs = 0_usize;
+                for (serial_value, concurrent_value) in
+                    serial_step.iter().zip(concurrent_step.iter())
+                {
+                    if serial_value.to_bits() != concurrent_value.to_bits() {
+                        step_diffs += 1;
+                    }
+                }
+                words_compared += step_words;
+                differing_words += step_diffs;
+                std::println!(
+                    "gemma4_dispatch_type_byte_gate prompt={name} step={step} words={step_words} \
+                     differing_words={step_diffs}"
+                );
+            }
+            std::println!(
+                "gemma4_dispatch_type_byte_gate prompt={name} steps_compared={steps_compared} \
+                 words_compared={words_compared} differing_words={differing_words} \
+                 (serial_steps={}, concurrent_steps={})",
+                serial_logits.len(),
+                concurrent_logits.len()
+            );
+            (steps_compared, words_compared, differing_words)
+        }
+
+        /// `run_decode_loop_observed_seeded` applies `runtime.dispatch_type`
+        /// to EVERY freshly-built `Plan` (`build_placed_plan`'s own
+        /// `plan.set_dispatch_type(runtime.dispatch_type)`, `decode.rs:320,
+        /// 733,863,1180`), and a prefill step is just `new_count > 1`'s own
+        /// pass through the SAME plan cache and dispatch-type application --
+        /// there is no separate "prefill mode" that pins `Serial`
+        /// regardless of `serving_config.dispatch_type`. `PROXIMA_DISPATCH`
+        /// therefore reaches prefill, not only decode; the two chat-
+        /// templated corpus prompts below (`docs/model-interop/...` /
+        /// `attn_parity` attribution run's own `prompt3.txt`/`prompt4.txt`,
+        /// identical text to `gemma4_correctness_gate.rs`'s
+        /// `ant_vs_briefcase`/`hippo_vs_building`) are the two prompts that
+        /// attribution run found DIFFERING at step 0 (prefill) under
+        /// `Concurrent`, at identical dispatch/barrier counts -- included
+        /// here so this gate covers the exact case a decode-only corpus
+        /// would miss.
+        #[test]
+        fn serial_vs_concurrent_logits_word_for_word_on_the_real_gemma4_e2b_checkpoint() {
+            let Ok(file) = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
+                std::eprintln!(
+                    "skipping: real gemma4-E2B blob not found at {REAL_GEMMA4_E2B_GGUF_PATH}"
+                );
+                return;
+            };
+            // SAFETY: the checkpoint file is not written or truncated by any
+            // other process for the duration of this read-only mapping.
+            let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
+            let bytes: &[u8] = &mapping;
+            let parsed =
+                parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
+            let model =
+                LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
+
+            fn chat_prompt(user_turn: &str) -> String {
+                std::format!("<|turn>user\n{user_turn}<turn|>\n<|turn>model\n")
+            }
+
+            // An open-ended continuation, not a short factual completion
+            // (`gemma4_correctness_gate.rs`'s own prompts all terminate at
+            // an EOS well under 32 tokens): this one needs no chat template
+            // and keeps narrating instead of stopping, so the run actually
+            // reaches the required `steps` decode positions and crosses at
+            // least one `ServingConfig::kv_bucket_tokens` boundary (32,
+            // `ServingConfig::default`'s own doc): the prompt tokenizes to
+            // well under 32 tokens, and 32 further decode steps carries
+            // `cached_len` past the next multiple of 32.
+            let narrative_prompt =
+                "Once upon a time, in a small village at the edge of a great forest, there lived";
+            let ant_vs_briefcase = chat_prompt("Which is bigger, an ant or a briefcase?");
+            let hippo_vs_building = chat_prompt(
+                "Which of these is smaller in size: a hippopotamus or a large office building?",
+            );
+            // the full corpus (`coverage/prompts.txt`, the e2e-vs-ollama race
+            // this gate is proving parity for): p1/p2 are the two short
+            // factual completions; p3/p4 are the two chat-templated prompts;
+            // p5/p6 (510/600-token repeated-sentence prompts) are named,
+            // not run here -- the production per-step decode cost on this
+            // checkpoint makes them exceed this gate's time budget.
+            let p1_capital = "The capital of France is";
+            let p2_soliloquy = "In drama, a speech in which a character, alone on stage, speaks \
+                                 their inner thoughts aloud is called a";
+
+            let mut totals = (0_usize, 0_usize, 0_usize);
+            for (name, prompt, steps) in [
+                ("p1_capital_of_france", p1_capital, 8_usize),
+                ("p2_soliloquy", p2_soliloquy, 8_usize),
+                ("p3_ant_vs_briefcase", ant_vs_briefcase.as_str(), 8_usize),
+                ("p4_hippo_vs_building", hippo_vs_building.as_str(), 8_usize),
+                ("narrative_32step", narrative_prompt, 32_usize),
+            ] {
+                let (steps_compared, words_compared, differing_words) =
+                    compare_prompt(&model, name, prompt, steps);
+                totals.0 += steps_compared;
+                totals.1 += words_compared;
+                totals.2 += differing_words;
+            }
+
+            std::println!(
+                "gemma4_dispatch_type_byte_gate TOTAL steps_compared={} words_compared={} \
+                 differing_words={}",
+                totals.0,
+                totals.1,
+                totals.2
+            );
+
+            assert!(
+                totals.0 > 0 && totals.1 > 0,
+                "degenerate gate: 0 steps or 0 words compared across the corpus"
+            );
+        }
+    }
 }

@@ -169,6 +169,20 @@ fn main() {
         Ok("serial") | Err(_) => omega::DispatchType::Serial,
         Ok(other) => panic!("PROXIMA_DISPATCH={other}: expected `serial` or `concurrent`"),
     };
+    // 2026-09-25 bucket-width sweep (owner brief prefill599/bucket): default
+    // off, so every other caller of this example keeps `ServingConfig::
+    // default()`'s measured `kv_bucket_tokens: 32` (comment at that field's
+    // own default, CARD 6.3's quiet-round table). Unset keeps 32; set but
+    // unparseable or non-positive is an explicit panic naming the value,
+    // matching `PROXIMA_DISPATCH`'s own invalid-arm handling above --
+    // `apply_serving_config`'s own `kv_bucket_tokens < 1` rejection
+    // (`serving.rs`) would otherwise surface as a less legible interop error.
+    let kv_bucket_tokens: usize = match std::env::var("PROXIMA_KV_BUCKET_TOKENS") {
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            panic!("PROXIMA_KV_BUCKET_TOKENS={value}: expected a positive integer")
+        }),
+        Err(_) => ServingConfig::default().kv_bucket_tokens,
+    };
     let serving_config = ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
         kv_cache_key_quant: GgmlType::F32,
@@ -177,6 +191,7 @@ fn main() {
         batch_size: 0,
         ubatch_size: 0,
         reasoning_budget: 0,
+        kv_bucket_tokens,
         #[cfg(all(feature = "metal", target_os = "macos"))]
         dispatch_type,
         ..ServingConfig::default()
