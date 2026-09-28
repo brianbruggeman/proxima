@@ -42,11 +42,16 @@ use alloc::vec::Vec;
 use fastrand::Rng;
 
 pub mod ngram_map;
+pub mod ngram_mod;
 pub mod ngram_simple;
 
 pub use ngram_map::{
     DEFAULT_MIN_HITS, DEFAULT_SIZE_KEY, DEFAULT_SIZE_VALUE, NgramMap, NgramMapConfig,
     ngram_map_accept, ngram_map_begin, ngram_map_draft,
+};
+pub use ngram_mod::{
+    DEFAULT_N_MATCH, DEFAULT_N_MAX, DEFAULT_N_MIN, NgramMod, NgramModConfig, ngram_mod_accept,
+    ngram_mod_begin, ngram_mod_draft,
 };
 pub use ngram_simple::{DEFAULT_SIZE_M, DEFAULT_SIZE_N, NgramSimpleConfig, ngram_simple_draft};
 

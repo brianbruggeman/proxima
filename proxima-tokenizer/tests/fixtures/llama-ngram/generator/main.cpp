@@ -52,46 +52,32 @@ static llama_tokens tokenize_text(const llama_vocab * vocab, const std::string &
     return common_tokenize(vocab, text, add_special, /*parse_special=*/false);
 }
 
-// walks real .c/.cpp/.h files under root, tokenizing them in directory order
-// until at least target_count tokens have been accumulated. used only to
-// warm the shared ngram_mod hash table -- never written to the fixtures.
-static llama_tokens collect_warmup_tokens(
-        const llama_vocab * vocab,
-        const std::vector<std::string> & roots,
-        size_t target_count,
-        std::vector<std::string> & files_used) {
+// ngram-mod's shared hash table only needs enough distinct 24-token windows
+// to push occupancy past its 0.25 threshold (README.md's "ngram-mod reset
+// mechanism") -- the warmup's actual content is never compared against
+// anything, so a synthetic high-entropy stream reproduces the reset without
+// storing millions of real token ids in the fixture. SplitMix64 (Vigna,
+// public domain) is deterministic from {seed, length, vocab_size} alone, and
+// this generator's Rust port (`ngram_mod.rs`'s `synthetic_occupancy_warmup`)
+// implements the identical constants so both sides produce the same stream.
+static const uint64_t OCCUPANCY_WARMUP_SEED = 1;
+static const uint32_t OCCUPANCY_WARMUP_LENGTH = 2'200'000;
+
+static uint64_t splitmix64_next(uint64_t & state) {
+    state += 0x9E3779B97F4A7C15ULL;
+    uint64_t z = state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static llama_tokens generate_occupancy_warmup_tokens(int32_t vocab_size, uint64_t seed, uint32_t length) {
     llama_tokens tokens;
-    tokens.reserve(target_count + 4096);
-
-    for (const auto & root : roots) {
-        if (tokens.size() >= target_count) {
-            break;
-        }
-        std::vector<fs::path> files;
-        for (const auto & entry : fs::recursive_directory_iterator(root)) {
-            if (!entry.is_regular_file()) {
-                continue;
-            }
-            const std::string extension = entry.path().extension().string();
-            if (extension == ".cpp" || extension == ".c" || extension == ".h" || extension == ".hpp") {
-                files.push_back(entry.path());
-            }
-        }
-        std::sort(files.begin(), files.end());
-
-        for (const auto & file : files) {
-            if (tokens.size() >= target_count) {
-                break;
-            }
-            const std::string text = read_file(file.string());
-            const llama_tokens piece = tokenize_text(vocab, text, /*add_special=*/false);
-            tokens.insert(tokens.end(), piece.begin(), piece.end());
-            files_used.push_back(file.string());
-        }
-    }
-
-    if (tokens.size() > target_count) {
-        tokens.resize(target_count);
+    tokens.reserve(length);
+    uint64_t state = seed;
+    for (uint32_t index = 0; index < length; ++index) {
+        const uint64_t value = splitmix64_next(state);
+        tokens.push_back((llama_token) (value % (uint64_t) vocab_size));
     }
     return tokens;
 }
@@ -121,7 +107,8 @@ static void write_cases_file(
         const std::string & drafter_type,
         const std::string & params_json,
         const std::vector<std::string> & sources,
-        const std::vector<case_record> & cases) {
+        const std::vector<case_record> & cases,
+        const std::string & extra_header_json = "") {
     FILE * file = fopen(path.c_str(), "w");
     if (!file) {
         fprintf(stderr, "fatal: could not open %s for write\n", path.c_str());
@@ -134,6 +121,9 @@ static void write_cases_file(
     writer.raw("  \"drafter\": \"" + drafter_type + "\",\n");
     writer.raw("  \"params\": " + params_json + ",\n");
     writer.raw("  \"sources\": " + json_writer::string_array(sources) + ",\n");
+    if (!extra_header_json.empty()) {
+        writer.raw("  " + extra_header_json + ",\n");
+    }
     writer.raw("  \"cases\": [\n");
     for (size_t index = 0; index < cases.size(); ++index) {
         const case_record & record = cases[index];
@@ -285,28 +275,6 @@ static std::vector<case_record> replay_ngram_cache(
     return cases;
 }
 
-// throwaway instance whose only purpose is to push the shared ngram_mod
-// hash table (4*1024*1024 entries, hardcoded at common/speculative.cpp:1876)
-// past its 0.25 occupancy threshold in one begin() call, logging the reset.
-static void trigger_ngram_mod_occupancy_reset(const llama_vocab * vocab, const std::vector<std::string> & warmup_roots) {
-    // ggml/src code has real repeated boilerplate (headers, includes), so
-    // used-slot growth trails raw token count roughly 0.66:1 (measured: a
-    // 1'060'000 token warmup produced 700'555 used slots) -- oversize well
-    // past the naive threshold to guarantee crossing 0.25 * 4*1024*1024.
-    const size_t target = 2'200'000;
-    std::vector<std::string> files_used;
-    llama_tokens warmup = collect_warmup_tokens(vocab, warmup_roots, target, files_used);
-
-    fprintf(stderr, "[occupancy-trigger] warmup tokens = %zu, files = %zu\n", warmup.size(), files_used.size());
-
-    common_params_speculative params;
-    params.types = { COMMON_SPECULATIVE_TYPE_NGRAM_MOD };
-
-    common_speculative * spec = common_speculative_init(params, 1);
-    common_speculative_begin(spec, 0, warmup);
-    common_speculative_free(spec);
-}
-
 int main(int argc, char ** argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: %s <vocab-gguf> <output-dir>\n", argv[0]);
@@ -331,6 +299,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int32_t vocab_size = llama_vocab_n_tokens(vocab);
 
     const std::vector<std::pair<std::string, std::string>> case_sources = {
         {"llama.cpp README.md",       "/Users/brianbruggeman/repos/others/llama.cpp/README.md"},
@@ -453,13 +422,18 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[streams 6..%d] ngram-map divergence batches\n", next_id - 1);
     }
 
+    // the streams every drafter type replays over. the ngram-mod occupancy
+    // warmup is generated synthetically further below and is never appended
+    // here -- it carries no distinguishing content, so it is not part of
+    // streams.json at all (see generate_occupancy_warmup_tokens above).
+    const std::vector<token_stream> primary_streams(streams.begin(), streams.end());
     write_streams_file(output_dir + "/streams.json", vocab_gguf_path, streams);
 
     // ngram-simple (R4): defaults from common_params_speculative_ngram_map
     // used for ngram_simple (common/common.h:361-365), size_n/size_m only.
     {
         common_ngram_simple_config config { /* .size_ngram = */ 12, /* .size_mgram = */ 48 };
-        auto cases = replay_ngram_simple(streams, config);
+        auto cases = replay_ngram_simple(primary_streams, config);
         std::string params_json = "{\"size_ngram\": 12, \"size_mgram\": 48}";
         write_cases_file(output_dir + "/ngram_simple.json", "ngram-simple", params_json, {}, cases);
         fprintf(stderr, "[ngram-simple] cases = %zu\n", cases.size());
@@ -467,7 +441,7 @@ int main(int argc, char ** argv) {
 
     // ngram-map-k (R5): key_only = true.
     {
-        auto cases = replay_ngram_map(streams, 12, 48, /*key_only=*/true, /*min_hits=*/1);
+        auto cases = replay_ngram_map(primary_streams, 12, 48, /*key_only=*/true, /*min_hits=*/1);
         std::string params_json = "{\"size_key\": 12, \"size_value\": 48, \"key_only\": true, \"min_hits\": 1}";
         write_cases_file(output_dir + "/ngram_map_k.json", "ngram-map-k", params_json, {}, cases);
         fprintf(stderr, "[ngram-map-k] cases = %zu\n", cases.size());
@@ -475,7 +449,7 @@ int main(int argc, char ** argv) {
 
     // ngram-map-k4v (R13): key_only = false.
     {
-        auto cases = replay_ngram_map(streams, 12, 48, /*key_only=*/false, /*min_hits=*/1);
+        auto cases = replay_ngram_map(primary_streams, 12, 48, /*key_only=*/false, /*min_hits=*/1);
         std::string params_json = "{\"size_key\": 12, \"size_value\": 48, \"key_only\": false, \"min_hits\": 1}";
         write_cases_file(output_dir + "/ngram_map_k4v.json", "ngram-map-k4v", params_json, {}, cases);
         fprintf(stderr, "[ngram-map-k4v] cases = %zu\n", cases.size());
@@ -486,7 +460,7 @@ int main(int argc, char ** argv) {
     // configuration at common/speculative.cpp:2189-2203.
     {
         common_ngram_cache nc_static_empty;
-        auto cases = replay_ngram_cache(streams, /*n_draft=*/8, nc_static_empty);
+        auto cases = replay_ngram_cache(primary_streams, /*n_draft=*/8, nc_static_empty);
         std::string params_json = "{\"n_draft\": 8, \"ngram_min\": " + std::to_string(LLAMA_NGRAM_MIN) +
             ", \"ngram_max\": " + std::to_string(LLAMA_NGRAM_MAX) + ", \"nc_dynamic\": \"empty\", \"nc_static\": \"empty\"}";
         write_cases_file(output_dir + "/ngram_cache.json", "ngram-cache", params_json, {}, cases);
@@ -494,18 +468,31 @@ int main(int argc, char ** argv) {
 
         // save/load round trip fixture: a real static cache built from stream 2 (C++ source).
         common_ngram_cache nc_for_save;
-        llama_tokens save_source = streams[2].tokens;
+        llama_tokens save_source = primary_streams[2].tokens;
         common_ngram_cache_update(nc_for_save, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX, save_source, (int) save_source.size(), false);
         common_ngram_cache_save(nc_for_save, output_dir + "/ngram_cache_static.bin");
-        fprintf(stderr, "[ngram-cache] saved static cache with %zu ngram entries from stream %d\n", nc_for_save.size(), streams[2].id);
+        fprintf(stderr, "[ngram-cache] saved static cache with %zu ngram entries from stream %d\n", nc_for_save.size(), primary_streams[2].id);
     }
 
-    // ngram-mod (R6): the constructed trap stream (streams[5]) forces the
-    // low-acceptance reset deterministically (see its construction comment
-    // above); the other streams contribute general non-empty coverage once
-    // begin() is given a real half-stream prompt so the periodic streams
-    // train the shared table in one pass instead of waiting on the 32-token
-    // incremental-add lag in draft_one (common/speculative.cpp:1940-1946).
+    // ngram-mod (R6): the SAME spec instance whose draft cases below are
+    // recorded into ngram_mod.json first absorbs a synthetic occupancy-warmup
+    // stream (generate_occupancy_warmup_tokens above) via begin() on this
+    // instance -- not a throwaway instance -- so `ngram_mod.json`'s own
+    // recorded cases come from a table that has genuinely undergone
+    // llama.cpp's own occupancy reset (`begin()`'s `mod.reset()` at
+    // `common/speculative.cpp:~1912`). begin() unconditionally zeroes
+    // `sinfo.i_last`/`n_draft_last` on entry (mirrored by this port's own
+    // `ngram_mod_begin`), and a reset wipes the table back to fully EMPTY,
+    // so the constructed trap stream (streams[5]) below still starts from
+    // the near-empty table its own construction comment requires -- the
+    // warmup changes NOTHING about the recorded draft content, only proves
+    // the reset fired on the instance under test. The constructed trap
+    // stream then forces the low-acceptance reset deterministically (see
+    // its construction comment above); the other streams contribute
+    // general non-empty coverage once begin() is given a real half-stream
+    // prompt so the periodic streams train the shared table in one pass
+    // instead of waiting on the 32-token incremental-add lag in draft_one
+    // (common/speculative.cpp:1940-1946).
     {
         common_params_speculative_ngram_mod mod_params;
         mod_params.n_match = 24;
@@ -517,7 +504,16 @@ int main(int argc, char ** argv) {
         params.ngram_mod = mod_params;
         common_speculative * spec = common_speculative_init(params, 1);
 
-        std::vector<token_stream> ordered = { streams[5], streams[2], streams[0], streams[1], streams[3], streams[4] };
+        const llama_tokens occupancy_warmup = generate_occupancy_warmup_tokens(
+            vocab_size, OCCUPANCY_WARMUP_SEED, OCCUPANCY_WARMUP_LENGTH);
+        common_speculative_begin(spec, 0, occupancy_warmup);
+        fprintf(stderr, "[ngram-mod] fed synthetic occupancy warmup (%u tokens, seed=%llu, vocab_size=%d) into the recorded instance\n",
+                OCCUPANCY_WARMUP_LENGTH, (unsigned long long) OCCUPANCY_WARMUP_SEED, vocab_size);
+
+        std::vector<token_stream> ordered = {
+            primary_streams[5], primary_streams[2], primary_streams[0],
+            primary_streams[1], primary_streams[3], primary_streams[4],
+        };
 
         std::vector<case_record> cases;
         for (const auto & stream : ordered) {
@@ -565,13 +561,12 @@ int main(int argc, char ** argv) {
             ", \"n_max\": " + std::to_string(mod_params.n_max) +
             ", \"n_min\": " + std::to_string(mod_params.n_min) +
             ", \"table_size\": 4194304, \"occupancy_threshold\": 0.25, \"low_accept_threshold\": 0.25, \"low_accept_streak\": 5}";
-        write_cases_file(output_dir + "/ngram_mod.json", "ngram-mod", params_json, {}, cases);
+        std::string occupancy_warmup_json = "\"occupancy_warmup\": {\"prng\": \"splitmix64\", \"seed\": " +
+            std::to_string(OCCUPANCY_WARMUP_SEED) + ", \"length\": " + std::to_string(OCCUPANCY_WARMUP_LENGTH) +
+            ", \"vocab_size\": " + std::to_string(vocab_size) + "}";
+        write_cases_file(output_dir + "/ngram_mod.json", "ngram-mod", params_json, {}, cases, occupancy_warmup_json);
         fprintf(stderr, "[ngram-mod] cases = %zu\n", cases.size());
     }
-
-    // dedicated occupancy-reset trigger: separate throwaway instance, not
-    // used for any recorded case -- see README.md.
-    trigger_ngram_mod_occupancy_reset(vocab, { "/Users/brianbruggeman/repos/others/llama.cpp/ggml/src" });
 
     common_log_flush(common_log_main());
 
