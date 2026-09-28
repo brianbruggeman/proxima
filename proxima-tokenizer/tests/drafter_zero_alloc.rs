@@ -5,9 +5,19 @@
 //! re-minting a per-crate counting allocator, per guiding principle 1.
 //!
 //! One drafter per test, per `TASKS.md` slice 21's own note: ngram-simple,
-//! ngram-map, and ngram-mod land here; ngram-cache joins once its own slice
-//! (7) lands, and the fifth type (the `Drafter` enum dispatch itself,
-//! slice 9) once it exists.
+//! ngram-map, ngram-mod, and ngram-cache land here; the fifth type (the
+//! `Drafter` enum dispatch itself, slice 9) joins once it exists.
+//!
+//! `ngram_cache`'s own module doc names an exception this file's
+//! `drafter_zero_alloc_ngram_cache` case honors rather than hides
+//! (SPEC.md invariant 3): only `ngram_cache_draft`'s PURE query path is
+//! zero-alloc -- cache MAINTENANCE (`ngram_cache_update`) genuinely grows
+//! an `alloc::collections::BTreeMap` per newly-observed n-gram, unboundedly,
+//! by the incumbent's own design. This case proves the query path directly
+//! against a cache built once, outside the measured window, rather than
+//! going through the stateful `NgramCacheState` wrapper (whose own
+//! per-call maintenance step is exactly the part that cannot make a
+//! zero-alloc claim).
 //!
 //! `#[global_allocator]` is process-wide, so it lives once, at the top of
 //! this binary -- `cargo nextest` gives every `tests/*.rs` target its own
@@ -18,8 +28,9 @@
 
 use proxima_test::alloc_count::{CountingAllocator, allocations};
 use proxima_tokenizer::draft::{
-    NgramMapConfig, NgramModConfig, NgramSimpleConfig, ngram_map_accept, ngram_map_begin,
-    ngram_map_draft, ngram_mod_accept, ngram_mod_begin, ngram_mod_draft, ngram_simple_draft,
+    LLAMA_NGRAM_MAX, NgramCache, NgramMapConfig, NgramModConfig, NgramSimpleConfig,
+    ngram_cache_draft, ngram_cache_update, ngram_map_accept, ngram_map_begin, ngram_map_draft,
+    ngram_mod_accept, ngram_mod_begin, ngram_mod_draft, ngram_simple_draft,
 };
 use serde::Deserialize;
 
@@ -169,6 +180,56 @@ fn drafter_zero_alloc_ngram_mod() {
 
     println!("allocs = {} over {ITERATIONS} calls", after - before);
     assert_eq!(after, before, "ngram_mod_draft/ngram_mod_accept must not allocate on their hot path");
+}
+
+/// [`ngram_cache_draft`]'s pure query path: the context cache is built ONCE
+/// via [`ngram_cache_update`] over the whole real stream, outside the
+/// measured window (cache maintenance is the part this module's own doc
+/// names as genuinely unbounded, per SPEC.md invariant 3) -- every
+/// measured call then only READS that already-built cache and writes into
+/// the caller-owned `drafted` buffer.
+#[test]
+fn drafter_zero_alloc_ngram_cache() {
+    let tokens = real_stream();
+    let mut context = NgramCache::new();
+    ngram_cache_update(&mut context, &tokens, tokens.len());
+    let dynamic = NgramCache::new();
+    let static_cache = NgramCache::new();
+
+    let min_len = LLAMA_NGRAM_MAX;
+    let span = tokens.len() - min_len - 2;
+
+    let mut drafted: Vec<u32> = Vec::with_capacity(64);
+
+    let warmup_position = min_len + 1;
+    ngram_cache_draft(
+        &tokens[..warmup_position],
+        tokens[warmup_position],
+        8,
+        &context,
+        &dynamic,
+        &static_cache,
+        &mut drafted,
+    );
+
+    let before = allocations();
+    for step in 0..ITERATIONS {
+        let position = min_len + 1 + (step % span);
+        let sampled = tokens[position];
+        ngram_cache_draft(
+            &tokens[..position],
+            sampled,
+            8,
+            &context,
+            &dynamic,
+            &static_cache,
+            &mut drafted,
+        );
+    }
+    let after = allocations();
+
+    println!("allocs = {} over {ITERATIONS} calls", after - before);
+    assert_eq!(after, before, "ngram_cache_draft's pure query path must not allocate");
 }
 
 /// Degenerate control: proves [`CountingAllocator`] is actually live and

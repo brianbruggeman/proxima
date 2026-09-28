@@ -41,10 +41,16 @@ use alloc::vec::Vec;
 
 use fastrand::Rng;
 
+pub mod ngram_cache;
 pub mod ngram_map;
 pub mod ngram_mod;
 pub mod ngram_simple;
 
+pub use ngram_cache::{
+    DEFAULT_N_DRAFT, LLAMA_NGRAM_MAX, LLAMA_NGRAM_MIN, LLAMA_NGRAM_STATIC,
+    NgramCache, NgramCacheLoadError, NgramCacheState, load_llama_ngram_cache_bytes,
+    ngram_cache_draft, ngram_cache_state_draft, ngram_cache_update,
+};
 pub use ngram_map::{
     DEFAULT_MIN_HITS, DEFAULT_SIZE_KEY, DEFAULT_SIZE_VALUE, NgramMap, NgramMapConfig,
     ngram_map_accept, ngram_map_begin, ngram_map_draft,
@@ -54,6 +60,9 @@ pub use ngram_mod::{
     ngram_mod_begin, ngram_mod_draft,
 };
 pub use ngram_simple::{DEFAULT_SIZE_M, DEFAULT_SIZE_N, NgramSimpleConfig, ngram_simple_draft};
+
+#[cfg(feature = "std")]
+pub use ngram_cache::{NgramCacheLoadIoError, load_llama_ngram_cache_file};
 
 use crate::sample::greedy_pick;
 
