@@ -12,7 +12,7 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 | 3 | `draft/ngram_simple.rs`; delete `draft_ngram_lookup` and repoint decode loop | AC5, AC11 | AC5 then AC11 | 1 passed, cases ≥ 200; 0 matches | [x] | tokenizer 115 passed; fixture cases=4346 non_empty=559; AC11 grep 0 matches; clippy/doctest/model-interop filter all green; found+fixed a real decode.rs bug (`token_history` already held `next_ids[0]` when drafting was called, corrupting every pattern -- speculation silently drafted nothing end-to-end on the real gemma4-E2B checkpoint until fixed); `speculative_decode_parity` (no flag, and `--seed-mismatch-control`) both pass, `speculative_verify_steps` > 0 on greedy AND sampled; `ngram_simple_draft` takes a caller-owned `&mut Vec<u32>` output buffer, zero per-call allocation, per mid-slice owner directive |
 | 4 | `draft/ngram_map.rs` key-only | AC6 | AC6 | 1 passed | [x] | landed with slice 5 in one commit (shared state/function, `key_only` is a boolean branch of the same `ngram_map_draft`, splitting was artificial); cases=4395 |
 | 5 | `draft/ngram_map.rs` k4v | AC7 | AC7 | 1 passed | [x] | cases=4546 (24 differ from k, per README); full crate 121/121 passed; doctest 1/1; clippy clean (tokenizer+model-interop, std, all-targets) |
-| 6 | `draft/ngram_mod.rs` | AC8 | AC8 | 1 passed, resets ≥ 1 each | [ ] | |
+| 6 | `draft/ngram_mod.rs` | AC8 | AC8 | 1 passed, resets ≥ 1 each | [x] | fixture cases=2081 non_empty=91 occupancy_resets=1 low_accept_resets=1, both proven directly from `ngram_mod.json`'s own fixture replay: a synthetic 2.2M-token occupancy-warmup stream (`ngram_mod.json`'s `occupancy_warmup` header -- SplitMix64, seed=1, vocab_size=262144; content is irrelevant to what this tests, only the count of distinct 24-token windows it inserts matters, so no token ids are stored) is fed into the SAME `NgramMod` instance whose ordered cases below are recorded, matching `generator/main.cpp`'s own `common_speculative_begin(spec, 0, occupancy_warmup)` call on the SAME `spec` instance ngram_mod.json's cases come from -- not a throwaway instance; the reset wipes the table back to fully empty, so it changes nothing about the recorded case content (`ngram_mod.json`'s `cases` diff byte-identical before/after this fix) while proving the reset fired against llama.cpp's own recorded behavior (measured: 1,712,260/4,194,304 = 0.41 occupancy, `fixtures/generator.log`); `occupancy_reset_fires_over_threshold` remains as a second, independent proof of the same threshold arithmetic; low_accept_resets=1 still from streams[5]'s constructed trap, replayed single-instance in generator order 5,2,0,1,3,4; zero-alloc case (`drafter_zero_alloc_ngram_mod`, 100000 calls, 0 allocs); full crate 133/133 passed, doctest 1/1, clippy (tokenizer+model-interop, std, all-targets) clean |
 | 7 | `draft/ngram_cache.rs` + llama cache file loader | AC9 | AC9 | 2 passed | [ ] | |
 | 8 | ServingConfig speculative section + builder/loader parity; delete env var | AC12, AC13 | AC12 then AC13 | 1 passed; 0 matches | [ ] | |
 | 9 | `Drafter` enum driven by the decode loop (begin/draft/accept); `--drafter` flag | AC10 | AC10 loop | 5 runs identical | [ ] | |
@@ -34,8 +34,8 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 
 ## resume
 
-Last landed slice: 5
-Next action: slice 6 -- `draft/ngram_mod.rs` (AC8); slices 19-21 (metal verify, bench harness, zero-alloc test) must land before slice 9
+Last landed slice: 6
+Next action: slice 7 -- `draft/ngram_cache.rs` + llama cache file loader (AC9); slices 19-21 (metal verify, bench harness, zero-alloc test) must land before slice 9
 Open question, if any: none
 
 ## struck

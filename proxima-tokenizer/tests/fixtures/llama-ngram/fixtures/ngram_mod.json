@@ -4,6 +4,7 @@
   "drafter": "ngram-mod",
   "params": {"n_match": 24, "n_max": 64, "n_min": 48, "table_size": 4194304, "occupancy_threshold": 0.25, "low_accept_threshold": 0.25, "low_accept_streak": 5},
   "sources": [],
+  "occupancy_warmup": {"prng": "splitmix64", "seed": 1, "length": 2200000, "vocab_size": 262144},
   "cases": [
     {"stream_id": 5, "position": 25, "sampled": 2148, "draft": [], "accepted": 0},
     {"stream_id": 5, "position": 26, "sampled": 528, "draft": [], "accepted": 0},

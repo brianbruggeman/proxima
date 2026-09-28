@@ -4,10 +4,10 @@
 //! gate (`proxima-test/src/alloc_count.rs`) -- reused here rather than
 //! re-minting a per-crate counting allocator, per guiding principle 1.
 //!
-//! One drafter per test, per `TASKS.md` slice 21's own note: ngram-simple
-//! and ngram-map land here; ngram-mod and ngram-cache join once their own
-//! slices (6, 7) land, and the fifth type (the `Drafter` enum dispatch
-//! itself, slice 9) once it exists.
+//! One drafter per test, per `TASKS.md` slice 21's own note: ngram-simple,
+//! ngram-map, and ngram-mod land here; ngram-cache joins once its own slice
+//! (7) lands, and the fifth type (the `Drafter` enum dispatch itself,
+//! slice 9) once it exists.
 //!
 //! `#[global_allocator]` is process-wide, so it lives once, at the top of
 //! this binary -- `cargo nextest` gives every `tests/*.rs` target its own
@@ -18,8 +18,8 @@
 
 use proxima_test::alloc_count::{CountingAllocator, allocations};
 use proxima_tokenizer::draft::{
-    NgramMapConfig, NgramSimpleConfig, ngram_map_accept, ngram_map_begin, ngram_map_draft,
-    ngram_simple_draft,
+    NgramMapConfig, NgramModConfig, NgramSimpleConfig, ngram_map_accept, ngram_map_begin,
+    ngram_map_draft, ngram_mod_accept, ngram_mod_begin, ngram_mod_draft, ngram_simple_draft,
 };
 use serde::Deserialize;
 
@@ -131,6 +131,44 @@ fn drafter_zero_alloc_ngram_map() {
 
     println!("allocs = {} over {ITERATIONS} calls", after - before);
     assert_eq!(after, before, "ngram_map_draft/ngram_map_accept must not allocate on their hot path");
+}
+
+/// [`ngram_mod_draft`]/[`ngram_mod_begin`]/[`ngram_mod_accept`]: stateful,
+/// so construction (`NgramMod::new`, which allocates the fixed
+/// `TABLE_SIZE`-entry table once) and one `ngram_mod_begin` call are the
+/// setup path, outside the measured window. `drafted` is pre-sized to
+/// `n_match + n_max`, the scratch capacity `ngram_mod_draft`'s own doc
+/// says it reuses for both the rolling lookahead window and the final
+/// draft.
+#[test]
+fn drafter_zero_alloc_ngram_mod() {
+    let tokens = real_stream();
+    let config = NgramModConfig {
+        n_match: 24,
+        n_max: 64,
+        n_min: 48,
+    };
+    let min_len = usize::from(config.n_match);
+    let span = tokens.len() - min_len - 1;
+
+    let mut mod_ = proxima_tokenizer::draft::NgramMod::new(config);
+    let prompt_len = tokens.len() / 2;
+    ngram_mod_begin(&mut mod_, &tokens[..prompt_len]);
+
+    let mut drafted: Vec<u32> =
+        Vec::with_capacity(usize::from(config.n_match) + usize::from(config.n_max));
+
+    let before = allocations();
+    for step in 0..ITERATIONS {
+        let position = min_len + 1 + (step % span);
+        let sampled = tokens[position];
+        ngram_mod_draft(&mut mod_, &tokens[..position], sampled, &mut drafted);
+        ngram_mod_accept(&mut mod_, drafted.len() as u16);
+    }
+    let after = allocations();
+
+    println!("allocs = {} over {ITERATIONS} calls", after - before);
+    assert_eq!(after, before, "ngram_mod_draft/ngram_mod_accept must not allocate on their hot path");
 }
 
 /// Degenerate control: proves [`CountingAllocator`] is actually live and
