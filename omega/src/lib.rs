@@ -94,7 +94,9 @@ pub use metal::{
     placed_buffer_identity,
 };
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-pub use metal::{execute_plan_timed, set_capture_step};
+pub use metal::{
+    execute_plan_timed, pipeline_cache_keys, pipeline_key_audit_counts, set_capture_step,
+};
 #[cfg(feature = "alloc")]
 pub use msl::{
     BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, FLOAT16_BLOCK_BYTES,

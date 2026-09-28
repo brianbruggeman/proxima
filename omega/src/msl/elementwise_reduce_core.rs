@@ -182,6 +182,7 @@ pub(super) fn render_reduce(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
+    metal: &MetalOnlyExtras,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -342,6 +343,7 @@ pub(super) fn render_reduce(
             epilogue_operands,
             is_broadcast_epilogue,
             expert_source_mode,
+            metal,
         )?;
     } else {
         push_serial_reduce_body(
@@ -972,6 +974,7 @@ pub(super) fn push_packed_row_multi_row_body(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     expert_source_mode: bool,
+    metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
     let weight = block.weight;
     let other = block.other;
@@ -1164,6 +1167,7 @@ pub(super) fn push_packed_row_multi_row_body(
             rows,
             cap,
             codec_block_bytes(block.codec),
+            metal,
         );
     } else if fast_q4_0 {
         push_packed_row_multi_row_q4_0_body(
@@ -1176,6 +1180,7 @@ pub(super) fn push_packed_row_multi_row_body(
             cap,
             element_type,
             operand_count,
+            metal,
         );
     } else if unroll_active && !weight_gathered {
         push_packed_row_multi_row_unroll_body(
@@ -1191,6 +1196,7 @@ pub(super) fn push_packed_row_multi_row_body(
             quantized[weight],
             quantized[other],
             index32_active,
+            metal,
         );
     } else {
         // `k`'s own declared type: `uint` under index32 (composes with the
@@ -1202,10 +1208,15 @@ pub(super) fn push_packed_row_multi_row_body(
         // already are (`long`, unchanged) -- it is never divided
         // (`multi_row_index32_active`'s own doc), so converting it buys
         // nothing and is left alone.
+        let reduction_bound = packed_row_reduction_bound_token(metal);
         if index32_active {
-            source.push_str("    for (uint k = (uint)lane; k < (uint)u.reduction_total; k += 32u) {\n");
+            source.push_str(&format!(
+                "    for (uint k = (uint)lane; k < (uint){reduction_bound}; k += 32u) {{\n"
+            ));
         } else {
-            source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+            source.push_str(&format!(
+                "    for (long k = (long)lane; k < {reduction_bound}; k += 32L) {{\n"
+            ));
         }
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
         source.push_str(&format!(
@@ -1386,12 +1397,14 @@ pub(super) fn push_packed_row_multi_row_q4k_body(
     rows: usize,
     cap: usize,
     block_bytes: usize,
+    metal: &MetalOnlyExtras,
 ) {
+    let reduction_bound = packed_row_reduction_bound_token(metal);
     source.push_str("    uint ix = (uint)lane / 8u;\n");
     source.push_str("    uint it = (uint)lane % 8u;\n");
     source.push_str("    uint iq = it / 4u;\n    uint ir = it % 4u;\n");
     source.push_str(&format!(
-        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
     ));
     source.push_str("    int ib_first = (int)ix;\n    int ib_step = 4;\n");
     source.push_str(&format!(
@@ -1467,8 +1480,12 @@ pub(super) fn push_packed_row_multi_row_q4_0_body(
     cap: usize,
     element_type: &str,
     operand_count: usize,
+    metal: &MetalOnlyExtras,
 ) {
-    source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+    let reduction_bound = packed_row_reduction_bound_token(metal);
+    source.push_str(&format!(
+        "    for (long k = (long)lane; k < {reduction_bound}; k += 32L) {{\n"
+    ));
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
         "            {element_type} scratch[{}];\n",
@@ -1542,14 +1559,20 @@ pub(super) fn push_packed_row_multi_row_unroll_body(
     weight_codec: Option<Codec>,
     other_codec: Option<Codec>,
     index32_active: bool,
+    metal: &MetalOnlyExtras,
 ) {
     // Same `k`-type branch as the generic (non-unrolled) arm --
     // `multi_row_index32_active`'s own doc for why only `k` and
     // `weight_base` change.
+    let reduction_bound = packed_row_reduction_bound_token(metal);
     if index32_active {
-        source.push_str("    for (uint k = (uint)lane; k < (uint)u.reduction_total; k += 32u) {\n");
+        source.push_str(&format!(
+            "    for (uint k = (uint)lane; k < (uint){reduction_bound}; k += 32u) {{\n"
+        ));
     } else {
-        source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+        source.push_str(&format!(
+            "    for (long k = (long)lane; k < {reduction_bound}; k += 32L) {{\n"
+        ));
     }
     for q in 0..rows {
         // Each literal `q`/`s` iteration gets its OWN brace scope -- the

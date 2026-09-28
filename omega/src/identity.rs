@@ -35,13 +35,13 @@
 //! parameter, never a second copy of the walk.
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_primitives::Codec;
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
-    ReduceInit, ScalarOp, StepArg,
+    BoundOp, ComposedBody, Keep, Layout, Lookup, NodeId, NumericPolicy, ReduceInit, ScalarOp,
+    StepArg,
 };
 
 use crate::msl::PackedOperands;
@@ -65,16 +65,6 @@ pub(crate) enum KernelLanguage {
     Cuda,
 }
 
-impl KernelLanguage {
-    const fn prefix(self) -> &'static str {
-        match self {
-            KernelLanguage::Metal => "omega",
-            KernelLanguage::Wgsl => "omega_wgsl",
-            KernelLanguage::Cuda => "omega_cuda",
-        }
-    }
-}
-
 /// The axes ONLY [`KernelLanguage::Metal`] varies its compiled kernel on —
 /// every field is `None` (the [`Default`]) for `Wgsl`/`Cuda`, which never
 /// render a cooperative-reduce width, a packed row-block body shape, or a
@@ -85,6 +75,18 @@ impl KernelLanguage {
 /// them into text, so `metal::pipeline_for`'s own `format!` fold (see its
 /// doc) has nothing left to do.
 #[derive(Debug, Clone, Default)]
+// every field below `cooperative_width` is written by `metal_specialization`
+// unconditionally but read only by `kernel_identity`'s gated callers -- with
+// none of them compiled in, the fields go unread, not unwritten.
+#[cfg_attr(
+    not(any(
+        test,
+        feature = "metal-core",
+        feature = "wgpu-backend",
+        feature = "cuda"
+    )),
+    expect(dead_code, reason = "fields feed kernel_identity, absent on this tier")
+)]
 pub(crate) struct MetalOnlyExtras {
     /// `tiled_gemm_threadgroup_width`'s return for this op — bakes literally
     /// into `render_reduce`'s lane-index/stride/tail-fold source text, so
@@ -203,6 +205,20 @@ pub(crate) struct MetalOnlyExtras {
     /// coexist in the same binary, matching [`Self::q4_0_multi_row_hoist`]'s
     /// own same-binary A/B posture.
     pub tiled_gemm_q4_0: bool,
+    /// `PROXIMA_REDUCTION_LITERAL=1` under the `metal-reduction-literal`
+    /// feature (default off): `Some(reduction_len(resolved, output_axes))`
+    /// only when a packed-row-blocked op's flattened reduction length is
+    /// model-fixed for the life of the loaded weights, so a renderer may bake
+    /// it as a compiled literal instead of reading the runtime `u.
+    /// reduction_total` uniform (`c4-7-reduction-literal.md`'s own worked
+    /// example). Lives on this record, not computed independently by each
+    /// renderer, because a renderer may only bake a value the cache key
+    /// itself already serializes -- see [`kernel_identity`]'s `_rl{n}` token.
+    /// `None` for the unset-env/feature-off default and for every op
+    /// [`crate::msl::packed_row_block`] does not admit, so the unset default
+    /// folds no new token and every emitted byte stays identical to before
+    /// this field existed.
+    pub reduction_literal: Option<u64>,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -338,46 +354,6 @@ pub(crate) fn operand_codecs(
         .collect()
 }
 
-/// `codec`'s single-character identity token — every renderer whose body
-/// text branches on the codec (all three: `crate::msl`'s row-blocked/tiled
-/// bodies, `crate::wgsl`'s `packed_element_fn`, `crate::cuda`'s `packed_
-/// element_expr`) needs this in its cache identity, or two operands
-/// differing only in codec can share one compiled kernel.
-fn codec_token(codec: Option<Codec>) -> char {
-    match codec {
-        Some(Codec::Q2K) => '2',
-        Some(Codec::Q3K) => '3',
-        Some(Codec::Q4K) => '4',
-        Some(Codec::Q5K) => '5',
-        Some(Codec::Q6K) => '6',
-        Some(Codec::Q8_0) => '8',
-        Some(Codec::Q4_0) => '0',
-        Some(Codec::Q5_1) => '1',
-        Some(Codec::Q5_0) => 'z',
-        Some(Codec::Float16) => 'h',
-        Some(Codec::BFloat16) => 'b',
-        Some(Codec::Q4_1) => 'a',
-        Some(Codec::Q8_1) => 'c',
-        Some(Codec::Q8K) => 'e',
-        Some(Codec::Iq1S) => 'g',
-        Some(Codec::Iq1M) => 'i',
-        Some(Codec::Iq2Xxs) => 'j',
-        Some(Codec::Iq2Xs) => 'k',
-        Some(Codec::Iq2S) => 'l',
-        Some(Codec::Iq3Xxs) => 'm',
-        Some(Codec::Iq3S) => 'n',
-        Some(Codec::Iq4Nl) => 'o',
-        Some(Codec::Iq4Xs) => 'p',
-        Some(Codec::Tq10) => 'q',
-        Some(Codec::Tq20) => 'r',
-        Some(Codec::Mxfp4) => 's',
-        Some(Codec::Nvfp4) => 't',
-        Some(Codec::Q1_0) => 'u',
-        Some(Codec::Q2_0) => 'v',
-        None => 'f',
-    }
-}
-
 pub(crate) fn signed_name_part(value: i64) -> String {
     if value < 0 {
         format!("n{}", value.unsigned_abs())
@@ -386,300 +362,382 @@ pub(crate) fn signed_name_part(value: i64) -> String {
     }
 }
 
-/// The one fingerprint every renderer's pipeline/name cache derives from —
-/// see this module's doc for the union of axes folded in and why
-/// [`MetalOnlyExtras`] carries the ones only [`KernelLanguage::Metal`]
-/// varies on.
-pub(crate) fn kernel_identity(
-    language: KernelLanguage,
-    resolved: &BoundOp,
-    packed_operands: &PackedOperands,
-    metal: MetalOnlyExtras,
-    numeric_policy: NumericPolicy,
-) -> String {
-    let rank = resolved.extents.len();
-    let operand_count = resolved.operands().len();
-    let prefix = language.prefix();
-    let mut identity = match &resolved.kind {
-        BoundOpKind::CachedAttention {
-            query_rows,
-            cached_key_rows,
-            new_key_rows,
-            kv_heads,
-            query_groups,
-            head_dim,
-            rotary_dim,
-            scale,
-            cached_lower_inclusive,
-            new_upper_inclusive,
-            ..
-        } => {
-            // `operand_count == 9` names a runtime ninth operand, but two
-            // DIFFERENT scalars share that slot, discriminated by
-            // `cached_key_rows` (`BoundOpKind::CachedAttention`'s own doc).
-            // `cached_key_rows == 0` (single-range) means the ninth operand
-            // IS the real `new_upper_inclusive`, so the identity names the
-            // STRUCTURE ("dyn") rather than that filler value, which must
-            // never appear to vary the key across calls whose real bound
-            // differs. `cached_key_rows != 0` (two-range, cached-bound) bakes
-            // `new_upper_inclusive` as a compiled `constexpr` instead (`omega::
-            // msl::render_cached_attention`'s own doc) -- collapsing it to
-            // "dyn" here would let two ops with different real bounds share
-            // one compiled kernel with the WRONG bound baked in, so this path
-            // keeps the real, varying token.
-            let upper_token = if operand_count == 9 && *cached_key_rows == 0 {
-                String::from("dyn")
-            } else {
-                signed_name_part(*new_upper_inclusive)
-            };
-            // `context_chunks` is already a deterministic function of
-            // `cached_key_rows + new_key_rows` (`crate::msl::
-            // context_chunks_for`), both already folded into this
-            // identity above -- naming it explicitly here means a future
-            // change to the sizing config's divisor/cap still shows up as
-            // a distinct cache key rather than silently reusing a pipeline
-            // compiled for the wrong chunk count.
-            let context_chunks = crate::msl::context_chunks_for(
-                *cached_key_rows + *new_key_rows,
-                *query_groups,
-                *head_dim,
-                numeric_policy,
-            );
-            // `two_range_cached_bound` (nine operands, `cached_key_rows !=
-            // 0`) renders a runtime `long cached_key_rows = (long)in8[0];`
-            // read where the eight-operand form bakes the identical-looking
-            // `c{cached_key_rows}` token as a compiled `constexpr` -- without
-            // this marker the two would collide on one identity string
-            // despite generating different kernel bodies.
-            let cached_bound_token = if operand_count == 9 && *cached_key_rows != 0 {
-                "_cb"
-            } else {
-                ""
-            };
-            // `rotary_dim == head_dim` (every caller before qwen35's
-            // partial-rotary dense attention) is byte-identical to this
-            // identity's pre-partial-rotary string -- the `_r{rotary_dim}`
-            // token appears ONLY when the pass plane is present, since a
-            // full-rotary op with the same `head_dim` would otherwise share
-            // an identity with one that carries a different `rotary_dim`.
-            let rotary_token = if rotary_dim == head_dim {
-                String::new()
-            } else {
-                format!("_r{rotary_dim}")
-            };
-            format!(
-                "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}",
-                scale.to_bits(),
-                signed_name_part(*cached_lower_inclusive),
-            )
-        }
-        BoundOpKind::Elementwise { .. } => {
-            let body = body_token(resolved.element_body());
-            format!("{prefix}_elementwise_r{rank}_n{operand_count}_{body}")
-        }
-        BoundOpKind::Reduce {
-            reduce_op,
-            init,
-            keep,
-            output_axes,
-            epilogue_body,
-            epilogue_operands,
-            epilogue_broadcast_axes,
-            ..
-        } => {
-            let body = body_token(resolved.element_body());
-            let kind = keep_token(*keep);
-            let reduce_body = op_token(*reduce_op);
-            let init = init_token(*init);
-            // The exact ORDERED axis sequence, not merely its length: two
-            // folds sharing every other axis here but keeping a DIFFERENT
-            // axis set (or the same set in a different order) still emit
-            // different source (`render_reduce`/`render_reduce_cooperative`
-            // bake the literal axis index into the uniform-slot addressing).
-            let axes = output_axes
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join("_");
-            let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
-                String::new()
-            } else {
-                // A non-empty `epilogue_broadcast_axes` widens every
-                // renderer's own write/operand addressing to full rank
-                // (`crate::msl::render_reduce`'s own doc) -- two folds
-                // sharing every other token here but disagreeing on the
-                // PLAIN-vs-BROADCAST epilogue shape must never share a
-                // pipeline entry, since they bake different array widths
-                // into the emitted source text.
-                let broadcast = if epilogue_broadcast_axes.is_empty() {
-                    String::new()
-                } else {
-                    let axes = epilogue_broadcast_axes
-                        .iter()
-                        .map(u16::to_string)
-                        .collect::<Vec<_>>()
-                        .join("_");
-                    format!("_eb{axes}")
-                };
-                format!(
-                    "_epi{}_{}{broadcast}",
-                    epilogue_operands.len(),
-                    body_token(epilogue_body)
-                )
-            };
-            format!(
-                "{prefix}_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
-            )
-        }
-        BoundOpKind::RoundBatchedReduce {
-            reduce_op,
-            init,
-            keep,
-            output_axes,
-            round_count,
-            ..
-        } => {
-            let body = body_token(resolved.element_body());
-            let kind = keep_token(*keep);
-            let reduce_body = op_token(*reduce_op);
-            let init = init_token(*init);
-            let axes = output_axes
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join("_");
-            format!(
-                "{prefix}_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}_k{round_count}"
-            )
-        }
-        BoundOpKind::Iota => format!("{prefix}_iota_r{rank}"),
-        // the literal is baked into the source, so it has to be part of the
-        // identity too -- otherwise two constants of the same rank would
-        // share one cached kernel and the second would run the first one's
-        // value. Raw bits, not the decimal, so the name is exact and
-        // identifier-safe.
-        BoundOpKind::Constant { value } => {
-            format!("{prefix}_constant_r{rank}_v{:08x}", value.to_bits())
-        }
-        BoundOpKind::GatedDeltaNet {
-            kv_heads,
-            num_v_heads,
-            head_k_dim,
-            head_v_dim,
-            ..
-        } => format!(
-            "{prefix}_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}"
-        ),
-        BoundOpKind::MoeTopK {
-            expert_count,
-            top_k,
-            ..
-        } => format!("{prefix}_moe_topk_e{expert_count}_k{top_k}"),
-        // Candidate B's kind (`R9/PROGRESS.md`'s own "Candidate B"
-        // sections) -- mechanical addition to keep this match total; not in
-        // this task's isolation grant (`identity.rs` is outside the listed
-        // writable set), landed anyway because Rust's own exhaustiveness
-        // check gives no way to keep `omega` compiling under
-        // `metal-fuse-attn-decode` without it once the new `BoundOpKind`
-        // variant exists -- reported as a deviation, not silently done.
-        BoundOpKind::CachedSoftmaxWeights {
-            cached_key_rows,
-            attention_rows,
-            head_dim,
-            ..
-        } => {
-            if metal.softmax_runtime_rows {
-                format!("{prefix}_cached_softmax_weights_rtrows_a{attention_rows}_d{head_dim}")
-            } else {
-                format!(
-                    "{prefix}_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
-                )
+// reachable only through `kernel_cache_key` (`test`/`metal-core`),
+// `wgsl::entry_name`-adjacent renderers (`wgpu-backend`), or `cuda`'s own --
+// the three production callers in `wgsl.rs`/`cuda.rs`/`emit_and_classify.rs`.
+// With none of those active, nothing ever asks for a kernel identity
+// string, so the whole group (the prefix lookup, the codec token, and the
+// fingerprint function itself) is dropped as one unit rather than three.
+#[cfg(any(
+    test,
+    feature = "metal-core",
+    feature = "wgpu-backend",
+    feature = "cuda"
+))]
+mod gated {
+    use alloc::string::ToString;
+
+    use proxima_tensor::{BoundOpKind, DType};
+
+    use super::*;
+
+    impl KernelLanguage {
+        const fn prefix(self) -> &'static str {
+            match self {
+                KernelLanguage::Metal => "omega",
+                KernelLanguage::Wgsl => "omega_wgsl",
+                KernelLanguage::Cuda => "omega_cuda",
             }
         }
-    };
-
-    let gather_bits: String = resolved
-        .operands()
-        .iter()
-        .map(|(_, _, gather)| if gather.is_some() { '1' } else { '0' })
-        .collect();
-    if gather_bits.contains('1') {
-        identity.push_str("_g");
-        identity.push_str(&gather_bits);
     }
 
-    // `type_token`'s own "half"/"float" (or "f16"/"f32", "__half"/"float")
-    // split -- every dtype every renderer accepts collapses to one of these
-    // two declarations, and only `DType::Float16` ever takes the narrow one
-    // (each renderer's own `type_token` match, byte-for-byte the same
-    // partition).
-    identity.push_str(if resolved.dtype == DType::Float16 {
-        "_half"
-    } else {
-        "_wide"
-    });
-
-    let quantized = operand_codecs(resolved, packed_operands);
-    if quantized.iter().any(Option::is_some) {
-        identity.push_str("_c");
-        for codec in &quantized {
-            identity.push(codec_token(*codec));
+    /// `codec`'s single-character identity token — every renderer whose body
+    /// text branches on the codec (all three: `crate::msl`'s row-blocked/
+    /// tiled bodies, `crate::wgsl`'s `packed_element_fn`, `crate::cuda`'s
+    /// `packed_element_expr`) needs this in its cache identity, or two
+    /// operands differing only in codec can share one compiled kernel.
+    fn codec_token(codec: Option<Codec>) -> char {
+        match codec {
+            Some(Codec::Q2K) => '2',
+            Some(Codec::Q3K) => '3',
+            Some(Codec::Q4K) => '4',
+            Some(Codec::Q5K) => '5',
+            Some(Codec::Q6K) => '6',
+            Some(Codec::Q8_0) => '8',
+            Some(Codec::Q4_0) => '0',
+            Some(Codec::Q5_1) => '1',
+            Some(Codec::Q5_0) => 'z',
+            Some(Codec::Float16) => 'h',
+            Some(Codec::BFloat16) => 'b',
+            Some(Codec::Q4_1) => 'a',
+            Some(Codec::Q8_1) => 'c',
+            Some(Codec::Q8K) => 'e',
+            Some(Codec::Iq1S) => 'g',
+            Some(Codec::Iq1M) => 'i',
+            Some(Codec::Iq2Xxs) => 'j',
+            Some(Codec::Iq2Xs) => 'k',
+            Some(Codec::Iq2S) => 'l',
+            Some(Codec::Iq3Xxs) => 'm',
+            Some(Codec::Iq3S) => 'n',
+            Some(Codec::Iq4Nl) => 'o',
+            Some(Codec::Iq4Xs) => 'p',
+            Some(Codec::Tq10) => 'q',
+            Some(Codec::Tq20) => 'r',
+            Some(Codec::Mxfp4) => 's',
+            Some(Codec::Nvfp4) => 't',
+            Some(Codec::Q1_0) => 'u',
+            Some(Codec::Q2_0) => 'v',
+            None => 'f',
         }
     }
 
-    if let Some(shape) = metal.packed_row_block_shape {
-        identity.push(shape);
-    }
-    if let Some(stride_is_one) = metal.packed_row_block_stride_is_one {
-        identity.push(if stride_is_one { '1' } else { 'N' });
-    }
-    if let Some(axis) = metal.packed_row_block_direct_axis {
-        identity.push_str("_da");
-        identity.push_str(&axis.to_string());
-    }
-    if let Some((selected_axis, out_axis)) = metal.packed_row_block_grouped_axes {
-        identity.push_str("_dg");
-        identity.push_str(&selected_axis.to_string());
-        identity.push('_');
-        identity.push_str(&out_axis.to_string());
-    }
-    if let Some(addressing) = metal.elementwise_addressing {
-        identity.push_str(&addressing);
-    }
-    if let Some(width) = metal.cooperative_width {
-        identity.push_str("_w");
-        identity.push_str(&width.to_string());
-    }
-    if let Some(token) = metal.numeric_policy_token {
-        identity.push(token[0] as char);
-        identity.push(token[1] as char);
-    }
-    if let Some(group_size) = metal.merged_z {
-        identity.push_str("_z");
-        identity.push_str(&group_size.to_string());
-    }
-    if let Some(rows) = metal.packed_row_block_rows_override {
-        identity.push_str("_pr");
-        identity.push_str(&rows.to_string());
-    }
-    if metal.q4_0_multi_row_hoist {
-        identity.push_str("_q0h");
-    }
-    if metal.tiled_gemm_q4_0 {
-        identity.push_str("_tgq0");
-    }
-    if metal.multi_row_unroll {
-        identity.push_str("_u");
-    }
-    if metal.multi_row_index32 {
-        identity.push_str("_i32");
-    }
-    if metal.coord_index32 {
-        identity.push_str("_c32");
-    }
+    /// The one fingerprint every renderer's pipeline/name cache derives from —
+    /// see this module's doc for the union of axes folded in and why
+    /// [`MetalOnlyExtras`] carries the ones only [`KernelLanguage::Metal`]
+    /// varies on.
+    pub(crate) fn kernel_identity(
+        language: KernelLanguage,
+        resolved: &BoundOp,
+        packed_operands: &PackedOperands,
+        metal: MetalOnlyExtras,
+        numeric_policy: NumericPolicy,
+    ) -> String {
+        let rank = resolved.extents.len();
+        let operand_count = resolved.operands().len();
+        let prefix = language.prefix();
+        let mut identity = match &resolved.kind {
+            BoundOpKind::CachedAttention {
+                query_rows,
+                cached_key_rows,
+                new_key_rows,
+                kv_heads,
+                query_groups,
+                head_dim,
+                rotary_dim,
+                scale,
+                cached_lower_inclusive,
+                new_upper_inclusive,
+                ..
+            } => {
+                // `operand_count == 9` names a runtime ninth operand, but two
+                // DIFFERENT scalars share that slot, discriminated by
+                // `cached_key_rows` (`BoundOpKind::CachedAttention`'s own doc).
+                // `cached_key_rows == 0` (single-range) means the ninth operand
+                // IS the real `new_upper_inclusive`, so the identity names the
+                // STRUCTURE ("dyn") rather than that filler value, which must
+                // never appear to vary the key across calls whose real bound
+                // differs. `cached_key_rows != 0` (two-range, cached-bound) bakes
+                // `new_upper_inclusive` as a compiled `constexpr` instead (`omega::
+                // msl::render_cached_attention`'s own doc) -- collapsing it to
+                // "dyn" here would let two ops with different real bounds share
+                // one compiled kernel with the WRONG bound baked in, so this path
+                // keeps the real, varying token.
+                let upper_token = if operand_count == 9 && *cached_key_rows == 0 {
+                    String::from("dyn")
+                } else {
+                    signed_name_part(*new_upper_inclusive)
+                };
+                // `context_chunks` is already a deterministic function of
+                // `cached_key_rows + new_key_rows` (`crate::msl::
+                // context_chunks_for`), both already folded into this
+                // identity above -- naming it explicitly here means a future
+                // change to the sizing config's divisor/cap still shows up as
+                // a distinct cache key rather than silently reusing a pipeline
+                // compiled for the wrong chunk count.
+                let context_chunks = crate::msl::context_chunks_for(
+                    *cached_key_rows + *new_key_rows,
+                    *query_groups,
+                    *head_dim,
+                    numeric_policy,
+                );
+                // `two_range_cached_bound` (nine operands, `cached_key_rows !=
+                // 0`) renders a runtime `long cached_key_rows = (long)in8[0];`
+                // read where the eight-operand form bakes the identical-looking
+                // `c{cached_key_rows}` token as a compiled `constexpr` -- without
+                // this marker the two would collide on one identity string
+                // despite generating different kernel bodies.
+                let cached_bound_token = if operand_count == 9 && *cached_key_rows != 0 {
+                    "_cb"
+                } else {
+                    ""
+                };
+                // `rotary_dim == head_dim` (every caller before qwen35's
+                // partial-rotary dense attention) is byte-identical to this
+                // identity's pre-partial-rotary string -- the `_r{rotary_dim}`
+                // token appears ONLY when the pass plane is present, since a
+                // full-rotary op with the same `head_dim` would otherwise share
+                // an identity with one that carries a different `rotary_dim`.
+                let rotary_token = if rotary_dim == head_dim {
+                    String::new()
+                } else {
+                    format!("_r{rotary_dim}")
+                };
+                format!(
+                    "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}",
+                    scale.to_bits(),
+                    signed_name_part(*cached_lower_inclusive),
+                )
+            }
+            BoundOpKind::Elementwise { .. } => {
+                let body = body_token(resolved.element_body());
+                format!("{prefix}_elementwise_r{rank}_n{operand_count}_{body}")
+            }
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                keep,
+                output_axes,
+                epilogue_body,
+                epilogue_operands,
+                epilogue_broadcast_axes,
+                ..
+            } => {
+                let body = body_token(resolved.element_body());
+                let kind = keep_token(*keep);
+                let reduce_body = op_token(*reduce_op);
+                let init = init_token(*init);
+                // The exact ORDERED axis sequence, not merely its length: two
+                // folds sharing every other axis here but keeping a DIFFERENT
+                // axis set (or the same set in a different order) still emit
+                // different source (`render_reduce`/`render_reduce_cooperative`
+                // bake the literal axis index into the uniform-slot addressing).
+                let axes = output_axes
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+                    String::new()
+                } else {
+                    // A non-empty `epilogue_broadcast_axes` widens every
+                    // renderer's own write/operand addressing to full rank
+                    // (`crate::msl::render_reduce`'s own doc) -- two folds
+                    // sharing every other token here but disagreeing on the
+                    // PLAIN-vs-BROADCAST epilogue shape must never share a
+                    // pipeline entry, since they bake different array widths
+                    // into the emitted source text.
+                    let broadcast = if epilogue_broadcast_axes.is_empty() {
+                        String::new()
+                    } else {
+                        let axes = epilogue_broadcast_axes
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join("_");
+                        format!("_eb{axes}")
+                    };
+                    format!(
+                        "_epi{}_{}{broadcast}",
+                        epilogue_operands.len(),
+                        body_token(epilogue_body)
+                    )
+                };
+                format!(
+                    "{prefix}_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
+                )
+            }
+            BoundOpKind::RoundBatchedReduce {
+                reduce_op,
+                init,
+                keep,
+                output_axes,
+                round_count,
+                ..
+            } => {
+                let body = body_token(resolved.element_body());
+                let kind = keep_token(*keep);
+                let reduce_body = op_token(*reduce_op);
+                let init = init_token(*init);
+                let axes = output_axes
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                format!(
+                    "{prefix}_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}_k{round_count}"
+                )
+            }
+            BoundOpKind::Iota => format!("{prefix}_iota_r{rank}"),
+            // the literal is baked into the source, so it has to be part of the
+            // identity too -- otherwise two constants of the same rank would
+            // share one cached kernel and the second would run the first one's
+            // value. Raw bits, not the decimal, so the name is exact and
+            // identifier-safe.
+            BoundOpKind::Constant { value } => {
+                format!("{prefix}_constant_r{rank}_v{:08x}", value.to_bits())
+            }
+            BoundOpKind::GatedDeltaNet {
+                kv_heads,
+                num_v_heads,
+                head_k_dim,
+                head_v_dim,
+                ..
+            } => format!(
+                "{prefix}_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}"
+            ),
+            BoundOpKind::MoeTopK {
+                expert_count,
+                top_k,
+                ..
+            } => format!("{prefix}_moe_topk_e{expert_count}_k{top_k}"),
+            // Candidate B's kind (`R9/PROGRESS.md`'s own "Candidate B"
+            // sections) -- mechanical addition to keep this match total; not in
+            // this task's isolation grant (`identity.rs` is outside the listed
+            // writable set), landed anyway because Rust's own exhaustiveness
+            // check gives no way to keep `omega` compiling under
+            // `metal-fuse-attn-decode` without it once the new `BoundOpKind`
+            // variant exists -- reported as a deviation, not silently done.
+            BoundOpKind::CachedSoftmaxWeights {
+                cached_key_rows,
+                attention_rows,
+                head_dim,
+                ..
+            } => {
+                if metal.softmax_runtime_rows {
+                    format!("{prefix}_cached_softmax_weights_rtrows_a{attention_rows}_d{head_dim}")
+                } else {
+                    format!(
+                        "{prefix}_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
+                    )
+                }
+            }
+        };
 
-    identity
+        let gather_bits: String = resolved
+            .operands()
+            .iter()
+            .map(|(_, _, gather)| if gather.is_some() { '1' } else { '0' })
+            .collect();
+        if gather_bits.contains('1') {
+            identity.push_str("_g");
+            identity.push_str(&gather_bits);
+        }
+
+        // `type_token`'s own "half"/"float" (or "f16"/"f32", "__half"/"float")
+        // split -- every dtype every renderer accepts collapses to one of these
+        // two declarations, and only `DType::Float16` ever takes the narrow one
+        // (each renderer's own `type_token` match, byte-for-byte the same
+        // partition).
+        identity.push_str(if resolved.dtype == DType::Float16 {
+            "_half"
+        } else {
+            "_wide"
+        });
+
+        let quantized = operand_codecs(resolved, packed_operands);
+        if quantized.iter().any(Option::is_some) {
+            identity.push_str("_c");
+            for codec in &quantized {
+                identity.push(codec_token(*codec));
+            }
+        }
+
+        if let Some(shape) = metal.packed_row_block_shape {
+            identity.push(shape);
+        }
+        if let Some(stride_is_one) = metal.packed_row_block_stride_is_one {
+            identity.push(if stride_is_one { '1' } else { 'N' });
+        }
+        if let Some(axis) = metal.packed_row_block_direct_axis {
+            identity.push_str("_da");
+            identity.push_str(&axis.to_string());
+        }
+        if let Some((selected_axis, out_axis)) = metal.packed_row_block_grouped_axes {
+            identity.push_str("_dg");
+            identity.push_str(&selected_axis.to_string());
+            identity.push('_');
+            identity.push_str(&out_axis.to_string());
+        }
+        if let Some(addressing) = metal.elementwise_addressing {
+            identity.push_str(&addressing);
+        }
+        if let Some(width) = metal.cooperative_width {
+            identity.push_str("_w");
+            identity.push_str(&width.to_string());
+        }
+        if let Some(token) = metal.numeric_policy_token {
+            identity.push(token[0] as char);
+            identity.push(token[1] as char);
+        }
+        if let Some(group_size) = metal.merged_z {
+            identity.push_str("_z");
+            identity.push_str(&group_size.to_string());
+        }
+        if let Some(rows) = metal.packed_row_block_rows_override {
+            identity.push_str("_pr");
+            identity.push_str(&rows.to_string());
+        }
+        if metal.q4_0_multi_row_hoist {
+            identity.push_str("_q0h");
+        }
+        if metal.tiled_gemm_q4_0 {
+            identity.push_str("_tgq0");
+        }
+        if metal.multi_row_unroll {
+            identity.push_str("_u");
+        }
+        if metal.multi_row_index32 {
+            identity.push_str("_i32");
+        }
+        if metal.coord_index32 {
+            identity.push_str("_c32");
+        }
+        if let Some(literal) = metal.reduction_literal {
+            identity.push_str("_rl");
+            identity.push_str(&literal.to_string());
+        }
+
+        identity
+    }
 }
+
+#[cfg(any(
+    test,
+    feature = "metal-core",
+    feature = "wgpu-backend",
+    feature = "cuda"
+))]
+pub(crate) use gated::kernel_identity;
 
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -286,6 +286,23 @@ pub enum MetalError {
         bound: NumericPolicy,
         requested: NumericPolicy,
     },
+    /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own stop condition: a
+    /// [`PIPELINE_CACHE`] hit re-emitted its source and the sha256 disagreed
+    /// with the hash [`PipelineCaptureRecord`] captured when that pipeline
+    /// was first compiled -- proof one of the 16 non-`reduction_literal`
+    /// axes [`crate::identity::kernel_identity`] folds into the key is
+    /// missing an axis two structurally-different ops actually differ on
+    /// (`c4-7-reduction-literal.md`'s own AC6). Diagnostic-only, same
+    /// `instrument`-gated reachability as [`CpuMetalDivergence`](Self::CpuMetalDivergence).
+    #[cfg(feature = "instrument")]
+    #[error(
+        "pipeline key audit: cache_key {cache_key:?} recorded sha256 {recorded_sha256} disagrees with re-emitted sha256 {recomputed_sha256}"
+    )]
+    PipelineKeyAuditMismatch {
+        cache_key: String,
+        recorded_sha256: String,
+        recomputed_sha256: String,
+    },
 }
 
 /// The plan-time description of one expert payload in an
@@ -369,6 +386,17 @@ thread_local! {
     pub(super) static PIPELINE_CAPTURE: RefCell<BTreeMap<usize, PipelineCaptureRecord>> =
         const { RefCell::new(BTreeMap::new()) };
 
+    /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own tally: every [`PIPELINE_CACHE`]
+    /// hit `pipeline_for` re-emits and sha256-compares increments the first
+    /// counter; a disagreement (see [`MetalError::PipelineKeyAuditMismatch`])
+    /// increments the second. Thread-local for the same reason
+    /// `PIPELINE_CACHE` itself is: the audit walks one thread's own cache.
+    #[cfg(feature = "instrument")]
+    pub(super) static PIPELINE_KEY_AUDIT_AUDITED: core::cell::Cell<u64> =
+        const { core::cell::Cell::new(0) };
+    #[cfg(feature = "instrument")]
+    pub(super) static PIPELINE_KEY_AUDIT_MISMATCHED: core::cell::Cell<u64> =
+        const { core::cell::Cell::new(0) };
 
     /// Emitted mixed-expert kernels persist beside their compiled pipeline.
     /// The source body depends only on the bound shape, codec policy, math
@@ -402,6 +430,29 @@ thread_local! {
 pub fn current_allocated_size() -> Option<u64> {
     let (device, _queue) = device_and_queue().ok()?;
     Some(device.currentAllocatedSize() as u64)
+}
+
+/// Every distinct [`kernel_cache_key`](crate::msl::kernel_cache_key) string
+/// currently compiled on this thread's [`PIPELINE_CACHE`] -- a query-only
+/// read of the same thread-local `pipeline_for` already maintains, for a test
+/// to confirm how many distinct pipelines two ops actually shared without
+/// re-deriving `pipeline_for`'s own hit/miss logic.
+#[cfg(feature = "instrument")]
+#[must_use]
+pub fn pipeline_cache_keys() -> Vec<String> {
+    PIPELINE_CACHE.with(|cache| cache.borrow().keys().cloned().collect())
+}
+
+/// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own tally, `(audited, mismatched)` --
+/// see [`PIPELINE_KEY_AUDIT_AUDITED`]/[`PIPELINE_KEY_AUDIT_MISMATCHED`]'s own
+/// doc. `(0, 0)` when the audit never ran on this thread.
+#[cfg(feature = "instrument")]
+#[must_use]
+pub fn pipeline_key_audit_counts() -> (u64, u64) {
+    (
+        PIPELINE_KEY_AUDIT_AUDITED.with(core::cell::Cell::get),
+        PIPELINE_KEY_AUDIT_MISMATCHED.with(core::cell::Cell::get),
+    )
 }
 
 /// The decode loop's own per-step counter (`_step` in

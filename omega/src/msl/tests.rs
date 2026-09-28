@@ -1734,6 +1734,122 @@ fn multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width() {
     );
 }
 
+/// `c4-7-reduction-literal.md` AC1: with `PROXIMA_REDUCTION_LITERAL` unset
+/// (today's default posture, whether or not `metal-reduction-literal` is
+/// even compiled in), [`MetalOnlyExtras::reduction_literal`] must stay
+/// `None` and the cache key must carry no `_rl` token -- the unset-env
+/// default folds no new token into the key, matching every other override in
+/// this crate.
+#[test]
+fn reduction_literal_default_is_none_and_key_carries_no_rl_token() {
+    let bound = matmul_op(4, 6144, 3);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let key = temp_env::with_var("PROXIMA_REDUCTION_LITERAL", None::<&str>, || {
+        kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("matmul_op emits")
+    });
+    assert!(
+        !key.contains("_rl"),
+        "unset PROXIMA_REDUCTION_LITERAL must never bake a reduction-length literal into the \
+         cache key: {key}"
+    );
+}
+
+/// `c4-7-reduction-literal.md` AC5's negative boundary: `K=288` is not a
+/// whole multiple of `Q4K_BLOCK_ELEMENTS` (256), so
+/// `classify_packed_row_block` rejects it (`ExtentNotBlockMultiple`) and
+/// [`packed_row_block`] returns `None` -- `reduction_literal_value`'s own
+/// admission short-circuits on that `None` regardless of the env override,
+/// so the key must carry no `_rl` token even with `PROXIMA_REDUCTION_LITERAL=1`.
+#[cfg(feature = "metal-reduction-literal")]
+#[test]
+fn reduction_literal_is_none_for_a_non_block_multiple_extent() {
+    let bound = matmul_op(4, 288, 3);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let key = temp_env::with_var("PROXIMA_REDUCTION_LITERAL", Some("1"), || {
+        kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("matmul_op emits")
+    });
+    assert!(
+        !key.contains("_rl"),
+        "K=288 is not a multiple of 256 -- classify_packed_row_block rejects it \
+         (ExtentNotBlockMultiple), so reduction_literal must stay None even with the env A/B on: \
+         {key}"
+    );
+}
+
+/// `c4-7-reduction-literal.md` AC5's positive boundary set: `K=256`
+/// (minimum admitted length) and `K=12288` each yield `Some` and a distinct
+/// `_rl{K}` token -- proven directly against [`matmul_op`]'s own synthetic
+/// shape rather than only through the real-checkpoint device test, so this
+/// runs without a Metal device or the real gguf blob.
+#[cfg(feature = "metal-reduction-literal")]
+#[test]
+fn reduction_literal_some_at_the_minimum_and_a_wide_boundary() {
+    for k in [256u32, 12288u32] {
+        let bound = matmul_op(4, k, 3);
+        let weight_node = bound.operands()[0].0;
+        let mut q4_0 = BTreeMap::new();
+        q4_0.insert(weight_node, Codec::Q4_0);
+
+        let key = temp_env::with_var("PROXIMA_REDUCTION_LITERAL", Some("1"), || {
+            kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("matmul_op emits")
+        });
+        assert!(
+            key.contains(&format!("_rl{k}")),
+            "K={k} is a whole multiple of 256 and packed_row_block admits it, so the key must \
+             carry _rl{k}: {key}"
+        );
+    }
+}
+
+/// `S/nb/prefill/RESULTS.md`'s toggle: `PROXIMA_REDUCTION_LITERAL=decode`
+/// narrows admission to single-token ops. A genuinely multi-token op
+/// ([`packed_row_multi_token_op`]'s own `token_axes = [0]` classification,
+/// unlike [`matmul_op`]'s shape) must keep `reduction_literal` at `None` --
+/// the same invariant [`reduction_literal_is_none_for_a_non_block_multiple_extent`]
+/// checks for a different admission gate.
+#[cfg(feature = "metal-reduction-literal")]
+#[test]
+fn reduction_literal_decode_mode_is_none_for_a_multi_token_op() {
+    let bound = packed_row_multi_token_op(27, 6144, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let key = temp_env::with_var("PROXIMA_REDUCTION_LITERAL", Some("decode"), || {
+        kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("multi-token op emits")
+    });
+    assert!(
+        !key.contains("_rl"),
+        "PROXIMA_REDUCTION_LITERAL=decode must never bake a literal for a 27-token op: {key}"
+    );
+}
+
+/// `PROXIMA_REDUCTION_LITERAL=decode`'s positive case: a single-token
+/// ([`packed_row_multi_token_op`] with `tokens = 1`) op still bakes, the
+/// same admission `=1` already grants it.
+#[cfg(feature = "metal-reduction-literal")]
+#[test]
+fn reduction_literal_decode_mode_is_some_for_a_single_token_op() {
+    let bound = packed_row_multi_token_op(1, 6144, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let key = temp_env::with_var("PROXIMA_REDUCTION_LITERAL", Some("decode"), || {
+        kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("single-token op emits")
+    });
+    assert!(
+        key.contains("_rl6144"),
+        "PROXIMA_REDUCTION_LITERAL=decode must bake a literal for a single-token op: {key}"
+    );
+}
+
 /// [`multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width`]'s
 /// multi-row counterpart: a real prefill shape (27 tokens) DOES take the
 /// `_u` cache-key suffix, but its dispatch geometry is UNCHANGED (unroll
@@ -3408,7 +3524,14 @@ fn a_keep_scan_over_zero_axes_is_rejected() {
 #[test]
 fn render_reduce_rejects_an_elementwise_bound_op() {
     let bound = elementwise_tanh_op(8);
-    let error = render_reduce(&bound, "entry", &[None], NumericPolicy::default(), false)
+    let error = render_reduce(
+        &bound,
+        "entry",
+        &[None],
+        NumericPolicy::default(),
+        false,
+        &MetalOnlyExtras::default(),
+    )
         .expect_err("an elementwise chain is not a Reduce fold");
     assert!(matches!(
         error,
@@ -3441,7 +3564,14 @@ fn render_reduce_rejects_a_broadcast_reduce_epilogue() {
     };
     epilogue_broadcast_axes.push(1);
 
-    let error = render_reduce(&bound, "entry", &[None], NumericPolicy::default(), false)
+    let error = render_reduce(
+        &bound,
+        "entry",
+        &[None],
+        NumericPolicy::default(),
+        false,
+        &MetalOnlyExtras::default(),
+    )
         .expect_err("a broadcast-reduce epilogue has no Metal renderer yet");
     assert!(
         matches!(error, EmitError::EpilogueNotSupported { .. }),
@@ -3538,6 +3668,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
+        &MetalOnlyExtras::default(),
     )
     .expect_err("Q5_1 never reaches the row-blocked path");
     assert!(matches!(
@@ -3578,6 +3709,7 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
+        &MetalOnlyExtras::default(),
     )
     .expect("Q8_0 now reaches the row-blocked path and renders a kernel body");
     assert!(
@@ -3618,6 +3750,7 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
+        &MetalOnlyExtras::default(),
     )
     .expect("Q4_0 now reaches the row-blocked path and renders a kernel body");
     // See the sibling assertion in `q4_0_codec_takes_the_row_blocked_path_

@@ -257,6 +257,8 @@ kv-capacity-bucket = [
 metal-q4k-ggml-port = ["omega?/metal-q4k-ggml-port"]
 # passthrough to `omega/metal-q4_0-native` so the decode harness can measure that arm.
 metal-q4_0-native = ["omega?/metal-q4_0-native"]
+# passthrough to `omega/metal-reduction-literal` so the gate can measure that arm.
+metal-reduction-literal = ["omega?/metal-reduction-literal"]
 memmap2 = ["dep:memmap2"]
 proxima-storage = ["dep:proxima-storage", "proxima-storage/dax"]
 conflaguration = ["dep:conflaguration"]
@@ -312,6 +314,7 @@ rustix.workspace = true
 proxima = { workspace = true, features = ["test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
 tempfile.workspace = true
+temp-env.workspace = true
 
 # Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
 # `proxima_telemetry`'s recorder/macros (only pulled in by `instrument`,

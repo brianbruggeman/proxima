@@ -410,6 +410,14 @@ metal-q4k-ggml-port = ["metal"]
 # only after a quiet-box decode-step seal, not on the "verbatim port"
 # argument alone.
 metal-q4_0-native = ["metal"]
+# Bakes a packed-row-blocked op's flattened reduction length
+# (`reduction_len`, the same product `pack_reduce_uniforms` writes into
+# `u.reduction_total`) as a compiled literal instead of reading the runtime
+# uniform, admitted per-op via `PROXIMA_REDUCTION_LITERAL=1`
+# (`docs/model-interop/c4-7-reduction-literal.md`). Default-off: the unset-env
+# default folds no new token into `kernel_identity` and every emitted byte
+# stays identical to before this feature existed.
+metal-reduction-literal = ["metal"]
 # Plan-time grouping of independent, identically-shaped packed-row matvec
 # dispatches sharing one `kernel_identity` (the 8 routed-expert gate/up/down
 # gathers per (layer, projection) `append_moe_round_output` already emits,
@@ -577,6 +585,14 @@ required-features = ["metal"]
 [[example]]
 name = "attn_partial_fusion_chain"
 required-features = ["metal"]
+
+[[example]]
+name = "reduction_literal_speed_probe"
+required-features = ["metal", "metal-reduction-literal", "instrument"]
+
+[[example]]
+name = "reduction_literal_prefill_speed_probe"
+required-features = ["metal", "metal-reduction-literal", "instrument"]
 
 [dev-dependencies]
 conflaguration = { workspace = true, features = ["toml"] }

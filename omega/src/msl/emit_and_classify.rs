@@ -36,6 +36,7 @@ pub(super) fn emit_inner(
     validate(resolved)?;
     let entry = entry_name(resolved);
     let quantized = operand_codecs(resolved, packed_operands);
+    let extras = metal_specialization(resolved, packed_operands, numeric_policy);
     let source = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
             render_cached_attention(resolved, &entry, numeric_policy)
@@ -52,6 +53,7 @@ pub(super) fn emit_inner(
             &quantized,
             numeric_policy,
             expert_source_mode,
+            &extras,
         ),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
@@ -71,6 +73,7 @@ pub(super) fn emit_inner(
                 &quantized,
                 numeric_policy,
                 expert_source_mode,
+                &extras,
             )
         }
         #[cfg(not(feature = "metal-moe-mul-mat-id"))]
@@ -105,7 +108,7 @@ pub(super) fn emit_inner(
         },
         grid: GridSpec {
             threads: grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?,
-            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
+            threadgroup_width: extras.cooperative_width,
             depth: reduce_round_count(resolved).unwrap_or(1),
         },
     };
@@ -748,13 +751,6 @@ pub(super) fn replace_whole_word(text: &str, identifier: &str, replacement: &str
 /// 'S' (fully serial, every non-`Reduce` op and every `Reduce` neither path
 /// claims). Kept here, not in `identity.rs`: every function it calls is
 /// Metal-only private state ([`PackedRowBlock`], [`tiled_gemm_block`]).
-// same gate as `kernel_cache_key`, its sole caller -- see that function's
-// own comment for why `metal-core` alone (not `metal`) is the right feature.
-#[cfg(any(test, feature = "metal-core"))]
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
-)]
 pub(super) fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Option<Codec>]) -> char {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -788,11 +784,6 @@ pub(super) fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Opti
 /// only cost an unnecessary cache miss, never a wrong hit; leaving it out
 /// entirely is just as sound and keeps a non-matching op's identity free of
 /// a token it has no reason to carry.
-#[cfg(any(test, feature = "metal-core"))]
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
-)]
 pub(super) fn packed_row_block_stride_is_one(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -813,11 +804,6 @@ pub(super) fn packed_row_block_stride_is_one(
 /// row addressing for this op, and on which axis — `None` when it did not
 /// (no `packed_row_block` match, or a multi-row `M` block, which always
 /// takes the generic path; see [`packed_row_direct_output_axis`]'s own doc).
-#[cfg(any(test, feature = "metal-core"))]
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
-)]
 pub(super) fn packed_row_block_direct_axis(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -842,11 +828,6 @@ pub(super) fn packed_row_block_direct_axis(
 /// source text and must never share a pipeline-cache entry -- this is that
 /// disambiguator, folded into [`crate::identity::kernel_identity`] the same
 /// way the single-axis case already is.
-#[cfg(any(test, feature = "metal-core"))]
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
-)]
 pub(super) fn packed_row_block_grouped_axes(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -1193,25 +1174,51 @@ pub(super) fn fast_q4_0_active(
 // gated on `metal-core` alone -- it builds (and is exercised) on Linux too.
 // `metal-core` without `metal` (the Linux emitter-only build) has no driver
 // to call it, hence the `allow`: genuinely unreachable there, not a hidden bug.
-#[cfg(any(test, feature = "metal-core"))]
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
-)]
-pub(crate) fn kernel_cache_key(
+/// `reduction_len(resolved, output_axes)` (the same product over folded
+/// reduce axes [`crate::metal::pack_reduce_uniforms`] writes into
+/// `u.reduction_total`) when the model-fixed length may be baked as a
+/// compiled literal, `None` otherwise. Independent of `expert_source_mode`
+/// so a key built at plan-resolution time and a render built with the real
+/// mode agree on this field exactly like every other axis
+/// [`metal_specialization`] computes. See [`MetalOnlyExtras::reduction_literal`]'s
+/// own doc for the invariant this maintains.
+fn reduction_literal_value(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    output_axes: &[u16],
+) -> Option<u64> {
+    if !reduction_literal_override() {
+        return None;
+    }
+    let block = packed_row_block(resolved, quantized)?;
+    if reduction_literal_decode_only() && packed_row_block_token_total(&block, &resolved.extents) > 1 {
+        return None;
+    }
+    Some(reduction_len(resolved, output_axes))
+}
+
+/// The one function that builds a Metal kernel's full specialization record —
+/// every axis [`kernel_identity`](crate::identity::kernel_identity) needs
+/// beyond the language-neutral fields it derives on its own.
+/// [`kernel_cache_key`] and [`emit_inner`] both call this SAME function
+/// (never duplicate its body), so the record a cache lookup keys on and the
+/// record a render actually consults can never drift apart -- the design
+/// `c4-7-reduction-literal.md` section 3 names: a renderer may bake a value
+/// only by reading a field this record already carries, because this record
+/// is also the only source [`kernel_identity`]'s own key text renders from.
+pub(super) fn metal_specialization(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
-) -> Result<String, EmitError> {
-    // Called for its unsupported-dtype rejection alone -- `kernel_identity`
-    // reads `resolved.dtype` directly for the actual half/wide classing (the
-    // same partition every renderer's own `type_token` match already makes),
-    // but `kernel_cache_key` has no `validate` call of its own upstream of
-    // it, so this stays the one place that fails fast on a dtype `emit`
-    // would also reject.
-    type_token(resolved.node, resolved.dtype)?;
+) -> crate::identity::MetalOnlyExtras {
     let quantized = operand_codecs(resolved, packed_operands);
-    let extras = crate::identity::MetalOnlyExtras {
+    let reduction_literal = match &resolved.kind {
+        BoundOpKind::Reduce { output_axes, .. } => {
+            reduction_literal_value(resolved, &quantized, output_axes)
+        }
+        _ => None,
+    };
+    crate::identity::MetalOnlyExtras {
         cooperative_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
@@ -1248,12 +1255,32 @@ pub(crate) fn kernel_cache_key(
             } => tiled_gemm_q4_0_active(resolved, &quantized, *reduce_op, *init, output_axes),
             _ => false,
         },
-    };
+        reduction_literal,
+    }
+}
+
+#[cfg(any(test, feature = "metal-core"))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
+pub(crate) fn kernel_cache_key(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<String, EmitError> {
+    // Called for its unsupported-dtype rejection alone -- `kernel_identity`
+    // reads `resolved.dtype` directly for the actual half/wide classing (the
+    // same partition every renderer's own `type_token` match already makes),
+    // but `kernel_cache_key` has no `validate` call of its own upstream of
+    // it, so this stays the one place that fails fast on a dtype `emit`
+    // would also reject.
+    type_token(resolved.node, resolved.dtype)?;
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
         resolved,
         packed_operands,
-        extras,
+        metal_specialization(resolved, packed_operands, numeric_policy),
         numeric_policy,
     ))
 }
@@ -1284,6 +1311,7 @@ pub(crate) fn kernel_dispatch_shape(
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
     let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
+    let extras = metal_specialization(resolved, packed_operands, numeric_policy);
     Ok((
         if is_split_cached_attention {
             split_bindings_with_scratch(resolved)
@@ -1295,7 +1323,7 @@ pub(crate) fn kernel_dispatch_shape(
             // took `expert_source_mode` before this parameter existed
             // either) -- `false` reproduces that pre-existing scope exactly.
             threads: grid_threads(resolved, &quantized, numeric_policy, false)?,
-            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
+            threadgroup_width: extras.cooperative_width,
             // Plan-resolved (`resolve_steps`'s own `ResolvedStep::grid`, the
             // production `execute_plan_with_placements` path) must agree
             // with `emit_inner`'s own `GridSpec::depth` for the identical

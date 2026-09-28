@@ -93,7 +93,7 @@ use proxima_tensor::QuantizedBlock;
 use crate::error::EmitError;
 use crate::identity::{
     body_token, init_token, keep_token, op_token, operand_codecs, reduce_epilogue_is_identity,
-    signed_name_part,
+    signed_name_part, MetalOnlyExtras,
 };
 #[cfg(all(
     any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
