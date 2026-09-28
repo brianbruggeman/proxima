@@ -21,9 +21,20 @@
 //! Speculative decode has three moving parts: drafting (this module, no
 //! model), running the target model once over `[last_accepted, draft_1,
 //! .., draft_k]` (GPU-driver-dependent, out of scope here), and verifying
-//! the resulting batch of logit rows against the drafts (this module).
-//! Sampling-based (non-greedy) verification is a later card; this one only
-//! accepts a draft when it exactly matches the target model's own argmax.
+//! the resulting batch of logit rows against the drafts. [`verify_greedy`]
+//! is that verification for a plain-argmax target -- greedy in, greedy out
+//! -- and stays the right primitive for a caller that never samples.
+//! `proxima-model-interop`'s own decode loop instead builds its verification
+//! from the same per-step selection its non-speculative branch already
+//! calls (its own `select_decoded_token`), row by row, comparing each row's
+//! real selection against the draft rather than a raw argmax -- so one
+//! verify batch is correct under ANY `ServingConfig` (temperature,
+//! penalties, `token_override`), not only plain argmax, the same
+//! prefix-match reasoning [`speculative_accept_greedy`]'s own doc proves for
+//! the pure-greedy case. [`speculative_accept_sampled`] is the general
+//! rejection-sampling accept rule for a caller with a real probability
+//! distribution to draw from on reject; no decode loop in this workspace
+//! wires it yet.
 
 use alloc::vec::Vec;
 
@@ -146,10 +157,17 @@ pub struct Verified {
 /// present) is a free extra token the target model would have produced
 /// next regardless of drafting.
 ///
-/// Greedy only -- sampling-based (temperature `> 0`) verification is a
-/// later card, matching [`crate::sample::sample_next_token`]'s own
-/// `temperature <= 0.0` == [`crate::sample::greedy_pick`] collapse this
-/// crate already documents.
+/// Greedy only -- for a target `ServingConfig` that samples
+/// (`temperature > 0`, an active penalty, or a caller-forced token
+/// override), the right per-row accept test is not this function's argmax
+/// comparison but the caller's own selection applied per row (this crate's
+/// [`crate::sample::sample_next_token`], or a caller-side override lookup)
+/// compared against the draft -- `proxima-model-interop`'s own decode loop
+/// takes that path directly (its `select_decoded_token`, not this function)
+/// rather than routing through `verify_greedy`. This function stays the
+/// right primitive for a caller that never samples: general rejection-
+/// sampling verification exists as [`speculative_accept_sampled`] for a
+/// caller with a real probability distribution to draw a correction from.
 ///
 /// `None` only when [`crate::sample::greedy_pick`] returns `None` for a row
 /// this function actually needs (an empty row), or `logit_rows` has no

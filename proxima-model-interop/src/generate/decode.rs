@@ -1303,6 +1303,38 @@ fn prefill_one_evaluation_requested(serving_config: &ServingConfig) -> bool {
         && std::env::var_os("PROXIMA_PREFILL_SEQUENTIAL").is_none()
 }
 
+/// One step's own token selection, shared by the ordinary single-row decode
+/// branch and speculative decode's verify batch
+/// ([`LoadedModel::speculative_verify_program`]'s own doc): `token_override`'s
+/// forced value at `step` when present, otherwise
+/// [`proxima_tokenizer::sample_next_token`] over `logits_row` and the
+/// `repeat_window`-sized tail of `token_history`. Both call sites feed this
+/// the identical inputs a plain one-token-at-a-time decode step would have
+/// at that `step` -- same override lookup, same recency window, same shared
+/// `rng` draw in the same order -- so a speculative batch that accepts `n`
+/// drafts consumes `rng` exactly `n` times, in exactly the order plain
+/// decode would have. That is what makes speculative decode bit-identical to
+/// plain decode for any [`SamplingConfig`], not only plain argmax.
+fn select_decoded_token(
+    step: usize,
+    logits_row: &[f32],
+    token_history: &[u32],
+    repeat_window: usize,
+    token_override: Option<&[u32]>,
+    sample_config: SamplingConfig,
+    rng: &mut fastrand::Rng,
+) -> Result<u32, InteropError> {
+    match token_override.and_then(|forced| forced.get(step)) {
+        Some(&forced_token) => Ok(forced_token),
+        None => {
+            let recent_window_start = token_history.len().saturating_sub(repeat_window);
+            let recent_tokens = &token_history[recent_window_start..];
+            sample_next_token(logits_row, recent_tokens, sample_config, rng)
+                .ok_or(InteropError::EmptyLogits)
+        }
+    }
+}
+
 /// Resolves `PROXIMA_DISPATCH` (`serial`|`concurrent`, case-insensitive)
 /// against `configured` (`ServingConfig::dispatch_type`'s own doc), read
 /// exactly once at [`LoadedModel::generate_with_serving_config`]'s own entry
@@ -3029,7 +3061,15 @@ impl<'file> LoadedModel<'file> {
                 // gemma4-only verify program bound at load time
                 // (`Self::speculative_verify_program`'s own doc). Constants
                 // `3`/`8` are `transformers`' own `PromptLookupCandidateGenerator`
-                // defaults (`min_ngram_size`/`max_matching_ngram_size`).
+                // defaults (`min_ngram_size`/`max_matching_ngram_size`). Every
+                // `ServingConfig` is eligible now -- the verify branch below
+                // selects each row through `select_decoded_token`, the SAME
+                // per-step selection the non-speculative branch uses, so a
+                // draft only ever survives when it equals what plain decode
+                // would have produced at that step; a config that makes
+                // speculation rarely pay off (a forced `token_override`, a
+                // high temperature) still emits the correct token, just via
+                // the correction/bonus row instead of an accepted draft.
                 let speculative_draft: Vec<u32> = if speculative_enabled
                     && next_ids.len() == 1
                     && cached_len > 0
@@ -4938,13 +4978,25 @@ impl<'file> LoadedModel<'file> {
                     // actually samples, exactly like a `new_count == 1` decode
                     // step always has.
                     // Speculative decode's own readout, parallel to the
-                    // ordinary single-row branch below (`Verified`'s own
-                    // doc): `active_logits_root` here is
-                    // `speculative_verify_program`'s all-positions gather
-                    // (`new_count` rows of `vocab_size`, not one), so the
-                    // single-row guard just below does not apply -- this
-                    // branch verifies the whole drafted span in one pass
-                    // and returns before reaching it.
+                    // ordinary single-row branch below: `active_logits_root`
+                    // here is `speculative_verify_program`'s all-positions
+                    // gather (`new_count` rows of `vocab_size`, not one), so
+                    // the single-row guard just below does not apply -- this
+                    // branch verifies the whole drafted span in one pass and
+                    // returns before reaching it.
+                    //
+                    // Sample-and-match (llama.cpp's own
+                    // `common_sampler_sample_and_accept_n`): row `r`'s own
+                    // token comes from `select_decoded_token` at step `_step
+                    // + r` -- the exact same selection the non-speculative
+                    // branch below makes for one step, over `token_history`
+                    // grown by every already-accepted draft earlier in this
+                    // same loop and the same shared `rng`. A draft only
+                    // survives when it equals that real selection, so the
+                    // emitted stream is byte-identical to plain
+                    // one-token-at-a-time decode for any `ServingConfig`
+                    // (temperature, penalties, seed, `token_override`), not
+                    // only plain argmax.
                     if speculative_step {
                         let (logits, _shape) = evaluated.get(active_logits_root).ok_or(
                             InteropError::MissingEvaluatedNode {
@@ -4959,29 +5011,46 @@ impl<'file> LoadedModel<'file> {
                             });
                         }
                         let rows: Vec<&[f32]> = logits.chunks_exact(vocab_size).collect();
-                        let verified = proxima_tokenizer::draft::verify_greedy(
-                            &rows,
-                            &speculative_draft,
-                        )
-                        .ok_or(InteropError::EmptyLogits)?;
-                        let mut emitted: Vec<u32> =
-                            speculative_draft[..verified.accepted].to_vec();
-                        emitted.push(verified.next);
+
+                        let mut emitted: Vec<u32> = Vec::with_capacity(rows.len());
+                        for (row_index, &row) in rows.iter().enumerate() {
+                            let selected = select_decoded_token(
+                                _step + row_index,
+                                row,
+                                &token_history,
+                                repeat_window,
+                                token_override,
+                                sample_config,
+                                &mut rng,
+                            )?;
+                            emitted.push(selected);
+                            token_history.push(selected);
+                            if speculative_draft.get(row_index) != Some(&selected) {
+                                break;
+                            }
+                        }
+                        // Every row this loop runs pushes exactly one token
+                        // onto `emitted` before it can possibly break, so
+                        // `emitted` is never empty -- `accepted` is the
+                        // count of leading drafts that matched their own
+                        // selection, `emitted`'s own last element the
+                        // correction (a mismatch) or the bonus token (every
+                        // draft matched).
+                        let accepted = emitted.len() - 1;
                         debug!(
                             step = _step as u64,
                             draft_len = speculative_draft.len() as u64,
-                            accepted = verified.accepted as u64,
+                            accepted = accepted as u64,
                             emitted = emitted.len() as u64,
                             "speculative_verify"
                         );
 
                         // The append loop above wrote `new_count` positions'
-                        // worth of K/V for every layer; only
-                        // `verified.accepted + 1` of them are real
-                        // (`LayerCache::truncate`'s own doc -- proved
-                        // against an incrementally-appended prefix in
-                        // `layer_cache_truncate_tests`).
-                        let keep_positions = cached_len_before_step + verified.accepted + 1;
+                        // worth of K/V for every layer; only `emitted.len()`
+                        // of them are real (`LayerCache::truncate`'s own doc
+                        // -- proved against an incrementally-appended prefix
+                        // in `layer_cache_truncate_tests`).
+                        let keep_positions = cached_len_before_step + emitted.len();
                         for (layer, widths) in layer_row_widths.iter().enumerate() {
                             if let (
                                 LayerPadRowWidths::Attention {
@@ -4995,15 +5064,13 @@ impl<'file> LoadedModel<'file> {
                             }
                         }
                         cached_len = keep_positions;
-                        token_history.extend_from_slice(&emitted);
                         for &extra in &emitted[1..] {
                             pending.push_back(extra);
                         }
-                        // `emitted`'s own last element is always
-                        // `verified.next` (pushed onto the accepted-draft
-                        // prefix immediately above), so this is the same
-                        // value without an `Option` to unwrap.
-                        next_ids = alloc::vec![verified.next];
+                        // `emitted` always has at least one element (the
+                        // loop above runs its first iteration
+                        // unconditionally), so this index never panics.
+                        next_ids = alloc::vec![emitted[emitted.len() - 1]];
                         return Ok(emitted[0]);
                     }
                     if is_last_step_batch {
@@ -5233,21 +5300,15 @@ impl<'file> LoadedModel<'file> {
 
                         #[cfg(feature = "instrument")]
                         let greedy_pick_started = read_ticks();
-                        token_id = match token_override.and_then(|forced| forced.get(_step)) {
-                            Some(&forced_token) => forced_token,
-                            None => {
-                                let recent_window_start =
-                                    token_history.len().saturating_sub(repeat_window);
-                                let recent_tokens = &token_history[recent_window_start..];
-                                sample_next_token(
-                                    last_position,
-                                    recent_tokens,
-                                    sample_config,
-                                    &mut rng,
-                                )
-                                .ok_or(InteropError::EmptyLogits)?
-                            }
-                        };
+                        token_id = select_decoded_token(
+                            _step,
+                            last_position,
+                            &token_history,
+                            repeat_window,
+                            token_override,
+                            sample_config,
+                            &mut rng,
+                        )?;
                         token_history.push(token_id);
                         #[cfg(feature = "instrument")]
                         let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
