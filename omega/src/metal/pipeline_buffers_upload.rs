@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(feature = "instrument")]
+use sha2::{Digest, Sha256};
+
 /// [`MTLCompileOptions::mathMode`], narrowed to the three values this
 /// crate's kernels compile with. ROW 296 (`proxima-tensor/docs/discipline.md`)
 /// measured `Fast` identical to `Relaxed` on that one kernel
@@ -177,6 +180,16 @@ pub(super) struct PipelineCaptureRecord {
     pub(super) msl_sha256: String,
 }
 
+/// Lowercase hex sha256 of `bytes` -- shared by [`capture_pipeline_source`]
+/// (hashes a freshly-compiled kernel's source) and
+/// [`audit_pipeline_key_on_hit`] (hashes a re-emitted one), so the two never
+/// drift onto different digest formats.
+#[cfg(feature = "instrument")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// `PROXIMA_PIPELINE_CAPTURE=<dir>` writes the exact MSL source text this
 /// process submitted to `newLibraryWithSource_options_error` to
 /// `<dir>/pipeline_<sha256-16hex>.metal`, prints the `pipeline_create`
@@ -186,9 +199,7 @@ pub(super) struct PipelineCaptureRecord {
 /// build with no capture directory pays one `env::var_os` lookup per miss.
 #[cfg(feature = "instrument")]
 fn capture_pipeline_source(kernel: &Kernel, cache_key: &str, math_mode: MathMode) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(kernel.source.as_bytes());
-    let full_hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let full_hex = sha256_hex(kernel.source.as_bytes());
     if let Some(dir) = std::env::var_os("PROXIMA_PIPELINE_CAPTURE") {
         let path = std::path::Path::new(&dir).join(format!("pipeline_{}.metal", &full_hex[..16]));
         if let Err(error) = std::fs::write(&path, &kernel.source) {
@@ -224,6 +235,61 @@ fn register_pipeline_capture(
             },
         );
     });
+}
+
+/// `PROXIMA_PIPELINE_KEY_AUDIT=1`: `pipeline_for` re-emits `bound`'s own
+/// kernel on every cache hit and re-hashes it, catching a key-completeness
+/// gap (an axis two structurally-different ops disagree on, but
+/// `kernel_identity` never folded in) as a loud, typed error at the exact hit
+/// that reused the wrong pipeline -- see `c4-7-reduction-literal.md`'s AC6.
+/// Default off; unset, empty, or any value other than `"1"` skips the
+/// re-emit entirely, so a plain `instrument` build with the audit off pays
+/// one `env::var_os` lookup per hit.
+#[cfg(feature = "instrument")]
+fn pipeline_key_audit_enabled() -> bool {
+    matches!(std::env::var("PROXIMA_PIPELINE_KEY_AUDIT"), Ok(value) if value.trim() == "1")
+}
+
+/// Re-emits `bound`'s kernel and compares its sha256 against the
+/// [`PipelineCaptureRecord`] this pipeline's pointer was registered under at
+/// compile time. `Ok(())` when the audit is off, when no record exists for
+/// this pointer (a pipeline built through [`pipeline_for_kernel`]'s own path
+/// rather than this function's `emit`-driven one), or when the two hashes
+/// agree.
+#[cfg(feature = "instrument")]
+fn audit_pipeline_key_on_hit(
+    pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    cache_key: &str,
+    numeric_policy: NumericPolicy,
+) -> Result<(), MetalError> {
+    if !pipeline_key_audit_enabled() {
+        return Ok(());
+    }
+    let recorded = super::device_buffers_arena_plan::PIPELINE_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .get(&(Retained::as_ptr(pipeline) as usize))
+            .cloned()
+    });
+    let Some(recorded) = recorded else {
+        return Ok(());
+    };
+    let kernel = emit(bound, packed_operands, numeric_policy)?;
+    let recomputed_sha256 = sha256_hex(kernel.source.as_bytes());
+    super::device_buffers_arena_plan::PIPELINE_KEY_AUDIT_AUDITED
+        .with(|counter| counter.set(counter.get() + 1));
+    if recorded.msl_sha256 != recomputed_sha256 {
+        super::device_buffers_arena_plan::PIPELINE_KEY_AUDIT_MISMATCHED
+            .with(|counter| counter.set(counter.get() + 1));
+        return Err(MetalError::PipelineKeyAuditMismatch {
+            cache_key: cache_key.to_string(),
+            recorded_sha256: recorded.msl_sha256,
+            recomputed_sha256,
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn compile_pipeline(
@@ -295,6 +361,8 @@ pub(super) fn pipeline_for(
         trace!(cache_key = %cache_key, hit = true, "pipeline cache lookup");
         #[cfg(feature = "instrument")]
         counter!(PIPELINE_HITS, 1);
+        #[cfg(feature = "instrument")]
+        audit_pipeline_key_on_hit(&pipeline, bound, packed_operands, cache_key, numeric_policy)?;
         return Ok(pipeline);
     }
     trace!(cache_key = %cache_key, hit = false, "pipeline cache lookup");

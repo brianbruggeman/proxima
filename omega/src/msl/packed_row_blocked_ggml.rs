@@ -14,6 +14,7 @@ pub(super) fn push_packed_row_blocked_body(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     expert_source_mode: bool,
+    metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
     if packed_row_block_token_total(block, &resolved.extents) > 1 {
         push_packed_row_multi_row_body(
@@ -28,6 +29,7 @@ pub(super) fn push_packed_row_blocked_body(
             epilogue_body,
             epilogue_operands,
             expert_source_mode,
+            metal,
         )?;
         return Ok(());
     }
@@ -223,6 +225,7 @@ pub(super) fn push_packed_row_blocked_body(
                 rows,
                 block_bytes,
                 other_stride_is_one,
+                metal,
             );
         } else if use_ggml_port && matches!(codec, Codec::Q5K) {
             push_q5k_ggml_port_body(
@@ -232,6 +235,7 @@ pub(super) fn push_packed_row_blocked_body(
                 rows,
                 block_bytes,
                 other_stride_is_one,
+                metal,
             );
         } else if use_ggml_port {
             push_q4k_ggml_port_body(
@@ -241,9 +245,10 @@ pub(super) fn push_packed_row_blocked_body(
                 rows,
                 block_bytes,
                 other_stride_is_one,
+                metal,
             );
         } else if use_q4_0_native {
-            push_q4_0_native_body(source, weight, other, rows, other_stride_is_one);
+            push_q4_0_native_body(source, weight, other, rows, other_stride_is_one, metal);
         } else if use_single_fetch {
             push_q4k_single_fetch_body(
                 source,
@@ -255,6 +260,7 @@ pub(super) fn push_packed_row_blocked_body(
                 operand_count,
                 rows,
                 block_bytes,
+                metal,
             );
         } else {
             source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
@@ -267,8 +273,9 @@ pub(super) fn push_packed_row_blocked_body(
             } else {
                 source.push_str(&format!("    {element_type} acts[{sub}];\n"));
             }
+            let reduction_bound = packed_row_reduction_bound_token(metal);
             source.push_str(&format!(
-                "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+                "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
             ));
             let ix_stride = SIMD_WIDTH as usize / lanes_per_block;
             if cfg!(feature = "metal-q4k-split-k") {
@@ -809,6 +816,7 @@ pub(super) fn push_q4k_single_fetch_body(
     operand_count: usize,
     rows: usize,
     block_bytes: usize,
+    metal: &MetalOnlyExtras,
 ) {
     source.push_str("    uint ix = (uint)lane / 8u;\n");
     source.push_str("    uint it = (uint)lane % 8u;\n");
@@ -816,8 +824,9 @@ pub(super) fn push_q4k_single_fetch_body(
     source.push_str("    uint sf_half = it % 2u;\n");
     source.push_str("    uint sf_low_base = sf_region * 64u + sf_half * 16u;\n");
     source.push_str("    uint sf_high_base = sf_low_base + 32u;\n");
+    let reduction_bound = packed_row_reduction_bound_token(metal);
     source.push_str(&format!(
-        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
     ));
     source.push_str("    for (int ib = (int)ix; ib < super_blocks; ib += 4) {\n");
     source.push_str("        int elem0_low = ib * 256 + (int)sf_low_base;\n");
@@ -1047,13 +1056,15 @@ pub(super) fn push_q4k_ggml_port_body(
     rows: usize,
     block_bytes: usize,
     other_stride_is_one: bool,
+    metal: &MetalOnlyExtras,
 ) {
     source.push_str("    uint ix = (uint)lane / 8u;\n");
     source.push_str("    uint it = (uint)lane % 8u;\n");
     source.push_str("    uint iq = it / 4u;\n");
     source.push_str("    uint ir = it % 4u;\n");
+    let reduction_bound = packed_row_reduction_bound_token(metal);
     source.push_str(&format!(
-        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
     ));
     source.push_str("    float yl[16];\n");
     source.push_str("    float yh[16];\n");
@@ -1240,11 +1251,13 @@ pub(super) fn push_q4_0_native_body(
     other: usize,
     rows: usize,
     other_stride_is_one: bool,
+    metal: &MetalOnlyExtras,
 ) {
     source.push_str("    uint ix = (uint)lane / 2u;\n");
     source.push_str("    uint il = ((uint)lane % 2u) * 8u;\n");
+    let reduction_bound = packed_row_reduction_bound_token(metal);
     source.push_str(&format!(
-        "    int nb = (int)u.reduction_total / {Q4_0_BLOCK_ELEMENTS};\n"
+        "    int nb = (int){reduction_bound} / {Q4_0_BLOCK_ELEMENTS};\n"
     ));
     source.push_str("    float yl[16];\n");
     source.push_str("    int ib_first = (int)ix;\n    int ib_step = 16;\n");
@@ -1401,6 +1414,7 @@ pub(super) fn push_q5k_ggml_port_body(
     rows: usize,
     block_bytes: usize,
     other_stride_is_one: bool,
+    metal: &MetalOnlyExtras,
 ) {
     source.push_str("    uint tid = (uint)lane / 4u;\n");
     source.push_str("    uint ix = (uint)lane % 4u;\n");
@@ -1412,8 +1426,9 @@ pub(super) fn push_q5k_ggml_port_body(
     source.push_str("    uchar hm2 = (uchar)(hm1 << 1u);\n");
     source.push_str("    uchar hm3 = (uchar)(hm1 << 4u);\n");
     source.push_str("    uchar hm4 = (uchar)(hm2 << 4u);\n");
+    let reduction_bound = packed_row_reduction_bound_token(metal);
     source.push_str(&format!(
-        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
     ));
     source.push_str("    float yl[16];\n");
     source.push_str("    float yh[16];\n");
@@ -1571,6 +1586,7 @@ pub(super) fn push_q6k_ggml_port_body(
     rows: usize,
     block_bytes: usize,
     other_stride_is_one: bool,
+    metal: &MetalOnlyExtras,
 ) {
     source.push_str("    uint tid = (uint)lane / 2u;\n");
     source.push_str("    uint ix = (uint)lane % 2u;\n");
@@ -1580,8 +1596,9 @@ pub(super) fn push_q6k_ggml_port_body(
     source.push_str("    uint is = 8u * ip + l0 / 16u;\n");
     source.push_str("    uint q_offset_l = 64u * ip + l0;\n");
     source.push_str("    uint q_offset_h = 32u * ip + l0;\n");
+    let reduction_bound = packed_row_reduction_bound_token(metal);
     source.push_str(&format!(
-        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
     ));
     source.push_str("    float yl[16];\n");
     source.push_str("    int ib_first = (int)ix;\n    int ib_step = 2;\n");

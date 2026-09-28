@@ -782,6 +782,7 @@ pub(super) fn push_cooperative_reduce_body(
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     is_broadcast_epilogue: bool,
     expert_source_mode: bool,
+    metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
@@ -857,6 +858,7 @@ pub(super) fn push_cooperative_reduce_body(
             epilogue_body,
             epilogue_operands,
             expert_source_mode,
+            metal,
         )?;
         return Ok(());
     }

@@ -496,17 +496,20 @@ pub fn execute_plan_named_with_expert_sources(
 /// Executes a named plan while allowing immutable model inputs to remain on
 /// the device between calls. `resident_names` contains only caller-owned bytes
 /// whose contents are immutable for the plan's lifetime.
+// leading underscore on `expert_sources`: same shape as `_named` and
+// `_resident_names` above -- with every backend feature off, only the
+// never-pattern arm survives cfg-stripping and it never reads the table.
 pub fn execute_plan_named_with_resident_names(
     plan: &mut Plan,
     _named: &[(&str, QuantizedBlock<'_>)],
     _resident_names: Option<&BTreeSet<&str>>,
-    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    _expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, BackendError> {
     match plan {
         #[cfg(feature = "cpu")]
-        Plan::Cpu(cpu_plan) => execute_plan_named_cpu(cpu_plan, _named, expert_sources),
+        Plan::Cpu(cpu_plan) => execute_plan_named_cpu(cpu_plan, _named, _expert_sources),
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(metal_plan) => match expert_sources {
+        Plan::Metal(metal_plan) => match _expert_sources {
             Some(sources) if !sources.is_empty() => Ok(
                 metal::execute_plan_named_with_expert_sources(metal_plan, _named, sources)?,
             ),
@@ -514,12 +517,12 @@ pub fn execute_plan_named_with_resident_names(
         },
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(wgpu_plan) => {
-            reject_gpu_expert_sources("wgpu", expert_sources)?;
+            reject_gpu_expert_sources("wgpu", _expert_sources)?;
             execute_plan_named_wgpu(wgpu_plan, _named)
         }
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => {
-            reject_gpu_expert_sources("cuda", expert_sources)?;
+            reject_gpu_expert_sources("cuda", _expert_sources)?;
             Ok(cuda_plan.execute_named(_named, _resident_names)?)
         }
         // `Plan` is uninhabited with every backend feature off; `*plan {}`

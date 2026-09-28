@@ -1636,9 +1636,10 @@ pub(crate) const fn codec_row_block_step_bytes(codec: Codec) -> usize {
 /// table needs this alongside [`codec_block_bytes`] the same way
 /// `operand_read`'s own `{offset} / N_ELEMENTS` / `{offset} % N_ELEMENTS`
 /// split does here, and `crate::metal`'s `operand_tensor_bytes` needs it to
-/// turn a packed operand's element count into its real byte count — gated on
-/// either caller's own feature, since neither is compiled by default.
-#[cfg(any(feature = "wgpu-backend", feature = "instrument", feature = "metal-core"))]
+/// turn a packed operand's element count into its real byte count.
+/// `multi_row_index32_active`/`metal_specialization` (`emit_and_classify.rs`)
+/// are both unconditional alloc-tier callers, so this is no longer behind
+/// any caller's own feature the way it once was.
 pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
     match codec {
         Codec::Q2K | Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K => Q4K_BLOCK_ELEMENTS,
@@ -1958,6 +1959,86 @@ fn log_coord_index32_once(_active: bool) {}
 #[cfg(not(feature = "std"))]
 pub(super) const fn coord_index32_override() -> bool {
     false
+}
+
+/// `PROXIMA_REDUCTION_LITERAL` A/B/C switch, admitted only when the
+/// `metal-reduction-literal` compile feature is also on: whether a
+/// packed-row op's flattened reduction length may be baked as a compiled
+/// literal instead of reading the runtime `u.reduction_total` uniform
+/// (`c4-7-reduction-literal.md`'s own design). Unset, empty, or any value
+/// other than `"1"`/`"decode"` keeps today's uniform-driven emit for every
+/// op. `"1"` and `"decode"` both admit baking; [`reduction_literal_decode_only`]
+/// narrows `"decode"` further to single-token ops -- see its own doc for why.
+#[cfg(all(feature = "metal-reduction-literal", feature = "std"))]
+pub(super) fn reduction_literal_override() -> bool {
+    let active = matches!(
+        std::env::var("PROXIMA_REDUCTION_LITERAL"),
+        Ok(value) if matches!(value.trim(), "1" | "decode")
+    );
+    log_reduction_literal_once(active);
+    active
+}
+
+/// `PROXIMA_REDUCTION_LITERAL=decode`: narrows [`reduction_literal_override`]'s
+/// admission to single-token (`token_total <= 1`) packed-row ops only.
+/// `S/nb/prefill/RESULTS.md`'s AIR/probe findings traced a real prefill
+/// (multi-token) slowdown to this bake that the decode-shaped body does not
+/// share, so this mode isolates the bake to the shape it was designed and
+/// measured against, while `"1"` keeps baking every admitted op (decode and
+/// prefill alike) for the original A/B comparison.
+#[cfg(all(feature = "metal-reduction-literal", feature = "std"))]
+pub(super) fn reduction_literal_decode_only() -> bool {
+    matches!(std::env::var("PROXIMA_REDUCTION_LITERAL"), Ok(value) if value.trim() == "decode")
+}
+
+/// Print whether the reduction-literal experiment fired exactly once per
+/// process, matching [`log_coord_index32_once`]'s own posture. Gated on
+/// `instrument` alone -- the override itself stays `std`-only and fires
+/// regardless of `instrument`.
+#[cfg(all(feature = "metal-reduction-literal", feature = "instrument"))]
+fn log_reduction_literal_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(
+            override_name = "reduction_literal",
+            active,
+            source,
+            "reduction-literal override resolved"
+        );
+    });
+}
+
+#[cfg(all(
+    feature = "metal-reduction-literal",
+    feature = "std",
+    not(feature = "instrument")
+))]
+fn log_reduction_literal_once(_active: bool) {}
+
+#[cfg(not(all(feature = "metal-reduction-literal", feature = "std")))]
+pub(super) const fn reduction_literal_override() -> bool {
+    false
+}
+
+#[cfg(not(all(feature = "metal-reduction-literal", feature = "std")))]
+pub(super) const fn reduction_literal_decode_only() -> bool {
+    false
+}
+
+/// The reduction-length token a packed-row body loops to -- the runtime
+/// `u.reduction_total` uniform by default, or `metal.reduction_literal`
+/// baked as a compiled `long` literal when the emit-time record admits one.
+/// Every packed-row-blocked render site reads its loop bound through this
+/// helper alone, never `u.reduction_total` directly, so the ONLY source of a
+/// baked reduction length is the field [`kernel_identity`]'s `_rl{n}` token
+/// already serializes -- see [`MetalOnlyExtras::reduction_literal`]'s own
+/// doc for why a renderer may never compute this independently.
+pub(super) fn packed_row_reduction_bound_token(metal: &MetalOnlyExtras) -> String {
+    match metal.reduction_literal {
+        Some(literal) => format!("{literal}L"),
+        None => "u.reduction_total".to_string(),
+    }
 }
 
 /// `PROXIMA_SOFTMAX_RUNTIME_ROWS=1` A/B switch: [`BoundOpKind::
