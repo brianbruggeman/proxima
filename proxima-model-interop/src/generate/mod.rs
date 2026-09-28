@@ -162,7 +162,11 @@ use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
     execute_plan_named_with_placements_and_expert_sources, plan_named_with_placed_inputs,
 };
-#[cfg(any(feature = "metal", feature = "instrument"))]
+// this module is only compiled under `feature = "std"` (lib.rs's own
+// `#[cfg(feature = "std")] mod generate;`), and `std` pulls in
+// `proxima-telemetry/emit` unconditionally (Cargo.toml's own doc) because
+// `decode.rs`/`pregather.rs` call these macros outside any `instrument`/
+// `metal` gate.
 use proxima_telemetry::{debug, trace, warn};
 #[cfg(feature = "instrument")]
 use proxima_telemetry::info;

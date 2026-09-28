@@ -27,6 +27,13 @@ qwen35moe-expert-prefetch = ["std"]
 # [dev-dependencies], so `cargo build -p proxima-model-interop --features std`
 # failed while `cargo test` passed — the dev-dep unified the feature in and hid
 # it. A lib that only builds when its own tests are built is a broken lib.
+# `dep:proxima-telemetry` + `proxima-telemetry/{std,emit}`: `generate/decode.rs`
+# and `generate/pregather.rs` (the e5fe4044 refactor onto proxima telemetry
+# events) call `trace!`/`debug!`/`warn!` unconditionally, not only under
+# `instrument`/`metal` -- those macros live behind proxima-telemetry's own
+# `emit` feature (`proxima-telemetry/src/lib.rs:77-78`, gating `pub mod
+# emit`), so a plain `std` build needs it directly rather than inheriting it
+# from a sibling feature.
 std = [
     "proxima-gguf/std",
     "proxima-tensor/std",
@@ -36,6 +43,9 @@ std = [
     "dep:fastrand",
     "conflaguration",
     "memmap2",
+    "dep:proxima-telemetry",
+    "proxima-telemetry/std",
+    "proxima-telemetry/emit",
 ]
 # split from `std` the same way proxima-tensor splits `tensor-bgpool`
 # (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
