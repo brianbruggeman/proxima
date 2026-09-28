@@ -928,6 +928,32 @@ pub fn execute_plan_with_placements_dispatch_timed(
     let mut metas: Vec<DispatchMeta> = Vec::with_capacity(position_count);
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
 
+    // profile-step-only census: the prefill plan never passes through
+    // `resolve_steps`, whose own classification row covers decode alone.
+    for bound in &prepared.resolved {
+        if let BoundOpKind::Reduce {
+            reduce_op,
+            init,
+            output_axes,
+            epilogue_body,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+            ..
+        } = &bound.kind
+        {
+            crate::msl::debug_tiled_gemm_classification(
+                bound,
+                &crate::identity::operand_codecs(bound, packed_operands),
+                *reduce_op,
+                *init,
+                output_axes,
+                epilogue_body,
+                epilogue_operands,
+                epilogue_broadcast_axes,
+                "dispatch_timed",
+            );
+        }
+    }
     let cpu_gpu_start = sample_timestamps(&device);
     for (position, bound) in prepared.resolved.iter().enumerate() {
         let placement = match output_placed.get(&bound.node).copied() {
