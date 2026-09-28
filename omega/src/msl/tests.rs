@@ -1469,14 +1469,24 @@ fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> Boun
             name: None,
         },
     );
+    // Real weight layout: heads outermost, head_dim next, embed (the
+    // reduce dim) innermost -- `classify_packed_row_block` requires the
+    // packed operand's reduce-dim stride to be exactly 1
+    // (`NonUnitWeightStride`), the same contiguity every real
+    // `attn_q`/`attn_k`/`attn_v` GGUF weight has. The original
+    // `[embed, heads, head_dim]` shape put the reduce dim OUTERMOST
+    // (stride `heads * head_dim`), which is not a layout any real packed
+    // weight ever takes -- `classify_packed_row_block` correctly declines
+    // it (`NonUnitWeightStride { stride: 1024 }`), so the fixture never
+    // reached the row-blocked gate this test means to exercise.
     let weight = append(
         &mut program,
         Op::Input {
             dtype: DType::Float32,
             shape: vec![
-                Extent::Static(embed),
                 Extent::Static(heads),
                 Extent::Static(head_dim),
+                Extent::Static(embed),
             ],
             name: None,
         },
@@ -1487,7 +1497,7 @@ fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> Boun
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
             operands: vec![
-                (weight, IndexMap::Affine(map::projection(4, &[3, 1, 2]))),
+                (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
                 (activation, IndexMap::Affine(map::projection(4, &[0, 3]))),
             ],
             name: None,
@@ -1501,7 +1511,17 @@ fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> Boun
             init: ReduceInit::Zero,
             operand: product,
             in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
-            out_map: IndexMap::Affine(map::projection(4, &[0, 1, 2])),
+            // `[token, head_dim, heads]` -- head_dim BEFORE heads, the
+            // reverse of the weight's own outer-to-inner nesting (heads
+            // outer, head_dim inner). This is the genuinely
+            // non-contiguous multi-feature-axis shape
+            // `classify_tiled_gemm`'s axis-group fold still declines:
+            // reversing the declared order breaks `axes_fold_contiguously`
+            // for the feature group even though each axis individually is
+            // weight-owned -- unlike the NATURAL `[token, heads, head_dim]`
+            // order, which folds contiguously and (correctly, since
+            // ROW 114) now admits the tiled-GEMM path.
+            out_map: IndexMap::Affine(map::projection(4, &[0, 2, 1])),
             keep: Keep::Reduce,
             name: Some("multi_head_matmul".into()),
         }),
@@ -2388,8 +2408,14 @@ fn q4_0_broadcast_epilogue_declines_tiled_gemm_admission_without_erroring() {
 fn multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_count() {
     // 32 sequence positions clears TILED_GEMM_MIN_TOKENS handily, but
     // this op keeps TWO weight-owned output axes (`heads`, `head_dim`)
-    // -- `classify_tiled_gemm`'s documented scope limit, not a silent
-    // gap.
+    // declared in the REVERSE of the weight's own outer-to-inner nesting
+    // (`multi_head_matmul_op`'s own doc) -- `axes_fold_contiguously`
+    // declines that group, so this is `classify_tiled_gemm`'s documented
+    // scope limit, not a silent gap. A NATURAL declared order (heads
+    // before head_dim, matching the weight's own nesting) folds
+    // contiguously and correctly clears tiled-GEMM admission instead --
+    // this fixture exists to prove the limit still exists for the
+    // shapes it should.
     let bound = multi_head_matmul_op(32, 8, 128, 4096);
     let weight_node = bound.operands()[1].0;
     let mut q4k = BTreeMap::new();

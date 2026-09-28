@@ -153,6 +153,38 @@ fn codec_marker(codec: Codec) -> &'static str {
 /// `'B'`.
 const MULTI_ROW_MARKER: &str = "feature_first";
 
+/// The batched `simdgroup_matrix` tiled-GEMM body's own
+/// `simdgroup_multiply_accumulate` call -- unique to
+/// `push_tiled_gemm_body`/`push_dense_batched_gemm_body`'s emitted text
+/// (confirmed empirically: never appears in the packed-row-blocked or
+/// serial renderers). `push_dense_batched_gemm_body` never fires in this
+/// file's own fixtures (every family carries a packed weight operand, and
+/// that path requires two UNQUANTIZED operands), so its presence here
+/// identifies `classify_tiled_gemm`'s admission unambiguously.
+const TILED_GEMM_MARKER: &str = "simdgroup_multiply_accumulate";
+
+/// Whether `classify_tiled_gemm` admits a `Codec::Q4K` weight matmul at
+/// token count `m`: compiled in (`metal-tiled-gemm`) and `m` clears
+/// `omega::sized::TILED_GEMM_MIN_TOKENS` are the only two gates a plain
+/// (non-multi-head, non-broadcast, non-gathered) matmul like every
+/// `WEIGHT_FAMILIES` entry here can fail on -- `classify_tiled_gemm`
+/// unconditionally admits `Codec::Q4K` (no env override needed, unlike
+/// `Codec::Q4_0`'s `PROXIMA_TILED_GEMM_Q4_0` gate). Verified empirically
+/// (`S/nb/bmm2/diag_census.log`): at `m` in `{8, 31, 256}` every Q4_K
+/// family's emitted source carries `weight_tile`/`simdgroup_multiply_
+/// accumulate` and NOT `feature_first`, while `m == 1` and the non-Q4_K
+/// families (`Q5_K`/`Q6_K`, which `classify_tiled_gemm` declines outright)
+/// still carry their original markers.
+#[cfg(feature = "metal-tiled-gemm")]
+fn q4k_takes_tiled_gemm(m: u32) -> bool {
+    u64::from(m) >= omega::sized::TILED_GEMM_MIN_TOKENS
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+fn q4k_takes_tiled_gemm(_m: u32) -> bool {
+    false
+}
+
 /// `m` activation rows (token count) x `k`-wide `Add`-reduce over a plain
 /// `weight * activation` body, `n`-wide output -- unlike `omega/src/msl.rs`'s
 /// own `matmul_op` (whose declared output-axis order puts the WEIGHT's own
@@ -238,6 +270,8 @@ fn assert_census_cell(m: u32) {
             .unwrap_or_else(|error| panic!("{}: emit failed: {error:?}", family.name));
         let expected_marker = if m == 1 {
             codec_marker(family.codec)
+        } else if family.codec == Codec::Q4K && q4k_takes_tiled_gemm(m) {
+            TILED_GEMM_MARKER
         } else {
             MULTI_ROW_MARKER
         };
