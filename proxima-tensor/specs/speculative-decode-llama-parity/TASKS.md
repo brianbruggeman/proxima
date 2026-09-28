@@ -10,8 +10,8 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 | 1 | sample-and-match verify via one shared per-row selection fn; remove plain-argmax gate; parity example runs greedy + sampled blocks and `--seed-mismatch-control` (includes the std-build fix and verify-step counting already on main uncommitted) | AC1, AC2 | `$EX` then `$EX --seed-mismatch-control` | per AC1, AC2 | [x] | AC1: no-flag run, both blocks identical=true, steps 4/2, exit 0. AC2: `--seed-mismatch-control` (seed 42 vs 4242), sampled identical=false at first_divergence=0, greedy unchanged identical=true steps=4, exit 0 |
 | 2 | fixture generator: C++ harness compiled against llama.cpp `common/ngram-*.cpp` emitting JSON cases from gemma4-tokenized real text; vendored at `proxima-tokenizer/tests/fixtures/llama-ngram/` with upstream commit in each header | AC5-AC9 (inputs) | `for f in proxima-tokenizer/tests/fixtures/llama-ngram/fixtures/ngram_*.json; do jq '.cases \| length' $f; done` | 5 files, each ≥ 200 | [x] | 4346/4395/4546/2081/4800 cases; non-empty 559/391/365/91/137; k vs k4v drafts differ in 24 cases; ngram_mod occupancy_resets=1 low_accept_resets=1; 2.4M; commit f1ea20621. streams 6-11 are constructed from real sentences to force k4v's tie guard (`ngram-map.cpp:495-499`); ngram_mod's low-accept reset uses a constructed stream (streams[5]) |
 | 3 | `draft/ngram_simple.rs`; delete `draft_ngram_lookup` and repoint decode loop | AC5, AC11 | AC5 then AC11 | 1 passed, cases ≥ 200; 0 matches | [x] | tokenizer 115 passed; fixture cases=4346 non_empty=559; AC11 grep 0 matches; clippy/doctest/model-interop filter all green; found+fixed a real decode.rs bug (`token_history` already held `next_ids[0]` when drafting was called, corrupting every pattern -- speculation silently drafted nothing end-to-end on the real gemma4-E2B checkpoint until fixed); `speculative_decode_parity` (no flag, and `--seed-mismatch-control`) both pass, `speculative_verify_steps` > 0 on greedy AND sampled; `ngram_simple_draft` takes a caller-owned `&mut Vec<u32>` output buffer, zero per-call allocation, per mid-slice owner directive |
-| 4 | `draft/ngram_map.rs` key-only | AC6 | AC6 | 1 passed | [ ] | |
-| 5 | `draft/ngram_map.rs` k4v | AC7 | AC7 | 1 passed | [ ] | |
+| 4 | `draft/ngram_map.rs` key-only | AC6 | AC6 | 1 passed | [x] | landed with slice 5 in one commit (shared state/function, `key_only` is a boolean branch of the same `ngram_map_draft`, splitting was artificial); cases=4395 |
+| 5 | `draft/ngram_map.rs` k4v | AC7 | AC7 | 1 passed | [x] | cases=4546 (24 differ from k, per README); full crate 121/121 passed; doctest 1/1; clippy clean (tokenizer+model-interop, std, all-targets) |
 | 6 | `draft/ngram_mod.rs` | AC8 | AC8 | 1 passed, resets ≥ 1 each | [ ] | |
 | 7 | `draft/ngram_cache.rs` + llama cache file loader | AC9 | AC9 | 2 passed | [ ] | |
 | 8 | ServingConfig speculative section + builder/loader parity; delete env var | AC12, AC13 | AC12 then AC13 | 1 passed; 0 matches | [ ] | |
@@ -27,15 +27,15 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 | 18 | corpus (≥ 50 prompts: chat, code, RAG) + `speculative_acceptance_corpus` example | AC17 | AC17 | prompts ≥ 50; 5 rows | [ ] | refutation check |
 | 19 | metal verify path: `--gpu-layers` flag on the parity example; verify program binds and runs on metal | AC24 | AC24 | identical, steps ≥ 1 | [ ] | lands before slice 9 |
 | 20 | `speculative_bench` harness: interleaved pairs, per-arm metrics, ioreg sampler, contamination flag, ratio stats, verify-width sweep | AC23 | AC23 | 6 rows + 1 break-even line per run | [ ] | lands before slice 9 |
-| 21 | drafter zero-alloc test with a counting allocator, one case per n-gram type as each lands | AC22 | AC22 | 5 passed, allocs = 0 | [ ] | ngram-simple case first (its out-buffer signature landed in slice 3) |
+| 21 | drafter zero-alloc test with a counting allocator, one case per n-gram type as each lands | AC22 | AC22 | 5 passed, allocs = 0 | [ ] | ngram-simple and ngram-map cases done (`proxima-tokenizer/tests/drafter_zero_alloc.rs`, reuses `proxima-test`'s `CountingAllocator`, both print `allocs = 0 over 100000 calls`); fixed `NgramMap::new` allocating per-call via unbounded `keys.push` -- now takes `max_context_len` and pre-sizes `keys` with `Vec::with_capacity`, capacity-neutral thereafter; ngram-mod and ngram-cache cases pending their own slices (6, 7) |
 | 22 | no-repeat corpus + idle overhead run | AC20 | AC20 | overhead ≤ 1.02 | [ ] | |
 | 23 | per-type speedup, metal and CPU | AC18, AC19 | AC18 then AC19 | 10 rows > 1.00 | [ ] | each drafter slice after 9 appends its row as it lands; prior evidence: ROW 292 (`proxima-tensor/docs/discipline.md:21395-21427`) measured mean k' 1.36 at k=4 on a mixed OpenChat set with the old drafter, prose 1.00-1.02 |
 | 24 | llama-server incumbent arm | AC21 | AC21 | 5 rows, proxima ≥ llama | [ ] | |
 
 ## resume
 
-Last landed slice: 3
-Next action: slice 4 -- `draft/ngram_map.rs` key-only (AC6); slices 19-21 (metal verify, bench harness, zero-alloc test) must land before slice 9
+Last landed slice: 5
+Next action: slice 6 -- `draft/ngram_mod.rs` (AC8); slices 19-21 (metal verify, bench harness, zero-alloc test) must land before slice 9
 Open question, if any: none
 
 ## struck
