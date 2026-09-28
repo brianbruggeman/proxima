@@ -66,6 +66,13 @@ use super::program::gemma4_sliding_rope_table;
 /// carries none of `attn_k.weight`, `attn_k_norm.weight`, or
 /// `attn_v.weight` at all -- see `gemma4_layer_schedule`'s own
 /// `shared_kv_source_layer` for which own-KV layer supplies them instead.
+/// The eight routed-expert leaves (`ffn_down_exps.{scale,weight}`,
+/// `ffn_gate_inp.{scale,weight}`, `ffn_gate_up_exps.weight`,
+/// `post_ffw_norm_1.weight`, `post_ffw_norm_2.weight`,
+/// `pre_ffw_norm_2.weight`) are gated on `architecture.expert_count > 0`,
+/// mirroring `bind_gemma4_weights`'s own split -- a dense checkpoint
+/// (E2B/E4B) carries none of them on disk, only the single
+/// `post_ffw_norm.weight` every layer lists unconditionally.
 #[must_use]
 pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
     let mut names = Vec::new();
@@ -73,6 +80,7 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
         .block_count
         .saturating_sub(architecture.shared_kv_layers);
 
+    let is_moe = architecture.expert_count > 0;
     for (layer, &is_sliding) in architecture.sliding_window_pattern.iter().enumerate() {
         let is_shared_kv = layer as u32 >= first_shared_idx;
         let mut suffixes = alloc::vec![
@@ -81,21 +89,28 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
             "attn_q.weight",
             "attn_q_norm.weight",
             "ffn_down.weight",
-            "ffn_down_exps.scale",
-            "ffn_down_exps.weight",
             "ffn_gate.weight",
-            "ffn_gate_inp.scale",
-            "ffn_gate_inp.weight",
-            "ffn_gate_up_exps.weight",
             "ffn_norm.weight",
             "ffn_up.weight",
             "layer_output_scale.weight",
             "post_attention_norm.weight",
             "post_ffw_norm.weight",
-            "post_ffw_norm_1.weight",
-            "post_ffw_norm_2.weight",
-            "pre_ffw_norm_2.weight",
         ];
+        // `bind_gemma4_weights`'s own `expert_count > 0` split (this file's
+        // own doc above it): these eight leaves exist on disk ONLY for a
+        // routed-expert checkpoint (12B/26B/31B) -- a dense checkpoint
+        // (E2B/E4B, `expert_count == 0`) carries none of them, only the
+        // single `post_ffw_norm.weight` already listed above.
+        if is_moe {
+            suffixes.push("ffn_down_exps.scale");
+            suffixes.push("ffn_down_exps.weight");
+            suffixes.push("ffn_gate_inp.scale");
+            suffixes.push("ffn_gate_inp.weight");
+            suffixes.push("ffn_gate_up_exps.weight");
+            suffixes.push("post_ffw_norm_1.weight");
+            suffixes.push("post_ffw_norm_2.weight");
+            suffixes.push("pre_ffw_norm_2.weight");
+        }
         if !is_shared_kv {
             suffixes.push("attn_k.weight");
             suffixes.push("attn_k_norm.weight");
@@ -1447,5 +1462,101 @@ mod declared_leaves_match_bound_leaves_tests {
                 "MoE full layer {name} must stay SharedWithKey (no attn_v.weight)"
             );
         }
+    }
+}
+
+/// Regression coverage for the bug this file shipped once:
+/// [`gemma4_tensor_names`] unconditionally listed the eight routed-expert
+/// leaves (`ffn_down_exps.*`, `ffn_gate_inp.*`, `ffn_gate_up_exps.weight`,
+/// `post_ffw_norm_1.weight`, `post_ffw_norm_2.weight`,
+/// `pre_ffw_norm_2.weight`) even on a dense checkpoint (`expert_count == 0`),
+/// producing 280 phantom names with no tensor behind them on the real
+/// `gemma4:e2b-it-qat` blob. Both fixtures below parse the real header
+/// (`parse_complete`, never a hand-built buffer, per guiding-principle 9) and
+/// assert [`gemma4_tensor_names`] equals the header's own tensor directory
+/// exactly -- zero missing, zero extra, in both directions.
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod real_checkpoint_tensor_directory_tests {
+    use std::collections::BTreeSet;
+    use std::fs::File;
+
+    use super::{from_metadata, gemma4_tensor_names};
+
+    /// The real dense E2B checkpoint the bug report names: 35 blocks, no
+    /// experts, `attention.shared_kv_layers=20`, `per_layer_token_embd`
+    /// (PLE) present. No environment override exists for this path --
+    /// `crate::test_support::require_fixture`'s own `None` branch, matching
+    /// `real_mixtral_file`/`real_lfm2_hybrid_file`'s convention for a
+    /// hardcoded fixture with no env var.
+    const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+
+    fn assert_tensor_directory_matches(path: &str) -> (usize, usize) {
+        let file = File::open(path).unwrap_or_else(|error| panic!("open {path}: {error}"));
+        // SAFETY: `file` stays open (owned by this stack frame) for as long
+        // as `mapping` is alive; the mapping is read-only and this test never
+        // writes to the backing file, so no other process racing a write can
+        // be observed as a data race on this side.
+        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
+        let file_bytes: &[u8] = &mapping;
+        let parsed =
+            proxima_gguf::parse_complete(file_bytes).expect("parses the real checkpoint's own GGUF header");
+        let architecture =
+            from_metadata(&parsed).expect("gemma4 hparams parse from the real checkpoint header");
+
+        let computed_names: BTreeSet<String> = gemma4_tensor_names(&architecture).into_iter().collect();
+        let real_names: BTreeSet<String> = parsed
+            .tensors
+            .iter()
+            .map(|tensor| tensor.name.clone())
+            .collect();
+
+        let missing: Vec<&String> = real_names.difference(&computed_names).collect();
+        let extra: Vec<&String> = computed_names.difference(&real_names).collect();
+        eprintln!(
+            "listed = {} header = {} extra = {} missing = {}",
+            computed_names.len(),
+            real_names.len(),
+            extra.len(),
+            missing.len()
+        );
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "gemma4_tensor_names must exactly match {path}'s own tensor directory: missing={missing:?} extra={extra:?}"
+        );
+        (computed_names.len(), real_names.len())
+    }
+
+    #[proxima::test]
+    #[ignore = "requires a real, local gemma4 E2B (dense) GGUF blob at REAL_GEMMA4_E2B_GGUF_PATH"]
+    async fn gemma4_tensor_names_matches_real_dense_e2b_header_with_no_moe_leaves() {
+        crate::test_support::require_fixture(REAL_GEMMA4_E2B_GGUF_PATH, None);
+        let (listed, header) = assert_tensor_directory_matches(REAL_GEMMA4_E2B_GGUF_PATH);
+        assert_eq!(listed, header);
+    }
+
+    /// `PROXIMA_GEMMA4_MOE_GGUF` read the same way `crate::test_support`'s
+    /// other `PROXIMA_*_GGUF` knobs are: unset falls back to this host-local
+    /// `batiai/gemma4-26b` checkpoint (`gemma4.expert_count`/
+    /// `gemma4.expert_used_count` present in its own GGUF metadata,
+    /// confirmed via `strings` over the blob header on 2026-09-28), the real
+    /// routed-expert sibling of the dense fixture above -- proves the MoE
+    /// leaves this fix keeps gated on `expert_count > 0` are still produced,
+    /// exactly, when a real MoE checkpoint's header says they should be.
+    fn real_gemma4_moe_gguf_path() -> String {
+        std::env::var("PROXIMA_GEMMA4_MOE_GGUF").unwrap_or_else(|_| {
+            "/Users/brianbruggeman/.ollama/models/blobs/\
+             sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129"
+                .to_string()
+        })
+    }
+
+    #[proxima::test]
+    #[ignore = "requires a real, local gemma4 MoE GGUF blob; set PROXIMA_GEMMA4_MOE_GGUF"]
+    async fn gemma4_tensor_names_matches_real_moe_header_with_expert_leaves_present() {
+        let path = real_gemma4_moe_gguf_path();
+        crate::test_support::require_fixture(&path, Some("PROXIMA_GEMMA4_MOE_GGUF"));
+        let (listed, header) = assert_tensor_directory_matches(&path);
+        assert_eq!(listed, header);
     }
 }
