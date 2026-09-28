@@ -1528,10 +1528,20 @@ fn push_tiled_gemm_body_rejects_an_empty_token_axis_group() {
         reduce_dim: 1,
         token_axes: Vec::new(),
         feature_axes: vec![0],
+        codec: Codec::Q4K,
     };
     let mut source = String::new();
-    let error = push_tiled_gemm_body(&mut source, bound.node, &[0], 2, &block, "float")
-        .expect_err("an empty token axis group is never built by classify_tiled_gemm");
+    let error = push_tiled_gemm_body(
+        &mut source,
+        bound.node,
+        &[0],
+        2,
+        &block,
+        "float",
+        &ComposedBody::leaf(ScalarOp::Identity),
+        &[],
+    )
+    .expect_err("an empty token axis group is never built by classify_tiled_gemm");
     assert!(matches!(
         error,
         EmitError::EmptyAxisGroup { group: "token", .. }
@@ -1553,10 +1563,20 @@ fn push_tiled_gemm_body_rejects_an_axis_not_in_output_axes() {
         reduce_dim: 1,
         token_axes: vec![5],
         feature_axes: vec![0],
+        codec: Codec::Q4K,
     };
     let mut source = String::new();
-    let error = push_tiled_gemm_body(&mut source, bound.node, &[0], 2, &block, "float")
-        .expect_err("axis 5 is never in output_axes [0]");
+    let error = push_tiled_gemm_body(
+        &mut source,
+        bound.node,
+        &[0],
+        2,
+        &block,
+        "float",
+        &ComposedBody::leaf(ScalarOp::Identity),
+        &[],
+    )
+    .expect_err("axis 5 is never in output_axes [0]");
     assert!(matches!(
         error,
         EmitError::AxisNotInOutputAxes { axis: 5, .. }
@@ -1576,8 +1596,17 @@ fn push_tiled_gemm_body_is_disabled_without_the_metal_tiled_gemm_feature() {
         feature_axes: Vec::new(),
     };
     let mut source = String::new();
-    let error = push_tiled_gemm_body(&mut source, bound.node, &[0], 2, &block, "float")
-        .expect_err("the tiled path never exists without metal-tiled-gemm");
+    let error = push_tiled_gemm_body(
+        &mut source,
+        bound.node,
+        &[0],
+        2,
+        &block,
+        "float",
+        &ComposedBody::leaf(ScalarOp::Identity),
+        &[],
+    )
+    .expect_err("the tiled path never exists without metal-tiled-gemm");
     assert!(matches!(error, EmitError::TiledGemmFeatureDisabled { .. }));
 
     let error = tiled_gemm_threadgroups(bound.node, 4, 16)
@@ -2087,6 +2116,155 @@ fn non_q4k_codec_never_takes_the_tiled_gemm_path() {
         !source.contains("simdgroup_multiply_accumulate"),
         "a Q6_K weight must not emit the tiled GEMM kernel:\n{source}"
     );
+}
+
+/// `PROXIMA_TILED_GEMM_Q4_0` default OFF: a `Q4_0` weight, otherwise
+/// tiled-GEMM-eligible (same shape [`many_token_matmul_takes_the_tiled_gemm_path`]
+/// admits for `Q4_K`), must still fall back to the row-blocked path -- and
+/// the emitted MSL for that fallback must be byte-identical whether the env
+/// var is unset, empty, or explicitly `"0"`, so this switch's mere existence
+/// changes nothing for anyone who has never set it (`tiled_gemm_q4_0_override`'s
+/// own doc).
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn q4_0_never_takes_the_tiled_gemm_path_with_the_switch_off() {
+    let bound = tiled_gemm_op(16, 256, 4);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    assert!(
+        tiled_gemm_block(
+            &bound,
+            &operand_codecs(&bound, &q4_0),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[1, 0]
+        )
+        .is_none(),
+        "a Q4_0 weight must never take the tiled GEMM path with the switch off"
+    );
+
+    let unset_source = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", None::<&str>, || {
+        emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("emits")
+            .source
+    });
+    let zero_source = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+        emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("emits")
+            .source
+    });
+    assert!(
+        !unset_source.contains("simdgroup_multiply_accumulate"),
+        "a Q4_0 weight must not emit the tiled GEMM kernel with the switch unset:\n{unset_source}"
+    );
+    assert_eq!(
+        unset_source, zero_source,
+        "unset and explicit \"0\" must emit byte-identical MSL for a Q4_0 weight"
+    );
+}
+
+/// `PROXIMA_TILED_GEMM_Q4_0=1`: the same `Q4_0` weight now takes the
+/// `simdgroup_matrix`-tiled path, decoding through the per-element
+/// `q4_0_element` accessor (already unconditional in the prelude via
+/// [`crate::identity`]'s own `Q4_0_UNPACK_MSL`) rather than `Q4_K`'s
+/// batched `q4k_header_for`/`q4k_run8` pair -- scheduling, packing and
+/// tiling stay the SAME emitted lines either codec takes; only this decode
+/// differs, matching the owner's standing rule that only the decoder may be
+/// codec-specific.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn q4_0_takes_the_tiled_gemm_path_with_the_switch_on() {
+    let bound = tiled_gemm_op(16, 256, 4);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
+        assert!(
+            tiled_gemm_block(
+                &bound,
+                &operand_codecs(&bound, &q4_0),
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                &[1, 0]
+            )
+            .is_some(),
+            "a Q4_0 weight must take the tiled GEMM path with the switch on"
+        );
+        let source = emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("emits")
+            .source;
+        assert!(
+            source.contains("simdgroup_multiply_accumulate"),
+            "a Q4_0 weight with the switch on must take the tiled GEMM path:\n{source}"
+        );
+        assert!(
+            source.contains("q4_0_block_scale(blk)") && source.contains("q4_0_run8(blk"),
+            "the Q4_0 tiled-GEMM arm must decode through the batched q4_0_run8 arm:\n{source}"
+        );
+        // the prelude declares `q4k_header_for`/`q4k_run8` unconditionally
+        // (every decode helper is always emitted, see `signature_tokens_
+        // prelude.rs`'s own comment), so this checks the BODY invocation
+        // pattern, not mere textual presence of the declaration.
+        assert!(
+            !source.contains("q4k_header_for(blk") && !source.contains("q4k_run8(blk"),
+            "a Q4_0 weight must never call the Q4_K decode helpers:\n{source}"
+        );
+    });
+}
+
+/// [`TiledGemmRejection::BroadcastEpilogueNotSupported`]'s own admission
+/// gate: a broadcast-reduce epilogue can never structurally reach a real
+/// packed matmul (its own fold body is never a bare `weight * activation`
+/// product, `is_plain_product_reduce` and `render_reduce`'s own broadcast
+/// gate both exclude it), so this hand-mutates the ONE field the gate reads
+/// on an otherwise-real tiled-eligible `Q4_0` op -- driving the admission
+/// contract directly, the same "hand-built shape a real classifier never
+/// produces" posture [`push_tiled_gemm_body_rejects_an_empty_token_axis_group`]
+/// already takes for [`TiledGemmBlock`] itself. The fix under test: admission
+/// declines BEFORE any renderer runs (`classify_tiled_gemm`, `kernel_cache_key`
+/// both return `Ok`/the expected `Err` with no `_tgq0` token folded in),
+/// never an [`EmitError`] surfacing at emit time the way it did before this
+/// gate existed.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn q4_0_broadcast_epilogue_declines_tiled_gemm_admission_without_erroring() {
+    let mut bound = tiled_gemm_op(16, 256, 4);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let BoundOpKind::Reduce {
+        output_axes,
+        epilogue_broadcast_axes,
+        ..
+    } = &mut bound.kind
+    else {
+        panic!("tiled_gemm_op always builds a Keep::Reduce fold")
+    };
+    *epilogue_broadcast_axes = output_axes.clone();
+
+    let codecs = operand_codecs(&bound, &q4_0);
+    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
+        let admission = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
+        assert!(
+            matches!(
+                admission,
+                Err(TiledGemmRejection::BroadcastEpilogueNotSupported)
+            ),
+            "a broadcast-reduce epilogue must decline tiled-GEMM admission naming that gate, \
+             not error later at render time"
+        );
+        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+            .expect("an admission decline must fall back, never error, at cache-key time");
+        assert!(
+            !key.contains("_tgq0"),
+            "a declined broadcast epilogue must never fold the tiled-Q4_0 token into the \
+             cache key: {key}"
+        );
+    });
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
@@ -4461,3 +4639,187 @@ fn cached_softmax_weights_render_is_deterministic_and_width_dependent() {
         let _ = std::fs::write(integration_dir.join("softmax_c512.metal"), &wide_text_a);
     }
 }
+
+/// `PROXIMA_SOFTMAX_RUNTIME_ROWS` unset (default) must reproduce the exact
+/// kernel body emitted before this switch existed: the `struct Uniforms`
+/// stays the one-word leaf shape, the entry opens with `(void)u;` (never a
+/// `cached_key_rows` read), and every one of the three key-loop bounds
+/// stays the compiled literal (`32`, not a variable read). This is the
+/// literal tail `render_cached_softmax_weights` emits for
+/// `cached_softmax_weights_op(8, 32, 256)`, captured against the pre-switch
+/// renderer -- any future edit that moves so much as one byte of this text
+/// with the switch off fails here.
+#[test]
+fn softmax_runtime_rows_default_off_is_byte_identical_to_the_literal_bound_emit() {
+    let narrow = cached_softmax_weights_op(8, 32, 256);
+    let text = temp_env::with_var("PROXIMA_SOFTMAX_RUNTIME_ROWS", None::<&str>, || {
+        render_cached_softmax_weights(&narrow, "omega_cached_softmax_weights_c32_a8_d256")
+            .expect("narrow shape renders with the switch off")
+    });
+    let expected_tail = "struct Uniforms { long total_elements; };\n\n\
+kernel void omega_cached_softmax_weights_c32_a8_d256(\n\
+\tdevice const float* cached_scores [[buffer(0)]],\n\
+\tdevice const float* new_scores [[buffer(1)]],\n\
+\tdevice const float* new_value [[buffer(2)]],\n\
+\tdevice float* out [[buffer(3)]],\n\
+\tconstant Uniforms& u [[buffer(4)]],\n\
+\tdevice float* cached_weight_sum [[buffer(5)]],\n\
+\tdevice float* new_weight_sum [[buffer(6)]],\n\
+\tdevice float* new_attended [[buffer(7)]],\n\
+\tuint local [[thread_position_in_threadgroup]],\n\
+\tuint tg [[threadgroup_position_in_grid]])\n\
+{\n\
+\t(void)u;\n\
+\tlong row = (long)tg;\n\n\
+\tfloat accumulator0 = -INFINITY;\n\
+\tbool seeded0 = false;\n\
+\tfor (long key = (long)local; key < 32; key += 32) {\n\
+\t\tlong offset = 0 + key * 8 + row * 1;\n\
+\t\tfloat value = cached_scores[offset];\n\
+\t\taccumulator0 = seeded0 ? max(accumulator0, value) : value;\n\
+\t\tseeded0 = true;\n\
+\t}\n\
+\tfloat reduced0 = simd_max(accumulator0);\n\
+\tthreadgroup float group_max_shared;\n\
+\tif (local == 0u) { group_max_shared = reduced0; }\n\
+\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+\tfloat group_max = group_max_shared;\n\n\
+\tlong new_offset = 0 + row * 1;\n\
+\tgroup_max = max(group_max, new_scores[new_offset]);\n\n\
+\tfor (long key = (long)local; key < 32; key += 32) {\n\
+\t\tlong offset = 0 + key * 8 + row * 1;\n\
+\t\tfloat step0 = (cached_scores[offset] - group_max);\n\
+\t\tout[key * 8 + row] = exp(step0);\n\
+\t}\n\
+\tthreadgroup_barrier(mem_flags::mem_device);\n\n\
+\tfloat new_shifted = exp(new_scores[new_offset] - group_max);\n\n\
+\tfloat accumulator1 = 0.0f;\n\
+\tbool seeded1 = false;\n\
+\tfor (long key = (long)local; key < 32; key += 32) {\n\
+\t\tfloat value = out[key * 8 + row];\n\
+\t\taccumulator1 = seeded1 ? (accumulator1 + value) : value;\n\
+\t\tseeded1 = true;\n\
+\t}\n\
+\tfloat reduced1 = simd_sum(accumulator1);\n\
+\tif (local == 0u) {\n\
+\t\tcached_weight_sum[row] = reduced1;\n\
+\t\tnew_weight_sum[row] = new_shifted;\n\
+\t}\n\n\
+\tfor (long dim = (long)local; dim < 256; dim += 32) {\n\
+\t\tlong voffset = 0 + row * 256 + dim * 1;\n\
+\t\tnew_attended[row * 256 + dim] = new_shifted * new_value[voffset];\n\
+\t}\n\
+}\n";
+    assert!(
+        text.ends_with(expected_tail),
+        "switch-off emit must stay byte-identical to the literal-bound kernel:\n{text}"
+    );
+    let entry = entry_name(&narrow);
+    assert_eq!(
+        entry, "omega_cached_softmax_weights_c32_a8_d256",
+        "switch-off entry name must keep the c{{n}} token"
+    );
+    let key = kernel_cache_key(&narrow, &BTreeMap::new(), NumericPolicy::default())
+        .expect("cache key computes with the switch off");
+    assert!(
+        key.contains("_c32_"),
+        "switch-off cache key must keep the c{{n}} token: {key}"
+    );
+    assert!(
+        !key.contains("rtrows"),
+        "switch-off cache key must never carry the runtime-rows marker: {key}"
+    );
+}
+
+/// `PROXIMA_SOFTMAX_RUNTIME_ROWS=1` must change exactly three things versus
+/// the switch-off emit above: the `Uniforms` struct gains a `cached_key_rows`
+/// field, the entry body reads it into a local instead of `(void)u;`, and
+/// every key-loop bound becomes that local's name instead of the literal
+/// `32` -- `width`, `attention_rows`, and `head_dim` stay compiled literals
+/// either way. The entry name and cache key both drop the `c{n}` token and
+/// carry `_rtrows` instead, so the two pipelines can never collide.
+#[test]
+fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
+    let narrow = cached_softmax_weights_op(8, 32, 256);
+
+    let off_text = temp_env::with_var("PROXIMA_SOFTMAX_RUNTIME_ROWS", None::<&str>, || {
+        render_cached_softmax_weights(&narrow, "omega_cached_softmax_weights_c32_a8_d256")
+            .expect("switch-off renders")
+    });
+    let (on_text, on_entry, on_key) = temp_env::with_var(
+        "PROXIMA_SOFTMAX_RUNTIME_ROWS",
+        Some("1"),
+        || {
+            let entry = entry_name(&narrow);
+            let text = render_cached_softmax_weights(&narrow, &entry)
+                .expect("switch-on renders");
+            let key = kernel_cache_key(&narrow, &BTreeMap::new(), NumericPolicy::default())
+                .expect("switch-on cache key computes");
+            (text, entry, key)
+        },
+    );
+
+    assert_eq!(
+        on_entry, "omega_cached_softmax_weights_rtrows_a8_d256",
+        "switch-on entry name must drop c{{n}} and carry _rtrows"
+    );
+    assert!(
+        on_key.contains("rtrows"),
+        "switch-on cache key must carry the runtime-rows marker: {on_key}"
+    );
+    assert!(
+        !on_key.contains("_c32_"),
+        "switch-on cache key must drop the c{{n}} token: {on_key}"
+    );
+
+    assert!(
+        on_text.contains("struct Uniforms { long total_elements; long cached_key_rows; };\n\n"),
+        "switch-on must widen the Uniforms struct by one word:\n{on_text}"
+    );
+    assert!(
+        on_text.contains("\tlong cached_key_rows = u.cached_key_rows;\n"),
+        "switch-on must read cached_key_rows off the uniform buffer:\n{on_text}"
+    );
+    assert!(
+        !on_text.contains("(void)u;"),
+        "switch-on no longer leaves u unused:\n{on_text}"
+    );
+    let bound_count = on_text.matches("key < cached_key_rows; key += 32").count();
+    assert_eq!(
+        bound_count, 3,
+        "all three key-loops must read the runtime bound, same stride/width as before:\n{on_text}"
+    );
+    assert!(
+        !on_text.contains("key < 32;"),
+        "switch-on must never leave a literal 32 loop bound behind:\n{on_text}"
+    );
+    // Only the entry name, the bound, and the uniform declaration differ --
+    // every other line (the accumulation expressions, the cooperative fold,
+    // the AV-fold tail) stays byte-for-byte the same text as the switch-off
+    // emit, entry names normalized to a shared placeholder first.
+    let off_normalized = off_text
+        .replace(
+            "omega_cached_softmax_weights_c32_a8_d256",
+            "omega_cached_softmax_weights_TEST_PLACEHOLDER",
+        )
+        .replace("\t(void)u;\n", "")
+        .replace(
+            "for (long key = (long)local; key < 32; key += 32)",
+            "for (long key = (long)local; key < cached_key_rows; key += 32)",
+        );
+    let on_normalized = on_text
+        .replace(
+            "omega_cached_softmax_weights_rtrows_a8_d256",
+            "omega_cached_softmax_weights_TEST_PLACEHOLDER",
+        )
+        .replace(
+            "struct Uniforms { long total_elements; long cached_key_rows; };\n\n",
+            "struct Uniforms { long total_elements; };\n\n",
+        )
+        .replace("\tlong cached_key_rows = u.cached_key_rows;\n", "");
+    assert_eq!(
+        off_normalized, on_normalized,
+        "switch-on must change only the entry name, the bound expression, and the uniform declaration"
+    );
+}
+

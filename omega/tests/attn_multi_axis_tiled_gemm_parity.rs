@@ -207,7 +207,7 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     let (program, sum) =
         multi_axis_matmul_program(TOKENS as u32, IN_DIM as u32, HEADS as u32, HEAD_DIM as u32);
     let blocks = [
-        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
+        QuantizedBlock::Packed { codec: omega::Codec::Q4K, bytes: &packed },
         QuantizedBlock::Float32(&activation),
     ];
 
@@ -219,7 +219,8 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     let packed_operands: omega::PackedOperands =
         [(NodeId(0), omega::Codec::Q4K)].into_iter().collect();
     let mut bound =
-        proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
+        proxima_tensor::bind(&program, &shapes, &[sum], proxima_tensor::NumericPolicy::default())
+            .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
     let resolved = bound
         .iter()
@@ -238,7 +239,14 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     );
 
     let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs the matmul");
-    let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
+    let plan = omega::plan(
+        &program,
+        &[],
+        &blocks,
+        &[sum],
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("metal plans the matmul");
     let metal =
         omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
@@ -313,7 +321,8 @@ fn metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path() {
     let packed_operands: omega::PackedOperands =
         [(NodeId(0), omega::Codec::Q4K)].into_iter().collect();
     let mut bound =
-        proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
+        proxima_tensor::bind(&program, &shapes, &[sum], proxima_tensor::NumericPolicy::default())
+            .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
     let resolved = bound
         .iter()

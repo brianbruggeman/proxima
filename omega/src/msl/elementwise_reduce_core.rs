@@ -250,23 +250,15 @@ pub(super) fn render_reduce(
     let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let epilogue_operand_count = epilogue_operands.len();
-    // The tiled `simdgroup_matrix` GEMM path (`push_tiled_gemm_body`) writes
-    // its output through cooperative per-tile stores this module has no
-    // single output-coordinate hook to splice an epilogue tail into -- every
-    // other reduce renderer funnels its write through one of
-    // `push_serial_reduce_body`/`push_cooperative_reduce_tail`/
-    // `push_packed_row_combine_and_write`, which `push_reduce_epilogue_write`
-    // now covers, so this is the one shape a fused epilogue is rejected for
-    // rather than rendered, the same "no renderer, reject" contract
-    // `BoundOpKind::Reduce::epilogue_body`'s own doc names.
-    if !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
-        && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
-    {
-        return Err(EmitError::EpilogueNotSupported {
-            node: resolved.node,
-            reason: "the tiled simdgroup_matrix GEMM kernel has no epilogue tail yet",
-        });
-    }
+    // The tiled `simdgroup_matrix` GEMM path (`push_tiled_gemm_body`) now
+    // funnels its own per-tile write through `push_reduce_epilogue_write`
+    // too (see that call site's doc), so a plain (non-broadcast) fused
+    // epilogue renders identically regardless of which reduce body produced
+    // the accumulator. The one shape it still cannot express -- a
+    // broadcast-reduce epilogue -- is declined at admission time by
+    // `classify_tiled_gemm`'s own `BroadcastEpilogueNotSupported` gate, so
+    // `tiled_gemm_block` never returns `Some` for that shape and there is
+    // nothing left to reject here.
 
     let mut source = String::new();
     preamble(&mut source);

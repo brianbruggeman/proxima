@@ -725,6 +725,44 @@ pub static PRE_ENCODE_CALLS: Counter = Counter::new("omega.metal.pre_encode_call
 #[cfg(feature = "instrument")]
 pub static PRE_ENCODE_TICKS: Counter = Counter::new("omega.metal.pre_encode_ticks");
 
+/// prefill599 retarget: `prepare`'s own internal phase split, five spans
+/// covering every statement between `infer` and `Prepared`'s own
+/// construction (`prepare_uniforms_pack::prepare`'s call sites name which
+/// span each wraps). Distinct from [`PREPARE_TICKS`] (the whole-function
+/// wall clock `plan_with_placed_inputs` already records) -- these are what
+/// let a caller attribute that ~28 ms bucket-crossing cost to a specific
+/// phase instead of treating `prepare` as one opaque block.
+#[cfg(feature = "instrument")]
+pub static PREPARE_INFER_TICKS: Counter = Counter::new("omega.metal.prepare_infer_ticks");
+#[cfg(feature = "instrument")]
+pub static PREPARE_VALIDATE_TICKS: Counter = Counter::new("omega.metal.prepare_validate_ticks");
+#[cfg(feature = "instrument")]
+pub static PREPARE_BIND_TICKS: Counter = Counter::new("omega.metal.prepare_bind_ticks");
+#[cfg(feature = "instrument")]
+pub static PREPARE_OPTIMIZE_TICKS: Counter = Counter::new("omega.metal.prepare_optimize_ticks");
+#[cfg(feature = "instrument")]
+pub static PREPARE_RETIRE_TICKS: Counter = Counter::new("omega.metal.prepare_retire_ticks");
+
+/// `build_plan_uniforms`'s own wall clock, timed at its sole lazy call site
+/// ([`arena_encode_dispatch_finish::plan_uniform_buffer`]) rather than inside
+/// itself, since a warm call never re-enters the function at all (the
+/// `OnceCell` is already populated) -- the counter only ever advances on the
+/// same plan-cache-miss step [`PREPARE_TICKS`] does.
+#[cfg(feature = "instrument")]
+pub static BUILD_PLAN_UNIFORMS_TICKS: Counter = Counter::new("omega.metal.build_plan_uniforms_ticks");
+/// [`arena_encode_dispatch_finish::resolve_steps`]'s own wall clock, timed
+/// past its staleness check so a plan-cache HIT (the common case, an
+/// immediate `return Ok(())`) never advances this counter -- only a genuine
+/// miss or a `set_math_mode` change compiles pipelines and pays this.
+#[cfg(feature = "instrument")]
+pub static RESOLVE_STEPS_TICKS: Counter = Counter::new("omega.metal.resolve_steps_ticks");
+/// One `newBufferWithLength_options` call inside [`build_plan_uniforms`] per
+/// resolved position -- the uniform-buffer allocation count a bucket
+/// crossing pays once per fresh `Plan`, never again for that plan's
+/// lifetime.
+#[cfg(feature = "instrument")]
+pub static UNIFORM_BUFFER_ALLOCATIONS: Counter = Counter::new("omega.metal.uniform_buffer_allocations");
+
 /// One [`execute_plan`] call's worth of the split-4019 counters above,
 /// snapshot-and-reset so a caller (the metal decode test) can read a
 /// PER-TOKEN delta rather than a cumulative mean over the whole run —
@@ -871,6 +909,22 @@ pub struct MetalStageTotals {
     pub pre_encode_calls: u64,
     /// [`PRE_ENCODE_TICKS`]'s own per-step delta.
     pub pre_encode_ticks: u64,
+    /// [`PREPARE_INFER_TICKS`]'s own per-step delta.
+    pub prepare_infer_ticks: u64,
+    /// [`PREPARE_VALIDATE_TICKS`]'s own per-step delta.
+    pub prepare_validate_ticks: u64,
+    /// [`PREPARE_BIND_TICKS`]'s own per-step delta.
+    pub prepare_bind_ticks: u64,
+    /// [`PREPARE_OPTIMIZE_TICKS`]'s own per-step delta.
+    pub prepare_optimize_ticks: u64,
+    /// [`PREPARE_RETIRE_TICKS`]'s own per-step delta.
+    pub prepare_retire_ticks: u64,
+    /// [`BUILD_PLAN_UNIFORMS_TICKS`]'s own per-step delta.
+    pub build_plan_uniforms_ticks: u64,
+    /// [`RESOLVE_STEPS_TICKS`]'s own per-step delta.
+    pub resolve_steps_ticks: u64,
+    /// [`UNIFORM_BUFFER_ALLOCATIONS`]'s own per-step delta.
+    pub uniform_buffer_allocations: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -944,6 +998,14 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         encoder_finish_ticks: ENCODER_FINISH_TICKS.snapshot_and_reset(),
         pre_encode_calls: PRE_ENCODE_CALLS.snapshot_and_reset(),
         pre_encode_ticks: PRE_ENCODE_TICKS.snapshot_and_reset(),
+        prepare_infer_ticks: PREPARE_INFER_TICKS.snapshot_and_reset(),
+        prepare_validate_ticks: PREPARE_VALIDATE_TICKS.snapshot_and_reset(),
+        prepare_bind_ticks: PREPARE_BIND_TICKS.snapshot_and_reset(),
+        prepare_optimize_ticks: PREPARE_OPTIMIZE_TICKS.snapshot_and_reset(),
+        prepare_retire_ticks: PREPARE_RETIRE_TICKS.snapshot_and_reset(),
+        build_plan_uniforms_ticks: BUILD_PLAN_UNIFORMS_TICKS.snapshot_and_reset(),
+        resolve_steps_ticks: RESOLVE_STEPS_TICKS.snapshot_and_reset(),
+        uniform_buffer_allocations: UNIFORM_BUFFER_ALLOCATIONS.snapshot_and_reset(),
     }
 }
 

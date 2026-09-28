@@ -1284,6 +1284,38 @@ static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thr
 }
 "#;
 
+/// Batched weight-tile decode for `PROXIMA_TILED_GEMM_Q4_0`'s staging loop
+/// (`push_tiled_gemm_body`'s `Codec::Q4_0` arm) -- the same amortization
+/// [`q4k_header_for`]/`q4k_run8` give `Q4_K`'s own tiled-GEMM staging: read
+/// `d` ONCE per 32-element block via `q4_0_block_scale`, then this decodes 8
+/// RAW levels at a time so the block's `d` is not re-derived (two `device`
+/// byte reads plus an `as_type<half>` reinterpret) on every one of the 32
+/// elements, which is what [`Q4_0_UNPACK_MSL`]'s `q4_0_element` still does
+/// per-call on the row-blocked path this arm does not touch.
+///
+/// Deliberately plain byte reads, NOT `q4k_run8`'s two-word-load trick:
+/// `Q4_0`'s block is 18 bytes, not a multiple of 4, so a `device const
+/// uint*` cast at `qs + 8` is not guaranteed 4-byte aligned the way
+/// `q4k_run8`'s comment proves for `Q4_K`'s 144-byte, 16-byte-aligned
+/// super-block. `out[j]` is the raw 4-bit level (0..15, caller applies
+/// `(level - 8) * d`), matching `q4k_run8`'s own raw-level contract.
+pub const Q4_0_RUN8_MSL: &str = r#"
+static inline float q4_0_block_scale(device const uchar *block) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    return (float)as_type<half>(d_bits);
+}
+
+static inline void q4_0_run8(device const uchar *block, uint index, thread float *out) {
+    device const uchar *qs = block + 2;
+    uint shift = (index < 16u) ? 0u : 4u;
+    uint base = index % 16u;
+    for (uint j = 0u; j < 8u; ++j) {
+        uchar byte = qs[base + j];
+        out[j] = (float)((byte >> shift) & 0x0Fu);
+    }
+}
+"#;
+
 /// Bytes one `Q4_0` block occupies -- read from
 /// `proxima_gguf::quant::q4_0::BLOCK_BYTES`; pinned in
 /// `omega/tests/q4_0_unpack.rs`, same posture as [`Q8_0_BLOCK_BYTES`].
@@ -1773,6 +1805,50 @@ pub(super) const fn q4_0_multi_row_hoist_override() -> bool {
     false
 }
 
+/// `PROXIMA_TILED_GEMM_Q4_0=1` A/B switch: admits `Codec::Q4_0` into
+/// [`crate::msl::classify_tiled_gemm`], the same `simdgroup_matrix`-tiled
+/// GEMM ([`crate::msl::push_tiled_gemm_body`]) today's `Codec::Q4_K`-only
+/// admission renders (`docs/discipline.md` ROW 109) -- scheduling, packing
+/// and tiling stay CODEC-GENERIC (only the weight-tile decode differs per
+/// codec), matching the owner's standing rule that only the decoder may be
+/// codec-specific. Default OFF -- unset, empty, or any value other than
+/// `"1"` keeps today's Q4_K-only admission, so the unset-env emit stays
+/// byte-identical to before this switch existed, same posture as
+/// [`q4_0_multi_row_hoist_override`] above.
+// gated on `metal-tiled-gemm`, not just `std`: this switch has no meaning
+// outside the tiled-GEMM admission path, and every caller (`emit_and_
+// classify.rs`'s `classify_tiled_gemm`/`tiled_gemm_q4_0_active`) already
+// lives behind that same feature -- unlike `q4_0_multi_row_hoist_override`
+// above, which a `metal`-only build (no `metal-tiled-gemm`) still calls from
+// its own unconditional seam.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_q4_0_override() -> bool {
+    let active = matches!(std::env::var("PROXIMA_TILED_GEMM_Q4_0"), Ok(value) if value.trim() == "1");
+    log_tiled_gemm_q4_0_once(active);
+    active
+}
+
+/// Print the selected tiled-GEMM `Q4_0` admission exactly once per process,
+/// matching [`log_q4_0_multi_row_hoist_once`]'s own posture. Gated on
+/// `instrument` alone -- the override itself stays `std`-only and fires
+/// regardless of `instrument`.
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_tiled_gemm_q4_0_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_q4_0");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_tiled_gemm_q4_0_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_q4_0_override() -> bool {
+    false
+}
+
 /// `PROXIMA_MULTI_ROW_UNROLL=1` A/B switch: literal indices let the `sumf`
 /// accumulator promote out of private memory instead of surviving as a
 /// dynamically-indexed array. Default off; unset, empty, or any value other
@@ -1881,6 +1957,46 @@ fn log_coord_index32_once(_active: bool) {}
 
 #[cfg(not(feature = "std"))]
 pub(super) const fn coord_index32_override() -> bool {
+    false
+}
+
+/// `PROXIMA_SOFTMAX_RUNTIME_ROWS=1` A/B switch: [`BoundOpKind::
+/// CachedSoftmaxWeights`]'s `cached_key_rows` loop bound is read off the
+/// runtime `Uniforms` buffer (`render_cached_attention`'s own `6c48b22f`
+/// `in8[0]` precedent) instead of baked as a compiled `constexpr` literal.
+/// Default off; unset, empty, or any value other than `"1"` keeps today's
+/// literal-bound emit.
+#[cfg(feature = "std")]
+pub(crate) fn softmax_runtime_rows_override() -> bool {
+    let active =
+        matches!(std::env::var("PROXIMA_SOFTMAX_RUNTIME_ROWS"), Ok(value) if value.trim() == "1");
+    log_softmax_runtime_rows_once(active);
+    active
+}
+
+/// Print whether the softmax-runtime-rows experiment fired exactly once per
+/// process, matching [`log_multi_row_index32_once`]'s own posture. Gated on
+/// `instrument` alone -- the override itself stays `std`-only and fires
+/// regardless of `instrument`.
+#[cfg(feature = "instrument")]
+fn log_softmax_runtime_rows_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(
+            override_name = "softmax_runtime_rows",
+            active,
+            source,
+            "softmax runtime-rows override resolved"
+        );
+    });
+}
+
+#[cfg(all(feature = "std", not(feature = "instrument")))]
+fn log_softmax_runtime_rows_once(_active: bool) {}
+
+#[cfg(not(feature = "std"))]
+pub(crate) const fn softmax_runtime_rows_override() -> bool {
     false
 }
 

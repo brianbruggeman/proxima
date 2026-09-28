@@ -272,6 +272,8 @@ pub(super) fn build_plan_uniforms(
         write_plan_uniform_bytes(&buffer, &bytes);
         #[cfg(feature = "instrument")]
         counter!(PLAN_UNIFORM_WRITES, 1);
+        #[cfg(feature = "instrument")]
+        counter!(UNIFORM_BUFFER_ALLOCATIONS, 1);
         buffers.push(buffer);
     }
     Ok(PlanUniforms { buffers })
@@ -354,7 +356,11 @@ pub(super) fn arena_placement(
 pub(super) fn plan_uniform_buffer(plan: &Plan, position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
     if plan.uniforms.get().is_none() {
         let (device, _queue) = device_and_queue()?;
+        #[cfg(feature = "instrument")]
+        let build_started = read_ticks();
         let uniforms = build_plan_uniforms(&device, &plan.prepared.resolved, plan.numeric_policy)?;
+        #[cfg(feature = "instrument")]
+        counter!(BUILD_PLAN_UNIFORMS_TICKS, elapsed_ticks(build_started));
         let _ = plan.uniforms.set(uniforms);
     }
     Ok(plan
@@ -476,6 +482,8 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
     if !stale {
         return Ok(());
     }
+    #[cfg(feature = "instrument")]
+    let resolve_started = read_ticks();
     // a math-mode change recompiles every pipeline, so a merged group's own
     // compiled pipeline/base_table (keyed off the STALE step pipelines) must
     // be dropped too, or the encode loop below would dispatch a merged
@@ -486,6 +494,29 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
     for bound in &plan.prepared.resolved {
         let mut cache_key = kernel_cache_key(bound, &plan.packed_operands, plan.numeric_policy)?;
         cache_key.push(plan.math_mode.cache_token());
+        #[cfg(feature = "instrument")]
+        if let BoundOpKind::Reduce {
+            reduce_op,
+            init,
+            output_axes,
+            epilogue_body,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+            ..
+        } = &bound.kind
+        {
+            crate::msl::debug_tiled_gemm_classification(
+                bound,
+                &crate::identity::operand_codecs(bound, &plan.packed_operands),
+                *reduce_op,
+                *init,
+                output_axes,
+                epilogue_body,
+                epilogue_operands,
+                epilogue_broadcast_axes,
+                &cache_key,
+            );
+        }
         let (bindings, grid) =
             kernel_dispatch_shape(bound, &plan.packed_operands, plan.numeric_policy)?;
         let pipeline = pipeline_for(
@@ -549,6 +580,8 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
         #[cfg(feature = "metal-horizontal-merge")]
         merge_candidates,
     });
+    #[cfg(feature = "instrument")]
+    counter!(RESOLVE_STEPS_TICKS, elapsed_ticks(resolve_started));
     Ok(())
 }
 
@@ -591,7 +624,44 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
 /// env vars per call (`PROXIMA_CAPTURE_NODES`, parsed once per call rather
 /// than cached, since this only ever fires under `instrument` for a handful
 /// of explicitly named nodes) -- never on the default decode hot path.
+///
+/// `PROXIMA_CAPTURE_DUMP_DIR=<dir>`, on top of a `PROXIMA_CAPTURE_NODES`
+/// match: stashes this dispatch's resolved buffer handles (not their bytes
+/// yet -- the GPU has not run this dispatch at encode time) into
+/// [`CAPTURE_DUMP_PENDING`] for [`flush_pending_capture_dumps`] to read back
+/// once the command buffer carrying this dispatch has actually completed.
+/// uses the renderer's own packed-row classifier so this substitution's
+/// admission can never diverge from what actually dispatches. `false` on a
+/// gathered weight: this diagnostic's blit substitution has no gather-aware
+/// ABI.
 #[cfg(feature = "instrument")]
+pub(super) fn is_packed_multi_token_projection(
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> bool {
+    let quantized: Vec<Option<Codec>> = bound
+        .operands()
+        .iter()
+        .map(|(node, _, _)| packed_operands.get(node).copied())
+        .collect();
+    let Some(block) = crate::msl::packed_row_block(bound, &quantized) else {
+        return false;
+    };
+    let token_total: u64 = block
+        .token_axes
+        .iter()
+        .map(|&axis| bound.extents[axis as usize])
+        .product();
+    token_total > 1
+}
+
+#[cfg(feature = "instrument")]
+// eight call-site facts a diagnostic dump genuinely needs (bound op, packed
+// operand codecs, the compiled pipeline, launch geometry, every binding, the
+// resolved buffer map, the output slot, the uniforms buffer) -- splitting
+// these into a struct only this one diagnostic function would ever construct
+// is not a real type, it is this argument list with extra steps.
+#[allow(clippy::too_many_arguments)]
 fn capture_dispatch(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
@@ -600,11 +670,14 @@ fn capture_dispatch(
     bindings: &[Binding],
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     output: (&MetalBuffer, usize),
+    uniforms: &MetalBuffer,
 ) {
     let Some(wanted) = std::env::var("PROXIMA_CAPTURE_NODES").ok() else {
         return;
     };
+    let output_only = wanted.trim() == "packed-multi-token";
     let matched = wanted.trim() == "all"
+        || (output_only && is_packed_multi_token_projection(bound, packed_operands))
         || wanted
             .split(',')
             .filter_map(|token| token.trim().parse::<u32>().ok())
@@ -643,13 +716,13 @@ fn capture_dispatch(
     // resolved offset, so `extents` (the iteration-space shape) is the
     // output-side geometry fact this record has to report, not a stride
     // vector `BoundOp` never stores.
-    eprintln!(
-        "bound_op node={} kind={} operands=[{}] output=(extents={:?}, dtype={:?})",
-        bound.node.0,
-        bound.kind.name(),
-        operand_records.join(", "),
-        bound.extents,
-        bound.dtype,
+    debug!(
+        node = bound.node.0,
+        kind = bound.kind.name(),
+        operands = %operand_records.join(", "),
+        extents = ?bound.extents,
+        dtype = ?bound.dtype,
+        "bound_op"
     );
     let record = PIPELINE_CAPTURE.with(|capture| {
         capture
@@ -671,6 +744,7 @@ fn capture_dispatch(
         None => (grid.threads as usize).min(max_threadgroup).max(1),
     };
     let mut buffers = Vec::new();
+    let mut dump_buffers = Vec::new();
     for (index, binding) in bindings.iter().enumerate() {
         let resolved: Option<(MetalBuffer, usize)> = match binding {
             Binding::Input(node) | Binding::Indices(node) => {
@@ -685,17 +759,217 @@ fn capture_dispatch(
                 Retained::as_ptr(&buffer),
                 buffer.length()
             ));
+            // keeps the dump small: only the output, never the resident
+            // weight/activation inputs a substitution pass never re-reads.
+            if !output_only || matches!(binding, Binding::Output(_)) {
+                dump_buffers.push((index, buffer, offset));
+            }
         } else {
             buffers.push(format!("({index}, unresolved, 0, 0)"));
         }
     }
-    eprintln!(
-        "dispatch_capture step={step} node={} key={cache_key:?} entry={entry} msl_sha256={msl_sha256} grid=({},1,{}) threadgroup=({threadgroup_width},1,1) buffers=[{}]",
-        bound.node.0,
-        grid.threads,
-        grid.depth,
-        buffers.join(", "),
+    if std::env::var_os("PROXIMA_CAPTURE_DUMP_DIR").is_some() {
+        CAPTURE_DUMP_PENDING.with(|pending| {
+            pending.borrow_mut().push(CaptureDumpEntry {
+                step,
+                node: bound.node.0,
+                bound_op_line: format!(
+                    "bound_op node={} kind={} operands=[{}] output=(extents={:?}, dtype={:?})",
+                    bound.node.0,
+                    bound.kind.name(),
+                    operand_records.join(", "),
+                    bound.extents,
+                    bound.dtype,
+                ),
+                entry: entry.clone(),
+                msl_sha256: msl_sha256.clone(),
+                grid: (grid.threads as usize, 1, grid.depth as usize),
+                threadgroup_width,
+                dtype: format!("{:?}", bound.dtype),
+                extents: format!("{:?}", bound.extents),
+                buffers: dump_buffers,
+                uniforms: (uniforms.clone(), uniforms.length()),
+                manifest: output_only,
+            });
+        });
+    }
+    debug!(
+        step,
+        node = bound.node.0,
+        key = ?cache_key,
+        entry = %entry,
+        msl_sha256 = %msl_sha256,
+        grid_threads = grid.threads,
+        grid_depth = grid.depth,
+        threadgroup_width,
+        buffers = %buffers.join(", "),
+        "dispatch_capture"
     );
+}
+
+/// One [`capture_dispatch`] match under `PROXIMA_CAPTURE_DUMP_DIR`, held
+/// until [`flush_pending_capture_dumps`] can read the GPU-written bytes back
+/// -- at encode time (where [`capture_dispatch`] runs) this dispatch has
+/// only been recorded into the command buffer, not yet executed.
+#[cfg(feature = "instrument")]
+struct CaptureDumpEntry {
+    step: u64,
+    node: u32,
+    bound_op_line: String,
+    entry: String,
+    msl_sha256: String,
+    grid: (usize, usize, usize),
+    threadgroup_width: usize,
+    dtype: String,
+    extents: String,
+    /// `(binding index, buffer, offset)`, one per resolved `Input`/`Indices`/
+    /// `Output` binding -- the same set [`capture_dispatch`]'s own
+    /// `dispatch_capture` line already reports as `(index, ptr, offset,
+    /// length)`, just holding the live buffer handle instead of formatting
+    /// it away.
+    buffers: Vec<(usize, MetalBuffer, usize)>,
+    uniforms: (MetalBuffer, usize),
+    /// `true` under `PROXIMA_CAPTURE_NODES=packed-multi-token`: also append
+    /// this node to `manifest.txt` at flush time.
+    manifest: bool,
+}
+
+thread_local! {
+    #[cfg(feature = "instrument")]
+    static CAPTURE_DUMP_PENDING: RefCell<Vec<CaptureDumpEntry>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Reads back every [`CaptureDumpEntry`] queued since the last flush and
+/// writes its buffer bytes to `PROXIMA_CAPTURE_DUMP_DIR`. Call ONLY at a
+/// point where every command buffer that could contain a queued dispatch has
+/// already returned from `waitUntilCompleted` -- Apple Silicon's unified
+/// memory makes `MTLBuffer::contents()` a plain host pointer, valid to read
+/// the instant the GPU work that wrote it has retired, but not one instant
+/// before (an in-flight write racing this read is exactly the hazard
+/// `waitUntilCompleted` exists to close). Draining (not just reading) the
+/// pending list means a later flush from the same process step never
+/// re-dumps an already-written node.
+///
+/// `<dir>/node<id>_buf<index>_off<offset>_len<len>.bin` holds one binding's
+/// raw bytes; `<dir>/node<id>_uniforms_len<len>.bin` holds the bound
+/// uniforms struct, when one was bound; `<dir>/node<id>.meta` holds the
+/// `bound_op` line plus extents/dtype/grid/threadgroup/entry/msl_sha256 --
+/// everything [`capture_dispatch`]'s own `dispatch_capture` line already
+/// prints, just also durable as a file `replay_projection.rs` can read
+/// without re-parsing stderr.
+#[cfg(feature = "instrument")]
+pub(super) fn flush_pending_capture_dumps() {
+    let Some(dir) = std::env::var_os("PROXIMA_CAPTURE_DUMP_DIR") else {
+        return;
+    };
+    let entries = CAPTURE_DUMP_PENDING.with(|pending| core::mem::take(&mut *pending.borrow_mut()));
+    if entries.is_empty() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(dir);
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        debug!(?err, dir = ?dir, "capture dump: failed to create dump directory");
+        return;
+    }
+    for entry in entries {
+        let node = entry.node;
+        let step = entry.step;
+        // A resident weight buffer is one no-copy `MTLBuffer` backing the
+        // whole checkpoint mmap (gigabytes); `buffer.length() - offset` on
+        // that identity is "rest of the checkpoint file", not this op's own
+        // operand. Cap at 64 MiB -- comfortably above every real operand this
+        // capture has seen (600x12288 f32 = 29.49 MB, the largest) -- so the
+        // dumped file is bounded while still holding this op's whole real
+        // slice for every non-resident buffer.
+        const CAPTURE_DUMP_MAX_BYTES: usize = 64 * 1024 * 1024;
+        let mut buffer_records = Vec::with_capacity(entry.buffers.len());
+        let mut manifest_row: Option<(usize, String)> = None;
+        for (index, buffer, offset) in &entry.buffers {
+            let length = buffer
+                .length()
+                .saturating_sub(*offset)
+                .min(CAPTURE_DUMP_MAX_BYTES);
+            let pointer = buffer.contents().as_ptr().cast::<u8>();
+            let bytes = unsafe { core::slice::from_raw_parts(pointer.add(*offset), length) };
+            // step in the name: without it, a later step silently overwrites
+            // an earlier step's dump of the same node.
+            let path = dir.join(format!("node{node}_step{step}_buf{index}_off{offset}_len{length}.bin"));
+            if let Err(err) = std::fs::write(&path, bytes) {
+                debug!(?err, path = ?path, "capture dump: failed to write buffer bytes");
+            }
+            buffer_records.push(format!("({index}, off={offset}, len={length})"));
+            if entry.manifest {
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(bytes);
+                manifest_row = Some((length, format!("{digest:x}")));
+            }
+        }
+        if let (true, Some((length, sha256))) = (entry.manifest, manifest_row) {
+            let manifest_line =
+                format!("node={node}\textents={}\toutput_len={length}\tsha256={sha256}\n", entry.extents);
+            let manifest_path = dir.join("manifest.txt");
+            let append_result = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&manifest_path)
+                .and_then(|mut file| {
+                    use std::io::Write;
+                    file.write_all(manifest_line.as_bytes())
+                });
+            if let Err(err) = append_result {
+                debug!(?err, path = ?manifest_path, "capture dump: failed to append manifest line");
+            }
+        }
+        let (uniforms_buffer, uniforms_len) = &entry.uniforms;
+        let mut uniforms_note = "none".to_string();
+        if *uniforms_len > 0 {
+            let pointer = uniforms_buffer.contents().as_ptr().cast::<u8>();
+            let bytes = unsafe { core::slice::from_raw_parts(pointer, *uniforms_len) };
+            let path = dir.join(format!("node{node}_step{step}_uniforms_len{uniforms_len}.bin"));
+            if let Err(err) = std::fs::write(&path, bytes) {
+                debug!(?err, path = ?path, "capture dump: failed to write uniforms bytes");
+            }
+            uniforms_note = format!("node{node}_step{step}_uniforms_len{uniforms_len}.bin");
+        }
+        let meta = format!(
+            "{}\nstep={}\nentry={}\nmsl_sha256={}\ngrid={:?}\nthreadgroup=({},1,1)\ndtype={}\nextents={}\nbuffers=[{}]\nuniforms={uniforms_note}\n",
+            entry.bound_op_line,
+            entry.step,
+            entry.entry,
+            entry.msl_sha256,
+            entry.grid,
+            entry.threadgroup_width,
+            entry.dtype,
+            entry.extents,
+            buffer_records.join(", "),
+        );
+        let meta_path = dir.join(format!("node{node}_step{step}.meta"));
+        if let Err(err) = std::fs::write(&meta_path, meta) {
+            debug!(?err, path = ?meta_path, "capture dump: failed to write meta file");
+        }
+        // Structured event, not a hand-rolled `eprintln!` (rust.md: "never
+        // hand-roll env-gated file dumps for forensics/instrumentation").
+        // The metadata (node/step/entry/extents/sha256/sizes) is fully
+        // captured here as typed fields; the raw buffer/uniforms BYTES stay
+        // plain `std::fs::write` above, never routed through
+        // `LogBody::Owned` -- `proxima-telemetry/src/pipes.rs:1859-1861`
+        // (and its JSON-format twin at `:1889-1891`) render `Owned` bytes
+        // via `String::from_utf8_lossy`, which is lossy for arbitrary
+        // binary tensor data (a Q4_0-packed weight row is not valid UTF-8
+        // in general): routing a 30 MB quantized buffer through that body
+        // type and either text-format exporter would silently corrupt it,
+        // not merely truncate it. The `Bytes` type `LogBody::Owned` wraps
+        // has no fixed size ceiling of its own; the refusal is a fidelity
+        // one, not a capacity one.
+        debug!(
+            node,
+            step,
+            dir = ?dir,
+            manifest = entry.manifest,
+            buffer_count = entry.buffers.len() as u64,
+            "capture dump: buffers and metadata flushed"
+        );
+    }
 }
 
 /// [`chunk_audit_record_dispatch`]'s per-dispatch feed: walks the SAME
@@ -1277,6 +1551,7 @@ pub(super) fn encode_op(
         bindings,
         device_buffers,
         (&output, output_offset),
+        &uniforms,
     );
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
@@ -2744,8 +3019,22 @@ pub(super) mod hazard_tracker_tests {
     /// now-read-since-barrier identity, the same shape
     /// [`arena_slot_reuse_after_a_read_emits_a_war_barrier`] drives) --
     /// exactly the scenario [`record_hazard_class`] exists to attribute.
-    // shared process-global counters: assert the before/after delta is >=
-    // this test's own contribution, never == (a concurrent test can only add).
+    /// Asserts BOTH on `classify`'s own returned [`HazardClass`] (a local
+    /// value) AND on the process-global `BARRIERS_*` counters
+    /// [`record_hazard_class`] feeds -- the counters are shared statics real
+    /// dispatch code and other concurrently running `cargo test` threads also
+    /// increment, so each is read via `.get()` BEFORE this test's own two
+    /// `record_hazard_class` calls and again AFTER, asserting the DELTA is at
+    /// least this test's own contribution (`>=`, never `==`) -- a concurrent
+    /// writer can only add to the delta, never subtract, so `>=` is sound
+    /// under a shared parallel suite. `BARRIERS_WAW`/`BARRIERS_WAW_WAR_
+    /// PERSISTENT` are NOT asserted to stay at exactly this test's own zero
+    /// contribution: an unrelated concurrently running test genuinely can
+    /// fire a WAW or persistent-identity barrier in the same window, and
+    /// there is no sound way to distinguish "this test caused zero" from "a
+    /// concurrent test's own nonzero landed in this window" from outside
+    /// that test's own scope -- asserting `== 0` here would be exactly the
+    /// exact-value-against-shared-state defect this whole fix removes.
     #[cfg(feature = "instrument")]
     #[test]
     fn hazard_class_counters_attribute_one_raw_and_one_arena_reuse_war() {

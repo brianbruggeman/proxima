@@ -79,6 +79,7 @@ use super::*;
 /// dimensionally valid MSL, semantically wrong matrix product -- caught by
 /// `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`.)
 #[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_tiled_gemm_body(
     source: &mut String,
     node: NodeId,
@@ -86,6 +87,8 @@ pub(super) fn push_tiled_gemm_body(
     rank: usize,
     block: &TiledGemmBlock,
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
     let TiledGemmBlock {
         weight,
@@ -93,6 +96,7 @@ pub(super) fn push_tiled_gemm_body(
         reduce_dim,
         ref token_axes,
         ref feature_axes,
+        codec,
     } = *block;
     // innermost (fastest, last-listed) of each group -- the single stride
     // the per-element reads below use; see `TiledGemmBlock`'s own doc.
@@ -205,9 +209,20 @@ pub(super) fn push_tiled_gemm_body(
     // `require_multiple_of_eight`, added alongside this row), so it is
     // always either <= the Q4_K sub-block width (32) or a whole multiple of
     // it -- `chunk_width` picks the smaller, `num_chunks` covers `block_k`
-    // exactly with no ragged remainder either way.
+    // exactly with no ragged remainder either way. `Q4_0` has no super-block
+    // of its own (its one real block IS 32 elements / 18 bytes), so its own
+    // `codec_block_elements`/`codec_block_bytes` happen to reproduce the
+    // identical 32-wide chunk width -- the SAME chunking loop below serves
+    // both codecs; only the per-chunk decode differs (`classify_tiled_gemm`
+    // only ever admits these two).
+    let block_elements = u64::try_from(codec_block_elements(codec)).unwrap_or(u64::MAX);
+    let block_bytes = u64::try_from(codec_block_bytes(codec)).unwrap_or(u64::MAX);
     let q4k_subblock_width: u64 = (Q4K_BLOCK_ELEMENTS / 8) as u64;
-    let chunk_width = q4k_subblock_width.min(block_k);
+    let chunk_width = match codec {
+        Codec::Q4_0 => Q4_0_BLOCK_ELEMENTS as u64,
+        _ => q4k_subblock_width,
+    }
+    .min(block_k);
     let num_chunks = block_k.div_ceil(chunk_width);
     for chunk_index in 0..num_chunks {
         let chunk_offset = chunk_index * chunk_width;
@@ -216,24 +231,50 @@ pub(super) fn push_tiled_gemm_body(
             "                    long slot_off = row_base + {chunk_offset};\n"
         ));
         source.push_str(&format!(
-            "                    device const uchar *blk = in{weight} + (slot_off / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES};\n"
+            "                    device const uchar *blk = in{weight} + (slot_off / {block_elements}) * {block_bytes};\n"
         ));
         source.push_str(&format!(
-            "                    uint slot = (uint)(slot_off % {Q4K_BLOCK_ELEMENTS});\n"
+            "                    uint slot = (uint)(slot_off % {block_elements});\n"
         ));
-        source.push_str("                    q4k_header hdr = q4k_header_for(blk, slot);\n");
-        let runs = chunk_width / 8;
-        for run_index in 0..runs {
-            let run_offset = run_index * 8;
-            source.push_str("                    {\n");
-            source.push_str("                        float levels[8];\n");
-            source.push_str(&format!(
-                "                        q4k_run8(blk, slot + {run_offset}u, levels);\n"
-            ));
-            source.push_str(&format!(
-                "                        for (int j = 0; j < 8; ++j) {{ weight_tile[w_row * {block_k} + {chunk_offset} + {run_offset} + j] = (half)(hdr.scale * levels[j] - hdr.minimum); }}\n"
-            ));
-            source.push_str("                    }\n");
+        match codec {
+            Codec::Q4_0 => {
+                // ROW 113's discipline (read the block's scale ONCE, not
+                // once per element) now applies here too, via `Q4_0`'s own
+                // batched sibling to `q4k_run8` (`Q4_0_RUN8_MSL`, see its
+                // own doc): `q4_0_block_scale` reads `d` once per
+                // 32-element block, `q4_0_run8` batches the raw-nibble
+                // extract 8 at a time, same shape as the Q4_K arm below.
+                source.push_str("                    float q4_0_d = q4_0_block_scale(blk);\n");
+                let runs = chunk_width / 8;
+                for run_index in 0..runs {
+                    let run_offset = run_index * 8;
+                    source.push_str("                    {\n");
+                    source.push_str("                        float levels[8];\n");
+                    source.push_str(&format!(
+                        "                        q4_0_run8(blk, slot + {run_offset}u, levels);\n"
+                    ));
+                    source.push_str(&format!(
+                        "                        for (int j = 0; j < 8; ++j) {{ weight_tile[w_row * {block_k} + {chunk_offset} + {run_offset} + j] = (half)((levels[j] - 8.0f) * q4_0_d); }}\n"
+                    ));
+                    source.push_str("                    }\n");
+                }
+            }
+            _ => {
+                source.push_str("                    q4k_header hdr = q4k_header_for(blk, slot);\n");
+                let runs = chunk_width / 8;
+                for run_index in 0..runs {
+                    let run_offset = run_index * 8;
+                    source.push_str("                    {\n");
+                    source.push_str("                        float levels[8];\n");
+                    source.push_str(&format!(
+                        "                        q4k_run8(blk, slot + {run_offset}u, levels);\n"
+                    ));
+                    source.push_str(&format!(
+                        "                        for (int j = 0; j < 8; ++j) {{ weight_tile[w_row * {block_k} + {chunk_offset} + {run_offset} + j] = (half)(hdr.scale * levels[j] - hdr.minimum); }}\n"
+                    ));
+                    source.push_str("                    }\n");
+                }
+            }
         }
         source.push_str("                }\n");
     }
@@ -344,9 +385,28 @@ pub(super) fn push_tiled_gemm_body(
             "            out_offset += coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str(&format!(
-        "            out[out_offset] = ({element_type})out_tile[idx];\n"
-    ));
+    // reuse the SAME fused-epilogue emitter every other reduce renderer
+    // funnels its write through (`push_reduce_epilogue_write`'s own doc) --
+    // `coord` reads this function's own per-output-element `coord[rank]`
+    // array at the axis id `output_axes[dim]` maps to, the identical
+    // addressing the `out_offset` loop just above already uses, so a fused
+    // GeGLU-shaped (or any other plain, non-broadcast) epilogue reads its
+    // extra operands at the exact element `push_tiled_gemm_body` is about to
+    // write. `classify_tiled_gemm`'s own `BroadcastEpilogueNotSupported` gate
+    // is what keeps a broadcast-reduce epilogue -- the one shape this write
+    // tail cannot express -- from ever reaching this function at all.
+    let accumulator_expr = format!("({element_type})out_tile[idx]");
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_axes.len(),
+        element_type,
+        "            ",
+        |dim| format!("coord[{}]", output_axes[dim]),
+        &accumulator_expr,
+        "out_offset",
+    );
     source.push_str("        }\n");
     source.push_str("    }\n");
     Ok(())
@@ -358,6 +418,7 @@ pub(super) fn push_tiled_gemm_body(
 /// exists only so [`push_cooperative_reduce_body`]'s `if let Some(block) =
 /// tiled_gemm_block(...)` arm still type-checks in that build.
 #[cfg(not(feature = "metal-tiled-gemm"))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_tiled_gemm_body(
     source: &mut String,
     node: NodeId,
@@ -365,8 +426,18 @@ pub(super) fn push_tiled_gemm_body(
     rank: usize,
     block: &TiledGemmBlock,
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
-    let _ = (source, output_axes, rank, block, element_type);
+    let _ = (
+        source,
+        output_axes,
+        rank,
+        block,
+        element_type,
+        epilogue_body,
+        epilogue_operands,
+    );
     Err(EmitError::TiledGemmFeatureDisabled { node })
 }
 
@@ -734,6 +805,8 @@ pub(super) fn push_cooperative_reduce_body(
             rank,
             &block,
             element_type,
+            epilogue_body,
+            epilogue_operands,
         )?;
         return Ok(());
     }
