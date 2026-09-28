@@ -1,7 +1,7 @@
 use core::ops::ControlFlow;
 
 use super::*;
-#[cfg(feature = "instrument")]
+#[cfg(all(feature = "instrument", feature = "metal"))]
 use proxima_telemetry::metric::Counter;
 
 /// GAP.md's own residual: the `resolve_cached_plan` `BTreeMap` lookup runs
@@ -11,10 +11,18 @@ use proxima_telemetry::metric::Counter;
 /// `omega::metal::MetalStageTotals` (Metal dispatch, a different crate's
 /// concern) -- read by [`crate::generate::load_model::emit_token_breakdown_metal`]
 /// as an explicit parameter instead.
-#[cfg(feature = "instrument")]
+///
+/// Gated on `metal` as well as `instrument`: both the writer (this file's
+/// `resolve_cached_plan`, inside the `#[cfg(feature = "metal")] impl
+/// BackendRuntime`) and the only reader
+/// (`emit_token_breakdown_metal`, `#[cfg(all(feature = "metal", target_os =
+/// "macos"))]` in `decode.rs`) require `metal`; an `instrument`-only build
+/// declared these statics with no reachable writer or reader at all, which
+/// `-D dead-code` correctly flagged.
+#[cfg(all(feature = "instrument", feature = "metal"))]
 pub(super) static RESOLVE_PLAN_CALLS: Counter =
     Counter::new("proxima_model_interop.residency.resolve_plan_calls");
-#[cfg(feature = "instrument")]
+#[cfg(all(feature = "instrument", feature = "metal"))]
 pub(super) static RESOLVE_PLAN_TICKS: Counter =
     Counter::new("proxima_model_interop.residency.resolve_plan_ticks");
 
