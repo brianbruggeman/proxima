@@ -1318,7 +1318,10 @@ fn push_packed_matmul_offset(
 // fold's axis/rank/operand facts in scope at once, and this crate's other
 // renderer already carries the same shape rather than a param-bundling
 // struct for read-only rendering inputs.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the Metal twin's renderer inputs field for field, and bundling them into a struct would only relocate the count"
+)]
 fn push_serial_reduce_body(
     source: &mut String,
     resolved: &BoundOp,

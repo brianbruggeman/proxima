@@ -23,6 +23,18 @@ filter = 'package(proxima) and test(pipelines::fs_control_plane::tests::)'
 test-group = "heavy-runtime"
 retries = 3
 
+# omega's index32 A/B runs production prefill shapes (600 tokens x 12288 rows
+# x 1536) as one long dispatch per command buffer. Alone, or in parallel with
+# its own 19 cases, it passes; with other omega GPU binaries in flight the
+# driver fails the command buffer ("Internal Error (0000000e)", status 5,
+# surfaced as MetalError::CommandBufferFailed; before that check existed it
+# read back as a bit mismatch). The GPU is one device, so these run with no
+# other test in flight rather than on smaller shapes that no longer cover
+# the prefill case the test exists for.
+[[profile.default.overrides]]
+filter = 'package(omega) and binary(packed_row_multi_row_index32_ab)'
+threads-required = "num-test-threads"
+
 # Scoped timeout for the lossless-backpressure tests: elastic producer-assist
 # guarantees forward progress, so these complete in well under a second. If a
 # regression reintroduces the hang-on-full-ring failure mode, terminate-after

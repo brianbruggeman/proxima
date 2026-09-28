@@ -78,6 +78,7 @@ pub(super) fn plan_with_placed_inputs(
         hazard_state: RefCell::new(HazardState::new()),
         device_buffers: RefCell::new(BTreeMap::new()),
         block_identity: RefCell::new(Vec::new()),
+        chunk_status_buffers: RefCell::new(Vec::new()),
     })
 }
 
