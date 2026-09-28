@@ -753,4 +753,13 @@ pub enum InteropError {
         bytes_missing: u64,
         bytes_total: u64,
     },
+
+    /// `PROXIMA_DISPATCH` (`generate::decode::resolve_dispatch_type_override`'s
+    /// own doc) was set to a value other than `serial`/`concurrent`
+    /// (case-insensitive) or was not valid Unicode. An explicit error here
+    /// rather than a silent fallback to `ServingConfig::dispatch_type` --
+    /// a typo in the override must not quietly run the configured default.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[error("PROXIMA_DISPATCH={value:?}: expected `serial` or `concurrent`")]
+    InvalidDispatchTypeOverride { value: String },
 }
