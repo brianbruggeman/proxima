@@ -779,6 +779,22 @@ static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thr
 }
 
 
+static inline float q4_0_block_scale(device const uchar *block) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    return (float)as_type<half>(d_bits);
+}
+
+static inline void q4_0_run8(device const uchar *block, uint index, thread float *out) {
+    device const uchar *qs = block + 2;
+    uint shift = (index < 16u) ? 0u : 4u;
+    uint base = index % 16u;
+    for (uint j = 0u; j < 8u; ++j) {
+        uchar byte = qs[base + j];
+        out[j] = (float)((byte >> shift) & 0x0Fu);
+    }
+}
+
+
 // element `index` (0..32) of one Q5_1 block, byte-for-byte the value
 // proxima_gguf::quant::q5_1::dequantize_block writes at the same index.
 static inline float q5_1_element(device const uchar *block, uint index) {
