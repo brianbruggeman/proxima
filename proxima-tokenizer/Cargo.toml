@@ -66,3 +66,5 @@ temp-env.workspace = true
 # above does ("unrecognized feature for crate serde_json: alloc") -- added
 # by hand, workspace-inherited, for the llama-ngram fixture parity test.
 serde_json.workspace = true
+proxima-test = { workspace = true, features = ["alloc-count"] }
+serde = { workspace = true, features = ["derive"] }

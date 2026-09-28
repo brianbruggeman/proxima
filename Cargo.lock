@@ -5119,6 +5119,7 @@ dependencies = [
  "proptest",
  "proxima-gguf",
  "proxima-primitives",
+ "proxima-test",
  "serde",
  "serde_json",
  "temp-env",
