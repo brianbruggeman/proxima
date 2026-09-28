@@ -423,8 +423,7 @@ pub(super) fn execute_plan_inner(
 
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
+    commit_and_wait(&command_buffer)?;
     #[cfg(feature = "instrument")]
     {
         counter!(GPU_EXEC_CALLS, 1);

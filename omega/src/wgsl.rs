@@ -251,6 +251,12 @@ pub fn emit_wgsl_with_policy(
                 kind: "round_batched_reduce",
             });
         }
+        BoundOpKind::CachedSoftmaxWeights { .. } => {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "cached_softmax_weights",
+            });
+        }
     };
     let (threads, workgroup_size) = match cooperative_width {
         Some(width) => (grid_threads(resolved) * u64::from(width), width),
@@ -529,17 +535,19 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => 1,
-        // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce` never reach
-        // this function in practice -- `emit_wgsl`'s own kind-match returns
-        // `EmitError::UnsupportedOpKind` for each before `grid_threads` is
-        // called. Grouped with `Iota`/`Constant` only to satisfy
-        // exhaustiveness with a harmless value, never a real dispatch shape.
+        // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce`/
+        // `CachedSoftmaxWeights` never reach this function in practice --
+        // `emit_wgsl`'s own kind-match returns `EmitError::UnsupportedOpKind`
+        // for each before `grid_threads` is called. Grouped with
+        // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
+        // value, never a real dispatch shape.
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
-        | BoundOpKind::RoundBatchedReduce { .. } => resolved.extents.iter().product(),
+        | BoundOpKind::RoundBatchedReduce { .. }
+        | BoundOpKind::CachedSoftmaxWeights { .. } => resolved.extents.iter().product(),
     }
 }
 
@@ -1036,8 +1044,7 @@ fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
 
 fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitError> {
     match codec {
-        Codec::Q2K => Err(EmitError::UnsupportedCodec { node }),
-        Codec::Q3K => Err(EmitError::UnsupportedCodec { node }),
+        Codec::Q2K | Codec::Q3K => Err(EmitError::UnsupportedCodec { node }),
         Codec::Q4K => Ok("q4k_element"),
         Codec::Q5K => Ok("q5k_element"),
         Codec::Q6K => Ok("q6k_element"),
@@ -1045,6 +1052,32 @@ fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitE
         Codec::Q4_0 => Ok("q4_0_element"),
         Codec::Float16 => Ok("f16_element"),
         Codec::BFloat16 => Ok("bf16_element"),
+        // No WGSL unpack function exists for any of these 20 -- this
+        // renderer's own `operand_read` only ever calls `codec_function_name`
+        // for a codec `crate::identity::operand_codecs` reports as packed by
+        // this backend, mirroring `crate::msl::signature_tokens_prelude::
+        // operand_read`'s trailing arm; kept exhaustive so a future codec
+        // forces a decision here rather than slipping through.
+        Codec::Q5_1
+        | Codec::Q5_0
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2Xs
+        | Codec::Iq2S
+        | Codec::Iq3Xxs
+        | Codec::Iq3S
+        | Codec::Iq4Nl
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => Err(EmitError::UnsupportedCodec { node }),
     }
 }
 

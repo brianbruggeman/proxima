@@ -164,6 +164,16 @@ pub enum MetalError {
     CheckpointMmapDiscardFailed { errno: i32 },
     #[error("hazard tracking: operand {node} has no resolved device buffer")]
     UnresolvedHazardOperand { node: NodeId },
+    /// `waitUntilCompleted` returning is proof the command buffer left the
+    /// queue, never proof it finished successfully -- a GPU-side fault, a
+    /// driver-enforced timeout under heavy contention (other processes
+    /// sharing this device), or a canceled queue all leave `status()` at
+    /// `MTLCommandBufferStatusError` with the buffer's output left
+    /// partially written. Reading that output back as if the dispatch
+    /// succeeded is exactly the silent-wrong-bits failure this variant
+    /// exists to turn into a hard error instead.
+    #[error("metal command buffer failed: status={status} error={log}")]
+    CommandBufferFailed { status: u64, log: String },
     /// `build_buffer_arena`'s own reuse pass still needed more transient
     /// bytes live at once than `cap_bytes` budgets -- MG-3's kill condition,
     /// now a typed error a caller can act on rather than a stderr line

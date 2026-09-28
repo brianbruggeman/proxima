@@ -25,6 +25,7 @@
 mod support;
 use support::{as_named_blocks, real_forward_fixture};
 
+use omega::Codec;
 use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_tensor::NumericPolicy;
 
@@ -346,7 +347,7 @@ fn packed_q4k_embedding_lookup_runs_on_wgpu_at_cpu_parity() {
     let (vocab, dim, seq) = (256usize, QK_K, 4usize);
     let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::UInt8);
     let mut packed = vec![0u8; vocab * BLOCK_BYTES];
-    for (row, bytes) in (0..vocab).zip(packed.chunks_exact_mut(BLOCK_BYTES)) {
+    for (row, bytes) in (0..vocab).zip(packed.as_chunks_mut::<BLOCK_BYTES>().0) {
         let values: Vec<f32> = (0..dim)
             .map(|index| ((row * 17 + index * 3) % 101) as f32 - 50.0)
             .collect();
