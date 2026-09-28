@@ -187,8 +187,34 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             // -- no wgpu unpack entry exists for any of them yet, the same
             // "decode-only so far" reasoning `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` (and
             // `Float32`/`Int32`, which have no `Codec` at all) already
-            // take through `codec_from_quantized_block`'s own `None`.
-            Some(Codec::Q2K | Codec::Q3K | Codec::Q5_1 | Codec::Q5_0) | None => None,
+            // take through `codec_from_quantized_block`'s own `None`. The
+            // remaining codecs below join them for the identical reason:
+            // no `crate::wgsl` unpack entry exists for any of them either.
+            Some(
+                Codec::Q2K
+                | Codec::Q3K
+                | Codec::Q5_1
+                | Codec::Q5_0
+                | Codec::Q4_1
+                | Codec::Q8_1
+                | Codec::Q8K
+                | Codec::Iq1S
+                | Codec::Iq1M
+                | Codec::Iq2Xxs
+                | Codec::Iq2Xs
+                | Codec::Iq2S
+                | Codec::Iq3Xxs
+                | Codec::Iq3S
+                | Codec::Iq4Nl
+                | Codec::Iq4Xs
+                | Codec::Tq10
+                | Codec::Tq20
+                | Codec::Mxfp4
+                | Codec::Nvfp4
+                | Codec::Q1_0
+                | Codec::Q2_0,
+            )
+            | None => None,
         })
         .collect()
 }
@@ -219,19 +245,10 @@ fn packed_block_bytes_slice<'a>(
     block: &QuantizedBlock<'a>,
 ) -> Result<&'a [u8], EmitError> {
     match block {
-        QuantizedBlock::Packed { codec: Codec::Q2K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q3K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q5_1, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Float16, bytes }
-        | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => Ok(bytes),
+        // Every `Packed` variant wraps a `&[u8]` regardless of which codec
+        // tags it (this function's own doc) -- the codec only matters to the
+        // caller decoding those bytes, never to extracting the slice.
+        QuantizedBlock::Packed { bytes, .. } => Ok(bytes),
         QuantizedBlock::Int32(_) => Err(EmitError::RenderKindMismatch {
             node,
             expected: "a packed (non-float32) block",
@@ -272,6 +289,22 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
         QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes: _ } => "iq3_xxs",
         QuantizedBlock::Packed { codec: Codec::Float16, bytes: _ } => "float16",
         QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: _ } => "bfloat16",
+        QuantizedBlock::Packed { codec: Codec::Q5_0, bytes: _ } => "q5_0",
+        QuantizedBlock::Packed { codec: Codec::Q4_1, bytes: _ } => "q4_1",
+        QuantizedBlock::Packed { codec: Codec::Q8_1, bytes: _ } => "q8_1",
+        QuantizedBlock::Packed { codec: Codec::Q8K, bytes: _ } => "q8_k",
+        QuantizedBlock::Packed { codec: Codec::Iq1S, bytes: _ } => "iq1_s",
+        QuantizedBlock::Packed { codec: Codec::Iq1M, bytes: _ } => "iq1_m",
+        QuantizedBlock::Packed { codec: Codec::Iq2Xxs, bytes: _ } => "iq2_xxs",
+        QuantizedBlock::Packed { codec: Codec::Iq2S, bytes: _ } => "iq2_s",
+        QuantizedBlock::Packed { codec: Codec::Iq3S, bytes: _ } => "iq3_s",
+        QuantizedBlock::Packed { codec: Codec::Iq4Xs, bytes: _ } => "iq4_xs",
+        QuantizedBlock::Packed { codec: Codec::Tq10, bytes: _ } => "tq1_0",
+        QuantizedBlock::Packed { codec: Codec::Tq20, bytes: _ } => "tq2_0",
+        QuantizedBlock::Packed { codec: Codec::Mxfp4, bytes: _ } => "mxfp4",
+        QuantizedBlock::Packed { codec: Codec::Nvfp4, bytes: _ } => "nvfp4",
+        QuantizedBlock::Packed { codec: Codec::Q1_0, bytes: _ } => "q1_0",
+        QuantizedBlock::Packed { codec: Codec::Q2_0, bytes: _ } => "q2_0",
     }
 }
 
@@ -706,10 +739,11 @@ fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound),
-        // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce` never reach
-        // this function in practice -- `crate::wgsl::emit_wgsl` (called
-        // before a `BoundOp` is ever dispatched through this driver) already
-        // returns `EmitError::UnsupportedOpKind` for each. Grouped with
+        // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce`/
+        // `CachedSoftmaxWeights` never reach this function in practice --
+        // `crate::wgsl::emit_wgsl` (called before a `BoundOp` is ever
+        // dispatched through this driver) already returns
+        // `EmitError::UnsupportedOpKind` for each. Grouped with
         // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
         // value, never a real uniform layout.
         BoundOpKind::Iota
@@ -717,7 +751,8 @@ fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         | BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
-        | BoundOpKind::RoundBatchedReduce { .. } => Ok(pack_leaf_uniforms(bound)),
+        | BoundOpKind::RoundBatchedReduce { .. }
+        | BoundOpKind::CachedSoftmaxWeights { .. } => Ok(pack_leaf_uniforms(bound)),
     }
 }
 
@@ -767,29 +802,25 @@ fn map_read(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, Wgp
 }
 
 fn read_f32_bytes(bytes: &[u8]) -> Result<Vec<f32>, WgpuError> {
-    let chunks = bytes.chunks_exact(size_of::<f32>());
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = bytes.as_chunks::<{ size_of::<f32>() }>();
+    if !remainder.is_empty() {
         return Err(WgpuError::Driver(format!(
             "F32 readback has {} trailing bytes",
-            chunks.remainder().len()
+            remainder.len()
         )));
     }
-    Ok(chunks
-        .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte chunk")))
-        .collect())
+    Ok(chunks.iter().copied().map(f32::from_ne_bytes).collect())
 }
 
 fn read_u32_bytes(bytes: &[u8]) -> Result<Vec<u32>, WgpuError> {
-    let chunks = bytes.chunks_exact(size_of::<u32>());
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = bytes.as_chunks::<{ size_of::<u32>() }>();
+    if !remainder.is_empty() {
         return Err(WgpuError::Driver(format!(
             "u32 readback has {} trailing bytes",
-            chunks.remainder().len()
+            remainder.len()
         )));
     }
-    Ok(chunks
-        .map(|chunk| u32::from_ne_bytes(chunk.try_into().expect("four-byte chunk")))
-        .collect())
+    Ok(chunks.iter().copied().map(u32::from_ne_bytes).collect())
 }
 
 fn gpu_dtype(program: &[Op], node: NodeId) -> DType {
@@ -1242,7 +1273,7 @@ mod block_node_attribution_tests {
         projection,
     };
 
-    use super::{NodeId, Op, QuantizedBlock, WgpuError, plan};
+    use super::{Codec, NodeId, Op, QuantizedBlock, WgpuError, plan};
 
     /// `activation -> weight -> product -> sum`: the activation node is
     /// declared FIRST (`NodeId(0)`), the quantized weight node SECOND

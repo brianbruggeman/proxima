@@ -204,6 +204,12 @@ pub fn emit_cuda_with_policy(
                 kind: "round_batched_reduce",
             });
         }
+        BoundOpKind::CachedSoftmaxWeights { .. } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: "cached_softmax_weights",
+            });
+        }
     };
     Ok(CudaKernel {
         source,
@@ -425,7 +431,8 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
         BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
-        | BoundOpKind::RoundBatchedReduce { .. } => {
+        | BoundOpKind::RoundBatchedReduce { .. }
+        | BoundOpKind::CachedSoftmaxWeights { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
                 kind: resolved.kind.name(),
@@ -629,17 +636,18 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
-        // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce` never reach
-        // this function in practice -- `emit_cuda`'s own match on
-        // `resolved.kind` returns `EmitError::CudaUnsupportedOpKind` for
-        // each before `grid_threads` is ever called. Grouped with
-        // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
-        // value, never a real dispatch shape.
+        // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce`/
+        // `CachedSoftmaxWeights` never reach this function in practice --
+        // `emit_cuda`'s own match on `resolved.kind` returns
+        // `EmitError::CudaUnsupportedOpKind` for each before `grid_threads`
+        // is ever called. Grouped with `Iota`/`Constant` only to satisfy
+        // exhaustiveness with a harmless value, never a real dispatch shape.
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
-        | BoundOpKind::RoundBatchedReduce { .. } => resolved.extents.iter().product(),
+        | BoundOpKind::RoundBatchedReduce { .. }
+        | BoundOpKind::CachedSoftmaxWeights { .. } => resolved.extents.iter().product(),
         BoundOpKind::CachedAttention { .. } => resolved.extents.iter().product(),
     }
 }
@@ -1156,6 +1164,35 @@ fn operand_read(
         Some(Codec::BFloat16) => Ok(format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (unsigned int)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         )),
+        // No CUDA unpack kernel exists for any of these 20 -- `PackedOperands`
+        // is only ever populated via `codec_from_quantized_block`, which maps
+        // just the 9 codecs above for this backend, so this arm is
+        // unreachable by construction; kept exhaustive (mirroring
+        // `crate::msl::signature_tokens_prelude::operand_read`'s own trailing
+        // arm) so a future codec forces a decision here rather than slipping
+        // through.
+        Some(
+            Codec::Q5_1
+            | Codec::Q5_0
+            | Codec::Q4_1
+            | Codec::Q8_1
+            | Codec::Q8K
+            | Codec::Iq1S
+            | Codec::Iq1M
+            | Codec::Iq2Xxs
+            | Codec::Iq2Xs
+            | Codec::Iq2S
+            | Codec::Iq3Xxs
+            | Codec::Iq3S
+            | Codec::Iq4Nl
+            | Codec::Iq4Xs
+            | Codec::Tq10
+            | Codec::Tq20
+            | Codec::Mxfp4
+            | Codec::Nvfp4
+            | Codec::Q1_0
+            | Codec::Q2_0,
+        ) => Ok(format!("in{index}[{offset}]")),
     }
 }
 
@@ -1276,6 +1313,12 @@ fn push_packed_matmul_offset(
     ));
 }
 
+// mirrors `crate::msl::elementwise_reduce_core::push_serial_reduce_body`'s
+// own identical allow: one CUDA C reduce body needs every one of the
+// fold's axis/rank/operand facts in scope at once, and this crate's other
+// renderer already carries the same shape rather than a param-bundling
+// struct for read-only rendering inputs.
+#[allow(clippy::too_many_arguments)]
 fn push_serial_reduce_body(
     source: &mut String,
     resolved: &BoundOp,
@@ -1408,9 +1451,7 @@ fn push_serial_reduce_body(
             "    for (long broadcast_r = 0; broadcast_r < u.reduction_total; broadcast_r++) {\n",
         );
         if reduce_rank > 0 {
-            source.push_str(&format!(
-                "        long broadcast_remaining = broadcast_r;\n"
-            ));
+            source.push_str("        long broadcast_remaining = broadcast_r;\n");
             for index in (0..reduce_rank).rev() {
                 source.push_str(&format!(
                     "        long broadcast_coord_{index} = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"

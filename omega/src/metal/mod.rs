@@ -199,7 +199,7 @@ use objc2::runtime::ProtocolObject;
 #[cfg(feature = "instrument")]
 use objc2_foundation::NSUInteger;
 use objc2_foundation::{NSError, NSString};
-use objc2_metal::{MTLBarrierScope, MTLDispatchType};
+use objc2_metal::{MTLBarrierScope, MTLCommandBufferStatus, MTLDispatchType};
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
@@ -264,6 +264,45 @@ use prepare_uniforms_pack::*;
 pub use pipeline_buffers_upload::*;
 pub use resident_nocopy_cache::*;
 use arena_encode_dispatch_finish::*;
+
+/// Commits `command_buffer` and blocks until the GPU finishes it, THEN
+/// checks the outcome -- `waitUntilCompleted` returning is proof the buffer
+/// left the queue, never proof the dispatch it carried actually ran to
+/// completion. A GPU fault, a driver timeout under heavy contention from
+/// other processes sharing this device, or a canceled queue all leave
+/// `status()` at `MTLCommandBufferStatusError` with every buffer this
+/// command wrote left partially updated; every caller here reads that
+/// output straight back afterward, so a caller that skipped this check
+/// would silently return wrong bits instead of an error. Every
+/// `commit()`/`waitUntilCompleted()` pair in this driver goes through this
+/// function for that reason.
+fn commit_and_wait(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+) -> Result<(), MetalError> {
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    check_command_buffer_status(command_buffer)
+}
+
+/// [`commit_and_wait`]'s status check alone, for the handful of call sites
+/// that split `commit()`/`waitUntilCompleted()` apart to bracket host-side
+/// instrumentation timing between them -- same failure this guards against,
+/// just without owning the commit/wait pair itself.
+fn check_command_buffer_status(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+) -> Result<(), MetalError> {
+    if command_buffer.status() == MTLCommandBufferStatus::Error {
+        let log = command_buffer
+            .error()
+            .map(|error| nserror_description(&error))
+            .unwrap_or_else(|| "no NSError attached".to_string());
+        return Err(MetalError::CommandBufferFailed {
+            status: MTLCommandBufferStatus::Error.0 as u64,
+            log,
+        });
+    }
+    Ok(())
+}
 
 /// Public wrapper around [`prepare_uniforms_pack::pack_uniforms`] (crate-private) --
 /// the same packer [`execute`] uses per dispatch, exposed so a caller outside

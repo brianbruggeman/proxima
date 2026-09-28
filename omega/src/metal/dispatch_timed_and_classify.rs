@@ -111,8 +111,7 @@ pub(super) fn execute_op_timed(
         expert_buffers,
     )?;
     encoder.finish();
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
+    commit_and_wait(&command_buffer)?;
     let gpu_ns =
         ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
     if let Some((fault_buffer, gathers)) = fault {
@@ -1142,8 +1141,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     // `cpu_gpu_end` bracket this function already takes for its own
     // nanosecond calibration, just also fed to the shared counter.
     let gpu_exec_started = read_ticks();
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
+    commit_and_wait(&command_buffer)?;
     counter!(GPU_EXEC_CALLS, 1);
     counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
     let cpu_gpu_end = sample_timestamps(&device);
