@@ -1534,6 +1534,129 @@ fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> Boun
         .expect("one fused bound emitted")
 }
 
+/// The REAL node-139-shaped ("score", `S/nb/bmm/RESULTS.md`'s own admitted
+/// census) dense (unquantized) batched matmul: `[token, feature, batch,
+/// reduce] -> [token, feature, batch]`, weight (operand 0) reading
+/// `(feature, batch, reduce)`, other (operand 1) reading `(token, batch,
+/// reduce)` -- a real stride on `batch` for BOTH operands (no broadcast),
+/// the exact shape `classify_dense_batched_gemm` classifies as one row
+/// axis, one column axis, one batch axis.
+#[cfg(feature = "metal-tiled-gemm")]
+fn dense_batched_score_shaped_op(token: u32, feature: u32, batch: u32, reduce_len: u32) -> BoundOp {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(feature),
+                Extent::Static(batch),
+                Extent::Static(reduce_len),
+            ],
+            name: None,
+        },
+    );
+    let other = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(token),
+                Extent::Static(batch),
+                Extent::Static(reduce_len),
+            ],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
+                (other, IndexMap::Affine(map::projection(4, &[0, 2, 3]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 1, 2])),
+            keep: Keep::Reduce,
+            name: Some("dense_batched_score".into()),
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("dense batched score op infers");
+    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("dense batched score op lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
+}
+
+/// Coordinator-required proof (2026-09-27 mid-task addition): a small
+/// assertion-bearing test, run against THIS tree's own `classify_dense_
+/// batched_gemm`, that the dense-batched admission count is nonzero with
+/// `PROXIMA_TILED_GEMM_DENSE=1` and exactly zero with it unset -- the same
+/// property `S/nb/bmm2/census_on_prefill.log`'s real 510-token prefill run
+/// shows (`admitted=true` count 210 on, 0 off), reproduced here as a fast,
+/// deterministic, GPU-free unit test rather than only a captured log.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn dense_batched_gemm_admission_is_switch_gated() {
+    use alloc::collections::BTreeMap;
+
+    let shapes: &[(u32, u32, u32, u32)] = &[(510, 512, 8, 128), (16, 32, 8, 128), (64, 96, 4, 256)];
+
+    let admitted_on: usize = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
+        shapes
+            .iter()
+            .filter(|&&(token, feature, batch, reduce_len)| {
+                let bound = dense_batched_score_shaped_op(token, feature, batch, reduce_len);
+                let codecs = operand_codecs(&bound, &BTreeMap::new());
+                let BoundOpKind::Reduce { reduce_op, init, ref output_axes, .. } = bound.kind else {
+                    panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
+                };
+                classify_dense_batched_gemm(&bound, &codecs, reduce_op, init, output_axes).is_ok()
+            })
+            .count()
+    });
+    assert!(
+        admitted_on > 0,
+        "PROXIMA_TILED_GEMM_DENSE=1 must admit at least one of the real score-shaped ops"
+    );
+    assert_eq!(
+        admitted_on,
+        shapes.len(),
+        "every one of these no-broadcast-batch score-shaped ops must admit when the switch is on"
+    );
+
+    let admitted_off: usize = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", None::<&str>, || {
+        shapes
+            .iter()
+            .filter(|&&(token, feature, batch, reduce_len)| {
+                let bound = dense_batched_score_shaped_op(token, feature, batch, reduce_len);
+                let codecs = operand_codecs(&bound, &BTreeMap::new());
+                let BoundOpKind::Reduce { reduce_op, init, ref output_axes, .. } = bound.kind else {
+                    panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
+                };
+                classify_dense_batched_gemm(&bound, &codecs, reduce_op, init, output_axes).is_ok()
+            })
+            .count()
+    });
+    assert_eq!(
+        admitted_off, 0,
+        "PROXIMA_TILED_GEMM_DENSE unset must admit none of these ops (EnvDisabled)"
+    );
+}
+
 /// [`push_tiled_gemm_body`]'s empty-group guard, driven with a hand-built
 /// [`TiledGemmBlock`] -- [`classify_tiled_gemm`]'s own `is_empty()` gate
 /// never lets a real caller build one of these, so this drives the
@@ -1560,6 +1683,7 @@ fn push_tiled_gemm_body_rejects_an_empty_token_axis_group() {
         "float",
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
+        &crate::identity::MetalOnlyExtras::default(),
     )
     .expect_err("an empty token axis group is never built by classify_tiled_gemm");
     assert!(matches!(
@@ -1595,6 +1719,7 @@ fn push_tiled_gemm_body_rejects_an_axis_not_in_output_axes() {
         "float",
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
+        &crate::identity::MetalOnlyExtras::default(),
     )
     .expect_err("axis 5 is never in output_axes [0]");
     assert!(matches!(
@@ -1625,6 +1750,7 @@ fn push_tiled_gemm_body_is_disabled_without_the_metal_tiled_gemm_feature() {
         "float",
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
+        &crate::identity::MetalOnlyExtras::default(),
     )
     .expect_err("the tiled path never exists without metal-tiled-gemm");
     assert!(matches!(error, EmitError::TiledGemmFeatureDisabled { .. }));
@@ -2222,6 +2348,141 @@ fn many_token_matmul_takes_the_tiled_gemm_path() {
         source.contains("feature_extent"),
         "the boundary mask must read the feature extent from uniforms, never bake it in:\n{source}"
     );
+}
+
+/// Real-production-shaped matmul: weight `[features, k]` (k innermost),
+/// activation `[tokens, k]` (k innermost), output `[tokens, features]`
+/// (FEATURE innermost) -- `lowering_census.rs`'s own `matmul_op` convention,
+/// the actual einsum shape the real spec's weight matmuls take. UNLIKE
+/// `tiled_gemm_op` above (whose activation and output both happen to lay
+/// out the OPPOSITE axis as contiguous -- confirmed empirically this
+/// session, `S/nb/bmm2/staging_switch_test2.log`), this fixture is what
+/// item 3c (`wide_activation_load`, needs `k` contiguous on the
+/// activation) actually admits.
+#[cfg(feature = "metal-tiled-gemm")]
+fn real_shaped_tiled_gemm_op(tokens: u32, k: u32, features: u32) -> (BoundOp, proxima_tensor::NodeId) {
+    let mut program = Vec::new();
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(tokens), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(features), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("real_shaped_tiled_gemm".into()),
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("real-shaped tiled gemm op infers");
+    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("real-shaped tiled gemm op lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted");
+    (bound, weight)
+}
+
+/// The staging-loop switches (`PROXIMA_TILED_GEMM_WIDE_ACT_LOAD`, item 3c,
+/// and `PROXIMA_TILED_GEMM_SLIM_TGMEM`, phase 2): unset, each must leave the
+/// emitted source and cache key byte-identical to the phase-1 baseline --
+/// same posture as `switch_off_keeps_the_source_and_cache_key_on_the_
+/// serial_path` (`dense_batched_tiled_gemm_parity.rs`) and every other
+/// override in this file. Also asserts each switch's own new marker token
+/// DOES appear when its var is `"1"`, so this test cannot pass by the new
+/// code paths silently never firing.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn staging_switches_default_off_keep_byte_identical_source() {
+    let (bound, weight_node) = real_shaped_tiled_gemm_op(16, 256, 4);
+    let mut q4k = BTreeMap::new();
+    q4k.insert(weight_node, Codec::Q4K);
+
+    let baseline_source = temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None::<&str>),
+            ("PROXIMA_TILED_GEMM_SLIM_TGMEM", None::<&str>),
+        ],
+        || emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source,
+    );
+    let baseline_key = temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None::<&str>),
+            ("PROXIMA_TILED_GEMM_SLIM_TGMEM", None::<&str>),
+        ],
+        || kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key derives"),
+    );
+    for marker in ["act_tile_interior", "tg_shared"] {
+        assert!(
+            !baseline_source.contains(marker),
+            "unset staging switches must never emit {marker:?}:\n{baseline_source}"
+        );
+    }
+
+    let cases: &[(&str, &str)] = &[
+        ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "act_tile_interior"),
+        ("PROXIMA_TILED_GEMM_SLIM_TGMEM", "tg_shared"),
+    ];
+    for &(var, marker) in cases {
+        let unset_source = temp_env::with_var(var, None::<&str>, || {
+            emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
+        });
+        assert_eq!(unset_source, baseline_source, "{var} unset must be byte-identical to the all-off baseline");
+        let unset_key = temp_env::with_var(var, None::<&str>, || {
+            kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key derives")
+        });
+        assert_eq!(unset_key, baseline_key, "{var} unset must share the baseline's cache key");
+
+        let zero_source = temp_env::with_var(var, Some("0"), || {
+            emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
+        });
+        assert_eq!(zero_source, baseline_source, "{var}=0 must be byte-identical to the all-off baseline");
+
+        let on_source = temp_env::with_var(var, Some("1"), || {
+            emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
+        });
+        assert!(
+            on_source.contains(marker),
+            "{var}=1 must actually render its new code path (missing {marker:?}):\n{on_source}"
+        );
+        let on_key = temp_env::with_var(var, Some("1"), || {
+            kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key derives")
+        });
+        assert_ne!(
+            on_key, baseline_key,
+            "{var}=1 must render under a DIFFERENT cache key than the baseline, or the two kernels \
+             would collide in the pipeline cache"
+        );
+    }
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
