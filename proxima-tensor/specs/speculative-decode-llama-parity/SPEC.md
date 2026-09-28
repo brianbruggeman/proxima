@@ -45,6 +45,12 @@ of this spec (R4-R7, R13) is struck.
 | R11d | an audited sub-spec exists for `draft-dspark` | yes |
 | R12 | per-request `draft_n` / `draft_n_accepted` emitted as proxima telemetry events, matching llama-server's timings fields | yes |
 | R14 | the refutation measurement: mean accepted draft tokens per verify step is recorded per n-gram type on the AC17 corpus | yes |
+| R15 | speculation ON is faster than OFF: per n-gram type, on the AC17 corpus, on the metal path (`gpu_layers = all`) and the CPU path, median per-pair speedup (OFF ms/token ÷ ON ms/token) > 1.0 with pair-ratio CoV ≤ 5% over ≥ 5 interleaved OFF/ON pairs per prompt | yes |
+| R16 | idle overhead is bounded: on a corpus where the drafter proposes nothing, ON ms/token ≤ 1.02 × OFF ms/token, same interleaving and CoV rules | yes |
+| R17 | proxima's speedup ratio ≥ llama.cpp `f1ea20621`'s speedup ratio (`llama-server --spec-type <type>` vs no spec) per n-gram type, same GGUF, prompts, sampling config, hardware | yes |
+| R18 | drafters allocate nothing per call: `draft()` writes into a caller-owned buffer; a counting allocator records 0 allocations over 100 000 `draft()` calls per n-gram type on the fixture streams | yes |
+| R19 | the verify-width cost curve is recorded: ms per verify forward at width k+1 for k ∈ {0, 1, 4, 8, 16, 48} on metal and CPU, plus the break-even accepted-tokens-per-step computed from it | yes |
+| R20 | speculation runs on the metal path: with `gpu_layers = all` the verify program binds and runs and R1's parity holds | yes |
 
 ## architecture
 
@@ -62,7 +68,19 @@ Two pure halves plus one loop seam, all sans-IO:
 - **rollback** (R3) is per `LayerCacheState`: `Attention` truncates, recurrent restores a
   pre-verify snapshot.
 - **parity example CLI** (`examples/speculative_decode_parity.rs`) grows flags:
-  `--drafter <type>`, `--draft-model <path>`, `--seed-mismatch-control`, `--telemetry-file <path>`.
+  `--drafter <type>`, `--draft-model <path>`, `--seed-mismatch-control`, `--telemetry-file <path>`, `--gpu-layers <n|all>`.
+- **performance harness** (`examples/speculative_bench.rs`): per prompt, OFF and ON run as
+  interleaved pairs (order swapped every pair, warmup pairs discarded); per arm it records
+  ms/token over the decode window, TTFT, p50/p99 per-token latency, verify steps, accepted
+  tokens, drafts proposed, RSS, CPU%, and on metal GPU utilization (ioreg IOAccelerator
+  "Device Utilization %", ~10 Hz, idle baseline); it prints per-pair ratios with median, p90,
+  CoV, win fraction, and the count of contaminated pairs excluded.
+- **measurement protocol**: an exclusive phase -- no concurrent cargo, Metal tests, or agents;
+  `ollama ps` recorded before/after, Ollama quit for the run and reopened after; load checked
+  before each arm; a pair whose idle window samples > 5% GPU is contaminated and excluded.
+- **incumbent arm**: `llama-server` built from `~/repos/others/llama.cpp` at `f1ea20621`
+  (Metal), same prompts over its HTTP API with and without `--spec-type <type>`, reading its
+  own `timings.predicted_per_second`, `draft_n`, `draft_n_accepted`.
 
 ### decisions
 
@@ -74,6 +92,9 @@ Two pure halves plus one loop seam, all sans-IO:
 | prompt-lookup | llama `ngram-simple` replaces `draft_ngram_lookup` | two prompt-lookup primitives differing only in tie-break and sizes is RISC debt |
 | draft-model families | sub-spec per family | each needs a GGUF head format + forward graph read from upstream before its ACs can be named |
 | draft-simple fixture | target = draft = gemma4-E2B blob | same-vocab by construction, available locally; exercises the full second-model path |
+| timing arms | interleaved per pair, ratio per pair | back-to-back arm blocks measured different GPU clock states: a 2.7x "win" that was 1.1x (2026-09-21) |
+| win metric | speedup ratio vs OFF and vs llama.cpp's own ratio | absolute tokens/s moves with hardware and quant; the ratio isolates what speculation buys |
+| idle overhead gate | ≤ 2% | drafting runs every step even when nothing matches; unbounded idle cost makes default-on wrong |
 
 ## acceptance criteria
 
@@ -101,6 +122,20 @@ Two pure halves plus one loop seam, all sans-IO:
 | AC16 | R12 | `$EX --telemetry-file /tmp/spec_tel.log && grep -c 'draft_n_accepted' /tmp/spec_tel.log` | count equals the example's printed `speculative_verify_steps` summed over both blocks |
 | AC17 | R14 | `cargo run --release -p proxima-model-interop --features std --example speculative_acceptance_corpus -- --corpus proxima-model-interop/examples/data/speculative_corpus.jsonl "$E2B"` | corpus has ≥ 50 prompts (printed `prompts = N`); 5 rows (one per n-gram type) of `mean_accepted_per_step`; any row < 0.1 invokes the refutation clause |
 
+`$BENCH` = `cargo run --release -p proxima-model-interop --features std,metal --example speculative_bench --`
+`$CORPUS` = `proxima-model-interop/examples/data/speculative_corpus.jsonl`
+`$TYPES` = `ngram-simple ngram-map-k ngram-map-k4v ngram-mod ngram-cache`
+
+| id | discharges | command | expected |
+|---|---|---|---|
+| AC18 | R15 | `for t in $TYPES; do $BENCH --drafter $t --corpus $CORPUS --pairs 5 --gpu-layers all "$E2B"; done` | 5 rows; each `median_speedup` > 1.00, `pair_cov` ≤ 0.05, `contaminated_pairs = 0` |
+| AC19 | R15 | `for t in $TYPES; do $BENCH --drafter $t --corpus $CORPUS --pairs 5 --gpu-layers 0 "$E2B"; done` | 5 rows; each `median_speedup` > 1.00, `pair_cov` ≤ 0.05 |
+| AC20 | R16 | `$BENCH --drafter ngram-simple --corpus proxima-model-interop/examples/data/speculative_no_repeat.jsonl --pairs 5 --gpu-layers all "$E2B"` | `verify_steps_total = 0`, `median_overhead` ≤ 1.02, `pair_cov` ≤ 0.05 |
+| AC21 | R17 | `for t in $TYPES; do $BENCH --drafter $t --incumbent llama-server --corpus $CORPUS --pairs 5 --gpu-layers all "$E2B"; done` | 5 rows; each prints `proxima_speedup` and `llama_speedup` with `proxima_speedup ≥ llama_speedup` |
+| AC22 | R18 | `cargo nextest run -p proxima-tokenizer -E 'test(/drafter_zero_alloc/)'` | 5 passed; each prints `allocs = 0 over 100000 calls` |
+| AC23 | R19 | `$BENCH --verify-width-sweep 0,1,4,8,16,48 --gpu-layers all "$E2B"` then the same with `--gpu-layers 0` | 6 rows per run with `ms_per_verify` and `cov` ≤ 0.05; 1 `break_even_accepted_per_step` line per run |
+| AC24 | R20 | `$EX --gpu-layers all` | exit 0; both config blocks `identical = true`, `speculative_verify_steps` ≥ 1 |
+
 ## out of scope
 
 - tree / multi-sequence drafting (`examples/speculative` branch splitting, `n_seq_dft > 1`) -- not in llama-server's path
@@ -119,5 +154,5 @@ Two pure halves plus one loop seam, all sans-IO:
 
 ## context
 
-- proxima: `proxima-tokenizer/src/draft.rs`, `proxima-tokenizer/src/sample.rs`, `proxima-model-interop/src/generate/decode.rs` (draft ~3033, verify ~4962), `proxima-model-interop/src/architecture.rs:292-309`, `proxima-model-interop/src/gemma4/bind.rs:1105-1110`, `proxima-model-interop/src/generate/residency_caches.rs` (`LayerCache::truncate`), `proxima-model-interop/examples/speculative_decode_parity.rs`
+- proxima: `proxima-tokenizer/src/draft/` (`mod.rs`, `ngram_simple.rs`), `proxima-tokenizer/src/sample.rs`, `proxima-model-interop/src/generate/decode.rs` (draft ~3033, verify ~4962), `proxima-model-interop/src/architecture.rs:292-309`, `proxima-model-interop/src/gemma4/bind.rs:1105-1110`, `proxima-model-interop/src/generate/residency_caches.rs` (`LayerCache::truncate`), `proxima-model-interop/examples/speculative_decode_parity.rs`
 - llama.cpp `f1ea20621` at `~/repos/others/llama.cpp`: `common/speculative.cpp` (impls at 179, 455, 923, 1331, 1750, 1795, 1849, 2024), `common/ngram-map.cpp`, `common/ngram-mod.cpp`, `common/ngram-cache.cpp`, `common/sampling.cpp` (`common_sampler_sample_and_accept_n`), `tools/server/server-context.cpp:3885-3900`, `common/common.h:173-186`, `:355-364`

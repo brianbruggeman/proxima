@@ -25,11 +25,17 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 | 16 | sub-spec draft-dflash, audited | AC15 | same, dflash | 1 | [ ] | |
 | 17 | sub-spec draft-dspark, audited | AC15 | same, dspark | 1 | [ ] | |
 | 18 | corpus (≥ 50 prompts: chat, code, RAG) + `speculative_acceptance_corpus` example | AC17 | AC17 | prompts ≥ 50; 5 rows | [ ] | refutation check |
+| 19 | metal verify path: `--gpu-layers` flag on the parity example; verify program binds and runs on metal | AC24 | AC24 | identical, steps ≥ 1 | [ ] | lands before slice 9 |
+| 20 | `speculative_bench` harness: interleaved pairs, per-arm metrics, ioreg sampler, contamination flag, ratio stats, verify-width sweep | AC23 | AC23 | 6 rows + 1 break-even line per run | [ ] | lands before slice 9 |
+| 21 | drafter zero-alloc test with a counting allocator, one case per n-gram type as each lands | AC22 | AC22 | 5 passed, allocs = 0 | [ ] | ngram-simple case first (its out-buffer signature landed in slice 3) |
+| 22 | no-repeat corpus + idle overhead run | AC20 | AC20 | overhead ≤ 1.02 | [ ] | |
+| 23 | per-type speedup, metal and CPU | AC18, AC19 | AC18 then AC19 | 10 rows > 1.00 | [ ] | each drafter slice after 9 appends its row as it lands; prior evidence: ROW 292 (`proxima-tensor/docs/discipline.md:21395-21427`) measured mean k' 1.36 at k=4 on a mixed OpenChat set with the old drafter, prose 1.00-1.02 |
+| 24 | llama-server incumbent arm | AC21 | AC21 | 5 rows, proxima ≥ llama | [ ] | |
 
 ## resume
 
 Last landed slice: 3
-Next action: slice 4 -- `draft/ngram_map.rs` key-only (AC6)
+Next action: slice 4 -- `draft/ngram_map.rs` key-only (AC6); slices 19-21 (metal verify, bench harness, zero-alloc test) must land before slice 9
 Open question, if any: none
 
 ## struck
