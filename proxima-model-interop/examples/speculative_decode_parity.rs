@@ -199,11 +199,36 @@ fn report_pair(label: &str, result: &PairResult, expect_divergence: bool) -> boo
 }
 
 /// AC2's control seed for the sampled block's ON run: distinct from the OFF
-/// run's `seed: 42` below. Both seeds feed the same active top-k/top-p/min-p
+/// run's `seed: 7` below. Both seeds feed the same active top-k/top-p/min-p
 /// filter chain and repeat penalty at `temperature = 0.8`, so a reseeded ON
 /// run samples a different token at the very first step -- verified by the
 /// gate run, not assumed (AC2 requires a pair that provably diverges).
 const SEED_MISMATCH_CONTROL_ON_SEED: u64 = 4242;
+
+/// A real two-sentence paragraph (Pangrams -- every letter of the alphabet
+/// appears in each, real English, not filler), repeated four times.
+/// `ngram_simple_draft`'s own `history.len() > size_n + size_m + 1 = 61`
+/// gate is necessary but not sufficient: llama.cpp's scan only tries the
+/// MOST RECENT earlier occurrence of the trailing `size_n`-gram (this
+/// module's own doc on `ngram_simple::ngram_simple_draft`, "the MOST RECENT
+/// earlier occurrence... a later match always wins"), and gives up entirely
+/// if fewer than `size_n` tokens remain after that occurrence
+/// (`copy_max < size_n` in the port) -- it never falls back to an earlier,
+/// longer-tailed occurrence. So a draft can only fire when the repeated
+/// unit's own token period exceeds `2 * size_n = 24`: a shorter period (a
+/// first attempt at this fixture used the ~20-token "quick brown fox"
+/// pangram alone and drafted nothing for the entire run, confirmed by a
+/// zero-`speculative_verify_steps` gate failure) always finds its nearest
+/// recurrence too close to have `size_n` tokens left to copy. This
+/// paragraph tokenizes to 37 ids (`tokenize_local` against the real
+/// checkpoint), comfortably past the 24-token floor, and four repeats
+/// (148 ids) clears the 61-token gate from the very first generated token.
+fn default_prompt() -> String {
+    const PARAGRAPH: &str = "The quick brown fox jumps over the lazy dog while a curious cat \
+         watches quietly from the garden wall. Pack my box with five dozen liquor jugs before \
+         the delivery truck arrives at noon. ";
+    PARAGRAPH.repeat(4)
+}
 
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
@@ -216,13 +241,11 @@ fn main() {
     let model_path = args
         .next()
         .unwrap_or_else(|| "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd".to_string());
-    let prompt = args
-        .next()
-        .unwrap_or_else(|| "Write a detailed history of the Roman Empire:".to_string());
+    let prompt = args.next().unwrap_or_else(default_prompt);
     let max_tokens: usize = args
         .next()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(64);
+        .unwrap_or(40);
 
     let log_path: PathBuf = env::var("PROXIMA_TELEMETRY_FILE")
         .map(PathBuf::from)
@@ -261,7 +284,23 @@ fn main() {
     // temperature, an active top-k/top-p/min-p filter chain, and an active
     // repeat penalty) at a fixed seed. Speculative decode's verify branch
     // must select every row through this exact config for the ON run to
-    // reproduce the OFF run's own seeded draws in order.
+    // reproduce the OFF run's own seeded draws in order. `seed: 7` -- of
+    // 12 seeds `{1,2,3,5,7,11,13,17,19,23,42,99}` this fixture's own
+    // selection swept (scratchpad probe, `speculative-decode-llama-parity`
+    // slice 3), most draw this repeated-paragraph prompt's own first token
+    // as `<end_of_turn>` (id 107) at `temperature = 0.8`, ending generation
+    // after one token, before a decode step ever reaches `cached_len > 0` --
+    // structurally unable to exercise the speculative branch at all. Of the
+    // seeds that DO run past one token, most sample genuinely novel
+    // continuations with no repeated n-gram anywhere in `history` for
+    // `ngram_simple_draft` to find (an n-gram drafter is definitionally
+    // blind to non-repeating text, `bind.rs`'s own `draft_acceptance`
+    // harness measured the same shape on real prose). `seed: 7` is the one
+    // swept seed whose sampled draws happen to re-enter this prompt's own
+    // repeated paragraph early (its first 15 tokens match the greedy block
+    // above exactly), giving the drafter a real recurring pattern to find --
+    // the same structural requirement `default_prompt`'s own doc argues for
+    // the prompt itself, now also true of what gets SAMPLED from it.
     let sampled_config = ServingConfig {
         temperature: 0.8,
         top_k: 40,
@@ -270,7 +309,7 @@ fn main() {
         repeat_penalty: 1.1,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
-        seed: 42,
+        seed: 7,
         ..base_config
     };
 

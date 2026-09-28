@@ -6761,7 +6761,7 @@ mod real_openchat_file {
 }
 
 // -- Sources speculative-decode's acceptance factor k' off a real greedy
-// token stream instead of assuming it: replays `draft_ngram_lookup` offline
+// token stream instead of assuming it: replays `ngram_simple_draft` offline
 // against the ids `real_openchat_file`'s own decode loop actually produced,
 // with no second model call, and reports the mean tokens-per-verification-
 // pass a caller would have gotten had it drafted alongside that same
@@ -6778,7 +6778,7 @@ mod draft_acceptance {
 
     use proxima_primitives::pipe::Pipe;
     use proxima_tokenizer::Vocab;
-    use proxima_tokenizer::draft::draft_ngram_lookup;
+    use proxima_tokenizer::draft::{NgramSimpleConfig, ngram_simple_draft};
 
     use crate::generate::LoadedModel;
 
@@ -6875,7 +6875,7 @@ mod draft_acceptance {
 
     /// Eight prompts a real serving caller would plausibly send, four
     /// categories (chat/code/prose/list) two prompts deep each -- real
-    /// enough that `draft_ngram_lookup`'s repeated-substring assumption
+    /// enough that `ngram_simple_draft`'s repeated-substring assumption
     /// gets tested against genuinely different amounts of local
     /// repetition (code and lists repeat structurally far more than
     /// prose), not eight near-identical variations of one shape.
@@ -6916,8 +6916,8 @@ mod draft_acceptance {
         ]
     }
 
-    /// One (prompt, k, n-gram-range) sweep cell's tally: how many times
-    /// [`draft_ngram_lookup`] was asked to draft at all, how many of those
+    /// One `(size_n, size_m)` sweep cell's tally: how many times
+    /// [`ngram_simple_draft`] was asked to draft at all, how many of those
     /// asks came back empty (no repeated n-gram anywhere in the history
     /// yet), and how many drafted tokens in total matched the real stream.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -6944,30 +6944,37 @@ mod draft_acceptance {
     }
 
     /// Offline draft-and-verify replay over one already-generated token
-    /// stream, no second model call: at every position from `prompt_len` up
-    /// to (and including) `stream.len() - k`, drafts off everything seen so
-    /// far ([`draft_ngram_lookup`] over `stream[..position]`) and counts how
-    /// many leading drafted tokens equal the real stream's own continuation
-    /// at that position -- the greedy-verification rule
-    /// [`proxima_tokenizer::draft::verify_greedy`] applies against real
-    /// logits collapses to exactly this equality check when the stream
-    /// being replayed was itself produced by greedy decoding, since the
-    /// model's own argmax at every position is definitionally the token
-    /// that is actually there.
+    /// stream, no second model call: at every position from `prompt_len`
+    /// (never below `1`, since [`ngram_simple_draft`]'s own `sampled`
+    /// argument needs a preceding real token) up to `stream.len() - 1`,
+    /// drafts using `sampled = stream[position - 1]` and `history =
+    /// stream[..position - 1]` -- the exact split `decode.rs`'s own
+    /// production caller feeds it (`token_history` before this step's own
+    /// selection is pushed) -- and counts how many leading drafted tokens
+    /// equal the real stream's own continuation at `position`. The
+    /// greedy-verification rule [`proxima_tokenizer::draft::verify_greedy`]
+    /// applies against real logits collapses to exactly this equality check
+    /// when the stream being replayed was itself produced by greedy
+    /// decoding, since the model's own argmax at every position is
+    /// definitionally the token that is actually there.
     fn replay_draft_acceptance(
         stream: &[u32],
         prompt_len: usize,
-        k: usize,
-        min_ngram: usize,
-        max_ngram: usize,
+        size_n: u16,
+        size_m: u16,
     ) -> DraftAcceptanceStats {
         let mut stats = DraftAcceptanceStats::default();
-        if k == 0 || stream.len() < prompt_len + k {
+        let config = NgramSimpleConfig { size_n, size_m };
+        let start = prompt_len.max(1);
+        if stream.len() <= start {
             return stats;
         }
-        for position in prompt_len..=stream.len() - k {
+        let mut draft: Vec<u32> = Vec::new();
+        for position in start..stream.len() {
             stats.attempts += 1;
-            let draft = draft_ngram_lookup(&stream[..position], k, min_ngram, max_ngram);
+            let history = &stream[..position - 1];
+            let sampled = stream[position - 1];
+            ngram_simple_draft(&config, history, sampled, &mut draft);
             if draft.is_empty() {
                 stats.empty += 1;
                 continue;
@@ -6982,30 +6989,25 @@ mod draft_acceptance {
         stats
     }
 
-    /// The (k, min_ngram, max_ngram) sweep this harness runs every prompt
-    /// through: `k` values from a small immediate draft up to a wide one,
-    /// crossed with a tight and a loose n-gram match window -- the same two
-    /// axes `transformers`' own `PromptLookupCandidateGenerator` exposes as
-    /// `num_output_tokens` and `max_matching_ngram_size`/`min_ngram_size`.
-    const SWEEP: [(usize, usize, usize); 6] = [
-        (2, 2, 4),
-        (2, 3, 6),
-        (4, 2, 4),
-        (4, 3, 6),
-        (8, 2, 4),
-        (8, 3, 6),
-    ];
+    /// The `(size_n, size_m)` sweep this harness runs every prompt through:
+    /// tight and loose n-gram match windows crossed with a small and a wide
+    /// draft length -- the same two axes `transformers`' own
+    /// `PromptLookupCandidateGenerator` exposed as
+    /// `min_ngram_size`/`max_matching_ngram_size` and `num_output_tokens`,
+    /// now over llama.cpp's own `common_ngram_simple_config` shape instead
+    /// (`speculative-decode-llama-parity/SPEC.md` R4/R8).
+    const SWEEP: [(u16, u16); 6] = [(2, 2), (3, 2), (2, 4), (3, 4), (2, 8), (3, 8)];
 
     /// Measures speculative-decode's acceptance factor k' off a real
     /// greedy-decoded stream instead of assuming it (both prior design
     /// critiques of this feature flagged k' as ASSUMED, never measured).
     /// Per prompt: one real greedy forward through [`LoadedModel`]'s public
-    /// [`Pipe`] surface generates the token stream, then every (k, n-gram
-    /// range) cell in [`SWEEP`] replays [`draft_ngram_lookup`] against that
-    /// same stream with no further model call. Prints one
-    /// machine-parseable `draft_acceptance` line per (prompt, k, n-gram)
-    /// cell and one `draft_acceptance_aggregate` line per (k, n-gram) cell
-    /// with the mean k' across all 8 prompts plus each category's own mean.
+    /// [`Pipe`] surface generates the token stream, then every `(size_n,
+    /// size_m)` cell in [`SWEEP`] replays [`ngram_simple_draft`] against
+    /// that same stream with no further model call. Prints one
+    /// machine-parseable `draft_acceptance` line per (prompt, size_n,
+    /// size_m) cell and one `draft_acceptance_aggregate` line per cell with
+    /// the mean k' across all 8 prompts plus each category's own mean.
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn ngram_draft_acceptance_rate_on_real_greedy_streams() {
@@ -7042,11 +7044,11 @@ mod draft_acceptance {
             stream.extend_from_slice(&generated.0);
             let prompt_len = prompt_ids.len();
 
-            for (cell_index, &(k, min_ngram, max_ngram)) in SWEEP.iter().enumerate() {
-                let stats = replay_draft_acceptance(&stream, prompt_len, k, min_ngram, max_ngram);
+            for (cell_index, &(size_n, size_m)) in SWEEP.iter().enumerate() {
+                let stats = replay_draft_acceptance(&stream, prompt_len, size_n, size_m);
                 let k_prime = stats.tokens_per_pass();
                 std::println!(
-                    "draft_acceptance prompt={prompt_index} category={category} k={k} ngram={min_ngram}-{max_ngram} \
+                    "draft_acceptance prompt={prompt_index} category={category} size_n={size_n} size_m={size_m} \
                      attempts={} empty={} accepted={} k_prime={k_prime:.4}",
                     stats.attempts,
                     stats.empty,
@@ -7056,7 +7058,7 @@ mod draft_acceptance {
             }
         }
 
-        for (cell_index, &(k, min_ngram, max_ngram)) in SWEEP.iter().enumerate() {
+        for (cell_index, &(size_n, size_m)) in SWEEP.iter().enumerate() {
             let entries = &by_sweep_cell[cell_index];
             let mean_k_prime =
                 entries.iter().map(|(_, k_prime)| k_prime).sum::<f64>() / entries.len() as f64;
@@ -7073,7 +7075,7 @@ mod draft_acceptance {
                 ));
             }
             std::println!(
-                "draft_acceptance_aggregate k={k} ngram={min_ngram}-{max_ngram} mean_k_prime={mean_k_prime:.4}{category_line}"
+                "draft_acceptance_aggregate size_n={size_n} size_m={size_m} mean_k_prime={mean_k_prime:.4}{category_line}"
             );
         }
     }
@@ -7108,7 +7110,7 @@ mod draft_acceptance {
             stream.extend_from_slice(&line_ids);
         }
 
-        let stats = replay_draft_acceptance(&stream, 0, 4, 2, 4);
+        let stats = replay_draft_acceptance(&stream, 0, 3, 6);
         let k_prime = stats.tokens_per_pass();
         assert!(
             stats.attempts > 0,
@@ -7130,7 +7132,7 @@ mod draft_acceptance {
     fn replay_draft_acceptance_on_a_stream_with_no_repeats_never_beats_one_token_per_pass() {
         let stream: Vec<u32> = (0..256u32).collect();
 
-        let stats = replay_draft_acceptance(&stream, 0, 4, 2, 4);
+        let stats = replay_draft_acceptance(&stream, 0, 3, 6);
 
         assert!(
             stats.attempts > 0,

@@ -3035,12 +3035,22 @@ impl<'file> LoadedModel<'file> {
         // forward runs, and pushed onto by the speculative verify branch
         // below whenever it accepts more than one token in a single pass.
         let speculative_enabled = std::env::var_os("PROXIMA_SPECULATIVE_DECODE").is_some();
-        let speculative_k: usize = std::env::var("PROXIMA_SPECULATIVE_K")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(4);
+        // llama.cpp's own `ngram-simple` defaults (`common_params_speculative_ngram_map`,
+        // `common/common.h:361-365`) -- named constants until
+        // `speculative-decode-llama-parity/TASKS.md` slice 8 lands the
+        // `ServingConfig` speculative section these will read from instead.
+        let speculative_config = proxima_tokenizer::draft::NgramSimpleConfig {
+            size_n: proxima_tokenizer::draft::DEFAULT_SIZE_N,
+            size_m: proxima_tokenizer::draft::DEFAULT_SIZE_M,
+        };
         let mut pending: VecDeque<u32> = VecDeque::new();
+        // One draft buffer, reused every step -- `ngram_simple_draft` itself
+        // clears and refills it, never allocates, and never appends onto a
+        // stale draft (the "else" branch below clears it explicitly for the
+        // steps drafting is not attempted at all, e.g. prefill's `_step ==
+        // 0`); the caller (this loop) owns the allocation across the whole
+        // decode, per `ngram_simple_draft`'s own doc on the reuse contract.
+        let mut speculative_draft: Vec<u32> = Vec::new();
 
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
@@ -3054,36 +3064,56 @@ impl<'file> LoadedModel<'file> {
                     return Ok(queued);
                 }
                 // Speculative decode's draft half (`proxima_tokenizer::draft::
-                // draft_ngram_lookup`, no second model): only attempted on a
-                // genuine one-token decode step (`next_ids.len() == 1`,
-                // excludes the prompt's own prefill at `_step == 0`) with a
-                // real cache to draft against (`cached_len > 0`) and a
-                // gemma4-only verify program bound at load time
-                // (`Self::speculative_verify_program`'s own doc). Constants
-                // `3`/`8` are `transformers`' own `PromptLookupCandidateGenerator`
-                // defaults (`min_ngram_size`/`max_matching_ngram_size`). Every
-                // `ServingConfig` is eligible now -- the verify branch below
-                // selects each row through `select_decoded_token`, the SAME
-                // per-step selection the non-speculative branch uses, so a
-                // draft only ever survives when it equals what plain decode
-                // would have produced at that step; a config that makes
-                // speculation rarely pay off (a forced `token_override`, a
-                // high temperature) still emits the correct token, just via
-                // the correction/bonus row instead of an accepted draft.
-                let speculative_draft: Vec<u32> = if speculative_enabled
+                // ngram_simple_draft`, a faithful port of llama.cpp's own
+                // `common_ngram_simple_draft` -- no second model): only
+                // attempted on a genuine one-token decode step
+                // (`next_ids.len() == 1`, excludes the prompt's own prefill
+                // at `_step == 0`) with a real cache to draft against
+                // (`cached_len > 0`) and a gemma4-only verify program bound
+                // at load time (`Self::speculative_verify_program`'s own
+                // doc). Every `ServingConfig` is eligible now -- the verify
+                // branch below selects each row through
+                // `select_decoded_token`, the SAME per-step selection the
+                // non-speculative branch uses, so a draft only ever
+                // survives when it equals what plain decode would have
+                // produced at that step; a config that makes speculation
+                // rarely pay off (a forced `token_override`, a high
+                // temperature) still emits the correct token, just via the
+                // correction/bonus row instead of an accepted draft.
+                // `next_ids[0]` is `sampled` in the C++ signature. It is
+                // ALREADY the last element of `token_history` here: the
+                // producing step pushed it the moment it was selected
+                // (`token_history.push(token_id)` below, or the verify
+                // readout's own per-row push), one full step before this
+                // step ever runs, so it is available to feed forward as
+                // `next_ids`. `ngram_simple_draft`'s own contract is that
+                // `history` excludes `sampled` (its own module doc: "every
+                // token generated so far, NOT including the token just
+                // sampled") -- passing `token_history` unsliced duplicates
+                // that tail token into the trailing pattern
+                // (`ngram_simple_draft` builds it as `history`'s own last
+                // `size_n - 1` tokens plus `sampled`), which can never match
+                // a real earlier occurrence and silently drafted nothing on
+                // every real decode step (a real gemma4-E2B run measured
+                // `speculative_verify_steps == 0` end to end before this
+                // slice). `saturating_sub(1)` degrades to an empty slice
+                // rather than panicking on the (unreached, guarded by
+                // `cached_len > 0` above) empty-history edge.
+                if speculative_enabled
                     && next_ids.len() == 1
                     && cached_len > 0
                     && self.speculative_verify_program.is_some()
                 {
-                    proxima_tokenizer::draft::draft_ngram_lookup(
-                        &token_history,
-                        speculative_k,
-                        3,
-                        8,
-                    )
+                    let history_len = token_history.len().saturating_sub(1);
+                    proxima_tokenizer::draft::ngram_simple_draft(
+                        &speculative_config,
+                        &token_history[..history_len],
+                        next_ids[0],
+                        &mut speculative_draft,
+                    );
                 } else {
-                    Vec::new()
-                };
+                    speculative_draft.clear();
+                }
                 let speculative_step = !speculative_draft.is_empty();
                 let speculative_ids: Vec<u32> = if speculative_step {
                     let mut ids = Vec::with_capacity(1 + speculative_draft.len());
