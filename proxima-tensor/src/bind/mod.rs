@@ -102,10 +102,12 @@ mod cached_attention_epilogue_liveness;
 mod identity_copy_alias;
 #[cfg(feature = "instrument")]
 mod repeat_nodes;
+mod refresh;
 pub use builder_compose_window::*;
 pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
+pub use refresh::{RefreshRefusal, refresh_bound_ops};
 pub use types_layout_boundop::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;

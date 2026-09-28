@@ -1519,6 +1519,28 @@ impl BackendRuntime {
     ) -> Result<Evaluated, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
         let exact_activations = self.exact_activations;
+        // prefill599 retarget: a genuine miss is about to clear `self.plans`
+        // (`resolve_cached_plan`'s own doc: it keeps exactly one entry), so
+        // the PRIOR miss's plan is only reachable right here, one line
+        // before that clear runs. `shape_footprint`/`kernel_keys` are both
+        // pure re-derivations off `self.prepared`/`self.numeric_policy`, so
+        // snapshotting them here costs nothing on a cache HIT (this branch
+        // is never taken then) and is `instrument`-gated off the default
+        // decode path either way.
+        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        let previous_plan_snapshot = if !self.plans.contains_key(&shape) {
+            self.plans.values().next().and_then(|plan| {
+                let omega::backend::Plan::Metal(metal_plan) = plan else {
+                    return None;
+                };
+                metal_plan
+                    .kernel_keys()
+                    .ok()
+                    .map(|kernel_keys| (metal_plan.shape_footprint(), kernel_keys))
+            })
+        } else {
+            None
+        };
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
@@ -1568,6 +1590,12 @@ impl BackendRuntime {
                 Ok(plan)
             },
         )?;
+        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        if let (Some((previous_footprint, previous_kernel_keys)), omega::backend::Plan::Metal(metal_plan)) =
+            (previous_plan_snapshot, &*plan)
+        {
+            Self::emit_plan_footprint_diff(&previous_footprint, &previous_kernel_keys, metal_plan);
+        }
         Ok(execute_plan_named_with_expert_sources(
             plan,
             named,
@@ -2220,6 +2248,85 @@ impl BackendRuntime {
     /// keeping (an immediate same-shape replay lands as a hit BEFORE the
     /// next miss would evict it) while making superseded entries collectible
     /// instead of retained for the rest of the call.
+    /// One structured `debug!` event per genuine bucket-crossing miss: how
+    /// much of the plan [`omega::metal::Plan::shape_footprint`] reports
+    /// actually moved, against the immediately prior miss's own plan --
+    /// answering "does a bucket crossing rebuild the whole plan, or move a
+    /// handful of positions" rather than assuming either. `node_total` is
+    /// `max(previous.len(), next.len())`: a position present in only one
+    /// plan (an op the fresh bind added or dropped) counts as changed on
+    /// both the shape and the op tallies, attributed to whichever side has
+    /// it.
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    fn emit_plan_footprint_diff(
+        previous_footprint: &[(u32, &'static str, alloc::vec::Vec<u64>, alloc::vec::Vec<i64>)],
+        previous_kernel_keys: &[alloc::string::String],
+        plan: &omega::metal::Plan,
+    ) {
+        let next_footprint = plan.shape_footprint();
+        let next_kernel_keys = plan.kernel_keys().unwrap_or_default();
+        let node_total = previous_footprint.len().max(next_footprint.len());
+        let mut shape_diff_nodes = 0u64;
+        let mut op_diff_nodes = 0u64;
+        let mut op_diff_kind_histogram: alloc::collections::BTreeMap<&'static str, u64> =
+            alloc::collections::BTreeMap::new();
+        for position in 0..node_total {
+            let previous_entry = previous_footprint.get(position);
+            let next_entry = next_footprint.get(position);
+            let shapes_differ = previous_entry.map(|(_, _, extents, _)| extents)
+                != next_entry.map(|(_, _, extents, _)| extents);
+            let ops_differ = previous_entry != next_entry;
+            if shapes_differ {
+                shape_diff_nodes += 1;
+            }
+            if ops_differ {
+                op_diff_nodes += 1;
+                let kind = next_entry
+                    .or(previous_entry)
+                    .map_or("absent", |(_, kind, ..)| *kind);
+                *op_diff_kind_histogram.entry(kind).or_insert(0) += 1;
+                // prefill599 changed-ops row dump: one line per differing
+                // position, the row-level payload the aggregate histogram
+                // above cannot answer (which node, whose reduced axis
+                // moved, whether the kernel identity itself moved).
+                // instrument-gated, fires only on a genuine bucket-crossing
+                // miss (rare), so this is never on the default decode path.
+                let previous_key = previous_kernel_keys.get(position);
+                let next_key = next_kernel_keys.get(position);
+                debug!(
+                    position = position as u64,
+                    previous_node = ?previous_entry.map(|(node, ..)| *node),
+                    next_node = ?next_entry.map(|(node, ..)| *node),
+                    kind,
+                    previous_extents = ?previous_entry.map(|(_, _, extents, _)| extents),
+                    next_extents = ?next_entry.map(|(_, _, extents, _)| extents),
+                    previous_strides = ?previous_entry.map(|(_, _, _, strides)| strides),
+                    next_strides = ?next_entry.map(|(_, _, _, strides)| strides),
+                    previous_kernel_cache_key = ?previous_key,
+                    next_kernel_cache_key = ?next_key,
+                    kernel_cache_key_identical = previous_key == next_key,
+                    "plan_footprint_diff_row: one differing position in a bucket-crossing miss"
+                );
+            }
+        }
+        let op_count_identical = previous_footprint.len() == next_footprint.len();
+        let kinds_sequence_identical = previous_footprint
+            .iter()
+            .map(|(_, kind, ..)| *kind)
+            .eq(next_footprint.iter().map(|(_, kind, ..)| *kind));
+        let kernel_cache_keys_identical = previous_kernel_keys == next_kernel_keys;
+        debug!(
+            node_total = node_total as u64,
+            shape_diff_nodes,
+            op_diff_nodes,
+            op_diff_kind_histogram = ?op_diff_kind_histogram,
+            op_count_identical,
+            kinds_sequence_identical,
+            kernel_cache_keys_identical,
+            "plan_footprint_diff: bucket-crossing miss against the immediately prior plan"
+        );
+    }
+
     #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
     pub(super) fn resolve_cached_plan<'cache, PlanKey, PlanType>(
         cache: &'cache mut alloc::collections::BTreeMap<PlanKey, PlanType>,
