@@ -1163,27 +1163,13 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
             // B" sections): `moe_topk_extra` is the SAME sink slot
             // `run_cached_softmax_weights` fills for THIS kind (mutually
             // exclusive with `MoeTopK`, `cpu::run_node`'s own dispatcher
-            // doc) -- `cached_softmax_weights_extra_node_order`'s own fixed
-            // order (cached_weight_sum, new_weight_sum, new_attended) is
-            // what `run_cached_softmax_weights` filled it in.
-            if let BoundOpKind::CachedSoftmaxWeights {
-                cached_weight_sum,
-                new_weight_sum,
-                new_attended,
-                attention_rows,
-                head_dim,
-                ..
-            } = &computed.kind
+            // doc) -- `cached_softmax_weights_extras` pairs that sink with its three
+            // nodes in the order `run_cached_softmax_weights` filled it.
+            if let Some(extras) =
+                cached_softmax_weights_extras(computed.node, &computed.kind, &moe_topk_extra)?
             {
-                let row_count = *attention_rows as usize;
-                let attended_len = row_count * *head_dim as usize;
-                if moe_topk_extra.len() == 2 * row_count + attended_len {
-                    arena.buffers[cached_weight_sum.0 as usize] =
-                        Some(moe_topk_extra[..row_count].to_vec());
-                    arena.buffers[new_weight_sum.0 as usize] =
-                        Some(moe_topk_extra[row_count..2 * row_count].to_vec());
-                    arena.buffers[new_attended.0 as usize] =
-                        Some(moe_topk_extra[2 * row_count..].to_vec());
+                for (extra_node, values) in extras {
+                    arena.buffers[extra_node.0 as usize] = Some(values.to_vec());
                 }
             }
             if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {

@@ -1871,6 +1871,123 @@ fn cached_softmax_weights_group_max_folds_in_new_scores_when_larger() {
     );
 }
 
+/// The two-attention-row, two-cached-key, head_dim-2 op
+/// [`cached_softmax_weights_bound_step_matches_hand_computed_softmax`] hand
+/// computes: inputs at nodes 0..=2, its own output at node 3, and the three
+/// extra outputs (`cached_weight_sum`, `new_weight_sum`, `new_attended`) at
+/// nodes 4, 5 and 6.
+fn two_row_cached_softmax_weights_op() -> BoundOp {
+    let attention_rows = 2u64;
+    BoundOp {
+        node: NodeId(3),
+        dtype: DType::Float32,
+        extents: vec![2, 2],
+        kind: BoundOpKind::CachedSoftmaxWeights {
+            operands: vec![
+                (
+                    NodeId(0),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![attention_rows as i64, 1],
+                    },
+                    None,
+                ),
+                (
+                    NodeId(1),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![1],
+                    },
+                    None,
+                ),
+                (
+                    NodeId(2),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![2, 1],
+                    },
+                    None,
+                ),
+            ],
+            cached_weight_sum: NodeId(4),
+            new_weight_sum: NodeId(5),
+            new_attended: NodeId(6),
+            cached_key_rows: 2,
+            new_key_rows: 1,
+            query_rows: 1,
+            attention_rows,
+            head_dim: 2,
+        },
+    }
+}
+
+fn two_row_cached_softmax_weights_inputs() -> Vec<Option<Vec<f32>>> {
+    let mut buffers: Vec<Option<Vec<f32>>> = vec![None; 7];
+    buffers[0] = Some(vec![1.0, 3.0, 2.0, 4.0]);
+    buffers[1] = Some(vec![0.5, 0.6]);
+    buffers[2] = Some(vec![4.0, 5.0, 6.0, 7.0]);
+    buffers
+}
+
+/// `Interpreter::fold`, the evaluator every caller of the composed pipe
+/// chain runs, must leave the op's three extra outputs in the buffer table:
+/// gemma4's combine reduce reads `cached_weight_sum` (node 157 in that
+/// program) as an epilogue operand, and the CPU evaluator reported it as a
+/// missing operand buffer when only the op's own output was stored.
+#[test]
+fn interpreter_places_cached_softmax_weights_extra_outputs_in_the_buffer_table() {
+    use proxima_primitives::block_on;
+    use proxima_primitives::pipe::Pipe;
+
+    let mut buffers = two_row_cached_softmax_weights_inputs();
+    let interpreter = Interpreter::new(&mut buffers);
+    let mut ready = ReadyBatch::new();
+    ready.push(two_row_cached_softmax_weights_op());
+
+    block_on(Pipe::call(&interpreter, ready)).expect("cached softmax weights folds");
+
+    let group_max = [2.0f32, 4.0];
+    let cached_weight_sum = [
+        (1.0f32 - group_max[0]).exp() + (2.0f32 - group_max[0]).exp(),
+        (3.0f32 - group_max[1]).exp() + (4.0f32 - group_max[1]).exp(),
+    ];
+    let new_weight_sum = [(0.5f32 - group_max[0]).exp(), (0.6f32 - group_max[1]).exp()];
+    let new_attended = [
+        new_weight_sum[0] * 4.0,
+        new_weight_sum[0] * 5.0,
+        new_weight_sum[1] * 6.0,
+        new_weight_sum[1] * 7.0,
+    ];
+    for (node, expected) in [
+        (4usize, cached_weight_sum.as_slice()),
+        (5, new_weight_sum.as_slice()),
+        (6, new_attended.as_slice()),
+    ] {
+        let stored = interpreter
+            .get(NodeId(node as u32))
+            .unwrap_or_else(|| panic!("node {node} must hold its extra output after the fold"));
+        assert_eq!(stored.len(), expected.len(), "node {node}");
+        for (index, (actual, wanted)) in stored.iter().zip(expected).enumerate() {
+            assert!((actual - wanted).abs() < 1e-6, "node {node}[{index}]: {actual} vs {wanted}");
+        }
+    }
+}
+
+#[test]
+fn cached_softmax_weights_extras_rejects_a_sink_of_the_wrong_length() {
+    let resolved = two_row_cached_softmax_weights_op();
+
+    let result = cached_softmax_weights_extras(resolved.node, &resolved.kind, &[0.0; 7]);
+
+    assert!(
+        matches!(
+            result,
+            Err(TensorError::NotLowerable { node: NodeId(3), .. })
+        ),
+        "a truncated sink must fail loudly instead of leaving readers with a missing buffer"
+    );
+}
+
 /// [`cached_attention_bound_step_runs_online_softmax`]'s counterpart for
 /// `rotary_dim < head_dim` (qwen35's partial-rotary shape,
 /// `BoundOpKind::CachedAttention`'s own doc, ROW 556/557
