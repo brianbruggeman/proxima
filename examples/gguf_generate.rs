@@ -483,11 +483,16 @@ fn main() {
     // extra top-level feature (`tracing-init`) is needed beyond what the
     // gate's own build command already requests.
     proxima_telemetry::emit::global::install_from_env();
-    let telemetry_recorder = proxima_telemetry::recorder::Recorder::builder()
+    let telemetry_recorder = match proxima_telemetry::recorder::Recorder::builder()
         .export(proxima_telemetry::export::Exporter::std())
-        .expect("console exporter installs for this example run")
-        .install()
-        .expect("console telemetry recorder installs for this example run");
+        .and_then(|builder| builder.install())
+    {
+        Ok(recorder) => recorder,
+        Err(error) => {
+            eprintln!("console telemetry recorder failed to install: {error}");
+            std::process::exit(1);
+        }
+    };
     // the lock-free ring buffer only reaches stdout once drained -- same
     // background-pump shape `generate.rs`'s own test-only
     // `install_stdout_telemetry` uses, so this example's `info!`/`debug!`
@@ -496,15 +501,18 @@ fn main() {
     // unread in the ring until the process exits.
     {
         let pump_recorder = std::sync::Arc::clone(&telemetry_recorder);
-        std::thread::Builder::new()
+        let drain_spawn = std::thread::Builder::new()
             .name("gguf-generate-telemetry-drain".to_string())
             .spawn(move || {
                 loop {
                     pump_recorder.drain();
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-            })
-            .expect("spawn the telemetry drain thread");
+            });
+        if let Err(error) = drain_spawn {
+            eprintln!("telemetry drain thread failed to spawn: {error}");
+            std::process::exit(1);
+        }
     }
 
     let settings = GenerateConfig::from_process();

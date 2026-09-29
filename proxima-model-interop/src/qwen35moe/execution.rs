@@ -219,7 +219,6 @@ pub fn split_mapped_layer_segment(
 /// Uses [`partition_between_with_mapping`] to retain the final gather and
 /// logits suffix in one program; the router remains an external cut.
 #[cfg(feature = "qwen35moe-linked-suffix")]
-#[must_use]
 pub(crate) fn split_gather_and_suffix_segment(
     program: &[Op],
     symbols: &[u64],

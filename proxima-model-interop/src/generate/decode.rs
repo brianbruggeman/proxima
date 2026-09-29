@@ -4174,53 +4174,51 @@ impl<'file> LoadedModel<'file> {
                                 if let (Some(policy), Some(sidecar)) = (
                                     qwen35moe_residency.as_ref(),
                                     expert_sidecar_for_gather.as_ref(),
-                                ) {
-                                    if let Some(next_history) =
-                                        qwen35moe_route_history.get(layer.saturating_add(1))
-                                    {
-                                        let candidates = policy
-                                            .prefetch_candidates::<16>(
-                                                layer.saturating_add(1),
-                                                &next_history.routes[..next_history.len],
-                                                f32::NEG_INFINITY,
-                                            )
-                                            .map_err(|error| {
-                                                InteropError::PreGatherExecutionUnsupported {
-                                                    architecture: String::from("qwen35moe"),
-                                                    reason: error.to_string(),
-                                                }
-                                            })?;
-                                        let mut advised_bytes = 0_u64;
-                                        for candidate in candidates.as_slice().iter().flatten() {
-                                            let candidate_bytes =
-                                                sidecar.advise_expert_low(candidate.address)?;
-                                            advised_bytes =
-                                                advised_bytes.saturating_add(candidate_bytes);
-                                            qwen35moe_prefetch_advised_bytes =
-                                                qwen35moe_prefetch_advised_bytes
-                                                    .saturating_add(candidate_bytes);
-                                        }
-                                        qwen35moe_prefetch_advice_events += 1;
-                                        if advised_bytes > 0 {
-                                            trace!(
-                                                layer = layer as u64,
-                                                next_layer = layer.saturating_add(1) as u64,
-                                                candidates = candidates.as_slice().len() as u64,
-                                                advised_bytes,
-                                                "qwen35_expert_prefetch"
-                                            );
-                                        }
+                                ) && let Some(next_history) =
+                                    qwen35moe_route_history.get(layer.saturating_add(1))
+                                {
+                                    let candidates = policy
+                                        .prefetch_candidates::<16>(
+                                            layer.saturating_add(1),
+                                            &next_history.routes[..next_history.len],
+                                            f32::NEG_INFINITY,
+                                        )
+                                        .map_err(|error| {
+                                            InteropError::PreGatherExecutionUnsupported {
+                                                architecture: String::from("qwen35moe"),
+                                                reason: error.to_string(),
+                                            }
+                                        })?;
+                                    let mut advised_bytes = 0_u64;
+                                    for candidate in candidates.as_slice().iter().flatten() {
+                                        let candidate_bytes =
+                                            sidecar.advise_expert_low(candidate.address)?;
+                                        advised_bytes =
+                                            advised_bytes.saturating_add(candidate_bytes);
+                                        qwen35moe_prefetch_advised_bytes =
+                                            qwen35moe_prefetch_advised_bytes
+                                                .saturating_add(candidate_bytes);
+                                    }
+                                    qwen35moe_prefetch_advice_events += 1;
+                                    if advised_bytes > 0 {
+                                        trace!(
+                                            layer = layer as u64,
+                                            next_layer = layer.saturating_add(1) as u64,
+                                            candidates = candidates.as_slice().len() as u64,
+                                            advised_bytes,
+                                            "qwen35_expert_prefetch"
+                                        );
                                     }
                                 }
                             }
                             expert_slab
                                 .add_selected_experts(layer, &selected_experts[..routes.len()]);
                             #[cfg(feature = "qwen35moe-expert-prefetch")]
-                            if qwen35moe_expert_prefetch_enabled {
-                                if let Some(history) = qwen35moe_route_history.get_mut(layer) {
-                                    history.len = routes.len();
-                                    history.routes[..routes.len()].copy_from_slice(routes);
-                                }
+                            if qwen35moe_expert_prefetch_enabled
+                                && let Some(history) = qwen35moe_route_history.get_mut(layer)
+                            {
+                                history.len = routes.len();
+                                history.routes[..routes.len()].copy_from_slice(routes);
                             }
                             if let Some(policy) = qwen35moe_residency.as_mut() {
                                 // Capture the precision decision before the
