@@ -922,6 +922,11 @@ pub struct Plan {
     /// returns, every earlier entry already has a terminal status too --
     /// checking them is a synchronous read, not an additional wait.
     pub(super) chunk_status_buffers: RefCell<Vec<Retained<ProtocolObject<dyn MTLCommandBuffer>>>>,
+    /// Parallel to [`Plan::chunk_status_buffers`], one [`BufferDiagnostics`]
+    /// per committed command buffer, reused call-to-call for the same reason:
+    /// a fresh `Vec` grown by its first push is a heap allocation on every
+    /// warm step.
+    pub(super) chunk_status_diagnostics: RefCell<Vec<BufferDiagnostics>>,
 }
 
 /// [`Plan::resolved_steps`]'s payload -- the [`MathMode`] it was built

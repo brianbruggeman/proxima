@@ -653,7 +653,9 @@ pub(super) fn execute_plan_with_placements_inner(
     // stop `check_all_command_buffers` short of the end of the vector,
     // exactly the "not every buffer gets checked" failure this whole
     // module exists to rule out).
-    let mut chunk_status_diagnostics: Vec<BufferDiagnostics> = Vec::new();
+    let mut chunk_status_diagnostics_guard = plan.chunk_status_diagnostics.borrow_mut();
+    let chunk_status_diagnostics: &mut Vec<BufferDiagnostics> = &mut chunk_status_diagnostics_guard;
+    chunk_status_diagnostics.clear();
     // `omega.chunk.<n>` label sequence -- bumped once per command buffer
     // THIS call creates (chunk boundaries and the diagnostic blit path
     // alike), independent of `next_boundary`/`chunk_count` so a substitute
@@ -1597,7 +1599,7 @@ pub(super) fn execute_plan_with_placements_inner(
     // checks EVERY command buffer this call committed, not only the last --
     // see `Plan::chunk_status_buffers`'s own doc for why one wait already
     // proves every earlier entry has a terminal status too.
-    check_all_command_buffers(&chunk_status_buffers, &chunk_status_diagnostics)?;
+    check_all_command_buffers(&chunk_status_buffers, chunk_status_diagnostics)?;
     // `PROXIMA_CAPTURE_DUMP_DIR`: the step's own final wait already proves
     // every chunk (including one whose boundary this step never crossed,
     // e.g. the captured node was the plan's very last op) has completed --
