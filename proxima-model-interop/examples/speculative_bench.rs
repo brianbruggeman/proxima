@@ -15,16 +15,32 @@
 //! path for verify_steps/drafted/accepted -- NOT the telemetry ring
 //! (`speculative_decode_parity.rs`'s own doc on that ring silently dropping
 //! events under metal's per-dispatch `debug!` volume).
+//!
+//! slice 24: `--incumbent llama-server [--llama-server-bin <path>]` (default
+//! `llama-server` off `PATH`) spawns TWO llama-server child processes --
+//! `--spec-type none` and `--spec-type <drafter>`, parameters read off the
+//! SAME [`ServingConfig`]/[`SpeculativeConfig`] proxima's own ON arm uses
+//! (`base_llama_server_args`/`ngram_type_args`) -- both alive for the whole
+//! run, interleaved the same OFF/ON/swap-order way proxima's own pair is.
+//! Each request sends the token ids proxima's own tokenizer produced for
+//! that prompt (`/completion`'s `"prompt": [ids...]`), never re-tokenized
+//! text, so a tokenizer disagreement cannot silently bias the comparison;
+//! [`check_token_parity`] cross-checks llama's own `/tokenize` against those
+//! ids once, on the corpus's first prompt, and reports (never hides) a
+//! mismatch. llama's own `predicted_per_token_ms`/`draft_n`/
+//! `draft_n_accepted` come straight off its `/completion` response
+//! `"timings"` object -- never wall-clock around the HTTP call.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 #![allow(clippy::too_many_lines)]
 
 use std::env;
 use std::fs::File;
-use std::io::BufRead;
+use std::io::{BufRead, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use core::ops::ControlFlow;
@@ -32,9 +48,10 @@ use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats,
-    SpeculativeType, SpeculativeTypeSet, TokenEvent,
+    GPU_LAYERS_ALL, LoadedModel, NgramMapParams, NgramModParams, Phase, ServingConfig,
+    SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet, TokenEvent,
 };
+use proxima_tokenizer::vocab::Vocab;
 
 const DEFAULT_MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
@@ -70,9 +87,12 @@ struct BenchArgs {
     gpu_layers: i32,
     max_tokens: usize,
     incumbent: Option<String>,
+    llama_server_bin: PathBuf,
     force: bool,
     model_path: String,
 }
+
+const DEFAULT_LLAMA_SERVER_BIN: &str = "llama-server";
 
 fn parse_gpu_layers(value: &str) -> i32 {
     if value.eq_ignore_ascii_case("all") {
@@ -115,6 +135,7 @@ fn parse_args() -> BenchArgs {
     let mut max_tokens = DEFAULT_MAX_TOKENS;
     let mut widths = None;
     let mut incumbent = None;
+    let mut llama_server_bin = PathBuf::from(DEFAULT_LLAMA_SERVER_BIN);
     let mut force = false;
     let mut positionals = Vec::new();
 
@@ -153,6 +174,10 @@ fn parse_args() -> BenchArgs {
                 index += 1;
                 incumbent = Some(raw[index].clone());
             }
+            "--llama-server-bin" => {
+                index += 1;
+                llama_server_bin = PathBuf::from(&raw[index]);
+            }
             "--force" => {
                 force = true;
             }
@@ -179,6 +204,7 @@ fn parse_args() -> BenchArgs {
         gpu_layers,
         max_tokens,
         incumbent,
+        llama_server_bin,
         force,
         model_path,
     }
@@ -616,6 +642,491 @@ fn coefficient_of_variation(values: &[f64]) -> f64 {
 }
 
 // ---------------------------------------------------------------------
+// llama-server incumbent arm (invariants 1-3 in the task brief; SPEC's
+// own "incumbent arm" architecture paragraph)
+// ---------------------------------------------------------------------
+
+/// Mirrors `proxima_model_interop::generate::residency_caches::wants_bos`,
+/// which is crate-private and unreachable from an example binary --
+/// `examples/attn_prompt_tokens.rs` already carries the identical copy for
+/// the identical reason.
+fn wants_bos(vocab: &Vocab) -> bool {
+    vocab
+        .add_bos_token()
+        .unwrap_or_else(|| vocab.bos_token_id().is_some())
+}
+
+/// One TCP round trip: a full HTTP/1.1 request with a JSON body, read to
+/// socket close (`Connection: close` on the request, so a non-streaming
+/// JSON response never needs chunked-transfer-encoding handling). llama's
+/// own client-side documentation for `/completion` and `/tokenize` is the
+/// llama-server source read for this arm (`server-context.cpp`,
+/// `server-common.cpp`) -- there is no client crate in this workspace's
+/// `Cargo.lock` that would save more than this hand-rolled request/response
+/// pair costs (invariant 5: `reqwest`/`ureq`/`hyper` are either absent or,
+/// for `hyper`, only ever wired as part of `proxima-http`'s full async
+/// server/client stack, which would drag a tokio runtime into a synchronous
+/// CLI example for one localhost POST).
+/// `Err` on ANY failure (connection refused, malformed response, non-200
+/// status) -- the caller decides whether that is a readiness-poll retry
+/// ([`LlamaServerHandle::wait_until_healthy`]) or a hard failure
+/// ([`http_get_json`]/[`http_post_json`]).
+fn try_http_request_json(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let payload = body.map(|value| serde_json::to_vec(value).expect("serialize json body"));
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", port)).map_err(|err| format!("connect: {err}"))?;
+    let content_length = payload.as_ref().map_or(0, Vec::len);
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+         Content-Length: {content_length}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(head.as_bytes())
+        .map_err(|err| format!("write request head: {err}"))?;
+    if let Some(payload) = &payload {
+        stream
+            .write_all(payload)
+            .map_err(|err| format!("write request body: {err}"))?;
+    }
+    stream.flush().map_err(|err| format!("flush request: {err}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|err| format!("read response: {err}"))?;
+    let separator = b"\r\n\r\n";
+    let split_at = response
+        .windows(separator.len())
+        .position(|window| window == separator)
+        .ok_or_else(|| "response missing header/body separator".to_string())?;
+    let status_line = response[..split_at]
+        .split(|&byte| byte == b'\r' || byte == b'\n')
+        .next()
+        .ok_or_else(|| "response missing status line".to_string())?;
+    let status_text = String::from_utf8_lossy(status_line).into_owned();
+    if !status_text.contains("200") {
+        return Err(format!("{method} {path} returned {status_text}"));
+    }
+    let response_body = &response[split_at + separator.len()..];
+    serde_json::from_slice(response_body)
+        .map_err(|err| format!("parse response json: {err} (body: {})", String::from_utf8_lossy(response_body)))
+}
+
+fn http_request_json(port: u16, method: &str, path: &str, body: Option<&serde_json::Value>) -> serde_json::Value {
+    try_http_request_json(port, method, path, body)
+        .unwrap_or_else(|err| panic!("llama-server {method} {path}: {err}"))
+}
+
+fn http_post_json(port: u16, path: &str, body: &serde_json::Value) -> serde_json::Value {
+    http_request_json(port, "POST", path, Some(body))
+}
+
+fn llama_gpu_layers_value(gpu_layers: i32) -> String {
+    if gpu_layers == GPU_LAYERS_ALL {
+        "all".to_string()
+    } else {
+        gpu_layers.to_string()
+    }
+}
+
+/// Only the parameters the task brief names as fair to match run off
+/// `config`: sampling (`--temp`/`--top-k`/`--top-p`/`--min-p`/
+/// `--repeat-last-n`/`--repeat-penalty`/`--frequency-penalty`/
+/// `--presence-penalty`), `--seed`, and `-ngl` (`config.gpu_layers`) --
+/// plus `-np` (`config.parallel_sequences`), which is `1` on both sides
+/// already (llama.cpp's own `n_parallel` default, `common.h:457`), so
+/// passing it explicitly never moves llama off its own turf. `batch_size`/
+/// `ubatch_size` are deliberately absent for the same reason they always
+/// were: proxima's own `0` sentinel has no llama-server equivalent value,
+/// left at llama's own CLI default (`-b 2048 -ub 512`) rather than guessed.
+///
+/// Everything else here previously copied `config`'s OWN serving values
+/// onto llama-server -- `-ctk f32 -ctv f32 -fa off --no-kv-offload` --
+/// which is not llama-server's home turf: `--no-kv-offload` in particular
+/// forces attention onto the CPU on Apple silicon. Those flags are gone;
+/// llama-server now runs its own real per-hardware defaults, confirmed
+/// against `common/common.h` and `common/arg.cpp` in this host's
+/// `llama.cpp` checkout:
+/// - KV cache dtype: `GGML_TYPE_F16` for both K and V (`common.h:589-590`,
+///   the `-ctk`/`-ctv` default `common_params` never overrides here).
+/// - KV offload: enabled (`no_kv_offload = false`, `common.h:580`;
+///   `-nkvo`/`--no-kv-offload` is the opt-in to disable it, `arg.cpp:2412-2419`).
+/// - Flash Attention: `auto` (`flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO`,
+///   `common.h:501`; `-fa`'s own default string reads `"auto"`,
+///   `arg.cpp:1751-1764`).
+///
+/// `-c` is the one exception NOT left at llama's literal default
+/// (`n_ctx = 0`, "whatever the model was trained with", `common.h:452`,
+/// `arg.cpp:1636-1644`): `llama_context_length` is sized to this run's own
+/// corpus (see `run_pairs_mode`'s own comment) so the incumbent is not
+/// forced to allocate KV cache for a multi-hundred-thousand-token context
+/// it never uses.
+fn base_llama_server_args(config: &ServingConfig, llama_context_length: u32) -> Vec<String> {
+    vec![
+        "-c".to_string(),
+        llama_context_length.to_string(),
+        "-ngl".to_string(),
+        llama_gpu_layers_value(config.gpu_layers),
+        "-np".to_string(),
+        config.parallel_sequences.to_string(),
+        "--temp".to_string(),
+        config.temperature.to_string(),
+        "--top-k".to_string(),
+        config.top_k.to_string(),
+        "--top-p".to_string(),
+        config.top_p.to_string(),
+        "--min-p".to_string(),
+        config.min_p.to_string(),
+        "--repeat-last-n".to_string(),
+        config.repeat_last_n.to_string(),
+        "--repeat-penalty".to_string(),
+        config.repeat_penalty.to_string(),
+        "--frequency-penalty".to_string(),
+        config.frequency_penalty.to_string(),
+        "--presence-penalty".to_string(),
+        config.presence_penalty.to_string(),
+        "--seed".to_string(),
+        config.seed.to_string(),
+        "--no-webui".to_string(),
+    ]
+}
+
+/// The size/hit-count flags llama's own five n-gram `--spec-type` values
+/// read, sourced from the SAME [`SpeculativeConfig`] struct proxima's
+/// decode loop reads for the ON arm -- so a parameter drift on either side
+/// shows up as a real speedup difference, not a silent mismatch.
+/// `ngram-cache` has no size/hit-count CLI flags upstream (it only takes
+/// `--lookup-cache-static`/`--lookup-cache-dynamic` file paths, R7's own
+/// concern, not wired here); the empty-args branch runs it at llama's own
+/// in-memory-dynamic-cache default, same as omitting both cache flags on
+/// llama's own CLI.
+fn ngram_type_args(spec_type: SpeculativeType, speculative: &SpeculativeConfig) -> Vec<String> {
+    fn map_params_args(flag_prefix: &str, params: NgramMapParams) -> Vec<String> {
+        vec![
+            format!("--spec-{flag_prefix}-size-n"),
+            params.size_n.to_string(),
+            format!("--spec-{flag_prefix}-size-m"),
+            params.size_m.to_string(),
+            format!("--spec-{flag_prefix}-min-hits"),
+            params.min_hits.to_string(),
+        ]
+    }
+    fn mod_params_args(params: NgramModParams) -> Vec<String> {
+        vec![
+            "--spec-ngram-mod-n-match".to_string(),
+            params.n_match.to_string(),
+            "--spec-ngram-mod-n-max".to_string(),
+            params.n_max.to_string(),
+            "--spec-ngram-mod-n-min".to_string(),
+            params.n_min.to_string(),
+        ]
+    }
+    match spec_type {
+        SpeculativeType::NgramSimple => map_params_args("ngram-simple", speculative.ngram_simple),
+        SpeculativeType::NgramMapK => map_params_args("ngram-map-k", speculative.ngram_map_k),
+        SpeculativeType::NgramMapK4v => map_params_args("ngram-map-k4v", speculative.ngram_map_k4v),
+        SpeculativeType::NgramMod => mod_params_args(speculative.ngram_mod),
+        SpeculativeType::NgramCache => Vec::new(),
+        other => panic!(
+            "llama-server incumbent arm only maps the five n-gram --spec-type \
+             values; {} is not one of them",
+            other.llama_name()
+        ),
+    }
+}
+
+/// PIDs of every child [`ChildGuard`] this run has spawned, so
+/// [`install_orphan_reaping_panic_hook`]'s hook can kill them even when
+/// [`ChildGuard::drop`] itself never runs -- the release profile's own
+/// `panic = "abort"` (workspace `Cargo.toml`) skips unwinding entirely, so
+/// no destructor on the panicking thread's stack executes. Plain `u32`
+/// PIDs, not `Child` handles: the hook needs to reach these from a context
+/// that does not (and must not) own the `Child` itself -- the normal drop
+/// path already owns and reaps it directly.
+static REAPABLE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Kills and waits the wrapped child on drop. `std::process::Child`'s own
+/// `Drop` deliberately does NOT kill the process (the stdlib's documented
+/// behavior) -- a bench that only ever calls `.spawn()` leaks a running
+/// llama-server on any early return, and leaked it on every panic in this
+/// file's own real-run history (two orphaned llama-server processes after a
+/// mid-run panic, neither killed nor waited).
+struct ChildGuard {
+    child: Child,
+    pid: u32,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        let pid = child.id();
+        REAPABLE_PIDS.lock().unwrap_or_else(PoisonError::into_inner).push(pid);
+        Self { child, pid }
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        REAPABLE_PIDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|&candidate| candidate != self.pid);
+    }
+}
+
+/// The `panic`-hook half of orphan reaping -- [`ChildGuard::drop`] alone
+/// does not run under the release profile's `panic = "abort"` (no
+/// unwinding, so no destructor on the panicking thread's stack executes),
+/// and never runs at all past a bare `std::process::exit`. A panic hook
+/// runs BEFORE the abort/unwind decision, on every profile, so it is the
+/// one mechanism that reaches both cases. Chains the previous hook rather
+/// than replacing it, so the default panic message (thread name, location,
+/// the `RUST_BACKTRACE` hint) still prints exactly as before. Installed
+/// once, at the top of `main`.
+fn install_orphan_reaping_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        reap_orphaned_llama_servers();
+        previous_hook(panic_info);
+    }));
+}
+
+fn reap_orphaned_llama_servers() {
+    let pids = REAPABLE_PIDS.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    for pid in pids {
+        eprintln!("speculative_bench: panic hook reaping orphaned llama-server pid={pid}");
+        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    }
+}
+
+/// One llama-server child process bound to one port, killed on
+/// [`Self::stop`] (and on drop regardless -- see [`ChildGuard`]). `label` is
+/// `"off"`/`"on"`, printed alongside the pid so a caller reading stderr can
+/// match this run's own process-management instructions to a concrete pid.
+struct LlamaServerHandle {
+    child: ChildGuard,
+    port: u16,
+    label: String,
+}
+
+impl LlamaServerHandle {
+    fn spawn(bin: &Path, model_path: &str, port: u16, label: &str, extra_args: &[String]) -> Self {
+        let mut command = Command::new(bin);
+        if let Some(lib_dir) = bin.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            // llama-server's own dylibs (libggml*, libllama*) live alongside
+            // the binary, not on the default dyld search path.
+            command.env("DYLD_LIBRARY_PATH", lib_dir);
+        }
+        let fixed_args = [
+            "--model".to_string(),
+            model_path.to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+        ];
+        // The exact command line this arm's incumbent ran under -- so a
+        // parity dispute (was `-c`/`-ctk`/`-fa` really what the log claims?)
+        // is settled by grepping this run's own log, not by trusting a
+        // doc-comment (principle 16: re-provable from the artifact alone).
+        eprintln!(
+            "speculative_bench: llama-server ({label}) command: {} {} {}",
+            bin.display(),
+            fixed_args.join(" "),
+            extra_args.join(" "),
+        );
+        command
+            .args(fixed_args)
+            .args(extra_args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = command
+            .spawn()
+            .unwrap_or_else(|err| panic!("spawn llama-server ({label}) from {}: {err}", bin.display()));
+        let child = ChildGuard::new(child);
+        let pid = child.pid();
+        eprintln!("speculative_bench: started llama-server ({label}) pid={pid} port={port}");
+        let handle = Self {
+            child,
+            port,
+            label: label.to_string(),
+        };
+        handle.wait_until_healthy();
+        handle
+    }
+
+    fn wait_until_healthy(&self) {
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            if let Ok(body) = try_http_request_json(self.port, "GET", "/health", None)
+                && body.get("status").and_then(serde_json::Value::as_str) == Some("ok")
+            {
+                return;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "llama-server ({}) on port {} never reported healthy within 180s",
+                self.label,
+                self.port
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    fn stop(self) {
+        let pid = self.child.pid();
+        let label = self.label.clone();
+        drop(self); // drops `child` (a `ChildGuard`) -- kills and waits it.
+        eprintln!("speculative_bench: stopped llama-server ({label}) pid={pid}");
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LlamaArmResult {
+    ms_per_token: f64,
+    ttft_ms: f64,
+    predicted_n: u64,
+    draft_n: u64,
+    draft_n_accepted: u64,
+}
+
+/// One non-streaming `/completion` call against token ids (invariant 2:
+/// "prefer sending token ids ... produced by the proxima tokenizer +
+/// template"), reading llama's OWN timing fields
+/// (`predicted_per_token_ms`, `prompt_ms`, `predicted_n`, `draft_n`,
+/// `draft_n_accepted`) straight off its response -- never wall-clock
+/// around this HTTP call (invariant 3). `cache_prompt: false` matches
+/// proxima's own arm: every [`run_one_arm`] call re-prefills from
+/// `cached_len == 0`, so a cached llama-server prompt would give llama an
+/// advantage this bench does not measure on proxima's side.
+fn run_llama_completion(port: u16, token_ids: &[u32], max_tokens: usize) -> LlamaArmResult {
+    let body = serde_json::json!({
+        "prompt": token_ids,
+        "n_predict": max_tokens,
+        "cache_prompt": false,
+        "stream": false,
+    });
+    let response = http_post_json(port, "/completion", &body);
+    let timings = response
+        .get("timings")
+        .unwrap_or_else(|| panic!("llama-server /completion response missing \"timings\": {response}"));
+    let get_f64 = |key: &str| timings.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let get_u64 = |key: &str| timings.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    LlamaArmResult {
+        ms_per_token: get_f64("predicted_per_token_ms"),
+        ttft_ms: get_f64("prompt_ms"),
+        predicted_n: get_u64("predicted_n"),
+        draft_n: get_u64("draft_n"),
+        draft_n_accepted: get_u64("draft_n_accepted"),
+    }
+}
+
+struct LlamaPairResult {
+    off: LlamaArmResult,
+    on: LlamaArmResult,
+}
+
+fn run_llama_pair(
+    off_handle: &LlamaServerHandle,
+    on_handle: &LlamaServerHandle,
+    token_ids: &[u32],
+    max_tokens: usize,
+    swap_order: bool,
+) -> LlamaPairResult {
+    let (off, on) = if swap_order {
+        let on = run_llama_completion(on_handle.port, token_ids, max_tokens);
+        let off = run_llama_completion(off_handle.port, token_ids, max_tokens);
+        (off, on)
+    } else {
+        let off = run_llama_completion(off_handle.port, token_ids, max_tokens);
+        let on = run_llama_completion(on_handle.port, token_ids, max_tokens);
+        (off, on)
+    };
+    LlamaPairResult { off, on }
+}
+
+fn format_llama_arm(label: &str, arm: &LlamaArmResult) -> String {
+    format!(
+        "{label}_llama_ms_per_token={:.3} {label}_llama_ttft_ms={:.3} {label}_llama_predicted_n={} \
+         {label}_llama_draft_n={} {label}_llama_draft_n_accepted={}",
+        arm.ms_per_token, arm.ttft_ms, arm.predicted_n, arm.draft_n, arm.draft_n_accepted,
+    )
+}
+
+/// Invariant 2's token-equality check, run once on the corpus's first
+/// prompt: proxima's own tokenization (`wants_bos`/`add_eos_token`, the
+/// exact convention [`run_one_arm`]'s decode call uses) vs llama-server's
+/// `/tokenize` on the same raw text. Prints the result either way --
+/// divergence is reported, not treated as fatal, per the task brief.
+fn check_token_parity(off_handle: &LlamaServerHandle, prompt: &str, proxima_ids: &[u32], add_bos: bool) {
+    let body = serde_json::json!({
+        "content": prompt,
+        "add_special": add_bos,
+        "parse_special": true,
+    });
+    let response = http_post_json(off_handle.port, "/tokenize", &body);
+    let llama_ids: Vec<u64> = response
+        .get("tokens")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("llama-server /tokenize response missing \"tokens\" array: {response}"))
+        .iter()
+        .map(|value| value.as_u64().unwrap_or_else(|| panic!("non-integer token id in {value}")))
+        .collect();
+    let proxima_ids_u64: Vec<u64> = proxima_ids.iter().map(|&id| u64::from(id)).collect();
+    let identical = llama_ids == proxima_ids_u64;
+    println!(
+        "token_parity proxima_len={} llama_len={} identical={identical} \
+         proxima_first_six={:?} llama_first_six={:?}",
+        proxima_ids_u64.len(),
+        llama_ids.len(),
+        proxima_ids_u64.iter().take(6).collect::<Vec<_>>(),
+        llama_ids.iter().take(6).collect::<Vec<_>>(),
+    );
+}
+
+/// Spawns the OFF (`--spec-type none`) and ON (`--spec-type <drafter>`,
+/// parameters read off `on_config.speculative`) llama-server processes on
+/// two fixed ports, both alive for the whole bench run (invariant 1: "one
+/// server process per configuration ... loaded once per config"). A caller
+/// interleaves requests against the SAME two handles for every pair.
+///
+/// `llama_context_length` is the ONE non-default value `base_llama_server_args`
+/// passes for `-c` -- everything else it emits either matches proxima's arm
+/// on purpose (sampling, seed, `-ngl`) or is llama-server's own real
+/// per-hardware default (KV cache dtype, KV offload, Flash Attention; see
+/// that function's own doc for the `common.h`/`arg.cpp` citations).
+fn spawn_incumbent_servers(
+    llama_server_bin: &Path,
+    model_path: &str,
+    drafter: SpeculativeType,
+    off_config: &ServingConfig,
+    on_config: &ServingConfig,
+    llama_context_length: u32,
+) -> (LlamaServerHandle, LlamaServerHandle) {
+    const OFF_PORT: u16 = 18_080;
+    const ON_PORT: u16 = 18_081;
+    let mut off_args = base_llama_server_args(off_config, llama_context_length);
+    off_args.push("--spec-type".to_string());
+    off_args.push("none".to_string());
+    let mut on_args = base_llama_server_args(on_config, llama_context_length);
+    on_args.push("--spec-type".to_string());
+    on_args.push(drafter.llama_name().to_string());
+    on_args.extend(ngram_type_args(drafter, &on_config.speculative));
+    let off_handle = LlamaServerHandle::spawn(llama_server_bin, model_path, OFF_PORT, "off", &off_args);
+    let on_handle = LlamaServerHandle::spawn(llama_server_bin, model_path, ON_PORT, "on", &on_args);
+    (off_handle, on_handle)
+}
+
+// ---------------------------------------------------------------------
 // corpus loading
 // ---------------------------------------------------------------------
 
@@ -891,7 +1402,7 @@ fn format_arm(label: &str, arm: &ArmResult) -> String {
     )
 }
 
-fn run_pairs_mode(model: &LoadedModel, args: &BenchArgs, unmeasured_label: &str) {
+fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasured_label: &str) {
     let drafter = args.drafter.unwrap_or(SpeculativeType::NgramSimple);
     if drafter != SpeculativeType::NgramSimple {
         eprintln!(
@@ -903,12 +1414,10 @@ fn run_pairs_mode(model: &LoadedModel, args: &BenchArgs, unmeasured_label: &str)
         std::process::exit(2);
     }
 
-    if let Some(incumbent) = &args.incumbent {
-        eprintln!(
-            "speculative_bench: --incumbent {incumbent}: not yet wired -- \
-             `speculative-decode-llama-parity/TASKS.md` slice 24 (llama-server \
-             incumbent arm) wires this"
-        );
+    if let Some(incumbent) = &args.incumbent
+        && incumbent != "llama-server"
+    {
+        eprintln!("speculative_bench: --incumbent {incumbent}: only \"llama-server\" is wired");
         std::process::exit(2);
     }
 
@@ -930,14 +1439,65 @@ fn run_pairs_mode(model: &LoadedModel, args: &BenchArgs, unmeasured_label: &str)
         ..SpeculativeConfig::none()
     });
 
+    let add_bos = wants_bos(vocab);
+    let add_eos = vocab.add_eos_token().unwrap_or(false);
+    // Tokenized once, up front, for the whole corpus -- reused by every
+    // prompt's own loop iteration below (never re-tokenized per pair), AND
+    // to size the incumbent's own `-c` before it spawns: llama.cpp's real
+    // per-hardware default is `-c 0` ("whatever the model was trained
+    // with"), which this harness deliberately does NOT hand it (see
+    // `spawn_incumbent_servers`'s own doc) in favor of sizing to what the
+    // corpus + this run's own `--max-tokens` actually need.
+    let token_ids_per_prompt: Vec<Vec<u32>> = prompts
+        .iter()
+        .map(|prompt| {
+            proxima_tokenizer::encode_with_bos_eos(prompt, vocab, add_bos, add_eos)
+                .expect("tokenize prompt under the cached_len convention run_one_arm's decode call uses")
+        })
+        .collect();
+    let longest_prompt_tokens = token_ids_per_prompt
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or_else(|| panic!("corpus produced no tokenized prompts"));
+    // Headroom absorbs the handful of extra tokens `cache_prompt`
+    // bookkeeping and the speculative draft buffer can append past
+    // `max_tokens` worth of predicted tokens. Generous, not tight:
+    // oversizing `-c` costs KV-cache memory, undersizing it truncates or
+    // forces a mid-run reprocess -- the wrong failure mode for a
+    // correctness-sensitive comparison run.
+    const LLAMA_CONTEXT_HEADROOM_TOKENS: usize = 256;
+    let llama_context_length = u32::try_from(longest_prompt_tokens + args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS)
+        .expect("corpus's longest prompt + max_tokens + headroom fits in a u32 context size");
+
+    let incumbent_handles = args.incumbent.as_deref().map(|_| {
+        spawn_incumbent_servers(
+            &args.llama_server_bin,
+            &args.model_path,
+            drafter,
+            &off_config,
+            &on_config,
+            llama_context_length,
+        )
+    });
+
     let mut pair_ratios: Vec<f64> = Vec::new();
+    let mut llama_pair_ratios: Vec<f64> = Vec::new();
     let mut contaminated_pairs = 0usize;
     let mut verify_steps_total = 0u64;
     let mut accepted_total = 0u64;
     let mut drafted_total = 0u64;
     let mut wins = 0usize;
+    let mut llama_wins = 0usize;
 
-    for prompt in &prompts {
+    for (prompt_index, prompt) in prompts.iter().enumerate() {
+        let token_ids = &token_ids_per_prompt[prompt_index];
+        if prompt_index == 0
+            && let Some((off_handle, _)) = &incumbent_handles
+        {
+            check_token_parity(off_handle, prompt, token_ids, add_bos);
+        }
+
         for pair_index in 0..args.pairs {
             let swap_order = pair_index % 2 == 1;
             let pair = run_pair(
@@ -958,9 +1518,29 @@ fn run_pairs_mode(model: &LoadedModel, args: &BenchArgs, unmeasured_label: &str)
                 0.0
             };
             let is_warmup = pair_index == 0;
+
+            let llama_pair = incumbent_handles.as_ref().map(|(off_handle, on_handle)| {
+                run_llama_pair(off_handle, on_handle, token_ids, args.max_tokens, swap_order)
+            });
+            let llama_ratio = llama_pair.as_ref().map(|llama_pair| {
+                if llama_pair.on.ms_per_token > 0.0 {
+                    llama_pair.off.ms_per_token / llama_pair.on.ms_per_token
+                } else {
+                    0.0
+                }
+            });
+
+            let llama_fields = llama_pair.as_ref().map_or_else(String::new, |llama_pair| {
+                format!(
+                    " llama_ratio={:.4} {} {}",
+                    llama_ratio.unwrap_or(0.0),
+                    format_llama_arm("off", &llama_pair.off),
+                    format_llama_arm("on", &llama_pair.on),
+                )
+            });
             println!(
                 "{unmeasured_label} pair prompt_prefix={:?} pair_index={pair_index} \
-                 warmup={is_warmup} contaminated={} ratio={ratio:.4} {} {}",
+                 warmup={is_warmup} contaminated={} ratio={ratio:.4} {} {}{llama_fields}",
                 prompt.chars().take(24).collect::<String>(),
                 pair.contaminated,
                 format_arm("off", &pair.off),
@@ -983,7 +1563,18 @@ fn run_pairs_mode(model: &LoadedModel, args: &BenchArgs, unmeasured_label: &str)
                 wins += 1;
             }
             pair_ratios.push(ratio);
+            if let Some(llama_ratio) = llama_ratio {
+                if llama_ratio > 1.0 {
+                    llama_wins += 1;
+                }
+                llama_pair_ratios.push(llama_ratio);
+            }
         }
+    }
+
+    if let Some((off_handle, on_handle)) = incumbent_handles {
+        off_handle.stop();
+        on_handle.stop();
     }
 
     pair_ratios.sort_by(|left, right| left.partial_cmp(right).expect("finite ratios"));
@@ -996,11 +1587,23 @@ fn run_pairs_mode(model: &LoadedModel, args: &BenchArgs, unmeasured_label: &str)
         wins as f64 / pair_ratios.len() as f64
     };
 
+    let llama_summary_fields = if llama_pair_ratios.is_empty() {
+        String::new()
+    } else {
+        llama_pair_ratios.sort_by(|left, right| left.partial_cmp(right).expect("finite ratios"));
+        let llama_median_speedup = percentile(&llama_pair_ratios, 50.0);
+        let llama_win_fraction = llama_wins as f64 / llama_pair_ratios.len() as f64;
+        format!(
+            " proxima_speedup={median_speedup:.4} llama_speedup={llama_median_speedup:.4} \
+             llama_win_fraction={llama_win_fraction:.4}"
+        )
+    };
+
     println!(
         "{unmeasured_label} summary drafter={} prompts={} pairs_per_prompt={} \
          median_speedup={:.4} p90_speedup={:.4} pair_cov={:.4} win_fraction={:.4} \
          contaminated_pairs={contaminated_pairs} verify_steps_total={verify_steps_total} \
-         accepted_total={accepted_total} drafted_total={drafted_total}",
+         accepted_total={accepted_total} drafted_total={drafted_total}{llama_summary_fields}",
         drafter.llama_name(),
         prompts.len(),
         args.pairs,
@@ -1081,6 +1684,7 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
 }
 
 fn main() {
+    install_orphan_reaping_panic_hook();
     let args = parse_args();
     let precheck = quiet_box_precheck();
 
@@ -1118,9 +1722,17 @@ fn main() {
     let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map model");
     let parsed = parse_complete(&bytes).expect("parse model");
     let model = LoadedModel::load(&parsed, &bytes).expect("bind model");
+    // SAME tokenization `run_one_arm`'s decode call performs internally
+    // (`generate/residency_caches.rs::wants_bos`, crate-private) -- this
+    // example rebuilds the identical `Vocab` from the identical metadata to
+    // hand llama-server the SAME token ids proxima decodes, rather than
+    // trusting the two tokenizers to agree from a shared prompt string
+    // (invariant 2).
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("builds vocab via the current gemma4 dispatch");
 
     match &args.mode {
-        BenchMode::Pairs => run_pairs_mode(&model, &args, unmeasured_label),
+        BenchMode::Pairs => run_pairs_mode(&model, &vocab, &args, unmeasured_label),
         BenchMode::VerifyWidthSweep { widths } => {
             run_verify_width_sweep_mode(&model, &args, widths, unmeasured_label);
         }
@@ -1129,9 +1741,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::{
-        CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT, cpu_idle_decision,
-        parse_top_cpu_line, summarize_gpu_idle_samples,
+        ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT, REAPABLE_PIDS,
+        cpu_idle_decision, parse_top_cpu_line, summarize_gpu_idle_samples,
     };
 
     const REAL_TOP_CPU_LINE: &str = "CPU usage: 8.97% user, 5.40% sys, 85.61% idle ";
@@ -1251,6 +1865,47 @@ mod tests {
         assert!(
             summarize_gpu_idle_samples(&[]).is_none(),
             "an empty sample vector (ioreg unavailable) must not fabricate a baseline"
+        );
+    }
+
+    /// Regression for the real-run orphan bug: two llama-server processes
+    /// survived a mid-run panic because nothing ever killed them.
+    /// `sleep 60` stands in for llama-server here -- any long-lived,
+    /// harmless child proves the same claim (`ChildGuard::drop` kills AND
+    /// waits it) without needing the real binary or a model on this host.
+    #[test]
+    fn child_guard_kills_and_reaps_a_real_child_on_drop() {
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn a harmless `sleep 60` child for the kill-on-drop test");
+        let pid = child.id();
+
+        {
+            let guard = ChildGuard::new(child);
+            assert_eq!(guard.pid(), pid);
+            assert!(
+                REAPABLE_PIDS.lock().expect("lock REAPABLE_PIDS").contains(&pid),
+                "ChildGuard::new must register its pid for the panic-hook fallback"
+            );
+        } // `guard` drops here -- kills and waits `sleep 60`.
+
+        assert!(
+            !REAPABLE_PIDS.lock().expect("lock REAPABLE_PIDS").contains(&pid),
+            "ChildGuard::drop must deregister its pid once it has reaped the child"
+        );
+        // `wait()` inside `Drop::drop` already reaped the process, so a
+        // liveness probe must find nothing -- a lingering zombie would still
+        // answer `kill -0` on some platforms, so this also confirms `wait()`
+        // ran, not just that a signal was sent.
+        let status = Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .expect("run `kill -0` to probe the child's liveness");
+        assert!(
+            !status.success(),
+            "pid {pid} still answers a liveness probe after ChildGuard was dropped"
         );
     }
 }
