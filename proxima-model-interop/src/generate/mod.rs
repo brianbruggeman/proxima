@@ -166,10 +166,11 @@ use omega::{
 // `#[cfg(feature = "std")] mod generate;`), and `std` pulls in
 // `proxima-telemetry/emit` unconditionally (Cargo.toml's own doc) because
 // `decode.rs`/`pregather.rs` call these macros outside any `instrument`/
-// `metal` gate.
-use proxima_telemetry::{debug, trace, warn};
-#[cfg(feature = "instrument")]
-use proxima_telemetry::info;
+// `metal` gate. `info` is unconditional alongside them: `decode.rs`'s
+// per-request `draft_n`/`draft_n_accepted` event (SPEC R12) is a
+// business-meaningful workflow fact, not an `instrument`-gated diagnostic,
+// so it must compile and fire under plain `--features std`.
+use proxima_telemetry::{debug, info, trace, warn};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::TensorError;
 #[cfg(feature = "instrument")]
