@@ -25,15 +25,16 @@
 //! ISOLATED, not end-to-end: one synthetic op run in a loop, nothing else
 //! touching the GPU. Weight bytes are synthetic (random `Q4_0` blocks).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
-fn main() {
+fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
-    run();
+    return run();
     #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos")))]
-    println!(
-        "staging_switches_isolated_probe requires --features metal,metal-tiled-gemm,instrument on macOS"
-    );
+    {
+        println!(
+            "staging_switches_isolated_probe requires --features metal,metal-tiled-gemm,instrument on macOS"
+        );
+        Ok(())
+    }
 }
 
 // phase-2 occupancy investigation: reads back each compiled
@@ -43,18 +44,22 @@ fn main() {
 // in the library because this is the one call site that needs a console sink
 // at all; `omega` itself stays a no-op emitter without an installed recorder.
 #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
-fn install_footprint_telemetry() -> std::sync::Arc<proxima_telemetry::recorder::Recorder<proxima_telemetry::clock::GlobalClock>> {
+fn install_footprint_telemetry()
+-> anyhow::Result<std::sync::Arc<proxima_telemetry::recorder::Recorder<proxima_telemetry::clock::GlobalClock>>> {
+    use anyhow::Context;
+
     proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse("debug"));
     proxima_telemetry::recorder::Recorder::builder()
         .ring_capacity(4096)
         .export(proxima_telemetry::export::Exporter::stderr())
-        .expect("stderr exporter installs")
+        .context("stderr exporter installs")?
         .install()
-        .expect("telemetry recorder installs")
+        .context("telemetry recorder installs")
 }
 
 #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
-fn run() {
+fn run() -> anyhow::Result<()> {
+    use anyhow::Context;
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
     use proxima_primitives::Codec;
     use proxima_tensor::test_support::Lcg;
@@ -63,7 +68,7 @@ fn run() {
         ReduceInit, ScalarOp, append, projection,
     };
 
-    let telemetry_recorder = install_footprint_telemetry();
+    let telemetry_recorder = install_footprint_telemetry()?;
 
     const IN_DIM: usize = 1536;
     const OUT_DIM: usize = 12288;
@@ -75,13 +80,13 @@ fn run() {
         (0..count).map(|_| lcg.next_unit()).collect()
     }
 
-    fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> Vec<u8> {
+    fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> anyhow::Result<Vec<u8>> {
         let blocks_per_row = in_dim / QK4_0;
         let mut packed = vec![0u8; rows.len() * blocks_per_row * BLOCK_BYTES];
         for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES)) {
-            quantize(row, row_packed).expect("in_dim is a whole multiple of QK4_0");
+            quantize(row, row_packed).context("in_dim is a whole multiple of QK4_0")?;
         }
-        packed
+        Ok(packed)
     }
 
     fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
@@ -179,17 +184,17 @@ fn run() {
         (program, sum, token as usize, feature as usize, batch as usize, reduce_len as usize)
     }
 
-    fn median_gpu_ns(program: &[Op], root: NodeId, blocks: &[QuantizedBlock<'_>], runs: usize) -> u64 {
-        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default()).expect("plan compiles");
+    fn median_gpu_ns(program: &[Op], root: NodeId, blocks: &[QuantizedBlock<'_>], runs: usize) -> anyhow::Result<u64> {
+        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default()).context("plan compiles")?;
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
             let (_, timings) = omega::metal::execute_plan_op_timed(&plan, blocks, None)
-                .expect("metal executes on a real device");
+                .context("metal executes on a real device")?;
             let total: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
             samples.push(total);
         }
         samples.sort_unstable();
-        samples[samples.len() / 2]
+        Ok(samples[samples.len() / 2])
     }
 
     if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "ollama|llama-server|Ollama"]).output()
@@ -203,7 +208,7 @@ fn run() {
 
     // Q4_0 weight-matmul shape (STAGING.md's own target).
     let rows: Vec<Vec<f32>> = (0..OUT_DIM).map(|row| random_vec(11 + row as u64, IN_DIM)).collect();
-    let packed = pack_rows(&rows, IN_DIM);
+    let packed = pack_rows(&rows, IN_DIM)?;
     let activation = random_vec(97, TOKENS * IN_DIM);
     let (program, sum) = matmul_program(TOKENS as u32, IN_DIM as u32, OUT_DIM as u32);
     let blocks = [
@@ -238,7 +243,7 @@ fn run() {
         for &(key, value) in extra {
             vars.push((key, Some(value)));
         }
-        let ns = temp_env::with_vars(vars, || median_gpu_ns(&program, sum, &blocks, RUNS));
+        let ns = temp_env::with_vars(vars, || median_gpu_ns(&program, sum, &blocks, RUNS))?;
         telemetry_recorder.drain();
         if label.starts_with("baseline") {
             baseline_ns = ns;
@@ -266,7 +271,7 @@ fn run() {
         for &(key, value) in extra {
             vars.push((key, Some(value)));
         }
-        let ns = temp_env::with_vars(vars, || median_gpu_ns(&dense_program, dense_sum, &dense_blocks, RUNS));
+        let ns = temp_env::with_vars(vars, || median_gpu_ns(&dense_program, dense_sum, &dense_blocks, RUNS))?;
         telemetry_recorder.drain();
         if label.starts_with("baseline") {
             dense_baseline_ns = ns;
@@ -306,22 +311,22 @@ fn run() {
             for &(key, value) in extra {
                 vars.push((key, Some(value)));
             }
-            let plan = temp_env::with_vars(vars, || {
+            let plan: anyhow::Result<_> = temp_env::with_vars(vars, || {
                 let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
-                    .expect("plan compiles");
+                    .context("plan compiles")?;
                 omega::metal::execute_plan_op_timed(&plan, &blocks, None)
-                    .expect("warm-up dispatch executes on a real device");
-                plan
+                    .context("warm-up dispatch executes on a real device")?;
+                Ok(plan)
             });
-            (label, plan)
+            plan.map(|plan| (label, plan))
         })
-        .collect();
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let mut samples: Vec<Vec<u64>> = vec![Vec::new(); interleave_configs.len()];
     for _round in 0..3 {
         for _sample in 0..RUNS {
             for (index, (_, plan)) in plans.iter().enumerate() {
                 let (_, timings) = omega::metal::execute_plan_op_timed(plan, &blocks, None)
-                    .expect("metal executes on a real device");
+                    .context("metal executes on a real device")?;
                 let total: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
                 samples[index].push(total);
             }
@@ -337,8 +342,8 @@ fn run() {
         let mut sorted = samples[index].clone();
         sorted.sort_unstable();
         let median = sorted[sorted.len() / 2];
-        let min = *sorted.first().expect("at least one sample");
-        let max = *sorted.last().expect("at least one sample");
+        let min = *sorted.first().context("at least one sample")?;
+        let max = *sorted.last().context("at least one sample")?;
         println!(
             "  [{label}] n={} median={median} ns = {:.4} ms  min={} ns max={} ns  ratio-vs-baseline={:.3}x",
             sorted.len(),
@@ -348,4 +353,5 @@ fn run() {
             interleaved_baseline_median as f64 / median as f64
         );
     }
+    Ok(())
 }

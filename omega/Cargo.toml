@@ -612,6 +612,7 @@ name = "reduction_literal_prefill_speed_probe"
 required-features = ["metal", "metal-reduction-literal", "instrument"]
 
 [dev-dependencies]
+anyhow = "1.0.104"
 conflaguration = { workspace = true, features = ["toml"] }
 criterion.workspace = true
 half = { version = "2.7.1", default-features = false }
