@@ -11,7 +11,9 @@
 #![cfg(all(feature = "alloc-count", feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{DType, Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_tensor::{
+    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
+};
 use proxima_test::alloc_count::{CountingAllocator, allocations, recorded_sizes, reset};
 
 #[global_allocator]
@@ -68,7 +70,13 @@ fn a_warm_plan_hit_allocates_the_same_amount_every_call() {
     const EXTENT: u32 = 4;
     let (program, _root) = two_step_identity_chain(EXTENT);
     let block = [1.0f32, 2.0, 3.0, 4.0];
-    let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
+    let plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        NumericPolicy::default(),
+    )
         .expect("plans the two-step identity chain");
 
     // Cold: builds `resolved_steps` from empty, compiles both kernels'
@@ -154,6 +162,7 @@ fn a_warm_call_s_allocation_count_does_not_grow_with_extra_steps() {
         &[],
         &[QuantizedBlock::Float32(&block)],
         &[],
+        NumericPolicy::default(),
     )
     .expect("plans the one-op chain");
 
@@ -163,6 +172,7 @@ fn a_warm_call_s_allocation_count_does_not_grow_with_extra_steps() {
         &[],
         &[QuantizedBlock::Float32(&block)],
         &[],
+        NumericPolicy::default(),
     )
     .expect("plans the two-op chain");
 
@@ -224,7 +234,13 @@ fn a_warm_plan_hit_s_allocations_are_named_by_size() {
     const EXTENT: u32 = 4;
     let (program, _root) = two_step_identity_chain(EXTENT);
     let block = [1.0f32, 2.0, 3.0, 4.0];
-    let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
+    let plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        NumericPolicy::default(),
+    )
         .expect("plans the two-step identity chain");
     // fed by `into_scratch` after each call below, so a warm call's root
     // read-back (`finish`'s `recycle` parameter) reuses the PREVIOUS call's
@@ -350,7 +366,13 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
         },
     );
     let block = [1.0f32, 2.0, 3.0, 4.0];
-    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
+    let mut plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        NumericPolicy::default(),
+    )
         .expect("plans the one-op resident chain");
     plan.mark_resident(&std::collections::BTreeSet::from(["weight"]));
 
@@ -414,45 +436,44 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
     );
 }
 
-/// The owner's finding on this branch: `resolve_steps` (`metal.rs`) used to
-/// invalidate `plan.resolved_steps` only when `MathMode` changed --
-/// `metal::numeric_policy_as_metal_math_mode` projects BOTH `BitExact` and
-/// `FusedNoReassociation` onto the SAME `MathMode::Safe`, so switching
-/// between those two policies on an already-resolved plan left the
-/// math-mode-keyed check believing nothing had changed, and it returned
-/// early before `kernel_cache_key` (and therefore the numeric-policy token
-/// this branch folded into it) was ever consulted again. `ResolvedSteps`
-/// now keys staleness on `numeric_policy` itself -- this proves the plan
-/// re-resolves across exactly that transition, on a real device, by the
-/// same allocation-count technique the rest of this file uses: a rebuild
-/// call pays `kernel_cache_key`/`kernel_dispatch_shape`/`pipeline_for`
-/// again and allocates more than a steady-state warm call; a stale-check
-/// bug would make this call look identically cheap to the warm baseline.
+/// `resolve_steps` keys its cache of per-position pipelines on the plan's
+/// [`omega::MathMode`]: `NumericPolicy` is fixed at construction and has no
+/// setter, so narrowing the mode within what the policy grants is the one
+/// change that can leave an already-resolved plan stale. This proves the plan
+/// re-resolves across exactly that transition, on a real device, by the same
+/// allocation-count technique the rest of this file uses: a rebuild call pays
+/// `kernel_cache_key`/`kernel_dispatch_shape`/`pipeline_for` again and
+/// allocates more than a steady-state warm call; a stale-check bug would make
+/// this call look identically cheap to the warm baseline.
 #[test]
-fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
+fn narrowing_the_math_mode_re_resolves_the_plans_pipelines() {
     const EXTENT: u32 = 4;
     let (program, _root) = two_step_identity_chain(EXTENT);
     let block = [1.0f32, 2.0, 3.0, 4.0];
-    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
-        .expect("plans the two-step identity chain");
+    let mut plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("plans the two-step identity chain under a policy that grants relaxed math");
+    assert_eq!(
+        plan.math_mode(),
+        omega::MathMode::Relaxed,
+        "the plan must start at the mode the policy projects to, or narrowing to Safe changes nothing"
+    );
 
-    plan.set_numeric_policy(proxima_tensor::NumericPolicy::FusedNoReassociation);
-    omega::execute_plan_with_placements(
-        &plan,
-        &[QuantizedBlock::Float32(&block)],
-        &[],
-        &[],
-        &mut Vec::new(),
-    )
-    .expect("cold call resolves under FusedNoReassociation");
-    omega::execute_plan_with_placements(
-        &plan,
-        &[QuantizedBlock::Float32(&block)],
-        &[],
-        &[],
-        &mut Vec::new(),
-    )
-    .expect("first warm call under FusedNoReassociation");
+    for call in ["cold call resolves under Relaxed", "first warm call under Relaxed"] {
+        omega::execute_plan_with_placements(
+            &plan,
+            &[QuantizedBlock::Float32(&block)],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|error| panic!("{call}: {error}"));
+    }
 
     let before_warm_baseline = allocations();
     omega::execute_plan_with_placements(
@@ -465,19 +486,8 @@ fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
     .expect("second warm call establishes the steady-state floor");
     let warm_baseline_allocations = allocations() - before_warm_baseline;
 
-    assert_eq!(
-        plan.math_mode(),
-        omega::MathMode::Safe,
-        "FusedNoReassociation must project to MathMode::Safe -- see \
-         metal::numeric_policy_as_metal_math_mode's own doc table"
-    );
-    plan.set_numeric_policy(proxima_tensor::NumericPolicy::BitExact);
-    assert_eq!(
-        plan.math_mode(),
-        omega::MathMode::Safe,
-        "math mode must stay Safe across this transition, or this test is not exercising \
-         the case a math-mode-keyed staleness check would have missed"
-    );
+    plan.set_math_mode(omega::MathMode::Safe)
+        .expect("Safe narrows within what a relaxed policy grants");
 
     let before_transition = allocations();
     omega::execute_plan_with_placements(
@@ -487,7 +497,7 @@ fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
         &[],
         &mut Vec::new(),
     )
-    .expect("first call after the numeric-policy change");
+    .expect("first call after narrowing the math mode");
     let transition_call_allocations = allocations() - before_transition;
 
     eprintln!(
@@ -496,9 +506,8 @@ fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
     );
     assert!(
         transition_call_allocations > warm_baseline_allocations,
-        "a numeric-policy change that leaves math_mode unchanged must still force a \
-         resolve_steps rebuild -- a math-mode-keyed staleness check would silently skip \
-         this and keep serving pipelines resolved for the OLD policy: \
+        "narrowing the math mode must force a resolve_steps rebuild -- a stale check would \
+         keep serving pipelines compiled for the OLD mode: \
          baseline={warm_baseline_allocations} transition={transition_call_allocations}"
     );
 
@@ -510,12 +519,12 @@ fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
         &[],
         &mut Vec::new(),
     )
-    .expect("second call after the policy change, steady-state again");
+    .expect("second call after narrowing, steady-state again");
     let second_warm_allocations = allocations() - before_second_warm;
 
     assert_eq!(
         second_warm_allocations, warm_baseline_allocations,
-        "once re-resolved under the new policy, the plan must return to the SAME \
+        "once re-resolved under the narrowed mode, the plan must return to the SAME \
          warm-call allocation floor it held before the transition"
     );
 }
