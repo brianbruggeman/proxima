@@ -101,6 +101,36 @@ pub(super) fn grid_threads(
                         .map(|&axis| resolved.extents[axis as usize])
                         .product(),
                 )?
+            } else if let Some(block) =
+                dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
+            {
+                // Same tile-grid shape as the arm above -- the batch axes
+                // dispatch over `GridSpec::depth` (z), never widen this `x`
+                // thread count. Must stay in lock-step with
+                // `tiled_gemm_threadgroup_width`'s own `dense_batched_gemm_block`
+                // arm: losing this arm (as opposed to that one) silently
+                // routes a dense-admitted op to the `reduce_is_cooperative_
+                // dispatch` branch below instead, dispatching `output_total
+                // * cooperative_reduce_width` threads -- `feature * token *
+                // batch * SIMD_WIDTH` rather than `row_tiles * col_tiles *
+                // TILED_GEMM_NSG * SIMD_WIDTH` -- while the kernel body
+                // still renders the tiled-gemm shape, producing a massive
+                // over-dispatch (redundant threadgroups recomputing the
+                // same tiles, masked only by the boundary checks on write,
+                // never on the work itself).
+                tiled_gemm_threadgroups(
+                    resolved.node,
+                    block
+                        .feature_axes
+                        .iter()
+                        .map(|&axis| resolved.extents[axis as usize])
+                        .product(),
+                    block
+                        .token_axes
+                        .iter()
+                        .map(|&axis| resolved.extents[axis as usize])
+                        .product(),
+                )?
             } else if let Some(block) = packed_row_block(resolved, quantized) {
                 // one simdgroup per `codec_rows_per_simdgroup(block.codec)`
                 // feature rows, times the split-K factor (1 = no-op unless
