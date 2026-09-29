@@ -49,6 +49,8 @@ pub mod cuda_driver;
 mod epilogue;
 pub mod error;
 #[cfg(feature = "alloc")]
+mod grid;
+#[cfg(feature = "alloc")]
 mod identity;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;

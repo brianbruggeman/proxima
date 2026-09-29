@@ -66,6 +66,7 @@ use proxima_tensor::{
 };
 
 use crate::error::EmitError;
+use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, Codec, PackedOperands};
 
@@ -102,6 +103,31 @@ pub struct CudaGridSpec {
     /// this wide so every warp boundary lands on an output-element
     /// boundary. `None` for every other kernel.
     pub block_width: Option<u64>,
+}
+
+/// Threads per block for every kernel whose [`CudaGridSpec::block_width`] is
+/// `None`: the driver's choice, named here so the emit-time grid check and the
+/// launch agree on how many blocks a grid needs.
+pub const DEFAULT_BLOCK_WIDTH: u64 = 256;
+
+/// Most blocks a launch's x dimension holds (`gridDim.x <= 2^31 - 1`). The
+/// kernel's own `gid` is 64-bit, so this, not a 32-bit thread index, is the
+/// widest grid `emit_cuda` covers.
+const MAX_GRID_BLOCKS: u64 = i32::MAX as u64;
+
+impl CudaGridSpec {
+    /// The block width this launch runs at: the pinned cooperative width, else
+    /// [`DEFAULT_BLOCK_WIDTH`].
+    #[must_use]
+    pub fn block_width_or_default(&self) -> u64 {
+        self.block_width.unwrap_or(DEFAULT_BLOCK_WIDTH).max(1)
+    }
+
+    /// Blocks needed to cover [`Self::threads`] at [`Self::block_width_or_default`].
+    #[must_use]
+    pub fn blocks(&self) -> u64 {
+        self.threads.div_ceil(self.block_width_or_default())
+    }
 }
 
 /// Emits a CUDA C kernel from a bound [`BoundOp`] — the CUDA counterpart of
@@ -211,18 +237,23 @@ pub fn emit_cuda_with_policy(
             });
         }
     };
+    let cooperative = reduce_is_cooperative(resolved, &quantized, numeric_policy);
+    let grid = CudaGridSpec {
+        threads: grid_threads(resolved, cooperative)?,
+        block_width: cooperative.then_some(WARP_SIZE),
+    };
+    if grid.blocks() > MAX_GRID_BLOCKS {
+        return Err(EmitError::GridExceedsThreadIndex {
+            node: resolved.node,
+            threads: grid.threads,
+            limit: MAX_GRID_BLOCKS * grid.block_width_or_default(),
+        });
+    }
     Ok(CudaKernel {
         source,
         entry,
         bindings: bindings(resolved),
-        grid: CudaGridSpec {
-            threads: grid_threads(
-                resolved,
-                reduce_is_cooperative(resolved, &quantized, numeric_policy),
-            ),
-            block_width: reduce_is_cooperative(resolved, &quantized, numeric_policy)
-                .then_some(WARP_SIZE),
-        },
+        grid,
     })
 }
 
@@ -607,9 +638,10 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings
 }
 
-fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
+fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError> {
+    let extents_product = || checked_product(resolved.node, resolved.extents.iter().copied());
     match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
+        BoundOpKind::Elementwise { .. } => extents_product(),
         BoundOpKind::Reduce {
             output_axes,
             epilogue_broadcast_axes,
@@ -617,24 +649,27 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
             ..
         } => {
             let output_total: u64 = if epilogue_broadcast_axes.is_empty() {
-                output_axes
-                    .iter()
-                    .map(|dim| resolved.extents[*dim as usize])
-                    .product()
+                checked_product(
+                    resolved.node,
+                    output_axes.iter().map(|dim| resolved.extents[*dim as usize]),
+                )?
             } else {
-                resolved.extents.iter().product()
+                extents_product()?
             };
             if cooperative {
-                output_total * WARP_SIZE
+                checked_product(resolved.node, [output_total, WARP_SIZE])
             } else {
-                output_total
+                Ok(output_total)
             }
         }
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => {
             let rank = resolved.extents.len();
-            resolved.extents[..rank.saturating_sub(1)].iter().product()
+            checked_product(
+                resolved.node,
+                resolved.extents[..rank.saturating_sub(1)].iter().copied(),
+            )
         }
         // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce`/
         // `CachedSoftmaxWeights` never reach this function in practice --
@@ -647,8 +682,8 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
-        | BoundOpKind::CachedSoftmaxWeights { .. } => resolved.extents.iter().product(),
-        BoundOpKind::CachedAttention { .. } => resolved.extents.iter().product(),
+        | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::CachedAttention { .. } => extents_product(),
     }
 }
 
@@ -1056,7 +1091,9 @@ fn kernel_signature(
     }
     source.push_str(") {\n");
     source.push_str("    const Uniforms u = *u_ptr;\n");
-    source.push_str("    long gid = (long)(blockIdx.x * blockDim.x + threadIdx.x);\n");
+    source.push_str(
+        "    long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;\n",
+    );
 }
 
 fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len: usize) {
@@ -2235,7 +2272,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2322,7 +2359,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2374,7 +2411,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2438,7 +2475,7 @@ mod tests {
         bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("embedding lookup lowers")
@@ -2514,7 +2551,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2613,7 +2650,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2647,7 +2684,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2885,5 +2922,52 @@ mod tests {
             kernel_q4k.entry, kernel_q5k.entry,
             "two operands differing only in packed codec must never share one compiled kernel name"
         );
+    }
+
+    #[test]
+    fn a_cooperative_grid_past_a_32_bit_thread_index_is_emitted_with_a_64_bit_gid() {
+        let bound = matmul_reduce_op(200_000_000, 4096, ScalarOp::Add);
+
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("200M cooperative rows emit");
+
+        assert_eq!(kernel.grid.threads, 200_000_000 * WARP_SIZE);
+        assert!(kernel.grid.threads > u64::from(u32::MAX));
+        assert_eq!(kernel.grid.blocks(), 200_000_000);
+        assert!(
+            kernel
+                .source
+                .contains("long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;"),
+            "{}",
+            kernel.source
+        );
+    }
+
+    #[test]
+    fn a_grid_with_more_blocks_than_the_x_dimension_holds_is_rejected_instead_of_truncated() {
+        let bound = matmul_reduce_op(u32::MAX, 4096, ScalarOp::Add);
+
+        let rejected = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed());
+
+        assert!(
+            matches!(
+                rejected,
+                Err(EmitError::GridExceedsThreadIndex { threads, limit, .. })
+                    if threads == u64::from(u32::MAX) * WARP_SIZE
+                        && limit == u64::from(i32::MAX as u32) * WARP_SIZE
+            ),
+            "4294967295 warp-wide blocks exceed gridDim.x = 2^31 - 1: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn a_default_width_grid_counts_its_blocks_at_the_default_block_width() {
+        let grid = CudaGridSpec {
+            threads: 1_000,
+            block_width: None,
+        };
+
+        assert_eq!(grid.block_width_or_default(), DEFAULT_BLOCK_WIDTH);
+        assert_eq!(grid.blocks(), 4);
     }
 }

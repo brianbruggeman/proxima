@@ -58,17 +58,15 @@ pub(super) fn grid_threads(
                     1,
                 )
             };
-            resolved
-                .extents
-                .iter()
-                .product::<u64>()
-                .checked_div(*head_dim)
-                .unwrap_or(0)
-                * chunks
-                * splits
-                * SIMD_WIDTH
+            let attention_vectors =
+                checked_product(resolved.node, resolved.extents.iter().copied())?
+                    .checked_div(*head_dim)
+                    .unwrap_or(0);
+            checked_product(resolved.node, [attention_vectors, chunks, splits, SIMD_WIDTH])?
         }
-        BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
+        BoundOpKind::Elementwise { .. } => {
+            checked_product(resolved.node, resolved.extents.iter().copied())?
+        }
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             reduce_op,
@@ -76,10 +74,10 @@ pub(super) fn grid_threads(
             output_axes,
             ..
         } => {
-            let output_total: u64 = output_axes
-                .iter()
-                .map(|dim| resolved.extents[*dim as usize])
-                .product();
+            let output_total: u64 = checked_product(
+                resolved.node,
+                output_axes.iter().map(|dim| resolved.extents[*dim as usize]),
+            )?;
             if let Some(block) =
                 tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
             {
@@ -147,7 +145,7 @@ pub(super) fn grid_threads(
                     .product();
                 let token_total = packed_row_block_token_total(&block, &resolved.extents);
                 let (base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
-                base * SIMD_WIDTH * split
+                checked_product(resolved.node, [base, SIMD_WIDTH, split])?
             } else if reduce_is_cooperative_dispatch(
                 resolved,
                 quantized,
@@ -163,7 +161,8 @@ pub(super) fn grid_threads(
                 // `reduce_is_cooperative`'s prior doc byte-for-byte) — see
                 // that function's own doc for the scaling policy.
                 let reduce_dims = reduction_dims(resolved, output_axes);
-                output_total * cooperative_reduce_width(resolved, quantized, &reduce_dims)
+                let lanes = cooperative_reduce_width(resolved, quantized, &reduce_dims);
+                checked_product(resolved.node, [output_total, lanes])?
             } else {
                 output_total
             }
@@ -172,7 +171,10 @@ pub(super) fn grid_threads(
             keep: Keep::Scan, ..
         } => {
             let rank = resolved.extents.len();
-            resolved.extents[..rank.saturating_sub(1)].iter().product()
+            checked_product(
+                resolved.node,
+                resolved.extents[..rank.saturating_sub(1)].iter().copied(),
+            )?
         }
         // `round_zero_reduce_bound`'s own doc: the per-round thread count is
         // whatever the round-0 `Reduce` this fold replaced would dispatch --
@@ -193,7 +195,9 @@ pub(super) fn grid_threads(
                          Metal grid-sizing renderer without metal-moe-mul-mat-id",
             });
         }
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => {
+            checked_product(resolved.node, resolved.extents.iter().copied())?
+        }
         // one thread per `(v_head, value_row)` pair -- `render_gated_delta_net`'s
         // own doc; `tiled_gemm_threadgroup_width`'s sibling arm widens the
         // threadgroup to exactly `head_v_dim` so `num_v_heads` threadgroups
@@ -202,7 +206,7 @@ pub(super) fn grid_threads(
             num_v_heads,
             head_v_dim,
             ..
-        } => num_v_heads * head_v_dim,
+        } => checked_product(resolved.node, [*num_v_heads, *head_v_dim])?,
         // One threadgroup, `expert_count` threads -- `dispatch`'s own doc:
         // `grid.threadgroup_width` left `None` at this kind's call site
         // defaults the threadgroup to the WHOLE grid, exactly one
@@ -219,7 +223,10 @@ pub(super) fn grid_threads(
             cached_key_rows,
             attention_rows,
             ..
-        } => *attention_rows * wide_cooperative_reduce_width(*cached_key_rows),
+        } => checked_product(
+            resolved.node,
+            [*attention_rows, wide_cooperative_reduce_width(*cached_key_rows)],
+        )?,
     };
     Ok(threads)
 }

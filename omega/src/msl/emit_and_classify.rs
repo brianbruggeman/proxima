@@ -3075,10 +3075,9 @@ pub(super) fn tiled_gemm_threadgroups(
     }
     #[cfg(feature = "metal-tiled-gemm")]
     {
-        let _ = node;
         let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
         let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
-        Ok(row_tiles * col_tiles * (TILED_GEMM_NSG as u64) * SIMD_WIDTH)
+        checked_product(node, [row_tiles, col_tiles, TILED_GEMM_NSG as u64, SIMD_WIDTH])
     }
 }
 

@@ -497,14 +497,9 @@ impl CudaDriver {
             .collect::<Result<Vec<_>, _>>()?;
         let mut device_output = self.stream.alloc_zeros::<f32>(output_len)?;
         let device_uniforms = self.stream.clone_htod(uniforms)?;
-        let block_width = kernel.grid.block_width.unwrap_or(256).max(1);
         let config = LaunchConfig {
-            grid_dim: (
-                (kernel.grid.threads as u32).div_ceil(block_width as u32),
-                1,
-                1,
-            ),
-            block_dim: (block_width as u32, 1, 1),
+            grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
+            block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
             shared_mem_bytes: 0,
         };
         let mut args = self.stream.launch_builder(&function);
@@ -655,14 +650,9 @@ impl CudaDriver {
                 .insert(output_node, CudaGraphBuffer::F32(device_output));
             return Err(CudaDriverError::BindingContract);
         }
-        let block_width = kernel.grid.block_width.unwrap_or(256).max(1);
         let config = LaunchConfig {
-            grid_dim: (
-                (kernel.grid.threads as u32).div_ceil(block_width as u32),
-                1,
-                1,
-            ),
-            block_dim: (block_width as u32, 1, 1),
+            grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
+            block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
             shared_mem_bytes: 0,
         };
         let mut fault_buffer = (fault_count > 0)
@@ -1260,4 +1250,13 @@ mod tests {
             }
         ));
     }
+}
+
+/// The x-dimension block count of `grid`'s launch, or an error rather than the
+/// silent truncation of an `as u32` cast: `emit_cuda` already rejects a grid
+/// past `gridDim.x`, so this only fires for a `CudaKernel` built by hand.
+fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
+    u32::try_from(grid.blocks()).map_err(|_| {
+        CudaDriverError::InputTooLarge(usize::try_from(grid.threads).unwrap_or(usize::MAX))
+    })
 }
