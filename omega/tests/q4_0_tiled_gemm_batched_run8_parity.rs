@@ -9,9 +9,11 @@
 //! session's own prefill-length target.
 //!
 //! Compares THREE things per shape: the new batched-`q4_0_run8` tiled path
-//! (`PROXIMA_TILED_GEMM_Q4_0=1`) against (a) today's row-blocked path (the
-//! switch unset -- `Codec::Q4_0` never takes the tiled path without it) and
-//! (b) an f32 CPU reference built by dequantizing the real packed rows and
+//! (`PROXIMA_TILED_GEMM_Q4_0` at its default, unset -- admits since this
+//! switch flipped default ON) against (a) today's row-blocked path (the
+//! switch explicitly `"0"` -- `Codec::Q4_0` only takes the tiled path when
+//! this override is off) and (b) an f32 CPU reference built by dequantizing
+//! the real packed rows and
 //! running `proxima_tensor::cpu::evaluate`'s plain f32 matmul -- the same
 //! independent-oracle discipline `attn_multi_axis_tiled_gemm_parity.rs` and
 //! `q4k_matmul_layout.rs` both hold their own tiled/row-blocked arms to.
@@ -272,16 +274,7 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
         QuantizedBlock::Float32(&activation),
     ];
 
-    let current = omega::execute(
-        &packed_program,
-        &[],
-        &blocks,
-        &[packed_sum],
-        NumericPolicy::default(),
-    )
-    .expect("metal executes today's row-blocked q4_0 matmul");
-
-    let new_tiled = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
+    let current = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
         omega::execute(
             &packed_program,
             &[],
@@ -289,8 +282,17 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
             &[packed_sum],
             NumericPolicy::default(),
         )
-        .expect("metal executes the new batched-q4_0_run8 tiled matmul")
+        .expect("metal executes today's row-blocked q4_0 matmul")
     });
+
+    let new_tiled = omega::execute(
+        &packed_program,
+        &[],
+        &blocks,
+        &[packed_sum],
+        NumericPolicy::default(),
+    )
+    .expect("metal executes the new batched-q4_0_run8 tiled matmul (default on, unset)");
 
     let (f32_program, f32_sum) =
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::Float32);
@@ -429,16 +431,7 @@ fn check_real_tensor_epilogue_at_token_count(tensor_name: &str, tokens: usize) {
         QuantizedBlock::Float32(&epilogue_scale),
     ];
 
-    let current = omega::execute(
-        &packed_program,
-        &[],
-        &blocks,
-        &[packed_epilogue],
-        NumericPolicy::default(),
-    )
-    .expect("metal executes today's row-blocked q4_0 matmul with a fused epilogue");
-
-    let new_tiled = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
+    let current = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
         omega::execute(
             &packed_program,
             &[],
@@ -446,8 +439,20 @@ fn check_real_tensor_epilogue_at_token_count(tensor_name: &str, tokens: usize) {
             &[packed_epilogue],
             NumericPolicy::default(),
         )
-        .expect("metal executes the new batched-q4_0_run8 tiled matmul with a fused epilogue")
+        .expect("metal executes today's row-blocked q4_0 matmul with a fused epilogue")
     });
+
+    let new_tiled = omega::execute(
+        &packed_program,
+        &[],
+        &blocks,
+        &[packed_epilogue],
+        NumericPolicy::default(),
+    )
+    .expect(
+        "metal executes the new batched-q4_0_run8 tiled matmul with a fused epilogue (default \
+         on, unset)",
+    );
 
     let (mut f32_program, f32_sum) =
         matmul_program(tokens as u32, in_dim as u32, rows as u32, DType::Float32);

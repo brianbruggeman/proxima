@@ -1,17 +1,21 @@
-//! Isolated GPU speed of the `S/nb/stage/STAGING.md` staging-loop switches
+//! Isolated GPU speed of the staging-loop switches (see
+//! `docs/model-interop/discipline.md` ROWs C4.9/C4.10)
 //! against the phase-1 baseline (`PROXIMA_TILED_GEMM_Q4_0=1`, nothing
 //! else). `PROXIMA_TILED_GEMM_PTR_HOIST` (item 3b) and `PROXIMA_TILED_
 //! GEMM_DECODE_SPREAD`/`_INTERIOR_STORE` (items 3a/3d) were measured here
-//! and found noise-level or a regression on this shape
-//! (`S/nb/bmm2/RESULTS.md`) -- ROLLBACK, discipline log C4.9; this probe
+//! and found noise-level or a regression on this shape (see
+//! `docs/model-interop/discipline.md` ROW C4.9) -- ROLLBACK; this probe
 //! now covers only the two switches that shipped, `_WIDE_ACT_LOAD` (item
-//! 3c) and `_SLIM_TGMEM` (phase 2). Same `execute_plan_op_timed`
+//! 3c) and `_SLIM_TGMEM` (phase 2), both default ON as of ROWs C4.9/C4.10
+//! (unset admits; explicit `"0"` disables) -- every combo below forces the
+//! OTHER switch to `"0"` explicitly so the isolated arms stay meaningful.
+//! Same `execute_plan_op_timed`
 //! real-`GPUStartTime`/`GPUEndTime` isolated-timing technique as
 //! `q4_0_tiled_gemm_run8_speed_probe.rs`.
 //!
-//! Two shapes: STAGING.md's own target Q4_0 weight matmul
+//! Two shapes: ROW C4.9's own target Q4_0 weight matmul
 //! `[K=1536, M=12288] x [N=510, K=1536]`, and node 162's dense-batched
-//! "value" shape (`S/nb/bmm/RESULTS.md`'s own admitted census: feature=256,
+//! "value" shape (this repo's own admitted census: feature=256,
 //! token=510, batch=8, K=512) run through `PROXIMA_TILED_GEMM_DENSE=1` --
 //! included for completeness even though neither switch touches
 //! `push_dense_batched_gemm_body`'s weight-decode loop, so this arm is
@@ -32,7 +36,7 @@ fn main() {
     );
 }
 
-// phase-2 occupancy investigation (S/nb/port2): reads back each compiled
+// phase-2 occupancy investigation: reads back each compiled
 // tiled-GEMM pipeline's `staticThreadgroupMemoryLength` via the
 // `pipeline_footprint` debug event this session added at
 // `pipeline_buffers_upload.rs`'s `pipeline_for` -- installed here rather than
@@ -127,7 +131,7 @@ fn run() {
     }
 
     fn dense_batched_value_program() -> (Vec<Op>, NodeId, usize, usize, usize, usize) {
-        // node 162's own admitted shape (`S/nb/bmm/RESULTS.md`): feature=256,
+        // node 162's own admitted shape: feature=256,
         // token=510, batch=8, K=512.
         let (token, feature, batch, reduce_len) = (510u32, 256u32, 8u32, 512u32);
         let mut program = Vec::new();
@@ -207,19 +211,24 @@ fn run() {
         QuantizedBlock::Float32(&activation),
     ];
 
+    // both staging switches default ON now (unset admits); to keep this
+    // probe's isolated A/B comparisons meaningful, "baseline" and the
+    // single-switch arms explicitly force the OTHER switch off with "0"
+    // rather than relying on unset, which no longer means off.
     let combos: &[(&str, &[(&str, &str)])] = &[
-        ("baseline (Q4_0 tiled only)", &[]),
-        ("wide_act_load alone", &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "1")]),
-        // phase 2 (`S/nb/port2/RESULTS.md`): `out_tile` aliased onto
-        // `weight_tile`/`act_tile`'s backing bytes.
-        ("slim_tgmem alone", &[("PROXIMA_TILED_GEMM_SLIM_TGMEM", "1")]),
         (
-            "slim_tgmem + wide_act_load",
+            "baseline (Q4_0 tiled only, staging switches off)",
             &[
-                ("PROXIMA_TILED_GEMM_SLIM_TGMEM", "1"),
-                ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "1"),
+                ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "0"),
+                ("PROXIMA_TILED_GEMM_SLIM_TGMEM", "0"),
             ],
         ),
+        ("wide_act_load alone", &[("PROXIMA_TILED_GEMM_SLIM_TGMEM", "0")]),
+        // phase 2 (see `docs/model-interop/discipline.md` ROW C4.10):
+        // `out_tile` aliased onto
+        // `weight_tile`/`act_tile`'s backing bytes.
+        ("slim_tgmem alone", &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "0")]),
+        ("slim_tgmem + wide_act_load (new default, unset)", &[]),
     ];
 
     println!("=== Q4_0 weight matmul [K={IN_DIM}, M={OUT_DIM}] x [N={TOKENS}, K={IN_DIM}] ===");
@@ -269,15 +278,21 @@ fn run() {
         );
     }
 
-    // phase 2 (`S/nb/port2/RESULTS.md`): interleaved baseline / wide_act_load
+    // phase 2 (see `docs/model-interop/discipline.md` ROW C4.10): interleaved baseline / wide_act_load
     // / slim_tgmem comparison, 12 samples per round x 3 rounds, round-robin
     // across configs so a clock-ramp or thermal drift within one round
     // cannot land entirely on one config's numbers.
     println!("=== interleaved baseline vs wide_act_load vs slim_tgmem (Q4_0 shape, 12 samples x 3 rounds) ===");
     let interleave_configs: &[(&str, &[(&str, &str)])] = &[
-        ("baseline", &[]),
-        ("wide_act_load", &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "1")]),
-        ("slim_tgmem", &[("PROXIMA_TILED_GEMM_SLIM_TGMEM", "1")]),
+        (
+            "baseline",
+            &[
+                ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "0"),
+                ("PROXIMA_TILED_GEMM_SLIM_TGMEM", "0"),
+            ],
+        ),
+        ("wide_act_load", &[("PROXIMA_TILED_GEMM_SLIM_TGMEM", "0")]),
+        ("slim_tgmem", &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", "0")]),
     ];
     // the kernel source (and which switch fires) is decided at first Metal
     // pipeline compile, not at `omega::plan` -- warm each plan with one

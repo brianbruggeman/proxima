@@ -202,7 +202,7 @@ pub(super) fn render_cached_attention(
         .replace("{cached_key_rows}", &cached_key_rows.to_string())
         .replace("{new_key_rows}", &new_key_rows.to_string());
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
     source.push_str(uniforms_struct);
     source.push_str(&format!(
         "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}{pass_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]{tgid_param}) {{\n"
@@ -539,7 +539,7 @@ pub(super) fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> 
     };
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
     source.push_str("struct Uniforms { long total_elements; long splits; };\n\n");
     source.push_str(&format!(
         "kernel void {entry}(device const float* in0 [[buffer(0)]], device {element_type}* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint gid [[thread_position_in_grid]]) {{\n"
@@ -601,6 +601,7 @@ pub(crate) fn emit_cached_attention_merge(
             threads: total_elements * SIMD_WIDTH,
             threadgroup_width: None,
             depth: 1,
+            grid2d: None,
         },
     }))
 }

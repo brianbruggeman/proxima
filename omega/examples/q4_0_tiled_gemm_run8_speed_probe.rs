@@ -1,6 +1,7 @@
 //! Isolated GPU speed of the new batched `q4_0_run8` tiled-GEMM weight-tile
-//! decode (`PROXIMA_TILED_GEMM_Q4_0=1`) against today's row-blocked path
-//! (switch off), at `T = 64` and `T = 510`. Uses real `GPUStartTime`/
+//! decode (`PROXIMA_TILED_GEMM_Q4_0` at its default, unset) against today's
+//! row-blocked path (switch explicitly `"0"`), at `T = 64` and `T = 510`.
+//! Uses real `GPUStartTime`/
 //! `GPUEndTime` per-op timing ([`omega::execute_plan_op_timed`], `instrument`
 //! feature) -- MTLCommandBuffer's own documented GPU occupancy, not a
 //! CPU-side wall-clock difference the way `q4k_matvec_probe.rs`'s own
@@ -140,12 +141,10 @@ fn run() {
             QuantizedBlock::Float32(&activation),
         ];
 
-        let current_ns = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", None::<&str>, || {
+        let current_ns = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
             median_gpu_ns(&program, sum, &blocks, RUNS)
         });
-        let new_ns = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-            median_gpu_ns(&program, sum, &blocks, RUNS)
-        });
+        let new_ns = median_gpu_ns(&program, sum, &blocks, RUNS);
 
         let flops = 2.0 * tokens as f64 * IN_DIM as f64 * OUT_DIM as f64;
         let current_gbs = weight_bytes as f64 / (current_ns as f64 / 1e9) / 1e9;

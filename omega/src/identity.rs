@@ -195,11 +195,12 @@ pub(crate) struct MetalOnlyExtras {
     /// `_rtrows` so the runtime-rows pipeline can never collide with the
     /// per-bucket specialized one. `false` is a no-op for every other kind.
     pub softmax_runtime_rows: bool,
-    /// `PROXIMA_TILED_GEMM_Q4_0=1`: `true` only when
+    /// `PROXIMA_TILED_GEMM_Q4_0`: `true` when
     /// [`crate::msl::push_tiled_gemm_body`] actually rendered its `Codec::
-    /// Q4_0` decode arm for this op (env on AND `classify_tiled_gemm`'s own
-    /// admission passed) -- so the unset-env default folds no new token and
-    /// the cache key, and every emitted byte, stays identical to before this
+    /// Q4_0` decode arm for this op (admission on AND `classify_tiled_gemm`'s
+    /// own admission passed). Default ON (unset admits; only explicit `"0"`
+    /// disables), so the UNSET-env default now folds the `_tgq0` token below;
+    /// the explicit-`"0"` default is what stays byte-identical to before this
     /// field existed. Feeds the `_tgq0` suffix below so the `Q4_0` and
     /// `Q4_K` tiled-GEMM variants compile as two distinct pipelines and
     /// coexist in the same binary, matching [`Self::q4_0_multi_row_hoist`]'s
@@ -219,23 +220,27 @@ pub(crate) struct MetalOnlyExtras {
     /// folds no new token and every emitted byte stays identical to before
     /// this field existed.
     pub reduction_literal: Option<u64>,
-    /// `PROXIMA_TILED_GEMM_DENSE=1`'s `(feature_axis, token_axis,
+    /// `PROXIMA_TILED_GEMM_DENSE`'s `(feature_axis, token_axis,
     /// batch_axes)` -- the three literals
     /// [`crate::msl::push_dense_batched_gemm_body`] bakes into its source
     /// text (mirrors [`Self::packed_row_block_direct_axis`]'s own doc: two
     /// bindings sharing every other axis here but disagreeing on which axis
     /// plays which role render different addressing source and must never
     /// share a cache entry). `None` for every op
-    /// [`crate::msl::dense_batched_gemm_block`] does not admit, so the
-    /// unset-env default folds no new token and every emitted byte stays
-    /// identical to before this field existed.
+    /// [`crate::msl::dense_batched_gemm_block`] does not admit. Default ON
+    /// (unset admits; only explicit `"0"` disables), so the UNSET-env default
+    /// now folds this token; the explicit-`"0"` default is what stays
+    /// byte-identical to before this field existed.
     pub dense_batched_gemm_axes: Option<(u16, u16, Vec<u16>)>,
-    /// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=1`: `true` only when
+    /// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD`: `true` when
     /// [`crate::msl::push_tiled_gemm_body`] renders the vectorized
-    /// `float4` activation-tile load for this op. Feeds the `_wal` suffix.
+    /// `float4` activation-tile load for this op. Default ON (unset renders
+    /// it; only explicit `"0"` falls back to the scalar load). Feeds the
+    /// `_wal` suffix.
     pub tiled_gemm_wide_act_load: bool,
-    /// `PROXIMA_TILED_GEMM_SLIM_TGMEM=1` (phase 2, `S/nb/port2/RESULTS.md`):
-    /// `true` only when [`crate::msl::push_tiled_gemm_body`]/[`crate::msl::
+    /// `PROXIMA_TILED_GEMM_SLIM_TGMEM` (phase 2, see `docs/model-interop/
+    /// discipline.md` ROW C4.10):
+    /// `true` when [`crate::msl::push_tiled_gemm_body`]/[`crate::msl::
     /// push_dense_batched_gemm_body`] alias `out_tile`'s epilogue-staging
     /// bytes onto the SAME backing `threadgroup` array `weight_tile`/
     /// `act_tile` already occupy (safe because the K-loop's own trailing
@@ -244,9 +249,62 @@ pub(crate) struct MetalOnlyExtras {
     /// write) instead of declaring a third, separately-sized array --
     /// mirrors ggml's own `kernel_mul_mm` (`ggml-metal.metal:330`, `sa`/`sb`
     /// and its boundary-tile `temp_str` sharing one `shmem` allocation).
-    /// Unset default folds no new token and keeps the three
-    /// separately-sized arrays. Feeds the `_slim` suffix.
+    /// Default ON (unset aliases; only explicit `"0"` keeps the three
+    /// separately-sized arrays). Feeds the `_slim` suffix.
     pub tiled_gemm_slim_tgmem: bool,
+    /// `PROXIMA_TILED_GEMM_DIRECT_STORE` (see `docs/model-interop/
+    /// discipline.md` ROW C4.11): `true`
+    /// when [`crate::msl::push_tiled_gemm_body`]/[`crate::msl::
+    /// push_dense_batched_gemm_body`] emit the device-direct
+    /// `simdgroup_store` fast path for an interior output tile instead of
+    /// always restaging through `out_tile` threadgroup memory. Default OFF
+    /// (unset keeps the restage path; only explicit `"1"` opts in) -- unlike
+    /// [`Self::tiled_gemm_wide_act_load`]/[`Self::tiled_gemm_slim_tgmem`],
+    /// this changes accumulated bits nowhere (the fast path is chosen or not
+    /// PER TILE at kernel run time, not baked into the source text), but the
+    /// EMITTED SOURCE differs (an extra branch and device-pointer store path
+    /// exist in the compiled kernel), so two ops agreeing on every other
+    /// axis but disagreeing on this flag must still render, and cache,
+    /// distinct kernels. Feeds the `_dstore` suffix.
+    pub tiled_gemm_direct_store: bool,
+    /// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` (see `docs/model-interop/
+    /// discipline.md` ROW C4.12): `true`
+    /// when [`crate::msl::push_tiled_gemm_body`]'s `Codec::Q4_0`/`Codec::Q4K`
+    /// weight-tile staging loop spreads each row across TWO threads (one per
+    /// nibble half, matching ggml's own `kernel_mul_mm` staging split)
+    /// instead of one thread decoding the whole row serially while the other
+    /// half of the threadgroup's 128 threads sit idle (`block_m`(64) < the
+    /// threadgroup's own thread count), reads `Q4_0`'s packed nibbles via
+    /// `q4_0_run8_wide`'s `ushort` loads instead of `q4_0_run8`'s per-byte
+    /// `uchar` loads, and carries a per-thread block pointer/slot across the
+    /// `k0` reduction loop instead of re-deriving it from a division every
+    /// step. Default OFF (unset keeps today's one-thread-per-row staging;
+    /// only explicit `"1"` opts in) -- this changes who computes which
+    /// element and how its bytes are loaded/stored, never the decoded value
+    /// (ROW C4.12's own byte-parity tables), so the on/off kernels
+    /// are two distinct compiled pipelines and must never share a cache
+    /// entry. Feeds the `_wws` suffix.
+    pub tiled_gemm_wide_weight_stage: bool,
+    /// `PROXIMA_TILED_GEMM_GRID2D` (see `docs/model-interop/
+    /// discipline.md` ROW C4.19, measured -4.20% on A2's
+    /// own shape via the harness-only `S2_2d_index_attrs` ablation before
+    /// this switch existed): `true` when [`crate::msl::push_tiled_gemm_body`]/
+    /// [`crate::msl::push_dense_batched_gemm_body`] read the thread's tile
+    /// coordinates from `threadgroup_position_in_grid`/`thread_index_in_
+    /// threadgroup`/`simdgroup_index_in_threadgroup` (ggml's own `kernel_
+    /// mul_mm` attribute set, `ggml-metal.metal:6490-6510`) and dispatch via
+    /// `dispatchThreadgroups` instead of deriving `tiitg`/`sgitg`/`tile_index`
+    /// from a flattened `uint gid [[thread_position_in_grid]]` under
+    /// `dispatchThreads`. Also narrows the K-reduction loop counter from
+    /// `long` to `int` (ROW C4.19's own `for (int k0 ...)` change).
+    /// Default OFF (unset keeps today's flattened `gid` + `dispatchThreads`
+    /// form; only explicit `"1"` opts in) -- the harness proved this
+    /// bit-identical to the flattened form on every validated shape, but the
+    /// EMITTED SOURCE and the dispatch call both differ, so two ops
+    /// agreeing on every other axis but disagreeing on this flag must still
+    /// render, and dispatch, as distinct kernels. Feeds the `_grid2d`
+    /// suffix.
+    pub tiled_gemm_grid2d: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -769,6 +827,15 @@ mod gated {
         }
         if metal.tiled_gemm_slim_tgmem {
             identity.push_str("_slim");
+        }
+        if metal.tiled_gemm_direct_store {
+            identity.push_str("_dstore");
+        }
+        if metal.tiled_gemm_wide_weight_stage {
+            identity.push_str("_wws");
+        }
+        if metal.tiled_gemm_grid2d {
+            identity.push_str("_grid2d");
         }
 
         identity

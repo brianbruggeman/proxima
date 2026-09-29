@@ -1315,6 +1315,22 @@ pub(super) fn dispatch(
     if grid.threads == 0 {
         return;
     }
+    if let Some(grid2d) = grid.grid2d {
+        let threadgroups = MTLSize {
+            width: grid2d.threadgroups_x as usize,
+            height: grid2d.threadgroups_y as usize,
+            depth: grid.depth as usize,
+        };
+        let threads_per_threadgroup = MTLSize {
+            width: grid2d.threads_per_threadgroup_x as usize,
+            height: grid2d.threads_per_threadgroup_y as usize,
+            depth: 1,
+        };
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_threadgroup);
+        #[cfg(feature = "instrument")]
+        counter!(PHYSICAL_DISPATCH_CALLS, 1);
+        return;
+    }
     let max_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
     let threadgroup_width = match grid.threadgroup_width {
         Some(width) => (width as usize).min(max_threadgroup).max(1),

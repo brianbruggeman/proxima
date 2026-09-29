@@ -626,12 +626,18 @@ fn run_multi_row(
     extra_env: Option<(&str, &str)>,
     reduction_literal_env: Option<&str>,
 ) -> Vec<f32> {
+    // `PROXIMA_TILED_GEMM_Q4_0` defaults ON now, and the one caller of this
+    // helper runs at `tokens == TILED_GEMM_MIN_TOKENS` -- force it off so
+    // Q4_0 still routes through `push_packed_row_multi_row_body`'s generic/
+    // hoist/unroll arms this AC targets, not the tiled path.
     let inner = || {
-        temp_env::with_var("PROXIMA_REDUCTION_LITERAL", reduction_literal_env, || {
-            omega::execute(program, &[], blocks, &[sum], policy)
-                .expect("metal executes the multi-row packed matvec")
-                .root()
-                .to_vec()
+        temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+            temp_env::with_var("PROXIMA_REDUCTION_LITERAL", reduction_literal_env, || {
+                omega::execute(program, &[], blocks, &[sum], policy)
+                    .expect("metal executes the multi-row packed matvec")
+                    .root()
+                    .to_vec()
+            })
         })
     };
     match extra_env {

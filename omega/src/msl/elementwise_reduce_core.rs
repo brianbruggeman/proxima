@@ -14,7 +14,7 @@ pub(super) fn render_elementwise(
     let coordinate_dims = elementwise_coordinate_dims(resolved, gather_count);
 
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long total_elements;\n");
@@ -262,7 +262,16 @@ pub(super) fn render_reduce(
     // nothing left to reject here.
 
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(
+        &mut source,
+        wide_weight_stage_wants_q4_0_wide_decode(
+            resolved,
+            quantized,
+            *reduce_op,
+            *init,
+            output_axes,
+        ),
+    );
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long output_total;\n");

@@ -257,6 +257,37 @@ pub struct GridSpec {
     /// signature change; `1` reproduces today's `MTLSize { depth: 1, .. }`
     /// exactly, so this field is inert until a caller sets it above `1`.
     pub depth: u64,
+    /// `Some` only when [`crate::identity::MetalOnlyExtras::tiled_gemm_grid2d`]
+    /// admitted for this op -- the kernel body reads `threadgroup_position_
+    /// in_grid`/`thread_index_in_threadgroup`/`simdgroup_index_in_
+    /// threadgroup` rather than a flattened `[[thread_position_in_grid]]`,
+    /// so `crate::metal::dispatch` must issue `dispatchThreadgroups_
+    /// threadsPerThreadgroup` against THIS threadgroup-count grid instead of
+    /// `dispatchThreads_threadsPerThreadgroup` against [`Self::threads`].
+    /// `None` reproduces today's dispatch call exactly -- this field is
+    /// inert (and `Self::threads`/`Self::threadgroup_width` remain the sole
+    /// authority) until a caller populates it.
+    pub grid2d: Option<Grid2DSpec>,
+}
+
+/// The threadgroup-count dispatch shape [`GridSpec::grid2d`] carries when
+/// populated -- `threadgroups_x`/`threadgroups_y` are `tiled_gemm_
+/// threadgroups`'s own `col_tiles`/`row_tiles`, matching ggml's own
+/// `kernel_mul_mm` dispatch convention (`ggml-metal-ops.cpp`'s
+/// `dispatchThreadgroups(MTLSizeMake(ne1/32, ne0/64, 1), ...)`: width over
+/// the token axis, height over the feature axis) so the kernel body's
+/// `tgpig.x`/`tgpig.y` reads land on the same tile [`GridSpec::threads`]'s
+/// flattened `gid / block_threads` decomposition already visited.
+/// `threads_per_threadgroup_x`/`_y` are [`crate::sized::SIMD_WIDTH`]/
+/// `TILED_GEMM_NSG` -- the fixed 32x4 threadgroup shape every tiled-GEMM
+/// kernel already dispatches under [`GridSpec::threadgroup_width`]'s own
+/// flat 128, just expressed as two axes instead of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grid2DSpec {
+    pub threadgroups_x: u64,
+    pub threadgroups_y: u64,
+    pub threads_per_threadgroup_x: u64,
+    pub threads_per_threadgroup_y: u64,
 }
 
 /// Emits an MSL kernel from a bound [`BoundOp`] — the GPU-emission half of
@@ -1316,6 +1347,33 @@ static inline void q4_0_run8(device const uchar *block, uint index, thread float
 }
 "#;
 
+/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s own drop-in for [`Q4_0_RUN8_MSL`]'s
+/// `q4_0_run8` -- byte-identical output for every `(block, index)` pair, but
+/// four `ushort` (2-byte) loads instead of eight `uchar` (1-byte) loads:
+/// `qs`'s 16 packed-nibble bytes are 2-byte aligned (`block` itself always
+/// starts at a `(slot / 32) * 18`-byte offset from a device buffer, `18` is
+/// even, so every block origin is even; `+2` for the header stays even), so
+/// pairing consecutive bytes into one `ushort` read is sound the same way
+/// [`q4k_run8`]'s wider `uint` read is sound for `Q4_K`'s 16-byte-aligned
+/// blocks -- just one width narrower, since `Q4_0`'s 18-byte block has no
+/// 4-byte alignment guarantee. `push_tiled_gemm_body`'s own module doc names
+/// this as the fix for "the same 16 `qs` bytes read twice" (once per nibble
+/// half, at `uchar` granularity) -- the wide-weight-stage schedule instead
+/// assigns each nibble half to its OWN thread, so this function only ever
+/// reads its half's 16 bytes once.
+pub const Q4_0_RUN8_WIDE_MSL: &str = r#"
+static inline void q4_0_run8_wide(device const uchar *block, uint index, thread float *out) {
+    device const ushort *qs = (device const ushort *)(block + 2);
+    uint shift = (index < 16u) ? 0u : 4u;
+    uint word_base = (index % 16u) / 2u;
+    for (uint w = 0u; w < 4u; ++w) {
+        ushort word = qs[word_base + w];
+        out[2u * w] = (float)((word >> shift) & 0x0Fu);
+        out[2u * w + 1u] = (float)((word >> (shift + 8u)) & 0x0Fu);
+    }
+}
+"#;
+
 /// Bytes one `Q4_0` block occupies -- read from
 /// `proxima_gguf::quant::q4_0::BLOCK_BYTES`; pinned in
 /// `omega/tests/q4_0_unpack.rs`, same posture as [`Q8_0_BLOCK_BYTES`].
@@ -1671,6 +1729,40 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
     }
 }
 
+/// The K-tile chunk width [`crate::msl::push_tiled_gemm_body`]'s weight-
+/// staging loop reads per iteration -- Q4_0's own 32-element block, or
+/// Q4_K's 32-element sub-block (`Q4K_BLOCK_ELEMENTS`/8, the header-
+/// amortization unit `q4k_header_for` reads once per, NOT `codec_block_
+/// elements(Q4K)`'s own 256-element super-block). `classify_tiled_gemm`'s
+/// admission gate and `push_tiled_gemm_body`'s emitter must agree on this
+/// value byte-for-byte -- this is the one definition both read, so they
+/// cannot silently drift apart.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(crate) const fn tiled_gemm_codec_chunk_width(codec: Codec) -> u64 {
+    match codec {
+        Codec::Q4_0 => Q4_0_BLOCK_ELEMENTS as u64,
+        _ => (Q4K_BLOCK_ELEMENTS / 8) as u64,
+    }
+}
+
+/// `push_tiled_gemm_body`'s per-row weight-staging loop (`num_chunks =
+/// block_k.div_ceil(chunk_width)`) writes exactly `chunk_width` elements
+/// per chunk into a `block_k`-wide `weight_tile` row. The last chunk's
+/// write extent is `num_chunks * chunk_width`, which overruns the row (and
+/// bleeds into the next row's slots, or past `weight_tile`'s own end on the
+/// tile's last row) whenever that product exceeds `block_k`. Safe exactly
+/// when `block_k <= chunk_width` (a single chunk that exactly covers, or
+/// under-covers with the remainder handled by the loop's own upper bound)
+/// or `block_k` is a whole multiple of `chunk_width` (every chunk fully
+/// covers, none ragged) -- `classify_tiled_gemm` calls this with the SAME
+/// `chunk_width` `push_tiled_gemm_body` computes
+/// ([`tiled_gemm_codec_chunk_width`]) so an admitted op can never reach the
+/// emitter with a ragged combination.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(crate) const fn tiled_gemm_block_k_chunk_aligned(block_k: u64, chunk_width: u64) -> bool {
+    chunk_width != 0 && (block_k <= chunk_width || block_k.is_multiple_of(chunk_width))
+}
+
 /// Whether this codec's block layout has a paired-nibble/paired-lane decode
 /// body (`q4k_pair_dot`/`q5k_pair_dot`/`q6k_pair_dot`) at all -- the
 /// structural fact `push_packed_row_blocked_body`'s `plain_product` gate
@@ -1806,16 +1898,17 @@ pub(super) const fn q4_0_multi_row_hoist_override() -> bool {
     false
 }
 
-/// `PROXIMA_TILED_GEMM_Q4_0=1` A/B switch: admits `Codec::Q4_0` into
+/// `PROXIMA_TILED_GEMM_Q4_0` A/B switch: admits `Codec::Q4_0` into
 /// [`crate::msl::classify_tiled_gemm`], the same `simdgroup_matrix`-tiled
 /// GEMM ([`crate::msl::push_tiled_gemm_body`]) today's `Codec::Q4_K`-only
 /// admission renders (`docs/discipline.md` ROW 109) -- scheduling, packing
 /// and tiling stay CODEC-GENERIC (only the weight-tile decode differs per
 /// codec), matching the owner's standing rule that only the decoder may be
-/// codec-specific. Default OFF -- unset, empty, or any value other than
-/// `"1"` keeps today's Q4_K-only admission, so the unset-env emit stays
-/// byte-identical to before this switch existed, same posture as
-/// [`q4_0_multi_row_hoist_override`] above.
+/// codec-specific. Default ON as of `docs/model-interop/discipline.md` ROW
+/// C4.6 (isolated 44.8-45.8x per projection, byte-exact vs the f32 CPU
+/// oracle at every admitted shape) -- unset keeps the tiled Q4_0 admission;
+/// only explicit `"0"` falls back to today's Q4_K-only admission. The A/B
+/// control stays reachable in the same binary via that explicit override.
 // gated on `metal-tiled-gemm`, not just `std`: this switch has no meaning
 // outside the tiled-GEMM admission path, and every caller (`emit_and_
 // classify.rs`'s `classify_tiled_gemm`/`tiled_gemm_q4_0_active`) already
@@ -1824,7 +1917,7 @@ pub(super) const fn q4_0_multi_row_hoist_override() -> bool {
 // its own unconditional seam.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_q4_0_override() -> bool {
-    let active = matches!(std::env::var("PROXIMA_TILED_GEMM_Q4_0"), Ok(value) if value.trim() == "1");
+    let active = !matches!(std::env::var("PROXIMA_TILED_GEMM_Q4_0"), Ok(value) if value.trim() == "0");
     log_tiled_gemm_q4_0_once(active);
     active
 }
@@ -1847,20 +1940,24 @@ fn log_tiled_gemm_q4_0_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn tiled_gemm_q4_0_override() -> bool {
-    false
+    true
 }
 
-/// `PROXIMA_TILED_GEMM_DENSE=1`: admits a dense (neither operand quantized)
+/// `PROXIMA_TILED_GEMM_DENSE`: admits a dense (neither operand quantized)
 /// batched matmul -- gemma4's GQA attention score (`Q.K^T`) and value
 /// (`P.V`) folds -- onto the same `simdgroup_matrix` tiled path
 /// [`tiled_gemm_q4_0_override`] admits `Codec::Q4_0` onto, plus a z-grid
 /// batch axis for the head-broadcast dimension `classify_dense_batched_gemm`
-/// resolves from the bound layout. Unset default keeps every emitted byte
-/// and cache key identical to before this switch existed, matching
+/// resolves from the bound layout. Default ON as of `docs/model-interop/
+/// discipline.md` ROW C4.8 (real 510-token prefill `gpu_exec_ms` mean 5739.7
+/// -> 1669.1 ms, `text_hash` identical on/off) once the `grid_threads`
+/// dispatch-shape defect this admission depended on was fixed --
+/// unset keeps the dense-batched admission; only
+/// explicit `"0"` falls back to the cooperative-reduce path, matching
 /// [`tiled_gemm_q4_0_override`]'s own posture.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_dense_override() -> bool {
-    let active = matches!(std::env::var("PROXIMA_TILED_GEMM_DENSE"), Ok(value) if value.trim() == "1");
+    let active = !matches!(std::env::var("PROXIMA_TILED_GEMM_DENSE"), Ok(value) if value.trim() == "0");
     log_tiled_gemm_dense_once(active);
     active
 }
@@ -1881,21 +1978,24 @@ fn log_tiled_gemm_dense_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn tiled_gemm_dense_override() -> bool {
-    false
+    true
 }
 
-/// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=1` (item 3c, `STAGING.md` §5.3): the
+/// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD` (item 3c, `STAGING.md` §5.3): the
 /// activation-tile load for an interior (fully-in-bounds) column tile reads
 /// one `float4` (16 bytes) per thread per trip instead of one scalar
 /// `float` per trip -- a quarter the loop trips and bounds checks for the
 /// same bytes moved. The LAST column tile (the only one that can carry any
 /// `a_tok >= token_extent` element) keeps the existing scalar,
-/// bounds-checked loop. Default off; unset, empty, or any value other than
-/// `"1"` keeps today's scalar-per-element load for every tile.
+/// bounds-checked loop. Default ON as of `docs/model-interop/discipline.md`
+/// ROW C4.9 (isolated Q4_0 `[K=1536,M=12288]x[N=510]`, 1.16-1.17x faster,
+/// byte-exact vs the f32 CPU oracle at tokens 8/37/510) -- unset keeps the
+/// vectorized load; only explicit `"0"` falls back to today's
+/// scalar-per-element load for every tile.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn wide_activation_load_override() -> bool {
     let active =
-        matches!(std::env::var("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD"), Ok(value) if value.trim() == "1");
+        !matches!(std::env::var("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD"), Ok(value) if value.trim() == "0");
     log_wide_activation_load_once(active);
     active
 }
@@ -1914,19 +2014,24 @@ fn log_wide_activation_load_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn wide_activation_load_override() -> bool {
-    false
+    true
 }
 
-/// `PROXIMA_TILED_GEMM_SLIM_TGMEM=1` (phase 2, `S/nb/port2/RESULTS.md`):
+/// `PROXIMA_TILED_GEMM_SLIM_TGMEM` (phase 2, see `docs/model-interop/
+/// discipline.md` ROW C4.10):
 /// aliases the epilogue `out_tile` staging bytes onto the same backing array
 /// `weight_tile`/`act_tile` already occupy instead of declaring a third,
 /// separately-sized `threadgroup` array -- see [`crate::identity::
 /// MetalOnlyExtras::tiled_gemm_slim_tgmem`]'s own doc for why this is safe.
-/// Default off; unset, empty, or any value other than `"1"` keeps today's
+/// Default ON as of `docs/model-interop/discipline.md` ROW C4.10 (threadgroup
+/// memory footprint 16384 -> 8192 bytes, matching ggml's own `kernel_mul_mm`
+/// boundary-tile exactly; 20480 -> 12288 bytes dense-batched; byte-exact vs
+/// the f32 CPU oracle at tokens 8/37/510) -- unset keeps the aliased,
+/// smaller-footprint layout; only explicit `"0"` falls back to today's
 /// three-array layout.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn slim_tgmem_override() -> bool {
-    let active = matches!(std::env::var("PROXIMA_TILED_GEMM_SLIM_TGMEM"), Ok(value) if value.trim() == "1");
+    let active = !matches!(std::env::var("PROXIMA_TILED_GEMM_SLIM_TGMEM"), Ok(value) if value.trim() == "0");
     log_slim_tgmem_once(active);
     active
 }
@@ -1945,6 +2050,110 @@ fn log_slim_tgmem_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn slim_tgmem_override() -> bool {
+    true
+}
+
+/// `PROXIMA_TILED_GEMM_DIRECT_STORE=1` (see `docs/model-interop/
+/// discipline.md` ROW C4.11): for an
+/// output tile fully inside `feature_extent`/`token_extent` (no boundary
+/// row/col needs masking) AND with an identity epilogue AND a unit-stride
+/// token axis on the output operand, `simdgroup_store`s the accumulators
+/// straight to device memory -- ggml's own fast path
+/// (`mul_mm.metal:317-357`) -- instead of restaging through `out_tile`
+/// threadgroup memory and a scalar bounds-checked copy-out loop. Boundary
+/// tiles, a non-identity epilogue, or a non-unit output token stride all
+/// keep today's threadgroup-restage path; this is a pure store-path change
+/// with the SAME accumulator values, so it is bit-identical by construction
+/// wherever it admits. Default OFF: unset or any value other than `"1"`
+/// keeps today's restage path; only explicit `"1"` opts in.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_direct_store_override() -> bool {
+    let active =
+        matches!(std::env::var("PROXIMA_TILED_GEMM_DIRECT_STORE"), Ok(value) if value.trim() == "1");
+    log_tiled_gemm_direct_store_once(active);
+    active
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_tiled_gemm_direct_store_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_direct_store");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_tiled_gemm_direct_store_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_direct_store_override() -> bool {
+    false
+}
+
+/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE=1` (see `docs/model-interop/
+/// discipline.md` ROW C4.12): see
+/// [`crate::identity::MetalOnlyExtras::tiled_gemm_wide_weight_stage`]'s own
+/// doc for what this switch changes. Default OFF: unset or any value other
+/// than `"1"` keeps today's one-thread-per-row weight-staging loop; only
+/// explicit `"1"` opts in.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_wide_weight_stage_override() -> bool {
+    let active = matches!(
+        std::env::var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE"),
+        Ok(value) if value.trim() == "1"
+    );
+    log_tiled_gemm_wide_weight_stage_once(active);
+    active
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_tiled_gemm_wide_weight_stage_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_wide_weight_stage");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_tiled_gemm_wide_weight_stage_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_wide_weight_stage_override() -> bool {
+    false
+}
+
+/// `PROXIMA_TILED_GEMM_GRID2D=1` (see `docs/model-interop/
+/// discipline.md` ROW C4.19): see
+/// [`crate::identity::MetalOnlyExtras::tiled_gemm_grid2d`]'s own doc for
+/// what this switch changes. Default OFF: unset or any value other than
+/// `"1"` keeps today's flattened `gid`/`dispatchThreads` form; only
+/// explicit `"1"` opts in.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_grid2d_override() -> bool {
+    let active = matches!(
+        std::env::var("PROXIMA_TILED_GEMM_GRID2D"),
+        Ok(value) if value.trim() == "1"
+    );
+    log_tiled_gemm_grid2d_once(active);
+    active
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_tiled_gemm_grid2d_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_grid2d");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_tiled_gemm_grid2d_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_grid2d_override() -> bool {
     false
 }
 
@@ -2079,7 +2288,7 @@ pub(super) fn reduction_literal_override() -> bool {
 
 /// `PROXIMA_REDUCTION_LITERAL=decode`: narrows [`reduction_literal_override`]'s
 /// admission to single-token (`token_total <= 1`) packed-row ops only.
-/// `S/nb/prefill/RESULTS.md`'s AIR/probe findings traced a real prefill
+/// A real prefill AIR/probe finding traced a real prefill
 /// (multi-token) slowdown to this bake that the decode-shaped body does not
 /// share, so this mode isolates the bake to the shape it was designed and
 /// measured against, while `"1"` keeps baking every admitted op (decode and
