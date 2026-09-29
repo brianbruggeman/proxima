@@ -661,11 +661,11 @@ pub struct ServingConfig<'model> {
     /// kernels instead of the `q{4,5,6}k-int8-dot` activation-quantized
     /// fast path those features default on
     /// (`proxima_tensor::cpu::evaluate_quantized_exact`'s own doc names the
-    /// finding this exists for). `false` (this field's default) is today's
-    /// shipping fast path, unchanged. A cross-backend quality harness
-    /// comparing against Metal's own exact kernels sets this `true` on its
-    /// CPU-reference side so neither side's own quantization error is
-    /// misattributed to the other backend.
+    /// finding this exists for). `true` (this field's default) keeps the CPU
+    /// on the exact dequantize-then-fold reference so a cross-backend quality
+    /// harness comparing against Metal's own exact kernels does not
+    /// misattribute either side's quantization error to the other backend.
+    /// `false` opts into the `q{4,5,6}k-int8-dot` fast path.
     pub exact_activations: bool,
     /// Not an upstream llama-server flag -- per-tensor bind-time recode
     /// rules ([`WeightPrecisionRule`]'s own doc), applied by
