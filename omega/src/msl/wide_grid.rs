@@ -94,6 +94,7 @@ pub(super) fn flat_grid2d(
 /// re-split to hold the now larger threadgroup count. `spec` unchanged when
 /// it already fits or is not the flat form.
 #[must_use]
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) fn fit_flat_width(spec: Grid2DSpec, max_width: u64) -> Grid2DSpec {
     let width = spec.threads_per_threadgroup_x;
     if spec.form != Grid2DForm::FlatThreadgroupIndex || width <= max_width.max(1) {
