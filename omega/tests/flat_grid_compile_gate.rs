@@ -539,13 +539,33 @@ fn the_packed_row_fixtures_take_the_launch_widths_their_labels_name() {
         .grid
         .threadgroup_width
         .expect("a packed row-blocked matvec pins a threadgroup width");
+    // split-k owns the row-blocked geometry when it is compiled in: a fixture
+    // this large is past its row ceiling, so the width is one simdgroup and
+    // the divisible case is the one-simdgroup case
+    #[cfg(not(feature = "metal-q4k-split-k"))]
     assert!(
         pinned_even > omega::sized::SIMD_WIDTH,
         "the even fixture only tests the divisible case when the pinned width exceeds one simdgroup, \
          got {pinned_even}"
     );
+    #[cfg(feature = "metal-q4k-split-k")]
+    assert_eq!(
+        pinned_even,
+        omega::sized::SIMD_WIDTH,
+        "past split-k's row ceiling the pinned width is one simdgroup"
+    );
     assert_eq!(even_kernel.grid.threads % pinned_even, 0, "even grid divides the pinned width");
     assert_eq!(launch_width("packed row even", &even_kernel), pinned_even);
-    assert_ne!(odd_kernel.grid.threads % pinned_odd, 0, "odd grid must not divide the pinned width");
-    assert_eq!(launch_width("packed row odd", &odd_kernel), omega::sized::SIMD_WIDTH);
+    #[cfg(not(feature = "metal-q4k-split-k"))]
+    {
+        assert_ne!(odd_kernel.grid.threads % pinned_odd, 0, "odd grid must not divide the pinned width");
+        assert_eq!(launch_width("packed row odd", &odd_kernel), omega::sized::SIMD_WIDTH);
+    }
+    #[cfg(feature = "metal-q4k-split-k")]
+    assert_eq!(
+        (pinned_odd, odd_kernel.grid.threads % omega::sized::SIMD_WIDTH),
+        (omega::sized::SIMD_WIDTH, 0),
+        "a one-simdgroup row-blocked grid is always a whole number of simdgroups, so the odd \
+         fixture has no indivisible case under split-k"
+    );
 }
