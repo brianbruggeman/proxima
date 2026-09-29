@@ -196,6 +196,7 @@ mod pregather;
 mod residency_caches;
 #[macro_use]
 mod decode;
+mod drafter;
 mod serving_backend;
 mod tests_all;
 use decode::*;

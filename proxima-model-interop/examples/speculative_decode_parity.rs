@@ -257,6 +257,24 @@ fn parse_gpu_layers(value: &str) -> i32 {
     }
 }
 
+/// `--drafter <type>[,<type>...]` -- a comma list of llama's own `--spec-type`
+/// names ([`SpeculativeType::from_llama_name`]), folded into one
+/// [`SpeculativeTypeSet`] the same way llama's own `--spec-type` (repeatable)
+/// folds into `common_params_speculative::types`
+/// ([`SpeculativeTypeSet`]'s own doc). Panics on an unrecognised name --
+/// this CLI has no typed-error surface of its own, matching every other
+/// `parse_*` helper in this file.
+fn parse_drafter_flag(value: &str) -> SpeculativeTypeSet {
+    value
+        .split(',')
+        .map(str::trim)
+        .fold(SpeculativeTypeSet::empty(), |set, name| {
+            let type_id = SpeculativeType::from_llama_name(name)
+                .unwrap_or_else(|| panic!("--drafter {value}: unknown speculation type {name:?}"));
+            set.insert(type_id)
+        })
+}
+
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
     let seed_mismatch_control = raw_args
@@ -267,6 +285,14 @@ fn main() {
         .and_then(|flag_index| raw_args.get(flag_index + 1))
         .map_or(0, |value| parse_gpu_layers(value));
     let gpu_layers_value_index = gpu_layers_flag_index.map(|flag_index| flag_index + 1);
+    let drafter_flag_index = raw_args.iter().position(|arg| arg == "--drafter");
+    let drafter_types = drafter_flag_index
+        .and_then(|flag_index| raw_args.get(flag_index + 1))
+        .map_or_else(
+            || SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
+            |value| parse_drafter_flag(value),
+        );
+    let drafter_value_index = drafter_flag_index.map(|flag_index| flag_index + 1);
     let mut args = raw_args
         .into_iter()
         .enumerate()
@@ -274,6 +300,8 @@ fn main() {
             arg != "--seed-mismatch-control"
                 && Some(*index) != gpu_layers_flag_index
                 && Some(*index) != gpu_layers_value_index
+                && Some(*index) != drafter_flag_index
+                && Some(*index) != drafter_value_index
         })
         .map(|(_, arg)| arg);
     let model_path = args
@@ -284,6 +312,11 @@ fn main() {
         .next()
         .and_then(|value| value.parse().ok())
         .unwrap_or(40);
+    println!(
+        "speculative_decode_parity: drafter={:?} prompt={:?}",
+        drafter_types.iter_priority_order().collect::<Vec<_>>(),
+        &prompt[..prompt.len().min(80)]
+    );
 
     let log_path: PathBuf = env::var("PROXIMA_TELEMETRY_FILE")
         .map(PathBuf::from)
@@ -351,8 +384,8 @@ fn main() {
         ..base_config
     };
 
-    let ngram_simple_on = SpeculativeConfig {
-        speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
+    let speculative_on = SpeculativeConfig {
+        speculative_types: drafter_types,
         ..SpeculativeConfig::none()
     };
 
@@ -361,7 +394,7 @@ fn main() {
         &prompt,
         max_tokens,
         greedy_config,
-        greedy_config.with_speculative(ngram_simple_on),
+        greedy_config.with_speculative(speculative_on),
         &capture,
         &recorder,
     );
@@ -379,7 +412,7 @@ fn main() {
     } else {
         sampled_config
     }
-    .with_speculative(ngram_simple_on);
+    .with_speculative(speculative_on);
     let sampled_result = run_pair(
         &model,
         &prompt,
