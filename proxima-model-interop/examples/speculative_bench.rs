@@ -48,7 +48,7 @@ use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, NgramMapParams, NgramModParams, Phase, ServingConfig,
+    GPU_LAYERS_ALL, LoadedModel, NgramMapParams, NgramModParams, Phase, PrefixState, ServingConfig,
     SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet, TokenEvent,
 };
 use proxima_tokenizer::vocab::Vocab;
@@ -990,6 +990,15 @@ impl LlamaServerHandle {
     }
 }
 
+/// `timings.prompt_n` above this many tokens on a repeat request means the
+/// slot's KV cache missed the common prefix and llama-server re-prefilled
+/// the whole prompt (`server-context.cpp:3198`'s `get_common_prefix`
+/// returned far short of the full length) -- the exact cost class
+/// [`warm_llama_prompt_cache`] exists to keep off the timed pairs. A cache
+/// hit still costs a handful of tokens (the freshly generated ones from the
+/// prior pair plus any per-call rounding), never the whole prompt.
+const LLAMA_REPREFILL_PROMPT_N_BOUND: u64 = 8;
+
 #[derive(Debug, Clone, Copy, Default)]
 struct LlamaArmResult {
     ms_per_token: f64,
@@ -997,37 +1006,60 @@ struct LlamaArmResult {
     predicted_n: u64,
     draft_n: u64,
     draft_n_accepted: u64,
+    prompt_n: u64,
+    llama_reprefilled: bool,
 }
 
-/// One non-streaming `/completion` call against token ids (invariant 2:
-/// "prefer sending token ids ... produced by the proxima tokenizer +
-/// template"), reading llama's OWN timing fields
-/// (`predicted_per_token_ms`, `prompt_ms`, `predicted_n`, `draft_n`,
-/// `draft_n_accepted`) straight off its response -- never wall-clock
-/// around this HTTP call (invariant 3). `cache_prompt: false` matches
-/// proxima's own arm: every [`run_one_arm`] call re-prefills from
-/// `cached_len == 0`, so a cached llama-server prompt would give llama an
-/// advantage this bench does not measure on proxima's side.
-fn run_llama_completion(port: u16, token_ids: &[u32], max_tokens: usize) -> LlamaArmResult {
-    let body = serde_json::json!({
-        "prompt": token_ids,
-        "n_predict": max_tokens,
-        "cache_prompt": false,
-        "stream": false,
-    });
-    let response = http_post_json(port, "/completion", &body);
+/// Parses one llama-server `/completion` response body into
+/// [`LlamaArmResult`], reading llama's OWN timing fields
+/// (`predicted_per_token_ms`, `prompt_ms`, `prompt_n`, `predicted_n`,
+/// `draft_n`, `draft_n_accepted`) straight off `timings`
+/// (`server-common.cpp:84-105`'s `server_slot_stats::to_json`) -- never
+/// wall-clock around the HTTP call (invariant 3).
+fn parse_llama_completion_response(response: &serde_json::Value) -> LlamaArmResult {
     let timings = response
         .get("timings")
         .unwrap_or_else(|| panic!("llama-server /completion response missing \"timings\": {response}"));
     let get_f64 = |key: &str| timings.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
     let get_u64 = |key: &str| timings.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let prompt_n = get_u64("prompt_n");
     LlamaArmResult {
         ms_per_token: get_f64("predicted_per_token_ms"),
         ttft_ms: get_f64("prompt_ms"),
         predicted_n: get_u64("predicted_n"),
         draft_n: get_u64("draft_n"),
         draft_n_accepted: get_u64("draft_n_accepted"),
+        prompt_n,
+        llama_reprefilled: prompt_n > LLAMA_REPREFILL_PROMPT_N_BOUND,
     }
+}
+
+/// One non-streaming `/completion` call against token ids (invariant 2:
+/// "prefer sending token ids ... produced by the proxima tokenizer +
+/// template"). `cache_prompt: true` (`server-task.h:53`, llama-server's own
+/// default) matches proxima's own arm: [`prefill_prompt_once`] prefills a
+/// prompt exactly once and every pair below resumes from that cached state,
+/// so llama-server must resume from its own per-slot KV cache too rather
+/// than re-prefilling on every pair -- [`warm_llama_prompt_cache`] primes
+/// that cache once per prompt, discarded, before the timed pairs begin.
+fn run_llama_completion(port: u16, token_ids: &[u32], max_tokens: usize) -> LlamaArmResult {
+    let body = serde_json::json!({
+        "prompt": token_ids,
+        "n_predict": max_tokens,
+        "cache_prompt": true,
+        "stream": false,
+    });
+    let response = http_post_json(port, "/completion", &body);
+    parse_llama_completion_response(&response)
+}
+
+/// Discarded warm call issued once per prompt, before this prompt's timed
+/// pairs begin: primes `handle`'s per-slot KV cache with `token_ids' full
+/// prefix so the first TIMED pair does not eat the one-time prefill cost --
+/// the same cost proxima's own [`prefill_prompt_once`] pays exactly once
+/// and excludes from the pair loop.
+fn warm_llama_prompt_cache(handle: &LlamaServerHandle, token_ids: &[u32]) {
+    let _ = run_llama_completion(handle.port, token_ids, 1);
 }
 
 struct LlamaPairResult {
@@ -1057,8 +1089,15 @@ fn run_llama_pair(
 fn format_llama_arm(label: &str, arm: &LlamaArmResult) -> String {
     format!(
         "{label}_llama_ms_per_token={:.3} {label}_llama_ttft_ms={:.3} {label}_llama_predicted_n={} \
-         {label}_llama_draft_n={} {label}_llama_draft_n_accepted={}",
-        arm.ms_per_token, arm.ttft_ms, arm.predicted_n, arm.draft_n, arm.draft_n_accepted,
+         {label}_llama_draft_n={} {label}_llama_draft_n_accepted={} {label}_llama_prompt_n={} \
+         {label}_llama_reprefilled={}",
+        arm.ms_per_token,
+        arm.ttft_ms,
+        arm.predicted_n,
+        arm.draft_n,
+        arm.draft_n_accepted,
+        arm.prompt_n,
+        arm.llama_reprefilled,
     )
 }
 
@@ -1173,6 +1212,19 @@ struct ArmResult {
     gpu: Option<GpuUtilizationSummary>,
 }
 
+/// Every arm's own cached context -- a [`PrefixState`] a single per-prompt
+/// [`LoadedModel::prefill_prefix`] call already produced, plus the small
+/// suffix text still needing a fresh forward pass. Every OFF/ON arm and
+/// every pair for a prompt decodes from the SAME `DecodeSource` instead of
+/// re-prefilling per arm (the performance-harness invariant: each prompt
+/// is prefilled exactly once per bench run). Plain references, so this is
+/// `Copy` -- cheap to pass by value into every arm call.
+#[derive(Clone, Copy)]
+struct DecodeSource<'source> {
+    prefix: &'source PrefixState,
+    suffix: &'source str,
+}
+
 /// `forced_draft_width` reaches
 /// [`LoadedModel::generate_streaming_with_speculative_stats`]'s own
 /// argument of the same name, never `serving_config` -- see that method's
@@ -1180,7 +1232,7 @@ struct ArmResult {
 /// caller except [`run_verify_width_sweep_mode`].
 fn run_one_arm(
     model: &LoadedModel,
-    prompt: &str,
+    source: DecodeSource<'_>,
     max_tokens: usize,
     serving_config: ServingConfig,
     sample_gpu: bool,
@@ -1206,8 +1258,9 @@ fn run_one_arm(
         ControlFlow::Continue(())
     };
     let (token_ids, _text, _stopped_by_eos) = model
-        .generate_streaming_with_speculative_stats(
-            prompt,
+        .generate_from_prefix_with_speculative_stats(
+            source.prefix,
+            source.suffix,
             max_tokens,
             serving_config,
             &mut on_token,
@@ -1290,21 +1343,21 @@ fn log_ollama_ps(label: &str) -> Vec<String> {
 /// even though none was loaded going in.
 fn run_arm_logged(
     model: &LoadedModel,
-    prompt: &str,
+    source: DecodeSource<'_>,
     max_tokens: usize,
     config: ServingConfig,
     sample_gpu: bool,
     label: &str,
 ) -> (ArmResult, bool) {
     log_ollama_ps(&format!("before_{label}"));
-    let result = run_one_arm(model, prompt, max_tokens, config, sample_gpu, None);
+    let result = run_one_arm(model, source, max_tokens, config, sample_gpu, None);
     let after = log_ollama_ps(&format!("after_{label}"));
     (result, !after.is_empty())
 }
 
 fn run_pair(
     model: &LoadedModel,
-    prompt: &str,
+    source: DecodeSource<'_>,
     max_tokens: usize,
     off_config: ServingConfig,
     on_config: ServingConfig,
@@ -1330,12 +1383,12 @@ fn run_pair(
         .is_some_and(|baseline| baseline.median > GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT);
 
     let (off, on, ollama_contaminated) = if swap_order {
-        let (on, on_loaded) = run_arm_logged(model, prompt, max_tokens, on_config, sample_gpu, "on");
-        let (off, off_loaded) = run_arm_logged(model, prompt, max_tokens, off_config, sample_gpu, "off");
+        let (on, on_loaded) = run_arm_logged(model, source, max_tokens, on_config, sample_gpu, "on");
+        let (off, off_loaded) = run_arm_logged(model, source, max_tokens, off_config, sample_gpu, "off");
         (off, on, on_loaded || off_loaded)
     } else {
-        let (off, off_loaded) = run_arm_logged(model, prompt, max_tokens, off_config, sample_gpu, "off");
-        let (on, on_loaded) = run_arm_logged(model, prompt, max_tokens, on_config, sample_gpu, "on");
+        let (off, off_loaded) = run_arm_logged(model, source, max_tokens, off_config, sample_gpu, "off");
+        let (on, on_loaded) = run_arm_logged(model, source, max_tokens, on_config, sample_gpu, "on");
         (off, on, off_loaded || on_loaded)
     };
 
@@ -1344,6 +1397,137 @@ fn run_pair(
         on,
         contaminated: gpu_idle_contaminated || ollama_contaminated,
     }
+}
+
+// ---------------------------------------------------------------------
+// prefill-once: one forward pass per prompt, every arm resumes from it
+// ---------------------------------------------------------------------
+
+/// gemma4-E2B's own real chat template (`tokenizer.chat_template`
+/// metadata) -- the exact rendering `tests/gemma4_correctness_gate.rs`'s
+/// own `chat_prompt` uses and confirms against this checkpoint's real
+/// vocab (`<|turn>` is id 105, `<turn|>` is id 106, NOT the older
+/// gemma2/3 `<start_of_turn>`/`<end_of_turn>` pair). Every corpus prompt is
+/// wrapped in this template before tokenization here -- a completion-style
+/// RAG passage and a bare one-line chat question both become a real "user
+/// turn", so neither depends on the raw corpus text happening to contain a
+/// newline for [`split_prompt_at_hard_boundary`] to find (the bug this
+/// fixes: 17 of the 51 corpus prompts are one-line and panicked with no
+/// template applied). The model's own BOS is prepended by the tokenizer
+/// (`tokenizer.ggml.add_bos_token`), so this template never spells `<bos>`
+/// itself.
+fn chat_prompt(user_turn: &str) -> String {
+    format!("<|turn>user\n{user_turn}<turn|>\n<|turn>model\n")
+}
+
+/// Splits a [`chat_prompt`]-rendered prompt at its own trailing newline --
+/// the one literal newline [`chat_prompt`] always appends after the
+/// model-turn opener (`<|turn>model`), regardless of whether `user_turn`
+/// itself carries embedded newlines. `rfind` therefore always lands on this
+/// template-guaranteed boundary, never on a newline inside the RAG passage
+/// or chat question: nothing follows the template's own trailing newline,
+/// so it is unconditionally the LAST one in the string.
+///
+/// The newline stays in the SUFFIX half, not the prefix: keeping it in the
+/// prefix (an earlier version of this function did) makes the prefix the
+/// entire templated text and the suffix empty whenever `prompt` ends in
+/// that newline -- and an empty suffix leaves no token for
+/// [`LoadedModel::generate_from_prefix`] to forward-evaluate before it can
+/// sample (see that function's own doc). Splitting on the newline itself
+/// keeps `prefix` ending exactly at the model-turn opener (this crate's own
+/// "prefix is the templated prompt through the opener" invariant) and
+/// leaves `suffix` a single real token -- the newline -- to seed
+/// generation from. A prompt with no newline at all has no verified-safe
+/// cut point, so this refuses loudly rather than guessing at an arbitrary
+/// byte offset that could split a multi-byte character or a BPE merge.
+///
+/// Still a generic last-newline split, not a [`chat_prompt`]-only one:
+/// [`run_verify_width_sweep_mode`]'s own multi-paragraph prompt (no
+/// template, several embedded newlines with real text after the last one)
+/// splits the same way and keeps working.
+fn split_prompt_at_hard_boundary(prompt: &str) -> (&str, &str) {
+    let newline_index = prompt.rfind('\n').unwrap_or_else(|| {
+        panic!(
+            "prompt has no newline to split on -- no verified-safe prefix/suffix boundary \
+             (prompt starts: {:?})",
+            prompt.chars().take(60).collect::<String>()
+        )
+    });
+    prompt.split_at(newline_index)
+}
+
+/// One prefill per prompt, kept alive across every OFF/ON arm and every
+/// pair a caller runs against it -- the performance-harness invariant that
+/// re-prefilling per arm would otherwise violate. `suffix` is a borrow of
+/// `prompt` itself (from [`split_prompt_at_hard_boundary`]), never a copy.
+struct CachedPrompt<'prompt> {
+    prefix_state: PrefixState,
+    suffix: &'prompt str,
+    prefill_ttft_ms: f64,
+}
+
+fn prefill_prompt_once<'prompt>(
+    model: &LoadedModel,
+    prompt: &'prompt str,
+    serving_config: &ServingConfig,
+) -> CachedPrompt<'prompt> {
+    let (prefix_text, suffix) = split_prompt_at_hard_boundary(prompt);
+    let prefill_start = Instant::now();
+    let prefix_state = model
+        .prefill_prefix(prefix_text, serving_config)
+        .expect("prefill this prompt's shared prefix exactly once");
+    let prefill_ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
+    CachedPrompt {
+        prefix_state,
+        suffix,
+        prefill_ttft_ms,
+    }
+}
+
+/// Invariant 1's own proof: a fresh full-prompt decode and a resumed
+/// decode off [`prefill_prompt_once`]'s cached prefix must sample the
+/// IDENTICAL first 32 greedy token ids. Run once per bench (prompt index
+/// 0), never per pair -- this is a correctness gate, not a measurement.
+fn verify_prefix_resume_matches_full_decode(
+    model: &LoadedModel,
+    full_prompt: &str,
+    cached: &CachedPrompt<'_>,
+    serving_config: ServingConfig,
+) {
+    const VERIFY_TOKENS: usize = 32;
+    let mut fresh_stats = SpeculativeDecodeStats::default();
+    let (fresh_ids, ..) = model
+        .generate_streaming_with_speculative_stats(
+            full_prompt,
+            VERIFY_TOKENS,
+            serving_config,
+            &mut |_event| ControlFlow::Continue(()),
+            &mut fresh_stats,
+            None,
+        )
+        .expect("fresh full-prompt decode for the prefix-resume parity check");
+    let mut resumed_stats = SpeculativeDecodeStats::default();
+    let (resumed_ids, ..) = model
+        .generate_from_prefix_with_speculative_stats(
+            &cached.prefix_state,
+            cached.suffix,
+            VERIFY_TOKENS,
+            serving_config,
+            &mut |_event| ControlFlow::Continue(()),
+            &mut resumed_stats,
+            None,
+        )
+        .expect("resumed decode for the prefix-resume parity check");
+    println!(
+        "prefix_resume_parity fresh_first32={fresh_ids:?} resumed_first32={resumed_ids:?} \
+         identical={}",
+        fresh_ids == resumed_ids,
+    );
+    assert_eq!(
+        resumed_ids, fresh_ids,
+        "resuming decode from the cached prefix must produce identical greedy token ids to a \
+         fresh full-prompt decode -- prefix/suffix split is not a tokenizer-safe boundary"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1425,12 +1609,17 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
         .corpus_path
         .clone()
         .unwrap_or_else(|| panic!("--corpus is required in pairs mode"));
-    let prompts = load_corpus(&corpus_path);
+    let raw_prompts = load_corpus(&corpus_path);
     assert!(
-        !prompts.is_empty(),
+        !raw_prompts.is_empty(),
         "corpus {} contained no {{\"prompt\": ...}} lines",
         corpus_path.display()
     );
+    // Every corpus prompt -- RAG passage or bare one-line chat question
+    // alike -- is a USER TURN, wrapped in `chat_prompt` so
+    // `split_prompt_at_hard_boundary` always has its template-guaranteed
+    // trailing newline instead of depending on the raw corpus text's own.
+    let prompts: Vec<String> = raw_prompts.iter().map(|raw| chat_prompt(raw)).collect();
 
     let sample_gpu = args.gpu_layers != 0 && cfg!(target_os = "macos");
     let off_config = base_serving_config(args.gpu_layers);
@@ -1497,12 +1686,41 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
         {
             check_token_parity(off_handle, prompt, token_ids, add_bos);
         }
+        if let Some((off_handle, on_handle)) = &incumbent_handles {
+            // discarded per-prompt warm call: primes each llama-server's
+            // own KV cache so the first TIMED pair below does not pay this
+            // prompt's one-time prefill cost -- mirrors prefill_prompt_once
+            // below, which does the same for proxima's own arm.
+            warm_llama_prompt_cache(off_handle, token_ids);
+            warm_llama_prompt_cache(on_handle, token_ids);
+        }
+
+        // Exactly one forward pass over this prompt's own tokens, kept
+        // alive across every pair below -- the performance-harness
+        // invariant (`speculative_bench` no longer re-prefills per arm).
+        let cached = prefill_prompt_once(model, prompt, &off_config);
+        println!(
+            "{unmeasured_label} prefill prompt_index={prompt_index} \
+             prefill_ttft_ms={:.3} prefix_tokens={} suffix_chars={}",
+            cached.prefill_ttft_ms,
+            cached.prefix_state.len(),
+            cached.suffix.len(),
+        );
+        // Every prompt, not just prompt 0 -- a split-boundary bug specific
+        // to one prompt's own template rendering (e.g. an embedded
+        // newline confusing the tokenizer at the cut point) must never
+        // pass silently just because prompt 0 happened to be safe.
+        verify_prefix_resume_matches_full_decode(model, prompt, &cached, off_config);
+        let source = DecodeSource {
+            prefix: &cached.prefix_state,
+            suffix: cached.suffix,
+        };
 
         for pair_index in 0..args.pairs {
             let swap_order = pair_index % 2 == 1;
             let pair = run_pair(
                 model,
-                prompt,
+                source,
                 args.max_tokens,
                 off_config,
                 on_config,
@@ -1628,9 +1846,30 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
 fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[usize], unmeasured_label: &str) {
     const REPEATED_PARAGRAPH: &str = "The quick brown fox jumps over the lazy dog while a curious cat \
          watches quietly from the garden wall. Pack my box with five dozen liquor jugs before \
-         the delivery truck arrives at noon. ";
-    let prompt = REPEATED_PARAGRAPH.repeat(6);
+         the delivery truck arrives at noon.";
+    // Joined by newline, never `.repeat` -- `split_prompt_at_hard_boundary`
+    // needs a newline with real suffix text after it, not one at the very
+    // end (an empty suffix has no tokens left to forward-evaluate).
+    let prompt = [REPEATED_PARAGRAPH; 6].join("\n");
     let sample_gpu = args.gpu_layers != 0 && cfg!(target_os = "macos");
+    let serving_config = base_serving_config(args.gpu_layers);
+
+    // Same prefill-once path `run_pairs_mode` uses (invariant 3): one
+    // forward pass over this fixed prompt, reused across every width and
+    // every one of the 3 runs per width below.
+    let cached = prefill_prompt_once(model, &prompt, &serving_config);
+    println!(
+        "{unmeasured_label} prefill prompt_index=0 prefill_ttft_ms={:.3} prefix_tokens={} \
+         suffix_chars={}",
+        cached.prefill_ttft_ms,
+        cached.prefix_state.len(),
+        cached.suffix.len(),
+    );
+    verify_prefix_resume_matches_full_decode(model, &prompt, &cached, serving_config);
+    let source = DecodeSource {
+        prefix: &cached.prefix_state,
+        suffix: cached.suffix,
+    };
 
     let mut ms_per_verify_at_zero = 0.0;
     let mut rows: Vec<(usize, f64, f64, f64)> = Vec::new();
@@ -1638,11 +1877,10 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
     for &width in widths {
         let mut samples_ms_per_verify = Vec::new();
         for _run in 0..3 {
-            let serving_config = base_serving_config(args.gpu_layers);
             let forced_draft_width = if width == 0 { None } else { Some(width as u16) };
             let arm = run_one_arm(
                 model,
-                &prompt,
+                source,
                 args.max_tokens,
                 serving_config,
                 sample_gpu,
@@ -1683,8 +1921,75 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
     }
 }
 
+/// One env lever this binary's own gemma4-on-Metal prefill/decode path
+/// reads (`omega/src/msl/kernel_types_identity.rs`'s own A/B switches) --
+/// `value` is `None` when the caller left the var unset, matching every
+/// switch's own "unset default" posture.
+struct LeverVar {
+    name: &'static str,
+    value: Option<String>,
+}
+
+impl LeverVar {
+    fn read(name: &'static str) -> Self {
+        LeverVar {
+            name,
+            value: env::var(name).ok(),
+        }
+    }
+
+    fn is_one(&self) -> bool {
+        matches!(self.value.as_deref(), Some(value) if value.trim() == "1")
+    }
+
+    fn display(&self) -> String {
+        format!("{}={}", self.name, self.value.as_deref().unwrap_or("unset"))
+    }
+}
+
+/// Prints every lever this bench's prefill/verify/decode path reads,
+/// per run (never assumed from a prior run -- SPEC's own "a result can
+/// never be read without its config"), and refuses outright when
+/// `PROXIMA_TILED_GEMM_DENSE=1` is set: on this branch's base (`df3766dd`)
+/// `classify_dense_batched_gemm`'s `grid_threads` arm has no dense-batched
+/// dispatch shape yet, so admitting a dense op onto the tiled-GEMM path
+/// over-dispatches by roughly 4080x and a 510-token prefill hangs past
+/// 180s -- the fix for that gap is not on this branch.
+fn print_lever_config_and_refuse_if_unsafe() {
+    let levers = [
+        LeverVar::read("PROXIMA_MULTI_ROW_UNROLL"),
+        LeverVar::read("PROXIMA_MULTI_ROW_INDEX32"),
+        LeverVar::read("PROXIMA_COORD_INDEX32"),
+        LeverVar::read("PROXIMA_TILED_GEMM_Q4_0"),
+        LeverVar::read("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD"),
+        LeverVar::read("PROXIMA_TILED_GEMM_SLIM_TGMEM"),
+        LeverVar::read("PROXIMA_TILED_GEMM_DENSE"),
+    ];
+    println!(
+        "lever_config {} metal_tiled_gemm_feature={}",
+        levers
+            .iter()
+            .map(LeverVar::display)
+            .collect::<Vec<_>>()
+            .join(" "),
+        cfg!(feature = "metal-tiled-gemm"),
+    );
+    let dense = &levers[6];
+    if dense.is_one() {
+        eprintln!(
+            "speculative_bench: refusing to run with {} -- on this branch's base \
+             (df3766dd) the dense-batched tiled-GEMM arm over-dispatches roughly 4080x \
+             and hangs a 510-token prefill past 180s; unset PROXIMA_TILED_GEMM_DENSE and \
+             retry",
+            dense.display()
+        );
+        std::process::exit(4);
+    }
+}
+
 fn main() {
     install_orphan_reaping_panic_hook();
+    print_lever_config_and_refuse_if_unsafe();
     let args = parse_args();
     let precheck = quiet_box_precheck();
 
@@ -1744,8 +2049,10 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT, REAPABLE_PIDS,
-        cpu_idle_decision, parse_top_cpu_line, summarize_gpu_idle_samples,
+        ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT, chat_prompt,
+        LLAMA_REPREFILL_PROMPT_N_BOUND, REAPABLE_PIDS, parse_llama_completion_response,
+        cpu_idle_decision, parse_top_cpu_line, split_prompt_at_hard_boundary,
+        summarize_gpu_idle_samples,
     };
 
     const REAL_TOP_CPU_LINE: &str = "CPU usage: 8.97% user, 5.40% sys, 85.61% idle ";
@@ -1865,6 +2172,189 @@ mod tests {
         assert!(
             summarize_gpu_idle_samples(&[]).is_none(),
             "an empty sample vector (ioreg unavailable) must not fabricate a baseline"
+        );
+    }
+
+    /// Field layout taken from llama.cpp's own non-streaming `/completion`
+    /// response (`server-task.cpp:340-358`'s `to_json_non_oaicompat`), with
+    /// `timings` built off `server_slot_stats::to_json`
+    /// (`server-common.cpp:84-105`) -- a cache HIT shape: `prompt_n` covers
+    /// only the tokens past the previously cached common prefix, well under
+    /// [`LLAMA_REPREFILL_PROMPT_N_BOUND`].
+    fn cache_hit_response_body() -> serde_json::Value {
+        serde_json::json!({
+            "index": 0,
+            "content": " a friendly island.",
+            "tokens": [],
+            "id_slot": 0,
+            "stop": true,
+            "model": "gemma-3-4b-it",
+            "tokens_predicted": 6,
+            "tokens_evaluated": 512,
+            "prompt": "",
+            "has_new_line": false,
+            "truncated": false,
+            "stop_type": "eos",
+            "stopping_word": "",
+            "tokens_cached": 517,
+            "timings": {
+                "cache_n": 512,
+                "prompt_n": 1,
+                "prompt_ms": 4.221,
+                "prompt_per_token_ms": 4.221,
+                "prompt_per_second": 236.912,
+                "predicted_n": 6,
+                "predicted_ms": 71.883,
+                "predicted_per_token_ms": 11.980,
+                "predicted_per_second": 83.470,
+                "draft_n": 24,
+                "draft_n_accepted": 18,
+            },
+        })
+    }
+
+    /// Same field layout, a cache MISS shape: `prompt_n` covers the entire
+    /// 512-token prompt because the slot's common prefix lookup
+    /// (`server-context.cpp:3198`'s `get_common_prefix`) found nothing to
+    /// reuse -- the exact silent-cost-regression case
+    /// [`crate::warm_llama_prompt_cache`] exists to keep off timed pairs.
+    fn cache_miss_response_body() -> serde_json::Value {
+        serde_json::json!({
+            "index": 0,
+            "content": " a friendly island.",
+            "tokens": [],
+            "id_slot": 0,
+            "stop": true,
+            "model": "gemma-3-4b-it",
+            "tokens_predicted": 6,
+            "tokens_evaluated": 512,
+            "prompt": "",
+            "has_new_line": false,
+            "truncated": false,
+            "stop_type": "eos",
+            "stopping_word": "",
+            "tokens_cached": 517,
+            "timings": {
+                "cache_n": 0,
+                "prompt_n": 512,
+                "prompt_ms": 612.44,
+                "prompt_per_token_ms": 1.196,
+                "prompt_per_second": 836.115,
+                "predicted_n": 6,
+                "predicted_ms": 71.883,
+                "predicted_per_token_ms": 11.980,
+                "predicted_per_second": 83.470,
+            },
+        })
+    }
+
+    #[test]
+    fn parse_llama_completion_response_reads_timing_fields_on_cache_hit() {
+        let arm = parse_llama_completion_response(&cache_hit_response_body());
+
+        assert!(
+            (arm.ms_per_token - 11.980).abs() < 1e-9,
+            "ms_per_token should come straight off timings.predicted_per_token_ms, got {}",
+            arm.ms_per_token
+        );
+        assert!(
+            (arm.ttft_ms - 4.221).abs() < 1e-9,
+            "ttft_ms should come straight off timings.prompt_ms, got {}",
+            arm.ttft_ms
+        );
+        assert_eq!(arm.predicted_n, 6, "predicted_n should come off timings.predicted_n");
+        assert_eq!(arm.draft_n, 24, "draft_n should come off timings.draft_n");
+        assert_eq!(
+            arm.draft_n_accepted, 18,
+            "draft_n_accepted should come off timings.draft_n_accepted"
+        );
+        assert_eq!(arm.prompt_n, 1, "prompt_n should come off timings.prompt_n");
+    }
+
+    #[test]
+    fn parse_llama_completion_response_flags_a_cache_hit_as_not_reprefilled() {
+        let arm = parse_llama_completion_response(&cache_hit_response_body());
+
+        assert!(
+            !arm.llama_reprefilled,
+            "prompt_n=1 is under LLAMA_REPREFILL_PROMPT_N_BOUND={LLAMA_REPREFILL_PROMPT_N_BOUND}; \
+             a resumed prompt must not be flagged as re-prefilled"
+        );
+    }
+
+    #[test]
+    fn parse_llama_completion_response_flags_a_cache_miss_as_reprefilled() {
+        let arm = parse_llama_completion_response(&cache_miss_response_body());
+
+        assert_eq!(arm.prompt_n, 512, "a cache miss processes the whole prompt");
+        assert!(
+            arm.llama_reprefilled,
+            "prompt_n=512 exceeds LLAMA_REPREFILL_PROMPT_N_BOUND={LLAMA_REPREFILL_PROMPT_N_BOUND}; \
+             a cache miss must be visible, never silent"
+        );
+    }
+
+    #[test]
+    fn parse_llama_completion_response_defaults_missing_draft_fields_to_zero() {
+        // llama-server only emits draft_n/draft_n_accepted when
+        // n_draft_tokens > 0 (server-common.cpp:99-102) -- a non-speculative
+        // ("off") arm's response omits them entirely.
+        let arm = parse_llama_completion_response(&cache_miss_response_body());
+
+        assert_eq!(arm.draft_n, 0, "missing draft_n must default to 0, not panic");
+        assert_eq!(arm.draft_n_accepted, 0, "missing draft_n_accepted must default to 0, not panic");
+    }
+
+    #[test]
+    #[should_panic(expected = "missing \"timings\"")]
+    fn parse_llama_completion_response_panics_on_missing_timings() {
+        let response = serde_json::json!({ "content": "no timings field at all" });
+        let _ = parse_llama_completion_response(&response);
+    }
+
+    /// Regression for the real-run panic: a one-line corpus prompt ("What's
+    /// the difference between a Roth IRA...") has no newline of its own, so
+    /// the split must rely entirely on `chat_prompt`'s own trailing newline.
+    #[test]
+    fn splits_a_one_line_chat_template_prompt_at_the_model_turn_opener() {
+        let templated =
+            chat_prompt("What's the difference between a Roth IRA and a traditional IRA?");
+
+        let (prefix, suffix) = split_prompt_at_hard_boundary(&templated);
+
+        assert!(
+            prefix.ends_with("<|turn>model"),
+            "prefix must end exactly at the model-turn opener, got {prefix:?}"
+        );
+        assert_eq!(suffix, "\n", "suffix must be the template's own trailing newline only");
+        assert_eq!(
+            format!("{prefix}{suffix}"),
+            templated,
+            "prefix and suffix must reassemble the original templated prompt exactly"
+        );
+    }
+
+    /// A multi-line user turn (embedded newlines inside the RAG-style
+    /// passage) must still split on the TEMPLATE's own trailing newline,
+    /// not on one of the embedded ones -- `chat_prompt` always appends its
+    /// own newline last, so `rfind` never sees the embedded ones.
+    #[test]
+    fn splits_a_multi_line_chat_template_prompt_at_the_model_turn_opener() {
+        let templated = chat_prompt(
+            "# Section one\n\nSome context spanning\nseveral lines.\n\nWhat does this say?",
+        );
+
+        let (prefix, suffix) = split_prompt_at_hard_boundary(&templated);
+
+        assert!(
+            prefix.ends_with("<|turn>model"),
+            "prefix must end exactly at the model-turn opener, got {prefix:?}"
+        );
+        assert_eq!(suffix, "\n", "suffix must be the template's own trailing newline only");
+        assert_eq!(
+            format!("{prefix}{suffix}"),
+            templated,
+            "prefix and suffix must reassemble the original templated prompt exactly"
         );
     }
 
