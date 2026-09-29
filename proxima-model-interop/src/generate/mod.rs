@@ -200,6 +200,8 @@ mod decode;
 mod drafter;
 mod serving_backend;
 mod tests_all;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod speculative_default_on_tests;
 use decode::*;
 pub use load_model::*;
 pub(crate) use pregather::*;

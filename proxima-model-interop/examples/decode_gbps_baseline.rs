@@ -35,7 +35,9 @@ use std::time::Instant;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, TokenEvent};
+use proxima_model_interop::{
+    GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, SpeculativeConfig, TokenEvent,
+};
 #[cfg(feature = "instrument")]
 use proxima_telemetry::export::Exporter;
 #[cfg(feature = "instrument")]
@@ -194,6 +196,7 @@ fn main() {
         kv_bucket_tokens,
         #[cfg(all(feature = "metal", target_os = "macos"))]
         dispatch_type,
+        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     };
 

@@ -174,6 +174,14 @@ impl SpeculativeTypeNameSet {
         self.0 & (1u16 << type_id as u16) != 0
     }
 
+    /// This crate's shipped default: `ngram-simple` alone, mirroring
+    /// [`crate::SpeculativeConfig::ngram_simple`]. [`Self::empty`] (`none`)
+    /// is the off switch.
+    #[must_use]
+    pub fn ngram_simple() -> Self {
+        Self::empty().insert(SpeculativeTypeName::NgramSimple)
+    }
+
     /// No speculator enabled.
     #[must_use]
     pub const fn is_empty(self) -> bool {
@@ -247,9 +255,12 @@ fn parse_speculative_type_set(
 #[builder(derive(Clone, Debug))]
 pub struct SpeculativeSettings {
     /// llama's `types` -- see [`crate::SpeculativeConfig::speculative_types`]'s
-    /// own doc for the set semantics this mirrors.
-    #[setting(resolve_with = "parse_speculative_type_set", default_str = "none")]
-    #[builder(default = SpeculativeTypeNameSet::empty())]
+    /// own doc for the set semantics this mirrors. Defaults to `ngram-simple`
+    /// (speculation on); `none` -- builder `SpeculativeTypeNameSet::empty()`,
+    /// TOML `speculative_types = "none"`, env `SPECULATIVE_SPECULATIVE_TYPES=none`
+    /// -- turns it off.
+    #[setting(resolve_with = "parse_speculative_type_set", default_str = "ngram-simple")]
+    #[builder(default = SpeculativeTypeNameSet::ngram_simple())]
     pub speculative_types: SpeculativeTypeNameSet,
 
     /// llama's `common_params_speculative_draft::n_max`.
@@ -442,12 +453,11 @@ mod tests {
         );
     }
 
-    /// R9: `SpeculativeSettings::default()` disables speculation, matching
-    /// llama's own `types = { COMMON_SPECULATIVE_TYPE_NONE }` default, and
-    /// its per-type param defaults match llama's
-    /// `common_params_speculative` (`common/common.h:372-389`).
+    /// Owner directive 2026-09-29: speculation is ON by default with the
+    /// `ngram-simple` drafter; its per-type param defaults still match
+    /// llama's `common_params_speculative` (`common/common.h:372-389`).
     #[test]
-    fn default_speculative_settings_are_disabled_with_llama_defaults() {
+    fn default_speculative_settings_enable_ngram_simple_with_llama_defaults() {
         temp_env::with_vars(
             [
                 ("SPECULATIVE_SPECULATIVE_TYPES", None::<&str>),
@@ -470,7 +480,8 @@ mod tests {
             || {
                 let settings = SpeculativeSettings::from_env()
                     .unwrap_or_else(|err| panic!("from_env failed: {err}"));
-                assert!(settings.speculative_types.is_empty());
+                assert_eq!(settings.speculative_types, SpeculativeTypeNameSet::ngram_simple());
+                assert!(settings.speculative_types.contains(SpeculativeTypeName::NgramSimple));
                 assert_eq!(settings.n_max, 3);
                 assert_eq!(settings.n_min, 0);
                 assert_eq!(settings.p_min, 0.0);
@@ -484,6 +495,160 @@ mod tests {
                 assert!(settings.ngram_cache_lookup_dynamic.is_none());
             },
         );
+    }
+
+    const SPECULATIVE_ENV_KEYS: [&str; 16] = [
+        "SPECULATIVE_SPECULATIVE_TYPES",
+        "SPECULATIVE_N_MAX",
+        "SPECULATIVE_N_MIN",
+        "SPECULATIVE_P_MIN",
+        "SPECULATIVE_NGRAM_SIMPLE_SIZE_N",
+        "SPECULATIVE_NGRAM_SIMPLE_SIZE_M",
+        "SPECULATIVE_NGRAM_SIMPLE_MIN_HITS",
+        "SPECULATIVE_NGRAM_MAP_K_SIZE_N",
+        "SPECULATIVE_NGRAM_MAP_K_SIZE_M",
+        "SPECULATIVE_NGRAM_MAP_K_MIN_HITS",
+        "SPECULATIVE_NGRAM_MAP_K4V_SIZE_N",
+        "SPECULATIVE_NGRAM_MAP_K4V_SIZE_M",
+        "SPECULATIVE_NGRAM_MAP_K4V_MIN_HITS",
+        "SPECULATIVE_NGRAM_MOD_N_MATCH",
+        "SPECULATIVE_NGRAM_MOD_N_MAX",
+        "SPECULATIVE_NGRAM_MOD_N_MIN",
+    ];
+
+    fn env_with_types(types: Option<&'static str>) -> Vec<(&'static str, Option<&'static str>)> {
+        SPECULATIVE_ENV_KEYS
+            .into_iter()
+            .map(|key| {
+                if key == "SPECULATIVE_SPECULATIVE_TYPES" {
+                    (key, types)
+                } else {
+                    (key, None)
+                }
+            })
+            .collect()
+    }
+
+    fn toml_with_types(types: &str) -> NamedTempFile {
+        let mut toml_file = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
+        writeln!(
+            toml_file,
+            r#"
+            speculative_types = "{types}"
+            n_max = 3
+            n_min = 0
+            p_min = 0.0
+            ngram_simple_size_n = 12
+            ngram_simple_size_m = 48
+            ngram_simple_min_hits = 1
+            ngram_map_k_size_n = 12
+            ngram_map_k_size_m = 48
+            ngram_map_k_min_hits = 1
+            ngram_map_k4v_size_n = 12
+            ngram_map_k4v_size_m = 48
+            ngram_map_k4v_min_hits = 1
+            ngram_mod_n_match = 24
+            ngram_mod_n_max = 64
+            ngram_mod_n_min = 48
+            "#
+        )
+        .expect("write temp toml file");
+        toml_file
+    }
+
+    fn off_settings() -> SpeculativeSettings {
+        SpeculativeSettings::builder()
+            .speculative_types(SpeculativeTypeNameSet::empty())
+            .build()
+    }
+
+    #[test]
+    fn builder_default_matches_env_loader_default_and_is_on() {
+        let via_builder = SpeculativeSettings::builder().build();
+
+        temp_env::with_vars(env_with_types(None), || {
+            let via_env = SpeculativeSettings::from_env()
+                .unwrap_or_else(|err| panic!("from_env failed: {err}"));
+            assert_eq!(via_builder, via_env, "builder default must match the env loader default");
+        });
+        assert!(via_builder.speculative_types.contains(SpeculativeTypeName::NgramSimple));
+    }
+
+    #[test]
+    fn default_settings_lower_to_the_same_config_as_serving_config_default() {
+        let settings = SpeculativeSettings::builder().build();
+
+        assert_eq!(settings.as_speculative_config(), SpeculativeConfig::default());
+        assert_eq!(
+            settings.as_speculative_config(),
+            crate::serving::ServingConfig::default().speculative
+        );
+        assert!(
+            SpeculativeConfig::default()
+                .speculative_types
+                .contains(SpeculativeType::NgramSimple)
+        );
+    }
+
+    #[test]
+    fn builder_none_turns_speculation_off() {
+        let config_owner = off_settings();
+        let config = config_owner.as_speculative_config();
+
+        assert!(config_owner.speculative_types.is_empty());
+        assert!(config.speculative_types.is_empty());
+        assert_eq!(config, SpeculativeConfig::none());
+    }
+
+    #[test]
+    fn toml_none_turns_speculation_off_and_matches_builder() {
+        let toml_file = toml_with_types("none");
+
+        let via_file: SpeculativeSettings = conflaguration::from_file(toml_file.path())
+            .unwrap_or_else(|err| panic!("from_file failed: {err}"));
+
+        assert_eq!(via_file, off_settings());
+        assert_eq!(via_file.as_speculative_config(), SpeculativeConfig::none());
+    }
+
+    #[test]
+    fn toml_ngram_simple_matches_the_default_builder() {
+        let toml_file = toml_with_types("ngram-simple");
+
+        let via_file: SpeculativeSettings = conflaguration::from_file(toml_file.path())
+            .unwrap_or_else(|err| panic!("from_file failed: {err}"));
+
+        assert_eq!(via_file, SpeculativeSettings::builder().build());
+    }
+
+    #[test]
+    fn env_none_turns_speculation_off_and_matches_builder() {
+        temp_env::with_vars(env_with_types(Some("none")), || {
+            let via_env = SpeculativeSettings::from_env()
+                .unwrap_or_else(|err| panic!("from_env failed: {err}"));
+
+            assert_eq!(via_env, off_settings());
+            assert_eq!(via_env.as_speculative_config(), SpeculativeConfig::none());
+        });
+    }
+
+    #[test]
+    fn env_ngram_simple_matches_the_default_builder() {
+        temp_env::with_vars(env_with_types(Some("ngram-simple")), || {
+            let via_env = SpeculativeSettings::from_env()
+                .unwrap_or_else(|err| panic!("from_env failed: {err}"));
+
+            assert_eq!(via_env, SpeculativeSettings::builder().build());
+        });
+    }
+
+    #[test]
+    fn env_unknown_type_is_rejected_not_silently_defaulted() {
+        temp_env::with_vars(env_with_types(Some("quantum-mtp")), || {
+            let result = SpeculativeSettings::from_env();
+
+            assert!(result.is_err(), "an unknown type must not fall back to a default");
+        });
     }
 
     /// R9: llama's own `--spec-type` strings round-trip through

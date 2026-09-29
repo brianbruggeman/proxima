@@ -1547,6 +1547,7 @@ fn base_serving_config(gpu_layers: i32) -> ServingConfig<'static> {
         repeat_penalty: 1.0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     }
 }

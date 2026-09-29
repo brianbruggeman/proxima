@@ -3230,7 +3230,8 @@ impl<'file> LoadedModel<'file> {
             }
         }
 
-        // Default-off greedy speculative decode (gemma4-only -- see
+        // Default-on speculative decode (ngram-simple; `SpeculativeConfig::none()`
+        // turns it off) (gemma4-only -- see
         // [`Self::speculative_verify_program`]'s own doc): built once, here,
         // outside the closure, matching [`prefill_one_evaluation_requested`]'s
         // own config-gate shape. `pending` is the queue-draining FSM's own
