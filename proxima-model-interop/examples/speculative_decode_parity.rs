@@ -25,6 +25,7 @@ use core::ops::ControlFlow;
 use std::env;
 use std::fs::File;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 use memmap2::{Mmap, MmapOptions};
@@ -372,7 +373,47 @@ fn parse_drafter_flag(value: &str) -> SpeculativeTypeSet {
         })
 }
 
+/// The compiled-in cargo features that move timing numbers for this
+/// binary (`proxima-model-interop/Cargo.toml` lines 128-227), rendered
+/// `key=true/false` via `cfg!` -- the SAME shape `speculative_bench.rs`
+/// prints, so a parity divergence and a bench timing line are always
+/// attributable to the same binary configuration.
+fn compiled_perf_features_summary() -> String {
+    format!(
+        "metal_feature={} metal_fuse_attn_decode_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={}",
+        cfg!(feature = "metal"),
+        cfg!(feature = "metal-fuse-attn-decode"),
+        cfg!(feature = "identity-copy-alias"),
+        cfg!(feature = "metal-tiled-gemm"),
+    )
+}
+
+/// The short commit this binary was built from, read at startup rather
+/// than baked in by a build script (no build.rs exists in this crate) --
+/// `unknown` when `git` is unavailable or this tree is not a git checkout.
+fn git_commit_at_startup() -> String {
+    Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(|| "unknown".to_string(), |commit| commit.trim().to_string())
+}
+
+/// Prints the same `lever_config` shape `speculative_bench.rs` prints, so a
+/// parity result is equally attributable to compiled features and commit --
+/// this probe carries no `PROXIMA_*` runtime levers of its own to report.
+fn print_lever_config() {
+    println!(
+        "lever_config {} git_commit={}",
+        compiled_perf_features_summary(),
+        git_commit_at_startup(),
+    );
+}
+
 fn main() {
+    print_lever_config();
     let raw_args: Vec<String> = env::args().skip(1).collect();
     let seed_mismatch_control = raw_args
         .iter()
@@ -542,5 +583,45 @@ fn main() {
             log_path.display()
         );
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compiled_perf_features_summary, git_commit_at_startup};
+
+    #[test]
+    fn compiled_perf_features_summary_names_every_performance_relevant_feature() {
+        let summary = compiled_perf_features_summary();
+
+        for key in [
+            "metal_feature=",
+            "metal_fuse_attn_decode_feature=",
+            "identity_copy_alias_feature=",
+            "metal_tiled_gemm_feature=",
+        ] {
+            assert!(
+                summary.contains(key),
+                "lever_config must attribute {key} on the same line, got: {summary}"
+            );
+        }
+        assert!(
+            summary.split(' ').all(|field| field.ends_with("=true") || field.ends_with("=false")),
+            "every feature field must render a bool, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn git_commit_at_startup_never_panics_and_is_never_empty() {
+        let commit = git_commit_at_startup();
+
+        assert!(
+            !commit.is_empty(),
+            "git_commit_at_startup must fall back to \"unknown\", never an empty string"
+        );
+        assert!(
+            !commit.contains(char::is_whitespace),
+            "git_commit_at_startup must trim to a bare token, got: {commit:?}"
+        );
     }
 }
