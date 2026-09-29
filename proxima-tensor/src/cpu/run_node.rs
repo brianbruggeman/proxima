@@ -1123,6 +1123,54 @@ pub(super) fn moe_topk_extra_node_order<'routing>(
         .chain(core::iter::once(weight_total))
 }
 
+type CachedSoftmaxWeightsExtras<'sink> = [(NodeId, &'sink [f32]); 3];
+
+/// The three extra outputs [`run_cached_softmax_weights`] leaves in its
+/// `extra_sink`, paired with the nodes that own them, in the sink's fixed
+/// order (`cached_weight_sum`, `new_weight_sum`, `new_attended`) -- the
+/// [`moe_topk_extra_node_order`] counterpart for
+/// [`BoundOpKind::CachedSoftmaxWeights`], so every evaluator loop places
+/// them into its own buffer table the same way. `Ok(None)` for every other
+/// kind.
+///
+/// # Errors
+/// [`TensorError::NotLowerable`] when `kind` is a cached softmax weights op
+/// and `extra` is not `2 * attention_rows + attention_rows * head_dim` long:
+/// a downstream reader would otherwise find its operand buffer missing and
+/// report the wrong node.
+pub(super) fn cached_softmax_weights_extras<'sink>(
+    node: NodeId,
+    kind: &BoundOpKind,
+    extra: &'sink [f32],
+) -> Result<Option<CachedSoftmaxWeightsExtras<'sink>>, TensorError> {
+    let BoundOpKind::CachedSoftmaxWeights {
+        cached_weight_sum,
+        new_weight_sum,
+        new_attended,
+        attention_rows,
+        head_dim,
+        ..
+    } = kind
+    else {
+        return Ok(None);
+    };
+    let row_count = *attention_rows as usize;
+    let attended_len = row_count * *head_dim as usize;
+    if extra.len() != 2 * row_count + attended_len {
+        return Err(TensorError::NotLowerable {
+            node,
+            reason: "cached softmax weights extra outputs have the wrong length",
+        });
+    }
+    let (cached_sum, rest) = extra.split_at(row_count);
+    let (new_sum, attended) = rest.split_at(row_count);
+    Ok(Some([
+        (*cached_weight_sum, cached_sum),
+        (*new_weight_sum, new_sum),
+        (*new_attended, attended),
+    ]))
+}
+
 /// [`BoundOpKind::MoeTopK`]'s whole computation: `top_k` rounds of
 /// take-the-maximum-with-exclusion over `scores`, ties broken toward the
 /// HIGHER index (ROW 569, `docs/discipline.md`'s own census fixture proves
@@ -1449,6 +1497,13 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                     .zip(moe_topk_extra.iter().copied())
                 {
                     (*buffers)[extra_node.0 as usize] = Some(B::from(vec![value]));
+                }
+            }
+            if let Some(extras) =
+                cached_softmax_weights_extras(resolved.node, &resolved.kind, &moe_topk_extra)?
+            {
+                for (extra_node, values) in extras {
+                    (*buffers)[extra_node.0 as usize] = Some(B::from(values.to_vec()));
                 }
             }
             if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &resolved.kind {

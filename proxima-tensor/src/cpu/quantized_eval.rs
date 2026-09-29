@@ -730,6 +730,14 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
                     buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
                 }
             }
+            if let Some(extras) =
+                cached_softmax_weights_extras(computed.node, &computed.kind, &moe_topk_extra)?
+            {
+                for (extra_node, values) in extras {
+                    buffers[extra_node.0 as usize] = Some(Cow::Owned(values.to_vec()));
+                    live_now += 1;
+                }
+            }
             // round_outputs[0] is `computed.node` itself, already written
             // above -- `round_outputs[1..]` are the k-1 round-sibling nodes
             // `bind::apply_moe_round_group_fusion` dropped from the resolved
@@ -1491,6 +1499,16 @@ pub fn evaluate_parallel(
                 .zip(node_output.moe_topk_extra.iter().copied())
             {
                 buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
+            }
+        }
+        if let Some(extras) = cached_softmax_weights_extras(
+            computed.node,
+            &computed.kind,
+            &node_output.moe_topk_extra,
+        )? {
+            for (extra_node, values) in extras {
+                buffers[extra_node.0 as usize] = Some(Cow::Owned(values.to_vec()));
+                live_now += 1;
             }
         }
         if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {
