@@ -30,7 +30,8 @@ use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeType, SpeculativeTypeSet,
+    GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeType,
+    SpeculativeTypeSet,
 };
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::Exporter;
@@ -45,8 +46,22 @@ use proxima_telemetry::tag::ScalarValue;
 /// applies globally -- `decode.rs`'s event lives under the library's own
 /// module path, not this binary's, so a target-scoped rule (as
 /// `decode_gbps_baseline.rs` uses for its own `info!` lines) would miss it.
+/// `omega=warn` narrows the one target that would otherwise drown the sparse
+/// `speculative_verify` event out of the recorder's bounded ring on the metal
+/// path: `omega::metal::execute_and_hazards`/`pipeline_buffers_upload` emit a
+/// per-op `debug!` for every dispatch/upload (measured: ~85 events per decode
+/// step against gemma4-E2B's real graph), so a 146-token prefill plus even a
+/// handful of decode steps fills a 65536-capacity ring before the ONE
+/// `speculative_verify` event this probe actually needs to count ever gets
+/// drained -- a probe run with the bare `"debug"` floor measured
+/// `speculative_verify_steps = 0` on `--gpu-layers all` despite the drafter
+/// itself firing (confirmed by instrumenting the draft call directly: a
+/// real 48-token draft was produced and accepted at that step). The CPU path
+/// never hit this ceiling because it has no metal per-op tracing to compete
+/// with. `omega`'s own `warn`-and-above events (none emitted in this probe)
+/// still reach both sinks; only its `debug`/`trace`/`info` volume is cut.
 fn install_telemetry(log_path: &std::path::Path) -> (InMemoryPipe, std::sync::Arc<Recorder>) {
-    let filter = env::var("RUST_LOG").unwrap_or_else(|_| "debug".to_string());
+    let filter = env::var("RUST_LOG").unwrap_or_else(|_| "debug,omega=warn".to_string());
     global::install(EnvFilter::parse(&filter));
     let capture = InMemoryPipe::new();
     let exporter = Exporter::fan(vec![
@@ -225,14 +240,42 @@ fn default_prompt() -> String {
     PARAGRAPH.repeat(4)
 }
 
+/// `--gpu-layers <n|all>` -- llama's own `-ngl` sentinel convention
+/// ([`GPU_LAYERS_ALL`]'s own doc): `all` selects [`GPU_LAYERS_ALL`],
+/// anything else parses as a literal layer count. `apply_serving_config`
+/// (`serving.rs`) is the sole validator: only `0` (CPU) and
+/// [`GPU_LAYERS_ALL`] (whole-model metal offload, requires the `metal`
+/// feature) are supported today, so an out-of-range value surfaces as that
+/// function's own typed error rather than a second check here.
+fn parse_gpu_layers(value: &str) -> i32 {
+    if value.eq_ignore_ascii_case("all") {
+        GPU_LAYERS_ALL
+    } else {
+        value
+            .parse()
+            .unwrap_or_else(|err| panic!("--gpu-layers {value}: not `all` or an integer: {err}"))
+    }
+}
+
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
     let seed_mismatch_control = raw_args
         .iter()
         .any(|arg| arg == "--seed-mismatch-control");
+    let gpu_layers_flag_index = raw_args.iter().position(|arg| arg == "--gpu-layers");
+    let gpu_layers = gpu_layers_flag_index
+        .and_then(|flag_index| raw_args.get(flag_index + 1))
+        .map_or(0, |value| parse_gpu_layers(value));
+    let gpu_layers_value_index = gpu_layers_flag_index.map(|flag_index| flag_index + 1);
     let mut args = raw_args
         .into_iter()
-        .filter(|arg| arg != "--seed-mismatch-control");
+        .enumerate()
+        .filter(move |(index, arg)| {
+            arg != "--seed-mismatch-control"
+                && Some(*index) != gpu_layers_flag_index
+                && Some(*index) != gpu_layers_value_index
+        })
+        .map(|(_, arg)| arg);
     let model_path = args
         .next()
         .unwrap_or_else(|| "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd".to_string());
@@ -254,7 +297,7 @@ fn main() {
     let model = LoadedModel::load(&parsed, &bytes).expect("bind model");
 
     let base_config = ServingConfig {
-        gpu_layers: 0,
+        gpu_layers,
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
         flash_attention: false,

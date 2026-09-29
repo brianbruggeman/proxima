@@ -25,7 +25,7 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 | 16 | sub-spec draft-dflash, audited | AC15 | same, dflash | 1 | [ ] | |
 | 17 | sub-spec draft-dspark, audited | AC15 | same, dspark | 1 | [ ] | |
 | 18 | corpus (≥ 50 prompts: chat, code, RAG) + `speculative_acceptance_corpus` example | AC17 | AC17 | prompts ≥ 50; 5 rows | [ ] | refutation check |
-| 19 | metal verify path: `--gpu-layers` flag on the parity example; verify program binds and runs on metal | AC24 | AC24 | identical, steps ≥ 1 | [ ] | lands before slice 9 |
+| 19 | metal verify path: `--gpu-layers` flag on the parity example; verify program binds and runs on metal | AC24 | AC24 | identical, steps ≥ 1 | [x] | verify program already bound/ran on metal (`speculative_verify_program` is built at load time, `#[cfg(feature = "std")]` only, never gated on backend); the real defect was observability, not the decode mechanism -- instrumenting the draft call directly proved a real 48-token draft fired and was accepted on `--gpu-layers all`, but the probe's own `speculative_verify_steps` counter read 0 because the bare `"debug"` `RUST_LOG` floor let `omega::metal::execute_and_hazards`/`pipeline_buffers_upload` (measured ~85 debug events/decode step against gemma4-E2B's real graph) fill the recorder's 65536-capacity ring before the ONE sparse `speculative_verify` event could be drained; fixed by narrowing the probe's own filter to `debug,omega=warn`, no decode.rs change; AC24 `$EX --features std,metal -- --gpu-layers all` exit 0, both blocks identical=true, speculative_verify_steps=1 (48 accepted greedy, 8 accepted sampled); `--seed-mismatch-control` on the same build diverges at first_divergence=1 as designed; CPU (`--features std`, no flag) exit 0, both blocks identical=true, steps=1 (48/8 accepted), unchanged from slice 8 |
 | 20 | `speculative_bench` harness: interleaved pairs, per-arm metrics, ioreg sampler, contamination flag, ratio stats, verify-width sweep | AC23 | AC23 | 6 rows + 1 break-even line per run | [ ] | lands before slice 9 |
 | 21 | drafter zero-alloc test with a counting allocator, one case per n-gram type as each lands | AC22 | AC22 | 5 passed, allocs = 0 | [x] | all 5 n-gram-TYPE cases now land (`proxima-tokenizer/tests/drafter_zero_alloc.rs`, reuses `proxima-test`'s `CountingAllocator`): ngram-simple, ngram-map key-only, ngram-map four-value (`draft_key_only` vs `draft_k4v` are distinct branches of the same `ngram_map_draft`, so each gets its own case), ngram-mod, and ngram-cache each print `allocs = 0 over 100000 calls`; ngram-cache's case now measures the PER-STEP path (`NgramCacheState`/`ngram_cache_state_draft`, update-then-draft, `history` walking strictly forward over a cycled real stream) rather than only `ngram_cache_draft`'s pure query path against a cache built once outside the window -- `NgramCache`'s own presized open-addressed storage (slice 7) makes that per-step maintenance genuinely zero-alloc when `NgramCacheState::new`'s own `max_context_len` bound is honored; fixed `NgramMap::new` allocating per-call via unbounded `keys.push` -- now takes `max_context_len` and pre-sizes `keys` with `Vec::with_capacity`, capacity-neutral thereafter; AC22's own "5 passed" is exactly 5 drafter-TYPE cases + the degenerate allocator-is-live control (6 total), matching `cargo nextest run -p proxima-tokenizer --test drafter_zero_alloc`'s own count |
 | 22 | no-repeat corpus + idle overhead run | AC20 | AC20 | overhead ≤ 1.02 | [ ] | |
@@ -34,8 +34,8 @@ Update the checkbox and the note IN THE SAME COMMIT as the slice.
 
 ## resume
 
-Last landed slice: 8
-Next action: slices 19-20 (metal verify path, speculative_bench harness) still must land before slice 9 (`Drafter` enum + `--drafter` flag, AC10)
+Last landed slice: 19
+Next action: slice 20 (`speculative_bench` harness) still must land before slice 9 (`Drafter` enum + `--drafter` flag, AC10)
 Open question, if any: none
 
 ## struck
