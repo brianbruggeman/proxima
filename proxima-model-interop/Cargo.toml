@@ -532,6 +532,15 @@ required-features = ["std"]
 name = "speculative_decode_parity"
 required-features = ["std"]
 
+# slice 20 (`speculative-decode-llama-parity/TASKS.md`): interleaved-pair
+# OFF/ON bench harness, GPU-utilization sampler, verify-width sweep. `metal`
+# required because `--gpu-layers all` and the ioreg sampler both need it --
+# `speculative_decode_parity`'s own CPU-only gate above stays a plain `std`
+# example so a non-metal build still exercises the parity probe.
+[[example]]
+name = "speculative_bench"
+required-features = ["std", "metal"]
+
 # Task brief "attribute a real gemma4-E2B forward's GPU time onto op/kernel
 # types" -- drives `generate_with_serving_config` through
 # `PROXIMA_METAL_DISPATCH_PROFILE_STEP` (already-wired production per-
