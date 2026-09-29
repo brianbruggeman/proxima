@@ -766,8 +766,14 @@ fn shuffle_combine_expr(
 /// does: per-operand packed codec, which `crate::cuda`'s own `packed_
 /// element_expr` already renders a distinct body for, and dtype width
 /// class — this census's own finding, neither was folded in before.
+///
+/// The `_gid64` suffix names the index form the emitted text carries (`long gid`
+/// built from `blockIdx.x * blockDim.x` in 64 bits). The entry name doubles as
+/// the cache identity a driver keys compiled modules on, and this text changed
+/// for every kernel at every size when the 32-bit multiply was widened, so a
+/// module compiled from the earlier text can never be served for this one.
 fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
-    crate::identity::kernel_identity(
+    let identity = crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Cuda,
         resolved,
         packed_operands,
@@ -778,7 +784,8 @@ fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
         // never actually varies this identity string -- the default is
         // correct, not a placeholder.
         proxima_tensor::NumericPolicy::default(),
-    )
+    );
+    format!("{identity}_gid64")
 }
 
 fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
@@ -2969,5 +2976,17 @@ mod tests {
 
         assert_eq!(grid.block_width_or_default(), DEFAULT_BLOCK_WIDTH);
         assert_eq!(grid.blocks(), 4);
+    }
+
+    #[test]
+    fn the_entry_name_carries_the_index_form_so_a_stale_module_cannot_be_served() {
+        let kernel = emit_cuda(&elementwise_tanh_op(8), &no_packed()).expect("emits");
+
+        assert!(kernel.entry.ends_with("_gid64"), "{}", kernel.entry);
+        assert!(
+            kernel.source.contains(&kernel.entry),
+            "the name a driver keys its compiled module on is the name the source declares"
+        );
+        assert!(kernel.source.contains("(long)blockIdx.x * (long)blockDim.x"));
     }
 }
