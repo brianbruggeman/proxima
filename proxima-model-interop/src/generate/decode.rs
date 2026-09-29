@@ -3,6 +3,7 @@ use core::ops::ControlFlow;
 use alloc::collections::VecDeque;
 
 use super::*;
+use super::drafter::DrafterSet;
 
 /// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
 /// bools into the process env vars `proxima_tensor::bind::bind_with_fusion`
@@ -3113,31 +3114,30 @@ impl<'file> LoadedModel<'file> {
         }
 
         // Default-off greedy speculative decode (gemma4-only -- see
-        // [`Self::speculative_verify_program`]'s own doc): read once, here,
+        // [`Self::speculative_verify_program`]'s own doc): built once, here,
         // outside the closure, matching [`prefill_one_evaluation_requested`]'s
         // own config-gate shape. `pending` is the queue-draining FSM's own
         // state -- popped from at the top of every closure call before any
         // forward runs, and pushed onto by the speculative verify branch
         // below whenever it accepts more than one token in a single pass.
-        // Only `NgramSimple` is wired end to end today (`ServingConfig::
-        // speculative`'s own doc names the sub-spec that owns each other
-        // type); `apply_serving_config` already rejects the unwired
-        // draft-model types before this call is reached.
-        let speculative_enabled = serving_config
-            .speculative
-            .speculative_types
-            .contains(crate::SpeculativeType::NgramSimple);
-        let speculative_config = proxima_tokenizer::draft::NgramSimpleConfig {
-            size_n: serving_config.speculative.ngram_simple.size_n,
-            size_m: serving_config.speculative.ngram_simple.size_m,
-        };
+        // `DrafterSet` drives every enabled n-gram type in llama's own
+        // priority order (`drafter.rs`'s own doc); `apply_serving_config`
+        // already rejects the unwired draft-model types before this call is
+        // reached. `begin` trains `ngram-map`/`ngram-mod`'s own index over
+        // the full prompt seen so far (`token_history` already holds
+        // `seed_ids` + `ids` at this point in the function).
+        let mut drafter_set =
+            DrafterSet::build(&serving_config.speculative, serving_config.context_length as usize);
+        drafter_set.begin(&token_history);
+        let speculative_enabled = !drafter_set.is_empty();
         let mut pending: VecDeque<u32> = VecDeque::new();
-        // One draft buffer, reused every step -- `ngram_simple_draft` itself
-        // clears and refills it, never allocates, and never appends onto a
-        // stale draft (the "else" branch below clears it explicitly for the
-        // steps drafting is not attempted at all, e.g. prefill's `_step ==
-        // 0`); the caller (this loop) owns the allocation across the whole
-        // decode, per `ngram_simple_draft`'s own doc on the reuse contract.
+        // One draft buffer, reused every step -- every drafter's own
+        // `draft()` clears and refills it, never allocates, and never
+        // appends onto a stale draft (the "else" branch below clears it
+        // explicitly for the steps drafting is not attempted at all, e.g.
+        // prefill's `_step == 0`); the caller (this loop) owns the
+        // allocation across the whole decode, per each drafter's own doc on
+        // the reuse contract.
         let mut speculative_draft: Vec<u32> = Vec::new();
 
         let decode_result = decode_until_stop_or_budget(
@@ -3151,50 +3151,48 @@ impl<'file> LoadedModel<'file> {
                     debug!(step = _step as u64, "speculative_pending_pop");
                     return Ok(queued);
                 }
-                // Speculative decode's draft half (`proxima_tokenizer::draft::
-                // ngram_simple_draft`, a faithful port of llama.cpp's own
-                // `common_ngram_simple_draft` -- no second model): only
-                // attempted on a genuine one-token decode step
-                // (`next_ids.len() == 1`, excludes the prompt's own prefill
-                // at `_step == 0`) with a real cache to draft against
-                // (`cached_len > 0`) and a gemma4-only verify program bound
-                // at load time (`Self::speculative_verify_program`'s own
-                // doc). Every `ServingConfig` is eligible now -- the verify
-                // branch below selects each row through
-                // `select_decoded_token`, the SAME per-step selection the
-                // non-speculative branch uses, so a draft only ever
-                // survives when it equals what plain decode would have
-                // produced at that step; a config that makes speculation
-                // rarely pay off (a forced `token_override`, a high
-                // temperature) still emits the correct token, just via the
-                // correction/bonus row instead of an accepted draft.
+                // Speculative decode's draft half (`drafter.rs`'s
+                // `DrafterSet`, a faithful port of llama.cpp's own
+                // `common_speculative_draft` priority walk -- no second
+                // model, only the five n-gram types): only attempted on a
+                // genuine one-token decode step (`next_ids.len() == 1`,
+                // excludes the prompt's own prefill at `_step == 0`) with a
+                // real cache to draft against (`cached_len > 0`) and a
+                // gemma4-only verify program bound at load time
+                // (`Self::speculative_verify_program`'s own doc). Every
+                // `ServingConfig` is eligible now -- the verify branch below
+                // selects each row through `select_decoded_token`, the SAME
+                // per-step selection the non-speculative branch uses, so a
+                // draft only ever survives when it equals what plain decode
+                // would have produced at that step; a config that makes
+                // speculation rarely pay off (a forced `token_override`, a
+                // high temperature) still emits the correct token, just via
+                // the correction/bonus row instead of an accepted draft.
                 // `next_ids[0]` is `sampled` in the C++ signature. It is
                 // ALREADY the last element of `token_history` here: the
                 // producing step pushed it the moment it was selected
                 // (`token_history.push(token_id)` below, or the verify
                 // readout's own per-row push), one full step before this
                 // step ever runs, so it is available to feed forward as
-                // `next_ids`. `ngram_simple_draft`'s own contract is that
-                // `history` excludes `sampled` (its own module doc: "every
-                // token generated so far, NOT including the token just
-                // sampled") -- passing `token_history` unsliced duplicates
-                // that tail token into the trailing pattern
-                // (`ngram_simple_draft` builds it as `history`'s own last
-                // `size_n - 1` tokens plus `sampled`), which can never match
-                // a real earlier occurrence and silently drafted nothing on
-                // every real decode step (a real gemma4-E2B run measured
-                // `speculative_verify_steps == 0` end to end before this
-                // slice). `saturating_sub(1)` degrades to an empty slice
-                // rather than panicking on the (unreached, guarded by
-                // `cached_len > 0` above) empty-history edge.
+                // `next_ids`. Every drafter's own contract is that `history`
+                // excludes `sampled` (`ngram_simple_draft`'s own module doc:
+                // "every token generated so far, NOT including the token
+                // just sampled") -- passing `token_history` unsliced
+                // duplicates that tail token into the trailing pattern,
+                // which can never match a real earlier occurrence and
+                // silently drafted nothing on every real decode step (a real
+                // gemma4-E2B run measured `speculative_verify_steps == 0`
+                // end to end before this was fixed). `saturating_sub(1)`
+                // degrades to an empty slice rather than panicking on the
+                // (unreached, guarded by `cached_len > 0` above)
+                // empty-history edge.
                 if speculative_enabled
                     && next_ids.len() == 1
                     && cached_len > 0
                     && self.speculative_verify_program.is_some()
                 {
                     let history_len = token_history.len().saturating_sub(1);
-                    proxima_tokenizer::draft::ngram_simple_draft(
-                        &speculative_config,
+                    drafter_set.draft(
                         &token_history[..history_len],
                         next_ids[0],
                         &mut speculative_draft,
@@ -5155,16 +5153,27 @@ impl<'file> LoadedModel<'file> {
                         // correction (a mismatch) or the bonus token (every
                         // draft matched).
                         let accepted = emitted.len() - 1;
+                        let drafting_type = drafter_set.active_type();
                         debug!(
                             step = _step as u64,
                             draft_len = speculative_draft.len() as u64,
                             accepted = accepted as u64,
                             emitted = emitted.len() as u64,
+                            drafter = ?drafting_type,
                             "speculative_verify"
                         );
                         if let Some(stats) = speculative_stats.as_deref_mut() {
                             stats.record_verify_step(speculative_draft.len(), accepted);
+                            if let Some(type_id) = drafting_type {
+                                stats.record_per_type(type_id, speculative_draft.len(), accepted);
+                            }
                         }
+                        // `common_speculative_accept`'s own bookkeeping
+                        // update for the drafting impl -- see `drafter.rs`'s
+                        // own doc for why "notify the other enabled impls"
+                        // never needs a second call for any type this crate
+                        // ports today.
+                        drafter_set.accept(accepted as u16);
 
                         // The append loop above wrote `new_count` positions'
                         // worth of K/V for every layer; only `emitted.len()`

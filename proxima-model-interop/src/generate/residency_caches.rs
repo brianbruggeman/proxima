@@ -2786,6 +2786,42 @@ pub struct SpeculativeDecodeStats {
     /// Sum of `accepted` (`emitted.len() - 1`) across every verify step --
     /// drafted tokens that matched `select_decoded_token`'s own choice.
     pub accepted_total: u64,
+    /// Per-`SpeculativeType` breakdown of the same two totals, indexed by
+    /// [`speculative_ngram_type_index`] -- lets a caller (`speculative_bench.rs`)
+    /// attribute drafted/accepted counts to whichever `DrafterSet` member
+    /// actually won each verify step, when more than one n-gram type is
+    /// enabled at once.
+    pub per_type: [SpeculativeTypeStats; SPECULATIVE_NGRAM_TYPE_COUNT],
+}
+
+/// The five n-gram [`SpeculativeType`] variants the decode loop's own
+/// `DrafterSet` can report as its active drafter -- the only member count
+/// [`SpeculativeDecodeStats::per_type`] needs to carry, since
+/// `apply_serving_config` rejects every other variant before a decode call
+/// is reached.
+pub const SPECULATIVE_NGRAM_TYPE_COUNT: usize = 5;
+
+/// [`SpeculativeDecodeStats::per_type`]'s index for `type_id` -- `None` for
+/// any [`SpeculativeType`] not one of the five wired n-gram types (never
+/// produced by `DrafterSet::active_type`).
+#[must_use]
+pub fn speculative_ngram_type_index(type_id: crate::SpeculativeType) -> Option<usize> {
+    match type_id {
+        crate::SpeculativeType::NgramSimple => Some(0),
+        crate::SpeculativeType::NgramMapK => Some(1),
+        crate::SpeculativeType::NgramMapK4v => Some(2),
+        crate::SpeculativeType::NgramMod => Some(3),
+        crate::SpeculativeType::NgramCache => Some(4),
+        _ => None,
+    }
+}
+
+/// One [`SpeculativeType`]'s own drafted/accepted totals, part of
+/// [`SpeculativeDecodeStats::per_type`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpeculativeTypeStats {
+    pub drafted: u64,
+    pub accepted: u64,
 }
 
 impl SpeculativeDecodeStats {
@@ -2795,6 +2831,25 @@ impl SpeculativeDecodeStats {
         self.verify_steps += 1;
         self.drafted_total += drafted as u64;
         self.accepted_total += accepted as u64;
+    }
+
+    /// Attributes one verify step's counts to the [`SpeculativeType`] that
+    /// actually drafted it -- a no-op for a type
+    /// [`speculative_ngram_type_index`] does not recognise.
+    pub fn record_per_type(&mut self, type_id: crate::SpeculativeType, drafted: usize, accepted: usize) {
+        if let Some(index) = speculative_ngram_type_index(type_id) {
+            self.per_type[index].drafted += drafted as u64;
+            self.per_type[index].accepted += accepted as u64;
+        }
+    }
+
+    /// Read one [`SpeculativeType`]'s own totals -- zero for a type
+    /// [`speculative_ngram_type_index`] does not recognise.
+    #[must_use]
+    pub fn per_type_stats(&self, type_id: crate::SpeculativeType) -> SpeculativeTypeStats {
+        speculative_ngram_type_index(type_id)
+            .map(|index| self.per_type[index])
+            .unwrap_or_default()
     }
 }
 
