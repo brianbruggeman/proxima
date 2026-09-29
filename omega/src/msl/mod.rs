@@ -155,6 +155,7 @@ pub(crate) use elementwise_reduce_core::*;
 use packed_row_blocked_ggml::*;
 use tiled_gemm_cooperative_scan::*;
 use wide_grid::*;
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) use wide_grid::fit_flat_width;
 // `crate::metal::prepare_uniforms_pack` (a sibling of `msl`, not a
 // descendant, so `pub(super)` there would not reach it) needs this to pack
