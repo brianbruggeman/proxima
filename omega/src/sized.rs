@@ -109,6 +109,13 @@ pub const SIMD_WIDTH: u64 = 32;
 // per-build without editing the TOML -- the mechanism that same discipline
 // row's bake-off used.
 
+// `GRID_LINEAR_THREAD_LIMIT`/`GRID_MAX_THREADGROUPS_X` come in through the
+// `include!` above -- `msl::grid2d_for`'s two grid-shape facts: the widest 1D
+// grid a `uint gid [[thread_position_in_grid]]` kernel can address (a wider
+// dispatch is silently truncated to `threads mod 2^32` by Metal, so it takes
+// the flat 2D form instead), and how many threadgroups that flat form puts on
+// its x axis before spilling into y. See `omega-runtime.toml`'s `[grid]`.
+
 // `UNIFORM_CACHE_ENTRIES` comes in through the `include!` above -- LRU
 // capacity of `crate::metal::UNIFORM_BUFFERS`. See
 // `omega-runtime.toml`'s `[spans]` doc for the measured default (57 entries

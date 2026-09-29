@@ -584,24 +584,26 @@ pub(crate) fn emit_cached_attention_merge(
     validate(resolved)?;
     let entry = alloc::format!("{}_merge", entry_name(resolved));
     let source = render_cached_attention_merge(resolved, &entry)?;
-    let total_elements = resolved
-        .extents
-        .iter()
-        .product::<u64>()
+    let total_elements = checked_product(resolved.node, resolved.extents.iter().copied())?
         .checked_div(match &resolved.kind {
             BoundOpKind::CachedAttention { head_dim, .. } => *head_dim,
             _ => 1,
         })
         .unwrap_or(0);
+    let threads = checked_product(resolved.node, [total_elements, SIMD_WIDTH])?;
+    let grid2d = exceeds_linear_grid(threads)
+        .then(|| flat_grid2d(resolved.node, threads, None))
+        .transpose()?;
+    let source = widen_for_grid(resolved.node, source, grid2d)?;
     Ok(Some(Kernel {
         source,
         entry,
         bindings: merge_bindings(resolved),
         grid: GridSpec {
-            threads: total_elements * SIMD_WIDTH,
+            threads,
             threadgroup_width: None,
             depth: 1,
-            grid2d: None,
+            grid2d,
         },
     }))
 }

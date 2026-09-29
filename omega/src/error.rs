@@ -40,6 +40,15 @@ pub enum EmitError {
         limit: u64,
     },
 
+    /// The flat 2D grid form rewrites a kernel's linear `gid` and dispatches
+    /// whole threadgroups; `reason` names the property of this kernel that the
+    /// rewrite cannot preserve.
+    #[error("node {node} cannot take the flat 2D grid form: {reason}")]
+    WideGridUnsupported {
+        node: NodeId,
+        reason: &'static str,
+    },
+
     #[error("node {node} elementwise body takes {expected} operands but the op carries {found}")]
     ArityMismatch {
         node: NodeId,

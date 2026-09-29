@@ -1175,6 +1175,12 @@ pub(super) fn build_merged_dispatch(
         return Ok(None);
     }
     let mut kernel = crate::msl::emit(leader, &plan.packed_operands, plan.numeric_policy)?;
+    // the merge splice rewrites a scalar `gid` and addresses members through
+    // its z axis, which a threadgroup-coordinate kernel does not have; the
+    // merged dispatch below is always the 1D form.
+    if kernel.grid.grid2d.is_some() {
+        return Ok(None);
+    }
     let Some(weight_index) = kernel.bindings.iter().position(
         |binding| matches!(binding, Binding::Input(node) if *node == weight_node),
     ) else {

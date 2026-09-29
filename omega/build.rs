@@ -102,6 +102,18 @@ fn require_multiple_of_eight(name: &str, value: usize) -> usize {
     value
 }
 
+/// The `[grid]` keys are 32-bit hardware facts: a `uint` thread index or a
+/// per-axis threadgroup count cannot hold more, so a larger value would
+/// reintroduce the silent truncation this section exists to end.
+fn require_within_u32(name: &str, value: usize) -> usize {
+    assert!(
+        u32::try_from(value).is_ok(),
+        "{name} must fit a 32-bit thread index (<= {}); got {value}",
+        u32::MAX
+    );
+    value
+}
+
 /// [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`]'s cross-axis rule: a power
 /// of two (so `simdgroups * SIMD_WIDTH` is always a clean multiple of
 /// `SIMD_WIDTH`, the invariant `msl.rs`'s row-blocked kernel body's
@@ -289,6 +301,27 @@ fn emit_sizing_consts() {
             "pub const PACKED_ROW_SPLIT_K_MAX_ROWS: u64 = {split_k_max_rows};\n"
         ));
     }
+
+    let linear_thread_limit = require_within_u32(
+        "grid.linear_thread_limit",
+        require_nonzero(
+            "grid.linear_thread_limit",
+            resolve_int(&root, "grid", "linear_thread_limit"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const GRID_LINEAR_THREAD_LIMIT: u64 = {linear_thread_limit};\n"
+    ));
+    let max_threadgroups_x = require_within_u32(
+        "grid.max_threadgroups_x",
+        require_nonzero(
+            "grid.max_threadgroups_x",
+            resolve_int(&root, "grid", "max_threadgroups_x"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const GRID_MAX_THREADGROUPS_X: u64 = {max_threadgroups_x};\n"
+    ));
 
     let group = require_power_of_two_le_32(
         "packed_row_multi_activation.group",
