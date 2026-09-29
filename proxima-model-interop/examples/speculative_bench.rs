@@ -662,12 +662,18 @@ struct ArmResult {
     gpu: Option<GpuUtilizationSummary>,
 }
 
+/// `forced_draft_width` reaches
+/// [`LoadedModel::generate_streaming_with_speculative_stats`]'s own
+/// argument of the same name, never `serving_config` -- see that method's
+/// doc for why the knob stays off the config surface. `None` for every
+/// caller except [`run_verify_width_sweep_mode`].
 fn run_one_arm(
     model: &LoadedModel,
     prompt: &str,
     max_tokens: usize,
     serving_config: ServingConfig,
     sample_gpu: bool,
+    forced_draft_width: Option<u16>,
 ) -> ArmResult {
     let mut prefill_elapsed_ms: u64 = 0;
     let cpu_start = cpu_seconds();
@@ -695,6 +701,7 @@ fn run_one_arm(
             serving_config,
             &mut on_token,
             &mut stats,
+            forced_draft_width,
         )
         .expect("decode arm");
     let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
@@ -779,7 +786,7 @@ fn run_arm_logged(
     label: &str,
 ) -> (ArmResult, bool) {
     log_ollama_ps(&format!("before_{label}"));
-    let result = run_one_arm(model, prompt, max_tokens, config, sample_gpu);
+    let result = run_one_arm(model, prompt, max_tokens, config, sample_gpu, None);
     let after = log_ollama_ps(&format!("after_{label}"));
     (result, !after.is_empty())
 }
@@ -1005,24 +1012,16 @@ fn run_pairs_mode(model: &LoadedModel, args: &BenchArgs, unmeasured_label: &str)
 }
 
 /// Per SPEC's own architecture paragraph -- "ms per verify forward at width
-/// k+1... via the verify program with forced drafts". Genuinely forcing an
-/// exact width bypasses the drafter entirely and calls
-/// [`LoadedModel::speculative_verify_program`] directly with a synthetic
-/// draft of length `k`; that entry point does not exist yet (it is
-/// `pub(crate)`, unexposed past the decode loop, per `architecture.rs:
-/// 292-309`'s own doc that only `ngram-simple`'s natural draft path is
-/// wired end to end today). This sweep is therefore an ENGINEERED
-/// approximation, not the literal forced call the SPEC names -- documented
-/// here rather than silently narrowed (guiding-principles principle 15):
-/// `ngram_simple.size_m` is pinned to `k` on the repeated-paragraph prompt
-/// (`speculative_decode_parity.rs`'s own `default_prompt`, chosen there
-/// because its token period clears `ngram_simple_draft`'s match-recency
-/// floor), so nearly every verify step's draft length is `k` once the
-/// prompt has looped once; `mean_drafted_per_step` is printed alongside so
-/// a reader can see how closely `k` was actually achieved, and `k=0`
-/// degrades to plain non-speculative decode (speculation off). Wiring a
-/// literal forced-width call is `speculative-decode-llama-parity`'s own
-/// slice 9 (`Drafter` enum) work, not this harness's.
+/// k+1... via the verify program with forced drafts". Genuinely forces an
+/// exact width via `run_one_arm`'s own `forced_draft_width` argument, which
+/// reaches [`LoadedModel::generate_streaming_with_speculative_stats`]
+/// directly rather than `ServingConfig`: `decode.rs`'s own speculative
+/// branch fills the draft buffer with `k` copies of the just-sampled token
+/// instead of calling a real drafter, then runs the SAME
+/// [`LoadedModel::speculative_verify_program`] forward every natural draft
+/// uses -- no forward-pass code is duplicated here. `k=0` degrades to plain
+/// non-speculative decode (speculation off), matching every other width-0
+/// arm in this harness.
 fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[usize], unmeasured_label: &str) {
     const REPEATED_PARAGRAPH: &str = "The quick brown fox jumps over the lazy dog while a curious cat \
          watches quietly from the garden wall. Pack my box with five dozen liquor jugs before \
@@ -1036,20 +1035,16 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
     for &width in widths {
         let mut samples_ms_per_verify = Vec::new();
         for _run in 0..3 {
-            let serving_config = if width == 0 {
-                base_serving_config(args.gpu_layers)
-            } else {
-                base_serving_config(args.gpu_layers).with_speculative(SpeculativeConfig {
-                    speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
-                    ngram_simple: proxima_model_interop::NgramMapParams {
-                        size_n: 6,
-                        size_m: width as u16,
-                        min_hits: 1,
-                    },
-                    ..SpeculativeConfig::none()
-                })
-            };
-            let arm = run_one_arm(model, &prompt, args.max_tokens, serving_config, sample_gpu);
+            let serving_config = base_serving_config(args.gpu_layers);
+            let forced_draft_width = if width == 0 { None } else { Some(width as u16) };
+            let arm = run_one_arm(
+                model,
+                &prompt,
+                args.max_tokens,
+                serving_config,
+                sample_gpu,
+                forced_draft_width,
+            );
             let steps = arm.verify_steps.max(1);
             let wall_over_decode = arm.ms_per_token * (steps as f64).max(1.0);
             let ms_per_verify = if width == 0 {

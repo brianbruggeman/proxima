@@ -2106,6 +2106,7 @@ impl<'file> LoadedModel<'file> {
                 None,
                 true,
                 None,
+                None,
             )?;
         Ok(prefix_state)
     }
@@ -2172,6 +2173,7 @@ impl<'file> LoadedModel<'file> {
                 on_token,
                 Some(seed),
                 true,
+                None,
                 None,
             )?;
         Ok((generated_ids, text, stopped_by_eos))
@@ -2466,6 +2468,19 @@ impl<'file> LoadedModel<'file> {
     /// discarded warmup pairs first, so a second warmup step here would be
     /// redundant, not incorrect. Every other caller keeps
     /// [`Self::generate_streaming`] itself, unchanged.
+    ///
+    /// `forced_draft_width`, when `Some(k)`, bypasses every real drafter and
+    /// forces `k`-wide verify steps for this call's whole decode -- see
+    /// [`Self::run_decode_loop_observed_seeded`]'s own doc on the parameter.
+    /// `None` for every caller except `examples/speculative_bench.rs`'s
+    /// verify-width sweep, which measures the verify program's own per-width
+    /// cost directly (SPEC's architecture paragraph, "ms per verify forward
+    /// at width k+1... via the verify program with forced drafts") without a
+    /// real n-gram match happening to land at that width. Deliberately a
+    /// call-site argument, not a [`ServingConfig`]/[`SpeculativeConfig`]
+    /// field: it is a measurement knob for this one harness, not a servable
+    /// setting -- keeping it out of the config surface means no builder
+    /// setter, TOML key, or env var ever reaches it.
     pub fn generate_streaming_with_speculative_stats(
         &self,
         prompt: &str,
@@ -2473,6 +2488,7 @@ impl<'file> LoadedModel<'file> {
         serving_config: ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
         speculative_stats: &mut SpeculativeDecodeStats,
+        forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let serving_config = {
             let mut serving_config = serving_config;
@@ -2493,6 +2509,7 @@ impl<'file> LoadedModel<'file> {
             &mut LogitsSink::Discard,
             on_token,
             speculative_stats,
+            forced_draft_width,
         )
     }
 
@@ -2536,6 +2553,7 @@ impl<'file> LoadedModel<'file> {
                 None,
                 false,
                 None,
+                None,
             )?;
         Ok((generated_ids, text, stopped_by_eos))
     }
@@ -2560,6 +2578,7 @@ impl<'file> LoadedModel<'file> {
         logits_sink: &mut LogitsSink,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
         speculative_stats: &mut SpeculativeDecodeStats,
+        forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let (generated_ids, text, stopped_by_eos, _prefix_state) = self
             .run_decode_loop_observed_seeded(
@@ -2574,6 +2593,7 @@ impl<'file> LoadedModel<'file> {
                 None,
                 false,
                 Some(speculative_stats),
+                forced_draft_width,
             )?;
         Ok((generated_ids, text, stopped_by_eos))
     }
@@ -2601,6 +2621,15 @@ impl<'file> LoadedModel<'file> {
     /// [`Self::run_decode_loop_observed`] discards it (nothing needs cross-
     /// call reuse there), [`Self::prefill_prefix`] is the one caller that
     /// keeps it.
+    ///
+    /// `forced_draft_width`, when `Some(k)`, bypasses every real drafter and
+    /// fills the draft buffer with `k` copies of the just-sampled token
+    /// instead, so `examples/speculative_bench.rs`'s verify-width sweep can
+    /// measure [`Self::speculative_verify_program`]'s own per-width cost at
+    /// an EXACT width rather than whatever an n-gram match happens to find.
+    /// Deliberately not a [`ServingConfig`]/[`SpeculativeConfig`] field: it
+    /// is not a servable setting, only this one harness's own measurement
+    /// knob, so every other caller threads `None`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_decode_loop_observed_seeded(
         &self,
@@ -2615,6 +2644,7 @@ impl<'file> LoadedModel<'file> {
         seed: Option<PrefixState>,
         force_two_range: bool,
         mut speculative_stats: Option<&mut SpeculativeDecodeStats>,
+        forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
         // Read unconditionally: the ONLY reader lives behind
         // `#[cfg(all(feature = "metal-output-placement", target_os =
@@ -3129,7 +3159,7 @@ impl<'file> LoadedModel<'file> {
         let mut drafter_set =
             DrafterSet::build(&serving_config.speculative, serving_config.context_length as usize);
         drafter_set.begin(&token_history);
-        let speculative_enabled = !drafter_set.is_empty();
+        let speculative_enabled = !drafter_set.is_empty() || forced_draft_width.is_some();
         let mut pending: VecDeque<u32> = VecDeque::new();
         // One draft buffer, reused every step -- every drafter's own
         // `draft()` clears and refills it, never allocates, and never
@@ -3191,12 +3221,25 @@ impl<'file> LoadedModel<'file> {
                     && cached_len > 0
                     && self.speculative_verify_program.is_some()
                 {
-                    let history_len = token_history.len().saturating_sub(1);
-                    drafter_set.draft(
-                        &token_history[..history_len],
-                        next_ids[0],
-                        &mut speculative_draft,
-                    );
+                    // `forced_draft_width` (this function's own doc)
+                    // bypasses every real drafter: `speculative_bench`'s
+                    // verify-width sweep needs an EXACT width k+1, which a
+                    // real n-gram match can only approximate. The value
+                    // repeated is irrelevant to what this measures (only the
+                    // verify program's own shape at that width), so the
+                    // just-sampled token is reused -- a real vocab id,
+                    // avoiding an out-of-range lookup.
+                    if let Some(forced_width) = forced_draft_width {
+                        speculative_draft.clear();
+                        speculative_draft.resize(usize::from(forced_width), next_ids[0]);
+                    } else {
+                        let history_len = token_history.len().saturating_sub(1);
+                        drafter_set.draft(
+                            &token_history[..history_len],
+                            next_ids[0],
+                            &mut speculative_draft,
+                        );
+                    }
                 } else {
                     speculative_draft.clear();
                 }
@@ -6283,6 +6326,7 @@ impl<'file> LoadedModel<'file> {
             &mut |_event| ControlFlow::Continue(()),
             None,
             true,
+            None,
             None,
         )?;
         Ok(steps)
