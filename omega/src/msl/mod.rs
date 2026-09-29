@@ -91,6 +91,7 @@ use proxima_tensor::{
 use proxima_tensor::QuantizedBlock;
 
 use crate::error::EmitError;
+use crate::grid::checked_product;
 use crate::identity::{
     body_token, init_token, keep_token, op_token, operand_codecs, reduce_epilogue_is_identity,
     signed_name_part, MetalOnlyExtras,

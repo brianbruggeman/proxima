@@ -21,6 +21,25 @@ use proxima_tensor::{DType, NodeId};
 /// kernel that ignores `out_scatter` and writes to the wrong address.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EmitError {
+    /// A dispatch wider than the emitter's thread index can address, and wider
+    /// than the widest form that emitter has for it. Metal launches only the
+    /// low 32 bits of a 1D grid, so `msl::grid2d_for` widens the index rather
+    /// than reach this; it fires for a grid the flat 2D form cannot cover
+    /// either (more threadgroups than the x and y axes hold), for `wgsl`
+    /// (whose `i32 gid` tops out at `i32::MAX` and has no 64-bit integer), and
+    /// for `cuda` (a grid dimension above `i32::MAX` blocks), and for any
+    /// thread count whose product overflows `u64` before a grid exists
+    /// (`threads` saturates at `u64::MAX`).
+    #[error(
+        "node {node} needs {threads} threads, above the {limit} this emitter's grid can index -- \
+         a wider launch is silently truncated by the driver and leaves the tail outputs unwritten"
+    )]
+    GridExceedsThreadIndex {
+        node: NodeId,
+        threads: u64,
+        limit: u64,
+    },
+
     #[error("node {node} elementwise body takes {expected} operands but the op carries {found}")]
     ArityMismatch {
         node: NodeId,

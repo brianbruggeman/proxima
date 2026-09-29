@@ -105,6 +105,7 @@ use proxima_tensor::{
 };
 
 use crate::error::EmitError;
+use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, Codec, PackedOperands, gather_count, gather_slots};
 
@@ -259,9 +260,19 @@ pub fn emit_wgsl_with_policy(
         }
     };
     let (threads, workgroup_size) = match cooperative_width {
-        Some(width) => (grid_threads(resolved) * u64::from(width), width),
-        None => (grid_threads(resolved), WORKGROUP_SIZE),
+        Some(width) => (
+            checked_product(resolved.node, [grid_threads(resolved)?, u64::from(width)])?,
+            width,
+        ),
+        None => (grid_threads(resolved)?, WORKGROUP_SIZE),
     };
+    if threads > MAX_GRID_THREADS {
+        return Err(EmitError::GridExceedsThreadIndex {
+            node: resolved.node,
+            threads,
+            limit: MAX_GRID_THREADS,
+        });
+    }
     Ok(WgslKernel {
         source,
         entry,
@@ -511,9 +522,15 @@ fn reduction_dims(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
         .collect()
 }
 
-fn grid_threads(resolved: &BoundOp) -> u64 {
+/// Widest grid a `wgsl` kernel indexes: its `gid` is `i32` and WGSL has no
+/// 64-bit integer to widen it into, so unlike `msl` and `cuda` there is no
+/// wider form to fall back to -- a bigger grid is rejected at emit time.
+const MAX_GRID_THREADS: u64 = i32::MAX as u64;
+
+fn grid_threads(resolved: &BoundOp) -> Result<u64, EmitError> {
+    let extents_product = || checked_product(resolved.node, resolved.extents.iter().copied());
     match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
+        BoundOpKind::Elementwise { .. } => extents_product(),
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             output_axes,
@@ -521,12 +538,12 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
             ..
         } => {
             if epilogue_broadcast_axes.is_empty() {
-                output_axes
-                    .iter()
-                    .map(|dim| resolved.extents[*dim as usize])
-                    .product()
+                checked_product(
+                    resolved.node,
+                    output_axes.iter().map(|dim| resolved.extents[*dim as usize]),
+                )
             } else {
-                resolved.extents.iter().product()
+                extents_product()
             }
         }
         // exactly one thread -- see `render_scan`'s own doc on why a scan's
@@ -534,7 +551,7 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         // per line, which rules out one thread per line.
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
-        } => 1,
+        } => Ok(1),
         // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce`/
         // `CachedSoftmaxWeights` never reach this function in practice --
         // `emit_wgsl`'s own kind-match returns `EmitError::UnsupportedOpKind`
@@ -547,7 +564,7 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
-        | BoundOpKind::CachedSoftmaxWeights { .. } => resolved.extents.iter().product(),
+        | BoundOpKind::CachedSoftmaxWeights { .. } => extents_product(),
     }
 }
 
@@ -1874,7 +1891,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -1934,7 +1951,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -1969,7 +1986,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2003,7 +2020,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2050,7 +2067,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2112,7 +2129,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2221,7 +2238,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2252,7 +2269,7 @@ mod tests {
         let bound = bind(
             &program,
             &shapes,
-            &[],
+            &[NodeId((program.len() - 1) as u32)],
             proxima_tensor::NumericPolicy::default(),
         )
         .expect("bind succeeds");
@@ -2357,5 +2374,49 @@ mod tests {
             error,
             EmitError::NonCooperativeReduceOp { op: "subtract", .. }
         ));
+    }
+
+    #[test]
+    fn a_grid_the_i32_gid_can_index_is_emitted() {
+        let bound = matmul_reduce_op(40_000, 4, 50_000);
+
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new())
+            .expect("2e9 threads fit an i32 gid");
+
+        assert_eq!(kernel.threads, 40_000 * 50_000);
+        assert!(kernel.threads <= i32::MAX as u64);
+    }
+
+    #[test]
+    fn a_grid_past_the_i32_gid_is_rejected_because_wgsl_has_no_wider_integer() {
+        let bound = matmul_reduce_op(70_000, 4, 70_000);
+
+        let rejected = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new());
+
+        assert!(
+            matches!(
+                rejected,
+                Err(EmitError::GridExceedsThreadIndex { threads, limit, .. })
+                    if threads == 70_000 * 70_000 && limit == i32::MAX as u64
+            ),
+            "{rejected:?}"
+        );
+    }
+
+    #[test]
+    fn a_thread_count_that_wraps_u64_is_rejected_instead_of_truncated() {
+        let bound = BoundOp {
+            node: NodeId(0),
+            dtype: DType::Float32,
+            extents: vec![u64::from(u32::MAX), u64::from(u32::MAX), 8],
+            kind: BoundOpKind::Iota,
+        };
+
+        let rejected = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new());
+
+        assert!(
+            matches!(rejected, Err(EmitError::GridExceedsThreadIndex { threads: u64::MAX, .. })),
+            "{rejected:?}"
+        );
     }
 }
