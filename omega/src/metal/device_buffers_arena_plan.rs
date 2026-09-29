@@ -1063,6 +1063,7 @@ pub(super) fn build_merged_dispatch(
         threads: kernel.grid.threads,
         threadgroup_width: kernel.grid.threadgroup_width,
         depth: group.len() as u64,
+        grid2d: None,
     };
     let member_bytes = bound_output_len(leader).max(1) * leader.dtype.size_bytes();
     Ok(Some(MergedDispatch {

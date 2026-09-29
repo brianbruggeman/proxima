@@ -370,20 +370,30 @@ fn real_attn_k_multi_token_case(tokens: usize) {
 
     let (packed_program, packed_sum) =
         matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::UInt8);
-    let metal = omega::execute(
-        &packed_program,
-        &[],
-        &[
-            QuantizedBlock::Packed {
-                codec: Codec::Q4_0,
-                bytes: &weight_bytes,
-            },
-            QuantizedBlock::Float32(&activation),
-        ],
-        &[packed_sum],
-        NumericPolicy::default(),
-    )
-    .expect("metal executes a packed q4_0 multi-token matmul on real blk.0.attn_k.weight bytes");
+    // `tokens` here (27, 600) clears `TILED_GEMM_MIN_TOKENS` (8), and
+    // `PROXIMA_TILED_GEMM_Q4_0` defaults ON as of `docs/model-interop/
+    // discipline.md` ROW C4.6 -- force it explicitly off so this test keeps
+    // proving what its own doc claims (the ROW-BLOCKED packed unpack), not
+    // silently switching to the tiled path this file's tight 1e-5 tolerance
+    // was never calibrated for (the tiled-vs-row-blocked reduction-order
+    // drift is exactly why `q4_0_tiled_gemm_batched_run8_parity.rs` uses a
+    // 1e-2 bound instead).
+    let metal = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+        omega::execute(
+            &packed_program,
+            &[],
+            &[
+                QuantizedBlock::Packed {
+                    codec: Codec::Q4_0,
+                    bytes: &weight_bytes,
+                },
+                QuantizedBlock::Float32(&activation),
+            ],
+            &[packed_sum],
+            NumericPolicy::default(),
+        )
+        .expect("metal executes a packed q4_0 multi-token matmul on real blk.0.attn_k.weight bytes")
+    });
 
     let (f32_program, f32_sum) =
         matmul_program_multi_token(tokens as u32, in_dim as u32, out_dim as u32, DType::Float32);

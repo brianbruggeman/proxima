@@ -146,6 +146,26 @@ metal-core = ["alloc"]
 # heavy external-contention noise inflating both arms' round-to-round CoV
 # (pooled CoV 53-68%, dominated by two other GPU benches sharing the device,
 # not by this change).
+# `metal-tiled-gemm` joins per `docs/model-interop/discipline.md` ROW C4.6
+# (Q4_0 admitted onto the `simdgroup_matrix`-tiled path: isolated 44.8-45.8x
+# per projection, real p5 prefill 7760 -> 5835 ms, byte-exact vs the f32 CPU
+# oracle) and ROW C4.8 (dense/batched Q.K^T and P.V folded onto the same
+# path: isolated node139/node162 11.5x/9.4x, real 510-token prefill
+# `gpu_exec_ms` mean 5739.7 -> 1669.1 ms, `text_hash` identical on/off, gemma4
+# 4-prompt gate 4/4 both ways). The `grid_threads` dense-batched dispatch-shape
+# defect that made ROW C4.8 unsafe to default on (a
+# dense-admitted op dispatched 261,120-522,240 threadgroups per batch slice
+# instead of the real 64-512 tile grid, ~4080x too many) is fixed in this same
+# tree (`signature_tokens_prelude.rs`'s restored `dense_batched_gemm_block`
+# arm); with the fix, real prefill measured 3.13-3.30x faster with `text_hash`
+# unchanged (prompt5: 5857-5915 -> 1795-1874 ms). ROW C4.9's
+# `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD` (1.16-1.17x on an isolated Q4_0 matvec,
+# byte-exact) and ROW C4.10's `PROXIMA_TILED_GEMM_SLIM_TGMEM` (threadgroup
+# memory footprint parity with ggml's own `kernel_mul_mm`, byte-exact) join
+# for the same reason. All four env switches under this feature now default
+# ON (unset = on, `=0` = off) per the owner's decision to make the measured
+# levers the production default; the A/B control stays reachable in the same
+# binary via the explicit `=0` override.
 metal = [
     "std",
     "metal-core",
@@ -166,6 +186,7 @@ metal = [
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
+    "metal-tiled-gemm",
 ]
 # `Vulkan`/`Npu`/`Ane` name-reservation features were deleted with the
 # `Backend` variants they backed (design §B.4, 2026-09-04): no emitter and no
@@ -218,12 +239,15 @@ alloc-count = ["metal"]
 # `simdgroup_matrix`-tiled Q4_K GEMM path (`msl.rs`'s `push_tiled_gemm_body`),
 # selected over the row-blocked packed path (`push_packed_row_blocked_body`)
 # only above `sized::TILED_GEMM_MIN_TOKENS` activation rows -- see that
-# const's own doc and `docs/discipline.md` ROW 107. Default-off: this is a
-# second, riskier kernel (`proxima-tensor/docs/discipline.md` ROW 105's own
-# framing) and does not earn the production default until an e2e bench shows
-# the full stack wins with it on. Depends on `metal` (not just `std`): the
-# eligibility gate and kernel body live in `msl.rs`, which is alloc-tier, but
-# the const it reads only has meaning for a Metal dispatch.
+# const's own doc and `docs/discipline.md` ROW 107. Joined `metal`'s default
+# above per `docs/model-interop/discipline.md` ROWs C4.6/C4.8-C4.10: measured
+# byte-exact against the f32 CPU oracle at every admitted shape, and a real
+# 510-token prefill 3.13-3.30x faster with `text_hash` unchanged
+# (after fixing the `grid_threads` dispatch-shape
+# defect that made the dense-batched arm unsafe before). Depends on `metal`
+# (not just `std`): the eligibility gate and kernel body live in `msl.rs`,
+# which is alloc-tier, but the const it reads only has meaning for a Metal
+# dispatch.
 metal-tiled-gemm = ["metal"]
 # Mask-without-shift/branch-free Q4_K matvec body for the row-blocked packed
 # path's SCALE-DEFERRED (`is_plain_product_reduce`) arm (`msl.rs`'s

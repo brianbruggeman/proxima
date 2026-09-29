@@ -119,10 +119,16 @@ fn run_bits(
         QuantizedBlock::Float32(&activation),
     ];
 
-    let output = temp_env::with_var("PROXIMA_Q4_0_MULTI_ROW_HOIST", hoist_env, || {
-        let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
-            .expect("metal plans the multi-token Q4_0 matmul");
-        omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device")
+    // `PROXIMA_TILED_GEMM_Q4_0` defaults ON now -- force it off so a case
+    // with `tokens >= TILED_GEMM_MIN_TOKENS` still routes through the
+    // row-blocked `push_packed_row_multi_row_body` the hoist knob lives in,
+    // rather than silently diverting to the tiled path.
+    let output = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+        temp_env::with_var("PROXIMA_Q4_0_MULTI_ROW_HOIST", hoist_env, || {
+            let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+                .expect("metal plans the multi-token Q4_0 matmul");
+            omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device")
+        })
     });
     output.root().iter().map(|value| value.to_bits()).collect()
 }

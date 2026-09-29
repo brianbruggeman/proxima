@@ -159,10 +159,16 @@ fn run_bits(
         QuantizedBlock::Float32(&activation),
     ];
 
-    let output = temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
-        let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
-            .expect("metal plans the multi-token packed matmul");
-        omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device")
+    // `PROXIMA_TILED_GEMM_Q4_0` defaults ON now -- force it off so a Q4_0
+    // case with `tokens >= TILED_GEMM_MIN_TOKENS` still routes through the
+    // row-blocked `push_packed_row_multi_row_body` this file's unroll knob
+    // lives in, rather than silently diverting to the tiled path.
+    let output = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
+            let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+                .expect("metal plans the multi-token packed matmul");
+            omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device")
+        })
     });
     output.root().iter().map(|value| value.to_bits()).collect()
 }
@@ -188,10 +194,12 @@ fn plan_kernel_keys(
         },
         QuantizedBlock::Float32(&activation),
     ];
-    temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
-        let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
-            .expect("metal plans the multi-token packed matmul");
-        plan.kernel_keys().expect("plan reports its own kernel cache keys")
+    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
+            let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+                .expect("metal plans the multi-token packed matmul");
+            plan.kernel_keys().expect("plan reports its own kernel cache keys")
+        })
     })
 }
 

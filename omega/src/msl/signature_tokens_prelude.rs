@@ -754,7 +754,20 @@ inline float proxima_erf(float x) {
 }
 ";
 
-pub(super) fn preamble(source: &mut String) {
+/// `include_q4_0_wide_decode`: `true` only from [`render_reduce`]'s own call
+/// site, and only when [`wide_weight_stage_wants_q4_0_wide_decode`] admits
+/// (the `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` switch is on, `resolved`
+/// takes the tiled-GEMM path, AND that path's codec is `Q4_0` -- the ONE
+/// combination [`crate::msl::tiled_gemm_cooperative_scan`]'s `q4_0_run8_
+/// wide` call site actually reaches). Every other caller passes `false`:
+/// unlike the codec decoders around it (`Q3K_UNPACK_MSL`, `Q5K_PAIR_DOT_
+/// MSL`, ...), which are cheap `static inline`s the compiler drops when
+/// unused, `Q4_0_RUN8_WIDE_MSL` is NEW text a default-off switch introduced
+/// -- splicing it unconditionally would grow every kernel's source (and
+/// shift pipeline-cache identity for every unrelated kernel in the crate)
+/// even when the switch this crate's other tiled-gemm switches all keep
+/// byte-identical-when-off is never touched.
+pub(super) fn preamble(source: &mut String, include_q4_0_wide_decode: bool) {
     source.push_str("#include <metal_stdlib>\n");
     source.push_str("using namespace metal;\n\n");
     source.push_str(PROXIMA_ERF_FN);
@@ -822,6 +835,10 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q4_0_RUN8_MSL);
     source.push('\n');
+    if include_q4_0_wide_decode {
+        source.push_str(Q4_0_RUN8_WIDE_MSL);
+        source.push('\n');
+    }
     source.push_str(Q5_1_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q5_0_UNPACK_MSL);
@@ -994,7 +1011,7 @@ pub(super) fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, Emi
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long total_elements;\n");
@@ -1017,7 +1034,7 @@ pub(super) fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Re
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long total_elements;\n");
@@ -1096,7 +1113,7 @@ pub(super) fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<
     }
 
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
     source.push_str(
         "struct Uniforms { long n_tokens; long query_key_head_stride; long query_key_dim_stride; long inv_sqrt_key_dim_bits; };\n\n",
     );
@@ -1218,7 +1235,7 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
     let num_simdgroups = expert_count.div_ceil(32);
 
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
     source.push_str("struct Uniforms { long unused; };\n\n");
     source.push_str(&format!(
         "kernel void {entry}(device const float* scores [[buffer(0)]], device float* route0 [[buffer(1)]], constant Uniforms& u [[buffer(2)]],\n"

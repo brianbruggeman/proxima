@@ -113,7 +113,6 @@ pub(super) fn push_tiled_gemm_body(
             group: "feature",
         });
     };
-    let rank_len = rank.max(1);
 
     let block_m = crate::sized::TILED_GEMM_BLOCK_M;
     let block_n = crate::sized::TILED_GEMM_BLOCK_N;
@@ -149,6 +148,27 @@ pub(super) fn push_tiled_gemm_body(
         Ok(terms.join(" * "))
     };
 
+    // `PROXIMA_TILED_GEMM_GRID2D` (see `docs/model-interop/discipline.md`
+    // ROW C4.19, `MetalOnlyExtras::tiled_gemm_grid2d`'s own doc): swaps the flattened
+    // `uint gid [[thread_position_in_grid]]` `kernel_signature` already
+    // emitted for ggml's own 2D attribute triple, and derives `row_tile`/
+    // `col_tile` straight from `tgpig` instead of dividing/modding a
+    // flattened `tile_index` by `num_col_tiles` -- the harness's own
+    // `S2_2d_index_attrs` ablation validated this bit-identical before this
+    // switch existed.
+    let grid2d_active = metal.tiled_gemm_grid2d;
+    if grid2d_active {
+        let scalar_gid = "uint gid [[thread_position_in_grid]]";
+        let vector_attrs = "uint3 tgpig [[threadgroup_position_in_grid]],\n    \
+            ushort tiitg [[thread_index_in_threadgroup]],\n    \
+            ushort sgitg [[simdgroup_index_in_threadgroup]]";
+        let gid_offset = source.find(scalar_gid).ok_or(EmitError::RenderKindMismatch {
+            node,
+            expected: "scalar thread_position_in_grid parameter",
+            found: "missing",
+        })?;
+        source.replace_range(gid_offset..gid_offset + scalar_gid.len(), vector_attrs);
+    }
     source.push_str(&format!(
         "    long feature_extent = {};\n",
         group_extent_expr(feature_axes)?
@@ -157,29 +177,41 @@ pub(super) fn push_tiled_gemm_body(
         "    long token_extent = {};\n",
         group_extent_expr(token_axes)?
     ));
-    source.push_str(&format!(
-        "    long num_col_tiles = (token_extent + {}) / {block_n};\n",
-        block_n - 1
-    ));
-    source.push_str(&format!("    long tiitg = (long)gid % {block_threads};\n"));
-    source.push_str(&format!("    long sgitg = tiitg / {SIMD_WIDTH};\n"));
-    source.push_str(&format!(
-        "    long tile_index = (long)gid / {block_threads};\n"
-    ));
-    source.push_str("    long row_tile = tile_index / num_col_tiles;\n");
-    source.push_str("    long col_tile = tile_index % num_col_tiles;\n");
-    source.push_str("    long row_half = sgitg & 1;\n");
-    source.push_str("    long col_half = sgitg >> 1;\n");
-    // phase 2 (`S/nb/port2/RESULTS.md`, `PROXIMA_TILED_GEMM_SLIM_TGMEM=1`):
+    if grid2d_active {
+        source.push_str("    long row_tile = (long)tgpig.y;\n");
+        source.push_str("    long col_tile = (long)tgpig.x;\n");
+        source.push_str("    long row_half = sgitg & 1;\n");
+        source.push_str("    long col_half = sgitg >> 1;\n");
+    } else {
+        source.push_str(&format!(
+            "    long num_col_tiles = (token_extent + {}) / {block_n};\n",
+            block_n - 1
+        ));
+        source.push_str(&format!("    long tiitg = (long)gid % {block_threads};\n"));
+        source.push_str(&format!("    long sgitg = tiitg / {SIMD_WIDTH};\n"));
+        source.push_str(&format!(
+            "    long tile_index = (long)gid / {block_threads};\n"
+        ));
+        source.push_str("    long row_tile = tile_index / num_col_tiles;\n");
+        source.push_str("    long col_tile = tile_index % num_col_tiles;\n");
+        source.push_str("    long row_half = sgitg & 1;\n");
+        source.push_str("    long col_half = sgitg >> 1;\n");
+    }
+    // phase 2 (see `docs/model-interop/discipline.md` ROW C4.10,
+    // `PROXIMA_TILED_GEMM_SLIM_TGMEM=1`):
     // `weight_tile`/`act_tile` are dead by the time `out_tile` needs its
     // bytes (the K-loop's own trailing `threadgroup_barrier` below already
     // fences the last read before any thread could reach the aliased
     // write), so a shared backing array sized to the larger of the two
     // phases' needs replaces three separately-sized ones -- mirrors ggml's
     // own `kernel_mul_mm` `shmem` reuse (`ggml-metal.metal:160-161,330`).
+    let act_element_type = "float";
+    let act_element_bytes = 4u64;
+    let act_value_cast = "";
+    let act_simdgroup_type = "simdgroup_float8x8";
     let slim_tgmem_active = metal.tiled_gemm_slim_tgmem;
     let weight_tile_bytes = weight_tile_elems * 2;
-    let act_tile_bytes = act_tile_elems * 4;
+    let act_tile_bytes = act_tile_elems * act_element_bytes;
     let out_tile_bytes = out_tile_elems * 4;
     let shared_bytes = (weight_tile_bytes + act_tile_bytes).max(out_tile_bytes);
     if slim_tgmem_active {
@@ -188,22 +220,19 @@ pub(super) fn push_tiled_gemm_body(
         ));
         source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
         source.push_str(&format!(
-            "    threadgroup float *act_tile = (threadgroup float *)(tg_shared + {weight_tile_bytes});\n"
+            "    threadgroup {act_element_type} *act_tile = (threadgroup {act_element_type} *)(tg_shared + {weight_tile_bytes});\n"
         ));
     } else {
         source.push_str(&format!(
             "    threadgroup half weight_tile[{weight_tile_elems}];\n"
         ));
         source.push_str(&format!(
-            "    threadgroup float act_tile[{act_tile_elems}];\n"
+            "    threadgroup {act_element_type} act_tile[{act_tile_elems}];\n"
         ));
     }
     source.push_str(&format!("    simdgroup_float8x8 acc[{mc_count}];\n"));
     source.push_str(&format!(
         "    for (int i = 0; i < {mc_count}; ++i) {{ acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }}\n"
-    ));
-    source.push_str(&format!(
-        "    for (long k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
     // ROW 113: weight staging amortizes the Q4_K sub-block header the same
     // way `push_packed_row_blocked_body` and ggml's own `dequantize_q4_K`
@@ -212,102 +241,159 @@ pub(super) fn push_tiled_gemm_body(
     // time -- instead of `operand_read`'s generic `q4k_element`, which
     // rederives the header (two `device` header reads plus the 6-bit
     // scale/min unpack) from scratch on every one of the tile's individual
-    // elements. Staged by ROW rather than by flat index: `block_threads`
-    // (128) exceeds `block_m` (64) with the default sizing, so the first
-    // `block_m` threads each own exactly one row of the tile for this phase
-    // and the rest do no extra weight work (`act_tile`'s own load below
-    // still uses every thread).
-    // `block_k` divides 256 (`Q4K_BLOCK_ELEMENTS`, `build.rs`'s
-    // `require_divides_q4k_block`) and is a multiple of 8 (`build.rs`'s own
-    // `require_multiple_of_eight`, added alongside this row), so it is
-    // always either <= the Q4_K sub-block width (32) or a whole multiple of
-    // it -- `chunk_width` picks the smaller, `num_chunks` covers `block_k`
-    // exactly with no ragged remainder either way. `Q4_0` has no super-block
-    // of its own (its one real block IS 32 elements / 18 bytes), so its own
-    // `codec_block_elements`/`codec_block_bytes` happen to reproduce the
-    // identical 32-wide chunk width -- the SAME chunking loop below serves
-    // both codecs; only the per-chunk decode differs (`classify_tiled_gemm`
-    // only ever admits these two).
+    // elements.
+    // `tiled_gemm_codec_chunk_width` is the SAME definition `classify_
+    // tiled_gemm` checks against `tiled_gemm_block_k_chunk_aligned` before
+    // admitting an op onto this path (`emit_and_classify.rs`'s own doc on
+    // that check) -- an admitted op's `block_k` is always either <= this
+    // chunk width or a whole multiple of it, so `num_chunks` below covers
+    // `block_k` exactly with no ragged remainder, never a `weight_tile`
+    // overrun. The SAME chunking loop serves both codecs; only the
+    // per-chunk decode differs (`classify_tiled_gemm` only ever admits
+    // `Q4_0`/`Q4_K`).
     let block_elements = u64::try_from(codec_block_elements(codec)).unwrap_or(u64::MAX);
     let block_bytes = u64::try_from(codec_block_bytes(codec)).unwrap_or(u64::MAX);
-    let q4k_subblock_width: u64 = (Q4K_BLOCK_ELEMENTS / 8) as u64;
-    let chunk_width = match codec {
-        Codec::Q4_0 => Q4_0_BLOCK_ELEMENTS as u64,
-        _ => q4k_subblock_width,
-    }
-    .min(block_k);
+    let chunk_width = tiled_gemm_codec_chunk_width(codec).min(block_k);
     let num_chunks = block_k.div_ceil(chunk_width);
 
-    source.push_str(&format!(
-        "        for (long w_row = tiitg; w_row < {block_m}; w_row += {block_threads}) {{\n"
-    ));
-    source.push_str(&format!(
-        "            long w_feat = row_tile * {block_m} + w_row;\n"
-    ));
-    source.push_str("            if (w_feat < feature_extent) {\n");
-    source.push_str(&format!(
-        "                long row_base = u.operand_base[{weight}] + w_feat * u.operand_strides[{weight}][{feature_axis}] + k0 * u.operand_strides[{weight}][{reduce_dim}];\n"
-    ));
-    for chunk_index in 0..num_chunks {
-        let chunk_offset = chunk_index * chunk_width;
-        source.push_str("                {\n");
-        source.push_str(&format!(
-            "                    long slot_off = row_base + {chunk_offset};\n"
-        ));
-        source.push_str(&format!(
-            "                    device const uchar *blk = in{weight} + (slot_off / {block_elements}) * {block_bytes};\n"
-        ));
-        source.push_str(&format!(
-            "                    uint slot = (uint)(slot_off % {block_elements});\n"
-        ));
-        match codec {
-            Codec::Q4_0 => {
-                // ROW 113's discipline (read the block's scale ONCE, not
-                // once per element) now applies here too, via `Q4_0`'s own
-                // batched sibling to `q4k_run8` (`Q4_0_RUN8_MSL`, see its
-                // own doc): `q4_0_block_scale` reads `d` once per
-                // 32-element block, `q4_0_run8` batches the raw-nibble
-                // extract 8 at a time, same shape as the Q4_K arm below.
-                source.push_str("                    float q4_0_d = q4_0_block_scale(blk);\n");
-                let runs = chunk_width / 8;
-                for run_index in 0..runs {
-                    let run_offset = run_index * 8;
-                    source.push_str("                    {\n");
-                    source.push_str("                        float levels[8];\n");
-                    source.push_str(&format!(
-                        "                        q4_0_run8(blk, slot + {run_offset}u, levels);\n"
-                    ));
-                    source.push_str(&format!(
-                        "                        for (int j = 0; j < 8; ++j) {{ weight_tile[w_row * {block_k} + {chunk_offset} + {run_offset} + j] = (half)((levels[j] - 8.0f) * q4_0_d); }}\n"
-                    ));
-                    source.push_str("                    }\n");
-                }
-            }
-            _ => {
-                source.push_str("                    q4k_header hdr = q4k_header_for(blk, slot);\n");
-                let runs = chunk_width / 8;
-                for run_index in 0..runs {
-                    let run_offset = run_index * 8;
-                    source.push_str("                    {\n");
-                    source.push_str("                        float levels[8];\n");
-                    source.push_str(&format!(
-                        "                        q4k_run8(blk, slot + {run_offset}u, levels);\n"
-                    ));
-                    source.push_str(&format!(
-                        "                        for (int j = 0; j < 8; ++j) {{ weight_tile[w_row * {block_k} + {chunk_offset} + {run_offset} + j] = (half)(hdr.scale * levels[j] - hdr.minimum); }}\n"
-                    ));
-                    source.push_str("                    }\n");
-                }
-            }
-        }
-        source.push_str("                }\n");
+    // `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` (see `docs/model-interop/
+    // discipline.md` ROW C4.12, `MetalOnlyExtras::tiled_gemm_wide_weight_stage`'s own doc): admitted
+    // only when a codec's own decode contract (8-element runs) still divides
+    // evenly into a HALF of one chunk (so a thread's half-chunk assignment
+    // never splits a run) AND the block/K-step ratio is a clean whole number
+    // in EITHER direction -- `chunk_width == block_elements` (Q4_0 with
+    // today's sizing, or any config where the codec's own block is no wider
+    // than one K-step: `block_k` a whole multiple of it) or `chunk_width ==
+    // block_k` (Q4_K with today's sizing: the K-step is narrower than the
+    // codec's super-block, so one super-block spans a whole multiple of
+    // K-steps). Both are checked, not assumed, so a future non-default
+    // `block_k` that breaks either ratio silently falls back to the
+    // existing per-K-step division instead of emitting a wrong pointer
+    // advance.
+    let wide_weight_stage_eligible = metal.tiled_gemm_wide_weight_stage
+        && chunk_width.is_multiple_of(16)
+        && if chunk_width == block_elements {
+            block_k.is_multiple_of(chunk_width)
+        } else {
+            chunk_width == block_k && block_elements.is_multiple_of(block_k)
+        };
+    let half_width = chunk_width / 2;
+    let total_halves = block_m * num_chunks * 2;
+    let half_units = total_halves.div_ceil(block_threads);
+
+    if wide_weight_stage_eligible {
+        push_wide_weight_stage_setup(
+            source,
+            weight,
+            feature_axis,
+            block_m,
+            block_k,
+            num_chunks,
+            half_width,
+            total_halves,
+            half_units,
+            block_elements,
+            block_bytes,
+        );
     }
-    source.push_str("            } else {\n");
+
+    let k0_counter_type = if grid2d_active { "int" } else { "long" };
     source.push_str(&format!(
-        "                for (long fill_k = 0; fill_k < {block_k}; ++fill_k) {{ weight_tile[w_row * {block_k} + fill_k] = 0.0h; }}\n"
+        "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
-    source.push_str("            }\n");
-    source.push_str("        }\n");
+    if wide_weight_stage_eligible {
+        push_wide_weight_stage_body(
+            source,
+            codec,
+            block_k,
+            num_chunks,
+            half_width,
+            half_units,
+            chunk_width,
+            block_elements,
+            block_bytes,
+        );
+    } else {
+        // Staged by ROW rather than by flat index: `block_threads` (128)
+        // exceeds `block_m` (64) with the default sizing, so the first
+        // `block_m` threads each own exactly one row of the tile for this
+        // phase and the rest do no extra weight work (`act_tile`'s own load
+        // below still uses every thread) -- see `wide_weight_stage_eligible`
+        // above for the schedule that fixes this idle half.
+        source.push_str(&format!(
+            "        for (long w_row = tiitg; w_row < {block_m}; w_row += {block_threads}) {{\n"
+        ));
+        source.push_str(&format!(
+            "            long w_feat = row_tile * {block_m} + w_row;\n"
+        ));
+        source.push_str("            if (w_feat < feature_extent) {\n");
+        source.push_str(&format!(
+            "                long row_base = u.operand_base[{weight}] + w_feat * u.operand_strides[{weight}][{feature_axis}] + k0 * u.operand_strides[{weight}][{reduce_dim}];\n"
+        ));
+        for chunk_index in 0..num_chunks {
+            let chunk_offset = chunk_index * chunk_width;
+            source.push_str("                {\n");
+            source.push_str(&format!(
+                "                    long slot_off = row_base + {chunk_offset};\n"
+            ));
+            source.push_str(&format!(
+                "                    device const uchar *blk = in{weight} + (slot_off / {block_elements}) * {block_bytes};\n"
+            ));
+            source.push_str(&format!(
+                "                    uint slot = (uint)(slot_off % {block_elements});\n"
+            ));
+            match codec {
+                Codec::Q4_0 => {
+                    // ROW 113's discipline (read the block's scale ONCE, not
+                    // once per element) now applies here too, via `Q4_0`'s own
+                    // batched sibling to `q4k_run8` (`Q4_0_RUN8_MSL`, see its
+                    // own doc): `q4_0_block_scale` reads `d` once per
+                    // 32-element block, `q4_0_run8` batches the raw-nibble
+                    // extract 8 at a time, same shape as the Q4_K arm below.
+                    source.push_str("                    float q4_0_d = q4_0_block_scale(blk);\n");
+                    let runs = chunk_width / 8;
+                    for run_index in 0..runs {
+                        let run_offset = run_index * 8;
+                        source.push_str("                    {\n");
+                        source.push_str("                        float levels[8];\n");
+                        source.push_str(&format!(
+                            "                        q4_0_run8(blk, slot + {run_offset}u, levels);\n"
+                        ));
+                        let weight_index = format!("w_row * {block_k} + {chunk_offset} + {run_offset} + j");
+                        source.push_str(&format!(
+                            "                        for (int j = 0; j < 8; ++j) {{ weight_tile[{weight_index}] = (half)((levels[j] - 8.0f) * q4_0_d); }}\n"
+                        ));
+                        source.push_str("                    }\n");
+                    }
+                }
+                _ => {
+                    source.push_str("                    q4k_header hdr = q4k_header_for(blk, slot);\n");
+                    let runs = chunk_width / 8;
+                    for run_index in 0..runs {
+                        let run_offset = run_index * 8;
+                        source.push_str("                    {\n");
+                        source.push_str("                        float levels[8];\n");
+                        source.push_str(&format!(
+                            "                        q4k_run8(blk, slot + {run_offset}u, levels);\n"
+                        ));
+                        let weight_index = format!("w_row * {block_k} + {chunk_offset} + {run_offset} + j");
+                        source.push_str(&format!(
+                            "                        for (int j = 0; j < 8; ++j) {{ weight_tile[{weight_index}] = (half)(hdr.scale * levels[j] - hdr.minimum); }}\n"
+                        ));
+                        source.push_str("                    }\n");
+                    }
+                }
+            }
+            source.push_str("                }\n");
+        }
+        source.push_str("            } else {\n");
+        let weight_fill_index = format!("w_row * {block_k} + fill_k");
+        source.push_str(&format!(
+            "                for (long fill_k = 0; fill_k < {block_k}; ++fill_k) {{ weight_tile[{weight_fill_index}] = 0.0h; }}\n"
+        ));
+        source.push_str("            }\n");
+        source.push_str("        }\n");
+    }
     // item 3c (`PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=1`, `STAGING.md` §5.3):
     // admitted (by `wide_activation_load_active`, at classification time)
     // only when the activation operand's stride along the reduce dim is
@@ -339,18 +425,17 @@ pub(super) fn push_tiled_gemm_body(
         source.push_str(&format!(
             "                float4 wide = *(const device float4 *)(in{other} + aoff);\n"
         ));
-        source.push_str(&format!(
-            "                act_tile[a_col * {block_k} + a_k] = wide.x;\n"
-        ));
-        source.push_str(&format!(
-            "                act_tile[a_col * {block_k} + a_k + 1] = wide.y;\n"
-        ));
-        source.push_str(&format!(
-            "                act_tile[a_col * {block_k} + a_k + 2] = wide.z;\n"
-        ));
-        source.push_str(&format!(
-            "                act_tile[a_col * {block_k} + a_k + 3] = wide.w;\n"
-        ));
+        for (lane, component) in ["x", "y", "z", "w"].into_iter().enumerate() {
+            let suffix = if lane == 0 {
+                String::new()
+            } else {
+                format!(" + {lane}")
+            };
+            let index = format!("a_col * {block_k} + a_k{suffix}");
+            source.push_str(&format!(
+                "                act_tile[{index}] = wide.{component};\n"
+            ));
+        }
         source.push_str("            }\n");
         source.push_str("        } else {\n");
     }
@@ -373,8 +458,9 @@ pub(super) fn push_tiled_gemm_body(
         operand_read(other, "aoff", None)
     ));
     source.push_str("            }\n");
+    let act_scalar_index = format!("a_col * {block_k} + a_k");
     source.push_str(&format!(
-        "            act_tile[a_col * {block_k} + a_k] = a_value;\n"
+        "            act_tile[{act_scalar_index}] = {act_value_cast}a_value;\n"
     ));
     source.push_str("        }\n");
     if wide_act_load_active {
@@ -390,19 +476,23 @@ pub(super) fn push_tiled_gemm_body(
     source.push_str(&format!(
         "            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
+    let (a_frag_offset, a_frag_stride) =
+        fragment_load_offset_stride("row_half", "i", thread_mat_m, block_k);
     source.push_str(&format!(
-        "                simdgroup_load(a_frag[i], weight_tile + (row_half * {thread_mat_m} + i) * 8 * {block_k} + sub_k * 8, {block_k});\n"
+        "                simdgroup_load(a_frag[i], weight_tile + {a_frag_offset}, {a_frag_stride});\n"
     ));
     source.push_str("            }\n");
     source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
     source.push_str(&format!(
-        "            simdgroup_float8x8 b_frag[{thread_mat_n}];\n"
+        "            {act_simdgroup_type} b_frag[{thread_mat_n}];\n"
     ));
     source.push_str(&format!(
         "            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
+    let (b_frag_offset, b_frag_stride) =
+        fragment_load_offset_stride("col_half", "j", thread_mat_n, block_k);
     source.push_str(&format!(
-        "                simdgroup_load(b_frag[j], act_tile + (col_half * {thread_mat_n} + j) * 8 * {block_k} + sub_k * 8, {block_k}, ulong2(0), true);\n"
+        "                simdgroup_load(b_frag[j], act_tile + {b_frag_offset}, {b_frag_stride}, ulong2(0), true);\n"
     ));
     source.push_str("            }\n");
     source.push_str(&format!(
@@ -426,6 +516,405 @@ pub(super) fn push_tiled_gemm_body(
             "    threadgroup float out_tile[{out_tile_elems}];\n"
         ));
     }
+    // lever 2 (see `docs/model-interop/discipline.md` ROW C4.11): a `device float*` direct-store pointer
+    // is only valid when `out`'s own element type IS `float` (`out
+    // [[buffer(N)]]` is declared `device {element_type}*` --
+    // `signature_tokens_prelude.rs:597`); `metal.tiled_gemm_direct_store`
+    // alone cannot see `element_type`, so this emitter is the one place that
+    // actually decides whether the direct-store text gets rendered at all.
+    let direct_store_eligible = metal.tiled_gemm_direct_store && element_type == "float";
+    if direct_store_eligible {
+        push_tiled_gemm_direct_store_arm(
+            source,
+            rank,
+            &[],
+            feature_axis,
+            token_axis,
+            block_m,
+            block_n,
+            thread_mat_m,
+            thread_mat_n,
+        );
+        source.push_str("    } else {\n");
+    }
+    push_tiled_gemm_restage_writeback(
+        source,
+        rank,
+        output_axes,
+        &[],
+        feature_axis,
+        token_axis,
+        block_m,
+        block_n,
+        block_threads,
+        thread_mat_m,
+        thread_mat_n,
+        out_tile_elems,
+        element_type,
+        epilogue_body,
+        epilogue_operands,
+    );
+    if direct_store_eligible {
+        source.push_str("    }\n");
+    }
+    Ok(())
+}
+
+/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s setup half: computed ONCE, before
+/// the `k0` reduction loop opens, for each of the (typically one)
+/// `half_units` this thread iterates -- a HALF-BLOCK unit `h = tiitg +
+/// unit * block_threads` decomposes into `(row, chunk, half)` via division
+/// by the compile-time constants `num_chunks * 2` and `2` (the Metal
+/// compiler strength-reduces these the same way it would the original
+/// per-K-step `slot_off / block_elements`; the difference this switch buys
+/// is doing it ONCE per row instead of once per row per `k0` step -- see
+/// [`crate::identity::MetalOnlyExtras::tiled_gemm_wide_weight_stage`]'s own
+/// doc). `total_halves` (`block_m * num_chunks * 2`) equals `block_threads`
+/// under today's default sizing (`block_m`=64, `num_chunks`=1), so every one
+/// of the threadgroup's 128 threads owns exactly one half-block -- the fix
+/// for the idle-half-of-the-threadgroup defect the non-wide path still has.
+#[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
+fn push_wide_weight_stage_setup(
+    source: &mut String,
+    weight: usize,
+    feature_axis: u16,
+    block_m: u64,
+    block_k: u64,
+    num_chunks: u64,
+    half_width: u64,
+    total_halves: u64,
+    half_units: u64,
+    block_elements: u64,
+    block_bytes: u64,
+) {
+    let chunks_times_two = num_chunks * 2;
+    for unit in 0..half_units {
+        let h_offset = unit * block_threads_const();
+        source.push_str(&format!(
+            "    long wws_h{unit} = tiitg + {h_offset};\n"
+        ));
+        source.push_str(&format!(
+            "    device const uchar *wws_blk{unit} = in{weight};\n"
+        ));
+        source.push_str(&format!("    uint wws_slot{unit} = 0u;\n"));
+        source.push_str(&format!("    long wws_row{unit} = 0;\n"));
+        source.push_str(&format!("    long wws_koff{unit} = 0;\n"));
+        source.push_str(&format!("    bool wws_active{unit} = false;\n"));
+        source.push_str(&format!(
+            "    if (wws_h{unit} < {total_halves}) {{\n"
+        ));
+        source.push_str(&format!(
+            "        wws_row{unit} = wws_h{unit} / {chunks_times_two};\n"
+        ));
+        source.push_str(&format!(
+            "        long wws_within{unit} = wws_h{unit} % {chunks_times_two};\n"
+        ));
+        source.push_str(&format!(
+            "        long wws_chunk{unit} = wws_within{unit} / 2;\n"
+        ));
+        source.push_str(&format!(
+            "        long wws_half{unit} = wws_within{unit} % 2;\n"
+        ));
+        source.push_str(&format!(
+            "        wws_koff{unit} = wws_chunk{unit} * {half_width_x2} + wws_half{unit} * {half_width};\n",
+            half_width_x2 = half_width * 2,
+        ));
+        source.push_str(&format!(
+            "        long wws_feat{unit} = row_tile * {block_m} + wws_row{unit};\n"
+        ));
+        source.push_str(&format!(
+            "        if (wws_feat{unit} < feature_extent) {{\n"
+        ));
+        source.push_str(&format!("            wws_active{unit} = true;\n"));
+        source.push_str(&format!(
+            "            long wws_base{unit} = u.operand_base[{weight}] + wws_feat{unit} * u.operand_strides[{weight}][{feature_axis}] + wws_koff{unit};\n"
+        ));
+        source.push_str(&format!(
+            "            wws_blk{unit} = in{weight} + (wws_base{unit} / {block_elements}) * {block_bytes};\n"
+        ));
+        source.push_str(&format!(
+            "            wws_slot{unit} = (uint)(wws_base{unit} % {block_elements});\n"
+        ));
+        source.push_str("        } else {\n");
+        let zero_fill_index = format!("wws_row{unit} * {block_k} + wws_koff{unit} + z");
+        source.push_str(&format!(
+            "            for (long z = 0; z < {half_width}; ++z) {{ weight_tile[{zero_fill_index}] = 0.0h; }}\n"
+        ));
+        source.push_str("        }\n");
+        source.push_str("    }\n");
+    }
+}
+
+/// `TILED_GEMM_NSG * SIMD_WIDTH` as the exact `u64` literal
+/// [`push_wide_weight_stage_setup`]'s own `h_offset` needs -- avoids a
+/// second computed-vs-hard-coded copy of [`push_tiled_gemm_body`]'s own
+/// `block_threads` local (both read the identical two constants).
+#[cfg(feature = "metal-tiled-gemm")]
+const fn block_threads_const() -> u64 {
+    (TILED_GEMM_NSG as u64) * SIMD_WIDTH
+}
+
+/// The `(pointer offset, stride)` pair a `simdgroup_load` call needs to read
+/// one `TILE_DIM x TILE_DIM` fragment, shared by [`push_tiled_gemm_body`]
+/// and [`push_dense_batched_gemm_body`]'s identical `a_frag`/`b_frag` load
+/// sites: the fragment's 8 rows are `block_k` elements apart in the
+/// row-major tile (`stride = block_k`).
+#[cfg(feature = "metal-tiled-gemm")]
+fn fragment_load_offset_stride(
+    half_expr: &str,
+    unroll_var: &str,
+    unroll_count: u64,
+    block_k: u64,
+) -> (String, String) {
+    (
+        format!("({half_expr} * {unroll_count} + {unroll_var}) * 8 * {block_k} + sub_k * 8"),
+        block_k.to_string(),
+    )
+}
+
+/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s decode half, emitted inside the
+/// `k0` reduction loop: reads `half_width` elements at each unit's current
+/// `(wws_blk, wws_slot)`, writes them into `weight_tile` via `half4` vector
+/// stores (`half_width` is a multiple of 8, per `wide_weight_stage_eligible`'s
+/// own admission -- `koff`'s two summands are each a multiple of `half_width`,
+/// so every store offset this function computes is a multiple of 4, the
+/// `half4` alignment `simdgroup_load`'s own downstream read needs unchanged),
+/// then advances the pointer/slot by exactly ONE addition and, in the case
+/// where the codec's block is narrower than a K-step, one compile-time-
+/// constant-vs-runtime-counter compare -- never a division, unlike the
+/// non-wide path's `slot_off / block_elements` recomputed fresh every `k0`
+/// step (see [`crate::identity::MetalOnlyExtras::tiled_gemm_wide_weight_
+/// stage`]'s own doc for the two cases this splits on).
+#[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
+fn push_wide_weight_stage_body(
+    source: &mut String,
+    codec: Codec,
+    block_k: u64,
+    num_chunks: u64,
+    half_width: u64,
+    half_units: u64,
+    chunk_width: u64,
+    block_elements: u64,
+    block_bytes: u64,
+) {
+    let runs = half_width / 8;
+    for unit in 0..half_units {
+        source.push_str(&format!("        if (wws_active{unit}) {{\n"));
+        match codec {
+            Codec::Q4_0 => {
+                source.push_str(&format!(
+                    "            float q4_0_d = q4_0_block_scale(wws_blk{unit});\n"
+                ));
+                for run_index in 0..runs {
+                    let run_offset = run_index * 8;
+                    source.push_str("            {\n");
+                    source.push_str("                float levels[8];\n");
+                    source.push_str(&format!(
+                        "                q4_0_run8_wide(wws_blk{unit}, wws_slot{unit} + {run_offset}u, levels);\n"
+                    ));
+                    push_wide_weight_stage_half4_store(
+                        source, unit, run_offset, block_k, "q4_0_d", None,
+                    );
+                    source.push_str("            }\n");
+                }
+            }
+            _ => {
+                source.push_str(&format!(
+                    "            q4k_header wws_hdr{unit} = q4k_header_for(wws_blk{unit}, wws_slot{unit});\n"
+                ));
+                for run_index in 0..runs {
+                    let run_offset = run_index * 8;
+                    source.push_str("            {\n");
+                    source.push_str("                float levels[8];\n");
+                    source.push_str(&format!(
+                        "                q4k_run8(wws_blk{unit}, wws_slot{unit} + {run_offset}u, levels);\n"
+                    ));
+                    push_wide_weight_stage_half4_store(
+                        source,
+                        unit,
+                        run_offset,
+                        block_k,
+                        &format!("wws_hdr{unit}.scale"),
+                        Some(&format!("wws_hdr{unit}.minimum")),
+                    );
+                    source.push_str("            }\n");
+                }
+            }
+        }
+        // Case A: this unit's chunk is exactly one codec block wide
+        // (`chunk_width == block_elements`) -- the whole `block_k`-wide
+        // K-step advances the row window by `num_chunks` whole blocks, and
+        // a unit's own slot-within-its-block (`0` for the low half, `half_
+        // width` for the high half) never changes across `k0` steps: the
+        // window shift always lands this unit back at the SAME relative
+        // position in a new block, never a fraction of one.
+        // Case B: the codec's block is wider than one K-step
+        // (`chunk_width == block_k`, `num_chunks == 1`) -- `wws_slot`
+        // accumulates by `block_k` each step. A unit's own starting slot is
+        // NOT necessarily `0` (the `half == 1` unit of a chunk starts at
+        // `half_width`, not the block origin), so wrapping compares `>=`
+        // and SUBTRACTS `block_elements` rather than resetting to `0` --
+        // `wws_slot < block_elements` is a loop invariant and `block_k <=
+        // block_elements` in this branch, so `wws_slot + block_k` never
+        // exceeds `2 * block_elements` and one subtraction always suffices
+        // (never a division, never a second subtraction).
+        if chunk_width == block_elements {
+            source.push_str(&format!(
+                "            wws_blk{unit} += {num_chunks}u * {block_bytes};\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "            wws_slot{unit} += {block_k}u;\n"
+            ));
+            source.push_str(&format!(
+                "            if (wws_slot{unit} >= {block_elements}u) {{ wws_slot{unit} -= {block_elements}u; wws_blk{unit} += {block_bytes}u; }}\n"
+            ));
+        }
+        source.push_str("        }\n");
+    }
+}
+
+/// Writes 8 already-decoded levels as two `half4` vector stores into
+/// `weight_tile` -- `minimum_expr` is `None` for `Q4_0` (fixed midpoint 8.0,
+/// no separate minimum term) and `Some(..)` for the K-quant header shape
+/// (`scale * level - minimum`), the same two value expressions
+/// [`push_tiled_gemm_body`]'s non-wide arms already compute per element,
+/// just grouped 4-at-a-time into one vector store instead of 8 separate
+/// scalar `half` writes.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_wide_weight_stage_half4_store(
+    source: &mut String,
+    unit: u64,
+    run_offset: u64,
+    block_k: u64,
+    scale_expr: &str,
+    minimum_expr: Option<&str>,
+) {
+    for half in 0..2 {
+        let base = run_offset + half * 4;
+        let mut components = Vec::with_capacity(4);
+        for lane in 0..4 {
+            let index = half * 4 + lane;
+            let value = match minimum_expr {
+                Some(minimum) => {
+                    format!("(half)({scale_expr} * levels[{index}] - {minimum})")
+                }
+                None => format!("(half)((levels[{index}] - 8.0f) * {scale_expr})"),
+            };
+            components.push(value);
+        }
+        let target = format!("wws_row{unit} * {block_k} + wws_koff{unit} + {base}");
+        source.push_str(&format!(
+            "                *(threadgroup half4 *)&weight_tile[{target}] = half4({}, {}, {}, {});\n",
+            components[0], components[1], components[2], components[3],
+        ));
+    }
+}
+
+/// Lever 2's fast arm: [`ggml`'s own `kernel_mul_mm`
+/// (`mul_mm.metal:317-357`)]'s technique -- `simdgroup_store` the
+/// accumulators straight to `device` memory for a tile that is fully inside
+/// both extents, skipping the `out_tile` threadgroup restage and the
+/// per-element bounds-checked copy-out loop entirely. Opens the `if
+/// (direct_store_interior) {` brace; the caller closes it (and appends the
+/// `} else { <restage> }` tail) since the restage path is shared with the
+/// direct-store-inactive case verbatim.
+#[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
+fn push_tiled_gemm_direct_store_arm(
+    source: &mut String,
+    rank: usize,
+    batch_axes: &[u16],
+    feature_axis: u16,
+    token_axis: u16,
+    block_m: u64,
+    block_n: u64,
+    thread_mat_m: u64,
+    thread_mat_n: u64,
+) {
+    let rank_len = rank.max(1);
+    // A tile is safe to store directly only when NO row or column of it
+    // falls outside the real extents (no mask needed) AND the output's own
+    // FEATURE axis is unit-stride: `acc`'s fragment is [row=feature,
+    // col=token] by construction (`a_frag` is the weight/feature operand,
+    // `b_frag` the token operand loaded `transpose_matrix=true` -- this
+    // function's own module doc), so a device write with `transpose=true`
+    // stores `acc^T` into a row-major destination whose ROW dimension
+    // (`elements_per_row`-scaled) is TOKEN and whose COLUMN dimension
+    // (contiguous) is FEATURE -- exactly ggml's own `kernel_mul_mm` dst
+    // convention (`mul_mm.metal:320-325`: `ne0` (feature/M) is the
+    // contiguous axis, `ne1` (token/N) is `elements_per_row`-scaled), which
+    // is also this crate's own real production output layout
+    // (`real_shaped_tiled_gemm_op`'s `out_map` places the feature axis
+    // innermost). `u.out_strides` is a RUNTIME uniform, never baked into
+    // source text, so this has to be a runtime branch, not a compile-time
+    // admission.
+    source.push_str(&format!(
+        "    bool direct_store_interior = (row_tile * {block_m} + {block_m} <= feature_extent) && (col_tile * {block_n} + {block_n} <= token_extent) && (u.out_strides[{feature_axis}] == 1);\n"
+    ));
+    source.push_str("    if (direct_store_interior) {\n");
+    source.push_str(&format!("        long direct_coord[{rank_len}];\n"));
+    source.push_str(&format!(
+        "        for (int d = 0; d < {rank}; ++d) {{ direct_coord[d] = 0; }}\n"
+    ));
+    source.push_str(&format!(
+        "        direct_coord[{feature_axis}] = row_tile * {block_m};\n"
+    ));
+    source.push_str(&format!(
+        "        direct_coord[{token_axis}] = col_tile * {block_n};\n"
+    ));
+    for &axis in batch_axes {
+        source.push_str(&format!(
+            "        direct_coord[{axis}] = dense_batch_coord_{axis};\n"
+        ));
+    }
+    source.push_str("        long direct_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "        direct_offset += direct_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "        for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+    ));
+    source.push_str(&format!(
+        "            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+    ));
+    source.push_str(&format!(
+        "                simdgroup_store(acc[i * {thread_mat_n} + j], out + direct_offset + (row_half * {thread_mat_m} + i) * 8 * u.out_strides[{feature_axis}] + (col_half * {thread_mat_n} + j) * 8 * u.out_strides[{token_axis}], u.out_strides[{token_axis}], ulong2(0), true);\n"
+    ));
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+}
+
+/// The pre-existing threadgroup-restage write tail, extracted verbatim so
+/// [`push_tiled_gemm_body`]/[`push_dense_batched_gemm_body`] can share it
+/// between the direct-store-inactive case and the direct-store-active
+/// boundary-tile fallback -- see [`push_tiled_gemm_direct_store_arm`]'s own
+/// doc for why a boundary tile (or a non-`float` output) still needs this
+/// path even with lever 2 on.
+#[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
+fn push_tiled_gemm_restage_writeback(
+    source: &mut String,
+    rank: usize,
+    output_axes: &[u16],
+    batch_axes: &[u16],
+    feature_axis: u16,
+    token_axis: u16,
+    block_m: u64,
+    block_n: u64,
+    block_threads: u64,
+    thread_mat_m: u64,
+    thread_mat_n: u64,
+    out_tile_elems: u64,
+    element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+) {
+    let rank_len = rank.max(1);
     source.push_str(&format!(
         "    for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
@@ -438,6 +927,39 @@ pub(super) fn push_tiled_gemm_body(
     source.push_str("        }\n");
     source.push_str("    }\n");
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    // `coord[]` is allocated and its provably loop-invariant slots (every
+    // dim NOT one of feature/token/batch stays 0 for the op's whole rank --
+    // it's the reduced axis, never an output axis at all) are set ONCE here,
+    // outside the per-element loop below, instead of a fresh zero + rewrite
+    // on every one of up to `out_tile_elems / block_threads` iterations per
+    // thread -- ROW C4.11's own basic-block read found that re-zero
+    // (a 3-store unrolled loop per iteration in the measured 3-axis case) is
+    // 21 of the 43 per-element instructions, none of it hoistable by the
+    // optimizer because the old code re-wrote the SAME alloca slots fresh
+    // every iteration. `out_offset_base` folds in the batch axes' own
+    // contribution the same way: their coordinate is a per-thread constant
+    // (`dense_batch_coord_{axis}`, set once per z-tile), so summing
+    // `coord[axis] * u.out_strides[axis]` for them here and reusing the
+    // running total inside the loop removes those terms (and the dead
+    // multiply against the never-written reduced-axis slots) from the
+    // per-element address computation entirely -- same total value as the
+    // old `for dim in 0..rank { out_offset += coord[dim] * u.out_strides[dim]; }`
+    // sum, just factored so the loop-invariant part is computed once.
+    source.push_str(&format!("    long coord[{rank_len}];\n"));
+    source.push_str(&format!(
+        "    for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"
+    ));
+    for &axis in batch_axes {
+        source.push_str(&format!(
+            "    coord[{axis}] = dense_batch_coord_{axis};\n"
+        ));
+    }
+    source.push_str("    long out_offset_base = u.out_base;\n");
+    for &axis in batch_axes {
+        source.push_str(&format!(
+            "    out_offset_base += coord[{axis}] * u.out_strides[{axis}];\n"
+        ));
+    }
     source.push_str(&format!(
         "    for (long idx = tiitg; idx < {out_tile_elems}; idx += {block_threads}) {{\n"
     ));
@@ -450,28 +972,21 @@ pub(super) fn push_tiled_gemm_body(
         "        long o_tok = col_tile * {block_n} + o_col;\n"
     ));
     source.push_str("        if (o_feat < feature_extent && o_tok < token_extent) {\n");
-    source.push_str(&format!("            long coord[{rank_len}];\n"));
-    source.push_str(&format!(
-        "            for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"
-    ));
     source.push_str(&format!("            coord[{feature_axis}] = o_feat;\n"));
     source.push_str(&format!("            coord[{token_axis}] = o_tok;\n"));
-    source.push_str("            long out_offset = u.out_base;\n");
-    for dim in 0..rank {
-        source.push_str(&format!(
-            "            out_offset += coord[{dim}] * u.out_strides[{dim}];\n"
-        ));
-    }
+    source.push_str(&format!(
+        "            long out_offset = out_offset_base + o_feat * u.out_strides[{feature_axis}] + o_tok * u.out_strides[{token_axis}];\n"
+    ));
     // reuse the SAME fused-epilogue emitter every other reduce renderer
     // funnels its write through (`push_reduce_epilogue_write`'s own doc) --
     // `coord` reads this function's own per-output-element `coord[rank]`
     // array at the axis id `output_axes[dim]` maps to, the identical
-    // addressing the `out_offset` loop just above already uses, so a fused
-    // GeGLU-shaped (or any other plain, non-broadcast) epilogue reads its
-    // extra operands at the exact element `push_tiled_gemm_body` is about to
-    // write. `classify_tiled_gemm`'s own `BroadcastEpilogueNotSupported` gate
-    // is what keeps a broadcast-reduce epilogue -- the one shape this write
-    // tail cannot express -- from ever reaching this function at all.
+    // addressing the `out_offset` computation just above already uses, so a
+    // fused GeGLU-shaped (or any other plain, non-broadcast) epilogue reads
+    // its extra operands at the exact element `push_tiled_gemm_body` is
+    // about to write. `classify_tiled_gemm`'s own `BroadcastEpilogueNotSupported`
+    // gate is what keeps a broadcast-reduce epilogue -- the one shape this
+    // write tail cannot express -- from ever reaching this function at all.
     let accumulator_expr = format!("({element_type})out_tile[idx]");
     push_reduce_epilogue_write(
         source,
@@ -486,7 +1001,6 @@ pub(super) fn push_tiled_gemm_body(
     );
     source.push_str("        }\n");
     source.push_str("    }\n");
-    Ok(())
 }
 
 /// Never actually invoked: [`classify_tiled_gemm`]'s own `#[cfg(not(feature
@@ -589,7 +1103,6 @@ pub(super) fn push_dense_batched_gemm_body(
             group: "feature",
         });
     };
-    let rank_len = rank.max(1);
 
     let block_m = crate::sized::TILED_GEMM_BLOCK_M;
     let block_n = crate::sized::TILED_GEMM_BLOCK_N;
@@ -614,21 +1127,42 @@ pub(super) fn push_dense_batched_gemm_body(
         Ok(terms.join(" * "))
     };
 
-    // Widen the scalar `gid` `kernel_signature` already emitted to a
-    // `uint3` in place -- see this function's own doc for why splicing an
-    // already-rendered body is not the shape here.
+    // `PROXIMA_TILED_GEMM_GRID2D` (see `docs/model-interop/discipline.md`
+    // ROW C4.19, `MetalOnlyExtras::tiled_gemm_grid2d`'s own doc): the SAME 2D-attribute
+    // swap `push_tiled_gemm_body` performs, with one simplification unique to
+    // the dense-batched body -- `tgpig.z` already IS the batch index (the
+    // grid's own third axis under `dispatchThreadgroups`), so there is no
+    // separate scalar-`gid`-to-`uint3` widening step to bridge through the
+    // way the non-`grid2d` form below needs.
+    let grid2d_active = metal.tiled_gemm_grid2d;
     let scalar_gid = "uint gid [[thread_position_in_grid]]";
-    let vector_gid = "uint3 dense_batch_gid [[thread_position_in_grid]]";
-    let gid_offset = source
-        .find(scalar_gid)
-        .ok_or(EmitError::RenderKindMismatch {
+    if grid2d_active {
+        let vector_attrs = "uint3 tgpig [[threadgroup_position_in_grid]],\n    \
+            ushort tiitg [[thread_index_in_threadgroup]],\n    \
+            ushort sgitg [[simdgroup_index_in_threadgroup]]";
+        let gid_offset = source.find(scalar_gid).ok_or(EmitError::RenderKindMismatch {
             node,
             expected: "scalar thread_position_in_grid parameter",
             found: "missing",
         })?;
-    source.replace_range(gid_offset..gid_offset + scalar_gid.len(), vector_gid);
-    source.push_str("    long gid = (long)dense_batch_gid.x;\n");
-    source.push_str("    long dense_batch_index = (long)dense_batch_gid.z;\n");
+        source.replace_range(gid_offset..gid_offset + scalar_gid.len(), vector_attrs);
+        source.push_str("    long dense_batch_index = (long)tgpig.z;\n");
+    } else {
+        // Widen the scalar `gid` `kernel_signature` already emitted to a
+        // `uint3` in place -- see this function's own doc for why splicing an
+        // already-rendered body is not the shape here.
+        let vector_gid = "uint3 dense_batch_gid [[thread_position_in_grid]]";
+        let gid_offset = source
+            .find(scalar_gid)
+            .ok_or(EmitError::RenderKindMismatch {
+                node,
+                expected: "scalar thread_position_in_grid parameter",
+                found: "missing",
+            })?;
+        source.replace_range(gid_offset..gid_offset + scalar_gid.len(), vector_gid);
+        source.push_str("    long gid = (long)dense_batch_gid.x;\n");
+        source.push_str("    long dense_batch_index = (long)dense_batch_gid.z;\n");
+    }
     source.push_str("    long dense_weight_batch_base = 0;\n");
     source.push_str("    long dense_other_batch_base = 0;\n");
     if !batch_axes.is_empty() {
@@ -660,47 +1194,62 @@ pub(super) fn push_dense_batched_gemm_body(
         "    long token_extent = {};\n",
         group_extent_expr(token_axes)?
     ));
-    source.push_str(&format!(
-        "    long num_col_tiles = (token_extent + {}) / {block_n};\n",
-        block_n - 1
-    ));
-    source.push_str(&format!("    long tiitg = (long)gid % {block_threads};\n"));
-    source.push_str(&format!("    long sgitg = tiitg / {SIMD_WIDTH};\n"));
-    source.push_str(&format!(
-        "    long tile_index = (long)gid / {block_threads};\n"
-    ));
-    source.push_str("    long row_tile = tile_index / num_col_tiles;\n");
-    source.push_str("    long col_tile = tile_index % num_col_tiles;\n");
-    source.push_str("    long row_half = sgitg & 1;\n");
-    source.push_str("    long col_half = sgitg >> 1;\n");
+    if grid2d_active {
+        source.push_str("    long row_tile = (long)tgpig.y;\n");
+        source.push_str("    long col_tile = (long)tgpig.x;\n");
+        source.push_str("    long row_half = sgitg & 1;\n");
+        source.push_str("    long col_half = sgitg >> 1;\n");
+    } else {
+        source.push_str(&format!(
+            "    long num_col_tiles = (token_extent + {}) / {block_n};\n",
+            block_n - 1
+        ));
+        source.push_str(&format!("    long tiitg = (long)gid % {block_threads};\n"));
+        source.push_str(&format!("    long sgitg = tiitg / {SIMD_WIDTH};\n"));
+        source.push_str(&format!(
+            "    long tile_index = (long)gid / {block_threads};\n"
+        ));
+        source.push_str("    long row_tile = tile_index / num_col_tiles;\n");
+        source.push_str("    long col_tile = tile_index % num_col_tiles;\n");
+        source.push_str("    long row_half = sgitg & 1;\n");
+        source.push_str("    long col_half = sgitg >> 1;\n");
+    }
     // see `push_tiled_gemm_body`'s own doc for why this aliasing is safe.
+    let dense_element_type = "float";
+    let dense_value_cast = "";
+    let dense_zero_literal = "0.0f";
+    let dense_simdgroup_type = "simdgroup_float8x8";
     let slim_tgmem_active = metal.tiled_gemm_slim_tgmem;
-    let weight_tile_bytes = weight_tile_elems * 4;
-    let act_tile_bytes = act_tile_elems * 4;
+    let dense_element_bytes = 4u64;
+    let weight_tile_bytes = weight_tile_elems * dense_element_bytes;
+    let act_tile_bytes = act_tile_elems * dense_element_bytes;
     let out_tile_bytes = out_tile_elems * 4;
     let shared_bytes = (weight_tile_bytes + act_tile_bytes).max(out_tile_bytes);
     if slim_tgmem_active {
         source.push_str(&format!(
             "    threadgroup uchar tg_shared[{shared_bytes}];\n"
         ));
-        source.push_str("    threadgroup float *weight_tile = (threadgroup float *)tg_shared;\n");
         source.push_str(&format!(
-            "    threadgroup float *act_tile = (threadgroup float *)(tg_shared + {weight_tile_bytes});\n"
+            "    threadgroup {dense_element_type} *weight_tile = (threadgroup {dense_element_type} *)tg_shared;\n"
+        ));
+        source.push_str(&format!(
+            "    threadgroup {dense_element_type} *act_tile = (threadgroup {dense_element_type} *)(tg_shared + {weight_tile_bytes});\n"
         ));
     } else {
         source.push_str(&format!(
-            "    threadgroup float weight_tile[{weight_tile_elems}];\n"
+            "    threadgroup {dense_element_type} weight_tile[{weight_tile_elems}];\n"
         ));
         source.push_str(&format!(
-            "    threadgroup float act_tile[{act_tile_elems}];\n"
+            "    threadgroup {dense_element_type} act_tile[{act_tile_elems}];\n"
         ));
     }
     source.push_str(&format!("    simdgroup_float8x8 acc[{mc_count}];\n"));
     source.push_str(&format!(
         "    for (int i = 0; i < {mc_count}; ++i) {{ acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }}\n"
     ));
+    let k0_counter_type = if grid2d_active { "int" } else { "long" };
     source.push_str(&format!(
-        "    for (long k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
+        "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
     source.push_str(&format!(
         "        for (long w_row = tiitg; w_row < {block_m}; w_row += {block_threads}) {{\n"
@@ -727,19 +1276,21 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str(&format!(
         "                        long w_off = row_base + w_k * u.operand_strides[{weight}][{reduce_dim}];\n"
     ));
+    let dense_weight_index = format!("w_row * {block_k} + w_k");
     source.push_str(&format!(
-        "                        weight_tile[w_row * {block_k} + w_k] = {};\n",
+        "                        weight_tile[{dense_weight_index}] = {dense_value_cast}{};\n",
         operand_read(weight, "w_off", None)
     ));
     source.push_str("                    } else {\n");
     source.push_str(&format!(
-        "                        weight_tile[w_row * {block_k} + w_k] = 0.0f;\n"
+        "                        weight_tile[{dense_weight_index}] = {dense_zero_literal};\n"
     ));
     source.push_str("                    }\n");
     source.push_str("                }\n");
     source.push_str("            } else {\n");
+    let dense_weight_fill_index = format!("w_row * {block_k} + fill_k");
     source.push_str(&format!(
-        "                for (long fill_k = 0; fill_k < {block_k}; ++fill_k) {{ weight_tile[w_row * {block_k} + fill_k] = 0.0f; }}\n"
+        "                for (long fill_k = 0; fill_k < {block_k}; ++fill_k) {{ weight_tile[{dense_weight_fill_index}] = {dense_zero_literal}; }}\n"
     ));
     source.push_str("            }\n");
     source.push_str("        }\n");
@@ -765,8 +1316,9 @@ pub(super) fn push_dense_batched_gemm_body(
         operand_read(other, "aoff", None)
     ));
     source.push_str("            }\n");
+    let dense_act_index = format!("a_col * {block_k} + a_k");
     source.push_str(&format!(
-        "            act_tile[a_col * {block_k} + a_k] = a_value;\n"
+        "            act_tile[{dense_act_index}] = {dense_value_cast}a_value;\n"
     ));
     source.push_str("        }\n");
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
@@ -774,24 +1326,28 @@ pub(super) fn push_dense_batched_gemm_body(
         "        for (int sub_k = 0; sub_k < {sub_k_steps}; ++sub_k) {{\n"
     ));
     source.push_str(&format!(
-        "            simdgroup_float8x8 a_frag[{thread_mat_m}];\n"
+        "            {dense_simdgroup_type} a_frag[{thread_mat_m}];\n"
     ));
     source.push_str(&format!(
         "            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
+    let (dense_a_frag_offset, dense_a_frag_stride) =
+        fragment_load_offset_stride("row_half", "i", thread_mat_m, block_k);
     source.push_str(&format!(
-        "                simdgroup_load(a_frag[i], weight_tile + (row_half * {thread_mat_m} + i) * 8 * {block_k} + sub_k * 8, {block_k});\n"
+        "                simdgroup_load(a_frag[i], weight_tile + {dense_a_frag_offset}, {dense_a_frag_stride});\n"
     ));
     source.push_str("            }\n");
     source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
     source.push_str(&format!(
-        "            simdgroup_float8x8 b_frag[{thread_mat_n}];\n"
+        "            {dense_simdgroup_type} b_frag[{thread_mat_n}];\n"
     ));
     source.push_str(&format!(
         "            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
+    let (dense_b_frag_offset, dense_b_frag_stride) =
+        fragment_load_offset_stride("col_half", "j", thread_mat_n, block_k);
     source.push_str(&format!(
-        "                simdgroup_load(b_frag[j], act_tile + (col_half * {thread_mat_n} + j) * 8 * {block_k} + sub_k * 8, {block_k}, ulong2(0), true);\n"
+        "                simdgroup_load(b_frag[j], act_tile + {dense_b_frag_offset}, {dense_b_frag_stride}, ulong2(0), true);\n"
     ));
     source.push_str("            }\n");
     source.push_str(&format!(
@@ -815,64 +1371,46 @@ pub(super) fn push_dense_batched_gemm_body(
             "    threadgroup float out_tile[{out_tile_elems}];\n"
         ));
     }
-    source.push_str(&format!(
-        "    for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
-    ));
-    source.push_str(&format!(
-        "        for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
-    ));
-    source.push_str(&format!(
-        "            simdgroup_store(acc[i * {thread_mat_n} + j], out_tile + (row_half * {thread_mat_m} + i) * 8 * {block_n} + (col_half * {thread_mat_n} + j) * 8, {block_n});\n"
-    ));
-    source.push_str("        }\n");
-    source.push_str("    }\n");
-    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    source.push_str(&format!(
-        "    for (long idx = tiitg; idx < {out_tile_elems}; idx += {block_threads}) {{\n"
-    ));
-    source.push_str(&format!("        long o_row = idx / {block_n};\n"));
-    source.push_str(&format!("        long o_col = idx % {block_n};\n"));
-    source.push_str(&format!(
-        "        long o_feat = row_tile * {block_m} + o_row;\n"
-    ));
-    source.push_str(&format!(
-        "        long o_tok = col_tile * {block_n} + o_col;\n"
-    ));
-    source.push_str("        if (o_feat < feature_extent && o_tok < token_extent) {\n");
-    source.push_str(&format!("            long coord[{rank_len}];\n"));
-    source.push_str(&format!(
-        "            for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"
-    ));
-    source.push_str(&format!("            coord[{feature_axis}] = o_feat;\n"));
-    source.push_str(&format!("            coord[{token_axis}] = o_tok;\n"));
-    // batch coords go through `coord[]`, not a separate out-base term: the
-    // fused epilogue below reads its extra operands at `coord[..]`, so a
-    // per-head epilogue operand would otherwise read head 0 for every head.
-    for &axis in batch_axes {
-        source.push_str(&format!(
-            "            coord[{axis}] = dense_batch_coord_{axis};\n"
-        ));
+    // batch coords go through `coord[]`/`direct_coord[]`, not a separate
+    // out-base term: the fused epilogue reads its extra operands at
+    // `coord[..]`, so a per-head epilogue operand would otherwise read head
+    // 0 for every head. See `push_tiled_gemm_body`'s own doc for why
+    // `element_type == "float"` gates the direct-store arm.
+    let direct_store_eligible = metal.tiled_gemm_direct_store && element_type == "float";
+    if direct_store_eligible {
+        push_tiled_gemm_direct_store_arm(
+            source,
+            rank,
+            batch_axes,
+            feature_axis,
+            token_axis,
+            block_m,
+            block_n,
+            thread_mat_m,
+            thread_mat_n,
+        );
+        source.push_str("    } else {\n");
     }
-    source.push_str("            long out_offset = u.out_base;\n");
-    for dim in 0..rank {
-        source.push_str(&format!(
-            "            out_offset += coord[{dim}] * u.out_strides[{dim}];\n"
-        ));
-    }
-    let accumulator_expr = format!("({element_type})out_tile[idx]");
-    push_reduce_epilogue_write(
+    push_tiled_gemm_restage_writeback(
         source,
+        rank,
+        output_axes,
+        batch_axes,
+        feature_axis,
+        token_axis,
+        block_m,
+        block_n,
+        block_threads,
+        thread_mat_m,
+        thread_mat_n,
+        out_tile_elems,
+        element_type,
         epilogue_body,
         epilogue_operands,
-        output_axes.len(),
-        element_type,
-        "            ",
-        |dim| format!("coord[{}]", output_axes[dim]),
-        &accumulator_expr,
-        "out_offset",
     );
-    source.push_str("        }\n");
-    source.push_str("    }\n");
+    if direct_store_eligible {
+        source.push_str("    }\n");
+    }
     Ok(())
 }
 
@@ -2003,7 +2541,7 @@ pub(super) fn render_scan(
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source);
+    preamble(&mut source, false);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long outer_total;\n");

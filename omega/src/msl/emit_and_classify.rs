@@ -110,6 +110,7 @@ pub(super) fn emit_inner(
             threads: grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?,
             threadgroup_width: extras.cooperative_width,
             depth: grid_depth_for(resolved, &quantized),
+            grid2d: grid2d_for(resolved, &quantized)?,
         },
     };
     // The z-addressed splice runs AFTER `bindings`/`grid` are built, mirroring
@@ -1285,6 +1286,37 @@ pub(super) fn metal_specialization(
             }
             _ => false,
         },
+        tiled_gemm_direct_store: match &resolved.kind {
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                epilogue_body,
+                epilogue_operands,
+                ..
+            } => direct_store_active(
+                resolved,
+                &quantized,
+                *reduce_op,
+                *init,
+                output_axes,
+                epilogue_body,
+                epilogue_operands,
+            ),
+            _ => false,
+        },
+        tiled_gemm_wide_weight_stage: match &resolved.kind {
+            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
+                wide_weight_stage_active(resolved, &quantized, *reduce_op, *init, output_axes)
+            }
+            _ => false,
+        },
+        tiled_gemm_grid2d: match &resolved.kind {
+            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
+                tiled_gemm_grid2d_active(resolved, &quantized, *reduce_op, *init, output_axes)
+            }
+            _ => false,
+        },
     }
 }
 
@@ -1360,6 +1392,7 @@ pub(crate) fn kernel_dispatch_shape(
             // would silently dispatch a spliced round-batched kernel with
             // only round 0's own threadgroup, at the cache-HIT path only.
             depth: grid_depth_for(resolved, &quantized),
+            grid2d: grid2d_for(resolved, &quantized)?,
         },
     ))
 }
@@ -1605,20 +1638,35 @@ pub(crate) fn debug_tiled_gemm_classification(
     // fast (`OperandCountNotTwo`/`OperandIsPacked`) for anything else, so no
     // extra guard is needed here to avoid double-counting a packed op.
     match classify_dense_batched_gemm(resolved, quantized, reduce_op, init, output_axes) {
-        Ok(block) => proxima_telemetry::debug!(
-            node = resolved.node.0,
-            reduction_k = reduction_k,
-            feature_extent = resolved.extents[block.feature_axes[0] as usize],
-            token_extent = resolved.extents[block.token_axes[0] as usize],
-            batch_extent = block
-                .batch_axes
-                .iter()
-                .map(|&axis| resolved.extents[axis as usize])
-                .product::<u64>(),
-            kernel_cache_key = %cache_key,
-            admitted = true,
-            "dense-batched-gemm plan-resolution classification"
-        ),
+        Ok(block) => {
+            // `classify_dense_batched_gemm`'s own `NotReduceKeepReduce` gate already
+            // requires this shape for `Ok`; a non-`Reduce` kind here would mean that
+            // gate regressed, so this census event silently skips rather than panics.
+            let BoundOpKind::Reduce { out_layout, .. } = &resolved.kind else {
+                return;
+            };
+            proxima_telemetry::debug!(
+                node = resolved.node.0,
+                reduction_k = reduction_k,
+                feature_extent = resolved.extents[block.feature_axes[0] as usize],
+                token_extent = resolved.extents[block.token_axes[0] as usize],
+                batch_extent = block
+                    .batch_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product::<u64>(),
+                out_stride_feature = out_layout.stride(block.feature_axes[0]),
+                out_stride_token = out_layout.stride(block.token_axes[0]),
+                out_stride_batch = ?block
+                    .batch_axes
+                    .iter()
+                    .map(|&axis| out_layout.stride(axis))
+                    .collect::<Vec<i64>>(),
+                kernel_cache_key = %cache_key,
+                admitted = true,
+                "dense-batched-gemm plan-resolution classification"
+            )
+        }
         Err(reason) => {
             // item-2 census detail: only the two rejection classes this
             // landing's own admission-gap analysis groups by
@@ -1628,7 +1676,7 @@ pub(crate) fn debug_tiled_gemm_classification(
             // `OperandCountNotTwo`, etc.) is already fully explained by the
             // rejection variant name alone, so adding the same fields there
             // would only inflate every plan-resolution log for no
-            // additional information (`S/nb/bmm/RESULTS.md`'s own census
+            // additional information (this repo's own admitted-census
             // already covers those counts).
             let detailed = matches!(
                 reason,
@@ -2404,6 +2452,19 @@ pub enum TiledGemmRejection {
     /// `weight * activation` product), but the check is kept independent
     /// rather than relied upon as a side effect.
     BroadcastEpilogueNotSupported,
+    /// `crate::sized::TILED_GEMM_BLOCK_K` is neither `<=` this codec's own
+    /// staging chunk width ([`tiled_gemm_codec_chunk_width`]) nor a whole
+    /// multiple of it -- `push_tiled_gemm_body`'s per-row chunk loop would
+    /// write past the row's own K-width in `weight_tile` for the last
+    /// chunk (see [`tiled_gemm_block_k_chunk_aligned`]'s own doc). Every
+    /// value `omega/build.rs`'s `require_divides_q4k_block` +
+    /// `require_multiple_of_eight` currently admit for `tiled_gemm.
+    /// block_k` happens to satisfy this, but that is an EMERGENT property
+    /// of two independently-motivated build-time rules, not an explicit
+    /// one -- this variant is the explicit, classification-time backstop
+    /// so a future change to either rule (or a third packed codec with a
+    /// different chunk width) cannot silently reopen the overrun.
+    BlockKNotChunkAligned { block_k: u64, chunk_width: u64 },
 }
 
 /// The additional narrowing [`push_tiled_gemm_body`]'s `simdgroup_matrix`
@@ -2480,9 +2541,9 @@ pub(super) fn classify_tiled_gemm(
             ..
         } = classify_packed_row_block(resolved, quantized)
             .map_err(TiledGemmRejection::NotPackedRowBlock)?;
-        // Q4_K unconditionally, plus Q4_0 behind `PROXIMA_TILED_GEMM_Q4_0=1`
-        // (default off, so the unset-env admission stays byte-identical to
-        // before this arm existed). Q5_K/Q6_K have no batched-unpack helper
+        // Q4_K unconditionally, plus Q4_0 behind `PROXIMA_TILED_GEMM_Q4_0`
+        // (default ON: unset admits, only explicit `"0"` falls back).
+        // Q5_K/Q6_K have no batched-unpack helper
         // yet (`push_packed_row_blocked_body`'s own comment on their arms)
         // and, more to the point, have never been measured on this path.
         // Shipping them unmeasured on a correctness-critical GPU kernel
@@ -2579,6 +2640,19 @@ pub(super) fn classify_tiled_gemm(
                 min_tokens: crate::sized::TILED_GEMM_MIN_TOKENS,
             });
         }
+        // See `TiledGemmRejection::BlockKNotChunkAligned`'s own doc: today's
+        // build-time `tiled_gemm.block_k` always satisfies this (an emergent
+        // property of two independent build.rs rules), but this admission
+        // gate is the explicit, load-bearing check rather than relying on
+        // that emergence -- `push_tiled_gemm_body`'s own chunk loop can never
+        // reach a ragged combination for an op this function admitted.
+        let chunk_width = tiled_gemm_codec_chunk_width(codec);
+        if !tiled_gemm_block_k_chunk_aligned(crate::sized::TILED_GEMM_BLOCK_K, chunk_width) {
+            return Err(TiledGemmRejection::BlockKNotChunkAligned {
+                block_k: crate::sized::TILED_GEMM_BLOCK_K,
+                chunk_width,
+            });
+        }
         Ok(TiledGemmBlock {
             weight,
             other,
@@ -2591,11 +2665,12 @@ pub(super) fn classify_tiled_gemm(
 }
 
 /// `true` only when [`push_tiled_gemm_body`] actually renders its `Codec::
-/// Q4_0` decode arm for this op -- `PROXIMA_TILED_GEMM_Q4_0=1` AND
-/// [`classify_tiled_gemm`]'s own admission passed -- so the unset-env
-/// default folds no new token into [`kernel_cache_key`] and the emitted
-/// source stays byte-identical to before this switch existed, matching
-/// [`q4_0_multi_row_hoist_active`]'s own posture one level up.
+/// Q4_0` decode arm for this op -- `PROXIMA_TILED_GEMM_Q4_0` admits (default
+/// ON: unset admits, only explicit `"0"` disables) AND [`classify_tiled_gemm`]'s
+/// own admission passed. Folds the `_tgq0` token into [`kernel_cache_key`] on
+/// the (now default) admitted path; explicit `"0"` is what stays byte-identical
+/// to before this switch existed, matching [`q4_0_multi_row_hoist_active`]'s
+/// own posture one level up.
 #[cfg(feature = "metal-tiled-gemm")]
 fn tiled_gemm_q4_0_active(
     resolved: &BoundOp,
@@ -2637,9 +2712,9 @@ pub(super) fn tiled_gemm_block(
     classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).ok()
 }
 
-/// item 3c (`STAGING.md` §5.3): `true` only when
-/// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=1` AND `resolved` takes the packed
-/// [`tiled_gemm_block`] path.
+/// item 3c (`STAGING.md` §5.3): `true` only when `PROXIMA_TILED_GEMM_WIDE_
+/// ACT_LOAD` admits (default ON: unset admits, only explicit `"0"` disables)
+/// AND `resolved` takes the packed [`tiled_gemm_block`] path.
 #[cfg(feature = "metal-tiled-gemm")]
 pub(super) fn wide_activation_load_active(
     resolved: &BoundOp,
@@ -2674,8 +2749,9 @@ pub(super) fn wide_activation_load_active(
     false
 }
 
-/// phase 2 (`S/nb/port2/RESULTS.md`): `true` only when
-/// `PROXIMA_TILED_GEMM_SLIM_TGMEM=1` AND `resolved` takes EITHER tiled-GEMM
+/// phase 2 (see `docs/model-interop/discipline.md` ROW C4.10): `true` only when
+/// `PROXIMA_TILED_GEMM_SLIM_TGMEM` admits (default ON: unset admits, only
+/// explicit `"0"` disables) AND `resolved` takes EITHER tiled-GEMM
 /// path -- unlike [`wide_activation_load_active`] above, the aliasing this
 /// feeds is a pure memory-layout change with no dependency on the
 /// packed-weight decode preamble, so it applies to
@@ -2702,6 +2778,243 @@ pub(super) fn slim_tgmem_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+) -> bool {
+    false
+}
+
+/// lever 2 (see `docs/model-interop/discipline.md` ROW C4.11): `true` only when `PROXIMA_TILED_GEMM_
+/// DIRECT_STORE` admits (default OFF: unset or any value other than `"1"`
+/// declines, only explicit `"1"` admits) AND `resolved` takes EITHER
+/// tiled-GEMM path AND its fused epilogue is the untouched identity default.
+/// The epilogue gate exists because [`push_tiled_gemm_body`]'s epilogue tail
+/// reads `out_tile[idx]` (a per-element SCALAR already unpacked from the
+/// `simdgroup_float8x8` accumulator by the existing `simdgroup_store` +
+/// threadgroup restage) -- there is no API to read one lane of a
+/// `simdgroup_float8x8` register directly, so a non-identity epilogue (a
+/// fused bias/gate/broadcast tail) cannot be evaluated "in registers" before
+/// a direct device store without that same per-element unpack, which is
+/// exactly the threadgroup-restage path this lever exists to skip. Declining
+/// the direct path for a non-identity epilogue is therefore the correct
+/// answer for this lever, not a punt: [`classify_tiled_gemm`]'s own
+/// `BroadcastEpilogueNotSupported` gate already excludes the one epilogue
+/// shape this function has no representation for at all; a PLAIN (non-
+/// broadcast) fused epilogue is structurally admitted upstream but still
+/// takes the restage path here until a register-level epilogue evaluator
+/// exists for it.
+#[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn direct_store_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+) -> bool {
+    if !tiled_gemm_direct_store_override() {
+        return false;
+    }
+    if !crate::identity::reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        return false;
+    }
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+        || dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+}
+
+/// see `docs/model-interop/discipline.md` ROW C4.12: `true` only when `PROXIMA_TILED_GEMM_WIDE_WEIGHT_
+/// STAGE` admits (default OFF) AND `resolved` takes the packed (quantized)
+/// tiled-GEMM path -- unlike [`direct_store_active`],
+/// this NEVER applies to [`push_dense_batched_gemm_body`]: that body has no
+/// codec-decode arm at all (both operands are plain `float`), so there is no
+/// weight-staging division/byte-read schedule for this switch to change.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn wide_weight_stage_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> bool {
+    if !tiled_gemm_wide_weight_stage_override() {
+        return false;
+    }
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+pub(super) fn wide_weight_stage_active(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+) -> bool {
+    false
+}
+
+/// see `docs/model-interop/discipline.md` ROW C4.19: `true` only when `PROXIMA_TILED_GEMM_GRID2D` admits
+/// (default OFF) AND `resolved` takes either the tiled (packed) or the
+/// dense-batched GEMM path -- unlike [`wide_weight_stage_active`], this
+/// applies to BOTH bodies: the 2D-attribute signature/dispatch swap is
+/// orthogonal to whether the weight operand is quantized.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn tiled_gemm_grid2d_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> bool {
+    if !tiled_gemm_grid2d_override() {
+        return false;
+    }
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+        || dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_grid2d_active(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+) -> bool {
+    false
+}
+
+/// [`GridSpec::grid2d`] for `resolved` -- `Some` only when
+/// [`tiled_gemm_grid2d_active`] admits, computed from the SAME
+/// `feature_extent`/`token_extent` products [`tiled_gemm_threadgroups`]'s
+/// own callers pass it, so the threadgroup-count grid this returns and the
+/// flattened thread count `grid_threads` returns always describe the
+/// identical launch (`row_tiles * col_tiles` threadgroups of
+/// `SIMD_WIDTH * TILED_GEMM_NSG` threads each, either way) -- see
+/// [`crate::msl::kernel_types_identity::Grid2DSpec`]'s own doc for why the
+/// two never disagree.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn tiled_gemm_grid2d_spec(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> Result<Option<Grid2DSpec>, EmitError> {
+    if !tiled_gemm_grid2d_active(resolved, quantized, reduce_op, init, output_axes) {
+        return Ok(None);
+    }
+    let (feature_extent, token_extent) =
+        if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
+            (
+                block
+                    .feature_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product::<u64>(),
+                block
+                    .token_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product::<u64>(),
+            )
+        } else if let Some(block) =
+            dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes)
+        {
+            (
+                block
+                    .feature_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product::<u64>(),
+                block
+                    .token_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product::<u64>(),
+            )
+        } else {
+            return Ok(None);
+        };
+    let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
+    let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
+    Ok(Some(Grid2DSpec {
+        threadgroups_x: col_tiles,
+        threadgroups_y: row_tiles,
+        threads_per_threadgroup_x: SIMD_WIDTH,
+        threads_per_threadgroup_y: TILED_GEMM_NSG as u64,
+    }))
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_grid2d_spec(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+) -> Result<Option<Grid2DSpec>, EmitError> {
+    Ok(None)
+}
+
+/// [`GridSpec::grid2d`] for ANY `resolved.kind` -- the one caller-facing
+/// wrapper both [`emit_inner`]'s own `Kernel::grid` literal and
+/// [`kernel_dispatch_shape`] call, so a cache-hit dispatch (which never
+/// renders `source` again) and a cache-miss `emit` always agree on whether
+/// THIS op's grid is 2D. `None` for every kind but `Reduce`, matching
+/// [`tiled_gemm_grid2d_active`]'s own admission (only a `Reduce` can be a
+/// tiled or dense-batched GEMM block).
+pub(super) fn grid2d_for(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Result<Option<Grid2DSpec>, EmitError> {
+    match &resolved.kind {
+        BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
+            tiled_gemm_grid2d_spec(resolved, quantized, *reduce_op, *init, output_axes)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `true` only when [`wide_weight_stage_active`] admits AND that admitted
+/// path's codec is `Q4_0` -- the ONE combination
+/// [`crate::msl::tiled_gemm_cooperative_scan::push_wide_weight_stage_body`]'s
+/// `q4_0_run8_wide` call site actually reaches (its `Q4_K` arm calls the
+/// existing `q4k_run8`, never a wide decoder). [`preamble`]'s own call site
+/// in [`render_reduce`] is this function's only caller: it decides whether
+/// `Q4_0_RUN8_WIDE_MSL` -- new text a default-off switch introduced, unlike
+/// the always-cheap codec decoders around it -- gets spliced into THIS
+/// kernel's source at all.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn wide_weight_stage_wants_q4_0_wide_decode(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> bool {
+    wide_weight_stage_active(resolved, quantized, reduce_op, init, output_axes)
+        && tiled_gemm_q4_0_active(resolved, quantized, reduce_op, init, output_axes)
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+pub(super) fn wide_weight_stage_wants_q4_0_wide_decode(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+) -> bool {
+    false
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn direct_store_active(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+    _epilogue_body: &ComposedBody,
+    _epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> bool {
     false
 }
@@ -2839,9 +3152,10 @@ pub(super) fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: C
 pub enum DenseBatchedGemmRejection {
     /// The `metal-tiled-gemm` feature is not compiled in.
     FeatureDisabled,
-    /// `PROXIMA_TILED_GEMM_DENSE` is unset (or not `"1"`) -- default off, so
-    /// the unset-env admission stays byte-identical to before this path
-    /// existed.
+    /// `PROXIMA_TILED_GEMM_DENSE` is explicitly `"0"` -- default ON, so
+    /// unset admits and only this explicit disable falls back to the
+    /// cooperative-reduce path this switch's existence used to be a no-op
+    /// for.
     EnvDisabled,
     /// Not a `Reduce { keep: Keep::Reduce, .. }` at all.
     NotReduceKeepReduce,
@@ -2928,11 +3242,12 @@ pub(super) struct DenseBatchedGemmBlock {
 ///
 /// Feature-gated exactly like [`classify_tiled_gemm`]: without
 /// `metal-tiled-gemm` this always returns `Err(DenseBatchedGemmRejection::FeatureDisabled)`,
-/// and with the feature on but `PROXIMA_TILED_GEMM_DENSE` unset it always
-/// returns `Err(DenseBatchedGemmRejection::EnvDisabled)` -- every dispatch
-/// keeps taking today's serial cooperative-reduce path until BOTH gates are
-/// satisfied, so this path's very existence changes nothing about a build or
-/// a process that never opts in.
+/// and with the feature on but `PROXIMA_TILED_GEMM_DENSE` explicitly `"0"` it
+/// always returns `Err(DenseBatchedGemmRejection::EnvDisabled)` -- with the
+/// feature on and the switch at its new default (unset, admitting), a
+/// dispatch that satisfies the remaining conditions below takes this path;
+/// the explicit `"0"` override is what falls back to the serial
+/// cooperative-reduce path this admission used to be a no-op against.
 pub(super) fn classify_dense_batched_gemm(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -3001,7 +3316,7 @@ pub(super) fn classify_dense_batched_gemm(
         // batch -- or both zero, a degenerate axis) is collected separately.
         // Unlike `classify_tiled_gemm`'s packed-weight counterpart, this
         // does NOT fold every exclusively-owned axis into one flat
-        // multi-axis group: `S/nb/att/RESULTS.md`'s own root cause is that
+        // multi-axis group: this repo's own root cause is that
         // gemma4's GQA head axis (`heads`) shares ownership with the real
         // token axis (`query`, both other-owned -- K/V broadcast over both)
         // but is NOT contiguous with it in the op's own output layout (`kv`
@@ -3071,7 +3386,7 @@ pub(super) fn classify_dense_batched_gemm(
         // the_row_blocked_vector_path` test asserts must NEVER tile. Taking
         // the first candidate in declaration order instead is a fixed
         // per-node choice: `query` is declared before `heads` in every
-        // real gemma4 attention product (`S/nb/att/RESULTS.md`'s own
+        // real gemma4 attention product (a real captured attention
         // dump), so this both fixes the flip-flop and keeps the decode
         // gate's own `token_extent < TILED_GEMM_MIN_TOKENS` check honest
         // (a real `query` extent of `1` correctly declines, every call).
