@@ -753,6 +753,20 @@ fn capture_dispatch(
         Some(width) => (width as usize).min(max_threadgroup).max(1),
         None => (grid.threads as usize).min(max_threadgroup).max(1),
     };
+    // the launch `resident_nocopy_cache::dispatch` actually issues: recorded
+    // from the same `grid2d` decision and the same pipeline clamp, so a replay
+    // of a flat or tile kernel is not handed a 1D grid it never ran under
+    let launch2d = grid
+        .grid2d
+        .map(|spec| crate::msl::fit_flat_width(spec, max_threadgroup as u64));
+    let (recorded_grid, recorded_threadgroup, recorded_dispatch) = match launch2d {
+        Some(spec) => (
+            (spec.threadgroups_x as usize, spec.threadgroups_y as usize, grid.depth as usize),
+            (spec.threads_per_threadgroup_x as usize, spec.threads_per_threadgroup_y as usize, 1),
+            "threadgroups",
+        ),
+        None => ((grid.threads as usize, 1, grid.depth as usize), (threadgroup_width, 1, 1), "threads"),
+    };
     let mut buffers = Vec::new();
     let mut dump_buffers = Vec::new();
     for (index, binding) in bindings.iter().enumerate() {
@@ -793,8 +807,9 @@ fn capture_dispatch(
                 ),
                 entry: entry.clone(),
                 msl_sha256: msl_sha256.clone(),
-                grid: (grid.threads as usize, 1, grid.depth as usize),
-                threadgroup_width,
+                grid: recorded_grid,
+                threadgroup: recorded_threadgroup,
+                dispatch: recorded_dispatch,
                 dtype: format!("{:?}", bound.dtype),
                 extents: format!("{:?}", bound.extents),
                 buffers: dump_buffers,
@@ -812,6 +827,7 @@ fn capture_dispatch(
         grid_threads = grid.threads,
         grid_depth = grid.depth,
         threadgroup_width,
+        grid2d = ?launch2d,
         buffers = %buffers.join(", "),
         "dispatch_capture"
     );
@@ -829,7 +845,11 @@ struct CaptureDumpEntry {
     entry: String,
     msl_sha256: String,
     grid: (usize, usize, usize),
-    threadgroup_width: usize,
+    threadgroup: (usize, usize, usize),
+    /// `threads` (`dispatchThreads`, `grid` is the thread count) or `threadgroups`
+    /// (`dispatchThreadgroups`, `grid` is the threadgroup count): which call a
+    /// replay must make for `grid` and `threadgroup` to mean what they did.
+    dispatch: &'static str,
     dtype: String,
     extents: String,
     /// `(binding index, buffer, offset)`, one per resolved `Input`/`Indices`/
@@ -942,13 +962,14 @@ pub(super) fn flush_pending_capture_dumps() {
             uniforms_note = format!("node{node}_step{step}_uniforms_len{uniforms_len}.bin");
         }
         let meta = format!(
-            "{}\nstep={}\nentry={}\nmsl_sha256={}\ngrid={:?}\nthreadgroup=({},1,1)\ndtype={}\nextents={}\nbuffers=[{}]\nuniforms={uniforms_note}\n",
+            "{}\nstep={}\nentry={}\nmsl_sha256={}\ndispatch={}\ngrid={:?}\nthreadgroup={:?}\ndtype={}\nextents={}\nbuffers=[{}]\nuniforms={uniforms_note}\n",
             entry.bound_op_line,
             entry.step,
             entry.entry,
             entry.msl_sha256,
+            entry.dispatch,
             entry.grid,
-            entry.threadgroup_width,
+            entry.threadgroup,
             entry.dtype,
             entry.extents,
             buffer_records.join(", "),
