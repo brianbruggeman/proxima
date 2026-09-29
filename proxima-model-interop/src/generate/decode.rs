@@ -2104,6 +2104,7 @@ impl<'file> LoadedModel<'file> {
                 &mut |_event| ControlFlow::Continue(()),
                 None,
                 true,
+                None,
             )?;
         Ok(prefix_state)
     }
@@ -2170,6 +2171,7 @@ impl<'file> LoadedModel<'file> {
                 on_token,
                 Some(seed),
                 true,
+                None,
             )?;
         Ok((generated_ids, text, stopped_by_eos))
     }
@@ -2450,6 +2452,49 @@ impl<'file> LoadedModel<'file> {
         )
     }
 
+    /// [`Self::generate_streaming`], plus `speculative_stats` (out
+    /// parameter, zeroed by the caller before this call): every speculative
+    /// verify step this decode makes accumulates into it via
+    /// [`Self::run_decode_loop_observed_with_stats`], so `examples/
+    /// speculative_bench.rs` reads verify-step/drafted/accepted counts off
+    /// this call's own return path instead of the telemetry ring
+    /// (`speculative_decode_parity.rs`'s own doc on that ring dropping
+    /// events under metal's per-dispatch `debug!` volume). Omits
+    /// [`Self::generate_streaming`]'s own `PROXIMA_WARMUP_BEFORE_GENERATE`
+    /// pipeline-warmup branch -- the bench harness always runs its own
+    /// discarded warmup pairs first, so a second warmup step here would be
+    /// redundant, not incorrect. Every other caller keeps
+    /// [`Self::generate_streaming`] itself, unchanged.
+    pub fn generate_streaming_with_speculative_stats(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: ServingConfig,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        speculative_stats: &mut SpeculativeDecodeStats,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let serving_config = {
+            let mut serving_config = serving_config;
+            self.apply_command_buffer_chunks_default(&mut serving_config);
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_memory_fit_gate(&mut serving_config)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_dispatch_type_override(&mut serving_config)?;
+            serving_config
+        };
+        let mut runtime = BackendRuntime::new(&serving_config);
+        self.run_decode_loop_observed_with_stats(
+            prompt,
+            max_tokens,
+            &serving_config,
+            &mut runtime,
+            None,
+            &mut LogitsSink::Discard,
+            on_token,
+            speculative_stats,
+        )
+    }
+
     /// [`Self::run_decode_loop`]'s own body, plus the two hooks
     /// [`crate::quality::quality_report`] needs to score a variant against
     /// a reference through this SAME cached decode loop rather than a
@@ -2489,6 +2534,45 @@ impl<'file> LoadedModel<'file> {
                 on_token,
                 None,
                 false,
+                None,
+            )?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
+    /// [`Self::run_decode_loop_observed`], plus `speculative_stats`: every
+    /// verify step this call's own decode makes records into it
+    /// ([`SpeculativeDecodeStats::record_verify_step`]), so a caller reads
+    /// verify-step/drafted/accepted counts directly off this call's return
+    /// path rather than a telemetry event stream. [`Self::generate_streaming`]
+    /// itself stays on [`Self::run_decode_loop_observed`] (`None` forwarded,
+    /// unchanged behavior for every existing caller);
+    /// [`Self::generate_streaming_with_speculative_stats`] is the one caller
+    /// of this method.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_decode_loop_observed_with_stats(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        token_override: Option<&[u32]>,
+        logits_sink: &mut LogitsSink,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        speculative_stats: &mut SpeculativeDecodeStats,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let (generated_ids, text, stopped_by_eos, _prefix_state) = self
+            .run_decode_loop_observed_seeded(
+                prompt,
+                max_tokens,
+                serving_config,
+                runtime,
+                token_override,
+                logits_sink,
+                &mut NodeValuesSink::Discard,
+                on_token,
+                None,
+                false,
+                Some(speculative_stats),
             )?;
         Ok((generated_ids, text, stopped_by_eos))
     }
@@ -2529,6 +2613,7 @@ impl<'file> LoadedModel<'file> {
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
         seed: Option<PrefixState>,
         force_two_range: bool,
+        mut speculative_stats: Option<&mut SpeculativeDecodeStats>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
         // Read unconditionally: the ONLY reader lives behind
         // `#[cfg(all(feature = "metal-output-placement", target_os =
@@ -5077,6 +5162,9 @@ impl<'file> LoadedModel<'file> {
                             emitted = emitted.len() as u64,
                             "speculative_verify"
                         );
+                        if let Some(stats) = speculative_stats.as_deref_mut() {
+                            stats.record_verify_step(speculative_draft.len(), accepted);
+                        }
 
                         // The append loop above wrote `new_count` positions'
                         // worth of K/V for every layer; only `emitted.len()`
@@ -6186,6 +6274,7 @@ impl<'file> LoadedModel<'file> {
             &mut |_event| ControlFlow::Continue(()),
             None,
             true,
+            None,
         )?;
         Ok(steps)
     }

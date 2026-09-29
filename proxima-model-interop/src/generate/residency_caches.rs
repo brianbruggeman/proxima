@@ -2766,6 +2766,38 @@ pub struct TokenEvent<'piece> {
     pub elapsed_ms: u64,
 }
 
+/// Per-call speculative-decode counters, read directly from the decode loop's
+/// own verify branch (`LoadedModel::run_decode_loop_observed_seeded`'s
+/// `speculative_step` arm) rather than scraped from a telemetry log: the same
+/// `draft_len`/`accepted` values that branch's own `speculative_verify`
+/// `debug!` event carries, accumulated across every verify step one decode
+/// call makes. `examples/speculative_bench.rs` reads this struct so a bench
+/// run does not depend on the telemetry ring surviving the whole decode
+/// (`speculative_decode_parity.rs`'s own doc on that ring silently dropping
+/// events under metal's per-dispatch `debug!` volume).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpeculativeDecodeStats {
+    /// Number of times the speculative verify branch ran at all (zero on a
+    /// decode that never drafted anything).
+    pub verify_steps: u64,
+    /// Sum of `speculative_draft.len()` across every verify step -- tokens
+    /// the drafter proposed, whether or not they were accepted.
+    pub drafted_total: u64,
+    /// Sum of `accepted` (`emitted.len() - 1`) across every verify step --
+    /// drafted tokens that matched `select_decoded_token`'s own choice.
+    pub accepted_total: u64,
+}
+
+impl SpeculativeDecodeStats {
+    /// One verify step's own readout: `drafted` is `speculative_draft.len()`
+    /// before verification, `accepted` is `emitted.len() - 1` after it.
+    pub fn record_verify_step(&mut self, drafted: usize, accepted: usize) {
+        self.verify_steps += 1;
+        self.drafted_total += drafted as u64;
+        self.accepted_total += accepted as u64;
+    }
+}
+
 /// Allocation-free decode evidence assembled from the events a caller already
 /// receives. The labels preserve provenance when a record is written beside
 /// measurements from another runtime or benchmark harness.
