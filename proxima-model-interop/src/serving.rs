@@ -44,6 +44,7 @@
 //! crate's own doc and the task that added this file.
 
 use alloc::format;
+use alloc::string::String;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
@@ -143,6 +144,294 @@ pub const REASONING_BUDGET_UNBOUNDED: i32 = -1;
 pub enum GdnPrefillBackend {
     Cpu,
     Mlx,
+}
+
+/// llama.cpp's `common_speculative_type` (`common/common.h:173-186`), named
+/// identically so this crate's config round-trips llama's own `--spec-type`
+/// vocabulary (`common_speculative_type_to_str`,
+/// `common/speculative.cpp:2229-2244`). Every upstream variant is present so
+/// a config file naming a not-yet-wired type (e.g. `draft-mtp`) still parses
+/// -- [`apply_serving_config`] is where an unwired selection is rejected,
+/// not this enum (this crate's own convention: an unimplemented knob is a
+/// per-field validation error, not a smaller enum). This crate's own
+/// `speculative-decode-llama-parity` sub-specs (R11a-d) own the draft-model
+/// families' correctness; only the five n-gram types plus `None` run end to
+/// end today (`generate/decode.rs`'s own speculative branch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeculativeType {
+    None,
+    DraftSimple,
+    DraftEagle3,
+    DraftMtp,
+    DraftDflash,
+    DraftDspark,
+    NgramSimple,
+    NgramMapK,
+    NgramMapK4v,
+    NgramMod,
+    NgramCache,
+}
+
+impl SpeculativeType {
+    /// llama's own `--spec-type` string for this variant
+    /// (`common_speculative_type_to_str`, `common/speculative.cpp:2229-2244`).
+    #[must_use]
+    pub const fn llama_name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DraftSimple => "draft-simple",
+            Self::DraftEagle3 => "draft-eagle3",
+            Self::DraftMtp => "draft-mtp",
+            Self::DraftDflash => "draft-dflash",
+            Self::DraftDspark => "draft-dspark",
+            Self::NgramSimple => "ngram-simple",
+            Self::NgramMapK => "ngram-map-k",
+            Self::NgramMapK4v => "ngram-map-k4v",
+            Self::NgramMod => "ngram-mod",
+            Self::NgramCache => "ngram-cache",
+        }
+    }
+
+    /// The inverse of [`Self::llama_name`]. `None` when `name` is not one of
+    /// llama's own `--spec-type` strings.
+    #[must_use]
+    pub fn from_llama_name(name: &str) -> Option<Self> {
+        match name {
+            "none" => Some(Self::None),
+            "draft-simple" => Some(Self::DraftSimple),
+            "draft-eagle3" => Some(Self::DraftEagle3),
+            "draft-mtp" => Some(Self::DraftMtp),
+            "draft-dflash" => Some(Self::DraftDflash),
+            "draft-dspark" => Some(Self::DraftDspark),
+            "ngram-simple" => Some(Self::NgramSimple),
+            "ngram-map-k" => Some(Self::NgramMapK),
+            "ngram-map-k4v" => Some(Self::NgramMapK4v),
+            "ngram-mod" => Some(Self::NgramMod),
+            "ngram-cache" => Some(Self::NgramCache),
+            _ => None,
+        }
+    }
+}
+
+/// llama's fixed speculator priority order (`common/speculative.cpp:2617-2629`,
+/// "this list here defines the priority of the speculators"): highest
+/// priority first. Registration order in llama's own `--spec-type` list
+/// never matters -- `common_get_enabled_speculative_configs` folds the
+/// caller's `Vec<type>` into a bitset before this order is walked -- so
+/// [`SpeculativeTypeSet::iter_priority_order`] reproduces the SAME set
+/// semantics for any set a caller enables. `SpeculativeType::None` is
+/// absent: llama's own `switch` in `common_speculative_init` treats that
+/// variant as a no-op (`case COMMON_SPECULATIVE_TYPE_NONE: break;`), never
+/// adding an implementation.
+const PRIORITY_ORDER: [SpeculativeType; 10] = [
+    SpeculativeType::NgramSimple,
+    SpeculativeType::NgramMapK,
+    SpeculativeType::NgramMapK4v,
+    SpeculativeType::NgramMod,
+    SpeculativeType::NgramCache,
+    SpeculativeType::DraftSimple,
+    SpeculativeType::DraftEagle3,
+    SpeculativeType::DraftMtp,
+    SpeculativeType::DraftDflash,
+    SpeculativeType::DraftDspark,
+];
+
+/// llama's `std::vector<common_speculative_type> types`
+/// (`common/common.h:373`) -- a SET of simultaneously-enabled speculators,
+/// not a single active choice (`common_get_enabled_speculative_configs`,
+/// `common/speculative.cpp:2310-2316`, folds the caller's list into exactly
+/// this bitset before `common_speculative_init` walks [`PRIORITY_ORDER`]
+/// over it). A `u16` bitmask keeps this `Copy` -- [`SpeculativeConfig`], and
+/// therefore [`ServingConfig`], depend on that (this struct's own doc).
+/// llama runs every enabled speculator per step in priority order until one
+/// yields a non-empty draft for a position (`common_speculative_draft`,
+/// `common/speculative.cpp:2802-2843`: each enabled impl's `draft()` is
+/// tried in turn; the first to fill `dp.result` wins and the rest are
+/// skipped via `dp.drafting = false`), then accepts through that
+/// implementation and notifies every other enabled implementation with
+/// `is_other = true` (`common_speculative_accept`, `:2915-2919`) so
+/// stateful drafters (`ngram-mod`, `ngram-cache`) can still track
+/// occupancy/acceptance across steps they did not win. This crate wires the
+/// draft/verify loop for exactly one member of the set today
+/// (`generate/decode.rs`'s own speculative branch checks
+/// `contains(SpeculativeType::NgramSimple)`) -- the SET representation is
+/// what lets a config round-trip any of llama's `--spec-type` combinations
+/// even before every member is wired; [`apply_serving_config`] rejects only
+/// the members that are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpeculativeTypeSet(u16);
+
+impl SpeculativeTypeSet {
+    /// llama's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+    /// (`common/common.h:373`) -- no speculator enabled.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// A set containing exactly one member.
+    #[must_use]
+    pub const fn single(type_id: SpeculativeType) -> Self {
+        Self(1u16 << type_id as u16)
+    }
+
+    /// This set with `type_id` added, llama's own `types.push_back`.
+    #[must_use]
+    pub const fn insert(self, type_id: SpeculativeType) -> Self {
+        Self(self.0 | (1u16 << type_id as u16))
+    }
+
+    /// Whether `type_id` is one of this set's enabled speculators.
+    #[must_use]
+    pub const fn contains(self, type_id: SpeculativeType) -> bool {
+        self.0 & (1u16 << type_id as u16) != 0
+    }
+
+    /// No speculator enabled -- llama's own default, and this crate's
+    /// speculation-off state.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// This set's members in llama's own fixed priority order
+    /// ([`PRIORITY_ORDER`]'s own doc) -- the order `common_speculative_init`
+    /// registers implementations in and `common_speculative_draft` tries
+    /// them in, regardless of the order a caller named them in.
+    pub fn iter_priority_order(self) -> impl Iterator<Item = SpeculativeType> {
+        PRIORITY_ORDER
+            .into_iter()
+            .filter(move |&type_id| self.contains(type_id))
+    }
+}
+
+/// llama's `common_params_speculative_ngram_map` (`common/common.h:361-365`),
+/// shared verbatim by llama's own `ngram_simple`/`ngram_map_k`/
+/// `ngram_map_k4v` fields -- one struct shape, three instances, matched here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NgramMapParams {
+    /// llama's `size_n`: the n-gram size looked up in history.
+    pub size_n: u16,
+    /// llama's `size_m`: the m-gram size drafted after a match.
+    pub size_m: u16,
+    /// llama's `min_hits`: minimum hits before a match is proposed.
+    pub min_hits: u16,
+}
+
+impl Default for NgramMapParams {
+    /// llama's own default for all three of `ngram_simple`/`ngram_map_k`/
+    /// `ngram_map_k4v` (`common/common.h:362-364`).
+    fn default() -> Self {
+        Self {
+            size_n: 12,
+            size_m: 48,
+            min_hits: 1,
+        }
+    }
+}
+
+/// llama's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NgramModParams {
+    pub n_match: u16,
+    pub n_max: u16,
+    pub n_min: u16,
+}
+
+impl Default for NgramModParams {
+    fn default() -> Self {
+        Self {
+            n_match: 24,
+            n_max: 64,
+            n_min: 48,
+        }
+    }
+}
+
+/// [`ServingConfig::speculative`]'s own data: llama's `common_params_speculative`
+/// (`common/common.h:372-389`), mirrored field for field -- including
+/// `types`, llama's own `Vec<common_speculative_type>` SET of
+/// simultaneously-enabled speculators ([`SpeculativeTypeSet`]'s own doc for
+/// the set/priority/accept-notification semantics this reproduces). A `u16`
+/// bitmask keeps [`Self::speculative_types`], and therefore this struct and
+/// [`ServingConfig`], `Copy` (a `Vec` field never is, and [`ServingConfig`]'s
+/// own `Copy` derive is load-bearing: `examples/speculative_decode_parity.rs`'s
+/// OFF/ON pairs rely on it to see byte-identical input). This crate wires the
+/// draft/verify loop for exactly one set member today
+/// (`generate/decode.rs`'s own speculative branch checks
+/// `contains(SpeculativeType::NgramSimple)`; the `Drafter` enum
+/// `speculative-decode-llama-parity/TASKS.md` slice 9 adds wires the rest) --
+/// [`apply_serving_config`] rejects only the members not yet wired, naming
+/// each. `ngram_cache_lookup_static`/`_dynamic` are borrowed (`&'model str`)
+/// for the same reason `model_path` is -- the caller keeps the owned path
+/// alive for `'model` ([`crate::SpeculativeSettings::as_speculative_config`],
+/// `std`-gated, is the conflaguration-facing owner of that storage).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpeculativeConfig<'model> {
+    /// llama's `types` (`common/common.h:373`) -- the enabled-speculator set.
+    pub speculative_types: SpeculativeTypeSet,
+    /// llama's `common_params_speculative_draft::n_max` (`common/common.h:328`):
+    /// maximum tokens to draft.
+    pub n_max: i32,
+    /// llama's `common_params_speculative_draft::n_min` (`common/common.h:329`):
+    /// minimum draft tokens to keep.
+    pub n_min: i32,
+    /// llama's `common_params_speculative_draft::p_min` (`common/common.h:332`):
+    /// minimum greedy-acceptance probability.
+    pub p_min: f32,
+    pub ngram_simple: NgramMapParams,
+    pub ngram_map_k: NgramMapParams,
+    pub ngram_map_k4v: NgramMapParams,
+    pub ngram_mod: NgramModParams,
+    /// llama's `common_params_speculative_ngram_cache::lookup_cache_static`.
+    pub ngram_cache_lookup_static: Option<&'model str>,
+    /// llama's `common_params_speculative_ngram_cache::lookup_cache_dynamic`.
+    pub ngram_cache_lookup_dynamic: Option<&'model str>,
+}
+
+impl SpeculativeConfig<'static> {
+    /// llama's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+    /// (`common/common.h:373`) -- the empty set, no speculation. Per-type
+    /// param defaults still hold llama's own values so enabling any single
+    /// member of [`Self::speculative_types`] alone reproduces llama's
+    /// defaults for that type.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            speculative_types: SpeculativeTypeSet::empty(),
+            n_max: 3,
+            n_min: 0,
+            p_min: 0.0,
+            ngram_simple: NgramMapParams {
+                size_n: 12,
+                size_m: 48,
+                min_hits: 1,
+            },
+            ngram_map_k: NgramMapParams {
+                size_n: 12,
+                size_m: 48,
+                min_hits: 1,
+            },
+            ngram_map_k4v: NgramMapParams {
+                size_n: 12,
+                size_m: 48,
+                min_hits: 1,
+            },
+            ngram_mod: NgramModParams {
+                n_match: 24,
+                n_max: 64,
+                n_min: 48,
+            },
+            ngram_cache_lookup_static: None,
+            ngram_cache_lookup_dynamic: None,
+        }
+    }
+}
+
+impl Default for SpeculativeConfig<'static> {
+    fn default() -> Self {
+        Self::none()
+    }
 }
 
 /// The forward test's former hardcoded `FIXTURE_PATH`, kept as the
@@ -528,6 +817,12 @@ pub struct ServingConfig<'model> {
     /// `ExpertResidencySchedule`'s own doc for the one site that
     /// consults it.
     pub expert_residency_schedule: ExpertResidencySchedule,
+    /// llama's `common_params_speculative` (`common/common.h:372-389`). See
+    /// `SpeculativeConfig`'s own doc for the shape and the one narrowing
+    /// from llama's own `Vec<type>`. Consulted by `generate/decode.rs`'s
+    /// speculative branch -- the sole gate for whether speculation runs,
+    /// replacing this crate's former process-env toggle.
+    pub speculative: SpeculativeConfig<'model>,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -544,6 +839,14 @@ impl<'model> ServingConfig<'model> {
         weight_precision: &'model [WeightPrecisionRule<'model>],
     ) -> Self {
         self.weight_precision = weight_precision;
+        self
+    }
+
+    /// Same shape as [`Self::with_weight_precision`], for the speculative
+    /// section.
+    #[must_use]
+    pub const fn with_speculative(mut self, speculative: SpeculativeConfig<'model>) -> Self {
+        self.speculative = speculative;
         self
     }
 }
@@ -634,6 +937,7 @@ impl Default for ServingConfig<'static> {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
+            speculative: SpeculativeConfig::none(),
         }
     }
 }
@@ -827,6 +1131,33 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
             "qwen35moe_layer_window=2 currently requires qwen35moe_persistent_cuts=false because the pair window returns both router roots after one command buffer".into(),
         ));
     }
+
+    let mut unwired_types = String::new();
+    for type_id in config.speculative.speculative_types.iter_priority_order() {
+        if matches!(
+            type_id,
+            SpeculativeType::DraftSimple
+                | SpeculativeType::DraftEagle3
+                | SpeculativeType::DraftMtp
+                | SpeculativeType::DraftDflash
+                | SpeculativeType::DraftDspark
+        ) {
+            if !unwired_types.is_empty() {
+                unwired_types.push(',');
+            }
+            unwired_types.push_str(type_id.llama_name());
+        }
+    }
+    if !unwired_types.is_empty() {
+        return Err(InteropError::UnsupportedServingConfig(format!(
+            "speculative.speculative_types={unwired_types} (--spec-type): draft-model \
+             speculation needs a second GGUF checkpoint's forward path, owned by each named \
+             type's own speculative-<type> sub-spec; only none and the five n-gram types \
+             (ngram-simple, ngram-map-k, ngram-map-k4v, ngram-mod, ngram-cache) run end to end \
+             today"
+        )));
+    }
+
     Ok(())
 }
 
@@ -970,6 +1301,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
+            speculative: SpeculativeConfig::none(),
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -1140,6 +1472,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
+            speculative: SpeculativeConfig::none(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1238,6 +1571,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
+            speculative: SpeculativeConfig::none(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1326,6 +1660,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
+            speculative: SpeculativeConfig::none(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1404,6 +1739,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
+            speculative: SpeculativeConfig::none(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);

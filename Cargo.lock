@@ -4552,6 +4552,7 @@ name = "proxima-model-interop"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "bon",
  "conflaguration",
  "criterion",
  "fastrand",
