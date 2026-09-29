@@ -1436,10 +1436,14 @@ pub(super) fn upload_base_table(
         })
 }
 
-/// One `RoundBatchedReduce` op's own contiguous route-index buffer, output
-/// buffer, and uploaded `RoundBase` offset table --
+/// One `RoundBatchedReduce` op's own contiguous output buffer and uploaded
+/// `RoundBase` offset table --
 /// [`splice_round_batched_reduce_base_table`](crate::msl::splice_round_batched_reduce_base_table)'s
-/// own two-field layout (`route_base`, `output_base`). Unlike
+/// own one-field layout (`output_base`). The routes are NOT part of this
+/// group: each round's route is read straight from its own `MoeTopK`
+/// output buffer through a bound `route_buf_{z}` parameter, because that
+/// buffer is written on the GPU earlier in the same command buffer and so
+/// holds nothing a CPU copy at encode time could read. Unlike
 /// [`ResolvedMergedGroup`], this is resolved FRESH on every
 /// [`ensure_round_group_resolved`] call rather than cached on a `Plan`:
 /// `encode_op` (this struct's one caller) has no `&Plan` to key a cache on
@@ -1449,7 +1453,6 @@ pub(super) fn upload_base_table(
 /// changing this struct's shape.
 #[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) struct ResolvedRoundGroup {
-    pub(super) route_buffer: MetalBuffer,
     pub(super) output_buffer: MetalBuffer,
     pub(super) round_table: MetalBuffer,
     /// Round 0's own output byte length -- every later round's own slot in
@@ -1459,19 +1462,10 @@ pub(super) struct ResolvedRoundGroup {
 }
 
 /// Builds this `RoundBatchedReduce` dispatch's own [`ResolvedRoundGroup`]:
-/// allocates ONE fresh, dedicated route-index buffer sized
-/// `route_member_bytes * round_count` and copies each round's existing
-/// (individually-allocated, `crate::metal::encode_op`'s own `MoeTopK` extra-
-/// output arm) route buffer into its own `z`-th slice -- `round_routes[z]`
-/// is round `z`'s own sibling of round 0's route, admitted by the identical
-/// `Lookup` shape `round_zero_reduce_bound` reuses
-/// (`bind::BoundOpKind::RoundBatchedReduce::round_routes`'s own doc), so
-/// every round's route buffer is the SAME byte length as round 0's --
-/// reading `route_member_bytes` off round 0's own resolved buffer is exact,
-/// not a guess. Also allocates ONE fresh, dedicated output buffer sized
+/// allocates ONE fresh, dedicated output buffer sized
 /// `output_member_bytes * round_count` (round 0's own slot at offset `0`,
 /// matching this op's own `Binding::Output(bound.node)` identity) and
-/// uploads the `RoundBase` table naming every round's own offset into both.
+/// uploads the `RoundBase` table naming every round's own offset into it.
 ///
 /// This device-direct allocation bypasses [`BufferArena`] entirely, the same
 /// "ask the device directly" stance [`ensure_merged_group_resolved`]'s own
@@ -1482,7 +1476,6 @@ pub(super) struct ResolvedRoundGroup {
 pub(super) fn ensure_round_group_resolved(
     device: &ProtocolObject<dyn MTLDevice>,
     bound: &BoundOp,
-    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
 ) -> Result<ResolvedRoundGroup, MetalError> {
     let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &bound.kind else {
         return Err(MetalError::CompileFailed {
@@ -1491,59 +1484,17 @@ pub(super) fn ensure_round_group_resolved(
         });
     };
     let round_count = round_routes.len();
-    let (route_leader_buffer, route_leader_offset) = buffer_for(device_buffers, round_routes[0])?;
-    let route_member_bytes = route_leader_buffer.length();
     let output_member_bytes = bound_output_len(bound) * bound.dtype.size_bytes();
-    let route_buffer = allocate_buffer(
-        device,
-        (route_member_bytes * round_count) / DType::Float32.size_bytes(),
-        DType::Float32,
-    )?;
     let output_buffer = allocate_buffer(
         device,
         (output_member_bytes * round_count) / bound.dtype.size_bytes(),
         bound.dtype,
     )?;
-    // SAFETY: both buffers are freshly allocated with `StorageModeShared`
-    // (CPU- and GPU-visible unified memory on every device this driver
-    // targets), sized for exactly `round_count` non-overlapping
-    // `route_member_bytes` slices above, and every source slice below is a
-    // DISTINCT, already-uploaded device buffer this same call resolved
-    // through `buffer_for` -- no aliasing between source and destination.
-    let destination = route_buffer.contents().as_ptr().cast::<u8>();
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            route_leader_buffer
-                .contents()
-                .as_ptr()
-                .cast::<u8>()
-                .add(route_leader_offset),
-            destination,
-            route_member_bytes,
-        );
-    }
-    let mut offsets: Vec<u64> = Vec::with_capacity(round_count * 2);
-    offsets.push(0);
-    offsets.push(0);
-    for (round, &route_node) in round_routes.iter().enumerate().skip(1) {
-        let (round_route_buffer, round_route_offset) = buffer_for(device_buffers, route_node)?;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                round_route_buffer
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(round_route_offset),
-                destination.add(round * route_member_bytes),
-                route_member_bytes,
-            );
-        }
-        offsets.push((round * route_member_bytes) as u64);
-        offsets.push((round * output_member_bytes) as u64);
-    }
+    let offsets: Vec<u64> = (0..round_count)
+        .map(|round| (round * output_member_bytes) as u64)
+        .collect();
     let round_table = upload_base_table(device, &offsets)?;
     Ok(ResolvedRoundGroup {
-        route_buffer,
         output_buffer,
         round_table,
         output_member_bytes,

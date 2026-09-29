@@ -1281,21 +1281,13 @@ pub(super) fn encode_op(
     // (`splice_round_batched_reduce_base_table`'s own doc), so round 0's own
     // output slot must be THIS group's own buffer at offset `0`, never a
     // caller placement or a bare `bound_output_len(bound)`-sized allocation
-    // sized for round 0 alone. `ensure_round_group_resolved` also OVERWRITES
-    // `device_buffers[round_routes[0]]` so `bind_buffers`' own `Binding::
-    // Indices` lookup for this op binds the group's contiguous route buffer
-    // (offset `0`) instead of round 0's own individually-allocated one --
-    // the spliced kernel's `gather_idx{slot}` parameter must be that
-    // contiguous buffer's base for `round_base.route_base` to address into
-    // it correctly.
+    // sized for round 0 alone. The routes need no such handling: each round's
+    // own route buffer is bound through its own trailing `Binding::Indices`
+    // (`bindings`'s doc), so `bind_buffers` and the hazard walk see them.
     #[cfg(feature = "metal-moe-mul-mat-id")]
     let round_group: Option<ResolvedRoundGroup> =
         if matches!(bound.kind, BoundOpKind::RoundBatchedReduce { .. }) {
-            let group = ensure_round_group_resolved(device, bound, device_buffers)?;
-            if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &bound.kind {
-                device_buffers.insert(round_routes[0], (group.route_buffer.clone(), 0));
-            }
-            Some(group)
+            Some(ensure_round_group_resolved(device, bound)?)
         } else {
             None
         };

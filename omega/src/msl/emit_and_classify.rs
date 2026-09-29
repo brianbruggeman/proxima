@@ -191,8 +191,12 @@ pub(crate) fn round_zero_reduce_bound(resolved: &BoundOp) -> BoundOp {
 /// deliberate difference: a round-batched fold's `k` round siblings share the
 /// SAME weight/activation buffers (`cpu::run_round_batched_reduce`'s own
 /// doc: only the gathered stack operand's route and the output move per
-/// round), so this slices ONLY the gathered route (`gather_idx{slot}`, the
-/// `Binding::Indices` buffer `round_routes[z]` addresses) and `out` --
+/// round), so this moves ONLY the gathered route and `out`: the route by a
+/// `round_gid.z`-switched pick among `round_count` bound `route_buf_{z}`
+/// parameters (the trailing `Binding::Indices` entries [`bindings`] appends,
+/// each written on the GPU by the `MoeTopK` that produced it, so no CPU copy
+/// at encode time can read it), the output by the `RoundBase` table's
+/// `output_base` offset --
 /// slicing the shared operand too would silently read the wrong slice every
 /// round the same way `splice_horizontal_merge_base_table`'s own doc warns
 /// against for ITS shared operand.
@@ -212,8 +216,23 @@ pub(crate) fn splice_round_batched_reduce_base_table(
             expected: "a round-batched reduce with a gathered stack operand",
             found: "no gathered operand",
         })?;
+    let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &resolved.kind else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "a round-batched reduce",
+            found: "another op kind",
+        });
+    };
+    let round_count = round_routes.len();
+    let route_slots_start = kernel.bindings.len().checked_sub(round_count).ok_or(
+        EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "one route binding per round",
+            found: "fewer bindings than rounds",
+        },
+    )?;
     let element_type = type_token(resolved.node, resolved.dtype)?;
-    let struct_decl = "struct RoundBase { ulong route_base; ulong output_base; };\n";
+    let struct_decl = "struct RoundBase { ulong output_base; };\n";
     let signature = format!("kernel void {}(", kernel.entry);
     let signature_start =
         kernel
@@ -272,13 +291,23 @@ pub(crate) fn splice_round_batched_reduce_base_table(
         )
     };
     let round_table_index = kernel.bindings.len();
-    let extra_params =
-        format!(",\n    device const RoundBase* round_table [[buffer({round_table_index})]]");
+    let route_params: String = (0..round_count)
+        .map(|round| {
+            format!(
+                ",\n    device const float* route_buf_{round} [[buffer({})]]",
+                route_slots_start + round
+            )
+        })
+        .collect();
+    let extra_params = format!(
+        ",\n    device const RoundBase* round_table [[buffer({round_table_index})]]{route_params}"
+    );
     let adjusted_body_start = body_start_after_struct + width_delta;
     kernel.source.insert_str(adjusted_body_start, &extra_params);
     let preamble_start = adjusted_body_start + extra_params.len() + 3;
+    let route_switch = round_switch(round_index, round_count);
     let preamble = format!(
-        "{gid_preamble}    RoundBase round_base = round_table[{round_index}];\n    device const float* sliced_route = (device const float*)((device const uchar*)gather_idx{gather_slot} + round_base.route_base);\n    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + round_base.output_base);\n"
+        "{gid_preamble}    RoundBase round_base = round_table[{round_index}];\n{route_switch}    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + round_base.output_base);\n"
     );
     kernel.source.insert_str(preamble_start, &preamble);
     let body_after_preamble = preamble_start + preamble.len();
@@ -291,6 +320,20 @@ pub(crate) fn splice_round_batched_reduce_base_table(
     kernel.source.truncate(body_after_preamble);
     kernel.source.push_str(&tail);
     Ok(())
+}
+
+/// The MSL that picks this round's own route buffer: a `switch` on the round
+/// index over the `route_buf_{round}` parameters, so the kernel reads routes
+/// the GPU wrote earlier in the same command buffer through their own bound
+/// buffers rather than through a CPU-side copy taken at encode time.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn round_switch(round_index: &str, round_count: usize) -> String {
+    let cases: String = (0..round_count)
+        .map(|round| format!("        case {round}: sliced_route = route_buf_{round}; break;\n"))
+        .collect();
+    format!(
+        "    device const float* sliced_route;\n    switch ({round_index}) {{\n{cases}        default: sliced_route = route_buf_0; break;\n    }}\n"
+    )
 }
 
 /// [`bind::BoundOpKind::RoundBatchedReduce::round_count`], widened to `u64`
@@ -1967,6 +2010,9 @@ pub(super) fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings.push(Binding::Uniforms);
     if gather_count(resolved) > 0 {
         bindings.push(Binding::Fault);
+    }
+    if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &resolved.kind {
+        bindings.extend(round_routes.iter().map(|route| Binding::Indices(*route)));
     }
     bindings
 }
