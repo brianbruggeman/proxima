@@ -965,9 +965,9 @@ fn multi_row_generic_arm_current(
     Some((block, codec))
 }
 
-/// admission for `PROXIMA_MULTI_ROW_UNROLL=1`: changes only the generic
-/// arm's body text (literal `q`/`s` indices instead of a dynamic loop),
-/// never dispatch geometry.
+/// admission for `PROXIMA_MULTI_ROW_UNROLL` (default on): changes only the
+/// generic arm's body text (literal `q`/`s` indices instead of a dynamic
+/// loop), never dispatch geometry.
 pub(super) fn multi_row_unroll_active(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -977,8 +977,9 @@ pub(super) fn multi_row_unroll_active(
         && multi_row_unroll_override()
 }
 
-/// admission for `PROXIMA_MULTI_ROW_INDEX32=1`: narrows `weight_base[q] + k`
-/// to `uint` so the weight decode's block/nibble division is 32-bit.
+/// admission for `PROXIMA_MULTI_ROW_INDEX32` (default on): narrows
+/// `weight_base[q] + k` to `uint` so the weight decode's block/nibble
+/// division is 32-bit.
 /// fit proof: `Σ(extent-1)×stride` plus `k`'s max bounds the narrowed value
 /// via `checked_mul`/`checked_add`, rejecting overflow and negative strides.
 /// alignment contract: `operand_base` must be a whole number of blocks.

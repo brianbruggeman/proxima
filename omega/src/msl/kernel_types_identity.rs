@@ -2157,13 +2157,16 @@ pub(super) const fn tiled_gemm_grid2d_override() -> bool {
     false
 }
 
-/// `PROXIMA_MULTI_ROW_UNROLL=1` A/B switch: literal indices let the `sumf`
+/// `PROXIMA_MULTI_ROW_UNROLL` A/B switch: literal indices let the `sumf`
 /// accumulator promote out of private memory instead of surviving as a
-/// dynamically-indexed array. Default off; unset, empty, or any value other
-/// than `"1"` keeps today's dynamic-loop emit.
+/// dynamically-indexed array. Default ON as of `docs/model-interop/
+/// discipline.md` (bit-identical by construction; measured 599-token
+/// prefill first-token 74.8 -> 9.75 s, decode 17.9 -> 16.9 ms) -- unset
+/// keeps the literal-index emit; only explicit `"0"` falls back to today's
+/// dynamically-indexed loop.
 #[cfg(feature = "std")]
 pub(super) fn multi_row_unroll_override() -> bool {
-    let active = matches!(std::env::var("PROXIMA_MULTI_ROW_UNROLL"), Ok(value) if value.trim() == "1");
+    let active = !matches!(std::env::var("PROXIMA_MULTI_ROW_UNROLL"), Ok(value) if value.trim() == "0");
     log_multi_row_unroll_once(active);
     active
 }
@@ -2191,16 +2194,20 @@ fn log_multi_row_unroll_once(_active: bool) {}
 
 #[cfg(not(feature = "std"))]
 pub(super) const fn multi_row_unroll_override() -> bool {
-    false
+    true
 }
 
-/// `PROXIMA_MULTI_ROW_INDEX32=1` A/B switch: emulates the k loop's 64-bit
+/// `PROXIMA_MULTI_ROW_INDEX32` A/B switch: emulates the k loop's 64-bit
 /// div/rem in `uint`, bit-exact when `weight_base + k` and the block-index
-/// arithmetic stay within `u32`. Default off; unset, empty, or any value
-/// other than `"1"` keeps today's `long`-indexed emit.
+/// arithmetic stay within `u32` (the checked-fit fallback still applies
+/// today's `long`-indexed emit whenever that proof fails, regardless of this
+/// switch). Default ON as of `docs/model-interop/discipline.md` (bit-identical
+/// by construction; measured alongside `PROXIMA_MULTI_ROW_UNROLL`) -- unset
+/// keeps the narrowed-index emit for shapes that fit; only explicit `"0"`
+/// falls back to today's `long`-indexed emit unconditionally.
 #[cfg(feature = "std")]
 pub(super) fn multi_row_index32_override() -> bool {
-    let active = matches!(std::env::var("PROXIMA_MULTI_ROW_INDEX32"), Ok(value) if value.trim() == "1");
+    let active = !matches!(std::env::var("PROXIMA_MULTI_ROW_INDEX32"), Ok(value) if value.trim() == "0");
     log_multi_row_index32_once(active);
     active
 }
@@ -2228,16 +2235,19 @@ fn log_multi_row_index32_once(_active: bool) {}
 
 #[cfg(not(feature = "std"))]
 pub(super) const fn multi_row_index32_override() -> bool {
-    false
+    true
 }
 
-/// `PROXIMA_COORD_INDEX32=1` A/B switch: narrows the coordinate
+/// `PROXIMA_COORD_INDEX32` A/B switch: narrows the coordinate
 /// decomposition's divisors to `uint` only when every output extent fits
-/// `u32`. Default off; unset, empty, or any value other than `"1"` keeps
-/// today's `long`-decomposed emit.
+/// `u32` (the checked-fit fallback still applies today's `long`-decomposed
+/// emit whenever that proof fails, regardless of this switch). Default ON as
+/// of `docs/model-interop/discipline.md` (bit-identical by construction) --
+/// unset keeps the narrowed-index emit for shapes that fit; only explicit
+/// `"0"` falls back to today's `long`-decomposed emit unconditionally.
 #[cfg(feature = "std")]
 pub(super) fn coord_index32_override() -> bool {
-    let active = matches!(std::env::var("PROXIMA_COORD_INDEX32"), Ok(value) if value.trim() == "1");
+    let active = !matches!(std::env::var("PROXIMA_COORD_INDEX32"), Ok(value) if value.trim() == "0");
     log_coord_index32_once(active);
     active
 }
@@ -2265,7 +2275,7 @@ fn log_coord_index32_once(_active: bool) {}
 
 #[cfg(not(feature = "std"))]
 pub(super) const fn coord_index32_override() -> bool {
-    false
+    true
 }
 
 /// `PROXIMA_REDUCTION_LITERAL` A/B/C switch, admitted only when the

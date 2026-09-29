@@ -175,7 +175,13 @@ fn up_geglu_program() -> (Vec<Op>, NodeId) {
 type EnvVar = (&'static str, Option<&'static str>);
 
 const ARMS: &[(&str, &[EnvVar])] = &[
-    ("current", &[]),
+    (
+        "current",
+        &[
+            ("PROXIMA_MULTI_ROW_UNROLL", Some("0")),
+            ("PROXIMA_MULTI_ROW_INDEX32", Some("0")),
+        ],
+    ),
     ("unroll", &[("PROXIMA_MULTI_ROW_UNROLL", Some("1"))]),
     ("index32", &[("PROXIMA_MULTI_ROW_INDEX32", Some("1"))]),
     (

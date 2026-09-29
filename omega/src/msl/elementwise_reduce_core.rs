@@ -1548,7 +1548,8 @@ pub(super) fn push_packed_row_multi_row_q4_0_body(
 }
 
 /// [`push_packed_row_multi_row_body`]'s generic (`else`) arm, gated by
-/// `PROXIMA_MULTI_ROW_UNROLL=1` (`multi_row_unroll_override`): renders the
+/// `PROXIMA_MULTI_ROW_UNROLL` (`multi_row_unroll_override`, default on):
+/// renders the
 /// same per-`k` body with `q`/`s` fully unrolled to literal integers instead
 /// of loop induction variables, so `sumf`/`weight_base`/`other_base` promote
 /// out of private memory. Never reached when the weight is gathered (the
