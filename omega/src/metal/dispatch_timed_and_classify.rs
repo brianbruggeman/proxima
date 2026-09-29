@@ -84,8 +84,7 @@ pub(super) fn execute_op_timed(
         .iter()
         .find_map(|(source, _, _)| packed_operands.get(source).copied());
 
-    let command_buffer = queue
-        .commandBuffer()
+    let command_buffer = new_labeled_command_buffer(queue, "omega.single.execute_op_timed")
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
@@ -111,7 +110,20 @@ pub(super) fn execute_op_timed(
         expert_buffers,
     )?;
     encoder.finish();
-    commit_and_wait(&command_buffer)?;
+    // one `BoundOp` encoded, this call's whole reason for existing -- the
+    // diagnostics name it directly rather than falling through to the
+    // untracked `BufferDiagnostics::single` shape.
+    commit_and_wait(
+        &command_buffer,
+        BufferDiagnostics {
+            chunk_index: 0,
+            chunk_count: 1,
+            dispatch_count: 1,
+            first_op_label: bound.kind.name(),
+            last_op_label: bound.kind.name(),
+            encoder_status_requested: encoder_error_status_requested(),
+        },
+    )?;
     let gpu_ns =
         ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
     if let Some((fault_buffer, gathers)) = fault {
@@ -882,11 +894,13 @@ pub fn execute_plan_with_placements_dispatch_timed(
             log: format!("failed to allocate a counter sample buffer: {error}"),
         })?;
 
-    let command_buffer = queue
-        .commandBuffer()
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command queue refused to hand out a command buffer".to_string(),
-        })?;
+    let command_buffer = new_labeled_command_buffer(
+        &queue,
+        "omega.single.execute_plan_with_placements_dispatch_timed",
+    )
+    .ok_or_else(|| MetalError::CompileFailed {
+        log: "command queue refused to hand out a command buffer".to_string(),
+    })?;
 
     let shared_encoder = if dispatch_boundary {
         Some(EncoderGuard::new(
@@ -1167,7 +1181,23 @@ pub fn execute_plan_with_placements_dispatch_timed(
     // `cpu_gpu_end` bracket this function already takes for its own
     // nanosecond calibration, just also fed to the shared counter.
     let gpu_exec_started = read_ticks();
-    commit_and_wait(&command_buffer)?;
+    // whole-program single buffer, split or not -- every position the loop
+    // above walked is `prepared.resolved`, so the diagnostics name the real
+    // op range this call encoded rather than the untracked `single()` shape.
+    commit_and_wait(
+        &command_buffer,
+        BufferDiagnostics {
+            chunk_index: 0,
+            chunk_count: 1,
+            dispatch_count: prepared.resolved.len() as u32,
+            first_op_label: resolved_op_label(&prepared.resolved, 0),
+            last_op_label: resolved_op_label(
+                &prepared.resolved,
+                prepared.resolved.len().saturating_sub(1),
+            ),
+            encoder_status_requested: encoder_error_status_requested(),
+        },
+    )?;
     counter!(GPU_EXEC_CALLS, 1);
     counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
     let cpu_gpu_end = sample_timestamps(&device);

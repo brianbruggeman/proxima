@@ -185,6 +185,22 @@ fn command_buffer_chunk_boundaries(total_ops: usize, chunk_count: usize) -> Vec<
     boundaries
 }
 
+/// The one place `BufferDiagnostics::first_op_label`/`last_op_label` are
+/// resolved -- a plain index (never a panic) into `resolved`, so a bound
+/// out of range (only reachable if `total_ops == 0`, an empty plan) reports
+/// `"empty-plan"` instead of indexing past the slice. `pub(super)`: every
+/// unchunked single-buffer call site in this module's sibling files
+/// (`execute_and_hazards`, `dispatch_timed_and_classify`,
+/// `placements_execute_named`'s own `execute_plan_timed`) builds its
+/// `BufferDiagnostics` from this same resolver, so a chunk-index-tracked
+/// commit and a whole-program single-buffer commit never disagree on how an
+/// op label is read out of `resolved`.
+pub(super) fn resolved_op_label(resolved: &[BoundOp], position: usize) -> &'static str {
+    resolved
+        .get(position)
+        .map_or("empty-plan", |bound| bound.kind.name())
+}
+
 /// `PROXIMA_CHUNK_AUDIT=1` (OWNER_BRIEF_chunked_submission_audit): a per-thread
 /// record of every CPU-side write into a Metal buffer's contents and every
 /// dispatch's bound ranges, tagged with which K-chunk each belongs to --
@@ -630,11 +646,24 @@ pub(super) fn execute_plan_with_placements_inner(
     // non-error status before any output is read back, not only the last.
     let mut chunk_status_buffers = plan.chunk_status_buffers.borrow_mut();
     chunk_status_buffers.clear();
-    let mut command_buffer = queue
-        .commandBuffer()
+    // parallel to `chunk_status_buffers` -- `check_all_command_buffers`
+    // zips the two, so every push into one below is paired with a push
+    // here, INCLUDING the diagnostic substitute-blit branches (their own
+    // `BufferDiagnostics` are coarser, but a missing entry would silently
+    // stop `check_all_command_buffers` short of the end of the vector,
+    // exactly the "not every buffer gets checked" failure this whole
+    // module exists to rule out).
+    let mut chunk_status_diagnostics: Vec<BufferDiagnostics> = Vec::new();
+    // `omega.chunk.<n>` label sequence -- bumped once per command buffer
+    // THIS call creates (chunk boundaries and the diagnostic blit path
+    // alike), independent of `next_boundary`/`chunk_count` so a substitute
+    // blit's extra buffer still gets its own distinct label.
+    let mut chunk_label_sequence: usize = 0;
+    let mut command_buffer = new_labeled_command_buffer(&queue, "omega.chunk.0")
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
+    chunk_label_sequence += 1;
     // `Concurrent` lets independent dispatches (e.g. Q/K/V from one normed
     // input) overlap instead of draining the pipeline between every op --
     // see [`DispatchType`]'s own doc for why that requires [`HazardTracker`]
@@ -737,6 +766,13 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let mut substitutions_applied: u64 = 0;
     let mut next_boundary = 0usize;
+    // always-on (not `instrument`-gated) chunk bookkeeping for
+    // `BufferDiagnostics` -- three `Copy` scalars, reset at every chunk
+    // boundary. `chunk_op_count` counts `encode_op` invocations, per
+    // `BufferDiagnostics::dispatch_count`'s own doc on what "dispatch"
+    // means here.
+    let mut chunk_first_op = 0usize;
+    let mut chunk_op_count: u32 = 0;
     #[cfg(feature = "instrument")]
     let mut first_command_buffer: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = None;
     #[cfg(feature = "instrument")]
@@ -807,11 +843,11 @@ pub(super) fn execute_plan_with_placements_inner(
     for (position, bound) in prepared.resolved.iter().enumerate() {
         if next_boundary < chunk_boundaries.len() && chunk_boundaries[next_boundary] == position {
             let new_command_buffer =
-                queue
-                    .commandBuffer()
+                new_labeled_command_buffer(&queue, &format!("omega.chunk.{chunk_label_sequence}"))
                     .ok_or_else(|| MetalError::CompileFailed {
                         log: "command queue refused to hand out a command buffer".to_string(),
                     })?;
+            chunk_label_sequence += 1;
             let new_encoder = EncoderGuard::new(
                 new_command_buffer
                     .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
@@ -827,6 +863,16 @@ pub(super) fn execute_plan_with_placements_inner(
             let closing_command_buffer =
                 core::mem::replace(&mut command_buffer, new_command_buffer);
             chunk_status_buffers.push(closing_command_buffer.clone());
+            chunk_status_diagnostics.push(BufferDiagnostics {
+                chunk_index: chunk_status_diagnostics.len(),
+                chunk_count,
+                dispatch_count: chunk_op_count,
+                first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
+                last_op_label: resolved_op_label(&prepared.resolved, position.saturating_sub(1)),
+                encoder_status_requested: encoder_error_status_requested(),
+            });
+            chunk_first_op = position;
+            chunk_op_count = 0;
             closing_encoder.finish();
             #[cfg(feature = "instrument")]
             let closing_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
@@ -982,11 +1028,15 @@ pub(super) fn execute_plan_with_placements_inner(
                     Some((buffer, offset)) => (buffer.clone(), offset),
                     None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
                 };
-                let blit_command_buffer =
-                    queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-                        log: "command queue refused to hand out a command buffer for the blit"
-                            .to_string(),
-                    })?;
+                let blit_command_buffer = new_labeled_command_buffer(
+                    &queue,
+                    &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
+                )
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command queue refused to hand out a command buffer for the blit"
+                        .to_string(),
+                })?;
+                chunk_label_sequence += 1;
                 let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
                     MetalError::CompileFailed {
                         log: "command buffer refused to hand out a blit encoder".to_string(),
@@ -1002,10 +1052,14 @@ pub(super) fn execute_plan_with_placements_inner(
                     );
                 }
                 blit.endEncoding();
-                let continuation_command_buffer =
-                    queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-                        log: "command queue refused to hand out a command buffer".to_string(),
-                    })?;
+                let continuation_command_buffer = new_labeled_command_buffer(
+                    &queue,
+                    &format!("omega.chunk.{chunk_label_sequence}"),
+                )
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command queue refused to hand out a command buffer".to_string(),
+                })?;
+                chunk_label_sequence += 1;
                 let continuation_encoder = EncoderGuard::new(
                     continuation_command_buffer
                         .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
@@ -1019,7 +1073,28 @@ pub(super) fn execute_plan_with_placements_inner(
                     core::mem::replace(&mut command_buffer, continuation_command_buffer);
                 closing_encoder.finish();
                 chunk_status_buffers.push(closing_command_buffer.clone());
+                chunk_status_diagnostics.push(BufferDiagnostics {
+                    chunk_index: chunk_status_diagnostics.len(),
+                    chunk_count,
+                    dispatch_count: chunk_op_count,
+                    first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
+                    last_op_label: resolved_op_label(
+                        &prepared.resolved,
+                        position.saturating_sub(1).max(chunk_first_op),
+                    ),
+                    encoder_status_requested: encoder_error_status_requested(),
+                });
                 chunk_status_buffers.push(blit_command_buffer.clone());
+                chunk_status_diagnostics.push(BufferDiagnostics {
+                    chunk_index: chunk_status_diagnostics.len(),
+                    chunk_count,
+                    dispatch_count: 0,
+                    first_op_label: "substitute-blit",
+                    last_op_label: "substitute-blit",
+                    encoder_status_requested: encoder_error_status_requested(),
+                });
+                chunk_first_op = position + 1;
+                chunk_op_count = 0;
                 closing_command_buffer.commit();
                 blit_command_buffer.commit();
                 device_buffers.insert(bound.node, (dest_buffer, dest_offset));
@@ -1348,6 +1423,7 @@ pub(super) fn execute_plan_with_placements_inner(
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
             }
+            chunk_op_count += 1;
             // blit-after-kernel: the real kernel already ran above; this
             // blits the identical captured bytes on top of what it wrote,
             // isolating the blit's own cost from "no kernel at all".
@@ -1358,11 +1434,15 @@ pub(super) fn execute_plan_with_placements_inner(
                     device_buffers.get(&bound.node).cloned(),
                 )
             {
-                    let blit_command_buffer =
-                        queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-                            log: "command queue refused to hand out a command buffer for the blit"
-                                .to_string(),
-                        })?;
+                    let blit_command_buffer = new_labeled_command_buffer(
+                        &queue,
+                        &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
+                    )
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "command queue refused to hand out a command buffer for the blit"
+                            .to_string(),
+                    })?;
+                    chunk_label_sequence += 1;
                     let blit = blit_command_buffer.blitCommandEncoder().ok_or_else(|| {
                         MetalError::CompileFailed {
                             log: "command buffer refused to hand out a blit encoder".to_string(),
@@ -1378,10 +1458,14 @@ pub(super) fn execute_plan_with_placements_inner(
                         );
                     }
                     blit.endEncoding();
-                    let continuation_command_buffer =
-                        queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
-                            log: "command queue refused to hand out a command buffer".to_string(),
-                        })?;
+                    let continuation_command_buffer = new_labeled_command_buffer(
+                        &queue,
+                        &format!("omega.chunk.{chunk_label_sequence}"),
+                    )
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "command queue refused to hand out a command buffer".to_string(),
+                    })?;
+                    chunk_label_sequence += 1;
                     let continuation_encoder = EncoderGuard::new(
                         continuation_command_buffer
                             .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
@@ -1395,7 +1479,25 @@ pub(super) fn execute_plan_with_placements_inner(
                         core::mem::replace(&mut command_buffer, continuation_command_buffer);
                     closing_encoder.finish();
                     chunk_status_buffers.push(closing_command_buffer.clone());
+                    chunk_status_diagnostics.push(BufferDiagnostics {
+                        chunk_index: chunk_status_diagnostics.len(),
+                        chunk_count,
+                        dispatch_count: chunk_op_count,
+                        first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
+                        last_op_label: resolved_op_label(&prepared.resolved, position),
+                        encoder_status_requested: encoder_error_status_requested(),
+                    });
                     chunk_status_buffers.push(blit_command_buffer.clone());
+                    chunk_status_diagnostics.push(BufferDiagnostics {
+                        chunk_index: chunk_status_diagnostics.len(),
+                        chunk_count,
+                        dispatch_count: 0,
+                        first_op_label: "substitute-blit",
+                        last_op_label: "substitute-blit",
+                        encoder_status_requested: encoder_error_status_requested(),
+                    });
+                    chunk_first_op = position + 1;
+                    chunk_op_count = 0;
                     closing_command_buffer.commit();
                     blit_command_buffer.commit();
                     substitutions_applied += 1;
@@ -1453,6 +1555,14 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let last_chunk_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
     chunk_status_buffers.push(command_buffer.clone());
+    chunk_status_diagnostics.push(BufferDiagnostics {
+        chunk_index: chunk_status_diagnostics.len(),
+        chunk_count,
+        dispatch_count: chunk_op_count,
+        first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
+        last_op_label: resolved_op_label(&prepared.resolved, total_ops.saturating_sub(1)),
+        encoder_status_requested: encoder_error_status_requested(),
+    });
     #[cfg(feature = "instrument")]
     chunk_command_buffers.push(command_buffer.clone());
     // "encode time elapsed after the first commit" (OWNER_BRIEF_structural_
@@ -1487,7 +1597,7 @@ pub(super) fn execute_plan_with_placements_inner(
     // checks EVERY command buffer this call committed, not only the last --
     // see `Plan::chunk_status_buffers`'s own doc for why one wait already
     // proves every earlier entry has a terminal status too.
-    check_all_command_buffers(&chunk_status_buffers)?;
+    check_all_command_buffers(&chunk_status_buffers, &chunk_status_diagnostics)?;
     // `PROXIMA_CAPTURE_DUMP_DIR`: the step's own final wait already proves
     // every chunk (including one whose boundary this step never crossed,
     // e.g. the captured node was the plan's very last op) has completed --
@@ -1884,8 +1994,7 @@ pub fn execute_plan_timed(
         device_buffers.insert(*node, buffer);
     }
 
-    let command_buffer = queue
-        .commandBuffer()
+    let command_buffer = new_labeled_command_buffer(&queue, "omega.single.execute_plan_timed")
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
@@ -1922,7 +2031,24 @@ pub fn execute_plan_timed(
     }
     encoder.finish();
 
-    commit_and_wait(&command_buffer)?;
+    // whole-program single buffer, same shape `execute_plan_inner` commits --
+    // every position this loop just encoded is `resolved`, so the diagnostics
+    // cover it exactly the same way a chunked commit's own
+    // `BufferDiagnostics` do, not the untracked `single()` fallback.
+    commit_and_wait(
+        &command_buffer,
+        BufferDiagnostics {
+            chunk_index: 0,
+            chunk_count: 1,
+            dispatch_count: prepared.resolved.len() as u32,
+            first_op_label: resolved_op_label(&prepared.resolved, 0),
+            last_op_label: resolved_op_label(
+                &prepared.resolved,
+                prepared.resolved.len().saturating_sub(1),
+            ),
+            encoder_status_requested: encoder_error_status_requested(),
+        },
+    )?;
     let gpu_ns =
         ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
 

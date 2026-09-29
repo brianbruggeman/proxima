@@ -224,8 +224,7 @@ pub(super) fn execute_plan_inner(
     #[cfg(feature = "instrument")]
     counter!(BLOCK_UPLOAD_TICKS, elapsed_ticks(block_upload_started));
 
-    let command_buffer = queue
-        .commandBuffer()
+    let command_buffer = new_labeled_command_buffer(&queue, "omega.single.execute_plan_inner")
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
@@ -425,7 +424,24 @@ pub(super) fn execute_plan_inner(
 
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
-    commit_and_wait(&command_buffer)?;
+    // whole-program single buffer -- `prepared.resolved` is exactly what the
+    // loop above encoded, position for position, so the diagnostics carry
+    // the real dispatch count and op-label range instead of the untracked
+    // `BufferDiagnostics::single` shape a bare `commit_and_wait` would report.
+    commit_and_wait(
+        &command_buffer,
+        BufferDiagnostics {
+            chunk_index: 0,
+            chunk_count: 1,
+            dispatch_count: prepared.resolved.len() as u32,
+            first_op_label: resolved_op_label(&prepared.resolved, 0),
+            last_op_label: resolved_op_label(
+                &prepared.resolved,
+                prepared.resolved.len().saturating_sub(1),
+            ),
+            encoder_status_requested: encoder_error_status_requested(),
+        },
+    )?;
     #[cfg(feature = "instrument")]
     {
         counter!(GPU_EXEC_CALLS, 1);
