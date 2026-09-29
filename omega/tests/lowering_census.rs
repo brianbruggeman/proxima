@@ -111,9 +111,17 @@ const WEIGHT_FAMILIES: &[WeightFamily] = &[
 /// which every M=1 cell here does. Only `Q3_K` (not one of the three the
 /// ggml port covers) still emits its own `q3k_pair_dot(blk`; `WEIGHT_FAMILIES`
 /// never assigns it, so this only needs the two ggml-port markers.
+///
+/// `metal-q4k-split-k` switches the ggml port off (`use_ggml_port` requires
+/// `!cfg!(feature = "metal-q4k-split-k")`), so those three codecs fall to
+/// their named pair-dot arms.
 fn codec_marker(codec: Codec) -> &'static str {
+    let split_k = cfg!(feature = "metal-q4k-split-k");
     match codec {
         Codec::Q3K => "q3k_pair_dot(blk",
+        Codec::Q4K if split_k => "q4k_pair_dot(blk",
+        Codec::Q5K if split_k => "q5k_pair_dot(blk",
+        Codec::Q6K if split_k => "q6k_pair_dot(blk",
         Codec::Q4K | Codec::Q5K => "acc1_0",
         Codec::Q6K => "sums0",
         Codec::Q2K

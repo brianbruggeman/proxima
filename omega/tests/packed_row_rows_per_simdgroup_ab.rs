@@ -123,11 +123,35 @@ fn assert_rows4_and_rows8_bit_exact(k: usize, rows: usize, seed: u64) {
         rows,
         "degenerate gate: K={k} rows={rows} baseline produced the wrong element count"
     );
+    assert_same_accumulation(k, rows, &baseline, &widened);
+}
+
+#[cfg(not(feature = "metal-q4k-split-k"))]
+fn assert_same_accumulation(k: usize, rows: usize, baseline: &[u32], widened: &[u32]) {
     assert_eq!(
         baseline, widened,
         "K={k} rows={rows}: PROXIMA_PACKED_ROWS=8 produced different bits than the rows=4 \
          default -- widening rows-per-simdgroup must not reorder any row's accumulation"
     );
+}
+
+/// Under split-k the K-axis partition is `TARGET_SIMDGROUPS / (rows /
+/// rows_per_group)` simdgroups wide, so changing rows-per-group changes the
+/// split factor (K=6144, rows=1536: 2048/384 = 5 at rows=4, 2048/192 clamped
+/// to 8 at rows=8) and with it the order a row's partial sums combine in.
+/// The contract there is agreement to reassociation error, not identical bits.
+#[cfg(feature = "metal-q4k-split-k")]
+fn assert_same_accumulation(k: usize, rows: usize, baseline: &[u32], widened: &[u32]) {
+    const RELATIVE_TOLERANCE: f32 = 1e-5;
+    for (index, (&want_bits, &got_bits)) in baseline.iter().zip(widened).enumerate() {
+        let (want, got) = (f32::from_bits(want_bits), f32::from_bits(got_bits));
+        let allowed = RELATIVE_TOLERANCE * want.abs().max(got.abs()).max(1.0);
+        assert!(
+            (want - got).abs() <= allowed,
+            "K={k} rows={rows} element {index}: rows=4 gave {want}, rows=8 gave {got}, beyond \
+             the {RELATIVE_TOLERANCE} reassociation tolerance"
+        );
+    }
 }
 
 #[test]
