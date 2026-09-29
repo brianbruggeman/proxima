@@ -51,6 +51,18 @@ pub(crate) fn dispatch_type_from_env() -> omega::DispatchType {
 /// existed, set swaps in a different host-local gguf checkout (a
 /// different quantization variant, most often) without touching
 /// `ServingConfig` or any non-test source.
+/// `PROXIMA_GEMMA4_E2B_GGUF` read the way [`openchat_gguf_path`] reads
+/// `PROXIMA_OPENCHAT_GGUF`: unset keeps every caller pointed at the ollama blob
+/// for gemma4-E2B on this host.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub(crate) fn gemma4_e2b_gguf_path() -> String {
+    std::env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| {
+        String::from(
+            "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+        )
+    })
+}
+
 pub(crate) fn openchat_gguf_path() -> String {
     std::env::var("PROXIMA_OPENCHAT_GGUF").unwrap_or_else(|_| {
         crate::serving::ServingConfig::default()
