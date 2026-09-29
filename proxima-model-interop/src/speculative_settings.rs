@@ -251,15 +251,15 @@ fn parse_speculative_type_set(
 /// data separately from the no_std-safe, `Copy` struct
 /// [`crate::ServingConfig::speculative`] actually reads at decode time.
 #[derive(Debug, Clone, PartialEq, Builder, Deserialize, Serialize, Settings, Validate)]
-#[settings(prefix = "SPECULATIVE")]
+#[settings(prefix = "PROXIMA_SPECULATIVE")]
 #[builder(derive(Clone, Debug))]
 pub struct SpeculativeSettings {
     /// llama's `types` -- see [`crate::SpeculativeConfig::speculative_types`]'s
     /// own doc for the set semantics this mirrors. Defaults to `ngram-simple`
     /// (speculation on); `none` -- builder `SpeculativeTypeNameSet::empty()`,
-    /// TOML `speculative_types = "none"`, env `SPECULATIVE_SPECULATIVE_TYPES=none`
+    /// TOML `speculative_types = "none"`, env `PROXIMA_SPECULATIVE_TYPES=none`
     /// -- turns it off.
-    #[setting(resolve_with = "parse_speculative_type_set", default_str = "ngram-simple")]
+    #[setting(resolve_with = "parse_speculative_type_set", default_str = "ngram-simple", envs = ["PROXIMA_SPECULATIVE_TYPES"], override)]
     #[builder(default = SpeculativeTypeNameSet::ngram_simple())]
     pub speculative_types: SpeculativeTypeNameSet,
 
@@ -440,10 +440,10 @@ mod tests {
 
         temp_env::with_vars(
             [
-                ("SPECULATIVE_SPECULATIVE_TYPES", Some("ngram-simple,ngram-map-k")),
-                ("SPECULATIVE_NGRAM_SIMPLE_SIZE_N", Some("16")),
-                ("SPECULATIVE_NGRAM_SIMPLE_SIZE_M", Some("32")),
-                ("SPECULATIVE_NGRAM_SIMPLE_MIN_HITS", Some("2")),
+                ("PROXIMA_SPECULATIVE_TYPES", Some("ngram-simple,ngram-map-k")),
+                ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_N", Some("16")),
+                ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_M", Some("32")),
+                ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_MIN_HITS", Some("2")),
             ],
             || {
                 let via_env = SpeculativeSettings::from_env()
@@ -460,22 +460,22 @@ mod tests {
     fn default_speculative_settings_enable_ngram_simple_with_llama_defaults() {
         temp_env::with_vars(
             [
-                ("SPECULATIVE_SPECULATIVE_TYPES", None::<&str>),
-                ("SPECULATIVE_N_MAX", None::<&str>),
-                ("SPECULATIVE_N_MIN", None::<&str>),
-                ("SPECULATIVE_P_MIN", None::<&str>),
-                ("SPECULATIVE_NGRAM_SIMPLE_SIZE_N", None::<&str>),
-                ("SPECULATIVE_NGRAM_SIMPLE_SIZE_M", None::<&str>),
-                ("SPECULATIVE_NGRAM_SIMPLE_MIN_HITS", None::<&str>),
-                ("SPECULATIVE_NGRAM_MAP_K_SIZE_N", None::<&str>),
-                ("SPECULATIVE_NGRAM_MAP_K_SIZE_M", None::<&str>),
-                ("SPECULATIVE_NGRAM_MAP_K_MIN_HITS", None::<&str>),
-                ("SPECULATIVE_NGRAM_MAP_K4V_SIZE_N", None::<&str>),
-                ("SPECULATIVE_NGRAM_MAP_K4V_SIZE_M", None::<&str>),
-                ("SPECULATIVE_NGRAM_MAP_K4V_MIN_HITS", None::<&str>),
-                ("SPECULATIVE_NGRAM_MOD_N_MATCH", None::<&str>),
-                ("SPECULATIVE_NGRAM_MOD_N_MAX", None::<&str>),
-                ("SPECULATIVE_NGRAM_MOD_N_MIN", None::<&str>),
+                ("PROXIMA_SPECULATIVE_TYPES", None::<&str>),
+                ("PROXIMA_SPECULATIVE_N_MAX", None::<&str>),
+                ("PROXIMA_SPECULATIVE_N_MIN", None::<&str>),
+                ("PROXIMA_SPECULATIVE_P_MIN", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_N", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_M", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_MIN_HITS", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MAP_K_SIZE_N", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MAP_K_SIZE_M", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MAP_K_MIN_HITS", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_SIZE_N", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_SIZE_M", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_MIN_HITS", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MOD_N_MATCH", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MOD_N_MAX", None::<&str>),
+                ("PROXIMA_SPECULATIVE_NGRAM_MOD_N_MIN", None::<&str>),
             ],
             || {
                 let settings = SpeculativeSettings::from_env()
@@ -498,29 +498,29 @@ mod tests {
     }
 
     const SPECULATIVE_ENV_KEYS: [&str; 16] = [
-        "SPECULATIVE_SPECULATIVE_TYPES",
-        "SPECULATIVE_N_MAX",
-        "SPECULATIVE_N_MIN",
-        "SPECULATIVE_P_MIN",
-        "SPECULATIVE_NGRAM_SIMPLE_SIZE_N",
-        "SPECULATIVE_NGRAM_SIMPLE_SIZE_M",
-        "SPECULATIVE_NGRAM_SIMPLE_MIN_HITS",
-        "SPECULATIVE_NGRAM_MAP_K_SIZE_N",
-        "SPECULATIVE_NGRAM_MAP_K_SIZE_M",
-        "SPECULATIVE_NGRAM_MAP_K_MIN_HITS",
-        "SPECULATIVE_NGRAM_MAP_K4V_SIZE_N",
-        "SPECULATIVE_NGRAM_MAP_K4V_SIZE_M",
-        "SPECULATIVE_NGRAM_MAP_K4V_MIN_HITS",
-        "SPECULATIVE_NGRAM_MOD_N_MATCH",
-        "SPECULATIVE_NGRAM_MOD_N_MAX",
-        "SPECULATIVE_NGRAM_MOD_N_MIN",
+        "PROXIMA_SPECULATIVE_TYPES",
+        "PROXIMA_SPECULATIVE_N_MAX",
+        "PROXIMA_SPECULATIVE_N_MIN",
+        "PROXIMA_SPECULATIVE_P_MIN",
+        "PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_N",
+        "PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_M",
+        "PROXIMA_SPECULATIVE_NGRAM_SIMPLE_MIN_HITS",
+        "PROXIMA_SPECULATIVE_NGRAM_MAP_K_SIZE_N",
+        "PROXIMA_SPECULATIVE_NGRAM_MAP_K_SIZE_M",
+        "PROXIMA_SPECULATIVE_NGRAM_MAP_K_MIN_HITS",
+        "PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_SIZE_N",
+        "PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_SIZE_M",
+        "PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_MIN_HITS",
+        "PROXIMA_SPECULATIVE_NGRAM_MOD_N_MATCH",
+        "PROXIMA_SPECULATIVE_NGRAM_MOD_N_MAX",
+        "PROXIMA_SPECULATIVE_NGRAM_MOD_N_MIN",
     ];
 
     fn env_with_types(types: Option<&'static str>) -> Vec<(&'static str, Option<&'static str>)> {
         SPECULATIVE_ENV_KEYS
             .into_iter()
             .map(|key| {
-                if key == "SPECULATIVE_SPECULATIVE_TYPES" {
+                if key == "PROXIMA_SPECULATIVE_TYPES" {
                     (key, types)
                 } else {
                     (key, None)
@@ -629,6 +629,18 @@ mod tests {
 
             assert_eq!(via_env, off_settings());
             assert_eq!(via_env.as_speculative_config(), SpeculativeConfig::none());
+        });
+    }
+
+    #[test]
+    fn retired_doubled_env_name_no_longer_selects_types() {
+        let mut env = env_with_types(None);
+        env.push(("SPECULATIVE_SPECULATIVE_TYPES", Some("none")));
+        temp_env::with_vars(env, || {
+            let via_env = SpeculativeSettings::from_env()
+                .unwrap_or_else(|err| panic!("from_env failed: {err}"));
+
+            assert_eq!(via_env.speculative_types, SpeculativeTypeNameSet::ngram_simple());
         });
     }
 

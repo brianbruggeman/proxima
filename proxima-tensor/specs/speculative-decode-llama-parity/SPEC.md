@@ -95,7 +95,7 @@ Two pure halves plus one loop seam, all sans-IO:
 | timing arms | interleaved per pair, ratio per pair | back-to-back arm blocks measured different GPU clock states: a 2.7x "win" that was 1.1x (2026-09-21) |
 | win metric | speedup ratio vs OFF and vs llama.cpp's own ratio | absolute tokens/s moves with hardware and quant; the ratio isolates what speculation buys |
 | idle overhead gate | ≤ 2% | drafting runs every step even when nothing matches; unbounded idle cost makes default-on wrong |
-| default | `ngram-simple` ON (`ServingConfig::default()`, `SpeculativeSettings` default), owner directive 2026-09-29; off via config `none` (builder `SpeculativeConfig::none()`, TOML `speculative_types = "none"`, env `SPECULATIVE_SPECULATIVE_TYPES=none`) | ~~default off, matching llama `types=[none]`~~ -- struck 2026-09-29: measured median speedup 0.998 over 90 pairs, idle overhead 0.03% (TASKS slices 22-24); output byte-identical by R1, so ON costs no correctness and OFF stays one config value away |
+| default | `ngram-simple` ON (`ServingConfig::default()`, `SpeculativeSettings` default), owner directive 2026-09-29; off via config `none` (builder `SpeculativeConfig::none()`, TOML `speculative_types = "none"`, env `PROXIMA_SPECULATIVE_TYPES=none`) | ~~default off, matching llama `types=[none]`~~ -- struck 2026-09-29: measured median speedup 0.998 over 90 pairs, idle overhead 0.03% (TASKS slices 22-24); output byte-identical by R1, so ON costs no correctness and OFF stays one config value away |
 
 ## acceptance criteria
 
