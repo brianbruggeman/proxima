@@ -2335,16 +2335,20 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
     let bound = matmul_op(4, 65536, 5);
     let empty_codecs = BTreeMap::new();
 
-    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
-        let key = kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-            .expect("baseline cache key");
-        let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-            .expect("baseline emits")
-            .source;
-        let dispatch = kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-            .expect("baseline dispatch shape");
-        (key, source, dispatch)
-    });
+    // `PROXIMA_COORD_INDEX32` now defaults ON, so the "baseline" this test
+    // means -- the wide, non-narrowed coordinate decomposition -- must be
+    // pinned explicitly rather than read off `with_every_multi_row_env_unset`.
+    let (baseline_key, baseline_source, baseline_dispatch) =
+        temp_env::with_var("PROXIMA_COORD_INDEX32", Some("0"), || {
+            let key = kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                .expect("baseline cache key");
+            let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                .expect("baseline emits")
+                .source;
+            let dispatch = kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
+                .expect("baseline dispatch shape");
+            (key, source, dispatch)
+        });
 
     let (shared_key, shared_source, shared_dispatch) =
         temp_env::with_var("PROXIMA_COORD_INDEX32", Some("1"), || {

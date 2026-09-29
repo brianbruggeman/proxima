@@ -613,9 +613,12 @@ fn multi_token_matmul_program(tokens: u32, in_dim: u32, out_dim: u32) -> (Vec<Op
     (program, sum)
 }
 
-/// Runs one `(program, sum)` under `reduction_literal_env`, with an optional
-/// second env var set for the duration of the SAME run -- lets one call site
-/// cover the plain generic arm (`extra_env = None`), the `Q4_0` header-hoist
+/// Runs one `(program, sum)` under `reduction_literal_env`, with a set of
+/// extra env vars set for the duration of the SAME run -- lets one call site
+/// cover the plain generic arm (`extra_env` pins `PROXIMA_MULTI_ROW_UNROLL`/
+/// `PROXIMA_MULTI_ROW_INDEX32` to `"0"`, since both now default ON and the
+/// generic arm exists to exercise the dynamic-loop, wide-indexed body this
+/// AC's literal-vs-runtime-bound comparison targets), the `Q4_0` header-hoist
 /// arm (`PROXIMA_Q4_0_MULTI_ROW_HOIST=1`), and the unrolled arm
 /// (`PROXIMA_MULTI_ROW_UNROLL=1`) without three copies of the same body.
 fn run_multi_row(
@@ -623,27 +626,23 @@ fn run_multi_row(
     sum: NodeId,
     blocks: &[QuantizedBlock<'_>],
     policy: NumericPolicy,
-    extra_env: Option<(&str, &str)>,
+    extra_env: &[(&str, Option<&str>)],
     reduction_literal_env: Option<&str>,
 ) -> Vec<f32> {
     // `PROXIMA_TILED_GEMM_Q4_0` defaults ON now, and the one caller of this
     // helper runs at `tokens == TILED_GEMM_MIN_TOKENS` -- force it off so
     // Q4_0 still routes through `push_packed_row_multi_row_body`'s generic/
     // hoist/unroll arms this AC targets, not the tiled path.
-    let inner = || {
-        temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
-            temp_env::with_var("PROXIMA_REDUCTION_LITERAL", reduction_literal_env, || {
-                omega::execute(program, &[], blocks, &[sum], policy)
-                    .expect("metal executes the multi-row packed matvec")
-                    .root()
-                    .to_vec()
-            })
+    let mut vars: Vec<(&str, Option<&str>)> = vec![("PROXIMA_TILED_GEMM_Q4_0", Some("0"))];
+    vars.extend_from_slice(extra_env);
+    temp_env::with_vars(vars, || {
+        temp_env::with_var("PROXIMA_REDUCTION_LITERAL", reduction_literal_env, || {
+            omega::execute(program, &[], blocks, &[sum], policy)
+                .expect("metal executes the multi-row packed matvec")
+                .root()
+                .to_vec()
         })
-    };
-    match extra_env {
-        Some((name, value)) => temp_env::with_var(name, Some(value), inner),
-        None => inner(),
-    }
+    })
 }
 
 /// AC2/AC3 extension (`c4-7-reduction-literal.md`): the `token_total > 1`
@@ -697,9 +696,26 @@ fn q4_0_multi_row_prefill_shaped_literal_matches_runtime() {
     let expected_len = tokens as usize * rows;
 
     for (arm, extra_env) in [
-        ("generic", None),
-        ("q4_0_hoist", Some(("PROXIMA_Q4_0_MULTI_ROW_HOIST", "1"))),
-        ("unroll", Some(("PROXIMA_MULTI_ROW_UNROLL", "1"))),
+        (
+            "generic",
+            [
+                ("PROXIMA_MULTI_ROW_UNROLL", Some("0")),
+                ("PROXIMA_MULTI_ROW_INDEX32", Some("0")),
+            ]
+            .as_slice(),
+        ),
+        (
+            "q4_0_hoist",
+            [
+                ("PROXIMA_Q4_0_MULTI_ROW_HOIST", Some("1")),
+                ("PROXIMA_MULTI_ROW_UNROLL", Some("0")),
+            ]
+            .as_slice(),
+        ),
+        (
+            "unroll",
+            [("PROXIMA_MULTI_ROW_UNROLL", Some("1"))].as_slice(),
+        ),
     ] {
         for policy in [
             NumericPolicy::bit_exact(),
