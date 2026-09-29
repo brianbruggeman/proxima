@@ -6648,3 +6648,49 @@ mod encode_allocation_budget {
         );
     }
 }
+
+/// The merge splice widens a kernel's scalar `uint gid [[thread_position_in_grid]]`
+/// into a `uint3` and reads the member index off its `z`. A kernel in the
+/// tile-coordinate form has no scalar `gid` at all (it declares
+/// `[[threadgroup_position_in_grid]]` instead), so the splice cannot apply to
+/// it: `build_merged_dispatch` declines a leader with `grid2d` set rather than
+/// let this error fail plan resolution. Merging tile-form kernels would need a
+/// splice over threadgroup coordinates, which changes kernel text and needs a
+/// device to check, so it stays a separate measured change.
+#[cfg(all(feature = "metal-horizontal-merge", feature = "metal-tiled-gemm"))]
+#[test]
+fn the_merge_splice_has_no_scalar_gid_to_widen_in_a_tile_form_kernel() {
+    let bound = tiled_gemm_op(510, 1536, 128);
+    let weight = bound.operands()[0].0;
+    let packed = BTreeMap::from([(weight, Codec::Q4_0)]);
+
+    temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("1"), || {
+        let mut kernel = emit(&bound, &packed, NumericPolicy::default()).expect("tiled emits");
+        assert_eq!(
+            kernel.grid.grid2d.map(|spec| spec.form),
+            Some(Grid2DForm::TileCoordinates),
+            "the lever must put this fixture in the tile form for the test to mean anything"
+        );
+
+        let outcome = splice_horizontal_merge_base_table(
+            &mut kernel,
+            bound.node,
+            0,
+            "uchar",
+            1,
+            "float",
+            "float",
+        );
+
+        assert!(
+            matches!(
+                outcome,
+                Err(EmitError::RenderKindMismatch {
+                    expected: "scalar thread_position_in_grid parameter",
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+    });
+}
