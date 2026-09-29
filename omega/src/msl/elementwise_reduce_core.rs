@@ -317,8 +317,14 @@ pub(super) fn render_reduce(
     // with the feature off this is always `false`, which is what makes
     // "split == 1 reproduces the current kernel exactly" hold at the source
     // level, not just numerically.
-    let include_threadgroup_width =
-        cfg!(feature = "metal-q4k-split-k") && packed_row_block(resolved, quantized).is_some();
+    // `push_cooperative_reduce_body` tries the tiled and dense-batched GEMM
+    // arms before the row-blocked one, so a shape they claim never reads
+    // `tptg`; declaring it there would mix a scalar `threads_per_threadgroup`
+    // with the tile form's `uint3` threadgroup position, which Metal rejects.
+    let include_threadgroup_width = cfg!(feature = "metal-q4k-split-k")
+        && packed_row_block(resolved, quantized).is_some()
+        && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_none()
+        && dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_none();
     kernel_signature(
         &mut source,
         quantized,
