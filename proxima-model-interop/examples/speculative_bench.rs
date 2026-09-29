@@ -1947,6 +1947,34 @@ impl LeverVar {
     }
 }
 
+/// The compiled-in cargo features that move timing numbers for this
+/// binary (`proxima-model-interop/Cargo.toml` lines 128-227), rendered
+/// `key=true/false` via `cfg!` so the printed line reflects THIS binary's
+/// own compilation, never an assumption about what the caller meant to
+/// build with.
+fn compiled_perf_features_summary() -> String {
+    format!(
+        "metal_feature={} metal_fuse_attn_decode_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={}",
+        cfg!(feature = "metal"),
+        cfg!(feature = "metal-fuse-attn-decode"),
+        cfg!(feature = "identity-copy-alias"),
+        cfg!(feature = "metal-tiled-gemm"),
+    )
+}
+
+/// The short commit this binary was built from, read at startup rather
+/// than baked in by a build script (no build.rs exists in this crate) --
+/// `unknown` when `git` is unavailable or this tree is not a git checkout.
+fn git_commit_at_startup() -> String {
+    Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(|| "unknown".to_string(), |commit| commit.trim().to_string())
+}
+
 /// Prints every lever this bench's prefill/verify/decode path reads,
 /// per run (never assumed from a prior run -- SPEC's own "a result can
 /// never be read without its config"), and refuses outright when
@@ -1966,13 +1994,14 @@ fn print_lever_config_and_refuse_if_unsafe() {
         LeverVar::read("PROXIMA_TILED_GEMM_DENSE"),
     ];
     println!(
-        "lever_config {} metal_tiled_gemm_feature={}",
+        "lever_config {} {} git_commit={}",
         levers
             .iter()
             .map(LeverVar::display)
             .collect::<Vec<_>>()
             .join(" "),
-        cfg!(feature = "metal-tiled-gemm"),
+        compiled_perf_features_summary(),
+        git_commit_at_startup(),
     );
     let dense = &levers[6];
     if dense.is_one() {
@@ -2049,10 +2078,10 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT, chat_prompt,
-        LLAMA_REPREFILL_PROMPT_N_BOUND, REAPABLE_PIDS, parse_llama_completion_response,
-        cpu_idle_decision, parse_top_cpu_line, split_prompt_at_hard_boundary,
-        summarize_gpu_idle_samples,
+        ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
+        LLAMA_REPREFILL_PROMPT_N_BOUND, REAPABLE_PIDS, chat_prompt, compiled_perf_features_summary,
+        cpu_idle_decision, git_commit_at_startup, parse_llama_completion_response,
+        parse_top_cpu_line, split_prompt_at_hard_boundary, summarize_gpu_idle_samples,
     };
 
     const REAL_TOP_CPU_LINE: &str = "CPU usage: 8.97% user, 5.40% sys, 85.61% idle ";
@@ -2396,6 +2425,41 @@ mod tests {
         assert!(
             !status.success(),
             "pid {pid} still answers a liveness probe after ChildGuard was dropped"
+        );
+    }
+
+    #[test]
+    fn compiled_perf_features_summary_names_every_performance_relevant_feature() {
+        let summary = compiled_perf_features_summary();
+
+        for key in [
+            "metal_feature=",
+            "metal_fuse_attn_decode_feature=",
+            "identity_copy_alias_feature=",
+            "metal_tiled_gemm_feature=",
+        ] {
+            assert!(
+                summary.contains(key),
+                "lever_config must attribute {key} on the same line, got: {summary}"
+            );
+        }
+        assert!(
+            summary.split(' ').all(|field| field.ends_with("=true") || field.ends_with("=false")),
+            "every feature field must render a bool, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn git_commit_at_startup_never_panics_and_is_never_empty() {
+        let commit = git_commit_at_startup();
+
+        assert!(
+            !commit.is_empty(),
+            "git_commit_at_startup must fall back to \"unknown\", never an empty string"
+        );
+        assert!(
+            !commit.contains(char::is_whitespace),
+            "git_commit_at_startup must trim to a bare token, got: {commit:?}"
         );
     }
 }
