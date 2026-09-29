@@ -87,7 +87,7 @@ struct GridAttribute {
     body_reads: &'static [(&'static str, &'static str)],
 }
 
-const GRID_ATTRIBUTES: [GridAttribute; 5] = [
+const GRID_ATTRIBUTES: [GridAttribute; 6] = [
     GridAttribute {
         parameter: "uint gid [[thread_position_in_grid]]",
         definition: "    ulong gid = wide_group_index * ulong(wide_width.x) + ulong(wide_lane);\n",
@@ -114,6 +114,11 @@ const GRID_ATTRIBUTES: [GridAttribute; 5] = [
     GridAttribute {
         parameter: "uint tptg [[threads_per_threadgroup]]",
         definition: "    uint tptg = wide_width.x;\n",
+        body_reads: &[],
+    },
+    GridAttribute {
+        parameter: "uint local [[thread_position_in_threadgroup]]",
+        definition: "    uint local = wide_lane;\n",
         body_reads: &[],
     },
 ];
