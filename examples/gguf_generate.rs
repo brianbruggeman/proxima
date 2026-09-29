@@ -115,8 +115,9 @@ struct GenerateConfig {
     // sequences. Serving defaults to serial until that hazard path is proven.
     #[setting(default_str = "serial")]
     dispatch: String,
-    #[setting(default = false)]
-    debug_exact_activations: bool,
+    // unset falls through to ..ServingConfig::default() so this field
+    // never duplicates the library's own default literal.
+    debug_exact_activations: Option<bool>,
     #[setting(default = false)]
     mmap_random: bool,
     #[setting(default = false)]
@@ -143,8 +144,9 @@ struct GenerateConfig {
     max_command_buffers_per_token: usize,
     #[setting(default = 0)]
     prefill_chunk_positions: usize,
-    #[setting(default = false)]
-    plan_time_constants: bool,
+    // unset falls through to ..ServingConfig::default() so this field
+    // never duplicates the library's own default literal.
+    plan_time_constants: Option<bool>,
     #[setting(default = false)]
     overlap_transfer_compute: bool,
 }
@@ -416,7 +418,6 @@ fn supported_serving_config<'model>(
         qwen35moe_monolithic_high_mmap: settings.qwen35moe_monolithic_high_mmap,
         #[cfg(target_os = "macos")]
         dispatch_type,
-        exact_activations: settings.debug_exact_activations,
         reasoning_budget: 0,
         temperature: settings.temperature,
         top_k: settings.top_k,
@@ -433,13 +434,18 @@ fn supported_serving_config<'model>(
         prefill_one_evaluation: settings.prefill_one_evaluation,
         max_command_buffers_per_token: settings.max_command_buffers_per_token,
         prefill_chunk_positions: settings.prefill_chunk_positions,
-        plan_time_constants: settings.plan_time_constants,
         overlap_transfer_compute: settings.overlap_transfer_compute,
         ..ServingConfig::default()
     };
     if let Some(kv_bucket_tokens) = kv_bucket_tokens {
         serving_config.kv_bucket_tokens = kv_bucket_tokens;
         println!("kv_bucket_tokens_override = {kv_bucket_tokens}");
+    }
+    if let Some(exact_activations) = settings.debug_exact_activations {
+        serving_config.exact_activations = exact_activations;
+    }
+    if let Some(plan_time_constants) = settings.plan_time_constants {
+        serving_config.plan_time_constants = plan_time_constants;
     }
     serving_config
 }
