@@ -3030,18 +3030,21 @@ impl<'file> LoadedModel<'file> {
         // Default-off greedy speculative decode (gemma4-only -- see
         // [`Self::speculative_verify_program`]'s own doc): read once, here,
         // outside the closure, matching [`prefill_one_evaluation_requested`]'s
-        // own env-gate shape. `pending` is the queue-draining FSM's own
+        // own config-gate shape. `pending` is the queue-draining FSM's own
         // state -- popped from at the top of every closure call before any
         // forward runs, and pushed onto by the speculative verify branch
         // below whenever it accepts more than one token in a single pass.
-        let speculative_enabled = std::env::var_os("PROXIMA_SPECULATIVE_DECODE").is_some();
-        // llama.cpp's own `ngram-simple` defaults (`common_params_speculative_ngram_map`,
-        // `common/common.h:361-365`) -- named constants until
-        // `speculative-decode-llama-parity/TASKS.md` slice 8 lands the
-        // `ServingConfig` speculative section these will read from instead.
+        // Only `NgramSimple` is wired end to end today (`ServingConfig::
+        // speculative`'s own doc names the sub-spec that owns each other
+        // type); `apply_serving_config` already rejects the unwired
+        // draft-model types before this call is reached.
+        let speculative_enabled = serving_config
+            .speculative
+            .speculative_types
+            .contains(crate::SpeculativeType::NgramSimple);
         let speculative_config = proxima_tokenizer::draft::NgramSimpleConfig {
-            size_n: proxima_tokenizer::draft::DEFAULT_SIZE_N,
-            size_m: proxima_tokenizer::draft::DEFAULT_SIZE_M,
+            size_n: serving_config.speculative.ngram_simple.size_n,
+            size_m: serving_config.speculative.ngram_simple.size_m,
         };
         let mut pending: VecDeque<u32> = VecDeque::new();
         // One draft buffer, reused every step -- `ngram_simple_draft` itself

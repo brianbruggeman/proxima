@@ -1,8 +1,9 @@
 //! P14 hard parity probe for gemma4-E2B's default-off speculative decode
 //! loop: for each of TWO `ServingConfig`s -- plain greedy, and a genuinely
 //! sampling config (temperature, top-k/top-p/min-p, repeat penalty, a fixed
-//! seed) -- runs the SAME prompt with `PROXIMA_SPECULATIVE_DECODE` off then
-//! on, and reports whether the two token id streams are byte-identical --
+//! seed) -- runs the SAME prompt with `ServingConfig::speculative` off then
+//! on (`SpeculativeType::None` vs `SpeculativeType::NgramSimple`), and
+//! reports whether the two token id streams are byte-identical --
 //! not library surface, a one-shot diagnostic (same convention as
 //! `gemma4_real_weight_parity.rs`). The sampled config is the load-bearing
 //! case: it is only a parity proof at all once `decode.rs`'s speculative
@@ -28,7 +29,9 @@ use std::time::Instant;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{LoadedModel, ServingConfig};
+use proxima_model_interop::{
+    LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeType, SpeculativeTypeSet,
+};
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::Exporter;
 use proxima_telemetry::log::LogBody;
@@ -82,7 +85,7 @@ fn speculative_verify_events(capture: &InMemoryPipe) -> Vec<proxima_telemetry::l
 
 /// One config's own OFF-then-ON pair, run against the same model and
 /// prompt: [`ServingConfig`] is `Copy`, so OFF and ON see byte-identical
-/// input other than the env var this probe itself toggles.
+/// input other than `speculative.speculative_types` this probe itself sets.
 struct PairResult {
     off_ids: Vec<u32>,
     on_ids: Vec<u32>,
@@ -92,10 +95,11 @@ struct PairResult {
     accepted_total: u64,
 }
 
-/// `off_serving_config` and `on_serving_config` are equal for every caller
+/// `off_serving_config` and `on_serving_config` differ only in
+/// `speculative.speculative_types` (`None` vs `NgramSimple`) for every caller
 /// except `--seed-mismatch-control`'s sampled block, where the ON run is
-/// deliberately reseeded -- the point of that control is that the two runs
-/// must NOT reproduce each other.
+/// ALSO deliberately reseeded -- the point of that control is that the two
+/// runs must NOT reproduce each other.
 fn run_pair(
     model: &LoadedModel,
     prompt: &str,
@@ -105,9 +109,6 @@ fn run_pair(
     capture: &InMemoryPipe,
     recorder: &Recorder,
 ) -> PairResult {
-    unsafe {
-        env::remove_var("PROXIMA_SPECULATIVE_DECODE");
-    }
     let off_started = Instant::now();
     let (off_ids, _off_text, _off_eos) = model
         .generate_with_serving_config(prompt, max_tokens, off_serving_config)
@@ -129,17 +130,11 @@ fn run_pair(
     // event `speculative_verify_events` sees afterward came from the ON run.
     capture.clear();
 
-    unsafe {
-        env::set_var("PROXIMA_SPECULATIVE_DECODE", "1");
-    }
     let on_started = Instant::now();
     let (on_ids, _on_text, _on_eos) = model
         .generate_with_serving_config(prompt, max_tokens, on_serving_config)
         .expect("ON decode");
     let on_elapsed_ms = on_started.elapsed().as_secs_f64() * 1000.0;
-    unsafe {
-        env::remove_var("PROXIMA_SPECULATIVE_DECODE");
-    }
     recorder.drain();
 
     let verify_events = speculative_verify_events(capture);
@@ -313,12 +308,17 @@ fn main() {
         ..base_config
     };
 
+    let ngram_simple_on = SpeculativeConfig {
+        speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
+        ..SpeculativeConfig::none()
+    };
+
     let greedy_result = run_pair(
         &model,
         &prompt,
         max_tokens,
         greedy_config,
-        greedy_config,
+        greedy_config.with_speculative(ngram_simple_on),
         &capture,
         &recorder,
     );
@@ -326,7 +326,8 @@ fn main() {
 
     // `--seed-mismatch-control` reseeds only the sampled ON run: greedy's
     // argmax selection ignores the rng entirely, so its OFF/ON pair stays
-    // pinned to the same config with or without the flag.
+    // pinned to the same config (other than speculation itself) with or
+    // without the flag.
     let sampled_on_config = if seed_mismatch_control {
         ServingConfig {
             seed: SEED_MISMATCH_CONTROL_ON_SEED,
@@ -334,7 +335,8 @@ fn main() {
         }
     } else {
         sampled_config
-    };
+    }
+    .with_speculative(ngram_simple_on);
     let sampled_result = run_pair(
         &model,
         &prompt,

@@ -67,6 +67,8 @@ mod qwen35;
 mod serving;
 #[cfg(feature = "std")]
 mod serving_fsm;
+#[cfg(feature = "std")]
+mod speculative_settings;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 mod source;
 pub mod task;
@@ -135,9 +137,12 @@ pub use residency::{
 #[cfg(feature = "std")]
 pub use serving::GdnPrefillBackend;
 pub use serving::{
-    DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, REASONING_BUDGET_UNBOUNDED, ServingConfig,
-    WeightPrecisionRule, apply_serving_config,
+    DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, NgramMapParams, NgramModParams,
+    REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
+    SpeculativeTypeSet, WeightPrecisionRule, apply_serving_config,
 };
+#[cfg(feature = "std")]
+pub use speculative_settings::{SpeculativeSettings, SpeculativeTypeName, SpeculativeTypeNameSet};
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 pub use source::{CheckpointMapping, CheckpointSourceError};
 pub use task::{ModelTask, TaskProfile, classify_task};

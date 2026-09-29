@@ -42,6 +42,7 @@ std = [
     "dep:proxima-tokenizer",
     "dep:fastrand",
     "conflaguration",
+    "bon",
     "memmap2",
     "dep:proxima-telemetry",
     "proxima-telemetry/std",
@@ -273,9 +274,11 @@ memmap2 = ["dep:memmap2"]
 proxima-storage = ["dep:proxima-storage", "proxima-storage/dax"]
 conflaguration = ["dep:conflaguration"]
 libc = ["dep:libc"]
+bon = ["dep:bon"]
 
 [dependencies]
 arrayvec.workspace = true
+bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, optional = true }
 # only used by `generate.rs`, which is `#[cfg(feature = "std")]`-gated —
 # optional so the alloc-only floor never links it.
