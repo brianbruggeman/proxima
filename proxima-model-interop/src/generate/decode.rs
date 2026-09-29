@@ -2179,6 +2179,65 @@ impl<'file> LoadedModel<'file> {
         Ok((generated_ids, text, stopped_by_eos))
     }
 
+    /// [`Self::generate_from_prefix`], plus `speculative_stats` and
+    /// `forced_draft_width` -- the same pair
+    /// [`Self::generate_streaming_with_speculative_stats`] adds onto
+    /// [`Self::generate_streaming`], mirrored onto the prefix-resume
+    /// primitive so a caller can prefill a prompt once via
+    /// [`Self::prefill_prefix`] and decode multiple arms (e.g. speculation
+    /// off vs on) from the SAME cached [`PrefixState`] instead of
+    /// re-prefilling per arm. Threads straight through to the same
+    /// [`Self::run_decode_loop_observed_seeded`] call
+    /// [`Self::generate_from_prefix`] itself makes -- no decode loop is
+    /// duplicated here.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_from_prefix_with_speculative_stats(
+        &self,
+        prefix: &PrefixState,
+        suffix: &str,
+        max_tokens: usize,
+        serving_config: ServingConfig,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        speculative_stats: &mut SpeculativeDecodeStats,
+        forced_draft_width: Option<u16>,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let effective_serving_config = {
+            let mut effective_serving_config = serving_config;
+            self.apply_command_buffer_chunks_default(&mut effective_serving_config);
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_memory_fit_gate(&mut effective_serving_config)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_dispatch_type_override(&mut effective_serving_config)?;
+            effective_serving_config
+        };
+        let mut runtime = BackendRuntime::new(&effective_serving_config);
+        let seed = PrefixState {
+            ids: prefix.ids.clone(),
+            layer_caches: prefix.layer_caches.clone(),
+            cached_len: prefix.cached_len,
+        };
+        let (generated_ids, text, stopped_by_eos, _final_state) = self
+            .run_decode_loop_observed_seeded(
+                suffix,
+                max_tokens,
+                &effective_serving_config,
+                &mut runtime,
+                None,
+                &mut LogitsSink::Discard,
+                &mut NodeValuesSink::Discard,
+                on_token,
+                Some(seed),
+                true,
+                Some(speculative_stats),
+                forced_draft_width,
+            )?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
     /// Applies this checkpoint's own resolved
     /// [`crate::architecture::Architecture::command_buffer_chunks`] as
     /// `serving_config.command_buffer_chunks`'s default -- only when the
