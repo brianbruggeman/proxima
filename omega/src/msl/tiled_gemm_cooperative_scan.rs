@@ -1616,8 +1616,9 @@ pub(super) fn tiled_gemm_threadgroup_width(
     else {
         return None;
     };
-    let reduce_dims = reduction_dims(resolved, output_axes);
-    Some(cooperative_reduce_width(resolved, quantized, &reduce_dims))
+    Some(with_reduction_dims(resolved, output_axes, |reduce_dims| {
+        cooperative_reduce_width(resolved, quantized, reduce_dims)
+    }))
 }
 
 /// Whether `resolved` takes [`push_cooperative_reduce_body`]'s "SUPER-BLOCK

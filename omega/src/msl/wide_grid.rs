@@ -20,41 +20,55 @@ pub(super) fn exceeds_linear_grid(threads: u64) -> bool {
     threads > crate::sized::GRID_LINEAR_THREAD_LIMIT
 }
 
+/// The x-by-y rectangle that holds exactly `groups` threadgroups: x the
+/// largest divisor of `groups` not above `GRID_MAX_THREADGROUPS_X`, so no
+/// whole threadgroup past the grid is ever launched. `None` when `y` would
+/// pass what a threadgroup position axis holds.
+fn split_threadgroups(groups: u64) -> Option<(u64, u64)> {
+    let threadgroups_x = (1..=groups.min(crate::sized::GRID_MAX_THREADGROUPS_X))
+        .rev()
+        .find(|candidate| groups.is_multiple_of(*candidate))
+        .unwrap_or(1);
+    let threadgroups_y = groups / threadgroups_x;
+    (threadgroups_y <= u64::from(u32::MAX)).then_some((threadgroups_x, threadgroups_y))
+}
+
 /// The launch [`Grid2DForm::FlatThreadgroupIndex`] describes for `threads`
 /// threads of a kernel whose threadgroup is `threadgroup_width` wide (`None`:
 /// the driver's choice). A pinned width that divides the grid is launched as
 /// pinned -- every kernel whose lane or row math depends on it (cooperative
 /// reduce, tiled GEMM, cached attention, softmax weights, gated delta net) has
 /// a grid that is a whole number of its threadgroups by construction. One that
-/// does not (a serial reduce the extras pinned a width for that it never
-/// reads, a row-blocked packed matvec at nsg=2 whose addressing is
-/// `gid / SIMD_WIDTH`) launches one simdgroup wide, which every such grid is a
-/// whole number of, or ends in a short last group that guards on its uniform
-/// total. The threadgroups are split into an exact x-by-y rectangle, x the
-/// largest divisor of the count not above `GRID_MAX_THREADGROUPS_X`, so no
-/// whole threadgroup past the grid is ever launched.
+/// does not launches one simdgroup wide only when `width_is_neutral` says the
+/// kernel never reads its own width (a serial reduce the extras pinned a width
+/// for, a row-blocked packed matvec whose addressing is `gid / SIMD_WIDTH`):
+/// every such grid is a whole number of simdgroups or ends in a short last
+/// group that guards on its uniform total. Any other kernel is refused rather
+/// than run with a width its lane math does not expect.
 pub(super) fn flat_grid2d(
     node: NodeId,
     threads: u64,
     threadgroup_width: Option<u64>,
+    width_is_neutral: bool,
 ) -> Result<Grid2DSpec, EmitError> {
     let width = match threadgroup_width {
         Some(pinned) if threads.is_multiple_of(pinned) => pinned,
+        Some(_) if !width_is_neutral => {
+            return Err(EmitError::WideGridUnsupported {
+                node,
+                reason: "the pinned threadgroup width does not divide the grid, and this kernel's \
+                         lane or row math reads that width",
+            });
+        }
         _ => SIMD_WIDTH,
     };
-    let groups = threads.div_ceil(width);
-    let threadgroups_x = (1..=groups.min(crate::sized::GRID_MAX_THREADGROUPS_X))
-        .rev()
-        .find(|candidate| groups.is_multiple_of(*candidate))
-        .unwrap_or(1);
-    let threadgroups_y = groups / threadgroups_x;
-    if threadgroups_y > u64::from(u32::MAX) {
-        return Err(EmitError::GridExceedsThreadIndex {
+    let (threadgroups_x, threadgroups_y) = split_threadgroups(threads.div_ceil(width)).ok_or(
+        EmitError::GridExceedsThreadIndex {
             node,
             threads,
             limit: u64::from(u32::MAX) * width,
-        });
-    }
+        },
+    )?;
     #[cfg(feature = "instrument")]
     proxima_telemetry::debug!(
         node = node.0,
@@ -73,6 +87,33 @@ pub(super) fn flat_grid2d(
     })
 }
 
+/// `spec` re-cut for a pipeline that cannot run threadgroups as wide as the
+/// emitter pinned (`maxTotalThreadsPerThreadgroup`): the 1D dispatch clamps its
+/// width to the pipeline's, and so must the flat launch. Same threads, the
+/// largest divisor of the pinned width the pipeline allows, the rectangle
+/// re-split to hold the now larger threadgroup count. `spec` unchanged when
+/// it already fits or is not the flat form.
+#[must_use]
+pub(crate) fn fit_flat_width(spec: Grid2DSpec, max_width: u64) -> Grid2DSpec {
+    let width = spec.threads_per_threadgroup_x;
+    if spec.form != Grid2DForm::FlatThreadgroupIndex || width <= max_width.max(1) {
+        return spec;
+    }
+    let fitted = (1..=max_width.max(1))
+        .rev()
+        .find(|candidate| width.is_multiple_of(*candidate))
+        .unwrap_or(1);
+    let groups = spec.threadgroups_x * spec.threadgroups_y * (width / fitted);
+    match split_threadgroups(groups) {
+        Some((threadgroups_x, threadgroups_y)) => Grid2DSpec {
+            threadgroups_x,
+            threadgroups_y,
+            threads_per_threadgroup_x: fitted,
+            ..spec
+        },
+        None => spec,
+    }
+}
 
 /// A grid attribute a 1D kernel's signature may carry, the definition that
 /// gives the body the same name back under the flat form, and any body text
