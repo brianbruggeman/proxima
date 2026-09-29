@@ -77,6 +77,8 @@ const GPU_IDLE_BASELINE_DURATION: Duration = Duration::from_secs(5);
 enum BenchMode {
     Pairs,
     VerifyWidthSweep { widths: Vec<usize> },
+    /// Greedy ids against llama.cpp on the same token ids -- [`run_llama_parity_mode`].
+    LlamaParity,
 }
 
 struct BenchArgs {
@@ -137,6 +139,7 @@ fn parse_args() -> BenchArgs {
     let mut incumbent = None;
     let mut llama_server_bin = PathBuf::from(DEFAULT_LLAMA_SERVER_BIN);
     let mut force = false;
+    let mut llama_parity = false;
     let mut positionals = Vec::new();
 
     let mut index = 0;
@@ -181,6 +184,9 @@ fn parse_args() -> BenchArgs {
             "--force" => {
                 force = true;
             }
+            "--llama-parity" => {
+                llama_parity = true;
+            }
             other => positionals.push(other.to_string()),
         }
         index += 1;
@@ -191,9 +197,10 @@ fn parse_args() -> BenchArgs {
         .next()
         .unwrap_or_else(|| DEFAULT_MODEL_PATH.to_string());
 
-    let mode = match widths {
-        Some(widths) => BenchMode::VerifyWidthSweep { widths },
-        None => BenchMode::Pairs,
+    let mode = match (llama_parity, widths) {
+        (true, _) => BenchMode::LlamaParity,
+        (false, Some(widths)) => BenchMode::VerifyWidthSweep { widths },
+        (false, None) => BenchMode::Pairs,
     };
 
     BenchArgs {
@@ -1656,7 +1663,6 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     // oversizing `-c` costs KV-cache memory, undersizing it truncates or
     // forces a mid-run reprocess -- the wrong failure mode for a
     // correctness-sensitive comparison run.
-    const LLAMA_CONTEXT_HEADROOM_TOKENS: usize = 256;
     let llama_context_length = u32::try_from(longest_prompt_tokens + args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS)
         .expect("corpus's longest prompt + max_tokens + headroom fits in a u32 context size");
 
@@ -1831,6 +1837,114 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
         pair_cov,
         win_fraction,
     );
+}
+
+
+// ---------------------------------------------------------------------
+// llama-parity mode: greedy token ids against the llama.cpp oracle
+// ---------------------------------------------------------------------
+
+/// Extra context llama-server is sized for past the longest prompt and
+/// `--max-tokens`; shared by every mode that spawns it.
+const LLAMA_CONTEXT_HEADROOM_TOKENS: usize = 256;
+
+const LLAMA_PARITY_PORT: u16 = 18_082;
+
+/// One non-streaming greedy `/completion` call that returns llama's own
+/// generated token ids (`return_tokens`), with `cache_prompt` off so every
+/// prompt is prefilled from scratch: the correctness oracle must not lean on
+/// a slot's cached prefix.
+fn run_llama_greedy_ids(port: u16, token_ids: &[u32], max_tokens: usize) -> Vec<u64> {
+    let body = serde_json::json!({
+        "prompt": token_ids,
+        "n_predict": max_tokens,
+        "temperature": 0,
+        "cache_prompt": false,
+        "stream": false,
+        "return_tokens": true,
+    });
+    let response = http_post_json(port, "/completion", &body);
+    response
+        .get("tokens")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("llama-server /completion response missing \"tokens\": {response}"))
+        .iter()
+        .map(|value| value.as_u64().unwrap_or_else(|| panic!("non-integer token id in {value}")))
+        .collect()
+}
+
+fn first_divergence(proxima: &[u64], llama: &[u64]) -> Option<usize> {
+    let shared = proxima.len().min(llama.len());
+    (0..shared)
+        .find(|&index| proxima[index] != llama[index])
+        .or_else(|| (proxima.len() != llama.len()).then_some(shared))
+}
+
+/// For each corpus prompt: proxima's greedy ids (speculation off) against
+/// llama.cpp's greedy ids on the SAME prompt token ids and the same gguf,
+/// one line per prompt with both id lists and the first divergence.
+/// Exists because a prompt long enough to overflow a 32-bit thread index in
+/// one of proxima's dispatches is wrong in a way no proxima-vs-proxima
+/// comparison can see: the incumbent is the oracle, never proxima's own
+/// output.
+fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
+    let corpus_path = args
+        .corpus_path
+        .clone()
+        .unwrap_or_else(|| panic!("--corpus is required in llama-parity mode"));
+    let raw_prompts = load_corpus(&corpus_path);
+    assert!(
+        !raw_prompts.is_empty(),
+        "corpus {} contained no {{\"prompt\": ...}} lines",
+        corpus_path.display()
+    );
+    let prompts: Vec<String> = raw_prompts.iter().map(|raw| chat_prompt(raw)).collect();
+    let add_bos = wants_bos(vocab);
+    let add_eos = vocab.add_eos_token().unwrap_or(false);
+    let token_ids_per_prompt: Vec<Vec<u32>> = prompts
+        .iter()
+        .map(|prompt| {
+            proxima_tokenizer::encode_with_bos_eos(prompt, vocab, add_bos, add_eos)
+                .expect("tokenize prompt the way the decode call does")
+        })
+        .collect();
+    let longest_prompt_tokens = token_ids_per_prompt.iter().map(Vec::len).max().unwrap_or(0);
+    let llama_context_length =
+        u32::try_from(longest_prompt_tokens + args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS)
+            .expect("longest prompt + max_tokens + headroom fits in a u32 context size");
+
+    let config = base_serving_config(args.gpu_layers);
+    let mut server_args = base_llama_server_args(&config, llama_context_length);
+    server_args.push("--spec-type".to_string());
+    server_args.push("none".to_string());
+    let handle = LlamaServerHandle::spawn(
+        &args.llama_server_bin,
+        &args.model_path,
+        LLAMA_PARITY_PORT,
+        "parity",
+        &server_args,
+    );
+
+    let mut diverged = 0usize;
+    for (prompt_index, prompt) in prompts.iter().enumerate() {
+        let token_ids = &token_ids_per_prompt[prompt_index];
+        check_token_parity(&handle, prompt, token_ids, add_bos);
+        let (proxima_ids, ..) = model
+            .generate_with_serving_config(prompt, args.max_tokens, base_serving_config(args.gpu_layers))
+            .unwrap_or_else(|err| panic!("proxima greedy decode of prompt {prompt_index}: {err:?}"));
+        let proxima_ids: Vec<u64> = proxima_ids.iter().map(|&id| u64::from(id)).collect();
+        let llama_ids = run_llama_greedy_ids(handle.port, token_ids, args.max_tokens);
+        let divergence = first_divergence(&proxima_ids, &llama_ids);
+        diverged += usize::from(divergence.is_some());
+        println!(
+            "llama_parity prompt={prompt_index} prompt_tokens={} identical={} first_divergence={divergence:?} \
+             proxima_ids={proxima_ids:?} llama_ids={llama_ids:?}",
+            token_ids.len(),
+            divergence.is_none(),
+        );
+    }
+    println!("llama_parity prompts={} diverged={diverged}", prompts.len());
+    handle.stop();
 }
 
 /// Per SPEC's own architecture paragraph -- "ms per verify forward at width
@@ -2071,6 +2185,7 @@ fn main() {
         BenchMode::VerifyWidthSweep { widths } => {
             run_verify_width_sweep_mode(&model, &args, widths, unmeasured_label);
         }
+        BenchMode::LlamaParity => run_llama_parity_mode(&model, &vocab, &args),
     }
 }
 
@@ -2345,6 +2460,14 @@ mod tests {
     /// Regression for the real-run panic: a one-line corpus prompt ("What's
     /// the difference between a Roth IRA...") has no newline of its own, so
     /// the split must rely entirely on `chat_prompt`'s own trailing newline.
+    #[test]
+    fn first_divergence_names_the_first_differing_index_or_the_shorter_length() {
+        assert_eq!(super::first_divergence(&[1, 2, 3], &[1, 2, 3]), None);
+        assert_eq!(super::first_divergence(&[1, 2, 3], &[1, 9, 3]), Some(1));
+        assert_eq!(super::first_divergence(&[1, 2], &[1, 2, 3]), Some(2));
+        assert_eq!(super::first_divergence(&[], &[]), None);
+    }
+
     #[test]
     fn splits_a_one_line_chat_template_prompt_at_the_model_turn_opener() {
         let templated =
