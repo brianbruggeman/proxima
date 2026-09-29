@@ -1429,6 +1429,33 @@ fn moe_round_group_is_contiguous(
     routes_uniform && reduces_uniform
 }
 
+/// `true` only when the collapsed dispatch fits Metal's buffer argument
+/// table: the round-0 fold's own [`metal_buffer_binding_count`] plus the
+/// round table plus one route buffer for each of rounds `1..k` (round 0's
+/// route is already its gathered operand's index buffer), which is
+/// `count + k`. A group over the limit keeps its k plain `Reduce`s, the same
+/// two-legal-kernels fallback the epilogue fusion takes, so an oversized
+/// plan never reaches a Metal pipeline error.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn round_batched_fits_metal_argument_table(
+    group: &MoeRoundGroup,
+    resolved: &BTreeMap<NodeId, &BoundOp>,
+) -> bool {
+    let Some(leader_reduce) = group.reduces.first().and_then(|node| resolved.get(node)) else {
+        return false;
+    };
+    let BoundOpKind::Reduce {
+        operands,
+        epilogue_operands,
+        ..
+    } = &leader_reduce.kind
+    else {
+        return false;
+    };
+    metal_buffer_binding_count(operands, epilogue_operands) + group.routes.len()
+        <= METAL_MAX_BUFFER_BINDINGS
+}
+
 /// `node`'s own element type and iteration shape, read straight from
 /// `program`/`shapes` rather than the bind pass's own `built` list -- a
 /// gather-index `route` is typically an [`Op::Input`] leaf
@@ -1510,7 +1537,9 @@ pub(super) fn apply_moe_round_group_fusion(
     let mut round_siblings_by_node: BTreeMap<NodeId, (Vec<NodeId>, Vec<NodeId>)> = BTreeMap::new();
     let mut drop: BTreeSet<NodeId> = BTreeSet::new();
     for group in &groups {
-        if !moe_round_group_is_contiguous(group, program, shapes, &resolved) {
+        if !moe_round_group_is_contiguous(group, program, shapes, &resolved)
+            || !round_batched_fits_metal_argument_table(group, &resolved)
+        {
             continue;
         }
         let Some((&first, rest)) = group.reduces.split_first() else {

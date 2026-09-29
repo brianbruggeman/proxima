@@ -13164,3 +13164,101 @@ fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
         "round1's own BoundOp must be dropped from the resolved list once absorbed"
     );
 }
+
+/// `rounds` round-sibling `sum_k table[route[z], k] * x[k]` reduces over one
+/// shared `table`/`x`, every route an `Int32` leaf declared before the first
+/// reduce -- the shape `moe_round_group_is_contiguous` admits -- returning the
+/// program and each round's output node in round order.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn round_group_program(rounds: u32) -> (Vec<Op>, Vec<NodeId>) {
+    let mut program = Vec::new();
+    let table = f32_block(&mut program, &[Extent::Static(3), Extent::Static(4)]);
+    let x = f32_block(&mut program, &[Extent::Static(4)]);
+    let routes: Vec<NodeId> = (0..rounds)
+        .map(|_| block(&mut program, DType::Int32, &[Extent::Static(1)]))
+        .collect();
+    let gather_map = |route: NodeId| IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(1, &[]),
+        base: map::IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![
+                map::AxisIndex::default(),
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let outputs = routes
+        .iter()
+        .map(|&route| {
+            let product = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![
+                        (table, gather_map(route)),
+                        (x, IndexMap::Affine(map::projection(1, &[0]))),
+                    ],
+                    name: None,
+                },
+            );
+            append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: product,
+                    in_map: IndexMap::Affine(map::projection(1, &[0])),
+                    out_map: IndexMap::Affine(map::projection(1, &[])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            )
+        })
+        .collect();
+    (program, outputs)
+}
+
+/// The collapsed dispatch binds the fold's 2 operands, its 1 gather index
+/// buffer, output, uniforms and fault (6), the round table (1), and one route
+/// buffer per round after the first (`k - 1`): `6 + k` against Metal's 31
+/// argument slots. k = 25 is exactly 31 and collapses; k = 26 would be 32, so
+/// the group keeps its 26 plain reduces instead of reaching a Metal error.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+#[test]
+fn round_group_collapses_to_the_metal_argument_table_limit_and_no_further() {
+    for (rounds, collapses) in [(25u32, true), (26u32, false)] {
+        let (program, outputs) = round_group_program(rounds);
+        let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
+
+        let resolved = bind::bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("bind succeeds");
+
+        let leader = resolved
+            .iter()
+            .find(|bound| bound.node == outputs[0])
+            .expect("round 0 resolves to a BoundOp");
+        assert_eq!(
+            matches!(leader.kind, BoundOpKind::RoundBatchedReduce { .. }),
+            collapses,
+            "{rounds} rounds: leader kind was {}",
+            leader.kind.name()
+        );
+        let surviving_rounds = outputs
+            .iter()
+            .filter(|node| resolved.iter().any(|bound| bound.node == **node))
+            .count();
+        assert_eq!(
+            surviving_rounds,
+            if collapses { 1 } else { rounds as usize },
+            "{rounds} rounds: a collapsed group keeps only its leader, a declined one keeps all"
+        );
+    }
+}

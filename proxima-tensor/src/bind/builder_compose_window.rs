@@ -411,7 +411,7 @@ impl BoundOpBuilder {
             let Some(held) = self.held.borrow().get(&node).cloned() else {
                 return Ok(emitted);
             };
-            if self.preview_elementwise_buffer_count(node, shapes)? <= 31 {
+            if self.preview_elementwise_buffer_count(node, shapes)? <= METAL_MAX_BUFFER_BINDINGS {
                 break;
             }
 

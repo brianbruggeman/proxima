@@ -482,7 +482,7 @@ pub(super) fn reduce_epilogue_fusion(
             // buffer. If it does not fit, leaving the consumer materialized
             // preserves the same algebra with two legal kernels.
             let buffer_binding_count = metal_buffer_binding_count(operands, &epilogue_operands);
-            if buffer_binding_count > 31 {
+            if buffer_binding_count > METAL_MAX_BUFFER_BINDINGS {
                 continue;
             }
             let fused = BoundOp {
@@ -521,6 +521,9 @@ pub(super) fn reduce_epilogue_fusion(
     }
     Ok(resolved)
 }
+
+/// Metal's per-kernel buffer argument table holds indices `0..=30`.
+pub(super) const METAL_MAX_BUFFER_BINDINGS: usize = 31;
 
 pub(super) fn metal_buffer_binding_count(
     operands: &BoundOperands,
