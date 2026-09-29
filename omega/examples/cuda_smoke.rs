@@ -3,6 +3,8 @@
 //! CUDA device reports the typed driver error and exits successfully so this
 //! remains useful in CPU CI.
 
+#![allow(clippy::expect_used)]
+
 use omega::CudaDriver;
 use proxima_tensor::{
     DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, map,
@@ -55,7 +57,7 @@ fn main() {
                     &[],
                     &[output_node],
                     NumericPolicy::default(),
-                    &[(&"x", QuantizedBlock::Float32(&[1.0, 2.0, 3.0, 4.0]))],
+                    &[("x", QuantizedBlock::Float32(&[1.0, 2.0, 3.0, 4.0]))],
                 )
                 .expect("planned CUDA graph should bind");
             if run_nvrtc {

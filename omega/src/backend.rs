@@ -670,10 +670,13 @@ pub fn set_math_mode(plan: &mut Plan, math_mode: metal::MathMode) -> Result<(), 
         Plan::Metal(metal_plan) => metal_plan.set_math_mode(math_mode),
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => Ok(()),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => Ok(()),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
-            feature = "wgpu-backend"
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
         )))]
         _ => match *plan {},
     }
@@ -694,10 +697,13 @@ pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
         Plan::Metal(metal_plan) => metal_plan.set_dispatch_type(dispatch_type),
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => {}
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => {}
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
-            feature = "wgpu-backend"
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
         )))]
         _ => match *plan {},
     }
@@ -716,10 +722,13 @@ pub fn set_command_buffer_chunks(plan: &mut Plan, chunks: u32, decode_shaped: bo
         Plan::Metal(metal_plan) => metal_plan.set_command_buffer_chunks(chunks, decode_shaped),
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => {}
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => {}
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
-            feature = "wgpu-backend"
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
         )))]
         _ => match *plan {},
     }
