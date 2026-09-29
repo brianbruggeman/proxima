@@ -592,7 +592,7 @@ pub(crate) fn emit_cached_attention_merge(
         .unwrap_or(0);
     let threads = checked_product(resolved.node, [total_elements, SIMD_WIDTH])?;
     let grid2d = exceeds_linear_grid(threads)
-        .then(|| flat_grid2d(resolved.node, threads, None))
+        .then(|| flat_grid2d(resolved.node, threads, None, false))
         .transpose()?;
     let source = widen_for_grid(resolved.node, source, grid2d)?;
     Ok(Some(Kernel {

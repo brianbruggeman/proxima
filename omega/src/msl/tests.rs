@@ -6172,7 +6172,7 @@ mod flat_grid_form {
     fn a_threadgroup_count_with_no_divisor_to_spill_into_y_is_rejected() {
         let prime_groups = 4_294_967_311u64;
 
-        let rejected = flat_grid2d(NodeId(3), prime_groups * SIMD_WIDTH, None);
+        let rejected = flat_grid2d(NodeId(3), prime_groups * SIMD_WIDTH, None, false);
 
         assert!(
             matches!(
@@ -6188,7 +6188,7 @@ mod flat_grid_form {
     fn a_composite_threadgroup_count_above_u32_max_splits_across_both_axes() {
         let composite_groups = 3 * 1_431_655_771u64;
 
-        let spec = flat_grid2d(NodeId(3), composite_groups * SIMD_WIDTH, None)
+        let spec = flat_grid2d(NodeId(3), composite_groups * SIMD_WIDTH, None, false)
             .expect("3 * 1431655771 threadgroups split as 3 x 1431655771");
 
         assert_eq!(spec.threadgroups_x * spec.threadgroups_y, composite_groups);
@@ -6197,7 +6197,7 @@ mod flat_grid_form {
 
     #[test]
     fn the_rectangle_never_launches_a_threadgroup_the_grid_does_not_need() {
-        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256)).expect("node 17 at 1873 rows");
+        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256), false).expect("node 17 at 1873 rows");
 
         assert_eq!(spec.threadgroups_x * spec.threadgroups_y, 1873 * 8960);
         assert!(spec.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X);
@@ -6208,7 +6208,7 @@ mod flat_grid_form {
     fn a_pinned_threadgroup_width_that_does_not_divide_the_grid_launches_one_simdgroup_wide() {
         let threads = SIMD_WIDTH * 4_000_000_001;
 
-        let spec = flat_grid2d(NodeId(5), threads, Some(64)).expect("an odd number of simdgroups still launches");
+        let spec = flat_grid2d(NodeId(5), threads, Some(64), true).expect("an odd number of simdgroups still launches");
 
         assert_eq!(spec.threads_per_threadgroup_x, SIMD_WIDTH);
         assert_eq!(spec.threadgroups_x * spec.threadgroups_y, threads.div_ceil(SIMD_WIDTH));
@@ -6218,7 +6218,10 @@ mod flat_grid_form {
     fn expert_source_substitution_refuses_the_flat_form() {
         let (bound, packed) = per_layer_projection_op(1873, 1536, 8960);
 
-        let refused = grid2d_for(&bound, &operand_codecs(&bound, &packed), NumericPolicy::llama_relaxed(), true);
+        let codecs = operand_codecs(&bound, &packed);
+        let threads = grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), true).expect("threads");
+
+        let refused = grid2d_for(&bound, &codecs, NumericPolicy::llama_relaxed(), true, threads);
 
         assert!(
             matches!(refused, Err(EmitError::WideGridUnsupported { .. })),
@@ -6304,5 +6307,165 @@ mod flat_grid_form {
             assert!(!kernel.source.contains("dense_batch_gid"), "{}", kernel.source);
             assert!(kernel.source.contains(FLAT_MARKER));
         });
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn a_batched_launch_whose_slice_fits_but_whose_whole_grid_does_not_takes_the_flat_form() {
+        let bound = dense_batched_score_shaped_op(102_400, 200_000, 8, 128);
+
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+            let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
+
+            assert!(kernel.grid.threads <= u64::from(u32::MAX), "one z slice fits: {}", kernel.grid.threads);
+            assert_eq!(kernel.grid.depth, 8);
+            assert!(kernel.grid.threads * kernel.grid.depth > u64::from(u32::MAX));
+            assert_eq!(
+                kernel.grid.grid2d.map(|spec| spec.form),
+                Some(Grid2DForm::FlatThreadgroupIndex),
+                "the launch covers threads x depth, and that product is what a 32-bit width cannot hold"
+            );
+            assert!(kernel.source.contains(FLAT_MARKER));
+        });
+    }
+
+    #[test]
+    fn a_pinned_width_that_does_not_divide_the_grid_is_refused_for_a_kernel_that_reads_it() {
+        let refused = flat_grid2d(NodeId(5), SIMD_WIDTH * 4_000_000_001, Some(64), false);
+
+        assert!(
+            matches!(refused, Err(EmitError::WideGridUnsupported { node, .. }) if node == NodeId(5)),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn cached_attention_with_grouped_queries_is_refused_when_its_width_does_not_divide_the_grid() {
+        let mut bound = cached_attention_op_dynamic(0, 1_000_000);
+        bound.extents = vec![300_000_001, 1, 1, 4];
+        let BoundOpKind::CachedAttention { query_groups, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic builds a CachedAttention")
+        };
+        *query_groups = 3;
+
+        let refused = emit(&bound, &BTreeMap::new(), NumericPolicy::default());
+
+        assert!(
+            matches!(refused, Err(EmitError::WideGridUnsupported { .. })),
+            "three query groups share one threadgroup, so a grid that is not a whole number of them \
+             cannot fall back to 32 lanes: {:?}",
+            refused.as_ref().map(|kernel| kernel.grid)
+        );
+    }
+
+    #[test]
+    fn a_flat_launch_is_re_cut_for_a_pipeline_that_cannot_run_the_pinned_width() {
+        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256), false).expect("node 17 at 1873 rows");
+
+        let fitted = fit_flat_width(spec, 128);
+
+        assert_eq!(fitted.threads_per_threadgroup_x, 128);
+        assert_eq!(
+            fitted.threadgroups_x * fitted.threadgroups_y * fitted.threads_per_threadgroup_x,
+            1873 * 8960 * 256,
+            "halving the width doubles the threadgroups and launches the same threads"
+        );
+        assert!(fitted.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X);
+        assert_eq!(fit_flat_width(spec, 256), spec, "a width the pipeline allows is left alone");
+        assert_eq!(fit_flat_width(spec, 1024), spec);
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn the_tile_coordinate_launch_is_never_re_cut_for_a_pipeline_width() {
+        let tiles = Grid2DSpec {
+            form: Grid2DForm::TileCoordinates,
+            threadgroups_x: 47,
+            threadgroups_y: 140,
+            threads_per_threadgroup_x: SIMD_WIDTH,
+            threads_per_threadgroup_y: TILED_GEMM_NSG as u64,
+        };
+
+        assert_eq!(fit_flat_width(tiles, 64), tiles);
+    }
+
+    /// Offline compile with the real Metal toolchain (`xcrun metal -c`, no
+    /// device); a missing toolchain fails the test, never skips it.
+    #[cfg(target_os = "macos")]
+    fn assert_compiles_with_the_metal_toolchain(label: &str, source: &str) {
+        let directory = tempfile::tempdir().expect("tempdir creation must not fail in ci");
+        let metal_path = directory.path().join("kernel.metal");
+        std::fs::write(&metal_path, source).expect("write metal source to a temp file");
+        let output = std::process::Command::new("xcrun")
+            .args(["-sdk", "macosx", "metal", "-c"])
+            .arg(&metal_path)
+            .arg("-o")
+            .arg(directory.path().join("kernel.air"))
+            .output()
+            .unwrap_or_else(|error| panic!("metal toolchain unavailable ({error}) -- a red gate, not a skip"));
+        assert!(
+            output.status.success(),
+            "{label}: metal compile failed:\n--- source ---\n{source}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_cached_attention_merge_kernel_past_the_thread_index_takes_the_flat_form_and_compiles() {
+        let mut bound = cached_attention_op_dynamic(0, 1_000_000);
+        bound.extents = vec![300_000_000, 1, 1, 4];
+
+        let merge = emit_cached_attention_merge(&bound, NumericPolicy::llama_relaxed())
+            .expect("emits")
+            .expect("a long context under the relaxed policy needs the merge dispatch");
+
+        assert!(merge.grid.threads > u64::from(u32::MAX), "{}", merge.grid.threads);
+        assert_eq!(merge.grid.grid2d.map(|spec| spec.form), Some(Grid2DForm::FlatThreadgroupIndex));
+        assert!(merge.source.contains(FLAT_MARKER), "{}", merge.source);
+        assert_compiles_with_the_metal_toolchain("cached attention merge", &merge.source);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cached_attention_with_grouped_queries_past_the_thread_index_launches_its_pinned_width_and_compiles() {
+        let mut bound = cached_attention_op_dynamic(0, 1_000_000);
+        bound.extents = vec![300_000_000, 1, 1, 4];
+        let BoundOpKind::CachedAttention { query_groups, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic builds a CachedAttention")
+        };
+        *query_groups = 4;
+
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
+        let spec = kernel.grid.grid2d.expect("a grid past u32::MAX cannot dispatch 1D");
+
+        assert_eq!(Some(spec.threads_per_threadgroup_x), kernel.grid.threadgroup_width, "pinned width is launched as pinned");
+        assert!(spec.threads_per_threadgroup_x > SIMD_WIDTH, "the four query groups share one threadgroup");
+        assert_compiles_with_the_metal_toolchain("cached attention, query_groups=4", &kernel.source);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-moe-mul-mat-id"))]
+    #[test]
+    fn a_round_batched_reduce_past_the_thread_index_compiles() {
+        let mut bound = round_batched_matmul_op(3);
+        bound.extents[0] = 20_000_000;
+        bound.extents[1] = 1_000;
+
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
+
+        assert_compiles_with_the_metal_toolchain("round-batched reduce", &kernel.source);
+    }
+
+    #[cfg(feature = "metal-q4k-split-k")]
+    #[test]
+    fn the_split_k_packed_row_body_gets_its_threadgroup_width_back_as_a_local() {
+        let bound = packed_row_multi_token_op(1, 256, 4_000_000_000);
+        let weight = bound.operands()[0].0;
+        let packed = BTreeMap::from([(weight, Codec::Q4K)]);
+
+        let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("emits");
+
+        assert!(kernel.source.contains("uint tptg = wide_width.x;"), "{}", kernel.source);
+        assert!(!kernel.source.contains("uint tptg [["), "{}", kernel.source);
     }
 }

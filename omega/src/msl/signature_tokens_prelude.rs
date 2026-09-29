@@ -160,8 +160,9 @@ pub(super) fn grid_threads(
                 // `metal-wide-cooperative-reduce` off, matching
                 // `reduce_is_cooperative`'s prior doc byte-for-byte) — see
                 // that function's own doc for the scaling policy.
-                let reduce_dims = reduction_dims(resolved, output_axes);
-                let lanes = cooperative_reduce_width(resolved, quantized, &reduce_dims);
+                let lanes = with_reduction_dims(resolved, output_axes, |reduce_dims| {
+                    cooperative_reduce_width(resolved, quantized, reduce_dims)
+                });
                 checked_product(resolved.node, [output_total, lanes])?
             } else {
                 output_total

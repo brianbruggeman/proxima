@@ -1316,6 +1316,12 @@ pub(super) fn dispatch(
         return;
     }
     if let Some(grid2d) = grid.grid2d {
+        // the 1D branch below clamps its width to the pipeline's own cap; the flat
+        // form must too, or a pinned width past it is a Metal validation error
+        let grid2d = crate::msl::fit_flat_width(
+            grid2d,
+            pipeline.maxTotalThreadsPerThreadgroup() as u64,
+        );
         let threadgroups = MTLSize {
             width: grid2d.threadgroups_x as usize,
             height: grid2d.threadgroups_y as usize,

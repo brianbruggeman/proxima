@@ -98,7 +98,8 @@ pub(super) fn emit_inner(
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
     let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
-    let grid2d = grid2d_for(resolved, &quantized, numeric_policy, expert_source_mode)?;
+    let threads = grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?;
+    let grid2d = grid2d_for(resolved, &quantized, numeric_policy, expert_source_mode, threads)?;
     let source = widen_for_grid(resolved.node, source, grid2d)?;
     let kernel = Kernel {
         source,
@@ -109,7 +110,7 @@ pub(super) fn emit_inner(
             bindings(resolved)
         },
         grid: GridSpec {
-            threads: grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?,
+            threads,
             threadgroup_width: extras.cooperative_width,
             depth: grid_depth_for(resolved, &quantized),
             grid2d,
@@ -1341,7 +1342,9 @@ pub(super) fn metal_specialization(
         // an op whose grid cannot be described (`Err`) fails `emit` and
         // `kernel_dispatch_shape` before any dispatch consults this key.
         wide_grid: matches!(
-            grid2d_for(resolved, &quantized, numeric_policy, false),
+            grid_threads(resolved, &quantized, numeric_policy, false).and_then(|threads| {
+                grid2d_for(resolved, &quantized, numeric_policy, false, threads)
+            }),
             Ok(Some(Grid2DSpec { form: Grid2DForm::FlatThreadgroupIndex, .. }))
         ),
     }
@@ -1399,7 +1402,10 @@ pub(crate) fn kernel_dispatch_shape(
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
     let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
-    let extras = metal_specialization(resolved, packed_operands, numeric_policy);
+    // `kernel_dispatch_shape` has no expert-source caller (it never took
+    // `expert_source_mode` before this parameter existed either) -- `false`
+    // reproduces that pre-existing scope exactly.
+    let threads = grid_threads(resolved, &quantized, numeric_policy, false)?;
     Ok((
         if is_split_cached_attention {
             split_bindings_with_scratch(resolved)
@@ -1407,11 +1413,8 @@ pub(crate) fn kernel_dispatch_shape(
             bindings(resolved)
         },
         GridSpec {
-            // `kernel_dispatch_shape` has no expert-source caller (it never
-            // took `expert_source_mode` before this parameter existed
-            // either) -- `false` reproduces that pre-existing scope exactly.
-            threads: grid_threads(resolved, &quantized, numeric_policy, false)?,
-            threadgroup_width: extras.cooperative_width,
+            threads,
+            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
             // Plan-resolved (`resolve_steps`'s own `ResolvedStep::grid`, the
             // production `execute_plan_with_placements` path) must agree
             // with `emit_inner`'s own `GridSpec::depth` for the identical
@@ -1419,7 +1422,7 @@ pub(crate) fn kernel_dispatch_shape(
             // would silently dispatch a spliced round-batched kernel with
             // only round 0's own threadgroup, at the cache-HIT path only.
             depth: grid_depth_for(resolved, &quantized),
-            grid2d: grid2d_for(resolved, &quantized, numeric_policy, false)?,
+            grid2d: grid2d_for(resolved, &quantized, numeric_policy, false, threads)?,
         },
     ))
 }
@@ -1917,6 +1920,33 @@ pub(crate) fn reduction_dims(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16
     (0..resolved.extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
         .collect()
+}
+
+/// Rank every real bound op stays under; [`with_reduction_dims`] keeps the
+/// reduction axes on the stack up to it.
+const INLINE_REDUCTION_RANK: usize = 16;
+
+/// [`reduction_dims`] without the heap allocation, for the per-dispatch
+/// shape and cache-key paths (`grid_threads`, `tiled_gemm_threadgroup_width`)
+/// that run once per encoded op: the axes live in a stack array for any
+/// rank up to [`INLINE_REDUCTION_RANK`] and fall back to [`reduction_dims`]'s
+/// `Vec` past it.
+pub(super) fn with_reduction_dims<Output>(
+    resolved: &BoundOp,
+    output_axes: &[u16],
+    visit: impl FnOnce(&[u16]) -> Output,
+) -> Output {
+    let rank = resolved.extents.len();
+    if rank > INLINE_REDUCTION_RANK {
+        return visit(&reduction_dims(resolved, output_axes));
+    }
+    let mut axes = [0u16; INLINE_REDUCTION_RANK];
+    let mut count = 0;
+    for dim in (0..rank as u16).filter(|dim| !output_axes.contains(dim)) {
+        axes[count] = dim;
+        count += 1;
+    }
+    visit(&axes[..count])
 }
 
 pub(super) fn bindings(resolved: &BoundOp) -> Vec<Binding> {
@@ -2996,7 +3026,8 @@ pub(super) fn tiled_gemm_grid2d_spec(
 ///
 /// - [`Grid2DForm::TileCoordinates`] when [`tiled_gemm_grid2d_active`] admits
 ///   (`Reduce` only: only a `Reduce` is a tiled or dense-batched GEMM block).
-/// - [`Grid2DForm::FlatThreadgroupIndex`] when [`grid_threads`] exceeds
+/// - [`Grid2DForm::FlatThreadgroupIndex`] when [`grid_threads`] times
+///   [`grid_depth_for`] (the whole launch, not one z slice) exceeds
 ///   [`crate::sized::GRID_LINEAR_THREAD_LIMIT`], the widest grid a 32-bit
 ///   thread index addresses: Metal truncates a wider 1D dispatch to
 ///   `threads mod 2^32` with no error.
@@ -3011,6 +3042,7 @@ pub(super) fn grid2d_for(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
+    threads: u64,
 ) -> Result<Option<Grid2DSpec>, EmitError> {
     if let BoundOpKind::Reduce {
         reduce_op,
@@ -3023,8 +3055,8 @@ pub(super) fn grid2d_for(
     {
         return Ok(Some(tiles));
     }
-    let threads = grid_threads(resolved, quantized, numeric_policy, expert_source_mode)?;
-    if !exceeds_linear_grid(threads) {
+    let depth = grid_depth_for(resolved, quantized);
+    if !exceeds_linear_grid(checked_product(resolved.node, [threads, depth])?) {
         return Ok(None);
     }
     if expert_source_mode {
@@ -3040,7 +3072,50 @@ pub(super) fn grid2d_for(
         });
     }
     let threadgroup_width = tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy);
-    flat_grid2d(resolved.node, threads, threadgroup_width).map(Some)
+    let width_is_neutral =
+        pinned_width_is_shape_neutral(resolved, quantized, numeric_policy, expert_source_mode);
+    flat_grid2d(resolved.node, threads, threadgroup_width, width_is_neutral).map(Some)
+}
+
+/// Whether the threadgroup width `tiled_gemm_threadgroup_width` pins for
+/// `resolved` is one its kernel never reads back: a serial reduce (the width
+/// is pinned off the structural cooperative test, but dispatch is one thread
+/// per output) and the row-blocked packed matvec, whose non-split-K body
+/// addresses its output group as `gid / SIMD_WIDTH`. Every other pinned width
+/// (cooperative lanes, tiled GEMM, cached attention, softmax weights, gated
+/// delta net) is baked into lane or row math, so the flat form must launch it
+/// exactly or not at all.
+fn pinned_width_is_shape_neutral(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+) -> bool {
+    let BoundOpKind::Reduce {
+        keep: Keep::Reduce,
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return false;
+    };
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+        || dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+    {
+        return false;
+    }
+    packed_row_block(resolved, quantized).is_some()
+        || !reduce_is_cooperative_dispatch(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+            expert_source_mode,
+        )
 }
 
 /// `true` only when [`wide_weight_stage_active`] admits AND that admitted
