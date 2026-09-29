@@ -2424,7 +2424,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grid_whose_padded_last_workgroup_would_wrap_the_i32_gid_is_rejected() {
+    fn a_grid_whose_padded_last_workgroup_reaches_the_i32_limit_is_rejected() {
         let padded_past = elementwise_tanh_op(i32::MAX as u32);
         let padded_exactly_to_the_limit = elementwise_tanh_op(i32::MAX as u32 + 1 - WORKGROUP_SIZE);
 
@@ -2433,10 +2433,13 @@ mod tests {
 
         assert!(
             matches!(rejected, Err(EmitError::GridExceedsThreadIndex { threads, .. }) if threads == i32::MAX as u64),
-            "i32::MAX threads pad to 2^31 and the last workgroup's gid goes negative: {rejected:?}"
+            "i32::MAX threads pad to 2^31, past the padded-count limit of i32::MAX (one \
+             workgroup stricter than the largest gid, 2^31 - 1, strictly needs): {rejected:?}"
         );
         assert_eq!(
-            accepted.expect("a grid that pads to exactly i32::MAX + 1 - 1 fits").threads,
+            accepted
+                .expect("a grid already a whole number of workgroups, padded count 2^31 - 256, fits")
+                .threads,
             u64::from(i32::MAX as u32 + 1 - WORKGROUP_SIZE)
         );
     }
