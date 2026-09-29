@@ -10,8 +10,6 @@ use proxima_gguf::types::GgmlType;
 use crate::LoadedModel;
 use crate::serving::{GPU_LAYERS_ALL, ServingConfig, SpeculativeConfig};
 
-const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
-
 const SPECULATIVE_CORPUS: &str = include_str!("../../examples/data/speculative_corpus.jsonl");
 
 const GREEDY_TOKENS: usize = 32;
@@ -22,7 +20,7 @@ const GREEDY_TOKENS: usize = 32;
 /// one row further.
 const LAST_ROW_COUNT_AT_FULL_LANE_WIDTH: usize = 1872;
 
-fn greedy_config() -> ServingConfig<'static> {
+pub(super) fn greedy_config() -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
         kv_cache_key_quant: GgmlType::F32,
@@ -49,7 +47,7 @@ fn corpus_document(id: &str) -> String {
         .unwrap_or_else(|| panic!("corpus has no record with id {id}"))
 }
 
-fn chat_prompt(document_chars: usize) -> String {
+pub(super) fn chat_prompt(document_chars: usize) -> String {
     let document: String = corpus_document("rag004").chars().take(document_chars).collect();
     format!("<|turn>user\n{document}<turn|>\n<|turn>model\n")
 }
@@ -92,11 +90,18 @@ fn decode_fresh_and_resumed(model: &LoadedModel<'_>, document_chars: usize) -> O
 /// `(threads - 2^32) / 256` came back zero, and the resumed decode -- whose
 /// single suffix row is projected in its own small dispatch -- diverged from
 /// the fresh one from the very first token.
+///
+/// A consistency check between two device paths, NOT a correctness oracle:
+/// the FFN gate/up reduces overflow from ~1,365 rows, so between 1,365 and
+/// 1,872 rows both paths share the same overflowed prefill and agree while
+/// both wrong. The oracle is llama.cpp on the same token ids:
+/// `speculative_bench --llama-parity`.
 #[test]
 #[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
 fn resumed_decode_matches_fresh_decode_across_the_thread_index_overflow_row_count() {
-    crate::test_support::require_fixture(REAL_GEMMA4_E2B_GGUF_PATH, None);
-    let file = File::open(REAL_GEMMA4_E2B_GGUF_PATH).expect("open the real gemma4-E2B checkpoint");
+    let model_path = crate::test_support::gemma4_e2b_gguf_path();
+    crate::test_support::require_fixture(&model_path, Some("PROXIMA_GEMMA4_E2B_GGUF"));
+    let file = File::open(&model_path).expect("open the real gemma4-E2B checkpoint");
     // SAFETY: read-only mapping of a file nothing else writes during the test.
     let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
     let bytes: &[u8] = &mapping;
