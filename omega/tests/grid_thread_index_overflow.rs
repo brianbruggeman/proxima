@@ -215,13 +215,13 @@ fn per_layer_projection_at_the_last_linear_row_count_is_fully_populated() {
     );
 }
 
-const DEFAULT_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
-
-/// `PROXIMA_GEMMA4_E2B_GGUF` names the host-local checkpoint; the test fails
-/// loudly, naming it, when it is absent rather than skipping.
+/// `PROXIMA_GEMMA4_E2B_GGUF` names the host-local checkpoint. There is no
+/// default path: the test fails loudly, naming the variable, when it is unset
+/// or points at nothing, rather than skipping.
 fn real_gemma4_e2b_gguf_path() -> String {
-    let path = std::env::var("PROXIMA_GEMMA4_E2B_GGUF")
-        .unwrap_or_else(|_| DEFAULT_GEMMA4_E2B_GGUF_PATH.to_string());
+    let path = std::env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| {
+        panic!("PROXIMA_GEMMA4_E2B_GGUF is unset: point it at the host-local gemma4-E2B gguf")
+    });
     assert!(
         std::path::Path::new(&path).exists(),
         "no host-local gemma4-E2B gguf at {path}: set PROXIMA_GEMMA4_E2B_GGUF to a valid checkpoint path"
