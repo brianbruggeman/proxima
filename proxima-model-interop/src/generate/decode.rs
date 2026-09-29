@@ -2481,6 +2481,16 @@ impl<'file> LoadedModel<'file> {
     /// field: it is a measurement knob for this one harness, not a servable
     /// setting -- keeping it out of the config surface means no builder
     /// setter, TOML key, or env var ever reaches it.
+    ///
+    /// On return, if this request drafted anything at all
+    /// (`speculative_stats.drafted_total > 0`), emits exactly one `info!`
+    /// event carrying `draft_n`/`draft_n_accepted` -- llama-server's own
+    /// per-request field names (`tools/server/server-common.cpp:96-101`'s
+    /// `if (n_draft_tokens > 0) { base["draft_n"] = ...; }`), read straight
+    /// off `speculative_stats` (SPEC R12), never a second counter -- plus
+    /// each n-gram type's own drafted/accepted split
+    /// ([`SpeculativeDecodeStats::per_type`]'s own doc). A request that
+    /// never drafted emits nothing, matching llama-server's own gate.
     pub fn generate_streaming_with_speculative_stats(
         &self,
         prompt: &str,
@@ -2500,7 +2510,7 @@ impl<'file> LoadedModel<'file> {
             serving_config
         };
         let mut runtime = BackendRuntime::new(&serving_config);
-        self.run_decode_loop_observed_with_stats(
+        let result = self.run_decode_loop_observed_with_stats(
             prompt,
             max_tokens,
             &serving_config,
@@ -2510,7 +2520,25 @@ impl<'file> LoadedModel<'file> {
             on_token,
             speculative_stats,
             forced_draft_width,
-        )
+        );
+        if result.is_ok() && speculative_stats.drafted_total > 0 {
+            info!(
+                draft_n = speculative_stats.drafted_total,
+                draft_n_accepted = speculative_stats.accepted_total,
+                ngram_simple_drafted = speculative_stats.per_type[0].drafted,
+                ngram_simple_accepted = speculative_stats.per_type[0].accepted,
+                ngram_map_k_drafted = speculative_stats.per_type[1].drafted,
+                ngram_map_k_accepted = speculative_stats.per_type[1].accepted,
+                ngram_map_k4v_drafted = speculative_stats.per_type[2].drafted,
+                ngram_map_k4v_accepted = speculative_stats.per_type[2].accepted,
+                ngram_mod_drafted = speculative_stats.per_type[3].drafted,
+                ngram_mod_accepted = speculative_stats.per_type[3].accepted,
+                ngram_cache_drafted = speculative_stats.per_type[4].drafted,
+                ngram_cache_accepted = speculative_stats.per_type[4].accepted,
+                "draft_n_accepted: request-level speculative decode draft/accept totals"
+            );
+        }
+        result
     }
 
     /// [`Self::run_decode_loop`]'s own body, plus the two hooks

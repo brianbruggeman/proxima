@@ -390,6 +390,11 @@ fn main() {
             |value| parse_drafter_flag(value),
         );
     let drafter_value_index = drafter_flag_index.map(|flag_index| flag_index + 1);
+    let telemetry_file_flag_index = raw_args.iter().position(|arg| arg == "--telemetry-file");
+    let telemetry_file_flag = telemetry_file_flag_index
+        .and_then(|flag_index| raw_args.get(flag_index + 1))
+        .map(PathBuf::from);
+    let telemetry_file_value_index = telemetry_file_flag_index.map(|flag_index| flag_index + 1);
     let mut args = raw_args
         .into_iter()
         .enumerate()
@@ -399,6 +404,8 @@ fn main() {
                 && Some(*index) != gpu_layers_value_index
                 && Some(*index) != drafter_flag_index
                 && Some(*index) != drafter_value_index
+                && Some(*index) != telemetry_file_flag_index
+                && Some(*index) != telemetry_file_value_index
         })
         .map(|(_, arg)| arg);
     let model_path = args
@@ -415,9 +422,9 @@ fn main() {
         &prompt[..prompt.len().min(80)]
     );
 
-    let log_path: PathBuf = env::var("PROXIMA_TELEMETRY_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("speculative_decode_parity_telemetry.log"));
+    let log_path: PathBuf = telemetry_file_flag
+        .or_else(|| env::var("PROXIMA_TELEMETRY_FILE").ok().map(PathBuf::from))
+        .unwrap_or_else(|| std::env::temp_dir().join("speculative_decode_parity_telemetry.log"));
     let (capture, recorder) = install_telemetry(&log_path);
 
     let file = File::open(&model_path).expect("open model");
