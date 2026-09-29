@@ -108,7 +108,8 @@ pub use expert_slab::{
 pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
 pub use generate::{
-    DecodeMetrics, LoadedModel, Phase, PrefixState, SpeculativeDecodeStats, TokenEvent,
+    DecodeMetrics, LoadedModel, Phase, PrefixState, SpeculativeDecodeStats, SpeculativeTypeStats,
+    TokenEvent,
 };
 #[cfg(feature = "std")]
 pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_rows};
