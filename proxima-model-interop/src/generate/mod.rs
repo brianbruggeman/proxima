@@ -204,6 +204,8 @@ mod serving_backend;
 mod tests_all;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod speculative_default_on_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod prefix_resume_long_prompt_tests;
 use decode::*;
 use kv_ring::{
     KvRing, attention_cache, rings_cover_speculation, sliding_cached_len_scalar,
