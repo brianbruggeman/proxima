@@ -1449,7 +1449,8 @@ pub(super) fn upload_base_table(
 /// [`splice_round_batched_reduce_base_table`](crate::msl::splice_round_batched_reduce_base_table)'s
 /// own one-field layout (`output_base`). The routes are NOT part of this
 /// group: each round's route is read straight from its own `MoeTopK`
-/// output buffer through a bound `route_buf_{z}` parameter, because that
+/// output buffer through a bound buffer (`gather_idx{slot}` for round 0,
+/// `route_buf_{z}` after), because that
 /// buffer is written on the GPU earlier in the same command buffer and so
 /// holds nothing a CPU copy at encode time could read. Unlike
 /// [`ResolvedMergedGroup`], this is resolved FRESH on every
