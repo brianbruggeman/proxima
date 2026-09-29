@@ -305,6 +305,96 @@ fn cached_attention(query_groups: u64, new_key_rows: u64) -> BoundOp {
     }
 }
 
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn round_batched_gathered_matmul(round_count: u32) -> BoundOp {
+    let mut program = Vec::new();
+    let weight = input(&mut program, DType::Float32, &[8, 16, 256]);
+    let route = input(&mut program, DType::Int32, &[4]);
+    let activation = input(&mut program, DType::Float32, &[4, 256]);
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (
+                    weight,
+                    IndexMap::Computed {
+                        indices: route,
+                        index_map: map::projection(3, &[0]),
+                        base: map::IndexPattern {
+                            iter_rank: 3,
+                            axes: vec![
+                                map::AxisIndex::default(),
+                                map::AxisIndex {
+                                    terms: core::iter::once(map::AxisTerm::projection(1)).collect(),
+                                    offset: 0,
+                                    len: None,
+                                },
+                                map::AxisIndex {
+                                    terms: core::iter::once(map::AxisTerm::projection(2)).collect(),
+                                    offset: 0,
+                                    len: None,
+                                },
+                            ],
+                        },
+                        gathered_dim: 0,
+                    },
+                ),
+                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+            ],
+            name: None,
+        },
+    );
+    reduce(&mut program, ScalarOp::Add, product, 3, &[0, 1], Keep::Reduce);
+    let gathered = bound_of(&program);
+    let BoundOp { node, dtype, extents, kind } = gathered;
+    let BoundOpKind::Reduce {
+        element_body,
+        reduce_op,
+        init,
+        keep,
+        operands,
+        output_axes,
+        out_layout,
+        out_scatter,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+    } = kind
+    else {
+        unreachable!("a gathered matmul binds to a reduce fold")
+    };
+    let route_node = operands
+        .iter()
+        .find_map(|(_, _, lookup)| lookup.as_ref().map(|lookup| lookup.indices))
+        .expect("the gathered operand names its route");
+    let mut wide_extents = extents;
+    wide_extents[0] = 20_000_000;
+    wide_extents[1] = 1_000;
+    BoundOp {
+        node,
+        dtype,
+        extents: wide_extents,
+        kind: BoundOpKind::RoundBatchedReduce {
+            element_body,
+            reduce_op,
+            init,
+            keep,
+            operands,
+            output_axes,
+            out_layout,
+            out_scatter,
+            epilogue_body,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+            round_count,
+            round_routes: vec![route_node; round_count as usize],
+            round_outputs: vec![node; round_count as usize],
+        },
+    }
+}
+
 fn flat_kernels() -> Vec<(&'static str, Kernel)> {
     let none = BTreeMap::new();
     let default_policy = NumericPolicy::default();
@@ -312,7 +402,7 @@ fn flat_kernels() -> Vec<(&'static str, Kernel)> {
     let (tiled, tiled_codecs) = tiled_q4k_gemm();
     let (packed_even, packed_even_codecs) = packed_row_q4k_matvec(4_000_000_000);
     let (packed_odd, packed_odd_codecs) = packed_row_q4k_matvec(4_000_000_004);
-    vec![
+    let kernels = vec![
         ("iota", emit_flat("iota", &position_only(BoundOpKind::Iota), &none, default_policy)),
         (
             "constant",
@@ -354,13 +444,37 @@ fn flat_kernels() -> Vec<(&'static str, Kernel)> {
             "cached attention, four query groups sharing a threadgroup",
             emit_flat("cached attention groups", &cached_attention(4, 1_000_000), &none, default_policy),
         ),
-    ]
+    ];
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let kernels = {
+        let mut kernels = kernels;
+        kernels.push((
+            "round-batched gathered reduce",
+            emit_flat(
+                "round-batched reduce",
+                &round_batched_gathered_matmul(3),
+                &none,
+                default_policy,
+            ),
+        ));
+        kernels
+    };
+    kernels
+}
+
+fn expected_kernel_count() -> usize {
+    14 + usize::from(cfg!(feature = "metal-moe-mul-mat-id"))
 }
 
 #[test]
 fn every_flat_form_kernel_compiles_with_the_metal_toolchain() {
     let kernels = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, flat_kernels);
-    assert_eq!(kernels.len(), 14, "one fixture per kernel form that can take the flat path");
+    let expected = expected_kernel_count();
+    assert_eq!(
+        kernels.len(),
+        expected,
+        "one fixture per kernel form that can take the flat path"
+    );
 
     let mut compiled = 0usize;
     for (label, kernel) in &kernels {
@@ -390,5 +504,48 @@ fn every_flat_form_kernel_compiles_with_the_metal_toolchain() {
         );
         compiled += 1;
     }
-    assert_eq!(compiled, 14, "compiled {compiled} flat-form kernels, expected exactly 14");
+    assert_eq!(
+        compiled, expected,
+        "compiled {compiled} flat-form kernels, expected exactly {expected}"
+    );
+}
+
+fn launch_width(label: &str, kernel: &Kernel) -> u64 {
+    kernel
+        .grid
+        .grid2d
+        .map(|spec| spec.threads_per_threadgroup_x)
+        .unwrap_or_else(|| panic!("{label}: the flat form carries its launch"))
+}
+
+#[test]
+fn the_packed_row_fixtures_take_the_launch_widths_their_labels_name() {
+    let default_policy = NumericPolicy::default();
+    let (even, even_codecs) = packed_row_q4k_matvec(4_000_000_000);
+    let (odd, odd_codecs) = packed_row_q4k_matvec(4_000_000_004);
+
+    let (even_kernel, odd_kernel) = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+        (
+            emit_flat("packed row even", &even, &even_codecs, default_policy),
+            emit_flat("packed row odd", &odd, &odd_codecs, default_policy),
+        )
+    });
+
+    let pinned_even = even_kernel
+        .grid
+        .threadgroup_width
+        .expect("a packed row-blocked matvec pins a threadgroup width");
+    let pinned_odd = odd_kernel
+        .grid
+        .threadgroup_width
+        .expect("a packed row-blocked matvec pins a threadgroup width");
+    assert!(
+        pinned_even > omega::sized::SIMD_WIDTH,
+        "the even fixture only tests the divisible case when the pinned width exceeds one simdgroup, \
+         got {pinned_even}"
+    );
+    assert_eq!(even_kernel.grid.threads % pinned_even, 0, "even grid divides the pinned width");
+    assert_eq!(launch_width("packed row even", &even_kernel), pinned_even);
+    assert_ne!(odd_kernel.grid.threads % pinned_odd, 0, "odd grid must not divide the pinned width");
+    assert_eq!(launch_width("packed row odd", &odd_kernel), omega::sized::SIMD_WIDTH);
 }
