@@ -544,7 +544,7 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
         // share every other structural token.
         let merge = match crate::msl::emit_cached_attention_merge(bound, plan.numeric_policy)? {
             Some(merge_kernel) => {
-                let merge_cache_key = format!("{cache_key}_merge");
+                let merge_cache_key = merge_pipeline_key(&cache_key, &merge_kernel);
                 let merge_pipeline =
                     pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, plan.math_mode)?;
                 Some(ResolvedMergeStep {
@@ -1233,7 +1233,7 @@ pub(super) fn encode_op(
         // cached_attention_merge` returns `None` before rendering anything.
         owned_merge = match crate::msl::emit_cached_attention_merge(bound, numeric_policy)? {
             Some(merge_kernel) => {
-                let merge_cache_key = format!("{cache_key}_merge");
+                let merge_cache_key = merge_pipeline_key(&cache_key, &merge_kernel);
                 let merge_pipeline =
                     pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, math_mode)?;
                 Some(ResolvedMergeStep {
@@ -4317,4 +4317,13 @@ pub(super) mod expert_payload_descriptor_tests {
         )
         .expect("a smaller mixed-codec table reduces the device upload");
     }
+}
+
+/// `{cache_key}_merge`, plus `_wg` when the merge kernel took the flat 2D grid
+/// form. The split kernel's own key already names ITS form, but the merge
+/// kernel's grid (rows x heads x `SIMD_WIDTH`) is narrower, so the two forms
+/// can differ and must not share a pipeline entry.
+fn merge_pipeline_key(cache_key: &str, merge_kernel: &Kernel) -> String {
+    let form = if merge_kernel.grid.grid2d.is_some() { "_wg" } else { "" };
+    format!("{cache_key}_merge{form}")
 }

@@ -119,6 +119,7 @@ mod elementwise_reduce_core;
 mod packed_row_blocked_ggml;
 #[macro_use]
 mod tiled_gemm_cooperative_scan;
+mod wide_grid;
 pub use kernel_types_identity::*;
 pub use emit_and_classify::*;
 pub(crate) use signature_tokens_prelude::*;
@@ -153,6 +154,7 @@ pub(crate) use cached_attention_render::emit_cached_attention_merge;
 pub(crate) use elementwise_reduce_core::*;
 use packed_row_blocked_ggml::*;
 use tiled_gemm_cooperative_scan::*;
+use wide_grid::*;
 // `crate::metal::prepare_uniforms_pack` (a sibling of `msl`, not a
 // descendant, so `pub(super)` there would not reach it) needs this to pack
 // `CachedSoftmaxWeights::Uniforms::total_elements` as `attention_rows *

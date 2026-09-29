@@ -257,33 +257,58 @@ pub struct GridSpec {
     /// signature change; `1` reproduces today's `MTLSize { depth: 1, .. }`
     /// exactly, so this field is inert until a caller sets it above `1`.
     pub depth: u64,
-    /// `Some` only when [`crate::identity::MetalOnlyExtras::tiled_gemm_grid2d`]
-    /// admitted for this op -- the kernel body reads `threadgroup_position_
-    /// in_grid`/`thread_index_in_threadgroup`/`simdgroup_index_in_
-    /// threadgroup` rather than a flattened `[[thread_position_in_grid]]`,
-    /// so `crate::metal::dispatch` must issue `dispatchThreadgroups_
-    /// threadsPerThreadgroup` against THIS threadgroup-count grid instead of
-    /// `dispatchThreads_threadsPerThreadgroup` against [`Self::threads`].
-    /// `None` reproduces today's dispatch call exactly -- this field is
-    /// inert (and `Self::threads`/`Self::threadgroup_width` remain the sole
-    /// authority) until a caller populates it.
+    /// `Some` when the kernel body reads threadgroup coordinates
+    /// (`threadgroup_position_in_grid` and friends) rather than a flattened
+    /// `uint gid [[thread_position_in_grid]]`, so `crate::metal::dispatch`
+    /// must issue `dispatchThreadgroups_threadsPerThreadgroup` against THIS
+    /// threadgroup-count grid instead of `dispatchThreads_
+    /// threadsPerThreadgroup` against [`Self::threads`]. Decided in one place,
+    /// `grid2d_for`, for both the tiled-GEMM tile form and the flat form a
+    /// grid wider than `u32::MAX` threads needs; [`Grid2DSpec::form`] says
+    /// which the kernel was rendered in. `None` is the 1D form: the grid fits
+    /// a 32-bit thread index and [`Self::threads`]/[`Self::threadgroup_width`]
+    /// are the sole authority.
     pub grid2d: Option<Grid2DSpec>,
 }
 
+/// How the kernel body of a [`Grid2DSpec`] launch turns its threadgroup
+/// coordinates into the work it owns. The launch (`dispatchThreadgroups`) is
+/// identical for both; what differs is what the kernel reads back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grid2DForm {
+    /// `tgpig.x`/`tgpig.y` ARE the tile coordinates (ggml's `kernel_mul_mm`
+    /// convention): `threadgroups_x`/`threadgroups_y` are the tiled GEMM's
+    /// own `col_tiles`/`row_tiles`.
+    TileCoordinates,
+    /// The kernel rebuilds its 1D global thread index in 64 bits as
+    /// `(tg.y * threadgroups_per_grid.x + tg.x) * threads_per_threadgroup +
+    /// lane`, because the grid is wider than the 32 bits of
+    /// `[[thread_position_in_grid]]`. `threadgroups_x * threadgroups_y` is
+    /// exactly the number of threadgroups `GridSpec::threads` needs, so the
+    /// only threads past `GridSpec::threads` are the tail of the last
+    /// threadgroup, and only for a kernel whose threadgroup width the driver
+    /// picks (`GridSpec::threadgroup_width` is `None`) -- every such kernel
+    /// already returns for `gid >= its uniform total`.
+    FlatThreadgroupIndex,
+}
+
 /// The threadgroup-count dispatch shape [`GridSpec::grid2d`] carries when
-/// populated -- `threadgroups_x`/`threadgroups_y` are `tiled_gemm_
-/// threadgroups`'s own `col_tiles`/`row_tiles`, matching ggml's own
-/// `kernel_mul_mm` dispatch convention (`ggml-metal-ops.cpp`'s
-/// `dispatchThreadgroups(MTLSizeMake(ne1/32, ne0/64, 1), ...)`: width over
-/// the token axis, height over the feature axis) so the kernel body's
-/// `tgpig.x`/`tgpig.y` reads land on the same tile [`GridSpec::threads`]'s
-/// flattened `gid / block_threads` decomposition already visited.
-/// `threads_per_threadgroup_x`/`_y` are [`crate::sized::SIMD_WIDTH`]/
-/// `TILED_GEMM_NSG` -- the fixed 32x4 threadgroup shape every tiled-GEMM
-/// kernel already dispatches under [`GridSpec::threadgroup_width`]'s own
-/// flat 128, just expressed as two axes instead of one.
+/// populated. For [`Grid2DForm::TileCoordinates`], `threadgroups_x`/
+/// `threadgroups_y` are `tiled_gemm_threadgroups`'s own `col_tiles`/
+/// `row_tiles`, matching ggml's own `kernel_mul_mm` dispatch convention
+/// (`ggml-metal-ops.cpp`'s `dispatchThreadgroups(MTLSizeMake(ne1/32,
+/// ne0/64, 1), ...)`: width over the token axis, height over the feature
+/// axis) so the kernel body's `tgpig.x`/`tgpig.y` reads land on the same tile
+/// [`GridSpec::threads`]'s flattened `gid / block_threads` decomposition
+/// already visited; `threads_per_threadgroup_x`/`_y` are
+/// [`crate::sized::SIMD_WIDTH`]/`TILED_GEMM_NSG`, the fixed 32x4 threadgroup
+/// shape every tiled-GEMM kernel already dispatches under
+/// [`GridSpec::threadgroup_width`]'s own flat 128, just expressed as two axes.
+/// For [`Grid2DForm::FlatThreadgroupIndex`], `threads_per_threadgroup_x` is the
+/// kernel's threadgroup width and `_y` is `1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grid2DSpec {
+    pub form: Grid2DForm,
     pub threadgroups_x: u64,
     pub threadgroups_y: u64,
     pub threads_per_threadgroup_x: u64,

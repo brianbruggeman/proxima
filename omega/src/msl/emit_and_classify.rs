@@ -98,6 +98,8 @@ pub(super) fn emit_inner(
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
     let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
+    let grid2d = grid2d_for(resolved, &quantized, numeric_policy, expert_source_mode)?;
+    let source = widen_for_grid(resolved.node, source, grid2d)?;
     let kernel = Kernel {
         source,
         entry,
@@ -110,7 +112,7 @@ pub(super) fn emit_inner(
             threads: grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?,
             threadgroup_width: extras.cooperative_width,
             depth: grid_depth_for(resolved, &quantized),
-            grid2d: grid2d_for(resolved, &quantized)?,
+            grid2d,
         },
     };
     // The z-addressed splice runs AFTER `bindings`/`grid` are built, mirroring
@@ -236,20 +238,38 @@ pub(crate) fn splice_round_batched_reduce_base_table(
     // `splice_horizontal_merge_base_table`'s own doc for why the existing
     // scalar `gid` widens to `uint3 round_gid` in place rather than a second
     // parameter.
-    let scalar_gid = "    uint gid [[thread_position_in_grid]]";
-    let vector_gid = "    uint3 round_gid [[thread_position_in_grid]]";
-    let gid_offset = kernel.source[signature_start..body_start_after_struct]
-        .find(scalar_gid)
-        .ok_or(EmitError::RenderKindMismatch {
-            node: resolved.node,
-            expected: "scalar thread_position_in_grid parameter",
-            found: "missing",
-        })?;
-    kernel.source.replace_range(
-        signature_start + gid_offset..signature_start + gid_offset + scalar_gid.len(),
-        vector_gid,
+    // a flat-form kernel (`widen_thread_index`) already carries a vector
+    // threadgroup position and rebuilt its 64-bit `gid` from it, so the round
+    // index is that vector's own `z` and there is no scalar `gid` to widen.
+    let flat_form = matches!(
+        kernel.grid.grid2d,
+        Some(Grid2DSpec {
+            form: Grid2DForm::FlatThreadgroupIndex,
+            ..
+        })
     );
-    let width_delta = vector_gid.len() - scalar_gid.len();
+    let (width_delta, gid_preamble, round_index) = if flat_form {
+        (0, "", "wide_group.z")
+    } else {
+        let scalar_gid = "    uint gid [[thread_position_in_grid]]";
+        let vector_gid = "    uint3 round_gid [[thread_position_in_grid]]";
+        let gid_offset = kernel.source[signature_start..body_start_after_struct]
+            .find(scalar_gid)
+            .ok_or(EmitError::RenderKindMismatch {
+                node: resolved.node,
+                expected: "scalar thread_position_in_grid parameter",
+                found: "missing",
+            })?;
+        kernel.source.replace_range(
+            signature_start + gid_offset..signature_start + gid_offset + scalar_gid.len(),
+            vector_gid,
+        );
+        (
+            vector_gid.len() - scalar_gid.len(),
+            "    uint gid = round_gid.x;\n",
+            "round_gid.z",
+        )
+    };
     let round_table_index = kernel.bindings.len();
     let extra_params =
         format!(",\n    device const RoundBase* round_table [[buffer({round_table_index})]]");
@@ -257,7 +277,7 @@ pub(crate) fn splice_round_batched_reduce_base_table(
     kernel.source.insert_str(adjusted_body_start, &extra_params);
     let preamble_start = adjusted_body_start + extra_params.len() + 3;
     let preamble = format!(
-        "    uint gid = round_gid.x;\n    RoundBase round_base = round_table[round_gid.z];\n    device const float* sliced_route = (device const float*)((device const uchar*)gather_idx{gather_slot} + round_base.route_base);\n    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + round_base.output_base);\n"
+        "{gid_preamble}    RoundBase round_base = round_table[{round_index}];\n    device const float* sliced_route = (device const float*)((device const uchar*)gather_idx{gather_slot} + round_base.route_base);\n    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + round_base.output_base);\n"
     );
     kernel.source.insert_str(preamble_start, &preamble);
     let body_after_preamble = preamble_start + preamble.len();
@@ -1318,6 +1338,12 @@ pub(super) fn metal_specialization(
             }
             _ => false,
         },
+        // an op whose grid cannot be described (`Err`) fails `emit` and
+        // `kernel_dispatch_shape` before any dispatch consults this key.
+        wide_grid: matches!(
+            grid2d_for(resolved, &quantized, numeric_policy, false),
+            Ok(Some(Grid2DSpec { form: Grid2DForm::FlatThreadgroupIndex, .. }))
+        ),
     }
 }
 
@@ -1393,7 +1419,7 @@ pub(crate) fn kernel_dispatch_shape(
             // would silently dispatch a spliced round-batched kernel with
             // only round 0's own threadgroup, at the cache-HIT path only.
             depth: grid_depth_for(resolved, &quantized),
-            grid2d: grid2d_for(resolved, &quantized)?,
+            grid2d: grid2d_for(resolved, &quantized, numeric_policy, false)?,
         },
     ))
 }
@@ -2940,6 +2966,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
     let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
     let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
     Ok(Some(Grid2DSpec {
+        form: Grid2DForm::TileCoordinates,
         threadgroups_x: col_tiles,
         threadgroups_y: row_tiles,
         threads_per_threadgroup_x: SIMD_WIDTH,
@@ -2958,20 +2985,62 @@ pub(super) fn tiled_gemm_grid2d_spec(
     Ok(None)
 }
 
-/// [`GridSpec::grid2d`] for ANY `resolved.kind` -- the one caller-facing
-/// wrapper both [`emit_inner`]'s own `Kernel::grid` literal and
-/// [`kernel_dispatch_shape`] call, so a cache-hit dispatch (which never
-/// renders `source` again) and a cache-miss `emit` always agree on whether
-/// THIS op's grid is 2D. `None` for every kind but `Reduce`, matching
-/// [`tiled_gemm_grid2d_active`]'s own admission (only a `Reduce` can be a
-/// tiled or dense-batched GEMM block).
-pub(super) fn grid2d_for(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Result<Option<Grid2DSpec>, EmitError> {
-    match &resolved.kind {
-        BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
-            tiled_gemm_grid2d_spec(resolved, quantized, *reduce_op, *init, output_axes)
-        }
-        _ => Ok(None),
+/// [`GridSpec::grid2d`] for ANY `resolved.kind` -- the ONE decision of
+/// whether a kernel indexes its grid with `uint gid [[thread_position_in_grid]]`
+/// or with threadgroup coordinates, and what the launch is if it is the
+/// latter. [`emit_inner`] (`Kernel::grid`, and via [`widen_for_grid`] the
+/// rendered text), [`kernel_dispatch_shape`] (the cache-hit dispatch that never
+/// renders `source`) and [`metal_specialization`] (the pipeline cache key)
+/// all read THIS value, so the kernel form, the launch shape and the cache
+/// identity never disagree.
+///
+/// - [`Grid2DForm::TileCoordinates`] when [`tiled_gemm_grid2d_active`] admits
+///   (`Reduce` only: only a `Reduce` is a tiled or dense-batched GEMM block).
+/// - [`Grid2DForm::FlatThreadgroupIndex`] when [`grid_threads`] exceeds
+///   [`crate::sized::GRID_LINEAR_THREAD_LIMIT`], the widest grid a 32-bit
+///   thread index addresses: Metal truncates a wider 1D dispatch to
+///   `threads mod 2^32` with no error.
+/// - `None` (the 1D form) otherwise.
+///
+/// # Errors
+/// [`EmitError::GridExceedsThreadIndex`] when even the flat form cannot cover
+/// the grid, [`EmitError::WideGridUnsupported`] for a kernel the flat form
+/// cannot render.
+pub(super) fn grid2d_for(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+) -> Result<Option<Grid2DSpec>, EmitError> {
+    if let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+        && let Some(tiles) =
+            tiled_gemm_grid2d_spec(resolved, quantized, *reduce_op, *init, output_axes)?
+    {
+        return Ok(Some(tiles));
     }
+    let threads = grid_threads(resolved, quantized, numeric_policy, expert_source_mode)?;
+    if !exceeds_linear_grid(threads) {
+        return Ok(None);
+    }
+    if expert_source_mode {
+        return Err(EmitError::WideGridUnsupported {
+            node: resolved.node,
+            reason: "expert-source substitution rewrites the linear-gid kernel text",
+        });
+    }
+    if let BoundOpKind::MoeTopK { .. } = &resolved.kind {
+        return Err(EmitError::WideGridUnsupported {
+            node: resolved.node,
+            reason: "its reduction is coherent only inside the one threadgroup it runs as",
+        });
+    }
+    let threadgroup_width = tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy);
+    flat_grid2d(resolved.node, threads, threadgroup_width).map(Some)
 }
 
 /// `true` only when [`wide_weight_stage_active`] admits AND that admitted

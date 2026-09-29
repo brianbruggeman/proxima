@@ -2872,6 +2872,11 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
             );
             if let Some(grid2d) = tiled_grid.grid2d {
                 assert_eq!(
+                    grid2d.form,
+                    Grid2DForm::TileCoordinates,
+                    "the tiled-GEMM lever's launch reads tile coordinates, never the flat thread index"
+                );
+                assert_eq!(
                     grid2d.threadgroups_x * grid2d.threadgroups_y
                         * grid2d.threads_per_threadgroup_x
                         * grid2d.threads_per_threadgroup_y,
@@ -5727,3 +5732,561 @@ fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
     );
 }
 
+
+/// A grid wider than the 32 bits of `uint gid [[thread_position_in_grid]]`
+/// (Metal launches `threads mod 2^32` of it, no error) must be described by
+/// ONE decision -- `grid2d_for` -- that the kernel text, the launch shape and
+/// the pipeline cache key all follow. Each case below is a real op whose grid
+/// is past `u32::MAX`, built without allocating a byte of tensor data.
+mod flat_grid_form {
+    use alloc::collections::BTreeMap;
+
+    use proxima_tensor::NumericPolicy;
+
+    use super::*;
+
+    const FLAT_MARKER: &str = "ulong wide_group_index";
+    const LINEAR_SIGNATURE: &str = "uint gid [[thread_position_in_grid]]";
+
+    struct FlatCase {
+        label: &'static str,
+        bound: BoundOp,
+        narrow: BoundOp,
+        packed: BTreeMap<NodeId, Codec>,
+        policy: NumericPolicy,
+    }
+
+    fn elementwise_tanh_op_2d(rows: u32, columns: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows), Extent::Static(columns)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: vec![(source, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("elementwise infers");
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+            .expect("elementwise lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted")
+    }
+
+    fn cumsum_rank3_op(outer: u32, middle: u32, inner: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![
+                    Extent::Static(outer),
+                    Extent::Static(middle),
+                    Extent::Static(inner),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                keep: Keep::Scan,
+                name: None,
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("cumsum infers");
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+            .expect("cumsum lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted")
+    }
+
+    /// gemma4-E2B's `per_layer_model_proj`: an F16 `[features, k]` weight
+    /// against `[rows, k]` f32 activations. F16 keeps it off the tiled-GEMM
+    /// path (dense x dense and Q4_0/Q4_K take that), so it is a cooperative
+    /// reduce at `wide_cooperative_reduce_width(k)` lanes.
+    fn per_layer_projection_op(
+        rows: u32,
+        reduction: u32,
+        features: u32,
+    ) -> (BoundOp, BTreeMap<NodeId, Codec>) {
+        let mut program = Vec::new();
+        let weights = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float16,
+                shape: vec![Extent::Static(features), Extent::Static(reduction)],
+                name: None,
+            },
+        );
+        let activations = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows), Extent::Static(reduction)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weights, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                    (activations, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("per_layer_model_proj".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("projection infers");
+        let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+            .expect("projection lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted");
+        let weight_node = bound.operands()[0].0;
+        (bound, BTreeMap::from([(weight_node, Codec::Float16)]))
+    }
+
+    fn unpacked(
+        label: &'static str,
+        bound: BoundOp,
+        narrow: BoundOp,
+        policy: NumericPolicy,
+    ) -> FlatCase {
+        FlatCase {
+            label,
+            bound,
+            narrow,
+            packed: BTreeMap::new(),
+            policy,
+        }
+    }
+
+    fn gated_delta_net_op(num_v_heads: u64) -> BoundOp {
+        let operands = (0..6)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(6),
+            dtype: DType::Float32,
+            extents: vec![1, num_v_heads, 128],
+            kind: BoundOpKind::GatedDeltaNet {
+                operands,
+                n_tokens: 1,
+                kv_heads: 1,
+                num_v_heads,
+                head_k_dim: 4,
+                head_v_dim: 128,
+                query_key_head_stride: 4,
+                query_key_dim_stride: 1,
+                inv_sqrt_key_dim: 0.5,
+                state_out: NodeId(7),
+            },
+        }
+    }
+
+    fn cached_attention_with_query_vectors(query_vectors: u64) -> BoundOp {
+        let mut bound = cached_attention_op_dynamic(0, 8);
+        bound.extents = vec![query_vectors, 1, 1, 4];
+        bound
+    }
+
+    fn position_only_op(kind: BoundOpKind, extent: u64) -> BoundOp {
+        BoundOp {
+            node: NodeId(0),
+            dtype: DType::Float32,
+            extents: vec![extent, extent],
+            kind,
+        }
+    }
+
+    /// Every kernel form that can take the flat path, each as a `(wide,
+    /// narrow)` pair: the same op structure at a shape past `u32::MAX` threads
+    /// and at one that fits. The wide shapes only ever reach `emit` and
+    /// `kernel_dispatch_shape`, so no tensor data exists for any of them.
+    fn flat_cases() -> Vec<FlatCase> {
+        let packed_row = packed_row_multi_token_op(1, 256, 4_000_000_000);
+        let packed_narrow = packed_row_multi_token_op(1, 256, 64);
+        let packed_weight = packed_row.operands()[0].0;
+        let (projection, projection_codecs) = per_layer_projection_op(1873, 1536, 8960);
+        let (projection_narrow, _) = per_layer_projection_op(2, 1536, 64);
+        vec![
+            FlatCase {
+                label: "cooperative reduce: per_layer_model_proj at 1873 rows, 256 lanes",
+                bound: projection,
+                narrow: projection_narrow,
+                packed: projection_codecs,
+                policy: NumericPolicy::llama_relaxed(),
+            },
+            unpacked(
+                "serial reduce: one thread per output past u32::MAX",
+                matmul_op_with_reduce(70_000, 8, 70_000, ScalarOp::Maximum),
+                matmul_op_with_reduce(64, 8, 64, ScalarOp::Maximum),
+                NumericPolicy::default(),
+            ),
+            unpacked(
+                "elementwise: 70000 x 70000 elements",
+                elementwise_tanh_op_2d(70_000, 70_000),
+                elementwise_tanh_op_2d(8, 8),
+                NumericPolicy::default(),
+            ),
+            unpacked(
+                "scan: one thread per outer line past u32::MAX",
+                cumsum_rank3_op(70_000, 70_000, 4),
+                cumsum_rank3_op(8, 8, 4),
+                NumericPolicy::default(),
+            ),
+            unpacked(
+                "iota",
+                position_only_op(BoundOpKind::Iota, 70_000),
+                position_only_op(BoundOpKind::Iota, 8),
+                NumericPolicy::default(),
+            ),
+            unpacked(
+                "constant",
+                position_only_op(BoundOpKind::Constant { value: 1.5 }, 70_000),
+                position_only_op(BoundOpKind::Constant { value: 1.5 }, 8),
+                NumericPolicy::default(),
+            ),
+            FlatCase {
+                label: "packed row-blocked Q4_K matvec with 4e9 output rows",
+                bound: packed_row,
+                narrow: packed_narrow,
+                packed: BTreeMap::from([(packed_weight, Codec::Q4K)]),
+                policy: NumericPolicy::default(),
+            },
+            unpacked(
+                "cached attention: split kernel over 3e8 query vectors",
+                cached_attention_with_query_vectors(300_000_000),
+                cached_attention_with_query_vectors(1),
+                NumericPolicy::default(),
+            ),
+            unpacked(
+                "cached softmax weights: 2e8 attention rows",
+                cached_softmax_weights_op(200_000_000, 1024, 64),
+                cached_softmax_weights_op(8, 1024, 64),
+                NumericPolicy::default(),
+            ),
+            unpacked(
+                "gated delta net: 2^25 heads x 128 rows",
+                gated_delta_net_op(1 << 25),
+                gated_delta_net_op(4),
+                NumericPolicy::default(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_kernel_past_the_thread_index_renders_and_dispatches_the_flat_form_together() {
+        let limit = u64::from(u32::MAX);
+        let cases = flat_cases();
+        assert_eq!(cases.len(), 10, "one case per kernel form that can take the flat path");
+
+        for case in &cases {
+            let kernel = emit(&case.bound, &case.packed, case.policy)
+                .unwrap_or_else(|error| panic!("{}: emit failed: {error}", case.label));
+            let (_, shape) = kernel_dispatch_shape(&case.bound, &case.packed, case.policy)
+                .unwrap_or_else(|error| panic!("{}: dispatch shape failed: {error}", case.label));
+
+            assert!(
+                kernel.grid.threads > limit,
+                "{}: the case must be past u32::MAX threads, got {}",
+                case.label,
+                kernel.grid.threads
+            );
+            assert_eq!(kernel.grid, shape, "{}: emit and the cache-hit dispatch shape disagree", case.label);
+            let spec = shape
+                .grid2d
+                .unwrap_or_else(|| panic!("{}: a {}-thread grid dispatched 1D", case.label, shape.threads));
+            assert_eq!(spec.form, Grid2DForm::FlatThreadgroupIndex, "{}", case.label);
+
+            assert!(
+                kernel.source.contains(FLAT_MARKER),
+                "{}: source must take threadgroup coordinates:\n{}",
+                case.label,
+                kernel.source
+            );
+            assert!(
+                !kernel.source.contains(LINEAR_SIGNATURE),
+                "{}: source still indexes a 32-bit thread position:\n{}",
+                case.label,
+                kernel.source
+            );
+            assert!(
+                kernel.source.contains("ulong wide_group_index = "),
+                "{}: the flat threadgroup index must be rebuilt in 64 bits",
+                case.label
+            );
+
+            let narrow = emit(&case.narrow, &case.packed, case.policy)
+                .unwrap_or_else(|error| panic!("{}: narrow sibling emit failed: {error}", case.label));
+            assert_eq!(narrow.grid.grid2d, None, "{}: the narrow sibling must stay 1D", case.label);
+            assert!(
+                !narrow.source.contains(FLAT_MARKER),
+                "{}: the narrow sibling must not carry the flat form",
+                case.label
+            );
+
+            let width = spec.threads_per_threadgroup_x;
+            assert_eq!(spec.threads_per_threadgroup_y, 1, "{}", case.label);
+            assert_eq!(
+                spec.threadgroups_x * spec.threadgroups_y,
+                shape.threads.div_ceil(width),
+                "{}: the rectangle must hold exactly the threadgroups the grid needs",
+                case.label
+            );
+            assert!(spec.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X, "{}", case.label);
+            assert!(spec.threadgroups_y <= limit, "{}", case.label);
+            match shape.threadgroup_width {
+                Some(pinned) if shape.threads % pinned == 0 => {
+                    assert_eq!(width, pinned, "{}: a pinned width that divides the grid is launched as-is", case.label);
+                }
+                Some(_) => assert_eq!(width, SIMD_WIDTH, "{}: a pinned width that does not divide the grid falls back to one simdgroup", case.label),
+                None => assert_eq!(width, SIMD_WIDTH, "{}", case.label),
+            }
+        }
+    }
+
+    #[test]
+    fn the_flat_form_gets_its_own_pipeline_identity_and_the_linear_sibling_keeps_its_own() {
+        for case in flat_cases() {
+            let wide_key = kernel_cache_key(&case.bound, &case.packed, case.policy)
+                .unwrap_or_else(|error| panic!("{}: cache key failed: {error}", case.label));
+            let narrow_key = kernel_cache_key(&case.narrow, &case.packed, case.policy)
+                .unwrap_or_else(|error| panic!("{}: sibling cache key failed: {error}", case.label));
+
+            assert!(wide_key.contains("_wg"), "{}: {wide_key}", case.label);
+            assert!(!narrow_key.contains("_wg"), "{}: {narrow_key}", case.label);
+        }
+    }
+
+    #[test]
+    fn a_grid_that_fits_a_32_bit_thread_index_keeps_the_linear_form() {
+        let (bound, packed) = per_layer_projection_op(1872, 1536, 8960);
+
+        let kernel = emit(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emits");
+
+        assert_eq!(kernel.grid.threads, 1872 * 8960 * 256, "the last row count that fits is 4_294_082_560 threads");
+        assert!(kernel.grid.threads <= u64::from(u32::MAX));
+        assert_eq!(kernel.grid.grid2d, None);
+        assert!(kernel.source.contains(LINEAR_SIGNATURE));
+        assert!(!kernel.source.contains(FLAT_MARKER));
+    }
+
+    #[test]
+    fn a_thread_count_that_wraps_u64_is_rejected_instead_of_truncated() {
+        let bound = BoundOp {
+            node: NodeId(4),
+            dtype: DType::Float32,
+            extents: vec![u64::from(u32::MAX), u64::from(u32::MAX), 8],
+            kind: BoundOpKind::Iota,
+        };
+
+        let overflow = kernel_dispatch_shape(&bound, &BTreeMap::new(), NumericPolicy::default());
+
+        assert!(
+            matches!(
+                overflow,
+                Err(EmitError::GridExceedsThreadIndex { node, threads: u64::MAX, .. }) if node == NodeId(4)
+            ),
+            "(2^32-1)^2 * 8 threads is 1.5e20, past u64::MAX: {overflow:?}"
+        );
+    }
+
+    #[test]
+    fn a_grid_with_more_threadgroups_than_two_axes_can_hold_is_rejected() {
+        let bound = BoundOp {
+            node: NodeId(4),
+            dtype: DType::Float32,
+            extents: vec![u64::from(u32::MAX), u64::from(u32::MAX)],
+            kind: BoundOpKind::Iota,
+        };
+
+        let rejected = kernel_dispatch_shape(&bound, &BTreeMap::new(), NumericPolicy::default());
+
+        assert!(
+            matches!(rejected, Err(EmitError::GridExceedsThreadIndex { .. })),
+            "(2^32-1)^2 threads is 5.8e17 threadgroups of 32, and their largest divisor under \
+             {} leaves y above u32::MAX: {rejected:?}",
+            crate::sized::GRID_MAX_THREADGROUPS_X
+        );
+    }
+
+    #[test]
+    fn a_threadgroup_count_with_no_divisor_to_spill_into_y_is_rejected() {
+        let prime_groups = 4_294_967_311u64;
+
+        let rejected = flat_grid2d(NodeId(3), prime_groups * SIMD_WIDTH, None);
+
+        assert!(
+            matches!(
+                rejected,
+                Err(EmitError::GridExceedsThreadIndex { node, limit, .. })
+                    if node == NodeId(3) && limit == u64::from(u32::MAX) * SIMD_WIDTH
+            ),
+            "a prime group count above u32::MAX cannot be split: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn a_composite_threadgroup_count_above_u32_max_splits_across_both_axes() {
+        let composite_groups = 3 * 1_431_655_771u64;
+
+        let spec = flat_grid2d(NodeId(3), composite_groups * SIMD_WIDTH, None)
+            .expect("3 * 1431655771 threadgroups split as 3 x 1431655771");
+
+        assert_eq!(spec.threadgroups_x * spec.threadgroups_y, composite_groups);
+        assert!(spec.threadgroups_y <= u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn the_rectangle_never_launches_a_threadgroup_the_grid_does_not_need() {
+        let spec = flat_grid2d(NodeId(17), 1873 * 8960 * 256, Some(256)).expect("node 17 at 1873 rows");
+
+        assert_eq!(spec.threadgroups_x * spec.threadgroups_y, 1873 * 8960);
+        assert!(spec.threadgroups_x <= crate::sized::GRID_MAX_THREADGROUPS_X);
+        assert_eq!(spec.threads_per_threadgroup_x, 256);
+    }
+
+    #[test]
+    fn a_pinned_threadgroup_width_that_does_not_divide_the_grid_launches_one_simdgroup_wide() {
+        let threads = SIMD_WIDTH * 4_000_000_001;
+
+        let spec = flat_grid2d(NodeId(5), threads, Some(64)).expect("an odd number of simdgroups still launches");
+
+        assert_eq!(spec.threads_per_threadgroup_x, SIMD_WIDTH);
+        assert_eq!(spec.threadgroups_x * spec.threadgroups_y, threads.div_ceil(SIMD_WIDTH));
+    }
+
+    #[test]
+    fn expert_source_substitution_refuses_the_flat_form() {
+        let (bound, packed) = per_layer_projection_op(1873, 1536, 8960);
+
+        let refused = grid2d_for(&bound, &operand_codecs(&bound, &packed), NumericPolicy::llama_relaxed(), true);
+
+        assert!(
+            matches!(refused, Err(EmitError::WideGridUnsupported { .. })),
+            "{refused:?}"
+        );
+    }
+
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    #[test]
+    fn a_round_batched_reduce_past_the_thread_index_reads_its_round_from_the_flat_group_z() {
+        let mut bound = round_batched_matmul_op(3);
+        bound.extents[0] = 20_000_000;
+
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
+
+        assert_eq!(
+            kernel.grid.grid2d.map(|spec| spec.form),
+            Some(Grid2DForm::FlatThreadgroupIndex)
+        );
+        assert_eq!(kernel.grid.depth, 3, "the round axis stays the z extent");
+        assert!(kernel.source.contains("round_table[wide_group.z]"), "{}", kernel.source);
+        assert!(!kernel.source.contains("round_gid"), "{}", kernel.source);
+        assert!(kernel.source.contains("ulong gid = "));
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn the_tiled_gemm_one_d_form_past_the_thread_index_takes_the_flat_form() {
+        let wide = tiled_gemm_op(300_000, 1536, 4_000_000);
+        let narrow = tiled_gemm_op(510, 1536, 128);
+        let weight = wide.operands()[0].0;
+        let packed = BTreeMap::from([(weight, Codec::Q4_0)]);
+
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+            let kernel = emit(&wide, &packed, NumericPolicy::default()).expect("wide tiled emits");
+            let sibling = emit(&narrow, &packed, NumericPolicy::default()).expect("narrow tiled emits");
+
+            assert!(kernel.grid.threads > u64::from(u32::MAX));
+            let spec = kernel.grid.grid2d.expect("a tiled grid past u32::MAX threads cannot dispatch 1D");
+            assert_eq!(spec.form, Grid2DForm::FlatThreadgroupIndex);
+            assert_eq!(spec.threads_per_threadgroup_x, (TILED_GEMM_NSG as u64) * SIMD_WIDTH);
+            assert_eq!(spec.threadgroups_x * spec.threadgroups_y * spec.threads_per_threadgroup_x, kernel.grid.threads);
+            assert!(kernel.source.contains(FLAT_MARKER), "{}", kernel.source);
+            assert!(!kernel.source.contains(LINEAR_SIGNATURE), "{}", kernel.source);
+            assert_eq!(sibling.grid.grid2d, None);
+            assert!(!sibling.source.contains(FLAT_MARKER));
+        });
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn the_tile_coordinate_form_needs_no_widening_however_wide_the_grid() {
+        let wide = tiled_gemm_op(300_000, 1536, 4_000_000);
+        let weight = wide.operands()[0].0;
+        let packed = BTreeMap::from([(weight, Codec::Q4_0)]);
+
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("1"), || {
+            let kernel = emit(&wide, &packed, NumericPolicy::default()).expect("wide tiled emits");
+
+            assert!(kernel.grid.threads > u64::from(u32::MAX));
+            let spec = kernel.grid.grid2d.expect("the lever dispatches threadgroup coordinates");
+            assert_eq!(spec.form, Grid2DForm::TileCoordinates);
+            assert!(!kernel.source.contains(FLAT_MARKER), "{}", kernel.source);
+        });
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn the_dense_batched_gemm_one_d_form_past_the_thread_index_reads_its_batch_from_the_flat_group_z() {
+        let bound = dense_batched_score_shaped_op(2_000_000, 2_000_000, 8, 128);
+
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+            let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("dense batched emits");
+
+            assert!(kernel.grid.threads > u64::from(u32::MAX));
+            assert_eq!(kernel.grid.depth, 8, "the batch axis stays the z extent");
+            assert_eq!(
+                kernel.grid.grid2d.map(|spec| spec.form),
+                Some(Grid2DForm::FlatThreadgroupIndex)
+            );
+            assert!(kernel.source.contains("(long)wide_group.z"), "{}", kernel.source);
+            assert!(!kernel.source.contains("dense_batch_gid"), "{}", kernel.source);
+            assert!(kernel.source.contains(FLAT_MARKER));
+        });
+    }
+}

@@ -318,3 +318,23 @@ os_headroom_bytes = 8_589_934_592
 # because the arena's real peak is only known AFTER a forward runs, and this
 # budget must be computed BEFORE the first weight upload.
 arena_allowance_bytes = 28_311_552
+
+[grid]
+# widest 1D grid, in threads, a Metal kernel's `uint gid
+# [[thread_position_in_grid]]` can address. A dispatch wider than this launches
+# only `threads mod 2^32` of them -- the tail outputs are never written and
+# read back as zeros with no driver error -- so `msl::grid2d_for` renders any
+# kernel whose grid exceeds it in the flat 2D form instead (a 64-bit global
+# index rebuilt from `threadgroup_position_in_grid`, dispatched with
+# `dispatchThreadgroups`). The hardware fact is 4294967295 (`u32::MAX`) and
+# the build rejects anything above it; lowering it is how a test build makes
+# every kernel take the wide form on a small shape. Overridable per-build via
+# `OMEGA_GRID_LINEAR_THREAD_LIMIT`.
+linear_thread_limit = 4294967295
+
+# most threadgroups the flat 2D form places on its x axis before spilling
+# whole threadgroups into y (`msl::grid2d_for`). Kernels rebuild the linear
+# threadgroup index as `y * threadgroups_per_grid.x + x`, so the split never
+# changes which thread computes which element. Overridable per-build via
+# `OMEGA_GRID_MAX_THREADGROUPS_X`.
+max_threadgroups_x = 65535

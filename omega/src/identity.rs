@@ -305,6 +305,14 @@ pub(crate) struct MetalOnlyExtras {
     /// render, and dispatch, as distinct kernels. Feeds the `_grid2d`
     /// suffix.
     pub tiled_gemm_grid2d: bool,
+    /// `true` when `msl::grid2d_for` chose the flat 2D form
+    /// ([`crate::msl::Grid2DForm::FlatThreadgroupIndex`]) because the grid is
+    /// wider than the 32 bits a `uint gid [[thread_position_in_grid]]` kernel
+    /// can index: the emitted source rebuilds a 64-bit `gid` from
+    /// threadgroup coordinates and is dispatched with `dispatchThreadgroups`,
+    /// so it must never share a compiled pipeline with the 1D form of an op
+    /// that agrees on every other axis. Feeds the `_wg` suffix.
+    pub wide_grid: bool,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -836,6 +844,9 @@ mod gated {
         }
         if metal.tiled_gemm_grid2d {
             identity.push_str("_grid2d");
+        }
+        if metal.wide_grid {
+            identity.push_str("_wg");
         }
 
         identity
