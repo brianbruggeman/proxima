@@ -1227,6 +1227,15 @@ $DONE:
 }
 "#;
 
+/// The x-dimension block count of `grid`'s launch, or an error rather than the
+/// silent truncation of an `as u32` cast: `emit_cuda` already rejects a grid
+/// past `gridDim.x`, so this only fires for a `CudaKernel` built by hand.
+fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
+    u32::try_from(grid.blocks()).map_err(|_| {
+        CudaDriverError::InputTooLarge(usize::try_from(grid.threads).unwrap_or(usize::MAX))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CudaDriverError, validate_cuda_dtype};
@@ -1250,13 +1259,4 @@ mod tests {
             }
         ));
     }
-}
-
-/// The x-dimension block count of `grid`'s launch, or an error rather than the
-/// silent truncation of an `as u32` cast: `emit_cuda` already rejects a grid
-/// past `gridDim.x`, so this only fires for a `CudaKernel` built by hand.
-fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
-    u32::try_from(grid.blocks()).map_err(|_| {
-        CudaDriverError::InputTooLarge(usize::try_from(grid.threads).unwrap_or(usize::MAX))
-    })
 }
