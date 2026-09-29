@@ -794,9 +794,11 @@ mod round_batched_reduce_base_table_splice_tests {
     use proxima_tensor::NumericPolicy;
 
     use super::super::{
-        Codec, EmitError, emit, round_zero_reduce_bound, splice_round_batched_reduce_base_table,
+        Binding, Codec, EmitError, emit, round_zero_reduce_bound,
+        splice_round_batched_reduce_base_table,
     };
     use super::round_batched_matmul_op;
+    use proxima_tensor::{BoundOpKind, NodeId};
 
     const STRUCT_DECL: &str = "struct RoundBase { ulong output_base; };\n";
 
@@ -864,6 +866,52 @@ mod round_batched_reduce_base_table_splice_tests {
             spliced.source.contains("in1"),
             "the shared activation operand must remain untouched:\n{}",
             spliced.source
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn each_round_reads_the_route_buffer_bound_at_its_own_slot() -> Result<(), EmitError> {
+        let mut round_batched = round_batched_matmul_op(4);
+        let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &mut round_batched.kind else {
+            unreachable!("round_batched_matmul_op builds a RoundBatchedReduce")
+        };
+        let sibling_routes: Vec<NodeId> = (0..4).map(|round| NodeId(900 + round)).collect();
+        round_routes.clone_from(&sibling_routes);
+        let weight_node = round_zero_reduce_bound(&round_batched).operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, Codec::Q4K);
+
+        let kernel = emit(&round_batched, &q4k, NumericPolicy::default())?;
+
+        let route_slots_start = kernel.bindings.len() - sibling_routes.len();
+        let expected_tail: Vec<Binding> = sibling_routes
+            .iter()
+            .map(|route| Binding::Indices(*route))
+            .collect();
+        assert_eq!(
+            kernel.bindings[route_slots_start..],
+            expected_tail,
+            "the last k bindings must be the k rounds' own routes, in round order, so the hazard \
+             walk sees each MoeTopK write as a read of this dispatch"
+        );
+        for round in 0..sibling_routes.len() {
+            let declaration = format!(
+                "route_buf_{round} [[buffer({})]]",
+                route_slots_start + round
+            );
+            assert!(
+                kernel.source.contains(&declaration),
+                "round {round}'s route_buf must sit at the slot its binding occupies \
+                 ({declaration}):\n{}",
+                kernel.source
+            );
+        }
+        let table_declaration = format!("round_table [[buffer({})]]", kernel.bindings.len());
+        assert!(
+            kernel.source.contains(&table_declaration),
+            "the round table binds right after every kernel binding ({table_declaration}):\n{}",
+            kernel.source
         );
         Ok(())
     }
@@ -6454,6 +6502,16 @@ mod flat_grid_form {
         let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
 
         assert_compiles_with_the_metal_toolchain("round-batched reduce", &kernel.source);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal-moe-mul-mat-id"))]
+    #[test]
+    fn a_round_batched_reduce_within_the_thread_index_compiles() {
+        let bound = round_batched_matmul_op(3);
+
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
+
+        assert_compiles_with_the_metal_toolchain("round-batched reduce, scalar gid", &kernel.source);
     }
 
     #[cfg(feature = "metal-q4k-split-k")]
