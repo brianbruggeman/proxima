@@ -21,6 +21,7 @@
 //! actually emitted at least one, for BOTH configs.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use core::ops::ControlFlow;
 use std::env;
 use std::fs::File;
 use std::path::PathBuf;
@@ -30,8 +31,8 @@ use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeType,
-    SpeculativeTypeSet,
+    GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats,
+    SpeculativeType, SpeculativeTypeSet,
 };
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::Exporter;
@@ -108,6 +109,7 @@ struct PairResult {
     on_elapsed_ms: f64,
     speculative_verify_steps: usize,
     accepted_total: u64,
+    on_stats: SpeculativeDecodeStats,
 }
 
 /// `off_serving_config` and `on_serving_config` differ only in
@@ -145,9 +147,25 @@ fn run_pair(
     // event `speculative_verify_events` sees afterward came from the ON run.
     capture.clear();
 
+    // `generate_streaming_with_speculative_stats` instead of the OFF run's
+    // plain `generate_with_serving_config`: its own `on_stats` out parameter
+    // (`SpeculativeDecodeStats`'s own doc) reads verify/drafted/accepted
+    // counts, including the PER-TYPE breakdown, directly off the decode
+    // loop's own bookkeeping -- the multi-type demonstration run needs to
+    // attribute drafted/accepted tokens to whichever enabled type actually
+    // won each step, which the telemetry ring below cannot do (it only
+    // records the pooled `accepted` field, not `drafting_type`).
+    let mut on_stats = SpeculativeDecodeStats::default();
+    let mut on_token = |_event: proxima_model_interop::TokenEvent<'_>| ControlFlow::Continue(());
     let on_started = Instant::now();
     let (on_ids, _on_text, _on_eos) = model
-        .generate_with_serving_config(prompt, max_tokens, on_serving_config)
+        .generate_streaming_with_speculative_stats(
+            prompt,
+            max_tokens,
+            on_serving_config,
+            &mut on_token,
+            &mut on_stats,
+        )
         .expect("ON decode");
     let on_elapsed_ms = on_started.elapsed().as_secs_f64() * 1000.0;
     recorder.drain();
@@ -163,13 +181,39 @@ fn run_pair(
         on_elapsed_ms,
         speculative_verify_steps,
         accepted_total,
+        on_stats,
+    }
+}
+
+/// Prints one line per enabled drafter type -- `SpeculativeType::llama_name`
+/// keeps this in the same vocabulary `--drafter` itself accepts. Skipped
+/// entirely for the common single-type case (nothing to attribute), matching
+/// this file's own `--drafter` doc: attribution only matters once more than
+/// one type can win a given verify step.
+fn print_per_type_stats(drafter_types: SpeculativeTypeSet, stats: &SpeculativeDecodeStats) {
+    if drafter_types.iter_priority_order().count() <= 1 {
+        return;
+    }
+    for type_id in drafter_types.iter_priority_order() {
+        let per_type = stats.per_type_stats(type_id);
+        println!(
+            "per_type {} drafted={} accepted={}",
+            type_id.llama_name(),
+            per_type.drafted,
+            per_type.accepted
+        );
     }
 }
 
 /// `expect_divergence` flips the pass rule for `--seed-mismatch-control`'s
 /// sampled block: that block is a control proving the sampled comparison is
 /// rng-sensitive, so passing means `identical = false`, not `true`.
-fn report_pair(label: &str, result: &PairResult, expect_divergence: bool) -> bool {
+fn report_pair(
+    label: &str,
+    result: &PairResult,
+    drafter_types: SpeculativeTypeSet,
+    expect_divergence: bool,
+) -> bool {
     let first_divergence = result
         .off_ids
         .iter()
@@ -196,6 +240,7 @@ fn report_pair(label: &str, result: &PairResult, expect_divergence: bool) -> boo
         result.speculative_verify_steps
     );
     println!("accepted_total = {}", result.accepted_total);
+    print_per_type_stats(drafter_types, &result.on_stats);
 
     // the non-control pass rule additionally requires speculation to have
     // fired at all (AC1's degenerate-control guard); the mismatch control's
@@ -238,6 +283,57 @@ fn default_prompt() -> String {
          watches quietly from the garden wall. Pack my box with five dozen liquor jugs before \
          the delivery truck arrives at noon. ";
     PARAGRAPH.repeat(4)
+}
+
+/// `ngram-mod`'s own default prompt (SPEC's own R6): [`default_prompt`]'s
+/// four full repeats make greedy (`temperature = 0.0`) draft well (a real
+/// run measured `speculative_verify_steps = 2 accepted_total = 44`), but the
+/// sampled block (`temperature = 0.8`, `seed: 7`) samples ~15 tokens that
+/// match greedy, diverges, then reaches `<end_of_turn><eos>` at ~22 tokens --
+/// before `ngram_mod_draft`'s own `n_min = 48`-token chain-keep floor is
+/// ever reachable (`ngram_mod.rs`'s own doc on that gate), so speculation
+/// never fires there (real runs measured `speculative_verify_steps = 0`).
+/// The fix is NOT more repeats: five or six full repeats (real runs on this
+/// checkpoint) push BOTH temperatures off the literal-repeat completion
+/// entirely -- greedy either samples `<eos>` on the very first token or
+/// paraphrases the paragraph into a `summary` instead of repeating it
+/// (ngram-mod's hash table trained on the literal text then finds nothing to
+/// match), which is worse, not better. What works is ending the prompt
+/// MID-SENTENCE, one word short of the fourth repeat's final clause ("...the
+/// delivery truck arrives at", no trailing "noon."): both temperatures are
+/// then forced to complete the interrupted clause before doing anything
+/// else, which is grammatically almost the only continuation an LM will
+/// assign real probability mass to, so greedy and sampled land on the exact
+/// same completion at that step regardless of temperature. A real run on
+/// this checkpoint (`--gpu-layers all`) measured `speculative_verify_steps =
+/// 1 accepted_total = 1` for BOTH blocks, byte-identical OFF/ON, at
+/// `max_tokens = 64` (`ngram_mod_default_max_tokens`) -- the small accepted
+/// count is expected: this prompt's job is to prove speculation FIRES on
+/// this type, not to maximise its acceptance rate (that is AC17/R14's own
+/// corpus-level measurement).
+fn ngram_mod_default_prompt() -> String {
+    const PARAGRAPH: &str = "The quick brown fox jumps over the lazy dog while a curious cat \
+         watches quietly from the garden wall. Pack my box with five dozen liquor jugs before \
+         the delivery truck arrives at noon. ";
+    const PARTIAL: &str = "The quick brown fox jumps over the lazy dog while a curious cat \
+         watches quietly from the garden wall. Pack my box with five dozen liquor jugs before \
+         the delivery truck arrives at";
+    format!("{}{PARTIAL}", PARAGRAPH.repeat(3))
+}
+
+/// Picks [`default_prompt`] for every drafter set except the single-member
+/// `{ngram-mod}` set, where [`ngram_mod_default_prompt`]'s own doc explains
+/// why a different prompt (and a larger `max_tokens`, to give the
+/// mid-sentence completion room to run) is needed for speculation to fire
+/// in both the greedy and sampled blocks. A caller-supplied positional
+/// `prompt`/`max_tokens` argument always overrides this choice (`main`'s own
+/// `args.next()` calls happen before this is consulted).
+fn default_prompt_and_max_tokens(drafter_types: SpeculativeTypeSet) -> (String, usize) {
+    if drafter_types == SpeculativeTypeSet::single(SpeculativeType::NgramMod) {
+        (ngram_mod_default_prompt(), 64)
+    } else {
+        (default_prompt(), 40)
+    }
 }
 
 /// `--gpu-layers <n|all>` -- llama's own `-ngl` sentinel convention
@@ -307,13 +403,13 @@ fn main() {
     let model_path = args
         .next()
         .unwrap_or_else(|| "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd".to_string());
-    let prompt = args.next().unwrap_or_else(default_prompt);
-    let max_tokens: usize = args
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(40);
+    let explicit_prompt = args.next();
+    let explicit_max_tokens: Option<usize> = args.next().and_then(|value| value.parse().ok());
+    let (chosen_prompt, chosen_max_tokens) = default_prompt_and_max_tokens(drafter_types);
+    let prompt = explicit_prompt.unwrap_or(chosen_prompt);
+    let max_tokens = explicit_max_tokens.unwrap_or(chosen_max_tokens);
     println!(
-        "speculative_decode_parity: drafter={:?} prompt={:?}",
+        "speculative_decode_parity: drafter={:?} max_tokens={max_tokens} prompt={:?}",
         drafter_types.iter_priority_order().collect::<Vec<_>>(),
         &prompt[..prompt.len().min(80)]
     );
@@ -398,7 +494,7 @@ fn main() {
         &capture,
         &recorder,
     );
-    let greedy_ok = report_pair("greedy", &greedy_result, false);
+    let greedy_ok = report_pair("greedy", &greedy_result, drafter_types, false);
 
     // `--seed-mismatch-control` reseeds only the sampled ON run: greedy's
     // argmax selection ignores the rng entirely, so its OFF/ON pair stays
@@ -422,7 +518,12 @@ fn main() {
         &capture,
         &recorder,
     );
-    let sampled_ok = report_pair("sampled", &sampled_result, seed_mismatch_control);
+    let sampled_ok = report_pair(
+        "sampled",
+        &sampled_result,
+        drafter_types,
+        seed_mismatch_control,
+    );
 
     if !greedy_ok || !sampled_ok {
         eprintln!(
