@@ -38,6 +38,11 @@
 //! `PROXIMA_QWEN35MOE_PRE_GATHER=1` enables the per-layer router/residency
 //! boundary when an expert sidecar is attached; without it the ordinary
 //! monolithic decode path is used.
+//! `PROXIMA_SPECULATIVE_TYPES` selects the speculative drafters (llama `--spec-type`
+//! names, comma-separated, e.g. `ngram-simple,ngram-map-k`); unset keeps the library
+//! default `ngram-simple`, and `none` turns speculation off. Output is byte-identical
+//! either way; the sibling `PROXIMA_SPECULATIVE_N_MAX`, `_N_MIN`, `_P_MIN`, and
+//! `_NGRAM_*` variables tune the drafters.
 //! `cpu` sets `gpu_layers = 0` and runs CPU-only, no Metal attempt, no
 //! fallback. `gpu` sets `gpu_layers = GPU_LAYERS_ALL`
 //! (`proxima-model-interop/src/generate.rs:856`'s `select_backend` reads
@@ -61,6 +66,7 @@ use proxima_model_interop::GdnPrefillBackend;
 use proxima_model_interop::LoadedModel;
 use proxima_model_interop::Phase;
 use proxima_model_interop::ServingConfig;
+use proxima_model_interop::SpeculativeSettings;
 use proxima_model_interop::TokenEvent;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Settings)]
@@ -149,6 +155,10 @@ struct GenerateConfig {
     plan_time_constants: Option<bool>,
     #[setting(default = false)]
     overlap_transfer_compute: bool,
+    // env PROXIMA_SPECULATIVE_TYPES (llama --spec-type names, comma-separated; `none` turns
+    // speculation off); unset keeps the library default, ngram-simple.
+    #[setting(nested)]
+    speculative: SpeculativeSettings,
 }
 
 impl GenerateConfig {
@@ -368,7 +378,7 @@ fn print_architecture_metadata(parsed: &proxima_gguf::pipe::ParsedGguf) {
 fn supported_serving_config<'model>(
     model_path: &'model str,
     gpu_layers: i32,
-    settings: &GenerateConfig,
+    settings: &'model GenerateConfig,
 ) -> ServingConfig<'model> {
     let gpu_memory_limit_bytes =
         (settings.gpu_memory_limit_bytes > 0).then_some(settings.gpu_memory_limit_bytes);
@@ -435,6 +445,7 @@ fn supported_serving_config<'model>(
         max_command_buffers_per_token: settings.max_command_buffers_per_token,
         prefill_chunk_positions: settings.prefill_chunk_positions,
         overlap_transfer_compute: settings.overlap_transfer_compute,
+        speculative: settings.speculative.as_speculative_config(),
         ..ServingConfig::default()
     };
     if let Some(kv_bucket_tokens) = kv_bucket_tokens {
@@ -908,6 +919,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use proxima_model_interop::SpeculativeType;
+    use proxima_model_interop::SpeculativeTypeSet;
+
     use super::GenerateConfig;
     use super::should_attach_expert_sidecar;
     use super::supported_serving_config;
@@ -936,5 +950,33 @@ mod tests {
         settings.prefill_one_evaluation = false;
         let disabled = supported_serving_config("model.gguf", 0, &settings);
         assert!(!disabled.prefill_one_evaluation);
+    }
+
+    fn drafter_types_for(env_value: Option<&str>) -> SpeculativeTypeSet {
+        temp_env::with_var("PROXIMA_SPECULATIVE_TYPES", env_value, || {
+            let settings = GenerateConfig::from_process();
+            let config = supported_serving_config("model.gguf", 0, &settings);
+            config.speculative.speculative_types
+        })
+    }
+
+    #[test]
+    fn speculation_is_ngram_simple_when_env_is_unset() {
+        let types = drafter_types_for(None);
+        assert_eq!(types, SpeculativeTypeSet::single(SpeculativeType::NgramSimple));
+    }
+
+    #[test]
+    fn speculation_is_off_when_env_is_none() {
+        let types = drafter_types_for(Some("none"));
+        assert!(types.is_empty(), "PROXIMA_SPECULATIVE_TYPES=none must clear every drafter, got {types:?}");
+    }
+
+    #[test]
+    fn env_selects_llama_spec_type_names() {
+        let types = drafter_types_for(Some("ngram-map-k,ngram-mod"));
+        let expected = SpeculativeTypeSet::single(SpeculativeType::NgramMapK)
+            .insert(SpeculativeType::NgramMod);
+        assert_eq!(types, expected);
     }
 }
