@@ -329,21 +329,12 @@ fn a_warm_plan_hit_s_allocations_are_named_by_size() {
 /// skips re-uploading the block ENTIRELY on a warm call whose block identity
 /// (`(pointer, byte_length)`) is unchanged -- `block_buffer_reusable`
 /// (`metal.rs`) is the decision this proves end to end, on a real device. A
-/// block whose ADDRESS moves (a different array, same content) is no longer
-/// trusted and forces a rebuild, same as before this landing -- this is the
-/// "no content hash" half of the contract: only the caller's own residency
-/// promise plus an unmoved address earns the skip.
-///
-/// This does NOT assert the rebuilt call allocates strictly more than the
-/// reused one: `upload_resident_copy`'s own NAME-keyed cache (`RESIDENT_BUFFERS`)
-/// already serves a `Retained` clone with no fresh Rust-heap allocation on a
-/// name hit regardless of address, so for a block this small the two calls'
-/// MEASURED allocation counts are equal in practice -- the win
-/// `block_buffer_reusable` buys here is skipping the match/dispatch/
-/// `device_buffers` write entirely, not a further allocation count drop on
-/// top of a cache that was already this cheap. What this test proves instead:
-/// both calls still produce the byte-identical, correct output, and neither
-/// regresses the other's allocation count.
+/// block whose ADDRESS moves (a different array, same content) under that
+/// resident name breaks the residency promise, and the name-keyed caches
+/// answer with `MetalError::ResidentNameRebound` instead of a stale serve or a
+/// silent replace -- the "no content hash" half of the contract: only the
+/// caller's own residency promise plus an unmoved address earns the skip. The
+/// refusal leaves the plan usable for the caller's real block.
 #[test]
 fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
     const EXTENT: u32 = 4;
@@ -396,22 +387,37 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
     .expect("second (warm) call against the SAME block address");
     let reused_allocations = allocations();
 
-    // a DIFFERENT array -- same content, a moved address -- must not be
-    // trusted: `block_buffer_reusable` sees a changed `(pointer, length)`
-    // and this call re-uploads exactly as a cold call would.
+    // a DIFFERENT array -- same content, a moved address -- under a name the
+    // plan marked resident breaks `Plan::mark_resident`'s promise that the
+    // address never moves: the name-keyed caches refuse it with a typed error
+    // rather than serve the old buffer or silently replace it.
     let moved_block = [1.0f32, 2.0, 3.0, 4.0];
-    reset();
-    let rebuilt = omega::execute_plan_with_placements(
+    let rebound = omega::execute_plan_with_placements(
         &plan,
         &[QuantizedBlock::Float32(&moved_block)],
         &[],
         &[],
         &mut Vec::new(),
     )
-    .expect("third call, block moved to a different address");
-    let rebuilt_allocations = allocations();
+    .expect_err("a resident name offered at a moved address must be refused");
 
-    eprintln!("reused_allocations={reused_allocations} rebuilt_allocations={rebuilt_allocations}");
+    let after_refusal = omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("the refusal must not poison the plan for the caller's real block");
+
+    eprintln!("reused_allocations={reused_allocations} rebound={rebound}");
+    assert!(
+        matches!(
+            &rebound,
+            omega::metal::MetalError::ResidentNameRebound { name, .. } if name == "weight"
+        ),
+        "expected ResidentNameRebound for \"weight\", got {rebound:?}"
+    );
     assert_eq!(
         reused
             .get(identity)
@@ -421,18 +427,12 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
         "the reused device buffer must still read back the correct content"
     );
     assert_eq!(
-        rebuilt
+        after_refusal
             .get(identity)
             .expect("identity node is the sole output")
             .0,
-        &moved_block,
-        "an address-moved, forced-rebuild call must read back the NEW content, not a stale \
-         buffer left over from the reused call"
-    );
-    assert!(
-        reused_allocations <= rebuilt_allocations,
-        "a resident block at an unmoved address must never allocate MORE than one whose \
-         address just moved -- reused={reused_allocations} rebuilt={rebuilt_allocations}"
+        &block,
+        "a call after the refusal must read back the resident block's content"
     );
 }
 
