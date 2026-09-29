@@ -13,19 +13,21 @@
 //! checkpoint bytes is `q4_0_tiled_gemm_batched_run8_parity.rs`'s own job,
 //! not this probe's.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
-fn main() {
+fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
-    run();
+    return run();
     #[cfg(not(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos")))]
-    println!(
-        "q4_0_tiled_gemm_run8_speed_probe requires --features metal,metal-tiled-gemm,instrument on macOS"
-    );
+    {
+        println!(
+            "q4_0_tiled_gemm_run8_speed_probe requires --features metal,metal-tiled-gemm,instrument on macOS"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", feature = "instrument", target_os = "macos"))]
-fn run() {
+fn run() -> anyhow::Result<()> {
+    use anyhow::Context;
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
     use proxima_primitives::Codec;
     use proxima_tensor::test_support::Lcg;
@@ -43,16 +45,16 @@ fn run() {
         (0..count).map(|_| lcg.next_unit()).collect()
     }
 
-    fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> Vec<u8> {
+    fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> anyhow::Result<Vec<u8>> {
         let blocks_per_row = in_dim / QK4_0;
         let mut packed = vec![0u8; rows.len() * blocks_per_row * BLOCK_BYTES];
         for (row, row_packed) in rows
             .iter()
             .zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row, row_packed).expect("in_dim is a whole multiple of QK4_0");
+            quantize(row, row_packed).context("in_dim is a whole multiple of QK4_0")?;
         }
-        packed
+        Ok(packed)
     }
 
     fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
@@ -106,18 +108,18 @@ fn run() {
         root: NodeId,
         blocks: &[QuantizedBlock<'_>],
         runs: usize,
-    ) -> u64 {
+    ) -> anyhow::Result<u64> {
         let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::default())
-            .expect("plan compiles");
+            .context("plan compiles")?;
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
             let (_, timings) = omega::metal::execute_plan_op_timed(&plan, blocks, None)
-                .expect("metal executes on a real device");
+                .context("metal executes on a real device")?;
             let total: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
             samples.push(total);
         }
         samples.sort_unstable();
-        samples[samples.len() / 2]
+        Ok(samples[samples.len() / 2])
     }
 
     if let Ok(output) = std::process::Command::new("pgrep").args(["-fl", "cargo|rustc"]).output()
@@ -130,7 +132,7 @@ fn run() {
     }
 
     let rows: Vec<Vec<f32>> = (0..OUT_DIM).map(|row| random_vec(11 + row as u64, IN_DIM)).collect();
-    let packed = pack_rows(&rows, IN_DIM);
+    let packed = pack_rows(&rows, IN_DIM)?;
     let weight_bytes = packed.len() as u64;
 
     for tokens in [64usize, 510] {
@@ -143,8 +145,8 @@ fn run() {
 
         let current_ns = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
             median_gpu_ns(&program, sum, &blocks, RUNS)
-        });
-        let new_ns = median_gpu_ns(&program, sum, &blocks, RUNS);
+        })?;
+        let new_ns = median_gpu_ns(&program, sum, &blocks, RUNS)?;
 
         let flops = 2.0 * tokens as f64 * IN_DIM as f64 * OUT_DIM as f64;
         let current_gbs = weight_bytes as f64 / (current_ns as f64 / 1e9) / 1e9;
@@ -162,4 +164,5 @@ fn run() {
             current_ns as f64 / new_ns as f64,
         );
     }
+    Ok(())
 }
