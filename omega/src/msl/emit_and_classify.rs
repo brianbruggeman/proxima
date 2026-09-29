@@ -36,7 +36,8 @@ pub(super) fn emit_inner(
     validate(resolved)?;
     let entry = entry_name(resolved);
     let quantized = operand_codecs(resolved, packed_operands);
-    let extras = metal_specialization(resolved, packed_operands, numeric_policy);
+    let grid = grid_spec(resolved, &quantized, numeric_policy, expert_source_mode)?;
+    let extras = metal_specialization(resolved, packed_operands, numeric_policy, &grid);
     let source = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
             render_cached_attention(resolved, &entry, numeric_policy)
@@ -98,9 +99,7 @@ pub(super) fn emit_inner(
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
     let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
-    let threads = grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?;
-    let grid2d = grid2d_for(resolved, &quantized, numeric_policy, expert_source_mode, threads)?;
-    let source = widen_for_grid(resolved.node, source, grid2d)?;
+    let source = widen_for_grid(resolved.node, source, grid.grid2d)?;
     let kernel = Kernel {
         source,
         entry,
@@ -109,12 +108,7 @@ pub(super) fn emit_inner(
         } else {
             bindings(resolved)
         },
-        grid: GridSpec {
-            threads,
-            threadgroup_width: extras.cooperative_width,
-            depth: grid_depth_for(resolved, &quantized),
-            grid2d,
-        },
+        grid,
     };
     // The z-addressed splice runs AFTER `bindings`/`grid` are built, mirroring
     // `splice_horizontal_merge_base_table`'s own call site
@@ -1276,6 +1270,7 @@ pub(super) fn metal_specialization(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    grid: &GridSpec,
 ) -> crate::identity::MetalOnlyExtras {
     let quantized = operand_codecs(resolved, packed_operands);
     let reduction_literal = match &resolved.kind {
@@ -1285,7 +1280,7 @@ pub(super) fn metal_specialization(
         _ => None,
     };
     crate::identity::MetalOnlyExtras {
-        cooperative_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
+        cooperative_width: grid.threadgroup_width,
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
         packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
@@ -1382,13 +1377,9 @@ pub(super) fn metal_specialization(
             }
             _ => false,
         },
-        // an op whose grid cannot be described (`Err`) fails `emit` and
-        // `kernel_dispatch_shape` before any dispatch consults this key.
         wide_grid: matches!(
-            grid_threads(resolved, &quantized, numeric_policy, false).and_then(|threads| {
-                grid2d_for(resolved, &quantized, numeric_policy, false, threads)
-            }),
-            Ok(Some(Grid2DSpec { form: Grid2DForm::FlatThreadgroupIndex, .. }))
+            grid.grid2d,
+            Some(Grid2DSpec { form: Grid2DForm::FlatThreadgroupIndex, .. })
         ),
     }
 }
@@ -1403,6 +1394,27 @@ pub(crate) fn kernel_cache_key(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
+    let quantized = operand_codecs(resolved, packed_operands);
+    let grid = grid_spec(resolved, &quantized, numeric_policy, false)?;
+    kernel_cache_key_for_grid(resolved, packed_operands, numeric_policy, &grid)
+}
+
+/// [`kernel_cache_key`] for a caller that already holds this op's
+/// [`GridSpec`] (the one [`kernel_dispatch_shape`] returns): the grid decision
+/// walks the op's reduction axes, so a caller that needs both the key and the
+/// shape asks for the shape first and hands it here instead of paying for the
+/// decision twice per encode.
+#[cfg(any(test, feature = "metal-core"))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
+pub(crate) fn kernel_cache_key_for_grid(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    grid: &GridSpec,
+) -> Result<String, EmitError> {
     // Called for its unsupported-dtype rejection alone -- `kernel_identity`
     // reads `resolved.dtype` directly for the actual half/wide classing (the
     // same partition every renderer's own `type_token` match already makes),
@@ -1414,7 +1426,7 @@ pub(crate) fn kernel_cache_key(
         crate::identity::KernelLanguage::Metal,
         resolved,
         packed_operands,
-        metal_specialization(resolved, packed_operands, numeric_policy),
+        metal_specialization(resolved, packed_operands, numeric_policy, grid),
         numeric_policy,
     ))
 }
@@ -1448,26 +1460,46 @@ pub(crate) fn kernel_dispatch_shape(
     // `kernel_dispatch_shape` has no expert-source caller (it never took
     // `expert_source_mode` before this parameter existed either) -- `false`
     // reproduces that pre-existing scope exactly.
-    let threads = grid_threads(resolved, &quantized, numeric_policy, false)?;
+    let grid = grid_spec(resolved, &quantized, numeric_policy, false)?;
     Ok((
         if is_split_cached_attention {
             split_bindings_with_scratch(resolved)
         } else {
             bindings(resolved)
         },
-        GridSpec {
-            threads,
-            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
-            // Plan-resolved (`resolve_steps`'s own `ResolvedStep::grid`, the
-            // production `execute_plan_with_placements` path) must agree
-            // with `emit_inner`'s own `GridSpec::depth` for the identical
-            // `resolved` -- see `reduce_round_count`'s doc; a stale `1` here
-            // would silently dispatch a spliced round-batched kernel with
-            // only round 0's own threadgroup, at the cache-HIT path only.
-            depth: grid_depth_for(resolved, &quantized),
-            grid2d: grid2d_for(resolved, &quantized, numeric_policy, false, threads)?,
-        },
+        grid,
     ))
+}
+
+/// The one grid decision for `resolved`: how many threads, at what pinned
+/// threadgroup width, how deep, and in which index form. [`emit_inner`] (the
+/// rendered kernel), [`kernel_dispatch_shape`] (the cache-hit launch that
+/// never renders) and [`kernel_cache_key_for_grid`] (the pipeline identity)
+/// all take this one value, so a caller computes it once per op -- it walks
+/// the op's reduction axes -- and the kernel form, the launch and the cache
+/// key cannot disagree.
+///
+/// `depth` is plan-resolved (`resolve_steps`'s own `ResolvedStep::grid`, the
+/// production `execute_plan_with_placements` path) and must agree with
+/// `emit_inner`'s: see `reduce_round_count`'s doc; a stale `1` would silently
+/// dispatch a spliced round-batched kernel with only round 0's own
+/// threadgroup, at the cache-HIT path only.
+///
+/// # Errors
+/// [`grid_threads`]' and [`grid2d_for`]'s: a grid no launch form can cover.
+pub(super) fn grid_spec(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+) -> Result<GridSpec, EmitError> {
+    let threads = grid_threads(resolved, quantized, numeric_policy, expert_source_mode)?;
+    Ok(GridSpec {
+        threads,
+        threadgroup_width: tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy),
+        depth: grid_depth_for(resolved, quantized),
+        grid2d: grid2d_for(resolved, quantized, numeric_policy, expert_source_mode, threads)?,
+    })
 }
 
 // `SIMD_WIDTH` moved to `crate::sized::SIMD_WIDTH` (the build-time floor's

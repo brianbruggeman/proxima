@@ -6527,3 +6527,124 @@ mod flat_grid_form {
         assert!(!kernel.source.contains("uint tptg [["), "{}", kernel.source);
     }
 }
+
+/// What one encode of a decode-shaped op costs in heap allocations, counted
+/// over the cache-key and dispatch-shape pair every `resolve_steps` and cold
+/// `encode_op` performs. The counted budget for each op is what the same pair
+/// allocated on `73fd1cbd` (main, before the grid decision existed), measured
+/// by running this module against that commit with the pair spelled
+/// `kernel_cache_key` then `kernel_dispatch_shape`; the tip must not exceed it.
+/// `proxima_test::alloc_count` installs the counting allocator for this test
+/// binary only under the `alloc-count` feature, and nextest gives each test its
+/// own process, so no other test shares the counter.
+#[cfg(feature = "alloc-count")]
+mod encode_allocation_budget {
+    use proxima_test::alloc_count::{CountingAllocator, allocations, reset};
+
+    use super::*;
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    struct EncodeCase {
+        label: &'static str,
+        bound: BoundOp,
+        packed: PackedOperands,
+        base_allocations: usize,
+    }
+
+    fn packed_weight(bound: &BoundOp, codec: Codec) -> PackedOperands {
+        let mut packed = PackedOperands::new();
+        packed.insert(bound.operands()[0].0, codec);
+        packed
+    }
+
+    fn encode_cases() -> Vec<EncodeCase> {
+        let q4k_matvec = packed_row_multi_token_op(1, 1536, 8960);
+        let q6k_matvec = packed_row_multi_token_op(1, 4096, 2048);
+        let tiled = tiled_gemm_op(64, 256, 128);
+        vec![
+            EncodeCase {
+                label: "q4k_matvec_decode",
+                packed: packed_weight(&q4k_matvec, Codec::Q4K),
+                bound: q4k_matvec,
+                base_allocations: BASE_Q4K_MATVEC,
+            },
+            EncodeCase {
+                label: "q6k_matvec_decode",
+                packed: packed_weight(&q6k_matvec, Codec::Q6K),
+                bound: q6k_matvec,
+                base_allocations: BASE_Q6K_MATVEC,
+            },
+            EncodeCase {
+                label: "tiled_gemm_prefill",
+                packed: packed_weight(&tiled, Codec::Q4K),
+                bound: tiled,
+                base_allocations: BASE_TILED_GEMM,
+            },
+            EncodeCase {
+                label: "f32_matmul",
+                bound: matmul_op(1, 256, 5),
+                packed: PackedOperands::new(),
+                base_allocations: BASE_F32_MATMUL,
+            },
+            EncodeCase {
+                label: "elementwise_tanh",
+                bound: elementwise_tanh_op(4096),
+                packed: PackedOperands::new(),
+                base_allocations: BASE_ELEMENTWISE,
+            },
+            EncodeCase {
+                label: "cached_attention",
+                bound: cached_attention_op_dynamic(64, 1),
+                packed: PackedOperands::new(),
+                base_allocations: BASE_CACHED_ATTENTION,
+            },
+            EncodeCase {
+                label: "cached_softmax_weights",
+                bound: cached_softmax_weights_op(4, 64, 64),
+                packed: PackedOperands::new(),
+                base_allocations: BASE_CACHED_SOFTMAX,
+            },
+        ]
+    }
+
+    const BASE_Q4K_MATVEC: usize = 297;
+    const BASE_Q6K_MATVEC: usize = 258;
+    const BASE_TILED_GEMM: usize = 254;
+    const BASE_F32_MATMUL: usize = 179;
+    const BASE_ELEMENTWISE: usize = 14;
+    const BASE_CACHED_ATTENTION: usize = 13;
+    const BASE_CACHED_SOFTMAX: usize = 9;
+
+    fn encode_pair(case: &EncodeCase) -> usize {
+        let policy = NumericPolicy::default();
+        let before = allocations();
+        let (_, grid) = kernel_dispatch_shape(&case.bound, &case.packed, policy)
+            .expect("the fixture's grid is describable");
+        let key = kernel_cache_key_for_grid(&case.bound, &case.packed, policy, &grid)
+            .expect("the fixture has a cache key");
+        let count = allocations() - before;
+        core::hint::black_box(key);
+        count
+    }
+
+    #[test]
+    fn encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision() {
+        let mut over_budget = Vec::new();
+        for case in encode_cases() {
+            encode_pair(&case);
+            reset();
+            let measured = encode_pair(&case);
+            eprintln!("encode_allocations label={} measured={measured}", case.label);
+            if measured > case.base_allocations {
+                over_budget.push((case.label, measured, case.base_allocations));
+            }
+        }
+
+        assert!(
+            over_budget.is_empty(),
+            "(label, measured, base) over budget: {over_budget:?}"
+        );
+    }
+}
