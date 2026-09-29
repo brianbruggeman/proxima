@@ -4348,3 +4348,43 @@ fn merge_pipeline_key(cache_key: &str, merge_kernel: &Kernel) -> String {
     let form = if merge_kernel.grid.grid2d.is_some() { "_wg" } else { "" };
     format!("{cache_key}_merge{form}")
 }
+
+#[cfg(test)]
+mod merge_pipeline_key_tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use super::merge_pipeline_key;
+    use crate::msl::{Grid2DForm, Grid2DSpec, GridSpec, Kernel};
+
+    fn merge_kernel(grid2d: Option<Grid2DSpec>) -> Kernel {
+        Kernel {
+            source: String::new(),
+            entry: String::from("omega_cached_attention_merge"),
+            bindings: Vec::new(),
+            grid: GridSpec {
+                threads: 1,
+                threadgroup_width: None,
+                depth: 1,
+                grid2d,
+            },
+        }
+    }
+
+    #[test]
+    fn a_merge_kernel_that_took_the_flat_form_never_shares_a_key_with_its_linear_sibling() {
+        let flat = Grid2DSpec {
+            form: Grid2DForm::FlatThreadgroupIndex,
+            threadgroups_x: 4,
+            threadgroups_y: 2,
+            threads_per_threadgroup_x: 32,
+            threads_per_threadgroup_y: 1,
+        };
+
+        let linear_key = merge_pipeline_key("split_key", &merge_kernel(None));
+        let flat_key = merge_pipeline_key("split_key", &merge_kernel(Some(flat)));
+
+        assert_eq!(linear_key, "split_key_merge");
+        assert_eq!(flat_key, "split_key_merge_wg");
+    }
+}
