@@ -780,7 +780,7 @@ fn round_batched_matmul_op(round_count: u32) -> BoundOp {
 
 /// Mirrors `horizontal_merge_base_table_splice_tests` (gate (1) of its own
 /// doc): the round-batched kernel's text must differ from round 0's own
-/// unspliced kernel ONLY by the `RoundBase` preamble and the k bound
+/// unspliced kernel ONLY by the `RoundBase` preamble and the k-1 bound
 /// `route_buf_{z}` parameters
 /// ([`splice_round_batched_reduce_base_table`]'s own doc) -- the route side
 /// is a `round_gid.z`-switched buffer SELECTION now, never a CPU-copied
@@ -843,10 +843,17 @@ mod round_batched_reduce_base_table_splice_tests {
             "the spliced kernel must declare the widened vector gid parameter:\n{}",
             spliced.source
         );
-        // every round's own route buffer is a separately bound parameter --
-        // 4 rounds means route_buf_0..route_buf_3, each selected only by the
-        // switch above, never read through gather_idx0 directly.
-        for round in 0..4 {
+        // round 0 selects its own gathered index buffer; every later round's
+        // route is a separately bound parameter -- 4 rounds means
+        // route_buf_1..route_buf_3, each selected only by the switch above.
+        assert!(
+            spliced
+                .source
+                .contains("case 0: sliced_route = gather_idx0; break;"),
+            "round 0 must read its own gather_idx binding:\n{}",
+            spliced.source
+        );
+        for round in 1..4 {
             assert!(
                 spliced.source.contains(&format!("route_buf_{round}")),
                 "spliced kernel must bind round {round}'s own route buffer:\n{}",
@@ -876,29 +883,40 @@ mod round_batched_reduce_base_table_splice_tests {
         let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &mut round_batched.kind else {
             unreachable!("round_batched_matmul_op builds a RoundBatchedReduce")
         };
-        let sibling_routes: Vec<NodeId> = (0..4).map(|round| NodeId(900 + round)).collect();
-        round_routes.clone_from(&sibling_routes);
+        let leader_route = round_routes[0];
+        let later_routes: Vec<NodeId> = (1..4).map(|round| NodeId(900 + round)).collect();
+        round_routes.truncate(1);
+        round_routes.extend(later_routes.iter().copied());
         let weight_node = round_zero_reduce_bound(&round_batched).operands()[0].0;
         let mut q4k = BTreeMap::new();
         q4k.insert(weight_node, Codec::Q4K);
 
         let kernel = emit(&round_batched, &q4k, NumericPolicy::default())?;
 
-        let route_slots_start = kernel.bindings.len() - sibling_routes.len();
-        let expected_tail: Vec<Binding> = sibling_routes
+        let route_slots_start = kernel.bindings.len() - later_routes.len();
+        let expected_tail: Vec<Binding> = later_routes
             .iter()
             .map(|route| Binding::Indices(*route))
             .collect();
         assert_eq!(
             kernel.bindings[route_slots_start..],
             expected_tail,
-            "the last k bindings must be the k rounds' own routes, in round order, so the hazard \
+            "the last k-1 bindings must be rounds 1.. own routes, in round order, so the hazard \
              walk sees each MoeTopK write as a read of this dispatch"
         );
-        for round in 0..sibling_routes.len() {
+        let leader_bindings = kernel
+            .bindings
+            .iter()
+            .filter(|binding| **binding == Binding::Indices(leader_route))
+            .count();
+        assert_eq!(
+            leader_bindings, 1,
+            "round 0's route is its gathered operand's index buffer and must be bound exactly once"
+        );
+        for round in 1..=later_routes.len() {
             let declaration = format!(
                 "route_buf_{round} [[buffer({})]]",
-                route_slots_start + round
+                route_slots_start + round - 1
             );
             assert!(
                 kernel.source.contains(&declaration),
@@ -907,6 +925,11 @@ mod round_batched_reduce_base_table_splice_tests {
                 kernel.source
             );
         }
+        assert!(
+            !kernel.source.contains("route_buf_0"),
+            "round 0 reads its own gather_idx binding, never a second buffer:\n{}",
+            kernel.source
+        );
         let table_declaration = format!("round_table [[buffer({})]]", kernel.bindings.len());
         assert!(
             kernel.source.contains(&table_declaration),
