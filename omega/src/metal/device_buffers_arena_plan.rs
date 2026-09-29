@@ -141,6 +141,130 @@ impl Drop for EncoderGuard {
 /// end-of-program wait (see the module doc's "Gather fault reporting").
 pub(super) type PendingFault<'a> = (&'a BoundOp, MetalBuffer, usize);
 
+/// Cheap, `Copy` context a command-buffer-creating call site hands
+/// [`check_command_buffer_status`]/[`check_all_command_buffers`] so a
+/// [`MetalError::CommandBufferFailed`] can name which chunk failed and how
+/// large it was without re-deriving that from the Metal object after the
+/// fact (the encoder that carried this information is already
+/// `endEncoding()`d and gone by the time a fault surfaces). Every field is
+/// an integer or a `&'static str` -- no allocation on the path that builds
+/// this, only on the path that turns it into an error message.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BufferDiagnostics {
+    pub(super) chunk_index: usize,
+    pub(super) chunk_count: usize,
+    pub(super) dispatch_count: u32,
+    pub(super) first_op_label: &'static str,
+    pub(super) last_op_label: &'static str,
+    pub(super) encoder_status_requested: bool,
+}
+
+impl BufferDiagnostics {
+    /// The "nothing to report" shape for a caller that commits one buffer
+    /// with no tracked per-op position -- honest about not knowing rather
+    /// than fabricating a chunk index or op label. Every real command-buffer
+    /// site in this module now builds a real `BufferDiagnostics` from what it
+    /// encoded (`resolved_op_label`, `dispatch_count`), so this constructor
+    /// has no production caller; kept `#[cfg(test)]` to document and prove
+    /// the fallback shape itself, not because any caller falls through to it.
+    #[cfg(test)]
+    pub(super) const fn single(encoder_status_requested: bool) -> Self {
+        Self {
+            chunk_index: 0,
+            chunk_count: 1,
+            dispatch_count: 0,
+            first_op_label: "n/a",
+            last_op_label: "n/a",
+            encoder_status_requested,
+        }
+    }
+}
+
+/// [`MetalError::CommandBufferFailed`]'s root-cause payload, boxed off the
+/// variant itself (see that variant's own doc for why). Built once, only on
+/// the fault branch of [`check_command_buffer_status`], from two sources:
+/// the failing [`BufferDiagnostics`] the encode loop already carried
+/// (`chunk_index`/`chunk_count`/`dispatch_count`/the op labels), and the
+/// Metal command buffer object itself (`buffer_label`, `gpu_start_s`,
+/// `gpu_end_s` -- free reads, no bookkeeping needed to produce them).
+#[derive(Debug)]
+pub struct CommandBufferFailureContext {
+    /// this buffer's 0-based position among every command buffer the SAME
+    /// step committed (`Plan::chunk_status_buffers`'s own doc) -- `0` with
+    /// `chunk_count == 1` outside the chunked loop.
+    pub chunk_index: usize,
+    pub chunk_count: usize,
+    /// `encode_op` invocations folded into this buffer, not raw
+    /// `dispatchThreadgroups`/`dispatchThreads` calls -- a fused
+    /// `CachedAttention` op that itself issues two device dispatches
+    /// (`encode_op`'s own doc, "two-dispatch `CachedAttention` form")
+    /// still counts once here. `0` where the call site never tracked
+    /// per-op count (`BufferDiagnostics::single`).
+    pub dispatch_count: u32,
+    pub first_op_label: &'static str,
+    pub last_op_label: &'static str,
+    /// `command_buffer.label()` read back at failure time -- the label was
+    /// set to `omega.chunk.<chunk_index>` at creation
+    /// (`execute_plan_with_placements`'s chunk loop), so this and
+    /// `chunk_index` should always agree; carried separately because the
+    /// label survives independently of this error's own bookkeeping if the
+    /// two ever drift.
+    pub buffer_label: Option<String>,
+    pub gpu_start_s: f64,
+    pub gpu_end_s: f64,
+    /// `true` when this buffer was created with
+    /// `MTLCommandBufferErrorOption::EncoderExecutionStatus` requested
+    /// (`PROXIMA_METAL_ENCODER_ERROR_STATUS=1`, off by default --
+    /// `encoder_error_status_requested`'s own doc). `encoder_infos` is only
+    /// ever non-empty when this is `true` -- Metal never populates the
+    /// `userInfo` key otherwise.
+    pub encoder_status_requested: bool,
+    /// One entry per `MTLCommandBufferEncoderInfo` Metal attached to the
+    /// failing `NSError.userInfo[MTLCommandBufferEncoderInfoErrorKey]`, in
+    /// the order Metal recorded them -- empty when
+    /// `encoder_status_requested` is `false`, or when it is `true` but the
+    /// driver did not populate the key (Apple's doc reserves that case for
+    /// hosts/drivers that do not support the richer report).
+    pub encoder_infos: Vec<CommandBufferEncoderFailureInfo>,
+}
+
+/// One Metal command encoder's post-mortem, read back from a failing
+/// command buffer's `NSError.userInfo[MTLCommandBufferEncoderInfoErrorKey]`
+/// (`mod.rs`'s `encoder_failure_infos`). `error_state` is
+/// `MTLCommandEncoderErrorState`'s raw ordinal (0=Unknown, 1=Completed,
+/// 2=Affected, 3=Pending, 4=Faulted) rather than the `objc2_metal` type
+/// itself, so this struct stays free of any Metal-framework dependency --
+/// the same convention `status`/`code` on [`MetalError::CommandBufferFailed`]
+/// already use for the buffer-level Metal status.
+#[derive(Debug, Clone)]
+pub struct CommandBufferEncoderFailureInfo {
+    pub label: String,
+    pub error_state: i64,
+}
+
+impl core::fmt::Display for CommandBufferFailureContext {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "chunk={}/{} dispatches={} ops=[{}..{}] buffer_label={:?} \
+             gpu_start_s={:.6} gpu_end_s={:.6} encoder_status_requested={}",
+            self.chunk_index,
+            self.chunk_count,
+            self.dispatch_count,
+            self.first_op_label,
+            self.last_op_label,
+            self.buffer_label,
+            self.gpu_start_s,
+            self.gpu_end_s,
+            self.encoder_status_requested,
+        )?;
+        for info in &self.encoder_infos {
+            write!(formatter, " encoder[{}]=error_state={}", info.label, info.error_state)?;
+        }
+        Ok(())
+    }
+}
+
 /// Everything [`execute`] can fail with: a missing device, any device
 /// operation that returned a Metal-side failure (compiling source, creating
 /// a pipeline, or one of the handful of `Option`-returning calls that are
@@ -172,8 +296,23 @@ pub enum MetalError {
     /// partially written. Reading that output back as if the dispatch
     /// succeeded is exactly the silent-wrong-bits failure this variant
     /// exists to turn into a hard error instead.
-    #[error("metal command buffer failed: status={status} code={code} error={log}")]
-    CommandBufferFailed { status: u64, code: i64, log: String },
+    ///
+    /// `context` is root-cause diagnosis gathered at the point of failure
+    /// (`check_command_buffer_status`) -- see [`CommandBufferFailureContext`]'s
+    /// own doc for what each field means and where it comes from. Boxed,
+    /// not inline: clippy's `result_large_err` measured this variant at
+    /// 133 bytes inline (nine extra fields on top of `status`/`code`/`log`),
+    /// which would have grown every `Result<_, MetalError>` on this
+    /// driver's hot dispatch path to that size even on the success arm --
+    /// principle 20's "measured large enum variant" exception, not a
+    /// default reach for `Box`.
+    #[error("metal command buffer failed: status={status} code={code} {context} error={log}")]
+    CommandBufferFailed {
+        status: u64,
+        code: i64,
+        log: String,
+        context: alloc::boxed::Box<CommandBufferFailureContext>,
+    },
     /// `build_buffer_arena`'s own reuse pass still needed more transient
     /// bytes live at once than `cap_bytes` budgets -- MG-3's kill condition,
     /// now a typed error a caller can act on rather than a stderr line
@@ -1763,6 +1902,115 @@ pub(super) mod block_buffer_reusable_tests {
     #[test]
     fn a_first_call_with_no_recorded_identity_is_never_reused() {
         assert!(!block_buffer_reusable(true, None, (0x1000, 64)));
+    }
+}
+
+// file-split artifact: see `block_buffer_reusable_tests`'s own doc for why
+// a test module sits here, mid-file, ahead of unrelated production code.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::items_after_test_module)]
+pub(super) mod command_buffer_failed_context_tests {
+    //! [`MetalError::CommandBufferFailed`]'s root-cause fields, proved
+    //! without a GPU: this is the shape a production log line (or the
+    //! `error!` event `check_command_buffer_status` emits alongside it)
+    //! actually carries, built from real chunked-decode numbers rather
+    //! than placeholder bytes -- the observed session fault this variant
+    //! was built to make root-causable read `status: 5, code: 1, log:
+    //! "Internal Error (0000000e:Internal Error)"` under 17-wide
+    //! speculative-decode K-chunking; this fixture's `log`/`status`/`code`
+    //! match that report, and `context` supplies the chunk position that
+    //! report itself never had.
+
+    use alloc::string::ToString;
+
+    use super::{BufferDiagnostics, CommandBufferEncoderFailureInfo, CommandBufferFailureContext, MetalError};
+
+    fn sample_error() -> MetalError {
+        MetalError::CommandBufferFailed {
+            status: 5,
+            code: 1,
+            log: "Internal Error (0000000e:Internal Error)".to_string(),
+            context: alloc::boxed::Box::new(CommandBufferFailureContext {
+                chunk_index: 2,
+                chunk_count: 4,
+                dispatch_count: 37,
+                first_op_label: "Elementwise",
+                last_op_label: "CachedAttention",
+                buffer_label: Some("omega.chunk.2".to_string()),
+                gpu_start_s: 1_234.500_000,
+                gpu_end_s: 1_234.501_200,
+                encoder_status_requested: false,
+                encoder_infos: alloc::vec::Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn display_names_the_failing_chunk_and_its_op_range() {
+        let message = sample_error().to_string();
+        assert!(
+            message.contains("chunk=2/4"),
+            "message did not name the chunk position: {message}"
+        );
+        assert!(
+            message.contains("dispatches=37"),
+            "message did not carry the dispatch count: {message}"
+        );
+        assert!(
+            message.contains("ops=[Elementwise..CachedAttention]"),
+            "message did not name the op range: {message}"
+        );
+        assert!(
+            message.contains("buffer_label=Some(\"omega.chunk.2\")"),
+            "message did not carry the buffer label: {message}"
+        );
+        assert!(
+            message.contains("status=5"),
+            "message dropped the underlying Metal status: {message}"
+        );
+        assert!(
+            message.contains("Internal Error (0000000e:Internal Error)"),
+            "message dropped the underlying NSError description: {message}"
+        );
+    }
+
+    #[test]
+    fn single_buffer_diagnostics_read_as_untracked_rather_than_a_fabricated_position() {
+        let diagnostics = BufferDiagnostics::single(true);
+        assert_eq!(diagnostics.chunk_index, 0);
+        assert_eq!(diagnostics.chunk_count, 1);
+        assert_eq!(diagnostics.dispatch_count, 0);
+        assert_eq!(diagnostics.first_op_label, "n/a");
+        assert_eq!(diagnostics.last_op_label, "n/a");
+        assert!(diagnostics.encoder_status_requested);
+    }
+
+    #[test]
+    fn display_names_each_failing_encoder_and_its_error_state() {
+        let mut error = sample_error();
+        let MetalError::CommandBufferFailed { context, .. } = &mut error else {
+            panic!("sample_error always builds CommandBufferFailed");
+        };
+        context.encoder_status_requested = true;
+        context.encoder_infos = alloc::vec![
+            CommandBufferEncoderFailureInfo {
+                label: "gate_matmul".to_string(),
+                error_state: 4,
+            },
+            CommandBufferEncoderFailureInfo {
+                label: "up_matmul".to_string(),
+                error_state: 1,
+            },
+        ];
+        let message = error.to_string();
+        assert!(
+            message.contains("encoder[gate_matmul]=error_state=4"),
+            "message did not name the faulted encoder: {message}"
+        );
+        assert!(
+            message.contains("encoder[up_matmul]=error_state=1"),
+            "message did not name the completed encoder: {message}"
+        );
     }
 }
 

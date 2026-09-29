@@ -198,15 +198,17 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 #[cfg(feature = "instrument")]
 use objc2_foundation::NSUInteger;
-use objc2_foundation::{NSError, NSString};
+use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_metal::{MTLBarrierScope, MTLCommandBufferStatus, MTLDispatchType};
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
+    MTLBuffer, MTLCommandBuffer, MTLCommandBufferDescriptor, MTLCommandBufferEncoderInfo,
+    MTLCommandBufferEncoderInfoErrorKey, MTLCommandBufferErrorOption, MTLCommandEncoder,
+    MTLCommandQueue, MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
 };
 use proxima_telemetry::counter;
 use proxima_telemetry::debug;
+use proxima_telemetry::error;
 use proxima_telemetry::info;
 use proxima_telemetry::metric::Counter;
 use proxima_telemetry::trace;
@@ -276,12 +278,61 @@ use arena_encode_dispatch_finish::*;
 /// would silently return wrong bits instead of an error. Every
 /// `commit()`/`waitUntilCompleted()` pair in this driver goes through this
 /// function for that reason.
+///
+/// `diagnostics` is the caller's own account of what it encoded onto this
+/// buffer -- every call site in this driver that loops over `BoundOp`s
+/// before committing knows its own dispatch count and op-label range
+/// (`placements_execute_named::resolved_op_label`'s own callers build
+/// exactly this), so [`BufferDiagnostics::single`] is reserved for the one
+/// case that is genuinely untracked, not a default every caller falls
+/// through to. Costs nothing on the pass path -- six `Copy` fields, no
+/// allocation.
 fn commit_and_wait(
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    diagnostics: BufferDiagnostics,
 ) -> Result<(), MetalError> {
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
-    check_command_buffer_status(command_buffer)
+    check_command_buffer_status(command_buffer, diagnostics)
+}
+
+/// `PROXIMA_METAL_ENCODER_ERROR_STATUS=1` asks Metal to populate
+/// `MTLCommandBufferEncoderInfo` per encoder on a fault
+/// (`MTLCommandBufferErrorOption::EncoderExecutionStatus`) -- default off,
+/// per Apple's own doc on that option: "enabling this error reporting
+/// option may increase CPU, GPU, and/or memory overhead on some
+/// platforms". [`new_labeled_command_buffer`] is the one place that reads
+/// this; every command buffer this driver creates goes through it, so the
+/// switch is process-wide once set, not per-call-site.
+///
+/// Requesting the option is wired all the way through -- the command
+/// buffer really is created with it set, and [`check_command_buffer_status`]
+/// reads the populated `MTLCommandBufferEncoderInfo` array back out of the
+/// failing `NSError`'s `userInfo` (`encoder_failure_infos`) into
+/// `MetalError::CommandBufferFailed`'s `encoder_infos` field, only on the
+/// fault branch and only when this switch was on.
+fn encoder_error_status_requested() -> bool {
+    std::env::var_os("PROXIMA_METAL_ENCODER_ERROR_STATUS").is_some_and(|value| value == "1")
+}
+
+/// Every command-buffer-creating call site in this driver goes through
+/// this instead of a bare `queue.commandBuffer()` -- it is what makes
+/// `buffer_label` on [`MetalError::CommandBufferFailed`] non-`None` and
+/// what wires [`encoder_error_status_requested`] onto the buffer Metal
+/// actually schedules, both of which a bare `commandBuffer()` call cannot
+/// carry after the fact (there is no `setErrorOptions` on an
+/// already-created buffer; it is descriptor-only).
+pub(super) fn new_labeled_command_buffer(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    label: &str,
+) -> Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
+    let descriptor = MTLCommandBufferDescriptor::new();
+    if encoder_error_status_requested() {
+        descriptor.setErrorOptions(MTLCommandBufferErrorOption::EncoderExecutionStatus);
+    }
+    let command_buffer = queue.commandBufferWithDescriptor(&descriptor)?;
+    command_buffer.setLabel(Some(&NSString::from_str(label)));
+    Some(command_buffer)
 }
 
 /// One per [`check_command_buffer_status`] call, pass or fail -- lets a test
@@ -295,23 +346,93 @@ pub static COMMAND_BUFFER_STATUS_CHECKS: Counter =
 /// [`commit_and_wait`]'s status check alone, for the handful of call sites
 /// that split `commit()`/`waitUntilCompleted()` apart to bracket host-side
 /// instrumentation timing between them -- same failure this guards against,
-/// just without owning the commit/wait pair itself.
+/// just without owning the commit/wait pair itself. `diagnostics` costs
+/// nothing on the pass path (six `Copy` fields, no allocation); the
+/// `buffer_label` string and the structured `error!` event below are the
+/// only allocation this function ever does, and only on the fault branch.
 fn check_command_buffer_status(
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    diagnostics: BufferDiagnostics,
 ) -> Result<(), MetalError> {
     counter!(COMMAND_BUFFER_STATUS_CHECKS, 1);
     if command_buffer.status() == MTLCommandBufferStatus::Error {
-        let (code, log) = command_buffer
-            .error()
-            .map(|error| (error.code() as i64, nserror_description(&error)))
+        let error_handle = command_buffer.error();
+        let (code, log) = error_handle
+            .as_deref()
+            .map(|error| (error.code() as i64, nserror_description(error)))
             .unwrap_or((0, "no NSError attached".to_string()));
+        let encoder_infos = if diagnostics.encoder_status_requested {
+            error_handle.as_deref().map(encoder_failure_infos).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let buffer_label = command_buffer.label().map(|label| label.to_string());
+        let gpu_start_s = command_buffer.GPUStartTime();
+        let gpu_end_s = command_buffer.GPUEndTime();
+        error!(
+            status = MTLCommandBufferStatus::Error.0 as u64,
+            code,
+            chunk_index = diagnostics.chunk_index as u64,
+            chunk_count = diagnostics.chunk_count as u64,
+            dispatch_count = diagnostics.dispatch_count,
+            first_op_label = diagnostics.first_op_label,
+            last_op_label = diagnostics.last_op_label,
+            buffer_label = ?buffer_label,
+            gpu_start_s,
+            gpu_end_s,
+            encoder_status_requested = diagnostics.encoder_status_requested,
+            log = %log,
+            "metal command buffer failed"
+        );
         return Err(MetalError::CommandBufferFailed {
             status: MTLCommandBufferStatus::Error.0 as u64,
             code,
             log,
+            context: alloc::boxed::Box::new(CommandBufferFailureContext {
+                chunk_index: diagnostics.chunk_index,
+                chunk_count: diagnostics.chunk_count,
+                dispatch_count: diagnostics.dispatch_count,
+                first_op_label: diagnostics.first_op_label,
+                last_op_label: diagnostics.last_op_label,
+                buffer_label,
+                gpu_start_s,
+                gpu_end_s,
+                encoder_status_requested: diagnostics.encoder_status_requested,
+                encoder_infos,
+            }),
         });
     }
     Ok(())
+}
+
+/// Reads `MTLCommandBufferEncoderInfoErrorKey` out of a failing command
+/// buffer's `NSError.userInfo` -- populated only when the buffer was created
+/// with `MTLCommandBufferErrorOption::EncoderExecutionStatus`
+/// (`encoder_error_status_requested`); Apple's own doc on that key says the
+/// key is simply absent otherwise, so an empty result here is the expected
+/// off-switch shape, not a parse failure.
+fn encoder_failure_infos(error: &NSError) -> Vec<CommandBufferEncoderFailureInfo> {
+    // SAFETY: reading an `extern "C"` static requires `unsafe`; this one is
+    // immutable and Metal-framework-owned for the process lifetime.
+    let key = unsafe { MTLCommandBufferEncoderInfoErrorKey };
+    let Some(raw_infos) = error.userInfo().objectForKey(key) else {
+        return Vec::new();
+    };
+    // SAFETY: `MTLCommandBufferEncoderInfoErrorKey`'s own doc guarantees the
+    // value, when present, is an `NSArray` of objects conforming to
+    // `MTLCommandBufferEncoderInfo` -- Metal itself is the only writer of
+    // this `userInfo` entry, never this crate.
+    let infos = unsafe {
+        Retained::cast_unchecked::<NSArray<ProtocolObject<dyn MTLCommandBufferEncoderInfo>>>(raw_infos)
+    };
+    infos
+        .to_vec()
+        .into_iter()
+        .map(|info| CommandBufferEncoderFailureInfo {
+            label: info.label().to_string(),
+            error_state: info.errorState().0 as i64,
+        })
+        .collect()
 }
 
 /// [`check_command_buffer_status`] over every command buffer a step
@@ -322,11 +443,16 @@ fn check_command_buffer_status(
 /// command buffers on one `MTLCommandQueue` reach a terminal `status()` in
 /// commit order (this module's own doc), so once the caller's own final
 /// `waitUntilCompleted` has returned, every earlier entry already has one.
+/// `diagnostics[i]` describes `command_buffers[i]`; a caller that pushed
+/// buffers without matching diagnostics is a bug, not something this
+/// function can detect -- see [`execute_plan_with_placements`]'s chunk
+/// loop for the one call site that keeps the two vectors in lock-step.
 fn check_all_command_buffers(
     command_buffers: &[Retained<ProtocolObject<dyn MTLCommandBuffer>>],
+    diagnostics: &[BufferDiagnostics],
 ) -> Result<(), MetalError> {
-    for command_buffer in command_buffers {
-        check_command_buffer_status(command_buffer)?;
+    for (command_buffer, buffer_diagnostics) in command_buffers.iter().zip(diagnostics.iter()) {
+        check_command_buffer_status(command_buffer, *buffer_diagnostics)?;
     }
     Ok(())
 }
