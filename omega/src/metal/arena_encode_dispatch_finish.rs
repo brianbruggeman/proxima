@@ -502,7 +502,10 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
     plan.merged.borrow_mut().take();
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
-        let mut cache_key = kernel_cache_key(bound, &plan.packed_operands, plan.numeric_policy)?;
+        let (bindings, grid) =
+            kernel_dispatch_shape(bound, &plan.packed_operands, plan.numeric_policy)?;
+        let mut cache_key =
+            kernel_cache_key_for_grid(bound, &plan.packed_operands, plan.numeric_policy, &grid)?;
         cache_key.push(plan.math_mode.cache_token());
         #[cfg(feature = "instrument")]
         if let BoundOpKind::Reduce {
@@ -527,8 +530,6 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
                 &cache_key,
             );
         }
-        let (bindings, grid) =
-            kernel_dispatch_shape(bound, &plan.packed_operands, plan.numeric_policy)?;
         let pipeline = pipeline_for(
             device,
             bound,
@@ -1158,7 +1159,8 @@ pub(super) fn encode_op(
             step.merge.as_ref(),
         )
     } else if let Some(source_node) = expert_source_node {
-        let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
+        let (binding_identity, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+        let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
         cache_key.push(math_mode.cache_token());
         let uniform_codec = expert_buffers.and_then(|buffers| {
             let mut codecs = buffers
@@ -1183,7 +1185,6 @@ pub(super) fn encode_op(
                 eprintln!("expert lowering mode=mixed node={source_node:?}");
             }
         }
-        let (binding_identity, _) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
         cache_key.push_str(&format!("_{binding_identity:?}"));
         let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
         let kernel = match kernel {
@@ -1221,9 +1222,9 @@ pub(super) fn encode_op(
         // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
         // called; only a genuine miss inside `pipeline_for` pays for the
         // full render + compile.
-        let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
-        cache_key.push(math_mode.cache_token());
         let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+        let mut cache_key = kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+        cache_key.push(math_mode.cache_token());
         #[cfg(feature = "instrument")]
         {
             counter!(EMIT_CALLS, 1);

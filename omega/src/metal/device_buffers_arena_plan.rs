@@ -1200,7 +1200,7 @@ pub(super) fn build_merged_dispatch(
         "float",
         "float",
     )?;
-    let mut cache_key = kernel_cache_key(leader, &plan.packed_operands, plan.numeric_policy)?;
+    let mut cache_key = kernel_cache_key_for_grid(leader, &plan.packed_operands, plan.numeric_policy, &kernel.grid)?;
     cache_key.push(plan.math_mode.cache_token());
     cache_key.push_str(&format!("_z{}", group.len()));
     let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, plan.math_mode)?;

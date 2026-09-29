@@ -233,7 +233,9 @@ use proxima_tensor::apply_repeat_nodes;
 use crate::error::EmitError;
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
-use crate::msl::{gather_count, kernel_cache_key, kernel_dispatch_shape, reduction_dims};
+use crate::msl::{
+    gather_count, kernel_cache_key, kernel_cache_key_for_grid, kernel_dispatch_shape, reduction_dims,
+};
 #[cfg(feature = "metal-plan-stable-buffers")]
 use crate::sized::ARENA_TRANSIENT_CAP;
 #[cfg(feature = "metal-buffer-pool")]
