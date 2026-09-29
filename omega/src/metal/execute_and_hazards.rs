@@ -64,6 +64,7 @@ pub(super) fn plan_with_placed_inputs(
         dispatch_type: DispatchType::default(),
         command_buffer_chunks: 0,
         command_buffer_chunks_decode_shaped: false,
+        bind_row_count: plan_bind_row_count(symbols),
         #[cfg(feature = "instrument")]
         encoder_split_at: None,
         #[cfg(feature = "metal-plan-stable-buffers")]

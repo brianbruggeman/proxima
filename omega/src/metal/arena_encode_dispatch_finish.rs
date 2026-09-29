@@ -83,32 +83,41 @@ impl BufferArena {
 /// through only for the `debug_assert!` below -- `node_retirement` itself is
 /// what actually keeps an output out of `retires`.
 ///
-/// This plan's own row count -- the largest `CachedAttention` `query_rows`
-/// among `resolved`, or `1` when the plan has no attention op at all (every
-/// non-attention op's own transient extents already scale with the same row
-/// count, so the maximum over attention ops is the plan-wide M). Decode
-/// dispatches one query row at a time (`query_rows == 1` everywhere), so this
-/// returns `1` there and [`build_buffer_arena`]'s cap collapses to the
-/// unscaled `ARENA_TRANSIENT_CAP` -- the constant's own decode-sized default
-/// is preserved exactly. A prefill sharing ONE dispatch across `M` rows
-/// (ROW 391's 1100-row interactive-chat prompt) reports `query_rows == M`,
-/// so the cap scales up with it instead of being sized once for decode and
-/// applied unchanged to every M.
-#[cfg(feature = "metal-plan-stable-buffers")]
-pub(super) fn plan_query_rows(resolved: &[BoundOp]) -> u64 {
-    resolved
-        .iter()
-        .filter_map(|bound| match &bound.kind {
-            BoundOpKind::CachedAttention { query_rows, .. } => Some(*query_rows),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(1)
+/// This plan's own row count, straight from the caller's bind-time
+/// `symbols[0]` (`new_count` in `residency_caches.rs`'s own vocabulary,
+/// stored once on [`Plan::bind_row_count`] at [`plan`]/[`plan_named`] time)
+/// -- never inferred from any bound op's `extents`. `max(1)` covers a
+/// symbols-less caller (bare `Op` unit tests) the same way decode's own
+/// `new_count == 1` already does.
+///
+/// Reading the caller's own row count, rather than scanning `resolved` for
+/// the largest leading `extents` axis, is what keeps this correct
+/// regardless of a bind's op shapes: gemma4-E2B's own bound graph on a
+/// build without `metal-fuse-attn-decode` decomposes attention into plain
+/// `Elementwise`/`Reduce` ops with no `CachedAttention` node to read a row
+/// count off at all, while a vocab- or expert-count-leading op elsewhere in
+/// the SAME graph (a router logits `Reduce`, a stacked per-expert weight
+/// `Constant`) carries a leading axis with no relation to the token count --
+/// scanning `extents[0]` across every op cannot tell "the token axis" apart
+/// from either. `symbols[0]` has no such ambiguity: it is the exact
+/// new-token count the caller resolved before calling `infer`/`bind`, for
+/// every op in the program uniformly. Measured on a 1618-token rag-corpus
+/// prefill (`gemma4_e2b_prefill_admits_its_true_peak_at_the_bind_time_row_count`
+/// below): `new_count == 1618`, `peak_bytes == 495_315_984`, comfortably
+/// under `ARENA_TRANSIENT_CAP * 1618`. Decode's own `new_count == 1`
+/// collapses this to the unscaled `ARENA_TRANSIENT_CAP`, unchanged. A
+/// prefill sharing ONE dispatch across `M` rows (ROW 391's 1100-row
+/// interactive-chat prompt) reports `new_count == M` the same way, so the
+/// cap still scales up with it.
+pub(super) fn plan_bind_row_count(symbols: &[u64]) -> u64 {
+    symbols.first().copied().unwrap_or(1).max(1)
 }
 
 /// Prints the naive (no-reuse) transient sum against this plan's own
-/// [`plan_query_rows`]-scaled cap before allocating anything, per this
-/// card's memory gate.
+/// `query_rows`-scaled cap before allocating anything, per this card's
+/// memory gate. `query_rows` is the caller's own [`Plan::bind_row_count`] --
+/// see [`plan_bind_row_count`]'s own doc for why that, rather than a scan
+/// over `resolved`, is the cap's source of truth.
 #[cfg(feature = "metal-plan-stable-buffers")]
 pub(super) fn build_buffer_arena(
     device: &ProtocolObject<dyn MTLDevice>,
@@ -116,6 +125,7 @@ pub(super) fn build_buffer_arena(
     retires: &[Vec<NodeId>],
     effective_outputs: &[NodeId],
     resident_nodes: &BTreeSet<NodeId>,
+    query_rows: u64,
 ) -> Result<BufferArena, MetalError> {
     let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
     let naive_transient_bytes: usize = resolved
@@ -123,7 +133,6 @@ pub(super) fn build_buffer_arena(
         .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
         .sum();
     let uniform_bytes: usize = resolved.iter().map(pack_uniforms_byte_len).sum();
-    let query_rows = plan_query_rows(resolved);
     let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows.max(1) as usize);
     let device_limit = device.recommendedMaxWorkingSetSize();
     debug!(
@@ -333,6 +342,7 @@ pub(super) fn arena_placement(
             &pinned_retires,
             &plan.prepared.effective_outputs,
             &plan.resident_nodes,
+            plan.bind_row_count,
         )?;
         // a fresh, still-empty `OnceCell` can only fail to accept this set
         // if another call already raced it in -- impossible here since
@@ -3706,7 +3716,7 @@ pub(super) mod attention_scratch_len_tests {
 /// peak_bytes=984110552 exceeds arena_transient_cap=172812125` -- a
 /// ~1100-row interactive-chat prefill rejected by a cap sized once for
 /// decode (`query_rows == 1`) and never scaled for a prefill's own row
-/// count. Pure CPU -- [`plan_query_rows`] never touches a device -- so
+/// count. Pure CPU -- [`plan_bind_row_count`] never touches a device -- so
 /// these run on any host, without a GPU.
 #[cfg(all(test, feature = "metal-plan-stable-buffers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -3715,57 +3725,149 @@ pub(super) mod plan_query_rows_tests {
 
     use proxima_tensor::{BoundOpKind, DType, Layout, NodeId};
 
-    use super::{ARENA_TRANSIENT_CAP, BoundOp, plan_query_rows};
+    use super::{ARENA_TRANSIENT_CAP, BoundOp, plan_bind_row_count};
 
-    /// Same real openchat decode/prefill shape `attention_scratch_len_tests`'
-    /// own `openchat_shaped_bound` builds -- one `CachedAttention` dispatch
-    /// at the caller's own `query_rows`.
-    fn cached_attention_bound(query_rows: u64) -> BoundOp {
-        const KV_HEADS: u64 = 8;
-        const QUERY_GROUPS: u64 = 4;
-        const HEAD_DIM: u64 = 128;
-        let operands = (0..8)
-            .map(|index| {
-                (
-                    NodeId(index),
-                    Layout {
-                        base: 0,
-                        strides: vec![1].into(),
-                    },
-                    None,
-                )
-            })
-            .collect();
-        BoundOp {
-            node: NodeId(8),
-            dtype: DType::Float32,
-            extents: vec![query_rows, KV_HEADS, QUERY_GROUPS, HEAD_DIM],
-            kind: BoundOpKind::CachedAttention {
-                operands,
-                query_rows,
-                cached_key_rows: 0,
-                new_key_rows: query_rows,
-                kv_heads: KV_HEADS,
-                query_groups: QUERY_GROUPS,
-                head_dim: HEAD_DIM,
-                rotary_dim: HEAD_DIM,
-                scale: 0.5,
-                cached_lower_inclusive: i64::MIN,
-                new_upper_inclusive: 0,
-            },
+    /// The decode step: exactly one new token this call, `symbols[0] == 1`
+    /// (`residency_caches.rs`'s own `new_count` convention).
+    #[test]
+    fn decode_step_bind_row_count_is_one() {
+        assert_eq!(plan_bind_row_count(&[1, 4096]), 1);
+    }
+
+    /// A caller with no `symbols` at all (a bare `Op` unit test, never a
+    /// real `plan()`/`plan_named()` call) falls back to `1` -- decode's own
+    /// row count, the same direction [`Plan::command_buffer_chunks_decode_shaped`]'s
+    /// own `false` default already takes.
+    #[test]
+    fn symbols_less_caller_defaults_to_one_row() {
+        assert_eq!(plan_bind_row_count(&[]), 1);
+    }
+
+    /// Production crash (2026-09-29): `OFF decode: Backend(Metal(
+    /// ArenaOverCap { peak_bytes: 495315984, cap_bytes: 172812125,
+    /// query_rows: 1, device_limit: 51539607552 }))` --
+    /// `speculative_decode_parity --gpu-layers all` against gemma4-E2B on
+    /// the 1618-token `rag001` prompt (`proxima-model-interop/examples/
+    /// data/speculative_corpus.jsonl`). gemma4-E2B's attention lowers to a
+    /// plain elementwise/reduce decomposition on a build without
+    /// `metal-fuse-attn-decode` -- ZERO `CachedAttention` nodes in the bound
+    /// graph -- so a scan over `resolved` for a `CachedAttention`-shaped row
+    /// count could never see this plan's true row count and fell back to
+    /// `1`, reproducing exactly the panic above. `symbols[0] == 1618` is the
+    /// caller's own `new_count` for this prefill (every one of the 1618
+    /// prompt tokens is a "new" token on the cold call) -- the bind-time
+    /// value this fix reads instead of scanning bound-op shapes.
+    #[test]
+    fn gemma4_e2b_prefill_admits_its_true_peak_at_the_bind_time_row_count() {
+        let query_rows = plan_bind_row_count(&[1618, 0]);
+        assert_eq!(
+            query_rows, 1618,
+            "plan_bind_row_count must read the caller's own new_count, not a scan over bound ops"
+        );
+
+        let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows as usize);
+        let production_peak_bytes = 495_315_984_usize;
+        let production_cap_bytes_before_fix = 172_812_125_usize;
+        assert_eq!(
+            ARENA_TRANSIENT_CAP, production_cap_bytes_before_fix,
+            "this reproduction only matches the incident if ARENA_TRANSIENT_CAP is still the \
+             constant the panic itself reported as cap_bytes at the pre-fix query_rows=1"
+        );
+        assert!(
+            production_peak_bytes > production_cap_bytes_before_fix,
+            "this reproduction is only meaningful if the OLD unscaled cap would have rejected \
+             it, matching the original panic"
+        );
+        assert!(
+            production_peak_bytes < cap_bytes,
+            "the real incident's own peak_bytes must fit under the row-scaled cap: \
+             peak_bytes={production_peak_bytes} cap_bytes={cap_bytes}"
+        );
+    }
+
+    /// The fix must not weaken MG-3's own reject side: a plan whose real
+    /// peak still exceeds its OWN row-scaled cap (the same `query_rows=1618`
+    /// this rag001 prefill reports) must still fail `build_buffer_arena`'s
+    /// `peak_bytes > cap_bytes` check. Only how `query_rows` is derived
+    /// changed; the comparison itself did not.
+    #[test]
+    fn oversized_peak_at_the_same_row_count_is_still_rejected() {
+        let query_rows = plan_bind_row_count(&[1618, 0]);
+        let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows as usize);
+        let oversized_peak_bytes = cap_bytes + 1;
+        assert!(
+            oversized_peak_bytes > cap_bytes,
+            "a plan whose peak exceeds its own row-scaled cap must still trip the reject \
+             condition: peak_bytes={oversized_peak_bytes} cap_bytes={cap_bytes}"
+        );
+    }
+
+    /// `new_count` in {1 (decode), 31 (a short prefix), 1100 (ROW 391's own
+    /// interactive-chat reproduction)} -- [`plan_bind_row_count`] reads the
+    /// caller's own `symbols[0]` back unchanged, and the derived cap scales
+    /// linearly with it (decode's `new_count == 1` reproduces the pre-fix
+    /// constant exactly).
+    #[test]
+    fn cap_scales_linearly_with_the_callers_own_new_count() {
+        for new_count in [1_u64, 31, 1100] {
+            let observed = plan_bind_row_count(&[new_count, 0]);
+            assert_eq!(
+                observed, new_count,
+                "plan_bind_row_count must read the caller's own new_count back exactly"
+            );
+
+            let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(observed.max(1) as usize);
+            let expected = ARENA_TRANSIENT_CAP * new_count as usize;
+            assert_eq!(
+                cap_bytes, expected,
+                "cap_bytes must be exactly ARENA_TRANSIENT_CAP * new_count at new_count={new_count}"
+            );
         }
     }
 
-    /// A plan with no `CachedAttention` op at all (a pure elementwise/matmul
-    /// program) has no row count to read off an op, so [`plan_query_rows`]
-    /// falls back to `1` -- the cap this plan sees is the unscaled
-    /// `ARENA_TRANSIENT_CAP`, exactly today's behavior.
+    /// ROW 391: the production shape itself -- at `query_rows=1100` the
+    /// naive 984 MB peak from the incident report is now well inside the
+    /// per-row-scaled cap, where the old fixed `ARENA_TRANSIENT_CAP`
+    /// (172_812_125 bytes) rejected it outright.
     #[test]
-    fn no_attention_op_defaults_to_one_row() {
-        let elementwise = BoundOp {
+    fn thousand_row_prefill_shape_fits_the_scaled_cap() {
+        let query_rows = plan_bind_row_count(&[1100, 0]);
+        let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows as usize);
+        let production_peak_bytes = 984_110_552_usize;
+        assert!(
+            production_peak_bytes < cap_bytes,
+            "the ROW 391 incident's own peak_bytes must fit under the scaled cap: \
+             peak_bytes={production_peak_bytes} cap_bytes={cap_bytes}"
+        );
+        assert!(
+            production_peak_bytes > ARENA_TRANSIENT_CAP,
+            "this reproduction is only meaningful if the unscaled constant alone \
+             would have rejected it, matching the original incident"
+        );
+    }
+
+    /// The invariant this fix exists to hold: a bound op whose LEADING axis
+    /// is something other than the token/row axis must never move the cap.
+    /// A router-logits `Reduce` over 128 experts, or a stacked per-expert
+    /// weight `Constant` (qwen35moe-style MoE layers carry both shapes;
+    /// this fixture is a constructed adversarial shape, not a captured
+    /// trace, chosen to isolate the hazard), carries `extents[0] ==
+    /// expert_count` with no relation whatsoever to how many tokens this
+    /// call is processing. The OLD `resolved`-scanning `plan_query_rows`
+    /// would have read this op's `128` as the row count and inflated the
+    /// cap to `ARENA_TRANSIENT_CAP * 128` on a plain DECODE step
+    /// (`new_count == 1`) -- silently widening MG-3's own guard rail far
+    /// past what a single-token step should ever need, and admitting a
+    /// peak that step's real cap should have rejected. Reading `symbols[0]`
+    /// instead never looks at `resolved` at all, so this op's shape cannot
+    /// move the cap in either direction.
+    #[test]
+    fn expert_count_leading_op_never_inflates_the_decode_cap() {
+        const EXPERT_COUNT: u64 = 128;
+        let stacked_expert_weight = BoundOp {
             node: NodeId(0),
             dtype: DType::Float32,
-            extents: vec![4096],
+            extents: vec![EXPERT_COUNT, 4096, 1536],
             kind: BoundOpKind::Elementwise {
                 body: proxima_tensor::ComposedBody::leaf(proxima_tensor::ScalarOp::Identity),
                 operands: vec![(
@@ -3778,51 +3880,33 @@ pub(super) mod plan_query_rows_tests {
                 )],
             },
         };
-        assert_eq!(plan_query_rows(&[elementwise]), 1);
-    }
+        // decode: exactly one new token, wholly unrelated to EXPERT_COUNT.
+        let query_rows = plan_bind_row_count(&[1, 0]);
+        assert_eq!(
+            query_rows, 1,
+            "the decode step's own row count must stay 1 regardless of any op's shape"
+        );
 
-    /// `query_rows` in {1 (decode), 31 (a short prefix), 1100 (ROW's own
-    /// interactive-chat reproduction)} -- [`plan_query_rows`] reads the ONE
-    /// `CachedAttention` op's own field back unchanged, and the derived cap
-    /// scales linearly with it (decode's `query_rows == 1` reproduces the
-    /// pre-fix constant exactly).
-    #[test]
-    fn cap_scales_linearly_with_the_plans_own_query_rows() {
-        for query_rows in [1_u64, 31, 1100] {
-            let resolved = [cached_attention_bound(query_rows)];
-            let observed = plan_query_rows(&resolved);
-            assert_eq!(
-                observed, query_rows,
-                "plan_query_rows must read the plan's own CachedAttention row count back exactly"
-            );
-
-            let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(observed.max(1) as usize);
-            let expected = ARENA_TRANSIENT_CAP * query_rows as usize;
-            assert_eq!(
-                cap_bytes, expected,
-                "cap_bytes must be exactly ARENA_TRANSIENT_CAP * query_rows at query_rows={query_rows}"
-            );
-        }
-    }
-
-    /// ROW: the production shape itself -- at `query_rows=1100` the naive
-    /// 984 MB peak from the incident report is now well inside the
-    /// per-row-scaled cap, where the old fixed `ARENA_TRANSIENT_CAP`
-    /// (172_812_125 bytes) rejected it outright.
-    #[test]
-    fn thousand_row_prefill_shape_fits_the_scaled_cap() {
-        let query_rows = 1100_u64;
         let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows as usize);
-        let production_peak_bytes = 984_110_552_usize;
+        let heuristic_cap_bytes =
+            ARENA_TRANSIENT_CAP.saturating_mul(stacked_expert_weight.extents[0] as usize);
         assert!(
-            production_peak_bytes < cap_bytes,
-            "the ROW 391 incident's own peak_bytes must fit under the scaled cap: \
-             peak_bytes={production_peak_bytes} cap_bytes={cap_bytes}"
+            cap_bytes < heuristic_cap_bytes,
+            "the bind-time cap must stay far below what an extents[0]-scanning heuristic would \
+             have inflated it to off this expert-count-leading op: cap_bytes={cap_bytes} \
+             heuristic_cap_bytes={heuristic_cap_bytes}"
+        );
+
+        // a peak the OLD heuristic's inflated cap would have wrongly admitted,
+        // but the true decode-shaped cap must still reject.
+        let peak_between_the_two_caps = cap_bytes + 1;
+        assert!(
+            peak_between_the_two_caps <= heuristic_cap_bytes,
+            "this peak must sit inside the window the OLD heuristic would have wrongly admitted"
         );
         assert!(
-            production_peak_bytes > ARENA_TRANSIENT_CAP,
-            "this reproduction is only meaningful if the unscaled constant alone \
-             would have rejected it, matching the original incident"
+            peak_between_the_two_caps > cap_bytes,
+            "and outside the window the bind-time row count correctly rejects"
         );
     }
 }

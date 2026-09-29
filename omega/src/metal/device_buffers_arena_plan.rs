@@ -179,7 +179,7 @@ pub enum MetalError {
     /// now a typed error a caller can act on rather than a stderr line
     /// beside a silently returned `Ok`. `cap_bytes` is
     /// `ARENA_TRANSIENT_CAP * max(query_rows, 1)` (see
-    /// `plan_query_rows`'s own doc for why the cap scales this way, not a
+    /// `plan_bind_row_count`'s own doc for why the cap scales this way, not a
     /// fixed decode-shaped constant): a prefill's transient outputs grow
     /// linearly with its own row count, so a per-call budget that ignores
     /// row count rejects a prefill that fits the device just as readily as
@@ -667,6 +667,16 @@ pub struct Plan {
     /// takes. The owner's own integration note: this measurement covers
     /// only the single-new-token decode plan, never prefill.
     pub(super) command_buffer_chunks_decode_shaped: bool,
+    /// This plan's own row count, as the caller's bind-time `symbols[0]`
+    /// (`new_count` in `residency_caches.rs`'s own vocabulary) reported it --
+    /// never inferred from any bound op's `extents`. [`build_buffer_arena`]
+    /// scales [`ARENA_TRANSIENT_CAP`] by this value instead of scanning
+    /// `prepared.resolved` for the largest leading axis, because no axis
+    /// position is reliably the token axis: a vocab- or expert-count-leading
+    /// op would inflate the cap under that scan and silently admit a peak
+    /// MG-3 should have rejected. `1` for a symbols-less `plan()` caller (a
+    /// bare `Op` unit test), matching decode's own row count.
+    pub(super) bind_row_count: u64,
     /// ROW 329 diagnostic: when `Some(position)`,
     /// [`execute_plan_with_placements_dispatch_timed`]'s stage-boundary
     /// fallback (the only branch this device's own `AtStageBoundary`-only
