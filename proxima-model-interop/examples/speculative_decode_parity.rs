@@ -165,6 +165,7 @@ fn run_pair(
             on_serving_config,
             &mut on_token,
             &mut on_stats,
+            None,
         )
         .expect("ON decode");
     let on_elapsed_ms = on_started.elapsed().as_secs_f64() * 1000.0;

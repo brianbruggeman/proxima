@@ -2721,6 +2721,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     false,
                     None,
+                    None,
                 )
                 .expect("direct greedy generate over the concatenated prompt");
 
@@ -2746,6 +2747,7 @@ pub(super) mod memory_fit_gate_tests {
                     &mut |_event| ControlFlow::Continue(()),
                     Some(seed),
                     true,
+                    None,
                     None,
                 )
                 .expect("resume decoding from the cached prefix");
@@ -2960,6 +2962,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     true,
                     None,
+                    None,
                 )
                 .expect("prefill a real multi-hundred-token prompt");
 
@@ -3098,6 +3101,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     true,
                     None,
+                    None,
                 )
                 .expect("prefill an ~850-token prompt with step 0's op-profile branch armed");
             // SAFETY: same justification as the `set_var` above.
@@ -3169,6 +3173,7 @@ pub(super) mod memory_fit_gate_tests {
                         None,
                         true,
                         None,
+                        None,
                     )
                     .expect("prefill an ~850-token prompt for one timed TTFT run");
                 let elapsed = start.elapsed();
@@ -3205,6 +3210,7 @@ pub(super) mod memory_fit_gate_tests {
                     &mut |_event| ControlFlow::Continue(()),
                     None,
                     true,
+                    None,
                     None,
                 )
                 .expect("greedy-decode 8 tokens for cross-feature-set identity comparison");
@@ -3346,6 +3352,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     false,
                     None,
+                    None,
                 )
                 .expect("sequential prefill greedy generate");
 
@@ -3367,6 +3374,7 @@ pub(super) mod memory_fit_gate_tests {
                             &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
+                            None,
                             None,
                         )
                         .expect("one-evaluation prefill greedy generate");
@@ -3537,6 +3545,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     false,
                     None,
+                    None,
                 )
                 .expect("sequential prefill diagnostic run");
 
@@ -3563,6 +3572,7 @@ pub(super) mod memory_fit_gate_tests {
                             &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
+                            None,
                             None,
                         )
                         .expect("one-evaluation prefill diagnostic run");
@@ -3688,6 +3698,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     false,
                     None,
+                    None,
                 )
                 .expect("sequential prefill layer-zero bisection run");
 
@@ -3714,6 +3725,7 @@ pub(super) mod memory_fit_gate_tests {
                             &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
+                            None,
                             None,
                         )
                         .expect("one-evaluation prefill layer-zero bisection run");
@@ -3885,6 +3897,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     false,
                     None,
+                    None,
                 )
                 .expect("sequential prefill layer-zero tap sweep run");
 
@@ -3911,6 +3924,7 @@ pub(super) mod memory_fit_gate_tests {
                             &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
+                            None,
                             None,
                         )
                         .expect("one-evaluation prefill layer-zero tap sweep run");
@@ -4168,6 +4182,7 @@ pub(super) mod memory_fit_gate_tests {
                     &mut |_event| ControlFlow::Continue(()),
                     None,
                     false,
+                    None,
                     None,
                 )
                 .expect("greedy gemma4-E2B decode for the dispatch-type byte gate");
