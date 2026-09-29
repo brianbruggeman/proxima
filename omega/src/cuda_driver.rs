@@ -60,13 +60,15 @@ impl From<DriverError> for CudaDriverError {
     }
 }
 
+type ResidentBuffers = BTreeMap<NodeId, ((usize, usize), CudaGraphBuffer)>;
+
 /// One CUDA context and stream owned by a caller's inference runtime.
 #[derive(Debug, Clone)]
 pub struct CudaDriver {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     modules: Arc<std::sync::Mutex<BTreeMap<String, CachedCudaModule>>>,
-    resident_buffers: Arc<std::sync::Mutex<BTreeMap<NodeId, ((usize, usize), CudaGraphBuffer)>>>,
+    resident_buffers: Arc<std::sync::Mutex<ResidentBuffers>>,
     kernel_compilations: Arc<AtomicU64>,
 }
 
@@ -250,15 +252,10 @@ impl CudaDriver {
             .zip(blocks.iter())
             .filter_map(|(node, block)| packed_codec(block).map(|codec| (*node, codec)))
             .collect();
-        let shapes =
-            infer(program, symbols).map_err(|error| CudaDriverError::UnsupportedGraph {
-                node: NodeId(0),
-                reason: if error.to_string().is_empty() {
-                    "shape inference failed"
-                } else {
-                    "shape inference failed"
-                },
-            })?;
+        let shapes = infer(program, symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
+            node: NodeId(0),
+            reason: "shape inference failed",
+        })?;
         let resolved = prune_dead(
             bind_with_fusion(program, &shapes, outputs, false, numeric_policy).map_err(|_| {
                 CudaDriverError::UnsupportedGraph {
@@ -321,13 +318,11 @@ impl CudaDriver {
         node: NodeId,
         values: &[f32],
     ) -> Result<(), CudaDriverError> {
-        if let Some(buffer) = arena.buffers.get_mut(&node) {
-            if let CudaGraphBuffer::F32(buffer) = buffer {
-                if buffer.len() == values.len() {
-                    self.stream.memcpy_htod(values, buffer)?;
-                    return Ok(());
-                }
-            }
+        if let Some(CudaGraphBuffer::F32(buffer)) = arena.buffers.get_mut(&node)
+            && buffer.len() == values.len()
+        {
+            self.stream.memcpy_htod(values, buffer)?;
+            return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
         arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
@@ -341,11 +336,11 @@ impl CudaDriver {
         node: NodeId,
         values: &[u8],
     ) -> Result<(), CudaDriverError> {
-        if let Some(CudaGraphBuffer::Bytes(buffer)) = arena.buffers.get_mut(&node) {
-            if buffer.len() == values.len() {
-                self.stream.memcpy_htod(values, buffer)?;
-                return Ok(());
-            }
+        if let Some(CudaGraphBuffer::Bytes(buffer)) = arena.buffers.get_mut(&node)
+            && buffer.len() == values.len()
+        {
+            self.stream.memcpy_htod(values, buffer)?;
+            return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
         arena.buffers.insert(node, CudaGraphBuffer::Bytes(buffer));
@@ -363,11 +358,11 @@ impl CudaDriver {
         node: NodeId,
         values: &[u8],
     ) -> Result<(), CudaDriverError> {
-        if let Some(buffer) = arena.uniforms.get_mut(&node) {
-            if buffer.len() == values.len() {
-                self.stream.memcpy_htod(values, buffer)?;
-                return Ok(());
-            }
+        if let Some(buffer) = arena.uniforms.get_mut(&node)
+            && buffer.len() == values.len()
+        {
+            self.stream.memcpy_htod(values, buffer)?;
+            return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
         arena.uniforms.insert(node, buffer);
@@ -955,9 +950,11 @@ impl CudaPlan {
                     kernel.grid.threads,
                     output_len,
                     uniforms.len(),
-                    (trace_node == Some(bound.node))
-                        .then(|| format!("{bound:?}"))
-                        .unwrap_or_default(),
+                    if trace_node == Some(bound.node) {
+                        format!("{bound:?}")
+                    } else {
+                        String::new()
+                    },
                 );
             }
             // A zero-extent intermediate is a valid tensor, not a valid CUDA
@@ -966,7 +963,7 @@ impl CudaPlan {
             if output_len == 0 {
                 let needs_zero_buffer = !matches!(
                     self.arena.buffers.get(&bound.node),
-                    Some(CudaGraphBuffer::F32(buffer)) if buffer.len() == 0
+                    Some(CudaGraphBuffer::F32(buffer)) if buffer.is_empty()
                 );
                 if needs_zero_buffer {
                     self.arena.allocations += 1;
@@ -987,15 +984,15 @@ impl CudaPlan {
                 {
                     self.driver.launch_f32_persistent_sized(
                         &mut self.arena,
-                        &kernel,
-                        &uniforms,
+                        kernel,
+                        uniforms,
                         output_len,
                     )
                 } else {
                     self.driver.launch_f32_persistent_sized_async(
                         &mut self.arena,
-                        &kernel,
-                        &uniforms,
+                        kernel,
+                        uniforms,
                         output_len,
                     )
                 };
@@ -1104,12 +1101,15 @@ impl CudaPlan {
 }
 
 // `Q5_1`/`Q5_0` are excluded here the same way `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` are --
-// no CUDA unpack kernel exists for either yet, so both stay routed through
-// `None` even though `codec_from_quantized_block` itself recognizes
-// them.
+// no CUDA unpack kernel exists for any of them yet, so all stay routed through
+// `None`. Every unsupported codec is named so a new `Codec` variant forces a
+// decision here instead of slipping through a wildcard.
 fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
-    match crate::msl::codec_from_quantized_block(block)? {
-        codec @ (Codec::Q2K
+    let QuantizedBlock::Packed { codec, .. } = block else {
+        return None;
+    };
+    match codec {
+        Codec::Q2K
         | Codec::Q3K
         | Codec::Q4K
         | Codec::Q5K
@@ -1117,28 +1117,34 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         | Codec::Q8_0
         | Codec::Q4_0
         | Codec::Float16
-        | Codec::BFloat16) => Some(codec),
-        Codec::Q5_1 | Codec::Q5_0 => None,
+        | Codec::BFloat16 => Some(*codec),
+        Codec::Q5_1
+        | Codec::Q5_0
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2Xs
+        | Codec::Iq2S
+        | Codec::Iq3Xxs
+        | Codec::Iq3S
+        | Codec::Iq4Nl
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => None,
     }
 }
 
 fn packed_bytes<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
     match block {
-        QuantizedBlock::Packed { codec: Codec::Q2K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q3K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }
-        | QuantizedBlock::Packed { codec: Codec::Float16, bytes }
-        | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => bytes,
-        QuantizedBlock::Float32(_)
-        | QuantizedBlock::Int32(_)
-        | QuantizedBlock::Packed { codec: Codec::Q5_1, bytes: _ }
-        | QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes: _ }
-        | QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes: _ }
-        | QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes: _ } => &[],
+        QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => &[],
+        QuantizedBlock::Packed { bytes, .. } => packed_codec(block).map_or(&[], |_| bytes),
     }
 }
 
@@ -1152,8 +1158,8 @@ fn block_address(block: &QuantizedBlock<'_>) -> usize {
 
 fn block_length(block: &QuantizedBlock<'_>) -> usize {
     match block {
-        QuantizedBlock::Float32(values) => values.len() * core::mem::size_of::<f32>(),
-        QuantizedBlock::Int32(values) => values.len() * core::mem::size_of::<i32>(),
+        QuantizedBlock::Float32(values) => std::mem::size_of_val(*values),
+        QuantizedBlock::Int32(values) => std::mem::size_of_val(*values),
         _ => packed_bytes(block).len(),
     }
 }
@@ -1238,8 +1244,74 @@ fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CudaDriverError, validate_cuda_dtype};
-    use proxima_tensor::{BoundOp, BoundOpKind, DType, NodeId};
+    use super::{CudaDriverError, packed_bytes, packed_codec, validate_cuda_dtype};
+    use crate::msl::Codec;
+    use proxima_tensor::{BoundOp, BoundOpKind, DType, NodeId, QuantizedBlock};
+
+    const CUDA_UNPACKABLE: [Codec; 20] = [
+        Codec::Q5_1,
+        Codec::Q5_0,
+        Codec::Q4_1,
+        Codec::Q8_1,
+        Codec::Q8K,
+        Codec::Iq1S,
+        Codec::Iq1M,
+        Codec::Iq2Xxs,
+        Codec::Iq2Xs,
+        Codec::Iq2S,
+        Codec::Iq3Xxs,
+        Codec::Iq3S,
+        Codec::Iq4Nl,
+        Codec::Iq4Xs,
+        Codec::Tq10,
+        Codec::Tq20,
+        Codec::Mxfp4,
+        Codec::Nvfp4,
+        Codec::Q1_0,
+        Codec::Q2_0,
+    ];
+
+    const CODECS_WITH_CUDA_KERNEL: [Codec; 9] = [
+        Codec::Q2K,
+        Codec::Q3K,
+        Codec::Q4K,
+        Codec::Q5K,
+        Codec::Q6K,
+        Codec::Q8_0,
+        Codec::Q4_0,
+        Codec::Float16,
+        Codec::BFloat16,
+    ];
+
+    #[test]
+    fn codecs_with_a_cuda_unpack_kernel_keep_their_bytes() {
+        let weights = [0x5au8; 64];
+
+        for codec in CODECS_WITH_CUDA_KERNEL {
+            let block = QuantizedBlock::Packed {
+                codec,
+                bytes: &weights,
+            };
+
+            assert_eq!(packed_codec(&block), Some(codec), "{codec:?}");
+            assert_eq!(packed_bytes(&block), &weights, "{codec:?}");
+        }
+    }
+
+    #[test]
+    fn codecs_without_a_cuda_unpack_kernel_bind_nothing() {
+        let weights = [0x5au8; 64];
+
+        for codec in CUDA_UNPACKABLE {
+            let block = QuantizedBlock::Packed {
+                codec,
+                bytes: &weights,
+            };
+
+            assert_eq!(packed_codec(&block), None, "{codec:?}");
+            assert!(packed_bytes(&block).is_empty(), "{codec:?}");
+        }
+    }
 
     #[test]
     fn non_f32_bound_op_reports_node_and_dtype() {
@@ -1250,13 +1322,15 @@ mod tests {
             kind: BoundOpKind::Constant { value: 0.0 },
         };
 
-        let error = validate_cuda_dtype(&bound).expect_err("integer output must be rejected");
-        assert!(matches!(
-            error,
-            CudaDriverError::UnsupportedDtype {
-                node: NodeId(157),
-                dtype: DType::Int32,
-            }
-        ));
+        assert!(
+            matches!(
+                validate_cuda_dtype(&bound),
+                Err(CudaDriverError::UnsupportedDtype {
+                    node: NodeId(157),
+                    dtype: DType::Int32,
+                })
+            ),
+            "integer output must be rejected"
+        );
     }
 }
