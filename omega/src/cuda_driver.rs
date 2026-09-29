@@ -34,6 +34,8 @@ pub enum CudaDriverError {
     Nvrtc(String),
     #[error("CUDA smoke input is too large for the launch ABI: {0} elements")]
     InputTooLarge(usize),
+    #[error("CUDA launch of {threads} threads needs more blocks than the launch index holds")]
+    GridTooLarge { threads: u64 },
     #[error("CUDA kernel binding contract is not inputs, output, uniforms")]
     BindingContract,
     #[error("CUDA graph buffer for node {0:?} is missing")]
@@ -1237,14 +1239,15 @@ $DONE:
 /// silent truncation of an `as u32` cast: `emit_cuda` already rejects a grid
 /// past `gridDim.x`, so this only fires for a `CudaKernel` built by hand.
 fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
-    u32::try_from(grid.blocks()).map_err(|_| {
-        CudaDriverError::InputTooLarge(usize::try_from(grid.threads).unwrap_or(usize::MAX))
+    u32::try_from(grid.blocks()).map_err(|_| CudaDriverError::GridTooLarge {
+        threads: grid.threads,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CudaDriverError, packed_bytes, packed_codec, validate_cuda_dtype};
+    use super::{CudaDriverError, launch_blocks, packed_bytes, packed_codec, validate_cuda_dtype};
+    use crate::cuda::CudaGridSpec;
     use crate::msl::Codec;
     use proxima_tensor::{BoundOp, BoundOpKind, DType, NodeId, QuantizedBlock};
 
@@ -1311,6 +1314,30 @@ mod tests {
             assert_eq!(packed_codec(&block), None, "{codec:?}");
             assert!(packed_bytes(&block).is_empty(), "{codec:?}");
         }
+    }
+
+    #[test]
+    fn launch_blocks_covers_a_grid_at_the_default_block_width() {
+        let grid = CudaGridSpec {
+            threads: 1_000_000,
+            block_width: None,
+        };
+
+        assert!(matches!(launch_blocks(&grid), Ok(3907)));
+    }
+
+    #[test]
+    fn launch_blocks_rejects_a_grid_past_the_launch_index_instead_of_truncating() {
+        let threads = (u64::from(u32::MAX) + 1) * 256;
+        let grid = CudaGridSpec {
+            threads,
+            block_width: None,
+        };
+
+        assert!(matches!(
+            launch_blocks(&grid),
+            Err(CudaDriverError::GridTooLarge { threads: rejected }) if rejected == threads
+        ));
     }
 
     #[test]
