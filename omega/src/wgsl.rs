@@ -266,7 +266,10 @@ pub fn emit_wgsl_with_policy(
         ),
         None => (grid_threads(resolved)?, WORKGROUP_SIZE),
     };
-    if threads > MAX_GRID_THREADS {
+    // the last workgroup is padded to a whole number of threads and every one of
+    // them computes `gid` as an i32 before the `gid >= total` guard, so it is the
+    // padded count that must fit, not the requested one
+    if threads.next_multiple_of(u64::from(workgroup_size)) > MAX_GRID_THREADS {
         return Err(EmitError::GridExceedsThreadIndex {
             node: resolved.node,
             threads,
@@ -2417,6 +2420,24 @@ mod tests {
         assert!(
             matches!(rejected, Err(EmitError::GridExceedsThreadIndex { threads: u64::MAX, .. })),
             "{rejected:?}"
+        );
+    }
+
+    #[test]
+    fn a_grid_whose_padded_last_workgroup_would_wrap_the_i32_gid_is_rejected() {
+        let padded_past = elementwise_tanh_op(i32::MAX as u32);
+        let padded_exactly_to_the_limit = elementwise_tanh_op(i32::MAX as u32 + 1 - WORKGROUP_SIZE);
+
+        let rejected = emit_wgsl(&padded_past, WgslCaps::default(), &PackedOperands::new());
+        let accepted = emit_wgsl(&padded_exactly_to_the_limit, WgslCaps::default(), &PackedOperands::new());
+
+        assert!(
+            matches!(rejected, Err(EmitError::GridExceedsThreadIndex { threads, .. }) if threads == i32::MAX as u64),
+            "i32::MAX threads pad to 2^31 and the last workgroup's gid goes negative: {rejected:?}"
+        );
+        assert_eq!(
+            accepted.expect("a grid that pads to exactly i32::MAX + 1 - 1 fits").threads,
+            u64::from(i32::MAX as u32 + 1 - WORKGROUP_SIZE)
         );
     }
 }
