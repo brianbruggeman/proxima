@@ -390,8 +390,10 @@ pub struct SpeculativeConfig<'model> {
 }
 
 impl SpeculativeConfig<'static> {
-    /// llama's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }`
-    /// (`common/common.h:373`) -- the empty set, no speculation. Per-type
+    /// Speculation OFF: llama's own default `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+    /// (`common/common.h:373`) -- the empty set. This crate's [`Default`] is
+    /// [`Self::ngram_simple`], not this; `none` is how a caller turns
+    /// speculation off. Per-type
     /// param defaults still hold llama's own values so enabling any single
     /// member of [`Self::speculative_types`] alone reproduces llama's
     /// defaults for that type.
@@ -426,11 +428,25 @@ impl SpeculativeConfig<'static> {
             ngram_cache_lookup_dynamic: None,
         }
     }
+
+    /// Speculation on with the single `ngram-simple` drafter at llama's own
+    /// per-type defaults (`size_n 12`, `size_m 48`, `min_hits 1`) -- this
+    /// crate's shipped default ([`Default`]). Output is unchanged by it:
+    /// every drafted token is checked against `select_decoded_token`'s own
+    /// choice, so it only ever changes how many forwards a decode takes.
+    /// [`Self::none`] is the off switch.
+    #[must_use]
+    pub const fn ngram_simple() -> Self {
+        Self {
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
+            ..Self::none()
+        }
+    }
 }
 
 impl Default for SpeculativeConfig<'static> {
     fn default() -> Self {
-        Self::none()
+        Self::ngram_simple()
     }
 }
 
@@ -821,7 +837,8 @@ pub struct ServingConfig<'model> {
     /// `SpeculativeConfig`'s own doc for the shape and the one narrowing
     /// from llama's own `Vec<type>`. Consulted by `generate/decode.rs`'s
     /// speculative branch -- the sole gate for whether speculation runs,
-    /// replacing this crate's former process-env toggle.
+    /// replacing this crate's former process-env toggle. On by default
+    /// (`ngram-simple`); `SpeculativeConfig::none()` is the off switch.
     pub speculative: SpeculativeConfig<'model>,
 }
 
@@ -937,7 +954,7 @@ impl Default for ServingConfig<'static> {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
-            speculative: SpeculativeConfig::none(),
+            speculative: SpeculativeConfig::default(),
         }
     }
 }
@@ -1301,7 +1318,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
-            speculative: SpeculativeConfig::none(),
+            speculative: SpeculativeConfig::default(),
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -1472,7 +1489,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
-            speculative: SpeculativeConfig::none(),
+            speculative: SpeculativeConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1571,7 +1588,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
-            speculative: SpeculativeConfig::none(),
+            speculative: SpeculativeConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1660,7 +1677,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
-            speculative: SpeculativeConfig::none(),
+            speculative: SpeculativeConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1739,7 +1756,7 @@ mod tests {
             expert_residency_schedule: ExpertResidencySchedule {
                 per_layer_budget_bytes: 0,
             },
-            speculative: SpeculativeConfig::none(),
+            speculative: SpeculativeConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);
@@ -1761,6 +1778,58 @@ mod tests {
         let error =
             apply_serving_config(&config, 6).expect_err("kv_bucket_tokens=0 must be rejected");
         assert!(error.to_string().contains("kv_bucket_tokens"));
+    }
+
+    fn supported_default() -> ServingConfig<'static> {
+        ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: 0,
+            gpu_memory_fit: false,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        }
+    }
+
+    #[test]
+    fn default_serving_config_enables_ngram_simple_with_llama_params() {
+        let speculative = ServingConfig::default().speculative;
+
+        assert_eq!(
+            speculative.speculative_types,
+            SpeculativeTypeSet::single(SpeculativeType::NgramSimple)
+        );
+        assert_eq!(speculative.ngram_simple.size_n, 12);
+        assert_eq!(speculative.ngram_simple.size_m, 48);
+        assert_eq!(speculative.ngram_simple.min_hits, 1);
+        assert_eq!(speculative, SpeculativeConfig::default());
+        apply_serving_config(&supported_default(), 6)
+            .expect("the shipped default must pass serving-config validation");
+    }
+
+    #[test]
+    fn none_turns_speculation_off_and_keeps_every_other_field() {
+        let off = supported_default().with_speculative(SpeculativeConfig::none());
+
+        assert!(off.speculative.speculative_types.is_empty());
+        assert_eq!(off.speculative.ngram_simple, SpeculativeConfig::default().ngram_simple);
+        apply_serving_config(&off, 6).expect("speculation off must pass serving-config validation");
+    }
+
+    #[test]
+    fn draft_model_type_is_still_rejected_when_selected_over_the_default() {
+        let draft_model = supported_default().with_speculative(SpeculativeConfig {
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::DraftSimple),
+            ..SpeculativeConfig::none()
+        });
+
+        let error = apply_serving_config(&draft_model, 6)
+            .expect_err("an unwired draft-model type must be rejected");
+
+        assert!(error.to_string().contains("draft-simple"));
     }
 
     /// I11: the three scheduling levels are independent structs consulted

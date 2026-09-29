@@ -1,5 +1,5 @@
-//! P14 hard parity probe for gemma4-E2B's default-off speculative decode
-//! loop: for each of TWO `ServingConfig`s -- plain greedy, and a genuinely
+//! P14 hard parity probe for gemma4-E2B's speculative decode
+//! loop (on by default; this probe pins OFF explicitly): for each of TWO `ServingConfig`s -- plain greedy, and a genuinely
 //! sampling config (temperature, top-k/top-p/min-p, repeat penalty, a fixed
 //! seed) -- runs the SAME prompt with `ServingConfig::speculative` off then
 //! on (`SpeculativeType::None` vs `SpeculativeType::NgramSimple`), and
@@ -482,6 +482,7 @@ fn main() {
         batch_size: 0,
         ubatch_size: 0,
         reasoning_budget: 0,
+        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     };
 

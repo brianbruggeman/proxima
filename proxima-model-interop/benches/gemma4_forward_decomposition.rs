@@ -113,7 +113,7 @@ use omega::metal::metal_stage_totals;
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::gemma4::program::gemma4_sliding_rope_table;
-use proxima_model_interop::{LoadedModel, ServingConfig};
+use proxima_model_interop::{LoadedModel, ServingConfig, SpeculativeConfig};
 use proxima_tensor::instrument::ticks_to_nanos;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
@@ -200,6 +200,7 @@ fn serving_config() -> ServingConfig<'static> {
         batch_size: 0,
         ubatch_size: 0,
         reasoning_budget: 0,
+        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     }
 }

@@ -261,6 +261,22 @@ mod tests {
         assert!(set.is_empty());
     }
 
+    /// The shipped default builds exactly one drafter (`ngram-simple`), so
+    /// the decode loop constructs a drafter by default; `none()` (test
+    /// above) constructs none, the off switch.
+    #[test]
+    fn default_config_yields_a_non_empty_drafter_set_with_ngram_simple() {
+        let mut set = DrafterSet::build(&SpeculativeConfig::default(), 4096);
+        assert!(!set.is_empty());
+
+        let history: Vec<u32> = (0..70u32).chain(0..12u32).collect();
+        set.begin(&history);
+        let mut out = Vec::new();
+        set.draft(&history, 12, &mut out);
+        assert!(!out.is_empty(), "size_n 12 pattern recurs in this history");
+        assert_eq!(set.active_type(), Some(SpeculativeType::NgramSimple));
+    }
+
     /// [`DrafterSet::accept`] is a no-op when nothing drafted this step
     /// (`active` is `None`) -- must not panic.
     #[test]
