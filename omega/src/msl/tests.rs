@@ -6047,6 +6047,21 @@ mod flat_grid_form {
                 case.label,
                 kernel.source
             );
+            for scalar_attribute in [
+                "uint tg [[",
+                "uint tgid [[",
+                "uint tptg [[",
+                "uint local [[",
+                "uint3 dense_batch_gid [[",
+            ] {
+                assert!(
+                    !kernel.source.contains(scalar_attribute),
+                    "{}: Metal rejects a scalar grid attribute beside the vector ones, but the source \
+                     still declares `{scalar_attribute}`:\n{}",
+                    case.label,
+                    kernel.source
+                );
+            }
             assert!(
                 !kernel.source.contains(LINEAR_SIGNATURE),
                 "{}: source still indexes a 32-bit thread position:\n{}",
@@ -6216,6 +6231,7 @@ mod flat_grid_form {
     fn a_round_batched_reduce_past_the_thread_index_reads_its_round_from_the_flat_group_z() {
         let mut bound = round_batched_matmul_op(3);
         bound.extents[0] = 20_000_000;
+        bound.extents[1] = 1_000;
 
         let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
 
