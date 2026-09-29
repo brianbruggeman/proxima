@@ -8,6 +8,7 @@
 //!
 //! A missing `xcrun`/`metal` fails the test, never skips it.
 
+// test fixtures: expect() and unwrap() carry the failure message
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
@@ -181,6 +182,28 @@ fn tiled_q4k_gemm() -> (BoundOp, BTreeMap<NodeId, Codec>) {
     (bound, BTreeMap::from([(weight, Codec::Q4K)]))
 }
 
+fn packed_row_q4k_matvec(rows: u32) -> (BoundOp, BTreeMap<NodeId, Codec>) {
+    let mut program = Vec::new();
+    let weights = input(&mut program, DType::Float32, &[rows, 256]);
+    let activation = input(&mut program, DType::Float32, &[1, 256]);
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weights, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+            ],
+            name: None,
+        },
+    );
+    reduce(&mut program, ScalarOp::Add, product, 3, &[0, 1], Keep::Reduce);
+    let bound = bound_of(&program);
+    let weight = bound.operands()[0].0;
+    (bound, BTreeMap::from([(weight, Codec::Q4K)]))
+}
+
 fn dense_batched_scores() -> BoundOp {
     let mut program = Vec::new();
     let weight = input(&mut program, DType::Float32, &[2_000_000, 8, 128]);
@@ -261,7 +284,7 @@ fn cached_softmax_weights() -> BoundOp {
     }
 }
 
-fn cached_attention() -> BoundOp {
+fn cached_attention(query_groups: u64, new_key_rows: u64) -> BoundOp {
     BoundOp {
         node: NodeId(9),
         dtype: DType::Float32,
@@ -270,9 +293,9 @@ fn cached_attention() -> BoundOp {
             operands: layouts(9),
             query_rows: 1,
             cached_key_rows: 0,
-            new_key_rows: 8,
+            new_key_rows,
             kv_heads: 1,
-            query_groups: 1,
+            query_groups,
             head_dim: 4,
             rotary_dim: 4,
             scale: 0.5,
@@ -287,6 +310,8 @@ fn flat_kernels() -> Vec<(&'static str, Kernel)> {
     let default_policy = NumericPolicy::default();
     let (projection, projection_codecs) = per_layer_projection();
     let (tiled, tiled_codecs) = tiled_q4k_gemm();
+    let (packed_even, packed_even_codecs) = packed_row_q4k_matvec(4_000_000_000);
+    let (packed_odd, packed_odd_codecs) = packed_row_q4k_matvec(4_000_000_004);
     vec![
         ("iota", emit_flat("iota", &position_only(BoundOpKind::Iota), &none, default_policy)),
         (
@@ -313,14 +338,29 @@ fn flat_kernels() -> Vec<(&'static str, Kernel)> {
             "cached softmax weights",
             emit_flat("cached softmax weights", &cached_softmax_weights(), &none, default_policy),
         ),
-        ("cached attention", emit_flat("cached attention", &cached_attention(), &none, default_policy)),
+        (
+            "packed row-blocked, groups divide the pinned width",
+            emit_flat("packed row even", &packed_even, &packed_even_codecs, default_policy),
+        ),
+        (
+            "packed row-blocked, odd group count falls back to one simdgroup",
+            emit_flat("packed row odd", &packed_odd, &packed_odd_codecs, default_policy),
+        ),
+        (
+            "cached attention, per-query-head grid",
+            emit_flat("cached attention", &cached_attention(1, 8), &none, default_policy),
+        ),
+        (
+            "cached attention, four query groups sharing a threadgroup",
+            emit_flat("cached attention groups", &cached_attention(4, 1_000_000), &none, default_policy),
+        ),
     ]
 }
 
 #[test]
 fn every_flat_form_kernel_compiles_with_the_metal_toolchain() {
     let kernels = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, flat_kernels);
-    assert_eq!(kernels.len(), 11, "one fixture per kernel form that can take the flat path");
+    assert_eq!(kernels.len(), 14, "one fixture per kernel form that can take the flat path");
 
     let mut compiled = 0usize;
     for (label, kernel) in &kernels {
@@ -350,5 +390,5 @@ fn every_flat_form_kernel_compiles_with_the_metal_toolchain() {
         );
         compiled += 1;
     }
-    assert_eq!(compiled, 11, "compiled {compiled} flat-form kernels, expected exactly 11");
+    assert_eq!(compiled, 14, "compiled {compiled} flat-form kernels, expected exactly 14");
 }

@@ -9,15 +9,17 @@
 //! asks for: `rows * 8960 * 256` threads, which crosses `2^32` at 1873 rows
 //! (1872 rows is 4_294_082_560 threads and still fits).
 //!
-//! Three independent checks per row count: no output reads back as zero unless
-//! its own dot product is (a truncated grid leaves millions of them, an exact
-//! cancellation leaves a handful); the rows
-//! the 1872-row linear-form dispatch also computes are byte-identical to it
+//! Three internal-consistency checks per row count (none of them the oracle --
+//! that is llama.cpp on the same token ids, `speculative_bench --llama-parity`):
+//! no output reads back as zero unless its own f64 dot product is (a truncated
+//! grid leaves millions of them, an exact cancellation leaves a handful); the
+//! rows the 1872-row linear-form dispatch also computes are byte-identical to it
 //! (the wide form must not change a single bit of what the linear form
 //! produced); and the tail rows past the threshold agree with
 //! `proxima_tensor::evaluate` on the same rows.
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
+// test fixtures: expect() and unwrap() carry the failure message
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Seek, SeekFrom};
@@ -213,10 +215,22 @@ fn per_layer_projection_at_the_last_linear_row_count_is_fully_populated() {
     );
 }
 
-const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+const DEFAULT_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+
+/// `PROXIMA_GEMMA4_E2B_GGUF` names the host-local checkpoint; the test fails
+/// loudly, naming it, when it is absent rather than skipping.
+fn real_gemma4_e2b_gguf_path() -> String {
+    let path = std::env::var("PROXIMA_GEMMA4_E2B_GGUF")
+        .unwrap_or_else(|_| DEFAULT_GEMMA4_E2B_GGUF_PATH.to_string());
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "no host-local gemma4-E2B gguf at {path}: set PROXIMA_GEMMA4_E2B_GGUF to a valid checkpoint path"
+    );
+    path
+}
 
 fn real_per_layer_model_proj_weight_bytes() -> Vec<u8> {
-    let mut file = std::fs::File::open(REAL_GEMMA4_E2B_GGUF_PATH)
+    let mut file = std::fs::File::open(real_gemma4_e2b_gguf_path())
         .expect("open the real gemma4-E2B checkpoint (host-local blob)");
     let file_len = file.metadata().expect("checkpoint metadata").len();
     let mut prefix_len = 1usize << 22;
