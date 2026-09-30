@@ -588,7 +588,16 @@ pub struct ServingConfig<'model> {
     pub flash_attention: bool,
     /// `-b`: logical prompt-processing batch size in tokens.
     pub batch_size: u32,
-    /// `-ub`: physical micro-batch size in tokens.
+    /// `-ub`: physical micro-batch size in tokens. An architecture that is
+    /// not `single_position_step` (gemma4, dense llama-family) evaluates a
+    /// prompt longer than this in `ceil(prompt_tokens / ubatch_size)`
+    /// evaluations of `ubatch_size` rows each (the last takes the
+    /// remainder): `cached_len` and the sliding KV ring advance per chunk
+    /// and only the last chunk requests logits, so the unfused two-range
+    /// attention's `[rows, keys, heads]` score tensors are sized by
+    /// `ubatch_size`, not by the prompt. `0` is the control: the whole
+    /// prompt in one evaluation. Speculative verify steps are never
+    /// chunked.
     pub ubatch_size: u32,
     /// `-ngl`: number of layers to offload to a GPU. [`GPU_LAYERS_ALL`]
     /// for "all", `0` for CPU-only, `N` for an explicit layer count.
@@ -797,11 +806,12 @@ pub struct ServingConfig<'model> {
     /// `single_position_step` prefill's alt one-evaluation program
     /// (`generate/decode.rs`'s `one_evaluation_prefill_requested`), in place
     /// of that call site's own `PROXIMA_PREFILL_ONE_EVALUATION` env var
-    /// (`5a4ac2c5`). `true` (this field's default, `dec68d40`'s width fix
-    /// having landed the real-checkpoint oracle) evaluates the whole prompt
-    /// in one call; `PROXIMA_PREFILL_SEQUENTIAL=1` is the opt-out back to
-    /// the old `next_ids.len()`-way split loop, checked at the same call
-    /// site regardless of this field's own value.
+    /// (`5a4ac2c5`). `false` (this field's default: the default path
+    /// regressed on the France checkpoint, `proxima-tensor/docs/discipline.md`
+    /// ROW 590) keeps the `next_ids.len()`-way split loop; `true` evaluates
+    /// the whole prompt in one call. `PROXIMA_PREFILL_SEQUENTIAL=1` forces
+    /// the split loop, checked at the same call site regardless of this
+    /// field's own value.
     pub prefill_one_evaluation: bool,
     /// Not an upstream llama-server flag -- caps how many prompt positions
     /// [`Self::prefill_one_evaluation`]'s alt program evaluates in one call
