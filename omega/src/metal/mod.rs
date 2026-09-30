@@ -194,6 +194,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use half::f16;
+use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 #[cfg(feature = "instrument")]
@@ -407,6 +408,19 @@ fn check_command_buffer_status(
     Ok(())
 }
 
+/// `-[MTLCommandBufferEncoderInfo label]` is nil for an unlabeled encoder, and
+/// the generated objc2-metal getter panics on nil; this failure path must
+/// never abort the process, so the label is read with an `Option` return.
+fn encoder_info_label(info: &ProtocolObject<dyn MTLCommandBufferEncoderInfo>) -> Option<Retained<NSString>> {
+    // SAFETY: `label` takes no arguments and returns an `NSString` or nil,
+    // which the `Option<Retained<NSString>>` return type models.
+    unsafe { msg_send![info, label] }
+}
+
+fn label_or_unlabeled(label: Option<&str>) -> String {
+    label.unwrap_or("<unlabeled>").to_string()
+}
+
 /// Reads `MTLCommandBufferEncoderInfoErrorKey` out of a failing command
 /// buffer's `NSError.userInfo` -- populated only when the buffer was created
 /// with `MTLCommandBufferErrorOption::EncoderExecutionStatus`
@@ -431,7 +445,7 @@ fn encoder_failure_infos(error: &NSError) -> Vec<CommandBufferEncoderFailureInfo
         .to_vec()
         .into_iter()
         .map(|info| CommandBufferEncoderFailureInfo {
-            label: info.label().to_string(),
+            label: label_or_unlabeled(encoder_info_label(&info).map(|label| label.to_string()).as_deref()),
             error_state: info.errorState().0 as i64,
         })
         .collect()
@@ -465,4 +479,24 @@ fn check_all_command_buffers(
 /// dispatch would upload without duplicating the per-`BoundOpKind` match.
 pub fn pack_uniforms_for(bound: &BoundOp, numeric_policy: NumericPolicy) -> Result<Vec<u8>, EmitError> {
     prepare_uniforms_pack::pack_uniforms(bound, numeric_policy)
+}
+
+#[cfg(test)]
+mod command_buffer_failed_label_tests {
+    use super::label_or_unlabeled;
+
+    #[test]
+    fn nil_label_becomes_unlabeled_marker() {
+        assert_eq!(label_or_unlabeled(None), "<unlabeled>");
+    }
+
+    #[test]
+    fn present_label_is_kept_verbatim() {
+        assert_eq!(label_or_unlabeled(Some("decode_layer_17")), "decode_layer_17");
+    }
+
+    #[test]
+    fn empty_label_is_kept_not_replaced() {
+        assert_eq!(label_or_unlabeled(Some("")), "");
+    }
 }
