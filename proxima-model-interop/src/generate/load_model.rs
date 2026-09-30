@@ -1372,6 +1372,21 @@ pub(super) fn kv_layers_for_layout(
     }
 }
 
+/// Evaluations one prompt of `len` rows takes when a step is cut into
+/// micro-batches of `ubatch` rows (`ServingConfig::ubatch_size`, llama.cpp's
+/// `-ub`): `ceil(len / ubatch)`. `ubatch == 0` is the control -- one
+/// evaluation of every row -- and a prompt no longer than `ubatch` is one
+/// evaluation too. The decode loop's `batch_count` reads this for an
+/// architecture that is not `single_position_step`, whose unfused two-range
+/// attention would otherwise materialize `[len, keys, heads]` score tensors.
+pub(super) const fn ubatch_prefill_chunks(ubatch: u32, len: usize) -> usize {
+    if ubatch == 0 || len <= ubatch as usize {
+        1
+    } else {
+        len.div_ceil(ubatch as usize)
+    }
+}
+
 pub(super) const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) -> bool {
     !split_prefill || is_last_step_batch
 }

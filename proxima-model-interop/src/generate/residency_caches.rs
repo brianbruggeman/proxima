@@ -1758,6 +1758,7 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
+        trace!(rows = symbols[0], "backend evaluation");
         let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
         let exact_activations = self.exact_activations;
         // prefill599 retarget: a genuine miss is about to clear `self.plans`
@@ -2899,6 +2900,7 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
+        trace!(rows = symbols[0], "backend evaluation");
         if self.exact_activations {
             return Ok(evaluate_quantized_named_exact_with_scratch_and_experts(
                 program,

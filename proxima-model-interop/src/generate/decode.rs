@@ -3515,10 +3515,23 @@ impl<'file> LoadedModel<'file> {
                     && next_ids.len() > 1
                     && one_evaluation_prefill_requested
                     && !one_evaluation_prefill_programs.is_empty();
-                let split_prefill =
-                    self.single_position_step && next_ids.len() > 1 && !one_evaluation_prefill;
+                let ubatch_chunks = if self.single_position_step
+                    || speculative_step
+                    || self.layer_roots.is_empty()
+                {
+                    1
+                } else {
+                    ubatch_prefill_chunks(serving_config.ubatch_size, next_ids.len())
+                };
+                let chunked_prefill = ubatch_chunks > 1;
+                let split_prefill = (self.single_position_step
+                    && next_ids.len() > 1
+                    && !one_evaluation_prefill)
+                    || chunked_prefill;
                 let batch_count = if one_evaluation_prefill {
                     one_evaluation_chunks.len()
+                } else if chunked_prefill {
+                    ubatch_chunks
                 } else if split_prefill {
                     next_ids.len()
                 } else {
@@ -3533,6 +3546,11 @@ impl<'file> LoadedModel<'file> {
                     } else if one_evaluation_prefill {
                         let (offset, width) = one_evaluation_chunks[batch_index];
                         &next_ids[offset..offset + width]
+                    } else if chunked_prefill {
+                        let chunk_start = batch_index * serving_config.ubatch_size as usize;
+                        let chunk_end =
+                            (chunk_start + serving_config.ubatch_size as usize).min(next_ids.len());
+                        &next_ids[chunk_start..chunk_end]
                     } else if split_prefill {
                         core::slice::from_ref(&next_ids[batch_index])
                     } else {
