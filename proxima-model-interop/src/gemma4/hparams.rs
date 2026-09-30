@@ -149,3 +149,101 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
         ple_dim: metadata_u32_optional(parsed, &prefix("embedding_length_per_layer_input")),
     })
 }
+
+/// One `(kv_heads, head_dim, window)` entry per layer that OWNS a KV cache:
+/// layers `0..block_count - shared_kv_layers`. The trailing shared layers
+/// read a source layer's cache and are charged nothing. A sliding layer
+/// carries `Some(sliding_window)` and `key_length_swa`, a full layer `None`
+/// and `key_length`. Reads only the keys it needs, so it works on a
+/// header-only GGUF (no `token_embd.weight` lookup as in [`from_metadata`]).
+///
+/// # Errors
+///
+/// [`InteropError::MissingMetadataKey`] or
+/// [`InteropError::MetadataArrayLengthMismatch`] from the underlying reads.
+pub fn kv_layers_from_metadata(
+    parsed: &ParsedGguf,
+) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
+    let family = metadata_str(parsed, "general.architecture")?;
+    let prefix = |name: &str| format!("{family}.{name}");
+
+    let block_count = metadata_u32(parsed, &prefix("block_count"))?;
+    let kv_heads_by_layer =
+        metadata_u32_per_layer(parsed, &prefix("attention.head_count_kv"), block_count)?;
+    let sliding_window_pattern = metadata_bool_per_layer(
+        parsed,
+        &prefix("attention.sliding_window_pattern"),
+        block_count,
+    )?;
+    let own_layers = block_count.saturating_sub(metadata_u32_optional(
+        parsed,
+        &prefix("attention.shared_kv_layers"),
+    ));
+    let key_length = metadata_u32(parsed, &prefix("attention.key_length"))?;
+    let key_length_swa = metadata_u32(parsed, &prefix("attention.key_length_swa"))?;
+    let sliding_window = metadata_u32(parsed, &prefix("attention.sliding_window"))?;
+
+    Ok(sliding_window_pattern
+        .into_iter()
+        .zip(kv_heads_by_layer)
+        .take(own_layers as usize)
+        .map(|(is_sliding, kv_heads)| {
+            if is_sliding {
+                (kv_heads, key_length_swa, Some(sliding_window))
+            } else {
+                (kv_heads, key_length, None)
+            }
+        })
+        .collect())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use alloc::vec;
+
+    use crate::architecture::Architecture as _;
+    use crate::gemma4::GEMMA4;
+    use crate::memory_fit::{MemoryBudget, WeightClassBytes};
+    use crate::test_support::gemma4_e2b_header as e2b_header;
+
+    const CONTEXT: u32 = 131_072;
+
+    /// 12 sliding layers at 2048 B/position and 3 full layers at 4096, no
+    /// window cap: (12 x 2048 + 3 x 4096) x 131072. Today's formula charges
+    /// all 35 layers at the last layer's shape and lands far above it.
+    #[test]
+    fn memory_budget_gemma4_own_layers() {
+        let parsed = e2b_header();
+        let layers = GEMMA4
+            .kv_layers(&parsed)
+            .expect("the e2b header carries every key kv_layers reads");
+        let uncapped: alloc::vec::Vec<_> = layers
+            .iter()
+            .map(|&(kv_heads, head_dim, _)| (kv_heads, head_dim, None))
+            .collect();
+
+        let own = MemoryBudget::derive(WeightClassBytes::default(), &uncapped, CONTEXT, 0);
+        let every_layer = vec![(1u32, 512u32, None); 35];
+        let all_layers =
+            MemoryBudget::derive(WeightClassBytes::default(), &every_layer, CONTEXT, 0);
+
+        assert_eq!(layers.len(), 15, "35 blocks minus 20 shared-KV layers");
+        assert_eq!(own.kv_cache_bytes, 4_831_838_208);
+        assert!(all_layers.kv_cache_bytes > own.kv_cache_bytes);
+    }
+
+    /// The same 15 layers with each sliding layer capped at the 512-row
+    /// window: 12 x 2048 x 512 + 3 x 4096 x 131072.
+    #[test]
+    fn memory_budget_gemma4_window_cap() {
+        let parsed = e2b_header();
+        let layers = GEMMA4
+            .kv_layers(&parsed)
+            .expect("the e2b header carries every key kv_layers reads");
+
+        let capped = MemoryBudget::derive(WeightClassBytes::default(), &layers, CONTEXT, 0);
+
+        assert_eq!(capped.kv_cache_bytes, 1_623_195_648);
+    }
+}

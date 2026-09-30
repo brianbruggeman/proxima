@@ -620,6 +620,41 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
     })
 }
 
+/// One `(kv_heads, head_dim, None)` entry per block, read straight off the
+/// checkpoint's own `head_count_kv`/`key_length` metadata -- the layout
+/// [`crate::memory_fit::MemoryBudget::derive`] prices for every
+/// architecture whose layers each own a full-length KV cache. A layer whose
+/// `head_count_kv` is `0` keeps no cache and so costs `0` rows. Unlike
+/// [`architecture_from_metadata`] this reads no tensor, so it works on a
+/// header-only GGUF.
+///
+/// # Errors
+///
+/// [`InteropError::MissingMetadataKey`] or
+/// [`InteropError::MetadataArrayLengthMismatch`] from the underlying reads.
+#[cfg(feature = "std")]
+pub(crate) fn kv_layers_from_metadata(
+    parsed: &ParsedGguf,
+) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
+    let architecture = metadata_str(parsed, "general.architecture")?;
+    let embedding = metadata_u32(parsed, &alloc::format!("{architecture}.embedding_length"))?;
+    let query_heads = metadata_u32(
+        parsed,
+        &alloc::format!("{architecture}.attention.head_count"),
+    )?;
+    let block_count = metadata_u32(parsed, &alloc::format!("{architecture}.block_count"))?;
+    let kv_heads_by_layer = metadata_u32_per_layer(
+        parsed,
+        &alloc::format!("{architecture}.attention.head_count_kv"),
+        block_count,
+    )?;
+    let head_dim = head_dim_from_metadata(parsed, architecture, embedding, query_heads);
+    Ok(kv_heads_by_layer
+        .into_iter()
+        .map(|kv_heads| (kv_heads, head_dim, None))
+        .collect())
+}
+
 /// llama.cpp's own RMSNorm epsilon default for a llama/mistral checkpoint
 /// (openchat-3.5 among them) -- used only when
 /// `{architecture}.attention.layer_norm_rms_epsilon` is absent from the

@@ -421,6 +421,20 @@ pub trait Architecture: Send + Sync {
     fn diagnostic_reduce_flags_apply(&self) -> bool {
         true
     }
+
+    /// The KV layout [`crate::memory_fit::MemoryBudget::derive`]
+    /// prices: one `(kv_heads, head_dim, window)` entry per layer that owns
+    /// a KV cache, `window` being `Some(rows)` for a sliding-window layer.
+    /// Default: every layer with a nonzero `head_count_kv` stores every
+    /// position ([`crate::bind::kv_layers_from_metadata`]). gemma4 and
+    /// qwen35moe override it with their own layouts.
+    ///
+    /// # Errors
+    ///
+    /// Whatever this architecture's own metadata reads can fail with.
+    fn kv_layers(&self, parsed: &ParsedGguf) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
+        crate::bind::kv_layers_from_metadata(parsed)
+    }
 }
 
 /// What [`Architecture::step_inputs`] reads to derive its own per-step

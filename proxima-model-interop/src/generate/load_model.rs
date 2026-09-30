@@ -808,6 +808,13 @@ pub struct LoadedModel<'file> {
     /// (`paired_gate_up_reduce`/`fused_qkv_reduce` on a non-qwen35
     /// checkpoint), which never resolves against an `Architecture` at all.
     pub(super) architecture_impl: Option<&'static dyn Architecture>,
+    /// One `(kv_heads, head_dim, window)` entry per layer that owns a KV
+    /// cache ([`Architecture::kv_layers`]), as this decode path allocates it:
+    /// every position is stored, so a sliding layer's window is dropped and
+    /// the fit prices the rows actually written. What
+    /// [`Self::apply_memory_fit_gate`] fits and budgets.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub(super) kv_layers: Vec<(u32, u32, Option<u32>)>,
     /// This checkpoint's own weight bytes, by class
     /// (`crate::bind::tensor_bytes_by_class`'s own dense/expert/table
     /// split, plus the SSM state bytes a qwen35 checkpoint's layers hold)

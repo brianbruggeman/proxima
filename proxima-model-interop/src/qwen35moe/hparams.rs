@@ -177,3 +177,76 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
         layer_kinds,
     })
 }
+
+/// One `(kv_heads, attn_head_dim, None)` entry per layer whose
+/// `head_count_kv` is nonzero: the GDN layers (`head_count_kv == 0`) keep a
+/// recurrent state, not a KV cache, and are charged nothing here.
+///
+/// # Errors
+///
+/// [`InteropError::MissingMetadataKey`] or
+/// [`InteropError::MetadataArrayLengthMismatch`] from the underlying reads.
+pub fn kv_layers_from_metadata(
+    parsed: &ParsedGguf,
+) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
+    let family = metadata_str(parsed, "general.architecture")?;
+    let prefix = |name: &str| format!("{family}.{name}");
+
+    let block_count = metadata_u32(parsed, &prefix("block_count"))?;
+    let kv_heads_by_layer = per_layer_kv(parsed, &prefix("attention.head_count_kv"), block_count)?;
+    let head_dim = metadata_u32(parsed, &prefix("attention.key_length"))?;
+
+    Ok(kv_heads_by_layer
+        .into_iter()
+        .filter(|&kv_heads| kv_heads != 0)
+        .map(|kv_heads| (kv_heads, head_dim, None))
+        .collect())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    use proxima_gguf::value::{MetadataArray, MetadataValue as Value};
+
+    use crate::architecture::Architecture as _;
+    use crate::memory_fit::{MemoryBudget, WeightClassBytes};
+    use crate::qwen35moe::QWEN35MOE;
+    use crate::test_support::parsed_header;
+
+    /// `qwen3.6:35b-a3b`'s KV-relevant header (`ollama /api/show`,
+    /// 2026-09-29): 40 blocks, `head_count_kv` of 2 on every fourth layer
+    /// and 0 on the 30 GDN layers, key length 256.
+    #[test]
+    fn memory_budget_qwen35moe() {
+        let parsed = parsed_header(vec![
+            (
+                "general.architecture",
+                Value::String("qwen35moe".to_string()),
+            ),
+            ("qwen35moe.block_count", Value::U32(40)),
+            (
+                "qwen35moe.attention.head_count_kv",
+                Value::Array(MetadataArray::U32(
+                    (0..40u32)
+                        .map(|layer| if (layer + 1) % 4 == 0 { 2 } else { 0 })
+                        .collect(),
+                )),
+            ),
+            ("qwen35moe.attention.key_length", Value::U32(256)),
+        ]);
+
+        let layers = QWEN35MOE
+            .kv_layers(&parsed)
+            .expect("the header carries every key kv_layers reads");
+        let budget = MemoryBudget::derive(WeightClassBytes::default(), &layers, 262_144, 0);
+        let every_layer = vec![(2u32, 256u32, None); 40];
+        let today = MemoryBudget::derive(WeightClassBytes::default(), &every_layer, 262_144, 0);
+
+        assert_eq!(layers.len(), 10, "only layers with head_count_kv != 0");
+        assert_eq!(budget.kv_cache_bytes, 10_737_418_240);
+        assert_eq!(today.kv_cache_bytes, 42_949_672_960);
+    }
+}

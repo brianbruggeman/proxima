@@ -3,6 +3,10 @@
 //! `real_openchat_file`) -- kept as ONE definition here rather than a
 //! private copy per module, per guiding-principle 1 (reuse first).
 
+use proxima_gguf::pipe::ParsedGguf;
+use proxima_gguf::value::{MetadataArray, MetadataValue};
+use proxima_gguf::{GgufModel, parse_complete, write_complete};
+
 /// `PROXIMA_MATH_MODE` read the same way every real-checkpoint decode test
 /// in this crate reads it: `"safe"` selects [`omega::MathMode::Safe`],
 /// `"fast"` selects [`omega::MathMode::Fast`], unset or `"relaxed"` selects
@@ -121,6 +125,59 @@ pub(crate) fn require_fixture(path: &str, env_var: Option<&str>) {
         None => panic!(
             "no host-local gguf fixture at {path}: stage one at this hardcoded path (no environment override exists)"
         ),
+    }
+}
+
+/// `gemma4:e2b-it-qat`'s KV-relevant header (`ollama /api/show`, 2026-09-29):
+/// 35 blocks, one kv head everywhere, every fifth layer full attention (key
+/// length 512) and the rest sliding (key length 256, window 512), the last 20
+/// layers sharing an earlier layer's KV.
+pub(crate) fn gemma4_e2b_header() -> ParsedGguf {
+    parsed_header(vec![
+        (
+            "general.architecture",
+            MetadataValue::String("gemma4".to_string()),
+        ),
+        ("gemma4.block_count", MetadataValue::U32(35)),
+        (
+            "gemma4.attention.head_count_kv",
+            MetadataValue::Array(MetadataArray::U32(vec![1; 35])),
+        ),
+        (
+            "gemma4.attention.sliding_window_pattern",
+            MetadataValue::Array(MetadataArray::Bool(
+                (0..35u32).map(|index| (index + 1) % 5 != 0).collect(),
+            )),
+        ),
+        ("gemma4.attention.shared_kv_layers", MetadataValue::U32(20)),
+        ("gemma4.attention.key_length", MetadataValue::U32(512)),
+        ("gemma4.attention.key_length_swa", MetadataValue::U32(256)),
+        ("gemma4.attention.sliding_window", MetadataValue::U32(512)),
+    ])
+}
+
+/// A header-only GGUF (no tensors) whose metadata is exactly `metadata`,
+/// written by the real encoder and parsed back by the real decoder -- the
+/// bytes a checkpoint's own header would hand `Architecture::kv_layers` and
+/// friends. The buffer is leaked because the parsed view borrows it; a test
+/// fixture, not a hot path.
+pub(crate) fn parsed_header(metadata: Vec<(&str, MetadataValue)>) -> ParsedGguf {
+    let model = GgufModel {
+        version: 3,
+        metadata: metadata
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect(),
+        tensors: Vec::new(),
+    };
+    let bytes = match write_complete(&model) {
+        Ok(bytes) => bytes,
+        Err(error) => panic!("a tensor-less gguf model must encode: {error:?}"),
+    };
+    let leaked: &'static [u8] = Vec::leak(bytes);
+    match parse_complete(leaked) {
+        Ok(parsed) => parsed,
+        Err(error) => panic!("bytes the gguf encoder just wrote must parse: {error:?}"),
     }
 }
 

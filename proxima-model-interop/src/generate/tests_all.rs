@@ -2430,6 +2430,7 @@ pub(super) mod memory_fit_gate_tests {
             },
             architecture: tiny_architecture(),
             architecture_impl: None,
+            kv_layers: vec![(2, 64, None); 2],
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
                 expert_bytes: 0,
