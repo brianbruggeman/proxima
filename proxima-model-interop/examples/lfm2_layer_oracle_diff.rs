@@ -155,7 +155,7 @@ fn main() {
         "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf".to_string()
     });
     let oracle_dir = env::args().nth(2).unwrap_or_else(|| {
-        "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/oracle/dump_lfm2".to_string()
+        panic!("argv[2] is required: directory of llama.cpp per-layer residual dumps (l_out-<n>.f32, model.embed_tokens.f32) written by the external llama.h oracle-dump probe run against LFM2.5-8B-A1B-Q4_K_M.gguf")
     });
     let prompt = env::args()
         .nth(3)
@@ -171,8 +171,7 @@ fn main() {
         return;
     }
     if !oracle_dir.exists() {
-        println!("skipping: no oracle layer-activation dump directory at {oracle_dir:?}");
-        return;
+        panic!("no oracle layer-activation dump directory at {oracle_dir:?}");
     }
 
     let recorder = Recorder::builder()

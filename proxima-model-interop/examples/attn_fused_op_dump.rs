@@ -19,7 +19,18 @@ use proxima_tensor::{NumericPolicy, bind_with_fusion, infer, prune_dead};
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
-const OUTPUT_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/rootcause/r9/wiring/gemma_fused_op.metal";
+const OUTPUT_FILE_NAME: &str = "gemma_fused_op.metal";
+
+fn output_path() -> std::path::PathBuf {
+    let output_dir = std::env::var_os("PROXIMA_ATTN_WIRING_DIR").map_or_else(
+        || {
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+            std::path::Path::new(&target_dir).join("attn_fused_op_dump")
+        },
+        std::path::PathBuf::from,
+    );
+    output_dir.join(OUTPUT_FILE_NAME)
+}
 
 const NEW_COUNT: usize = 1;
 const KV_BUCKET_EXTENT: usize = 32;
@@ -66,9 +77,11 @@ fn main() {
         .unwrap_or_else(|error| panic!("emit node={} failed: {error}", first.node.0));
 
     println!("attn_fused_op_dump: node={} entry={}", first.node.0, kernel.entry);
-    fs::create_dir_all(std::path::Path::new(OUTPUT_PATH).parent().expect("has parent"))
-        .expect("create output dir");
-    fs::write(OUTPUT_PATH, &kernel.source).unwrap_or_else(|error| panic!("write {OUTPUT_PATH}: {error}"));
+    let output_path = output_path();
+    fs::create_dir_all(output_path.parent().expect("has parent")).expect("create output dir");
+    fs::write(&output_path, &kernel.source)
+        .unwrap_or_else(|error| panic!("write {}: {error}", output_path.display()));
+    println!("attn_fused_op_dump: wrote {}", output_path.display());
 
     // `BoundOpKind::CachedAttention::two_pass` (the online-vs-staged kernel
     // selector this diagnostic used to flip on a cloned op) is deleted --

@@ -15,6 +15,7 @@
 
 use std::fs::File;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 use omega::PackedOperands;
@@ -25,8 +26,8 @@ use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer};
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
-const OFF_CSV_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/measure/saturation/launch_shapes_off.csv";
-const ON_CSV_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/measure/saturation/launch_shapes_on.csv";
+const OFF_CSV_NAME: &str = "launch_shapes_off.csv";
+const ON_CSV_NAME: &str = "launch_shapes_on.csv";
 
 const NEW_COUNT: usize = 1;
 const KV_BUCKET_EXTENT: usize = 32;
@@ -44,8 +45,21 @@ fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]
     outputs
 }
 
-fn write_launch_shapes(path: &str, label: &str, program_outputs: &(Vec<proxima_tensor::bind::BoundOp>,)) {
-    let mut csv = File::create(path).unwrap_or_else(|error| panic!("create {path}: {error}"));
+fn census_out_dir(scratch: &tempfile::TempDir) -> PathBuf {
+    let out_dir = std::env::var_os("PROXIMA_CENSUS_OUT")
+        .map_or_else(|| scratch.path().to_path_buf(), PathBuf::from);
+    std::fs::create_dir_all(&out_dir).unwrap_or_else(|error| panic!("create {}: {error}", out_dir.display()));
+    out_dir
+}
+
+fn write_launch_shapes(
+    out_dir: &Path,
+    file_name: &str,
+    label: &str,
+    program_outputs: &(Vec<proxima_tensor::bind::BoundOp>,),
+) {
+    let path = out_dir.join(file_name);
+    let mut csv = File::create(&path).unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
     writeln!(csv, "index,node,kind,entry,grid_threads,threadgroup_width")
         .expect("write csv header");
     let packed_operands = PackedOperands::new();
@@ -80,8 +94,9 @@ fn write_launch_shapes(path: &str, label: &str, program_outputs: &(Vec<proxima_t
         }
     }
     println!(
-        "attn_launch_shape_census[{label}]: total_bound_ops={} emitted={emitted} errored={errored} csv={path}",
-        program_outputs.0.len()
+        "attn_launch_shape_census[{label}]: total_bound_ops={} emitted={emitted} errored={errored} csv={}",
+        program_outputs.0.len(),
+        path.display()
     );
 }
 
@@ -131,14 +146,16 @@ async fn attn_launch_shape_census() {
         fused_bound_ops.len()
     );
 
-    write_launch_shapes(OFF_CSV_PATH, "off_unfused", &(unfused_bound_ops,));
-    write_launch_shapes(ON_CSV_PATH, "on_fused", &(fused_bound_ops,));
+    let scratch = tempfile::tempdir().expect("scratch dir creates");
+    let out_dir = census_out_dir(&scratch);
+    write_launch_shapes(&out_dir, OFF_CSV_NAME, "off_unfused", &(unfused_bound_ops,));
+    write_launch_shapes(&out_dir, ON_CSV_NAME, "on_fused", &(fused_bound_ops,));
 }
 
 #[cfg(feature = "metal-fuse-attn-decode")]
-const OFF_CSV_DECODE_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/measure/saturation/launch_shapes_off_decode.csv";
+const OFF_CSV_DECODE_NAME: &str = "launch_shapes_off_decode.csv";
 #[cfg(feature = "metal-fuse-attn-decode")]
-const ON_CSV_DECODE_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/measure/saturation/launch_shapes_on_decode.csv";
+const ON_CSV_DECODE_NAME: &str = "launch_shapes_on_decode.csv";
 
 /// Decode-shaped counterpart to [`attn_launch_shape_census`]: that test's
 /// fixed input binds `single_position_step=false` (`bind_program.single_position_step`
@@ -197,6 +214,8 @@ async fn attn_launch_shape_census_decode_shaped() {
         pruned_fused_bound_ops.len(),
     );
 
-    write_launch_shapes(OFF_CSV_DECODE_PATH, "off_unfused_decode", &(unfused_bound_ops,));
-    write_launch_shapes(ON_CSV_DECODE_PATH, "on_fused_decode_pruned", &(pruned_fused_bound_ops,));
+    let scratch = tempfile::tempdir().expect("scratch dir creates");
+    let out_dir = census_out_dir(&scratch);
+    write_launch_shapes(&out_dir, OFF_CSV_DECODE_NAME, "off_unfused_decode", &(unfused_bound_ops,));
+    write_launch_shapes(&out_dir, ON_CSV_DECODE_NAME, "on_fused_decode_pruned", &(pruned_fused_bound_ops,));
 }

@@ -24,7 +24,10 @@ use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead}
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
-const DEFAULT_OUTPUT_DIR: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/rootcause/r9/nodes";
+fn default_output_dir() -> String {
+    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
+    format!("{target_dir}/attn_node_dump/nodes")
+}
 
 const NEW_COUNT: usize = 1;
 const KV_BUCKET_EXTENT: usize = 32;
@@ -104,7 +107,7 @@ fn dump_node(bound: &BoundOp, numeric_policy: NumericPolicy, output_dir: &str, m
 }
 
 fn main() {
-    let output_dir = std::env::var("PROXIMA_ATTN_NODES_DIR").unwrap_or_else(|_| DEFAULT_OUTPUT_DIR.to_string());
+    let output_dir = std::env::var("PROXIMA_ATTN_NODES_DIR").unwrap_or_else(|_| default_output_dir());
     let layer_index: usize = std::env::var("PROXIMA_ATTN_LAYER")
         .ok()
         .and_then(|value| value.trim().parse().ok())
