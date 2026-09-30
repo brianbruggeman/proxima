@@ -2628,12 +2628,20 @@ impl<'file> LoadedModel<'file> {
             let bound = bound;
             let expert_slab =
                 crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            let kv_layers = resolved
+                .kv_layers(parsed)?
+                .into_iter()
+                .map(|(kv_heads, head_dim, _window)| (kv_heads, head_dim, None))
+                .collect();
             return Self {
                 expert_slab: std::sync::Mutex::new(expert_slab),
                 expert_sidecar: None,
                 weights: bound.weights,
                 architecture: bound.architecture,
                 architecture_impl: Some(resolved),
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                kv_layers,
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                     dense_bytes: dense_weight_bytes,
@@ -2747,12 +2755,16 @@ impl<'file> LoadedModel<'file> {
             build_single_range_program(&architecture, qk_norm)?
         };
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let kv_layers = crate::bind::kv_layers_from_metadata(parsed)?;
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
             expert_sidecar: None,
             weights,
             architecture,
             architecture_impl: None,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            kv_layers,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
@@ -2851,12 +2863,19 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let kv_layers = alloc::vec![
+            (architecture.kv_heads, architecture.head_dim, None);
+            architecture.block_count as usize
+        ];
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
             expert_sidecar: None,
             weights,
             architecture,
             architecture_impl: None,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            kv_layers,
             // safetensors carries no `_exps.`-style naming convention this
             // crate has confirmed against a real checkpoint the way
             // `crate::bind::tensor_bytes_by_class` has for GGUF -- every

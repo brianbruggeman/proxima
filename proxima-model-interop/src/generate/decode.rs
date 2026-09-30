@@ -2325,9 +2325,7 @@ impl<'file> LoadedModel<'file> {
         let requested_context_length = serving_config.context_length;
         let (context_length, outcome) = crate::memory_fit::fit_context_length(
             weights,
-            self.architecture.block_count,
-            self.architecture.kv_heads,
-            self.architecture.head_dim,
+            &self.kv_layers,
             requested_context_length,
             omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
             limit,
@@ -2345,9 +2343,7 @@ impl<'file> LoadedModel<'file> {
         );
         let per_class_budget = crate::memory_fit::MemoryBudget::derive(
             weights,
-            self.architecture.block_count,
-            self.architecture.kv_heads,
-            self.architecture.head_dim,
+            &self.kv_layers,
             context_length,
             omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
         );

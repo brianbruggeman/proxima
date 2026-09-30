@@ -95,9 +95,9 @@ pub struct MemoryBudget {
     pub expert_weights_bytes: u64,
     /// [`WeightClassBytes::table_bytes`], carried through unchanged.
     pub table_weights_bytes: u64,
-    /// [`kv_row_bytes`] times `block_count` times the context length this
-    /// budget was derived for -- the one class that varies with
-    /// `context_length`.
+    /// [`kv_row_bytes`] summed over the KV-owning layers, each at the rows it
+    /// stores for the context length this budget was derived for -- the one
+    /// class that varies with `context_length`.
     pub kv_cache_bytes: u64,
     /// [`WeightClassBytes::ssm_state_bytes`], carried through unchanged.
     pub ssm_state_bytes: u64,
@@ -110,19 +110,29 @@ pub struct MemoryBudget {
 
 impl MemoryBudget {
     /// Derives a budget for `context_length` positions of placed KV cache
-    /// across `block_count` layers, `weights`' own per-class byte counts,
-    /// and `arena_allowance_bytes` of fixed arena headroom.
+    /// over an explicit per-layer KV layout, `weights`' own per-class byte
+    /// counts, and `arena_allowance_bytes` of fixed arena headroom. One
+    /// `(kv_heads, head_dim, window)` entry per layer that OWNS a KV cache
+    /// (a layer that reads another layer's cache has no entry, so it is
+    /// charged nothing). `window` is `Some(rows)` for a sliding-window layer,
+    /// whose stored rows are `min(rows, context_length)`, and `None` for a
+    /// layer that stores every position. A tuple rather than a named type:
+    /// [`crate::architecture::Architecture::kv_layers`] is the one producer
+    /// and this function the one consumer.
     #[must_use]
     pub fn derive(
         weights: WeightClassBytes,
-        block_count: u32,
-        kv_heads: u32,
-        head_dim: u32,
+        layers: &[(u32, u32, Option<u32>)],
         context_length: u32,
         arena_allowance_bytes: u64,
     ) -> Self {
-        let kv_cache_bytes =
-            kv_row_bytes(kv_heads, head_dim) * u64::from(block_count) * u64::from(context_length);
+        let kv_cache_bytes: u64 = layers
+            .iter()
+            .map(|&(kv_heads, head_dim, window)| {
+                let rows = window.map_or(context_length, |window| window.min(context_length));
+                kv_row_bytes(kv_heads, head_dim) * u64::from(rows)
+            })
+            .sum();
         Self {
             dense_weights_bytes: weights.dense_bytes,
             expert_weights_bytes: weights.expert_bytes,
@@ -189,31 +199,31 @@ pub enum FitOutcome {
 /// naming every class and number involved -- the caller never uploads a
 /// weight in that case.
 ///
+/// `layers` is the same input [`MemoryBudget::derive`] prices, so
+/// the fit and the budget can never disagree about a layer's row bytes. KV
+/// bytes are non-decreasing in context length (each layer stores
+/// `min(window, context)` or `context` rows), so the largest fitting length
+/// is found by bisection over `1..requested`; for an unwindowed layout that
+/// is exactly `(available - fixed) / row_bytes`.
+///
 /// # Errors
 ///
 /// [`InteropError::MemoryBudgetExceeded`] when no context length, including
 /// `1`, fits.
 pub fn fit_context_length(
     weights: WeightClassBytes,
-    block_count: u32,
-    kv_heads: u32,
-    head_dim: u32,
+    layers: &[(u32, u32, Option<u32>)],
     requested_context_length: u32,
     arena_allowance_bytes: u64,
     limit: HostMemoryLimit,
 ) -> Result<(u32, FitOutcome), InteropError> {
     let available = limit.available_bytes();
     let fixed_bytes = weights.total_bytes() + arena_allowance_bytes;
-    let row_bytes = kv_row_bytes(kv_heads, head_dim) * u64::from(block_count);
+    let budget_at = |context_length: u32| {
+        MemoryBudget::derive(weights, layers, context_length, arena_allowance_bytes)
+    };
 
-    let requested_budget = MemoryBudget::derive(
-        weights,
-        block_count,
-        kv_heads,
-        head_dim,
-        requested_context_length,
-        arena_allowance_bytes,
-    );
+    let requested_budget = budget_at(requested_context_length);
     if requested_budget.total_bytes() <= available {
         return Ok((requested_context_length, FitOutcome::Fits));
     }
@@ -229,21 +239,25 @@ pub fn fit_context_length(
         os_headroom_bytes: limit.os_headroom_bytes,
     };
 
-    if fixed_bytes >= available || row_bytes == 0 {
+    if fixed_bytes >= available || budget_at(1).total_bytes() > available {
         return Err(exceeded(requested_budget.kv_cache_bytes));
     }
 
-    let max_context_length = (available - fixed_bytes) / row_bytes;
-    if max_context_length == 0 {
-        return Err(exceeded(requested_budget.kv_cache_bytes));
+    let mut fitting = 1u32;
+    let mut overflowing = requested_context_length;
+    while overflowing - fitting > 1 {
+        let middle = fitting + (overflowing - fitting) / 2;
+        if budget_at(middle).total_bytes() <= available {
+            fitting = middle;
+        } else {
+            overflowing = middle;
+        }
     }
-
-    let reduced = u32::try_from(max_context_length).unwrap_or(u32::MAX);
     Ok((
-        reduced,
+        fitting,
         FitOutcome::ReducedContext {
             from: requested_context_length,
-            to: reduced,
+            to: fitting,
         },
     ))
 }
@@ -345,6 +359,14 @@ mod tests {
     };
     use crate::error::InteropError;
 
+    fn uniform_layers(
+        block_count: u32,
+        kv_heads: u32,
+        head_dim: u32,
+    ) -> alloc::vec::Vec<(u32, u32, Option<u32>)> {
+        alloc::vec![(kv_heads, head_dim, None); block_count as usize]
+    }
+
     const KV_HEADS: u32 = 2;
     const HEAD_DIM: u32 = 64;
     const BLOCK_COUNT: u32 = 2;
@@ -383,9 +405,7 @@ mod tests {
         let context_length = 4096u32;
         let budget = MemoryBudget::derive(
             weights,
-            BLOCK_COUNT,
-            KV_HEADS,
-            HEAD_DIM,
+            &uniform_layers(BLOCK_COUNT, KV_HEADS, HEAD_DIM),
             context_length,
             ARENA_ALLOWANCE_BYTES,
         );
@@ -416,9 +436,7 @@ mod tests {
         };
         let (context_length, outcome) = fit_context_length(
             weights(1_000_000),
-            BLOCK_COUNT,
-            KV_HEADS,
-            HEAD_DIM,
+            &uniform_layers(BLOCK_COUNT, KV_HEADS, HEAD_DIM),
             131_072,
             ARENA_ALLOWANCE_BYTES,
             limit,
@@ -443,9 +461,7 @@ mod tests {
         };
         let (context_length, outcome) = fit_context_length(
             weights(dense_bytes),
-            BLOCK_COUNT,
-            KV_HEADS,
-            HEAD_DIM,
+            &uniform_layers(BLOCK_COUNT, KV_HEADS, HEAD_DIM),
             131_072,
             ARENA_ALLOWANCE_BYTES,
             limit,
@@ -469,15 +485,16 @@ mod tests {
             limit_bytes: 8 * gib,
             os_headroom_bytes: 0,
         };
+        let layers = uniform_layers(32, 8, 128);
         let (context_length, outcome) =
-            fit_context_length(weights, 32, 8, 128, 131_072, 64 * 1024 * 1024, limit)
+            fit_context_length(weights, &layers, 131_072, 64 * 1024 * 1024, limit)
                 .expect("a four-GiB checkpoint must fit some context inside an eight-GiB ceiling");
         assert!(context_length > 0 && context_length < 131_072);
         assert!(matches!(
             outcome,
             FitOutcome::ReducedContext { from: 131_072, .. }
         ));
-        let budget = MemoryBudget::derive(weights, 32, 8, 128, context_length, 64 * 1024 * 1024);
+        let budget = MemoryBudget::derive(weights, &layers, context_length, 64 * 1024 * 1024);
         assert!(budget.total_bytes() <= limit.available_bytes());
     }
 
@@ -497,9 +514,7 @@ mod tests {
         };
         let error = fit_context_length(
             checkpoint_weights,
-            BLOCK_COUNT,
-            KV_HEADS,
-            HEAD_DIM,
+            &uniform_layers(BLOCK_COUNT, KV_HEADS, HEAD_DIM),
             131_072,
             ARENA_ALLOWANCE_BYTES,
             limit,
@@ -611,5 +626,31 @@ mod tests {
             ..PerClassBudgets::default()
         };
         fit_per_class_budgets(budget, caps).expect("bytes equal to the cap must fit, not refuse");
+    }
+
+    /// qwen3.6:35b-a3b's KV layout (`ollama /api/show`: 10 attention layers
+    /// of 2 kv heads x 256, the other 30 are GDN) against a 4.096 GB limit:
+    /// 10 x 4096 B = 40,960 B/token, so 4,096,000,000 / 40,960 = 100,000.
+    #[test]
+    fn context_fit_clamps() {
+        let layers = alloc::vec![(2u32, 256u32, None); 10];
+        let limit = HostMemoryLimit {
+            limit_bytes: 4_096_000_000,
+            os_headroom_bytes: 0,
+        };
+
+        let (context_length, outcome) = fit_context_length(weights(0), &layers, 262_144, 0, limit)
+            .expect("a zero-weight checkpoint must fit some context in 4.096 GB");
+
+        assert_eq!(context_length, 100_000);
+        assert_eq!(
+            outcome,
+            FitOutcome::ReducedContext {
+                from: 262_144,
+                to: 100_000
+            }
+        );
+        let budget = MemoryBudget::derive(weights(0), &layers, 100_000, 0);
+        assert_eq!(budget.total_bytes(), 4_096_000_000);
     }
 }

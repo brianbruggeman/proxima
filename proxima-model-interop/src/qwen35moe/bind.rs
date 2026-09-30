@@ -229,6 +229,10 @@ impl ArchitectureTrait for Qwen35MoeArch {
         crate::architecture::KvCacheShape::Monolithic
     }
 
+    fn kv_layers(&self, parsed: &ParsedGguf) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
+        super::hparams::kv_layers_from_metadata(parsed)
+    }
+
     fn ffn_routing(&self) -> crate::architecture::FfnRouting {
         crate::architecture::FfnRouting::Routed
     }

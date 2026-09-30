@@ -1084,6 +1084,10 @@ impl ArchitectureTrait for Gemma4Arch {
         crate::architecture::KvCacheShape::Custom
     }
 
+    fn kv_layers(&self, parsed: &ParsedGguf) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
+        super::hparams::kv_layers_from_metadata(parsed)
+    }
+
     /// Intervention 6's measured decode configuration (RUN.md "Intervention
     /// 6" / "INTEGRATION"): whole-token latency 18.83 -> 16.60 ms (-11.9%) at
     /// K=8, bytes identical to K=1 on the six-prompt corpus, uninstrumented
