@@ -398,6 +398,10 @@ name = "bench_local"
 required-features = ["std"]
 
 [[example]]
+name = "gemma4_ring_parity"
+required-features = ["std", "metal"]
+
+[[example]]
 name = "long_context_niah"
 required-features = ["std", "metal"]
 
