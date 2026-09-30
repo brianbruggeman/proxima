@@ -3,7 +3,7 @@
 //! [`synth_qwen35_gguf`]'s own generator (reused here via `#[path]` rather
 //! than duplicated, `examples/synth_qwen35_gguf.rs`), since no real
 //! Qwen3.8-27B checkpoint exists on this box
-//! (`/private/tmp/.../scratchpad/qwen38-path.md`'s leading finding). Random
+//! (the only on-disk qwen3.5/3.6 files are `qwen35moe`). Random
 //! weights of the right shape and quant mix exercise the same graph
 //! (`proxima_tensor::spec::qwen35_forward_program`) and the same Metal/CPU
 //! dispatch classification a real checkpoint would, since neither depends

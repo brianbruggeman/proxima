@@ -1,8 +1,7 @@
 //! Synthesizes a Qwen3.8-27B-*shaped* GGUF fixture and runs it through
 //! [`proxima_model_interop::generate::LoadedModel`]'s `qwen35` hybrid path
 //! (`crate::qwen35`) -- no real Qwen3.8-27B checkpoint exists on this box
-//! (`/private/tmp/.../scratchpad/qwen38-path.md`'s own leading finding: the
-//! only on-disk qwen3.5/3.6 files are `qwen35moe`, MoE + vision, typed-
+//! (the only on-disk qwen3.5/3.6 files are `qwen35moe`, MoE + vision, typed-
 //! rejected by `architecture_from_metadata`'s heterogeneous-`head_count_kv`
 //! guard), so memory-by-class and the lowering census cannot come from a
 //! real weight file. Random weights of the RIGHT shape and quant mix are
@@ -47,11 +46,24 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::path::PathBuf;
+
 use proxima_gguf::types::GgmlType;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::writer::{GgufModel, TensorPayload, write_complete};
 
-const OUTPUT_PATH: &str = "/tmp/proxima-synth-qwen35.gguf";
+const FIXTURE_ENV: &str = "PROXIMA_SYNTH_QWEN35_GGUF";
+const FIXTURE_FILE: &str = "synth_qwen35/proxima-synth-qwen35.gguf";
+
+fn output_path() -> PathBuf {
+    std::env::var_os(FIXTURE_ENV).map_or_else(
+        || {
+            let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+            PathBuf::from(target).join(FIXTURE_FILE)
+        },
+        PathBuf::from,
+    )
+}
 
 // DOCUMENTED (`qwen35.rs:136-137`'s own worked example: "5120 / 24 = 213.33"
 // proves embedding=5120, query_heads=24 on the real 27B checkpoint).
@@ -442,11 +454,13 @@ fn main() {
     };
 
     let written = write_complete(&model).expect("write synthetic qwen35 gguf");
+    let output = output_path();
     println!(
-        "synth_qwen35_gguf: {} tensors, {} bytes ({:.2} MiB) -> {OUTPUT_PATH}",
+        "synth_qwen35_gguf: {} tensors, {} bytes ({:.2} MiB) -> {}",
         model.tensors.len(),
         written.len(),
-        written.len() as f64 / (1024.0 * 1024.0)
+        written.len() as f64 / (1024.0 * 1024.0),
+        output.display()
     );
 
     let reparsed = proxima_gguf::parse_complete(&written).expect("written bytes parse back");
@@ -456,5 +470,7 @@ fn main() {
         "tensor count round-trips"
     );
 
-    std::fs::write(OUTPUT_PATH, &written).expect("write synthetic gguf to scratchpad");
+    let parent = output.parent().expect("fixture path has a parent directory");
+    std::fs::create_dir_all(parent).expect("create fixture directory");
+    std::fs::write(&output, &written).expect("write synthetic gguf fixture");
 }

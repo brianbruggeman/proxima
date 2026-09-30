@@ -14,10 +14,24 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::path::PathBuf;
+
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig};
 
-const FIXTURE_PATH: &str = "/tmp/proxima-synth-qwen35.gguf";
+const FIXTURE_ENV: &str = "PROXIMA_SYNTH_QWEN35_GGUF";
+const FIXTURE_FILE: &str = "synth_qwen35/proxima-synth-qwen35.gguf";
+const GENERATE_COMMAND: &str = "cargo run -p proxima-model-interop --example synth_qwen35_gguf";
+
+fn fixture_path() -> PathBuf {
+    std::env::var_os(FIXTURE_ENV).map_or_else(
+        || {
+            let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+            PathBuf::from(target).join(FIXTURE_FILE)
+        },
+        PathBuf::from,
+    )
+}
 
 // Mirrors `synth_qwen35_gguf.rs`'s own constants -- kept in sync by hand
 // since the two examples don't share a lib target; the budget check below
@@ -36,9 +50,8 @@ const MAX_DEVICE_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 /// weights (measured, on-disk file size) + KV cache (attention-kind layers,
 /// at `SERVING_CONTEXT`) + SSM state (ssm-kind layers, O(1) in sequence
-/// length -- `qwen38-path.md`'s own formula) + a generous fixed arena
-/// allowance. All four terms are the same ones `qwen38-path.md`'s section
-/// (4) names; this is that formula evaluated at THIS fixture's (tiny)
+/// length -- the checkpoint-budget formula) + a generous fixed arena
+/// allowance. All four terms are the same ones the budget formula names; this is that formula evaluated at THIS fixture's (tiny)
 /// hparams rather than the real checkpoint's.
 fn derived_device_budget_bytes(weights_bytes: u64) -> (u64, u64, u64, u64) {
     let attention_layers = (0..BLOCK_COUNT)
@@ -63,7 +76,7 @@ fn derived_device_budget_bytes(weights_bytes: u64) -> (u64, u64, u64, u64) {
         * (u64::from(SSM_TIME_STEP_RANK) / u64::from(SSM_GROUP_COUNT));
     let ssm_state_bytes = (conv_rows * qkv_dim * 4 + state_len * 4) * ssm_layers;
 
-    // Fixed, generous allowance -- `qwen38-path.md`'s own arena line was
+    // Fixed, generous allowance -- the checkpoint-budget arena line was
     // ASSUMED order-of-magnitude even for the real checkpoint; at this
     // fixture's tiny per-layer widths the real arena is under a MiB, so
     // 256 MiB here is pure headroom, not a measurement.
@@ -105,8 +118,10 @@ fn decode(
     // (`pub(crate)`, unreachable from here) is the fully-supported knob set
     // every existing caller actually runs; mirrored by hand field-for-field
     // (`generate.rs:1497-1513`) since an example crate cannot import it.
+    let fixture = fixture_path();
+    let model_path = fixture.to_string_lossy();
     let config = ServingConfig {
-        model_path: FIXTURE_PATH,
+        model_path: &model_path,
         context_length: ContextLength::Within(SERVING_CONTEXT),
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
@@ -140,10 +155,17 @@ fn decode(
 }
 
 fn main() {
-    let file_bytes = std::fs::read(FIXTURE_PATH).expect("read synth_qwen35_gguf's own output");
+    let fixture = fixture_path();
+    let file_bytes = std::fs::read(&fixture).unwrap_or_else(|error| {
+        panic!(
+            "fixture {} unreadable ({error}); generate it with `{GENERATE_COMMAND}` (path override: {FIXTURE_ENV})",
+            fixture.display()
+        )
+    });
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
     println!(
-        "synth_qwen35_decode: fixture={FIXTURE_PATH} bytes={}",
+        "synth_qwen35_decode: fixture={} bytes={}",
+        fixture.display(),
         file_bytes.len()
     );
 
