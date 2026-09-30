@@ -52,6 +52,7 @@ use proxima_gguf::types::GgmlType;
 use proxima_tensor::NumericPolicy;
 
 use crate::error::InteropError;
+use crate::rope_scaling::RopeScaling;
 
 /// Which tensor names a [`WeightPrecisionRule`] applies to. Deliberately not
 /// a glob: `crate::bind::bind_dense_as`/`bind_matmul_weight_as` (this rule's
@@ -525,6 +526,10 @@ pub struct ServingConfig<'model> {
     pub model_path: &'model str,
     /// `-c`: maximum context length in tokens.
     pub context_length: u32,
+    /// Replaces the GGUF's own `{arch}.rope.scaling.*` for this call when
+    /// `Some` (e.g. `Some(RopeScaling::yarn(4.0, 32_768))` to run qwen3-8b at
+    /// 131072); `None` keeps whatever the checkpoint declares.
+    pub rope_scaling: Option<RopeScaling>,
     /// `-np`: number of parallel sequence slots served at once.
     pub parallel_sequences: u32,
     /// `-ctk`: KV cache key-tensor storage type.
@@ -898,6 +903,7 @@ impl Default for ServingConfig<'static> {
         Self {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
+            rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -1288,6 +1294,7 @@ mod tests {
         let config = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
+            rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -1459,6 +1466,7 @@ mod tests {
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
+            rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -1558,6 +1566,7 @@ mod tests {
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
+            rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -1647,6 +1656,7 @@ mod tests {
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
+            rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -1726,6 +1736,7 @@ mod tests {
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
+            rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,

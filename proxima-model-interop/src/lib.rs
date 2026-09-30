@@ -64,6 +64,7 @@ mod memory_fit;
 mod quality;
 #[cfg(feature = "std")]
 mod qwen35;
+pub mod rope_scaling;
 mod serving;
 #[cfg(feature = "std")]
 mod serving_fsm;
@@ -137,6 +138,7 @@ pub use residency::{
     ResidencyAction, ResidencyActions, ResidencyConfig, ResidencyError, RoutedExpert,
     ServeDecision, ServePrecision,
 };
+pub use rope_scaling::RopeScaling;
 #[cfg(feature = "std")]
 pub use serving::GdnPrefillBackend;
 pub use serving::{

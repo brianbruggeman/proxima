@@ -51,6 +51,8 @@ use crate::bind::{
     metadata_u32_optional, metadata_u32_optional_or, reinterpret_f32, vocab_from_token_embedding,
 };
 use crate::error::InteropError;
+use crate::generate::build_position_inputs;
+use crate::rope_scaling::{RopeScaling, f32_from_u32};
 
 /// Every hparam [`lfm2_forward_program_with_experts`] needs, derived from a
 /// real `lfm2moe`-architecture checkpoint's own metadata --
@@ -77,6 +79,11 @@ pub struct Lfm2Architecture {
     pub leading_dense_block_count: u32,
     pub l_cache: u32,
     pub rope_freq_base: f32,
+    /// The checkpoint's own `{architecture}.rope.scaling.*`
+    /// ([`RopeScaling::from_gguf`]); [`RopeScaling::None`] when it declares
+    /// none. This program takes no `ServingConfig`, so there is no per-call
+    /// override here.
+    pub rope_scaling: RopeScaling,
     pub rms_epsilon: f32,
     pub layer_kinds: Vec<LayerKind>,
 }
@@ -167,6 +174,7 @@ pub fn lfm2_architecture_from_metadata(
         leading_dense_block_count,
         l_cache,
         rope_freq_base,
+        rope_scaling: RopeScaling::from_gguf(parsed)?,
         rms_epsilon,
         layer_kinds,
     })
@@ -573,27 +581,22 @@ fn build_lfm2_position_inputs(
     head_dim: u32,
     rope_freq_base: f32,
     rms_epsilon: f32,
+    rope_scaling: RopeScaling,
 ) -> Lfm2PositionInputs {
-    let pairs = head_dim as usize / 2;
-    let ids_f32: Vec<f32> = ids.iter().map(|&id| id as f32).collect();
-    let epsilon = vec![rms_epsilon; ids.len()];
-
-    let mut cos = vec![0.0f32; ids.len() * pairs];
-    let mut sin = vec![0.0f32; ids.len() * pairs];
-    for (position, _) in ids.iter().enumerate() {
-        for pair in 0..pairs {
-            let theta =
-                position as f32 * rope_freq_base.powf(-((2 * pair) as f32) / (head_dim as f32));
-            cos[position * pairs + pair] = theta.cos();
-            sin[position * pairs + pair] = theta.sin();
-        }
-    }
-
+    let shared = build_position_inputs(
+        ids,
+        0,
+        head_dim,
+        rope_freq_base,
+        rms_epsilon,
+        None,
+        rope_scaling,
+    );
     Lfm2PositionInputs {
-        ids_f32,
-        epsilon,
-        cos,
-        sin,
+        ids_f32: ids.iter().map(|&id| f32_from_u32(id)).collect(),
+        epsilon: shared.epsilon,
+        cos: shared.cos,
+        sin: shared.sin,
     }
 }
 
@@ -693,6 +696,7 @@ pub fn run_lfm2_prefill(
             architecture.head_dim,
             architecture.rope_freq_base,
             architecture.rms_epsilon,
+            architecture.rope_scaling,
         );
 
         let mut named_blocks: Vec<(&str, QuantizedBlock)> =
@@ -794,6 +798,7 @@ pub fn lfm2_forward_values(
         architecture.head_dim,
         architecture.rope_freq_base,
         architecture.rms_epsilon,
+        architecture.rope_scaling,
     );
     let vocab_size = architecture.vocab as usize;
 

@@ -387,6 +387,7 @@ pub(super) mod tests {
         decode_until_stop_or_budget,
     };
     use crate::bind::architecture_from_metadata;
+    use crate::rope_scaling::RopeScaling;
 
     #[test]
     fn residency_mutation_closes_only_for_the_expert_gather_phase() {
@@ -783,6 +784,7 @@ pub(super) mod tests {
             architecture.rope_freq_base,
             architecture.rms_epsilon,
             None,
+            RopeScaling::None,
         );
 
         assert_eq!(
@@ -2387,6 +2389,7 @@ pub(super) mod memory_fit_gate_tests {
     use proxima_tokenizer::Vocab;
 
     use crate::bind::{BoundWeights, ModelArchitecture};
+    use crate::rope_scaling::RopeScaling;
     use crate::serving::ServingConfig;
 
     use super::LoadedModel;
@@ -2430,6 +2433,7 @@ pub(super) mod memory_fit_gate_tests {
             },
             architecture: tiny_architecture(),
             architecture_impl: None,
+            rope_scaling: RopeScaling::None,
             kv_layers: vec![(2, 64, None); 2],
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
