@@ -975,6 +975,7 @@ fn bind_gemma4_with_last_row_only<'file>(
             // per-layer INJECTS Stage B; this is the checkpoint-wide toggle
             // that builds Stage A's preamble at all.
             ple_dim: (architecture.ple_dim > 0).then_some(architecture.ple_dim),
+            sliding_kv_ring: false,
             qk_norm: false,
             qkv_biases: false,
             paired_gate_up_reduce: false,

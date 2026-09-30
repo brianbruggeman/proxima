@@ -13593,6 +13593,7 @@ mod gemma4_synthetic_parity {
                 Some(SOFTCAP),
                 false,
                 None,
+                false,
             )
             .expect("the two-range cached gemma4-shaped program lowers");
 
@@ -13822,6 +13823,7 @@ mod gemma4_synthetic_parity {
                 Some(SOFTCAP),
                 true,
                 None,
+                false,
             )
             .expect("the gemma4-shaped two-range recognizer fixture lowers");
 
@@ -14235,6 +14237,7 @@ mod gemma4_synthetic_parity {
                 Some(SOFTCAP),
                 false,
                 None,
+                false,
             )
             .expect("the two-range cached gemma4-shaped shared-kv program lowers");
 
@@ -14428,6 +14431,7 @@ mod gemma4_synthetic_parity {
             cache_strategy: CacheStrategy::TwoRange,
             // no PLE entry in the fixture schedule above.
             ple_dim: None,
+            sliding_kv_ring: false,
             // inert under `TwoRange` -- see `ModelDescriptor::qk_norm`'s own doc.
             qk_norm: false,
             qkv_biases: false,
@@ -14701,6 +14705,7 @@ mod gemma4_synthetic_parity {
                 Some(30.0),
                 true,
                 None,
+                false,
             )
             .expect("direct real-dims build");
 
@@ -15038,6 +15043,7 @@ mod gemma4_synthetic_parity {
                 Some(SOFTCAP),
                 false,
                 None,
+                false,
             )
             .expect("the two-range cached gemma4-shaped program lowers");
 
@@ -15445,6 +15451,7 @@ mod gemma4_synthetic_parity {
                 Some(SOFTCAP),
                 false,
                 None,
+                false,
             )
             .expect("the all-positions two-range cached program lowers");
 
@@ -15502,6 +15509,7 @@ mod gemma4_synthetic_parity {
                 Some(SOFTCAP),
                 true,
                 None,
+                false,
             )
             .expect("the last-row-only two-range cached program lowers");
 
@@ -15590,6 +15598,454 @@ mod gemma4_synthetic_parity {
                  the incremental single-position decode's row at the same position -- found {diff}"
             );
         }
+    }
+
+    fn ring_layer_weight_blocks(
+        layer: usize,
+        weights: &LayerWeights,
+        owns_kv: bool,
+    ) -> Vec<(String, Vec<f32>)> {
+        let tag = |suffix: &str| alloc::format!("blk.{layer}.{suffix}");
+        let mut blocks = alloc::vec![
+            (tag("attn_norm.weight"), weights.attn_norm.clone()),
+            (
+                tag("post_attention_norm.weight"),
+                weights.post_attention_norm.clone()
+            ),
+            (tag("attn_q_norm.weight"), weights.q_norm.clone()),
+            (tag("attn_q.weight"), weights.wq.clone()),
+            (tag("attn_output.weight"), weights.wo.clone()),
+            (
+                tag("layer_output_scale.weight"),
+                alloc::vec![weights.output_scale]
+            ),
+            (tag("ffn_norm.weight"), weights.ffn_norm.clone()),
+            (
+                tag("post_ffw_norm_1.weight"),
+                weights.post_ffw_norm_1.clone()
+            ),
+            (
+                tag("post_ffw_norm_2.weight"),
+                weights.post_ffw_norm_2.clone()
+            ),
+            (tag("post_ffw_norm.weight"), weights.post_ffw_norm.clone()),
+            (tag("pre_ffw_norm_2.weight"), weights.pre_ffw_norm_2.clone()),
+            (tag("ffn_gate.weight"), weights.ffn_gate.clone()),
+            (tag("ffn_up.weight"), weights.ffn_up.clone()),
+            (tag("ffn_down.weight"), weights.ffn_down.clone()),
+            (tag("ffn_gate_inp.weight"), weights.gate_inp.clone()),
+            (tag("ffn_gate_inp.scale"), weights.gate_inp_scale.clone()),
+            (tag("ffn_gate_exps.weight"), weights.gate_exps.clone()),
+            (tag("ffn_up_exps.weight"), weights.up_exps.clone()),
+            (tag("ffn_down_exps.weight"), weights.down_exps.clone()),
+            (tag("ffn_down_exps.scale"), weights.down_exps_scale.clone()),
+        ];
+        if owns_kv {
+            blocks.push((tag("attn_k_norm.weight"), weights.k_norm.clone()));
+            blocks.push((tag("attn_k.weight"), weights.wk.clone()));
+            if let Some(wv) = &weights.wv {
+                blocks.push((tag("attn_v.weight"), wv.clone()));
+            }
+        }
+        blocks
+    }
+
+    /// Decodes a five-layer gemma4-shaped stack (sliding own, sliding own,
+    /// sliding shared-from-1, full own, full shared-from-3) through the
+    /// full-cache two-range program and the sliding-ring program in
+    /// lockstep, and returns the largest logit difference over every step.
+    /// `window_shift` moves the ring program's window view that many rows
+    /// toward the past (0 is the contract: the most recent
+    /// `min(cached_len, window)` rows, oldest first).
+    fn ring_versus_full_max_logit_diff(window_shift: usize) -> f32 {
+        let step_sizes = [3usize, 1, 1, 2, 1, 1, 1];
+        let all_ids = [1usize, 3, 2, 0, 4, 5, 1, 3, 2, 0];
+        let total = all_ids.len();
+        let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
+        let output_norm = norm_wave("output_norm.weight", EMBEDDING);
+        let mut tied_lm_head = alloc::vec![0.0f32; EMBEDDING * VOCAB];
+        for token in 0..VOCAB {
+            for column in 0..EMBEDDING {
+                tied_lm_head[column * VOCAB + token] = embedding_table[token * EMBEDDING + column];
+            }
+        }
+        let positions: Vec<usize> = (0..total).collect();
+        let (cos_full, sin_full) =
+            rope_table_partial(&positions, ROPE_BASE_FULL, HEAD_DIM, ROTARY_PAIRS_FULL);
+        let (cos_swa, sin_swa) = rope_table(&positions, ROPE_BASE_SWA, HEAD_DIM);
+
+        let ffn_config = LayerFfnConfig {
+            post_attention_norm: true,
+            combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                dense_post_norm: true,
+                routed_post_norm: true,
+                combined_post_norm: true,
+                routed_pre_norm: true,
+                router_scale: true,
+                expert_output_scale: true,
+            }),
+            output_scale: true,
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            dense_feed_forward: None,
+            exclusive_dense_post_norm: false,
+            activation: Activation::GeluTanh,
+            ple: false,
+        };
+        let attention =
+            |window: Option<u32>, source: KeySourceKind, value: ValueSourceKind, full: bool| {
+                LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: window,
+                    value_source_kind: value,
+                    key_source_kind: source,
+                    rope_table: if full {
+                        RopeTableSel {
+                            cos_name: "rope_cos",
+                            sin_name: "rope_sin",
+                        }
+                    } else {
+                        RopeTableSel {
+                            cos_name: "rope_cos_swa",
+                            sin_name: "rope_sin_swa",
+                        }
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32,
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: matches!(source, KeySourceKind::ProjectedK),
+                }
+            };
+        let window = Some(SWA_WINDOW as u32);
+        let attentions = [
+            attention(
+                window,
+                KeySourceKind::ProjectedK,
+                ValueSourceKind::ProjectedV,
+                false,
+            ),
+            attention(
+                window,
+                KeySourceKind::ProjectedK,
+                ValueSourceKind::ProjectedV,
+                false,
+            ),
+            attention(
+                window,
+                KeySourceKind::SharedFromLayer(1),
+                ValueSourceKind::SharedFromLayer(1),
+                false,
+            ),
+            attention(
+                None,
+                KeySourceKind::ProjectedK,
+                ValueSourceKind::SharedWithKey,
+                true,
+            ),
+            attention(
+                None,
+                KeySourceKind::SharedFromLayer(3),
+                ValueSourceKind::SharedFromLayer(3),
+                true,
+            ),
+        ];
+        let schedule: Vec<LayerSchedule> = attentions
+            .iter()
+            .map(|attention| LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: *attention,
+                ffn: ffn_config,
+            })
+            .collect();
+        let owning_layers = [0usize, 1, 3];
+        let windowed_owner = [true, true, false];
+
+        let mut weight_blocks: Vec<(String, Vec<f32>)> = alloc::vec![
+            ("token_embd.weight".into(), embedding_table.clone()),
+            ("output_norm.weight".into(), output_norm.clone()),
+            ("output.weight".into(), tied_lm_head.clone()),
+        ];
+        for layer in 0..schedule.len() {
+            let owns_kv = owning_layers.contains(&layer);
+            let sliding_weights = layer < 3;
+            let weights = layer_weights(layer, sliding_weights && owns_kv);
+            weight_blocks.extend(ring_layer_weight_blocks(layer, &weights, owns_kv));
+        }
+
+        let build = |ring: bool| {
+            lfm2_two_range_cached_forward_program_with_experts(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                EXPERT_FF as u32,
+                QUERY_HEADS as u32,
+                schedule.len() as u32,
+                EXPERT_COUNT as u32,
+                EXPERT_USED as u32,
+                0,
+                &schedule,
+                Some(EmbeddingScale::Sqrt),
+                Some(SOFTCAP),
+                true,
+                None,
+                ring,
+            )
+            .expect("the five-layer two-range cached program lowers")
+        };
+        let (program_full, logits_full, roots_full, _sites_full, _repeats_full) = build(false);
+        let (program_ring, logits_ring, roots_ring, _sites_ring, _repeats_ring) = build(true);
+
+        let mut history_full: Vec<[Vec<f32>; 3]> = alloc::vec![Default::default(); 3];
+        let mut history_ring: Vec<[Vec<f32>; 3]> = alloc::vec![Default::default(); 3];
+        let pair_row = KV_HEADS * PAIRS;
+        let value_row = KV_HEADS * HEAD_DIM;
+        let mut worst = 0.0f32;
+        let mut cached_len = 0usize;
+
+        for &count in &step_sizes {
+            let step_ids: Vec<f32> = all_ids[cached_len..cached_len + count]
+                .iter()
+                .map(|&id| id as f32)
+                .collect();
+            let eps_data = alloc::vec![EPS; count];
+            let span = cached_len..cached_len + count;
+            let cos_swa_step = flatten(&cos_swa[span.clone()]);
+            let sin_swa_step = flatten(&sin_swa[span.clone()]);
+            let cos_full_step = flatten(&cos_full[span.clone()]);
+            let sin_full_step = flatten(&sin_full[span]);
+            let lm_head_row = [(count - 1) as f32];
+            let view_end = cached_len.saturating_sub(window_shift);
+            let window_rows = cached_len.min(SWA_WINDOW).min(view_end);
+            let window_start = view_end - window_rows;
+            let full_len = [cached_len as f32];
+            let ring_len = [window_rows as f32];
+
+            let evaluate = |ring: bool| -> (Vec<f32>, Vec<[Vec<f32>; 3]>) {
+                let (program, logits, roots, history) = if ring {
+                    (&program_ring, logits_ring, &roots_ring, &history_ring)
+                } else {
+                    (&program_full, logits_full, &roots_full, &history_full)
+                };
+                let cache_names: Vec<[String; 3]> = owning_layers
+                    .iter()
+                    .map(|layer| {
+                        [
+                            alloc::format!("kv_cache.{layer}.k_even"),
+                            alloc::format!("kv_cache.{layer}.k_odd"),
+                            alloc::format!("kv_cache.{layer}.v"),
+                        ]
+                    })
+                    .collect();
+                let mut named: Vec<(&str, &[f32])> = weight_blocks
+                    .iter()
+                    .map(|(name, values)| (name.as_str(), values.as_slice()))
+                    .collect();
+                named.push(("ids", step_ids.as_slice()));
+                named.push(("eps", eps_data.as_slice()));
+                named.push(("rope_cos_swa", cos_swa_step.as_slice()));
+                named.push(("rope_sin_swa", sin_swa_step.as_slice()));
+                named.push(("rope_cos", cos_full_step.as_slice()));
+                named.push(("rope_sin", sin_full_step.as_slice()));
+                named.push(("cached_len", full_len.as_slice()));
+                named.push(("lm_head_row", lm_head_row.as_slice()));
+                if ring {
+                    named.push((SLIDING_CACHED_LEN_INPUT, ring_len.as_slice()));
+                }
+                for (owner, names) in cache_names.iter().enumerate() {
+                    let (first, rows) = if ring && windowed_owner[owner] {
+                        (window_start, window_rows)
+                    } else {
+                        (0, cached_len)
+                    };
+                    let [k_even, k_odd, value] = &history[owner];
+                    named.push((
+                        names[0].as_str(),
+                        &k_even[first * pair_row..(first + rows) * pair_row],
+                    ));
+                    named.push((
+                        names[1].as_str(),
+                        &k_odd[first * pair_row..(first + rows) * pair_row],
+                    ));
+                    named.push((
+                        names[2].as_str(),
+                        &value[first * value_row..(first + rows) * value_row],
+                    ));
+                }
+                let sliding_extent = if ring { window_rows as u64 } else { 0 };
+                let symbols = [count as u64, cached_len as u64, sliding_extent];
+                let mut step_roots: Vec<NodeId> = alloc::vec![logits];
+                for (even, odd, value) in roots {
+                    step_roots.extend([*even, *odd, *value]);
+                }
+                let evaluated = crate::cpu::evaluate_named(program, &symbols, &named, &step_roots)
+                    .expect("the decode step evaluates");
+                let step_logits = evaluated.get(logits).expect("logits present").0.to_vec();
+                let fresh: Vec<[Vec<f32>; 3]> = roots
+                    .iter()
+                    .map(|(even, odd, value)| {
+                        [
+                            evaluated.get(*even).expect("k_even root").0.to_vec(),
+                            evaluated.get(*odd).expect("k_odd root").0.to_vec(),
+                            evaluated.get(*value).expect("v root").0.to_vec(),
+                        ]
+                    })
+                    .collect();
+                (step_logits, fresh)
+            };
+
+            let (logits_a, fresh_a) = evaluate(false);
+            let (logits_b, fresh_b) = evaluate(true);
+            worst = worst.max(max_abs_diff(&logits_a, &logits_b));
+            for owner in 0..owning_layers.len() {
+                for leaf in 0..3 {
+                    history_full[owner][leaf].extend_from_slice(&fresh_a[owner][leaf]);
+                    history_ring[owner][leaf].extend_from_slice(&fresh_b[owner][leaf]);
+                }
+            }
+            cached_len += count;
+        }
+        worst
+    }
+
+    /// The sliding ring is exact: a program whose windowed layers read only
+    /// the most recent `min(cached_len, window)` cached rows (oldest first,
+    /// counted by `cached_len_swa`) produces the same logits as the program
+    /// that reads the whole history and masks everything older than the
+    /// window. Covers a 3-token prefill, single-token decode steps, a
+    /// 2-token step over a full window, and a sliding layer that shares its
+    /// donor's ring.
+    #[test]
+    fn two_range_cached_gemma4_sliding_ring_matches_full_cache_logits_across_prefill_and_decode() {
+        let worst = ring_versus_full_max_logit_diff(0);
+        std::println!("ring_vs_full max_abs_logit_diff={worst}");
+        assert!(
+            worst < TOLERANCE,
+            "the ring program's logits must equal the full-cache program's at every step -- \
+             worst difference {worst}"
+        );
+    }
+
+    /// Control for the exactness test above: handing the ring program its
+    /// window one row too old (dropping the newest cached row) must break
+    /// parity, or the comparison is not measuring the window at all.
+    #[test]
+    fn two_range_cached_gemma4_sliding_ring_window_one_row_stale_breaks_logit_parity() {
+        let worst = ring_versus_full_max_logit_diff(1);
+        std::println!("ring_vs_full stale_window max_abs_logit_diff={worst}");
+        assert!(
+            worst > TOLERANCE * 10.0,
+            "a window view missing the newest cached row must diverge from the full cache -- \
+             worst difference {worst}"
+        );
+    }
+
+    /// Only windowed layers move to the sliding slot: their cache leaves are
+    /// bounded by [`SLIDING_KV_SYMBOL`], every full layer keeps slot 1, and
+    /// with the ring off no leaf mentions the sliding slot or its length
+    /// input.
+    #[test]
+    fn sliding_ring_program_bounds_only_windowed_cache_leaves_by_the_sliding_slot() {
+        let ffn_config = LayerFfnConfig {
+            post_attention_norm: true,
+            combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                dense_post_norm: true,
+                routed_post_norm: true,
+                combined_post_norm: true,
+                routed_pre_norm: true,
+                router_scale: true,
+                expert_output_scale: true,
+            }),
+            output_scale: true,
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            dense_feed_forward: None,
+            exclusive_dense_post_norm: false,
+            activation: Activation::GeluTanh,
+            ple: false,
+        };
+        let entry = |window: Option<u32>, value_source_kind: ValueSourceKind| LayerSchedule {
+            kind: LayerKind::Attention,
+            attention: LayerAttentionConfig {
+                head_dim: HEAD_DIM as u32,
+                kv_heads: KV_HEADS as u32,
+                mask_window: window,
+                value_source_kind,
+                key_source_kind: KeySourceKind::ProjectedK,
+                rope_table: RopeTableSel {
+                    cos_name: "rope_cos",
+                    sin_name: "rope_sin",
+                },
+                rope_pairing: RopePairing::SplitHalf {
+                    pairs: PAIRS as u32,
+                },
+                score_scale: AttentionScoreScale::Unscaled,
+                value_norm: true,
+            },
+            ffn: ffn_config,
+        };
+        let schedule = alloc::vec![
+            entry(Some(SWA_WINDOW as u32), ValueSourceKind::ProjectedV),
+            entry(None, ValueSourceKind::SharedWithKey),
+        ];
+        let build = |ring: bool| {
+            lfm2_two_range_cached_forward_program_with_experts(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                EXPERT_FF as u32,
+                QUERY_HEADS as u32,
+                2,
+                EXPERT_COUNT as u32,
+                EXPERT_USED as u32,
+                0,
+                &schedule,
+                Some(EmbeddingScale::Sqrt),
+                Some(SOFTCAP),
+                true,
+                None,
+                ring,
+            )
+            .expect("the two-layer two-range cached program lowers")
+            .0
+        };
+        let leading_extent = |program: &[Op], name: &str| {
+            program.iter().find_map(|operation| match operation {
+                Op::Input {
+                    name: Some(leaf),
+                    shape,
+                    ..
+                } if leaf == name => shape.first().copied(),
+                _ => None,
+            })
+        };
+        let has_input = |program: &[Op], name: &str| {
+            program.iter().any(
+                |operation| matches!(operation, Op::Input { name: Some(leaf), .. } if leaf == name),
+            )
+        };
+
+        let with_ring = build(true);
+        assert_eq!(
+            leading_extent(&with_ring, "kv_cache.0.k_even"),
+            Some(Extent::Symbolic(SLIDING_KV_SYMBOL)),
+            "the windowed layer's cache is bounded by the sliding slot"
+        );
+        assert_eq!(
+            leading_extent(&with_ring, "kv_cache.1.k_even"),
+            Some(Extent::Symbolic(1)),
+            "the full layer's cache keeps slot 1"
+        );
+        assert!(has_input(&with_ring, SLIDING_CACHED_LEN_INPUT));
+
+        let without_ring = build(false);
+        assert_eq!(
+            leading_extent(&without_ring, "kv_cache.0.k_even"),
+            Some(Extent::Symbolic(1)),
+            "ring off: the windowed layer is bounded by slot 1 as before"
+        );
+        assert!(!has_input(&without_ring, SLIDING_CACHED_LEN_INPUT));
     }
 
     /// Bisects [`gemma4_synthetic_parity_localizes_first_divergence`]'s

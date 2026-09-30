@@ -655,6 +655,17 @@ pub(super) fn cached_attention_candidates(
     // and the ninth-operand push near the end of this loop need the SAME
     // node identity to agree it is the one true `cached_len`.
     let named_cached_len = find_named_input(program, "cached_len");
+    // a sliding-ring program (`crate::spec::SLIDING_CACHED_LEN_INPUT`) bounds
+    // its windowed layers by their own live-row count, a second rank-0 leaf;
+    // a layer's mask names whichever of the two it reads, and that same node
+    // is what its ninth operand must bind.
+    let named_cached_lens: Vec<NodeId> = [
+        named_cached_len,
+        find_named_input(program, crate::spec::SLIDING_CACHED_LEN_INPUT),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     for output_position in (0..program.len()).rev() {
         let output = NodeId(output_position as u32);
         let Some(attended_sum) = binary_elementwise(program, output, ScalarOp::Multiply) else {
@@ -808,18 +819,35 @@ pub(super) fn cached_attention_candidates(
         // mask node is sound whenever its bound is the SAME `cached_len`
         // leaf the ninth operand below reads.
         #[cfg(feature = "metal-fuse-attn-decode")]
-        let (cached_scaled_source, cached_lower_inclusive, cached_padding_matched, via_gemma_template) =
-            match cached_padding_mask_lower_bound(program, cached_score_parts[0], named_cached_len)
-            {
-                Some((inner, bound, via_gemma_template)) => (inner, bound, true, via_gemma_template),
-                None => (cached_score_parts[0], i64::MIN, false, false),
-            };
+        let (
+            cached_scaled_source,
+            cached_lower_inclusive,
+            cached_padding_matched,
+            via_gemma_template,
+            matched_cached_len,
+        ) = match named_cached_lens.iter().find_map(|&candidate| {
+            cached_padding_mask_lower_bound(program, cached_score_parts[0], Some(candidate))
+                .map(|found| (found, candidate))
+        }) {
+            Some(((inner, bound, via_gemma_template), matched)) => {
+                (inner, bound, true, via_gemma_template, Some(matched))
+            }
+            None => (cached_score_parts[0], i64::MIN, false, false, None),
+        };
         #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let (cached_scaled_source, cached_lower_inclusive, _cached_padding_matched) =
-            match unwrap_cached_padding_select(program, cached_score_parts[0], named_cached_len) {
-                Some(inner) => (inner, i64::MIN, true),
-                None => (cached_score_parts[0], i64::MIN, false),
-            };
+        let (
+            cached_scaled_source,
+            cached_lower_inclusive,
+            _cached_padding_matched,
+            matched_cached_len,
+        ) = match named_cached_lens.iter().find_map(|&candidate| {
+            unwrap_cached_padding_select(program, cached_score_parts[0], Some(candidate))
+                .map(|found| (found, candidate))
+        }) {
+            Some((inner, matched)) => (inner, i64::MIN, true, Some(matched)),
+            None => (cached_score_parts[0], i64::MIN, false, None),
+        };
+        let bound_cached_len = matched_cached_len.or(named_cached_len);
         let Some(cached_scaled_parts) =
             binary_elementwise(program, cached_scaled_source, ScalarOp::Multiply)
         else {
@@ -1141,7 +1169,7 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
-            let ninth_operand_available = named_cached_len
+            let ninth_operand_available = bound_cached_len
                 .map(|node| shapes.of(node).is_empty())
                 .unwrap_or(false);
             if cached_padding_matched && cached_key_shape[0] > 0 && !ninth_operand_available {
@@ -1660,7 +1688,7 @@ pub(super) fn cached_attention_candidates(
         // indistinguishable at that value, so this is the one case that
         // must stay eight-operand regardless of bucketing.
         if cached_key_shape[0] > 0
-            && let Some(cached_len_node) = named_cached_len
+            && let Some(cached_len_node) = bound_cached_len
             && shapes.of(cached_len_node).is_empty()
         {
             operands.push((
