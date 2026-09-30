@@ -553,3 +553,10 @@ REBOOT LOSS, 2026-09-30.
      - niah at 8K/16K/32K with chunked prefill;
      - M0, the per-kernel GPU-time census that must precede any P2 v4.
 - **P2 (fused attention):** v1-v3 are not admitted. Design is paused until M0 data exists.
+- Tokenizer cross-check on slot-0-84's gemma4 26B MoE prompts (blob ea549b76…),
+  HEAD 95519693 against llama.cpp's ids:
+  - p0/p1/p2 are exactly equal (198/1000/2426 tokens). Old proxima gave 204/1013/2470
+    and diverged at index 3.
+  - The `\n` + 4 spaces + `--` case gives [140,726], as llama.cpp does.
+  - The gemma4-capable llama-tokenize equals HEAD on 15 probe files.
+  - Evidence: `.long_ctx_backups/tok/peer_check/`.
