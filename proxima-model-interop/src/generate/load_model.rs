@@ -808,6 +808,11 @@ pub struct LoadedModel<'file> {
     /// (`paired_gate_up_reduce`/`fused_qkv_reduce` on a non-qwen35
     /// checkpoint), which never resolves against an `Architecture` at all.
     pub(super) architecture_impl: Option<&'static dyn Architecture>,
+    /// The checkpoint's own `{arch}.rope.scaling.*`
+    /// ([`RopeScaling::from_gguf`]); a per-call
+    /// [`ServingConfig::rope_scaling`] replaces it. Read only through
+    /// [`Self::effective_rope_scaling`].
+    pub(super) rope_scaling: RopeScaling,
     /// One `(kv_heads, head_dim, window)` entry per layer that owns a KV
     /// cache ([`Architecture::kv_layers`]), as this decode path allocates it:
     /// every position is stored, so a sliding layer's window is dropped and

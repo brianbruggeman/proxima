@@ -279,6 +279,11 @@ pub enum InteropError {
         context_length: u32,
     },
 
+    /// `{arch}.rope.scaling.type` named a scaling law this crate does not
+    /// implement.
+    #[error("unknown rope scaling type {found:?}: expected none, linear, or yarn")]
+    UnknownRopeScalingType { found: String },
+
     /// [`crate::serving::apply_serving_config`] found a [`crate::serving::ServingConfig`]
     /// field requesting behavior this forward path does not implement yet --
     /// what used to be a `todo!` naming the gap now surfaces as data, since a

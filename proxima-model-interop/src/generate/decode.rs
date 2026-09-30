@@ -2255,6 +2255,14 @@ impl<'file> LoadedModel<'file> {
         }
     }
 
+    /// The rope scaling this call runs: `serving_config.rope_scaling` when
+    /// the caller set one, else the checkpoint's own `{arch}.rope.scaling.*`.
+    /// The one place a scaling is chosen; [`build_position_inputs`] takes
+    /// the result, never the raw field.
+    pub(super) fn effective_rope_scaling(&self, serving_config: &ServingConfig) -> RopeScaling {
+        serving_config.rope_scaling.unwrap_or(self.rope_scaling)
+    }
+
     /// The first auto-tune step (`crate::memory_fit`'s own module doc):
     /// derives this checkpoint's device-memory budget from its own shape at
     /// `serving_config.context_length`, probes the host's own device facts
@@ -3468,6 +3476,7 @@ impl<'file> LoadedModel<'file> {
                         self.architecture_impl
                             .as_ref()
                             .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
+                        self.effective_rope_scaling(serving_config),
                     );
                     #[cfg(feature = "instrument")]
                     let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
@@ -5916,6 +5925,7 @@ impl<'file> LoadedModel<'file> {
                     self.architecture_impl
                         .as_ref()
                         .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
+                    self.effective_rope_scaling(serving_config),
                 );
                 #[cfg(feature = "instrument")]
                 let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
@@ -6462,6 +6472,7 @@ impl<'file> LoadedModel<'file> {
             self.architecture_impl
                 .as_ref()
                 .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
+            self.effective_rope_scaling(&serving_config),
         );
 
         // The SAME program-derived cache-leaf-name/step_inputs assembly

@@ -184,6 +184,7 @@ use crate::bind::{
 };
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;
+use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;
 use crate::serving::apply_serving_config;

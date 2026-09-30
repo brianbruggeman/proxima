@@ -1083,11 +1083,11 @@ pub(super) fn push_kv_named_blocks<'call>(
 /// angle (`start_position`, not 0 -- a generated token's position is
 /// `cached_len`, never the start of the sequence), plus the
 /// reduce-broadcast `eps` vector sized to match.
-pub(super) struct PositionInputs {
+pub(crate) struct PositionInputs {
     pub(super) ids_i32: Vec<i32>,
-    pub(super) epsilon: Vec<f32>,
-    pub(super) cos: Vec<f32>,
-    pub(super) sin: Vec<f32>,
+    pub(crate) epsilon: Vec<f32>,
+    pub(crate) cos: Vec<f32>,
+    pub(crate) sin: Vec<f32>,
 }
 
 /// Builds the `ids`/`eps`/`rope_cos`/`rope_sin` step inputs every
@@ -1108,36 +1108,55 @@ pub(super) struct PositionInputs {
 /// `gemma4_sliding_rope_table`, which never calls this function) leaves
 /// every pair's angle undivided -- full rotation, this function's only
 /// behaviour before `rope_freqs` existed.
-pub(super) fn build_position_inputs(
+///
+/// `scaling` is the call's [`RopeScaling`]
+/// (`LoadedModel::effective_rope_scaling`): each pair's angle is
+/// `position * inv_frequency` with the inverse frequency taken from
+/// [`RopeScaling::inv_frequencies`], and both `cos` and `sin` are multiplied
+/// by [`RopeScaling::attention_factor`], which scales attention logits by
+/// its square with no kernel change. [`RopeScaling::None`] keeps the
+/// unscaled expression, so its table is bit-identical to the one this
+/// function produced before scaling existed. There is no scaling-free
+/// overload: a caller that wants none says [`RopeScaling::None`].
+pub(crate) fn build_position_inputs(
     new_ids: &[u32],
     start_position: usize,
     head_dim: u32,
     rope_freq_base: f32,
     rms_epsilon: f32,
     rope_freqs: Option<&[f32]>,
+    scaling: RopeScaling,
 ) -> PositionInputs {
     let new_count = new_ids.len();
     let pairs = head_dim as usize / 2;
     let ids_i32: Vec<i32> = new_ids.iter().map(|&id| id as i32).collect();
     let epsilon = alloc::vec![rms_epsilon; new_count];
+    let inv_frequencies = scaling.inv_frequencies(head_dim, rope_freq_base);
+    let attention_factor = scaling.attention_factor();
 
     let mut cos = alloc::vec![1.0f32; new_count * pairs];
     let mut sin = alloc::vec![0.0f32; new_count * pairs];
     for offset in 0..new_count {
         let position = (start_position + offset) as f32;
-        for pair in 0..pairs {
+        for pair_index in 0..head_dim / 2 {
             // Qwen3.6 text positions use three MRoPE sections (11, 11, 10
             // pairs). Each section restarts its local frequency index; the
             // graph still consumes one flat table, so only angle generation
             // changes here.
-            let frequency_pair = pair;
-            let mut theta =
-                position * rope_freq_base.powf(-((2 * frequency_pair) as f32) / (head_dim as f32));
+            let pair = pair_index as usize;
+            let mut theta = match &inv_frequencies {
+                Some(frequencies) => position * frequencies[pair],
+                None => {
+                    position
+                        * rope_freq_base
+                            .powf(-f32_from_u32(2 * pair_index) / f32_from_u32(head_dim))
+                }
+            };
             if let Some(factor) = rope_freqs.and_then(|freqs| freqs.get(pair)) {
                 theta /= factor;
             }
-            cos[offset * pairs + pair] = theta.cos();
-            sin[offset * pairs + pair] = theta.sin();
+            cos[offset * pairs + pair] = theta.cos() * attention_factor;
+            sin[offset * pairs + pair] = theta.sin() * attention_factor;
         }
     }
 
@@ -1153,6 +1172,7 @@ pub(super) fn build_position_inputs(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod rope_freqs_tests {
     use super::build_position_inputs;
+    use crate::rope_scaling::RopeScaling;
 
     /// gemma4's real checkpoint shape: `head_dim=512` (256 pairs),
     /// `rope_freq_base=1e6`, `rope_freqs.weight = [1.0]*64 + [1e30]*192`.
@@ -1171,7 +1191,15 @@ mod rope_freqs_tests {
         rope_freqs.extend(alloc::vec![1.0e30_f32; 192]);
         let positions = [1u32, 100, 4096];
 
-        let full_rotation = build_position_inputs(&positions, 0, head_dim, rope_freq_base, 1e-5, None);
+        let full_rotation = build_position_inputs(
+            &positions,
+            0,
+            head_dim,
+            rope_freq_base,
+            1e-5,
+            None,
+            RopeScaling::None,
+        );
         let scaled = build_position_inputs(
             &positions,
             0,
@@ -1179,6 +1207,7 @@ mod rope_freqs_tests {
             rope_freq_base,
             1e-5,
             Some(&rope_freqs),
+            RopeScaling::None,
         );
 
         let pairs = head_dim as usize / 2;
@@ -1207,6 +1236,139 @@ mod rope_freqs_tests {
                     scaled.sin[index]
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod yarn_rope_table_tests {
+    use super::build_position_inputs;
+    use crate::rope_scaling::RopeScaling;
+
+    const HEAD_DIM: u32 = 128;
+    const ROPE_BASE: f32 = 1_000_000.0;
+    const ATTENTION_FACTOR: f64 = 1.138_629_436_111;
+    const TWO_F32_ROUNDINGS_AT_UNIT: f64 = 1.0 / 4_194_304.0;
+
+    /// `yarn-worked-example.md`'s scaled cos/sin table: (position, pair,
+    /// theta, cos x af, sin x af) for Qwen3-8B's `YaRN` (base 1e6, dim 128,
+    /// factor 4, original 32768), 5 pairs at each of the two long positions.
+    const CELLS: [(usize, usize, f64, f64, f64); 10] = [
+        (32_767, 0, 32_767.0, 1.118_433_966_337, 0.213_500_481_795),
+        (
+            32_767,
+            20,
+            436.954_967_656_207,
+            -1.096_280_897_338,
+            -0.307_644_578_868,
+        ),
+        (
+            32_767,
+            30,
+            34.875_916_231_660,
+            -1.081_400_139_014,
+            -0.356_441_765_391,
+        ),
+        (
+            32_767,
+            40,
+            1.456_722_027_495,
+            0.129_606_833_300,
+            1.131_229_004_905,
+        ),
+        (
+            32_767,
+            63,
+            0.010_165_437_478,
+            1.138_570_605_843,
+            0.011_574_466_996,
+        ),
+        (
+            131_071,
+            0,
+            131_071.0,
+            -0.931_380_090_655,
+            -0.654_987_114_049,
+        ),
+        (
+            131_071,
+            20,
+            1_747.859_876_267_791,
+            0.481_312_027_679,
+            1.031_899_086_533,
+        ),
+        (
+            131_071,
+            30,
+            139.506_858_009_580,
+            0.329_971_771_655,
+            1.089_768_609_699,
+        ),
+        (
+            131_071,
+            40,
+            5.827_021_480_935,
+            1.022_203_394_571,
+            -0.501_574_733_118,
+        ),
+        (
+            131_071,
+            63,
+            0.040_662_680_614,
+            1.137_688_230_341,
+            0.046_286_967_077,
+        ),
+    ];
+
+    fn table_at(position: usize) -> (alloc::vec::Vec<f32>, alloc::vec::Vec<f32>) {
+        let inputs = build_position_inputs(
+            &[0u32],
+            position,
+            HEAD_DIM,
+            ROPE_BASE,
+            1e-6,
+            None,
+            RopeScaling::yarn(4.0, 32_768),
+        );
+        (inputs.cos, inputs.sin)
+    }
+
+    /// The tolerance the worked example derives: two f32 roundings of theta
+    /// (`inv_freq` and the position product, `|theta| x 2^-22` together)
+    /// carried through a unit-slope sin/cos and scaled by the attention
+    /// factor, plus 1e-6 for the f32 cos/sin itself.
+    fn tolerance(theta: f64) -> f64 {
+        theta.abs() * TWO_F32_ROUNDINGS_AT_UNIT * ATTENTION_FACTOR + 1e-6
+    }
+
+    #[test]
+    fn yarn_scaled_rope_table_matches_the_worked_example_cells() {
+        let (position_zero_cos, position_zero_sin) = table_at(0);
+        for pair in 0..64 {
+            assert!(
+                (f64::from(position_zero_cos[pair]) - 1.138_629_436_109).abs() <= 1e-6,
+                "position 0 pair {pair}: cos must be the attention factor"
+            );
+            assert!(
+                f64::from(position_zero_sin[pair]).abs() <= 1e-6,
+                "position 0 pair {pair}: sin must be zero"
+            );
+        }
+
+        for (position, pair, theta, expected_cos, expected_sin) in CELLS {
+            let (cos, sin) = table_at(position);
+            let bound = tolerance(theta);
+            let cos_error = (f64::from(cos[pair]) - expected_cos).abs();
+            let sin_error = (f64::from(sin[pair]) - expected_sin).abs();
+            assert!(
+                cos_error <= bound,
+                "position {position} pair {pair}: cos error {cos_error} exceeds {bound}"
+            );
+            assert!(
+                sin_error <= bound,
+                "position {position} pair {pair}: sin error {sin_error} exceeds {bound}"
+            );
         }
     }
 }

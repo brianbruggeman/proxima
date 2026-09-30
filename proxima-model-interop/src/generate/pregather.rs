@@ -2628,6 +2628,7 @@ impl<'file> LoadedModel<'file> {
             let bound = bound;
             let expert_slab =
                 crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
+            let rope_scaling = RopeScaling::from_gguf(parsed)?;
             #[cfg(all(feature = "metal", target_os = "macos"))]
             let kv_layers = resolved
                 .kv_layers(parsed)?
@@ -2640,6 +2641,7 @@ impl<'file> LoadedModel<'file> {
                 weights: bound.weights,
                 architecture: bound.architecture,
                 architecture_impl: Some(resolved),
+                rope_scaling,
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 kv_layers,
                 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -2755,6 +2757,7 @@ impl<'file> LoadedModel<'file> {
             build_single_range_program(&architecture, qk_norm)?
         };
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
+        let rope_scaling = RopeScaling::from_gguf(parsed)?;
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let kv_layers = crate::bind::kv_layers_from_metadata(parsed)?;
         Self {
@@ -2763,6 +2766,7 @@ impl<'file> LoadedModel<'file> {
             weights,
             architecture,
             architecture_impl: None,
+            rope_scaling,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             kv_layers,
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -2874,6 +2878,9 @@ impl<'file> LoadedModel<'file> {
             weights,
             architecture,
             architecture_impl: None,
+            // safetensors carries no rope.scaling key this crate reads
+            // (`crate::hf_config::architecture_from_hf_config` parses none).
+            rope_scaling: RopeScaling::None,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             kv_layers,
             // safetensors carries no `_exps.`-style naming convention this
