@@ -3,13 +3,16 @@
 //!
 //! Usage:
 //! `cargo run -p proxima-model-interop --example gemma4_ring_parity --features std,metal -- \
-//!   <gguf> (--record FILE | --expect FILE [--ring-offset ROWS] | --ollama-facts)`
+//!   <gguf> (--record FILE [--max-tokens N] | --expect FILE [--ring-offset ROWS] | --ollama-facts)`
 //!
-//! `--record` decodes the same 2,048-token chat-templated prompt for 256 greedy
-//! tokens through the full KV cache (`KvLayout::Full`). `--expect` decodes it
-//! twice, once through the full cache and once through the sliding ring
-//! (`KvLayout::SlidingRing`, what `LoadedModel::load` binds), and prints
-//! `full vs head: N/256` and `ring vs head: N/256` against the recorded tokens.
+//! `--record` decodes the same 2,048-token chat-templated prompt for up to
+//! `--max-tokens N` (default 256) greedy tokens through the full KV cache
+//! (`KvLayout::Full`), writes however many the run produced, and prints
+//! `recorded K`. `--expect` decodes it twice, once through the full cache and
+//! once through the sliding ring (`KvLayout::SlidingRing`, what
+//! `LoadedModel::load` binds), and prints `full vs head: M/K` and
+//! `ring vs head: M/K` plus the first divergence index. A length difference is a
+//! mismatch: positions past the shorter side count as mismatches.
 //! The prompt is public-domain text (Gettysburg Address, Declaration of
 //! Independence, Moby-Dick, Pride and Prejudice, Origin of Species) cycled and
 //! trimmed to exactly 2,048 tokens. `--ollama-facts` sends the four
@@ -17,7 +20,7 @@
 //!
 //! `--ring-offset ROWS` is the control: it writes every sliding-ring row that
 //! many slots away from where the read looks for it, so `ring vs head` must
-//! fall below 256 while `full vs head` stays 256. A ring check that still
+//! fall below K while `full vs head` stays K. A ring check that still
 //! passes with an offset is not reading the ring.
 
 use std::env;
@@ -38,7 +41,7 @@ use proxima_tokenizer::{TokenizerError, Vocab, encode_with_bos_eos};
 use serde_json::{Value, json};
 
 const PROMPT_TOKENS: usize = 2048;
-const GENERATED_TOKENS: usize = 256;
+const DEFAULT_MAX_TOKENS: usize = 256;
 const FACT_MAX_TOKENS: usize = 48;
 const OLLAMA_ADDRESS: &str = "localhost:11434";
 const OLLAMA_MODEL: &str = "gemma4:e2b-it-qat";
@@ -56,7 +59,7 @@ const CORPUS: [&str; 5] = [
 #[derive(Debug, thiserror::Error)]
 enum ExampleError {
     #[error(
-        "usage: gemma4_ring_parity <model.gguf> (--record FILE | --expect FILE [--ring-offset ROWS] | --ollama-facts)"
+        "usage: gemma4_ring_parity <model.gguf> (--record FILE [--max-tokens N] | --expect FILE [--ring-offset ROWS] | --ollama-facts)"
     )]
     Usage,
     #[error("{context}: {source}")]
@@ -75,9 +78,15 @@ enum ExampleError {
 }
 
 enum Mode {
-    Record(PathBuf),
+    Record { output: PathBuf, max_tokens: usize },
     Expect { head: PathBuf, ring_offset: usize },
     OllamaFacts,
+}
+
+struct Divergence {
+    matched: usize,
+    compared: usize,
+    first: Option<usize>,
 }
 
 enum CacheArm {
@@ -154,7 +163,19 @@ fn io_error(context: &str, source: std::io::Error) -> ExampleError {
 
 fn parse_mode(mut args: impl Iterator<Item = String>) -> Result<Mode, ExampleError> {
     let mode = match args.next().as_deref() {
-        Some("--record") => Mode::Record(args.next().ok_or(ExampleError::Usage)?.into()),
+        Some("--record") => {
+            let output = args.next().ok_or(ExampleError::Usage)?.into();
+            let max_tokens = match args.next().as_deref() {
+                None => DEFAULT_MAX_TOKENS,
+                Some("--max-tokens") => args
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0)
+                    .ok_or(ExampleError::Usage)?,
+                Some(_) => return Err(ExampleError::Usage),
+            };
+            Mode::Record { output, max_tokens }
+        }
         Some("--expect") => {
             let head = args.next().ok_or(ExampleError::Usage)?.into();
             let ring_offset = match args.next().as_deref() {
@@ -238,16 +259,9 @@ fn serving_config() -> ServingConfig<'static> {
     }
 }
 
-fn run_arm(model: &LoadedModel, prompt: &str, arm: &CacheArm) -> Result<Vec<u32>, ExampleError> {
+fn run_arm(model: &LoadedModel, prompt: &str, max_tokens: usize) -> Result<Vec<u32>, ExampleError> {
     let (ids, _text, _stopped_by_eos) =
-        model.generate_with_serving_config(prompt, GENERATED_TOKENS, serving_config())?;
-    if ids.len() != GENERATED_TOKENS {
-        return Err(ExampleError::Failed(format!(
-            "{} arm produced {} tokens, expected {GENERATED_TOKENS}",
-            arm.label(),
-            ids.len()
-        )));
-    }
+        model.generate_with_serving_config(prompt, max_tokens, serving_config())?;
     Ok(ids)
 }
 
@@ -265,23 +279,33 @@ fn read_head_ids(path: &Path) -> Result<Vec<u32>, ExampleError> {
             })
         })
         .collect::<Result<Vec<u32>, ExampleError>>()?;
-    if ids.len() != GENERATED_TOKENS {
-        return Err(ExampleError::Failed(format!(
-            "{}: {} ids, expected {GENERATED_TOKENS}",
-            path.display(),
-            ids.len()
-        )));
-    }
     Ok(ids)
 }
 
+fn compare_to_head(ids: &[u32], head: &[u32]) -> Divergence {
+    let compared = ids.len().max(head.len());
+    let first = (0..compared).find(|&index| ids.get(index) != head.get(index));
+    let matched = ids.iter().zip(head).filter(|(left, right)| left == right).count();
+    Divergence {
+        matched,
+        compared: head.len(),
+        first,
+    }
+}
+
 fn report_against_head(arm: &CacheArm, ids: &[u32], head: &[u32]) {
-    let equal = ids
-        .iter()
-        .zip(head)
-        .filter(|(left, right)| left == right)
-        .count();
-    println!("{} vs head: {equal}/{GENERATED_TOKENS}", arm.label());
+    let divergence = compare_to_head(ids, head);
+    let first = divergence
+        .first
+        .map_or_else(|| "none".to_string(), |index| index.to_string());
+    println!(
+        "{} vs head: {}/{} first_divergence={first} arm_len={} head_len={}",
+        arm.label(),
+        divergence.matched,
+        divergence.compared,
+        ids.len(),
+        head.len()
+    );
 }
 
 fn with_model<T>(
@@ -300,10 +324,10 @@ fn with_model<T>(
     action(&model, &vocab)
 }
 
-fn record(gguf_path: &str, output: &Path) -> Result<(), ExampleError> {
+fn record(gguf_path: &str, output: &Path, max_tokens: usize) -> Result<(), ExampleError> {
     with_model(gguf_path, &CacheArm::Full, |model, vocab| {
         let prompt = build_long_prompt(vocab)?;
-        let ids = run_arm(model, &prompt, &CacheArm::Full)?;
+        let ids = run_arm(model, &prompt, max_tokens)?;
         let line = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
         fs::write(output, line)
             .map_err(|source| io_error(&output.display().to_string(), source))?;
@@ -315,7 +339,7 @@ fn record(gguf_path: &str, output: &Path) -> Result<(), ExampleError> {
 fn expect_arm(gguf_path: &str, arm: &CacheArm, head: &[u32]) -> Result<(), ExampleError> {
     with_model(gguf_path, arm, |model, vocab| {
         let prompt = build_long_prompt(vocab)?;
-        let ids = run_arm(model, &prompt, arm)?;
+        let ids = run_arm(model, &prompt, head.len() + 1)?;
         report_against_head(arm, &ids, head);
         Ok(())
     })
@@ -425,7 +449,7 @@ fn run() -> Result<(), ExampleError> {
     let mut args = env::args().skip(1);
     let gguf_path = args.next().ok_or(ExampleError::Usage)?;
     match parse_mode(args)? {
-        Mode::Record(output) => record(&gguf_path, &output),
+        Mode::Record { output, max_tokens } => record(&gguf_path, &output, max_tokens),
         Mode::Expect { head, ring_offset } => expect(&gguf_path, &head, ring_offset),
         Mode::OllamaFacts => ollama_facts(),
     }
