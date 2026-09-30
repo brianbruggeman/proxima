@@ -369,16 +369,20 @@ impl SendPipe for InterceptPipe {
 
                         #[cfg(not(feature = "intercept-capture"))]
                         {
-                            let dump_path = format!(
-                                "/tmp/proxima-request-{}.json",
+                            let dump_path = std::env::temp_dir().join(format!(
+                                "proxima-request-{}.json",
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis()
-                            );
+                            ));
                             if !request_body.is_empty() {
                                 let _ = std::fs::write(&dump_path, &request_body);
-                                eprintln!("{} [request-body] dumped to {dump_path}", ts());
+                                eprintln!(
+                                    "{} [request-body] dumped to {}",
+                                    ts(),
+                                    dump_path.display()
+                                );
                             }
                         }
 
@@ -483,20 +487,21 @@ impl SendPipe for InterceptPipe {
 
                         #[cfg(not(feature = "intercept-capture"))]
                         {
-                            let dump_path = format!(
-                                "/tmp/proxima-response-{}.txt",
+                            let dump_path = std::env::temp_dir().join(format!(
+                                "proxima-response-{}.txt",
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis()
-                            );
+                            ));
                             let mut combined = response_head_wire.clone();
                             combined.extend_from_slice(&stream_buf);
                             let _ = std::fs::write(&dump_path, &combined);
                             eprintln!(
-                                "{} [response-dump] {} bytes -> {dump_path}",
+                                "{} [response-dump] {} bytes -> {}",
                                 ts(),
-                                combined.len()
+                                combined.len(),
+                                dump_path.display()
                             );
                         }
 
@@ -577,7 +582,7 @@ static H2_DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// dump files, so the captured frames decode offline with proxima-h2-codec and
 /// the Connect/protobuf vocab can be characterized from real bytes (§14). This
 /// observes — it does not terminate h2; full termination/forwarding is the
-/// follow-on once the wire is known. Dump dir: `PROXIMA_INTERCEPT_H2_DUMP` or /tmp.
+/// follow-on once the wire is known. Dump dir: `PROXIMA_INTERCEPT_H2_DUMP` or the OS temp dir.
 async fn relay_h2_capture<Reader, Writer>(
     host: &str,
     addr: &str,
@@ -591,8 +596,8 @@ where
     let upstream = connect_upstream_h2(host, addr).await?;
     let (upstream_reader, upstream_writer) = tokio::io::split(upstream);
 
-    let dump_dir =
-        std::env::var("PROXIMA_INTERCEPT_H2_DUMP").unwrap_or_else(|_| "/tmp".to_string());
+    let dump_dir = std::env::var("PROXIMA_INTERCEPT_H2_DUMP")
+        .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
     let safe_host: String = host
         .chars()
         .map(|character| {
