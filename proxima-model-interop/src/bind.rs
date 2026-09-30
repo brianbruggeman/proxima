@@ -6426,6 +6426,8 @@ mod real_openchat_file {
             named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
             named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
             named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+            let cached_len = alloc::vec![0.0f32];
+            named_blocks.push(("cached_len", QuantizedBlock::Float32(cached_len.as_slice())));
             for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
                 named_blocks.extend(layer_caches[layer].named_blocks(
                     k_even_name,
@@ -6470,10 +6472,17 @@ mod real_openchat_file {
                     .map(|value| alloc::string::String::from(*value))
             })
             .unwrap_or_default();
+        // with `cached-attention-streaming` the attention reduces fuse into
+        // `CachedAttention` before the matmul seam, and the packed cache
+        // operand is then refused at lowering instead: the same unsupported
+        // input, surfaced one stage earlier
+        let refused_at_the_matmul_seam = message.contains(
+            "quantized matmul activation varies along an output axis its packed weight also varies along",
+        );
+        let refused_at_lowering = message.contains("NotLowerable")
+            && message.contains("operand buffer missing at evaluation time");
         assert!(
-            message.contains(
-                "quantized matmul activation varies along an output axis its packed weight also varies along"
-            ),
+            refused_at_the_matmul_seam || refused_at_lowering,
             "unexpected panic message: {message}"
         );
     }
@@ -7735,10 +7744,11 @@ mod real_lfm2_hybrid_file {
     /// before the derive-when-absent fallback landed, this call errored
     /// outright, never reaching the `head_count_kv` array at all. This
     /// checkpoint's own `attention.head_count_kv` genuinely disagrees across
-    /// layers (conv vs. attention), so the correct, honest outcome here is
-    /// still an `Err` -- just the NAMED one
-    /// ([`InteropError::HeterogeneousMetadataArray`]), not a misdiagnosed
-    /// [`InteropError::MissingMetadataKey`] and not a silently wrong scalar.
+    /// layers (conv vs. attention), so `architecture_from_metadata` carries
+    /// the array as `kv_heads_by_layer` and leaves the uniform `kv_heads` view
+    /// at zero; a consumer that needs one scalar gets the NAMED error
+    /// ([`InteropError::HeterogeneousMetadataArray`]) from
+    /// [`ModelArchitecture::uniform_kv_heads`], never a silently wrong scalar.
     #[test]
     #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
     fn architecture_from_metadata_names_the_heterogeneous_kv_heads_honestly() {
@@ -7751,13 +7761,27 @@ mod real_lfm2_hybrid_file {
 
         let outcome = architecture_from_metadata(&parsed);
         std::println!("real_lfm2 architecture_from_metadata outcome={outcome:?}");
+        let architecture = outcome.expect(
+            "LFM2's real per-layer-varying head_count_kv must parse (never MissingMetadataKey)",
+        );
+        assert_eq!(architecture.kv_heads, 0, "the uniform view is zero when the array varies");
+        assert_eq!(
+            architecture.kv_heads_by_layer.len(),
+            architecture.block_count as usize,
+            "one head count per block"
+        );
+        assert!(
+            architecture.kv_heads_by_layer.contains(&0)
+                && architecture.kv_heads_by_layer.iter().any(|&heads| heads > 0),
+            "conv layers carry zero and attention layers a positive count: {:?}",
+            architecture.kv_heads_by_layer
+        );
         assert!(
             matches!(
-                outcome,
+                architecture.uniform_kv_heads(),
                 Err(InteropError::HeterogeneousMetadataArray { .. })
             ),
-            "LFM2's real per-layer-varying head_count_kv must surface the named, honest error \
-             (never MissingMetadataKey, and never a silently-picked scalar), got {outcome:?}"
+            "a uniform consumer must get the named error, never a silently-picked scalar"
         );
     }
 
