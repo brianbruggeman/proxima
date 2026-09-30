@@ -562,3 +562,12 @@ REBOOT LOSS, 2026-09-30.
   - The `\n` + 4 spaces + `--` case gives [140,726], as llama.cpp does.
   - The gemma4-capable llama-tokenize equals HEAD on 15 probe files.
   - Evidence: `.long_ctx_backups/tok/peer_check/`.
+- **Ring-parity oracle available (2026-09-30, from slot-0-84):**
+  `../../../../proxima-speculative-decode-evidence/preland/ring_prompt_llama_ids.json`
+  (llama-server f1ea20621, Metal, greedy: 51 ids ending at `<turn|>` 106) and
+  `ring_prompt_ids.json` (the 2048 prompt ids).
+  - slot-0-84's branch, which carries the truncation fix, matches all 51 on the full-KV arm.
+  - Main diverges at index 0.
+  - proxima keeps generating past 106. Known: gemma4's 106 is text-suppressed but not a
+    stop (the stop-set is downstream chat policy). The re-record is compared up to and including the
+    first 106.
