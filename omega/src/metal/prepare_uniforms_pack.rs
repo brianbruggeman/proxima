@@ -357,6 +357,11 @@ pub(super) fn live_block_inputs(
         {
             live_nodes.insert(lookup.indices);
         }
+        // rounds 1.. read their routes through bound buffers no operand names,
+        // so a host-supplied route leaf is live only through this list
+        if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &bound.kind {
+            live_nodes.extend(round_routes.iter().copied());
+        }
     }
     live_nodes.extend(effective_outputs.iter().copied());
     block_nodes
