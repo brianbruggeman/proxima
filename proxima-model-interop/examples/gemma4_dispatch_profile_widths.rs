@@ -37,7 +37,9 @@ use std::time::Duration;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig};
+use proxima_model_interop::{
+    ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig,
+};
 use proxima_telemetry::export::Exporter;
 use proxima_telemetry::recorder::Recorder;
 
@@ -70,7 +72,7 @@ fn install_console_telemetry() -> (Arc<Recorder>, Arc<AtomicUsize>) {
 
 fn profile_step(model: &LoadedModel<'_>, step: usize, max_tokens: usize, prompt: &str) {
     let serving_config = ServingConfig {
-        context_length: 64,
+        context_length: ContextLength::Within(64),
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
         flash_attention: false,

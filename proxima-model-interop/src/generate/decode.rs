@@ -2263,6 +2263,50 @@ impl<'file> LoadedModel<'file> {
         serving_config.rope_scaling.unwrap_or(self.rope_scaling)
     }
 
+    /// The context length this call serves at, before the memory fit clamps
+    /// it: [`resolve_context_length`] over the checkpoint's trained context
+    /// and [`Self::effective_rope_scaling`]. Every reader of
+    /// `serving_config.context_length` goes through here, so a `Native` (the
+    /// limit) or an explicit length past the limit is resolved or rejected
+    /// the same way whichever entry point reached it. A checkpoint that
+    /// declares no `context_length` has no limit to resolve to, so the
+    /// memory fit is the only bound.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::ContextExceedsTrained`] when an explicit length is
+    /// above the limit and `context_length` is `ContextLength::Within`.
+    pub(super) fn serving_context_length(
+        &self,
+        serving_config: &ServingConfig,
+    ) -> Result<u32, InteropError> {
+        resolve_context_length(
+            serving_config.context_length,
+            self.trained_context_length.unwrap_or(u32::MAX),
+            self.effective_rope_scaling(serving_config),
+        )
+    }
+
+    /// Writes [`Self::serving_context_length`] and
+    /// [`Self::effective_rope_scaling`] back into `serving_config`, so what
+    /// the memory fit and the decode loop read is the resolved value, on every
+    /// build (unlike [`Self::apply_memory_fit_gate`], which is `metal`-only
+    /// and skipped when `gpu_memory_fit` is off).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::serving_context_length`].
+    pub(super) fn apply_context_resolution(
+        &self,
+        serving_config: &mut ServingConfig,
+    ) -> Result<(), InteropError> {
+        serving_config.context_length = serving_config
+            .context_length
+            .resolved(self.serving_context_length(serving_config)?);
+        serving_config.rope_scaling = Some(self.effective_rope_scaling(serving_config));
+        Ok(())
+    }
+
     /// The first auto-tune step (`crate::memory_fit`'s own module doc):
     /// derives this checkpoint's device-memory budget from its own shape at
     /// `serving_config.context_length`, probes the host's own device facts
@@ -2330,7 +2374,7 @@ impl<'file> LoadedModel<'file> {
                 .next_multiple_of(omega::metal::page_size() as u64),
             ..self.checkpoint_weight_bytes
         };
-        let requested_context_length = serving_config.context_length;
+        let requested_context_length = self.serving_context_length(serving_config)?;
         let (context_length, outcome) = crate::memory_fit::fit_context_length(
             weights,
             &self.kv_layers,
@@ -2393,7 +2437,7 @@ impl<'file> LoadedModel<'file> {
                      to the largest value that does"
                 );
             }
-            serving_config.context_length = context_length;
+            serving_config.context_length = serving_config.context_length.resolved(context_length);
         }
         Ok(())
     }
@@ -2737,6 +2781,9 @@ impl<'file> LoadedModel<'file> {
         mut speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let mut resolved_serving_config = *serving_config;
+        self.apply_context_resolution(&mut resolved_serving_config)?;
+        let serving_config = &resolved_serving_config;
         // Read unconditionally: the ONLY reader lives behind
         // `#[cfg(all(feature = "metal-output-placement", target_os =
         // "macos"))]` below, so a build without that cfg combination never
@@ -2949,9 +2996,11 @@ impl<'file> LoadedModel<'file> {
                 })
                 .collect::<Result<_, InteropError>>()?;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let serving_context_length = self.serving_context_length(serving_config)? as usize;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let dense_attention_positions = kv_extent(
-            (seed_cached_len + ids.len() + max_tokens).min(serving_config.context_length as usize),
-            serving_config.context_length as usize,
+            (seed_cached_len + ids.len() + max_tokens).min(serving_context_length),
+            serving_context_length,
             serving_config.kv_bucket_tokens,
         );
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3248,8 +3297,9 @@ impl<'file> LoadedModel<'file> {
         // reached. `begin` trains `ngram-map`/`ngram-mod`'s own index over
         // the full prompt seen so far (`token_history` already holds
         // `seed_ids` + `ids` at this point in the function).
+        let drafter_context_length = self.serving_context_length(serving_config)?;
         let mut drafter_set =
-            DrafterSet::build(&serving_config.speculative, serving_config.context_length as usize);
+            DrafterSet::build(&serving_config.speculative, drafter_context_length as usize);
         drafter_set.begin(&token_history);
         let speculative_enabled = !drafter_set.is_empty() || forced_draft_width.is_some();
         let mut pending: VecDeque<u32> = VecDeque::new();
@@ -5816,7 +5866,7 @@ impl<'file> LoadedModel<'file> {
         let kv_heads = self.architecture.kv_heads as usize;
         let head_dim = self.architecture.head_dim as usize;
         let pairs = head_dim / 2;
-        let context_length = serving_config.context_length as usize;
+        let context_length = self.serving_context_length(serving_config)? as usize;
 
         // Sized from what THIS call can actually reach (`prompt_len +
         // max_tokens`), not `context_length` (default 131_072). Capping the
@@ -6449,11 +6499,12 @@ impl<'file> LoadedModel<'file> {
         node_ids: &[NodeId],
         gpu_layers: i32,
     ) -> Result<Vec<Vec<f32>>, InteropError> {
-        let serving_config = supported_serving_config(
+        let mut serving_config = supported_serving_config(
             gpu_layers,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             omega::MathMode::default(),
         );
+        self.apply_context_resolution(&mut serving_config)?;
         let mut runtime = BackendRuntime::new(&serving_config);
 
         let ids = proxima_tokenizer::encode_with_bos_eos(

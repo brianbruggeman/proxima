@@ -279,6 +279,20 @@ pub enum InteropError {
         context_length: u32,
     },
 
+    /// [`crate::serving::resolve_context_length`]: an explicit context
+    /// length above what the checkpoint was trained for (or its
+    /// [`crate::rope_scaling::RopeScaling`] admits) while
+    /// `ContextLength::Within` is requested.
+    #[error(
+        "requested context {requested} exceeds the limit {limit} under rope scaling {scaling:?}; \
+         request ContextLength::Extrapolate to run past it"
+    )]
+    ContextExceedsTrained {
+        requested: u32,
+        limit: u32,
+        scaling: crate::rope_scaling::RopeScaling,
+    },
+
     /// `{arch}.rope.scaling.type` named a scaling law this crate does not
     /// implement.
     #[error("unknown rope scaling type {found:?}: expected none, linear, or yarn")]

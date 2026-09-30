@@ -2641,6 +2641,7 @@ impl<'file> LoadedModel<'file> {
                 weights: bound.weights,
                 architecture: bound.architecture,
                 architecture_impl: Some(resolved),
+                trained_context_length: resolved.trained_context_length(parsed),
                 rope_scaling,
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 kv_layers,
@@ -2766,6 +2767,7 @@ impl<'file> LoadedModel<'file> {
             weights,
             architecture,
             architecture_impl: None,
+            trained_context_length: crate::dense::DENSE.trained_context_length(parsed),
             rope_scaling,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             kv_layers,
@@ -2878,8 +2880,10 @@ impl<'file> LoadedModel<'file> {
             weights,
             architecture,
             architecture_impl: None,
-            // safetensors carries no rope.scaling key this crate reads
-            // (`crate::hf_config::architecture_from_hf_config` parses none).
+            // safetensors carries no context_length or rope.scaling key this
+            // crate reads (`crate::hf_config::architecture_from_hf_config`
+            // parses neither), so the limit is the memory fit alone.
+            trained_context_length: None,
             rope_scaling: RopeScaling::None,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             kv_layers,

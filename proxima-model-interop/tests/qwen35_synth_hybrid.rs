@@ -26,7 +26,7 @@ use proxima_gguf::types::GgmlType;
 use proxima_gguf::writer::{GgufModel, write_complete};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::GPU_LAYERS_ALL;
-use proxima_model_interop::{LoadedModel, ServingConfig};
+use proxima_model_interop::{ContextLength, LoadedModel, ServingConfig};
 
 fn build_fixture_bytes() -> Vec<u8> {
     let mut metadata = fixture::architecture_metadata();
@@ -70,7 +70,7 @@ fn build_fixture_bytes() -> Vec<u8> {
 fn supported_config(gpu_layers: i32) -> ServingConfig<'static> {
     ServingConfig {
         model_path: "synthetic-qwen35-fixture",
-        context_length: 256,
+        context_length: ContextLength::Within(256),
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
         flash_attention: false,

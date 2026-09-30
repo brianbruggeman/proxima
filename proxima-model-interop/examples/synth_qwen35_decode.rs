@@ -15,7 +15,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig};
+use proxima_model_interop::{ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig};
 
 const FIXTURE_PATH: &str = "/tmp/proxima-synth-qwen35.gguf";
 
@@ -107,7 +107,7 @@ fn decode(
     // (`generate.rs:1497-1513`) since an example crate cannot import it.
     let config = ServingConfig {
         model_path: FIXTURE_PATH,
-        context_length: SERVING_CONTEXT,
+        context_length: ContextLength::Within(SERVING_CONTEXT),
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
         flash_attention: false,

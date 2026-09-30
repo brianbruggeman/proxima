@@ -278,7 +278,7 @@ mod tests {
 
     use super::RopeScaling;
     use crate::error::InteropError;
-    use crate::serving::ServingConfig;
+    use crate::serving::{ContextLength, ServingConfig, resolve_context_length};
     use crate::test_support::parsed_header;
 
     const QWEN3_TRAINED_CONTEXT: u32 = 40_960;
@@ -347,6 +347,16 @@ mod tests {
 
         assert_eq!(effective_overridden, linear);
         assert_eq!(effective_inherited, gguf_scaling);
+        assert_eq!(
+            resolve_context_length(
+                ContextLength::Native,
+                QWEN3_TRAINED_CONTEXT,
+                effective_overridden
+            )
+            .expect("no explicit request always resolves to the limit"),
+            81_920,
+            "the override, not the gguf's yarn, must set the limit (40960 x 2)"
+        );
     }
 
     const QWEN3_ORIGINAL_CONTEXT: u32 = 32_768;
