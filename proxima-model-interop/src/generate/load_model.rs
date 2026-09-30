@@ -808,6 +808,11 @@ pub struct LoadedModel<'file> {
     /// (`paired_gate_up_reduce`/`fused_qkv_reduce` on a non-qwen35
     /// checkpoint), which never resolves against an `Architecture` at all.
     pub(super) architecture_impl: Option<&'static dyn Architecture>,
+    /// The checkpoint's own `{arch}.context_length`
+    /// ([`Architecture::trained_context_length`]), `None` when the header
+    /// carries none (safetensors loads, synthetic fixtures). Read only
+    /// through [`Self::serving_context_length`].
+    pub(super) trained_context_length: Option<u32>,
     /// The checkpoint's own `{arch}.rope.scaling.*`
     /// ([`RopeScaling::from_gguf`]); a per-call
     /// [`ServingConfig::rope_scaling`] replaces it. Read only through

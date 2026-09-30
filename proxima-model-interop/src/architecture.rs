@@ -422,6 +422,17 @@ pub trait Architecture: Send + Sync {
         true
     }
 
+    /// `{general.architecture}.context_length` -- the context the checkpoint
+    /// was trained at, read off `parsed` (the trait carries no state, so the
+    /// GGUF is an argument like [`Architecture::step_state`]'s). `None` when
+    /// the key is absent or is not a `u32`. Keyed by `general.architecture`,
+    /// not [`Architecture::name`]: the dense fallback's name is a label, not
+    /// the metadata prefix. No architecture overrides this.
+    fn trained_context_length(&self, parsed: &ParsedGguf) -> Option<u32> {
+        let family = metadata_str(parsed, "general.architecture").ok()?;
+        crate::bind::metadata_u32(parsed, &alloc::format!("{family}.context_length")).ok()
+    }
+
     /// The KV layout [`crate::memory_fit::MemoryBudget::derive`]
     /// prices: one `(kv_heads, head_dim, window)` entry per layer that owns
     /// a KV cache, `window` being `Some(rows)` for a sliding-window layer.
@@ -753,6 +764,46 @@ mod tests {
         assert_eq!(
             registry.names(),
             alloc::vec!["qwen35", "qwen35moe", "gemma4", "dense"]
+        );
+    }
+
+    /// The measured `context_length` of each real checkpoint (`ollama
+    /// /api/show`, 2026-09-29), each written into a GGUF header by the real
+    /// encoder and read back through the registry-resolved architecture.
+    #[proxima::test]
+    #[case::gemma4_e2b_reads_131072("gemma4", "gemma4", 131_072)]
+    #[case::qwen35moe_a3b_reads_262144("qwen35moe", "qwen35moe", 262_144)]
+    #[case::qwen3_8b_dense_reads_40960("qwen3", "dense", 40_960)]
+    async fn trained_context_read(
+        #[case] family: &'static str,
+        #[case] resolved_name: &'static str,
+        #[case] expected: u32,
+    ) {
+        let context_key = alloc::format!("{family}.context_length");
+        let parsed = crate::test_support::parsed_header(alloc::vec![
+            ("general.architecture", Value::String(family.to_string())),
+            (context_key.as_str(), Value::U32(expected)),
+        ]);
+
+        let architecture = ArchitectureRegistry::with_builtin()
+            .resolve(&parsed)
+            .expect("every family in this table resolves");
+
+        assert_eq!(architecture.name(), resolved_name);
+        assert_eq!(architecture.trained_context_length(&parsed), Some(expected));
+    }
+
+    #[test]
+    fn trained_context_absent_key_reads_none() {
+        let parsed = crate::test_support::parsed_header(alloc::vec![(
+            "general.architecture",
+            Value::String("qwen3".to_string()),
+        )]);
+
+        assert_eq!(
+            crate::dense::DENSE.trained_context_length(&parsed),
+            None,
+            "a header without {{arch}}.context_length must read None, not a default"
         );
     }
 }

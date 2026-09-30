@@ -188,7 +188,7 @@ use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;
 use crate::serving::apply_serving_config;
-use crate::serving::{GdnPrefillBackend, ServingConfig};
+use crate::serving::{GdnPrefillBackend, ServingConfig, resolve_context_length};
 
 #[macro_use]
 mod load_model;

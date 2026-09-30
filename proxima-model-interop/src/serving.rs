@@ -514,6 +514,50 @@ pub struct ExpertResidencySchedule {
     pub per_layer_budget_bytes: u64,
 }
 
+/// `-c`: the context length a call asks for, and how strictly it is held to
+/// the limit [`resolve_context_length`] derives from the checkpoint (its
+/// trained context, or `original_context x factor` under
+/// [`RopeScaling`]). [`resolve_context_length`] is the one primitive that
+/// turns this into a served length; the memory fit
+/// (`crate::memory_fit::fit_context_length`) then clamps the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContextLength {
+    /// Serve the limit itself, e.g. 131072 for gemma4 at its trained context.
+    #[default]
+    Native,
+    /// Serve exactly `n` tokens; `n` above the limit is rejected with
+    /// [`InteropError::ContextExceedsTrained`].
+    Within(u32),
+    /// Serve exactly `n` tokens even past the limit -- llama.cpp's silent
+    /// behaviour, made explicit (e.g. `Extrapolate(131_072)` on an unscaled
+    /// qwen3-8b whose limit is 40960).
+    Extrapolate(u32),
+}
+
+impl ContextLength {
+    /// The explicit token count, or `None` for [`Self::Native`], which is
+    /// unresolved until [`resolve_context_length`] sees the checkpoint.
+    #[must_use]
+    pub const fn length(self) -> Option<u32> {
+        match self {
+            Self::Native => None,
+            Self::Within(length) | Self::Extrapolate(length) => Some(length),
+        }
+    }
+
+    /// `self` with its token count replaced by `length`, keeping whether
+    /// extrapolation was opted into, so a resolved or memory-fit-reduced
+    /// length re-resolves the same way. [`Self::Native`] becomes
+    /// [`Self::Within`]: a length derived from the limit is within it.
+    #[must_use]
+    pub const fn resolved(self, length: u32) -> Self {
+        match self {
+            Self::Native | Self::Within(_) => Self::Within(length),
+            Self::Extrapolate(_) => Self::Extrapolate(length),
+        }
+    }
+}
+
 /// One field per llama-server flag the repo owner's invocation sets,
 /// plus `model_path`. See the module doc for why each field's shape is
 /// what it is and why none of this crate's dependencies grew to carry it.
@@ -524,8 +568,11 @@ pub struct ServingConfig<'model> {
     /// flow); added because [`crate::bind::gguf_tensor_as_f32`]'s callers
     /// need a path from somewhere other than a source constant.
     pub model_path: &'model str,
-    /// `-c`: maximum context length in tokens.
-    pub context_length: u32,
+    /// `-c`: maximum context length in tokens, and whether one past the
+    /// checkpoint's limit is rejected or served ([`ContextLength`]; resolved
+    /// by [`resolve_context_length`]). The memory fit then clamps whichever
+    /// length results.
+    pub context_length: ContextLength,
     /// Replaces the GGUF's own `{arch}.rope.scaling.*` for this call when
     /// `Some` (e.g. `Some(RopeScaling::yarn(4.0, 32_768))` to run qwen3-8b at
     /// 131072); `None` keeps whatever the checkpoint declares.
@@ -887,7 +934,8 @@ impl Default for ServingConfig<'static> {
     /// The repo owner's invocation (`-c 131072 -np 1 -ctk q8_0 -ctv q8_0 -fa
     /// on -b 32 -ub 32 -ngl all -fit off --no-kv-offload --no-mmproj
     /// --reasoning-budget 1024 --min-p 0`) restricted to what
-    /// [`apply_serving_config`] admits: F32 KV (`-ctk`/`-ctv`), `-fa off`,
+    /// [`apply_serving_config`] admits, with `-c` unset (`Native`: the
+    /// checkpoint's own limit, [`resolve_context_length`]): F32 KV (`-ctk`/`-ctv`), `-fa off`,
     /// `--reasoning-budget 0`, and `-ngl` [`DEFAULT_GPU_LAYERS`]. A default
     /// the admission check rejects is a defect, so the deviations are the
     /// ones admission forces. `gpu_memory_fit` (`-fit`) also defaults `true`
@@ -902,7 +950,7 @@ impl Default for ServingConfig<'static> {
     fn default() -> Self {
         Self {
             model_path: DEFAULT_MODEL_PATH,
-            context_length: 131_072,
+            context_length: ContextLength::Native,
             rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -991,8 +1039,10 @@ impl Default for ServingConfig<'static> {
 ///
 /// # Errors
 ///
-/// [`InteropError::SequenceExceedsContextLength`] if `sequence` exceeds
-/// `config.context_length`, or [`InteropError::UnsupportedServingConfig`] at
+/// [`InteropError::SequenceExceedsContextLength`] if `sequence` exceeds an
+/// explicit `config.context_length` (a `Native` one is unresolved: the loaded
+/// model's own `serving_context_length` resolves it to the limit before any
+/// step reaches this gate), or [`InteropError::UnsupportedServingConfig`] at
 /// the first knob below whose value requests behavior this forward path
 /// does not implement yet.
 pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(), InteropError> {
@@ -1001,10 +1051,12 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
             "gdn_prefill_backend=mlx requires the mlx-gdn feature and an MLX installation".into(),
         ));
     }
-    if sequence > config.context_length as usize {
+    if let Some(context_length) = config.context_length.length()
+        && sequence > context_length as usize
+    {
         return Err(InteropError::SequenceExceedsContextLength {
             sequence,
-            context_length: config.context_length,
+            context_length,
         });
     }
 
@@ -1198,6 +1250,38 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
     Ok(())
 }
 
+/// The context length to serve at, before the memory fit clamps it
+/// (`crate::memory_fit::fit_context_length`, which takes the result as its
+/// requested length): the explicit length of `requested` ([`ContextLength::Within`]
+/// or [`ContextLength::Extrapolate`]), or for [`ContextLength::Native`] the
+/// limit `scaling` admits over `trained` ([`RopeScaling::limit`]). `trained` is the
+/// checkpoint's own `{arch}.context_length`
+/// (`Architecture::trained_context_length`), so a default request never
+/// silently runs past what the checkpoint was trained for.
+///
+/// # Errors
+///
+/// [`InteropError::ContextExceedsTrained`] when `requested` is
+/// [`ContextLength::Within`] a length above the limit.
+pub fn resolve_context_length(
+    requested: ContextLength,
+    trained: u32,
+    scaling: RopeScaling,
+) -> Result<u32, InteropError> {
+    let limit = scaling.limit(trained);
+    match requested {
+        ContextLength::Native => Ok(limit),
+        ContextLength::Within(requested) if requested > limit => {
+            Err(InteropError::ContextExceedsTrained {
+                requested,
+                limit,
+                scaling,
+            })
+        }
+        ContextLength::Within(requested) | ContextLength::Extrapolate(requested) => Ok(requested),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1215,7 +1299,11 @@ mod tests {
     fn default_matches_owner_invocation_semantics() {
         let config = ServingConfig::default();
 
-        assert_eq!(config.context_length, 131_072, "-c 131072");
+        assert_eq!(
+            config.context_length,
+            ContextLength::Native,
+            "-c unset resolves to the limit"
+        );
         assert_eq!(config.parallel_sequences, 1, "-np 1");
         assert_eq!(config.kv_cache_key_quant, GgmlType::F32, "-ctk f32");
         assert_eq!(config.kv_cache_value_quant, GgmlType::F32, "-ctv f32");
@@ -1293,7 +1381,7 @@ mod tests {
     fn fully_supported_config_applies_without_error() {
         let config = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
-            context_length: 131_072,
+            context_length: ContextLength::Native,
             rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -1381,7 +1469,7 @@ mod tests {
     #[test]
     fn prompt_longer_than_context_length_errors() {
         let config = ServingConfig {
-            context_length: 4,
+            context_length: ContextLength::Within(4),
             ..ServingConfig::default()
         };
         let error =
@@ -1465,7 +1553,7 @@ mod tests {
         };
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
-            context_length: 131_072,
+            context_length: ContextLength::Native,
             rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -1565,7 +1653,7 @@ mod tests {
         };
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
-            context_length: 131_072,
+            context_length: ContextLength::Native,
             rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -1655,7 +1743,7 @@ mod tests {
         };
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
-            context_length: 131_072,
+            context_length: ContextLength::Native,
             rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -1735,7 +1823,7 @@ mod tests {
         };
         let via_full_literal = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
-            context_length: 131_072,
+            context_length: ContextLength::Native,
             rope_scaling: None,
             parallel_sequences: 1,
             kv_cache_key_quant: GgmlType::F32,
@@ -1933,5 +2021,70 @@ mod tests {
             .expect_err("parallel_sequences over the admission ceiling must be rejected");
         assert!(error.to_string().contains("max_concurrent_requests"));
         assert!(!error.to_string().contains("phase_schedule"));
+    }
+
+    const QWEN3_TRAINED_CONTEXT: u32 = 40_960;
+
+    fn qwen3_yarn_4() -> RopeScaling {
+        RopeScaling::Yarn {
+            factor: 4.0,
+            original_context: 32_768,
+            extrapolation_factor: 1.0,
+            attention_factor: 1.138_629_4,
+            beta_fast: 32.0,
+            beta_slow: 1.0,
+        }
+    }
+
+    #[proxima::test]
+    #[case::qwen3_unscaled_resolves_to_the_trained_context(RopeScaling::None, 40_960)]
+    #[case::qwen3_yarn_4_resolves_to_original_context_times_factor(qwen3_yarn_4(), 131_072)]
+    async fn context_default_resolves(#[case] scaling: RopeScaling, #[case] expected: u32) {
+        let resolved =
+            resolve_context_length(ContextLength::Native, QWEN3_TRAINED_CONTEXT, scaling)
+                .expect("no explicit request must resolve to the limit");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[proxima::test]
+    #[case::one_past_trained_unscaled_is_rejected(
+        ContextLength::Within(40_961),
+        RopeScaling::None,
+        Err(40_960)
+    )]
+    #[case::one_past_yarn_limit_is_rejected(
+        ContextLength::Within(131_073),
+        qwen3_yarn_4(),
+        Err(131_072)
+    )]
+    #[case::extrapolation_admits_the_yarn_length_unscaled(
+        ContextLength::Extrapolate(131_072),
+        RopeScaling::None,
+        Ok(131_072)
+    )]
+    async fn context_over_limit(
+        #[case] requested: ContextLength,
+        #[case] scaling: RopeScaling,
+        #[case] expected: Result<u32, u32>,
+    ) {
+        let outcome = resolve_context_length(requested, QWEN3_TRAINED_CONTEXT, scaling);
+
+        match (expected, outcome) {
+            (Ok(admitted), Ok(resolved)) => assert_eq!(resolved, admitted),
+            (
+                Err(expected_limit),
+                Err(InteropError::ContextExceedsTrained {
+                    requested: reported_requested,
+                    limit,
+                    scaling: reported_scaling,
+                }),
+            ) => {
+                assert_eq!(Some(reported_requested), requested.length());
+                assert_eq!(limit, expected_limit);
+                assert_eq!(reported_scaling, scaling);
+            }
+            (expected, outcome) => panic!("expected {expected:?}, got {outcome:?}"),
+        }
     }
 }

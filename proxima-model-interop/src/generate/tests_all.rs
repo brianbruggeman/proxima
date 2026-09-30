@@ -2,8 +2,8 @@
 use super::phys_footprint_bytes;
 #[cfg(all(test, feature = "metal"))]
 use super::{
-    BackendRuntime, InteropError, LogitsSink, NodeValuesSink, PrefixState, ServingConfig,
-    map_expert_sources_to_segment, supported_serving_config, wants_bos,
+    BackendRuntime, InteropError, LogitsSink, NodeValuesSink, PrefixState,
+    ServingConfig, map_expert_sources_to_segment, supported_serving_config, wants_bos,
 };
 #[cfg(test)]
 use core::ops::ControlFlow;
@@ -2390,9 +2390,12 @@ pub(super) mod memory_fit_gate_tests {
 
     use crate::bind::{BoundWeights, ModelArchitecture};
     use crate::rope_scaling::RopeScaling;
+    use crate::serving::ContextLength;
     use crate::serving::ServingConfig;
 
     use super::LoadedModel;
+
+    const TRAINED_CONTEXT_LENGTH: u32 = 131_072;
 
     /// A minimal valid byte-level BPE vocab -- every base-byte token
     /// present ([`Vocab::new`]'s own precondition), no merges, no special
@@ -2433,6 +2436,7 @@ pub(super) mod memory_fit_gate_tests {
             },
             architecture: tiny_architecture(),
             architecture_impl: None,
+            trained_context_length: Some(TRAINED_CONTEXT_LENGTH),
             rope_scaling: RopeScaling::None,
             kv_layers: vec![(2, 64, None); 2],
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
@@ -2474,7 +2478,7 @@ pub(super) mod memory_fit_gate_tests {
         let model = model_with(1_000_000);
         let mut serving_config = ServingConfig {
             gpu_memory_fit: false,
-            context_length: u32::MAX,
+            context_length: ContextLength::Within(u32::MAX),
             ..ServingConfig::default()
         };
 
@@ -2484,7 +2488,7 @@ pub(super) mod memory_fit_gate_tests {
 
         assert_eq!(
             serving_config.context_length,
-            u32::MAX,
+            ContextLength::Within(u32::MAX),
             "gate must not touch context_length when the caller opted out"
         );
     }
@@ -2498,16 +2502,20 @@ pub(super) mod memory_fit_gate_tests {
             gpu_memory_fit: true,
             ..ServingConfig::default()
         };
-        let requested = serving_config.context_length;
+        let requested = model
+            .serving_context_length(&serving_config)
+            .expect("an unset context_length resolves to the fixture's trained context");
 
         model
             .apply_memory_fit_gate(&mut serving_config)
             .expect("a real device's own limit must comfortably fit this fixture's budget");
 
         assert_eq!(
-            serving_config.context_length, requested,
-            "a generously fitting budget must not reduce context_length"
+            serving_config.context_length.length().unwrap_or(requested),
+            requested,
+            "a generously fitting budget must not reduce the resolved context_length"
         );
+        assert_eq!(requested, TRAINED_CONTEXT_LENGTH);
     }
 
     #[test]
@@ -2519,7 +2527,7 @@ pub(super) mod memory_fit_gate_tests {
         let mut serving_config = ServingConfig {
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: Some(FOUR_GIB),
-            context_length: 1,
+            context_length: ContextLength::Within(1),
             ..ServingConfig::default()
         };
 
