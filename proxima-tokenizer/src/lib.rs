@@ -29,6 +29,12 @@
 //! real fixture this crate was built against
 //! (`~/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf`).
 //!
+//! Char-level BPE for `tokenizer.ggml.model = "gemma4"`: merges keyed on raw
+//! UTF-8 characters with `▁` for space, split only on newline runs
+//! ([`pretokenize::pretokenize_newline_runs`]) and merged by
+//! [`bpe::encode_char_pretoken`]. [`vocab::Vocab::is_char_level_bpe`] is
+//! probed from the vocab's own tokens; the GPT-2 path above is untouched.
+//!
 //! SentencePiece/SPM ([`unigram`]) for `tokenizer.ggml.model = "llama"`
 //! vocabs (`tokenizer.ggml.scores` present, no `tokenizer.ggml.merges`),
 //! confirmed against a real openchat-3.5-1210 fixture. [`pipe::encode`]/

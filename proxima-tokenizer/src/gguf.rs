@@ -52,12 +52,10 @@ const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
 /// merges-driven ([`Vocab::new`]) or scores-driven ([`Vocab::new_unigram`])
 /// constructor from `tokenizer.ggml.model` -- never a caller flag, matching
 /// llama.cpp's own dispatch (`tokenizer_model == "gpt2"` /
-/// `tokenizer_model == "llama"`, `llama-vocab.cpp:1405-1428`). `"gemma4"` is
-/// not an upstream llama.cpp string (this codebase's own local
-/// `llama.cpp` checkout predates it) -- routed onto the same merges-driven
-/// arm as `"gpt2"` because its GGUF carries a real, resolvable
-/// `tokenizer.ggml.merges`, verified against a real checkpoint (see the
-/// match arm below).
+/// `tokenizer_model == "llama"`, `llama-vocab.cpp:1405-1428`). `"gemma4"`
+/// (llama.cpp `llama-vocab.cpp:2110`) rides the merges-driven arm as
+/// `"gpt2"` does; the vocab's own shape decides between byte-level and
+/// char-level BPE (see the match arm below).
 ///
 /// # Errors
 ///
@@ -84,17 +82,12 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
     let add_eos_token = bool_scalar(metadata, ADD_EOS_KEY)?;
 
     let vocab = match model.as_str() {
-        // `gemma4` carries a real `tokenizer.ggml.merges` (rank-ordered
-        // pairs resolving to real vocab entries -- verified against the
-        // sha256-ea549b76.. checkpoint, 262144 tokens / 514906 merges) even
-        // though its byte alphabet is spelled SentencePiece-style
-        // (`<0xXX>` hex-fallback tokens, not `gpt2`'s Unicode remap) --
-        // `assemble`'s byte-token lookup already tries the hex-fallback
-        // form as a fallback (below), so the merges-driven, rank-priority
-        // BPE encoder gpt2 uses is the correct engine here too, not the
-        // scores-driven unigram path: gemma4 also carries scores, but a
-        // real merges array means llama.cpp's own dispatch (SPM vs BPE)
-        // would pick rank-based merging, not per-token score greedy merge.
+        // `gemma4` carries a real `tokenizer.ggml.merges` keyed on raw UTF-8
+        // characters with `▁` for space (llama.cpp `LLAMA_VOCAB_PRE_TYPE_GEMMA4`,
+        // `byte_encode = false`). It shares the merges arm with `gpt2`;
+        // `Vocab::assemble` probes the token list (merges present, `▁` and
+        // `<0x0A>` are tokens) and marks it char-level, which routes encode
+        // to `bpe::encode_char_pretoken` and decode to raw UTF-8.
         "gpt2" | "gemma4" => {
             let merges = string_array(metadata, MERGES_KEY)?
                 .ok_or(TokenizerError::MissingMetadataKey { key: MERGES_KEY })?;
