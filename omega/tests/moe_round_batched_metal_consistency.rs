@@ -32,7 +32,7 @@ use proxima_tensor::{
 };
 
 const EMBEDDING: u32 = 256;
-const EXPERT_HIDDEN: u32 = 16;
+const EXPERT_HIDDEN: u32 = 64;
 const DISABLE_ROUND_GROUP_FUSION: &str = "PROXIMA_DISABLE_MOE_ROUND_GROUP_FUSION";
 const ROUTE_NAMES: [&str; 8] = [
     "route_0", "route_1", "route_2", "route_3", "route_4", "route_5", "route_6", "route_7",
