@@ -178,7 +178,7 @@ use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
-use crate::architecture::{Architecture, StepInput, StepInputContext, bind_symbols};
+use crate::architecture::{Architecture, KvLayout, StepInput, StepInputContext, bind_symbols};
 use crate::bind::{
     BoundWeights, Codec, ModelArchitecture, architecture_from_metadata, bind_all_weights,
 };
@@ -199,11 +199,16 @@ mod residency_caches;
 #[macro_use]
 mod decode;
 mod drafter;
+mod kv_ring;
 mod serving_backend;
 mod tests_all;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod speculative_default_on_tests;
 use decode::*;
+use kv_ring::{
+    KvRing, attention_cache, rings_cover_speculation, sliding_cached_len_scalar,
+    sliding_ring_geometry, speculative_draft_limit,
+};
 pub use load_model::*;
 pub(crate) use pregather::*;
 pub use residency_caches::*;

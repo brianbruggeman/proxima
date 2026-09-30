@@ -1550,16 +1550,35 @@ impl<'file> LoadedModel<'file> {
         &self,
         cache_names: &[LayerCacheNames],
         layer_row_widths: &[LayerPadRowWidths],
-    ) -> Vec<LayerCacheState> {
+        positions_needed: usize,
+        draft_slack: usize,
+    ) -> Result<Vec<LayerCacheState>, InteropError> {
         cache_names
             .iter()
             .zip(layer_row_widths)
-            .map(|(names, widths)| match (names, widths) {
+            .enumerate()
+            .map(|(layer, (names, widths))| match (names, widths) {
+                (
+                    LayerCacheNames::Attention { k_even, .. },
+                    LayerPadRowWidths::Attention {
+                        even_odd_row,
+                        v_row,
+                    },
+                ) => self
+                    .attention_layer_cache(
+                        layer,
+                        k_even,
+                        *even_odd_row,
+                        *v_row,
+                        positions_needed,
+                        draft_slack,
+                    )
+                    .map(LayerCacheState::Attention),
                 (LayerCacheNames::Attention { .. }, _) => {
-                    LayerCacheState::Attention(LayerCache::new())
+                    Ok(LayerCacheState::Attention(LayerCache::new()))
                 }
                 (LayerCacheNames::DenseAttention { .. }, _) => {
-                    LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
+                    Ok(LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new()))
                 }
                 (
                     LayerCacheNames::Ssm {
@@ -1581,16 +1600,56 @@ impl<'file> LoadedModel<'file> {
                     );
                     #[cfg(not(feature = "instrument"))]
                     let _ = (conv_history, state);
-                    LayerCacheState::Ssm(SsmLayerCache::new(*conv_history_len, *state_len))
+                    Ok(LayerCacheState::Ssm(SsmLayerCache::new(*conv_history_len, *state_len)))
                 }
                 (LayerCacheNames::SharedFromLayer, LayerPadRowWidths::SharedFromLayer) => {
-                    LayerCacheState::SharedFromLayer
+                    Ok(LayerCacheState::SharedFromLayer)
                 }
                 _ => unreachable!(
                     "cache_names/layer_row_widths built from the same layer_roots, in lockstep"
                 ),
             })
             .collect()
+    }
+
+    /// One attention layer's cache: a ring when the program bounds this
+    /// layer's `kv_cache.{layer}.*` leaves by the sliding slot
+    /// ([`proxima_tensor::spec::SLIDING_KV_SYMBOL`]), a growing cache
+    /// otherwise. The program decides whether; [`Self::kv_layers`]' window
+    /// (the checkpoint's own `attention.sliding_window`) decides how wide, and
+    /// [`crate::memory_fit`] prices the same window, so what is allocated is
+    /// what is budgeted.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::SlidingRingWindowMissing`] when the program declares a
+    /// ring leaf for a layer the checkpoint gives no window.
+    fn attention_layer_cache(
+        &self,
+        layer: usize,
+        k_even_name: &str,
+        even_odd_row: usize,
+        v_row: usize,
+        positions_needed: usize,
+        draft_slack: usize,
+    ) -> Result<LayerCache, InteropError> {
+        let bound_slot = cache_leaf_bound_slot(&self.program, k_even_name);
+        if bound_slot != Some(proxima_tensor::spec::SLIDING_KV_SYMBOL) {
+            return Ok(LayerCache::new());
+        }
+        let window = self
+            .kv_layers
+            .get(layer)
+            .and_then(|(_, _, window)| *window)
+            .ok_or(InteropError::SlidingRingWindowMissing { layer })?;
+        Ok(attention_cache(
+            Some(window as usize),
+            draft_slack,
+            even_odd_row,
+            v_row,
+            self.ring_write_offset,
+            positions_needed,
+        ))
     }
 
     /// Pushes one step's position/RoPE inputs, `cached_len`/`lm_head_row`
@@ -1622,6 +1681,7 @@ impl<'file> LoadedModel<'file> {
         &'call self,
         position_inputs: &'call PositionInputs,
         cached_len_scalar: &'call [f32; 1],
+        sliding_len_scalar: &'call [f32; 1],
         lm_head_row_scalar: &'call [f32; 1],
         token_history: &[u32],
         new_start: usize,
@@ -1682,18 +1742,29 @@ impl<'file> LoadedModel<'file> {
             }
             named_blocks.push(step_input.as_named_block());
         }
-        let symbols = bind_symbols(
+        let mut symbols = bind_symbols(
             new_count,
             kv_bound_extent,
             step_input_scratch,
             single_position_step,
         )?;
+        if let Some(ring) = sliding_ring_geometry(layer_caches) {
+            named_blocks.push((
+                proxima_tensor::spec::SLIDING_CACHED_LEN_INPUT,
+                QuantizedBlock::Float32(sliding_len_scalar.as_slice()),
+            ));
+            symbols[usize::from(crate::architecture::symbols::SLIDING_KV_BOUND)] =
+                ring.bound_extent(kv_bound_extent) as u64;
+        }
 
         push_kv_named_blocks(
             cache_names,
             layer_caches,
             layer_row_widths,
-            kv_bound_extent,
+            KvStep {
+                cached_len: new_start,
+                bound_extent: kv_bound_extent,
+            },
             kv_pad_scratch,
             qwen35_dense_pad_scratch,
             named_blocks,
@@ -2375,10 +2446,13 @@ impl<'file> LoadedModel<'file> {
             ..self.checkpoint_weight_bytes
         };
         let requested_context_length = self.serving_context_length(serving_config)?;
+        let draft_slack = speculative_draft_limit(&serving_config.speculative, None)
+            .map_or(0, |limit| limit as u32);
         let (context_length, outcome) = crate::memory_fit::fit_context_length(
             weights,
             &self.kv_layers,
             requested_context_length,
+            draft_slack,
             omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
             limit,
         )?;
@@ -2397,6 +2471,7 @@ impl<'file> LoadedModel<'file> {
             weights,
             &self.kv_layers,
             context_length,
+            draft_slack,
             omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
         );
         crate::memory_fit::fit_per_class_budgets(
@@ -2935,10 +3010,23 @@ impl<'file> LoadedModel<'file> {
             // buffers instead of retaining the 24 GB checkpoint mapping.
             omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
         }
+        let positions_needed = seed_cached_len + ids.len() + max_tokens;
+        let draft_limit =
+            speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
-            None => self.fresh_layer_caches(&cache_names, &layer_row_widths),
+            None => self.fresh_layer_caches(
+                &cache_names,
+                &layer_row_widths,
+                positions_needed,
+                draft_limit,
+            )?,
         };
+        for state in &mut layer_caches {
+            if let LayerCacheState::Attention(cache) = state {
+                cache.reserve_ring_rows(positions_needed);
+            }
+        }
         // One [`KvPadScratch`] per layer, reused across every step of this
         // call -- only ever filled for a [`LayerCacheState::Attention`]
         // layer (the only cache shape `mistral_cached_forward_program_with_experts`
@@ -3301,7 +3389,11 @@ impl<'file> LoadedModel<'file> {
         let mut drafter_set =
             DrafterSet::build(&serving_config.speculative, drafter_context_length as usize);
         drafter_set.begin(&token_history);
-        let speculative_enabled = !drafter_set.is_empty() || forced_draft_width.is_some();
+        // A ring cache carried in from a call that ran without speculation
+        // has no slack to rewind into ([`rings_cover_speculation`]), so
+        // speculation stays off for that call rather than rewinding inexactly.
+        let speculative_enabled = (!drafter_set.is_empty() || forced_draft_width.is_some())
+            && rings_cover_speculation(&layer_caches, draft_limit);
         let mut pending: VecDeque<u32> = VecDeque::new();
         // One draft buffer, reused every step -- every drafter's own
         // `draft()` clears and refills it, never allocates, and never
@@ -3624,9 +3716,11 @@ impl<'file> LoadedModel<'file> {
                     // `Architecture::step_inputs`' own leaves, and every KV/SSM
                     // cache leaf -- so a foreign architecture's own leaf names
                     // are fed identically whether decoding or tapping one node.
+                    let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, cached_len);
                     let symbols = self.push_step_named_blocks(
                         &inputs,
                         &cached_len_scalar,
+                        &sliding_len_scalar,
                         &lm_head_row_scalar,
                         &token_history,
                         cached_len,
@@ -5078,7 +5172,7 @@ impl<'file> LoadedModel<'file> {
                                         (even_data.len() + odd_data.len() + value_data.len())
                                             as u64;
                                 }
-                                cache.append(even_data, odd_data, value_data);
+                                cache.append_at(cached_len, even_data, odd_data, value_data);
                             }
                             (
                                 Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
@@ -6537,7 +6631,7 @@ impl<'file> LoadedModel<'file> {
         // ids.len()` -- this is always a one-shot forward from an empty
         // cache over the WHOLE prompt (this method's own doc).
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
-        let layer_caches = self.fresh_layer_caches(&cache_names, &layer_row_widths);
+        let layer_caches = self.fresh_layer_caches(&cache_names, &layer_row_widths, ids.len(), 0)?;
         let mut kv_pad_scratch: Vec<KvPadScratch> = self
             .layer_roots
             .iter()
@@ -6585,9 +6679,11 @@ impl<'file> LoadedModel<'file> {
         let lm_head_row_scalar = [(ids.len() - 1) as f32];
         let kv_bound_extent = kv_extent(ids.len(), usize::MAX, serving_config.kv_bucket_tokens);
 
+        let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, 0);
         let symbols = self.push_step_named_blocks(
             &inputs,
             &cached_len_scalar,
+            &sliding_len_scalar,
             &lm_head_row_scalar,
             &ids,
             0,

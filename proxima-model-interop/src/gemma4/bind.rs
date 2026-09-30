@@ -35,7 +35,7 @@ use proxima_tensor::spec::{
 };
 
 use crate::architecture::{
-    Architecture as ArchitectureTrait, BoundProgram, StepInput, StepInputContext,
+    Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext,
 };
 use crate::bind::{
     BoundWeights, ModelArchitecture, bind_dense, bind_matmul_weight, bind_matmul_weight_as,
@@ -893,6 +893,7 @@ fn bind_gemma4_with_last_row_only<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     last_row_only: bool,
+    layout: KvLayout,
 ) -> Result<BoundProgram<'file>, InteropError> {
     let architecture = from_metadata(parsed)?;
     let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
@@ -975,7 +976,7 @@ fn bind_gemma4_with_last_row_only<'file>(
             // per-layer INJECTS Stage B; this is the checkpoint-wide toggle
             // that builds Stage A's preamble at all.
             ple_dim: (architecture.ple_dim > 0).then_some(architecture.ple_dim),
-            sliding_kv_ring: false,
+            sliding_kv_ring: layout == KvLayout::SlidingRing,
             qk_norm: false,
             qkv_biases: false,
             paired_gate_up_reduce: false,
@@ -1073,7 +1074,7 @@ pub fn bind_gemma4_all_positions_logits<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
 ) -> Result<BoundProgram<'file>, InteropError> {
-    bind_gemma4_with_last_row_only(parsed, file_bytes, false)
+    bind_gemma4_with_last_row_only(parsed, file_bytes, false, KvLayout::Full)
 }
 
 impl ArchitectureTrait for Gemma4Arch {
@@ -1107,7 +1108,22 @@ impl ArchitectureTrait for Gemma4Arch {
         parsed: &ParsedGguf,
         file_bytes: &'file [u8],
     ) -> Result<BoundProgram<'file>, InteropError> {
-        bind_gemma4_with_last_row_only(parsed, file_bytes, true)
+        bind_gemma4_with_last_row_only(parsed, file_bytes, true, KvLayout::Full)
+    }
+
+    /// [`Self::bind`] with the sliding layers' cache laid out as the ring
+    /// [`KvLayout::SlidingRing`] names -- what
+    /// [`crate::generate::LoadedModel::load`] binds. [`Self::bind`] itself
+    /// stays the full-cache layout, so every caller that drives its own
+    /// `kv_cache.*` leaves against it is unchanged.
+    #[cfg(feature = "std")]
+    fn bind_with_kv_layout<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        layout: KvLayout,
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        bind_gemma4_with_last_row_only(parsed, file_bytes, true, layout)
     }
 
     #[cfg(not(feature = "std"))]
@@ -1133,6 +1149,16 @@ impl ArchitectureTrait for Gemma4Arch {
         file_bytes: &'file [u8],
     ) -> Result<Option<BoundProgram<'file>>, InteropError> {
         bind_gemma4_all_positions_logits(parsed, file_bytes).map(Some)
+    }
+
+    #[cfg(feature = "std")]
+    fn speculative_verify_program_with_kv_layout<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        layout: KvLayout,
+    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
+        bind_gemma4_with_last_row_only(parsed, file_bytes, false, layout).map(Some)
     }
 
     /// Feeds the sliding-window RoPE table the `rope_cos_swa`/`rope_sin_swa`

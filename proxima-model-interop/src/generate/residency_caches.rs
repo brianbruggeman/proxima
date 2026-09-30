@@ -113,6 +113,9 @@ pub(super) struct LayerCache {
     pub(super) k_even: Vec<f32>,
     pub(super) k_odd: Vec<f32>,
     pub(super) v: Vec<f32>,
+    /// `Some` for a sliding-window layer whose rows live in a ring
+    /// ([`LayerCache::ring`]); `None` for a layer that stores every position.
+    pub(super) ring: Option<KvRing>,
 }
 
 impl LayerCache {
@@ -121,6 +124,7 @@ impl LayerCache {
             k_even: Vec::new(),
             k_odd: Vec::new(),
             v: Vec::new(),
+            ring: None,
         }
     }
 
@@ -139,7 +143,9 @@ impl LayerCache {
     /// position row widths [`KvPadShape`] already carries, so this call
     /// mirrors `append`'s own row-based growth exactly, just shrinking
     /// instead of extending. A no-op when `keep_positions` is not shorter
-    /// than what is already cached (nothing to rewind).
+    /// than what is already cached (nothing to rewind), and for a ring layer:
+    /// its rows are addressed by absolute position, rewinding is `cached_len`
+    /// going back, and the ring's slack keeps every row the window needs.
     ///
     /// Called from [`super::decode::LoadedModel::run_decode_loop_observed_seeded`]'s
     /// speculative-decode verify branch: a forward over
@@ -147,6 +153,9 @@ impl LayerCache {
     /// and this rewinds every layer back to the `verified.accepted + 1`
     /// that survived.
     pub(super) fn truncate(&mut self, keep_positions: usize, even_odd_row: usize, v_row: usize) {
+        if self.ring.is_some() {
+            return;
+        }
         self.k_even.truncate(keep_positions * even_odd_row);
         self.k_odd.truncate(keep_positions * even_odd_row);
         self.v.truncate(keep_positions * v_row);
@@ -251,6 +260,11 @@ impl KvPadScratch {
         }
     }
 
+    /// A ring `source` ([`KvRing`]) is unrolled instead of copied whole: its
+    /// most recent `min(cached_len, window)` rows land oldest-first at the
+    /// front of the scratch, `cached_len` being the positions cached before
+    /// this step.
+    ///
     /// # Errors
     ///
     /// [`InteropError::CacheScratchShapeMismatch`] when `source` (this
@@ -266,6 +280,7 @@ impl KvPadScratch {
         source: &LayerCache,
         shape: &KvPadShape,
         layer: usize,
+        cached_len: usize,
     ) -> Result<(), InteropError> {
         let even_odd_len = shape.even_odd_len();
         let v_len = shape.v_len();
@@ -277,6 +292,16 @@ impl KvPadScratch {
         }
         if self.v.len() < v_len {
             self.v.resize(v_len, 0.0);
+        }
+        if source.ring.is_some() {
+            source.unroll_live_rows(
+                cached_len,
+                &mut self.k_even,
+                &mut self.k_odd,
+                &mut self.v,
+                layer,
+            )?;
+            return Ok(());
         }
         copy_into_padded(&mut self.k_even, &source.k_even, layer, "k_even")?;
         copy_into_padded(&mut self.k_odd, &source.k_odd, layer, "k_odd")?;
@@ -321,6 +346,25 @@ pub(super) struct KvPadShape {
 }
 
 impl KvPadShape {
+    /// The scratch shape for `cache` at a step whose full-attention extent is
+    /// `kv_bound_extent`: a ring layer's extent is the sliding slot's
+    /// ([`KvRing::bound_extent`]), every other layer's is the full one.
+    pub(super) fn for_cache(
+        cache: &LayerCache,
+        kv_bound_extent: usize,
+        even_odd_row: usize,
+        v_row: usize,
+    ) -> Self {
+        let bound_extent = cache
+            .ring_geometry()
+            .map_or(kv_bound_extent, |ring| ring.bound_extent(kv_bound_extent));
+        Self {
+            bound_extent,
+            even_odd_row,
+            v_row,
+        }
+    }
+
     pub(super) fn even_odd_len(&self) -> usize {
         self.bound_extent * self.even_odd_row
     }
@@ -849,6 +893,26 @@ pub(super) fn cache_leaf_row_elements(program: &[Op], name: &str) -> Option<usiz
         })
 }
 
+/// The `Extent::Symbolic` slot `name`'s leading (cached-row) extent is
+/// bounded by -- [`crate::symbols::KV_BOUND`] for a full layer's cache leaf,
+/// [`crate::symbols::SLIDING_KV_BOUND`] for a ring layer's. The program is the one
+/// source of which layers are rings, the way [`cache_leaf_row_elements`] is
+/// the one source of row width. `None` when `name` is not declared or its
+/// leading extent is static.
+pub(super) fn cache_leaf_bound_slot(program: &[Op], name: &str) -> Option<u16> {
+    program.iter().find_map(|op| match op {
+        Op::Input {
+            name: Some(leaf_name),
+            shape,
+            ..
+        } if leaf_name == name => match shape.first() {
+            Some(Extent::Symbolic(slot)) => Some(*slot),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 /// `name`'s own declared [`Op::Input`] shape, collapsed to its flat total
 /// element count -- unlike [`cache_leaf_row_elements`], every dimension
 /// counts (an SSM cache leaf like `ssm_cache.{layer}.conv_history`,
@@ -946,6 +1010,17 @@ pub(super) fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> L
     }
 }
 
+/// Where one step sits in the caches: the positions already cached, and the
+/// bucketed extent the program's full-attention slot resolves to
+/// ([`crate::symbols::KV_BOUND`]). Both are read together by every layer's
+/// fill: a full layer pads to `bound_extent`, a ring layer unrolls its
+/// `cached_len`-relative window.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct KvStep {
+    pub(super) cached_len: usize,
+    pub(super) bound_extent: usize,
+}
+
 /// One step's KV-cache `Op::Input` leaves, named and padded off whatever
 /// [`LayerCacheNames`]/[`LayerCacheState`]/[`LayerPadRowWidths`] this call's
 /// own layers declared -- the ONE place either
@@ -968,11 +1043,15 @@ pub(super) fn push_kv_named_blocks<'call>(
     cache_names: &'call [LayerCacheNames],
     layer_caches: &'call [LayerCacheState],
     layer_row_widths: &[LayerPadRowWidths],
-    kv_bound_extent: usize,
+    step: KvStep,
     kv_pad_scratch: &'call mut [KvPadScratch],
     qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
     named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
 ) -> Result<(), InteropError> {
+    let KvStep {
+        cached_len,
+        bound_extent: kv_bound_extent,
+    } = step;
     for (layer, cache) in layer_caches.iter().enumerate() {
         match (cache, &layer_row_widths[layer]) {
             (
@@ -982,12 +1061,8 @@ pub(super) fn push_kv_named_blocks<'call>(
                     v_row,
                 },
             ) => {
-                let shape = KvPadShape {
-                    bound_extent: kv_bound_extent,
-                    even_odd_row: *even_odd_row,
-                    v_row: *v_row,
-                };
-                kv_pad_scratch[layer].fill(cache, &shape, layer)?;
+                let shape = KvPadShape::for_cache(cache, kv_bound_extent, *even_odd_row, *v_row);
+                kv_pad_scratch[layer].fill(cache, &shape, layer, cached_len)?;
             }
             (
                 LayerCacheState::DenseAttention(cache),
@@ -1016,17 +1091,13 @@ pub(super) fn push_kv_named_blocks<'call>(
         match (names, &layer_caches[layer], &layer_row_widths[layer]) {
             (
                 LayerCacheNames::Attention { k_even, k_odd, v },
-                LayerCacheState::Attention(_),
+                LayerCacheState::Attention(cache),
                 LayerPadRowWidths::Attention {
                     even_odd_row,
                     v_row,
                 },
             ) => {
-                let shape = KvPadShape {
-                    bound_extent: kv_bound_extent,
-                    even_odd_row: *even_odd_row,
-                    v_row: *v_row,
-                };
+                let shape = KvPadShape::for_cache(cache, kv_bound_extent, *even_odd_row, *v_row);
                 named_blocks.extend(kv_pad_scratch[layer].named_blocks(k_even, k_odd, v, &shape));
             }
             (
