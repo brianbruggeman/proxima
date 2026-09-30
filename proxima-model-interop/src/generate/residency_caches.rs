@@ -3209,7 +3209,7 @@ pub(super) fn decode_streamed_piece(
     pending.extend_from_slice(&bytes);
     let mut piece = String::new();
     proxima_tokenizer::drain_lossy_utf8(pending, &mut piece);
-    Ok(if vocab.is_unigram() {
+    Ok(if vocab.is_unigram() || vocab.is_char_level_bpe() {
         proxima_tokenizer::unigram::replace_space_markers(&piece)
     } else {
         piece

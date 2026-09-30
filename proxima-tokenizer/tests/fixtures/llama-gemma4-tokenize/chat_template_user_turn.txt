@@ -1,0 +1,3 @@
+<|turn>user
+What is the capital of France?<turn|>
+<|turn>model

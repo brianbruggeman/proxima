@@ -1,0 +1,7 @@
+First paragraph here.
+
+Second paragraph follows.
+With a soft break.
+
+
+Third after a gap.

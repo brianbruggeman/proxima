@@ -112,6 +112,7 @@ pub struct Vocab {
     add_bos_token: Option<bool>,
     add_eos_token: Option<bool>,
     space_marker: SpaceMarker,
+    char_level_bpe: bool,
 }
 
 impl Vocab {
@@ -198,8 +199,6 @@ impl Vocab {
             .map(|(id, token)| (token.clone(), id as u32))
             .collect();
 
-        let id_to_bytes: Vec<Vec<u8>> = tokens.iter().map(|token| token_bytes_for(token)).collect();
-
         // Probed once, here, against the vocab's own token list -- never the
         // model name or which constructor (`new`/`new_unigram`) built it.
         // `▁` resolving to a real entry means this vocab's merges/scores are
@@ -214,6 +213,24 @@ impl Vocab {
                 SpaceMarker::Gpt2ByteLevel
             }
         };
+
+        // char-level BPE (gemma4): merges keyed on raw UTF-8 characters with
+        // `▁` for space, and `<0xXX>` spelling the byte fallback. The same
+        // shape probe as `space_marker`, read off the vocab's own tokens.
+        let char_level_bpe = !merges.is_empty()
+            && space_marker == SpaceMarker::SentencePiece
+            && token_to_id.contains_key(hex_fallback_token(b'\n').as_str());
+
+        let id_to_bytes: Vec<Vec<u8>> = tokens
+            .iter()
+            .map(|token| {
+                if char_level_bpe {
+                    char_level_token_bytes(token)
+                } else {
+                    token_bytes_for(token)
+                }
+            })
+            .collect();
 
         // A real HF byte-level BPE vocab is NOT guaranteed to carry all 256
         // single-byte display tokens explicitly -- confirmed against the
@@ -234,6 +251,11 @@ impl Vocab {
         // input contains one of these specific rare bytes.
         let mut base_byte_token_id = [None; 256];
         for byte in 0..=255u8 {
+            if char_level_bpe {
+                base_byte_token_id[byte as usize] =
+                    token_to_id.get(hex_fallback_token(byte).as_str()).copied();
+                continue;
+            }
             // A SentencePiece byte-BPE vocab (e.g. `gemma4`) spells the
             // space byte as `crate::unigram::SPACE_MARKER` (`▁`, U+2581),
             // never GPT-2's own private-alphabet marker (`Ġ`, U+0120,
@@ -325,6 +347,7 @@ impl Vocab {
             add_bos_token: None,
             add_eos_token: None,
             space_marker,
+            char_level_bpe,
         })
     }
 
@@ -448,6 +471,23 @@ impl Vocab {
         self.base_byte_token_id[byte as usize].unwrap_or(0)
     }
 
+    /// Whether this vocab merges over raw UTF-8 characters (gemma4) rather
+    /// than GPT-2 remapped bytes: merges present, and both `▁` and `<0x0A>`
+    /// are tokens. Derived once at construction from the vocab itself.
+    /// [`crate::pipe::encode`] routes to [`crate::bpe::encode_char_pretoken`]
+    /// on this; every other vocab keeps the byte-seeded path unchanged.
+    #[must_use]
+    pub fn is_char_level_bpe(&self) -> bool {
+        self.char_level_bpe
+    }
+
+    /// The `<0xXX>` byte-fallback token for `byte` in a char-level vocab,
+    /// `None` when the vocab does not carry it.
+    #[must_use]
+    pub(crate) fn byte_fallback_token(&self, byte: u8) -> Option<u32> {
+        self.base_byte_token_id[byte as usize]
+    }
+
     /// The merge rule for an adjacent token id pair, if one exists.
     #[must_use]
     pub(crate) fn merge_rule(&self, left: u32, right: u32) -> Option<(u32, u32)> {
@@ -552,6 +592,16 @@ fn parse_hex_fallback_byte(token: &str) -> Option<u8> {
         return None;
     }
     u8::from_str_radix(hex, 16).ok()
+}
+
+/// A char-level vocab token's raw bytes: its UTF-8 as spelled (no GPT-2
+/// inverse remap, which would turn a literal `é` into byte 0xE9), or the
+/// single byte a `<0xXX>` fallback names.
+fn char_level_token_bytes(token: &str) -> Vec<u8> {
+    match parse_hex_fallback_byte(token) {
+        Some(byte) => alloc::vec![byte],
+        None => Vec::from(token.as_bytes()),
+    }
 }
 
 /// Converts a token's display-domain string back to the raw bytes it

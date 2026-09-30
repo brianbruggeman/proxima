@@ -53,6 +53,22 @@ pub fn escape(text: &str) -> String {
     escaped
 }
 
+/// Every literal space to `SPACE_MARKER` (crate-private), with no synthetic
+/// prefix -- the gemma4 half of [`escape`] (char-level BPE adds no leading
+/// space).
+#[must_use]
+pub fn replace_spaces_with_markers(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character == ' ' {
+                SPACE_MARKER
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// Every `SPACE_MARKER` (crate-private) back to a literal space, with no
 /// leading-space trim -- the half of [`unescape`] that is safe to apply to
 /// one streamed piece at a time. Trimming the one leading space [`escape`]

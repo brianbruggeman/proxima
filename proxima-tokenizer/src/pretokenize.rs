@@ -75,6 +75,31 @@ pub fn pretokenize(text: &str) -> Vec<core::ops::Range<usize>> {
     spans
 }
 
+/// gemma4's pre-split, `[^\n]+|[\n]+` (`LLAMA_VOCAB_PRE_TYPE_GEMMA4`,
+/// `llama-vocab.cpp:528-536`): alternating runs of non-newline and newline
+/// characters, as byte-offset ranges into `text`. Nothing else is split --
+/// BPE merges run over the whole line, since gemma4's merges are keyed on raw
+/// characters and no merge may span a `\n`. Contrast [`pretokenize`], the
+/// LLAMA3 word splitter the GPT-2 byte-level path uses.
+#[must_use]
+pub fn pretokenize_newline_runs(text: &str) -> Vec<core::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut start = 0usize;
+    let mut in_newlines = false;
+    for (offset, character) in text.char_indices() {
+        let is_newline = character == '\n';
+        if offset > 0 && is_newline != in_newlines {
+            spans.push(start..offset);
+            start = offset;
+        }
+        in_newlines = is_newline;
+    }
+    if start < text.len() {
+        spans.push(start..text.len());
+    }
+    spans
+}
+
 /// Byte offset of each char boundary in `text`, plus one trailing entry
 /// for the end of the string (`char_count + 1` total entries).
 fn char_byte_offsets(text: &str, char_count: usize) -> Vec<usize> {
@@ -278,5 +303,39 @@ mod tests {
             rebuilt.push_str(span);
         }
         assert_eq!(rebuilt, text);
+    }
+
+    fn newline_run_spans(text: &str) -> Vec<&str> {
+        pretokenize_newline_runs(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect()
+    }
+
+    #[test]
+    fn newline_runs_split_only_on_newline_boundaries() {
+        assert_eq!(newline_run_spans("a\nb"), ["a", "\n", "b"]);
+        assert_eq!(newline_run_spans("a\n\nb"), ["a", "\n\n", "b"]);
+        assert_eq!(newline_run_spans("\n\n\n"), ["\n\n\n"]);
+    }
+
+    #[test]
+    fn newline_runs_keep_spaces_carriage_returns_and_multibyte_inside_a_line() {
+        assert_eq!(
+            newline_run_spans("a  b\r\n\u{201c}q\u{201d} x"),
+            ["a  b\r", "\n", "\u{201c}q\u{201d} x"]
+        );
+    }
+
+    #[test]
+    fn newline_runs_of_empty_text_is_empty() {
+        assert!(newline_run_spans("").is_empty());
+    }
+
+    #[test]
+    fn newline_runs_cover_the_input_contiguously() {
+        let text = "\nfirst line\n\nsecond \u{1F600} line\n";
+        let joined: alloc::string::String = newline_run_spans(text).concat();
+        assert_eq!(joined, text);
     }
 }

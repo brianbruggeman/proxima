@@ -5,9 +5,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::bpe::{decode_ids, encode_pretoken};
+use crate::bpe::{decode_ids, encode_char_pretoken, encode_pretoken};
 use crate::error::TokenizerError;
-use crate::pretokenize::pretokenize;
+use crate::pretokenize::{pretokenize, pretokenize_newline_runs};
 use crate::unigram;
 use crate::vocab::{TokenType, Vocab};
 
@@ -69,10 +69,24 @@ fn encode_ordinary(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError
         let normalized = unigram::escape(text);
         return unigram::encode_fragment(&normalized, vocab);
     }
+    if vocab.is_char_level_bpe() {
+        return encode_char_level(text, vocab);
+    }
     let mut ids = Vec::new();
     for span in pretokenize(text) {
         let piece = &text[span];
         ids.extend(encode_pretoken(piece.as_bytes(), vocab)?);
+    }
+    Ok(ids)
+}
+
+/// gemma4's encoder: split only on newline runs, spell spaces `▁` (no
+/// synthetic prefix), then char-level BPE per run ([`encode_char_pretoken`]).
+fn encode_char_level(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError> {
+    let mut ids = Vec::new();
+    for span in pretokenize_newline_runs(text) {
+        let piece = unigram::replace_spaces_with_markers(&text[span]);
+        ids.extend(encode_char_pretoken(&piece, vocab)?);
     }
     Ok(ids)
 }
@@ -192,6 +206,9 @@ pub fn decode(ids: &[u32], vocab: &Vocab) -> Result<String, TokenizerError> {
     drain_lossy_utf8(&mut pending, &mut text);
     if !pending.is_empty() {
         text.push('\u{FFFD}');
+    }
+    if vocab.is_char_level_bpe() {
+        return Ok(unigram::replace_space_markers(&text));
     }
     if vocab.space_marker() == crate::vocab::SpaceMarker::SentencePiece {
         return Ok(unigram::unescape(&text));
