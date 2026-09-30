@@ -36,8 +36,8 @@ async fn main() -> Result<(), proxima_core::ProximaError> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let bind =
         std::env::var("PROXIMA_TRANSPARENT_BIND").unwrap_or_else(|_| BIND_DEFAULT.to_string());
-    let dump_dir =
-        std::env::var("PROXIMA_INTERCEPT_H2_DUMP").unwrap_or_else(|_| "/tmp".to_string());
+    let dump_dir = std::env::var("PROXIMA_INTERCEPT_H2_DUMP")
+        .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
     let upstreams = Arc::new(parse_upstreams()?);
 
     let ca = Arc::new(load_or_make_ca()?);

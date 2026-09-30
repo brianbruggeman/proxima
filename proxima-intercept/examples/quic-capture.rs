@@ -65,8 +65,8 @@ async fn main() {
     let _recorder = install_console_recorder().expect("install console telemetry");
 
     let bind = std::env::var("PROXIMA_QUIC_BIND").unwrap_or_else(|_| BIND_DEFAULT.to_string());
-    let dump_dir =
-        std::env::var("PROXIMA_INTERCEPT_H2_DUMP").unwrap_or_else(|_| "/tmp".to_string());
+    let dump_dir = std::env::var("PROXIMA_INTERCEPT_H2_DUMP")
+        .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
     // explicit real-upstream addr to bypass a poisoned /etc/hosts redirect loop.
     let upstream_addr: Option<SocketAddr> = std::env::var("PROXIMA_QUIC_UPSTREAM_ADDR")
         .ok()
