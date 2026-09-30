@@ -324,6 +324,8 @@ split with slot-0-ea, in omega).
 - **`gemma4_base_tokens.txt` is INVALID as an oracle.** It came from a 2048-token
   one-evaluation prefill. AC12/AC13 parity results recorded against it are
   determinism-only. Re-record it after the omega fix lands on main.
+  The file is deleted. It is re-recorded (`--record`, length as produced, EOS at 53 tokens
+  on the corrected run) after the truncation fix lands; llama.cpp is the oracle for that recording.
 - **P1 is not the fix.** At ubatch 512, chunked prefill keeps node 17 under the limit, but
   score ops overflow at about 4090 rows x 32 lanes, so large cached ranges must still be
   checked per dispatch. P1 sidesteps the bug below that limit; it does not fix it.
