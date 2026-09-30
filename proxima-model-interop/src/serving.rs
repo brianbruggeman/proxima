@@ -137,6 +137,16 @@ pub(crate) fn matching_precision_target(
 /// the same idea.
 pub const GPU_LAYERS_ALL: i32 = -1;
 
+/// [`ServingConfig::default`]'s `gpu_layers`: whole-model offload on a build
+/// that has a GPU backend, CPU-only on one that does not --
+/// [`apply_serving_config`] rejects [`GPU_LAYERS_ALL`] without the `metal`
+/// feature, so a default of `-1` there would fail its own admission check.
+pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "metal") {
+    GPU_LAYERS_ALL
+} else {
+    0
+};
+
 /// `--reasoning-budget -1` (upstream's own sentinel for "unbounded").
 pub const REASONING_BUDGET_UNBOUNDED: i32 = -1;
 
@@ -869,12 +879,16 @@ impl<'model> ServingConfig<'model> {
 }
 
 impl Default for ServingConfig<'static> {
-    /// The repo owner's exact invocation, verbatim, with ONE deliberate
-    /// deviation: `-c 131072 -np 1 -ctk q8_0 -ctv q8_0 -fa on -b 32 -ub 32
-    /// -ngl all -fit off --no-kv-offload --no-mmproj --reasoning-budget 1024
-    /// --min-p 0`. `gpu_memory_fit` (`-fit`) defaults `true` here, not the
-    /// invocation's own `off` -- see that field's own doc for why the safe
-    /// default won this argument over exact invocation fidelity. Every
+    /// The repo owner's invocation (`-c 131072 -np 1 -ctk q8_0 -ctv q8_0 -fa
+    /// on -b 32 -ub 32 -ngl all -fit off --no-kv-offload --no-mmproj
+    /// --reasoning-budget 1024 --min-p 0`) restricted to what
+    /// [`apply_serving_config`] admits: F32 KV (`-ctk`/`-ctv`), `-fa off`,
+    /// `--reasoning-budget 0`, and `-ngl` [`DEFAULT_GPU_LAYERS`]. A default
+    /// the admission check rejects is a defect, so the deviations are the
+    /// ones admission forces. `gpu_memory_fit` (`-fit`) also defaults `true`
+    /// here, not the invocation's own `off` -- see that field's own doc for
+    /// why the safe default won this argument over exact invocation
+    /// fidelity. Every
     /// other field, and every sampling knob (the invocation names none, so
     /// each defaults to its own disabled value -- `temperature: 0.0`, not
     /// upstream's own `0.80`, see that field's own doc), remains the exact
@@ -885,17 +899,17 @@ impl Default for ServingConfig<'static> {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::Q8_0,
-            kv_cache_value_quant: GgmlType::Q8_0,
-            flash_attention: true,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
             batch_size: 32,
             ubatch_size: 32,
-            gpu_layers: GPU_LAYERS_ALL,
+            gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
-            reasoning_budget: 1024,
+            reasoning_budget: 0,
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
@@ -1197,19 +1211,19 @@ mod tests {
 
         assert_eq!(config.context_length, 131_072, "-c 131072");
         assert_eq!(config.parallel_sequences, 1, "-np 1");
-        assert_eq!(config.kv_cache_key_quant, GgmlType::Q8_0, "-ctk q8_0");
-        assert_eq!(config.kv_cache_value_quant, GgmlType::Q8_0, "-ctv q8_0");
-        assert!(config.flash_attention, "-fa on");
+        assert_eq!(config.kv_cache_key_quant, GgmlType::F32, "-ctk f32");
+        assert_eq!(config.kv_cache_value_quant, GgmlType::F32, "-ctv f32");
+        assert!(!config.flash_attention, "-fa off");
         assert_eq!(config.batch_size, 32, "-b 32");
         assert_eq!(config.ubatch_size, 32, "-ub 32");
-        assert_eq!(config.gpu_layers, GPU_LAYERS_ALL, "-ngl all");
+        assert_eq!(config.gpu_layers, DEFAULT_GPU_LAYERS, "-ngl all with metal");
         assert!(
             config.gpu_memory_fit,
             "gpu_memory_fit defaults true, deliberately overriding the owner's own -fit off"
         );
         assert!(!config.kv_offload, "--no-kv-offload");
         assert!(!config.multimodal_projector, "--no-mmproj");
-        assert_eq!(config.reasoning_budget, 1024, "--reasoning-budget 1024");
+        assert_eq!(config.reasoning_budget, 0, "--reasoning-budget 0");
         assert_eq!(config.min_p, 0.0, "--min-p 0");
         assert_eq!(config.model_path, DEFAULT_MODEL_PATH);
     }
@@ -1234,20 +1248,36 @@ mod tests {
         assert_eq!(config.seed, 0, "always literal, never OS-sourced");
     }
 
-    /// `apply_serving_config` on the owner's own default invocation still
-    /// reaches an unimplemented knob -- the owner's invocation is `-ctk
-    /// q8_0 -ctv q8_0`, and only F32 is supported end to end, so
-    /// `kv_cache_key_quant`/`kv_cache_value_quant` fires first, ahead of
-    /// `-fa`, `-ngl`, `--reasoning-budget`. The placeholders are real, not
-    /// decorative, even against the one config that matters most.
+    /// A default the admission check rejects is a self-consistency defect:
+    /// the config a caller gets without asking must pass the function that
+    /// validates configs.
     #[test]
-    fn owner_default_invocation_reaches_an_unimplemented_knob() {
-        let error = apply_serving_config(&ServingConfig::default(), 6)
-            .expect_err("owner's default invocation must reach an unimplemented knob");
-        assert!(
-            error.to_string().contains("kv_cache_key_quant"),
-            "expected the kv-cache-quant gate to fire first, got: {error}"
-        );
+    fn serving_default_admission_accepts_the_default() {
+        apply_serving_config(&ServingConfig::default(), 1)
+            .expect("ServingConfig::default() must pass apply_serving_config");
+    }
+
+    /// The paired control: admission still refuses what it must, so the
+    /// default cannot pass by loosening the check. `Q4_0` KV and a second
+    /// parallel sequence are both unimplemented and must stay refused.
+    #[test]
+    fn serving_default_admission_rejects_the_controls() {
+        let two_sequences = ServingConfig {
+            parallel_sequences: 2,
+            ..ServingConfig::default()
+        };
+        let q4_0_keys = ServingConfig {
+            kv_cache_key_quant: GgmlType::Q4_0,
+            ..ServingConfig::default()
+        };
+
+        let sequences_error = apply_serving_config(&two_sequences, 1)
+            .expect_err("parallel_sequences=2 must be rejected");
+        let quant_error =
+            apply_serving_config(&q4_0_keys, 1).expect_err("Q4_0 key cache must be rejected");
+
+        assert!(sequences_error.to_string().contains("parallel_sequences"));
+        assert!(quant_error.to_string().contains("kv_cache_key_quant"));
     }
 
     /// A config with every unimplemented knob switched to its
@@ -1430,17 +1460,17 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::Q8_0,
-            kv_cache_value_quant: GgmlType::Q8_0,
-            flash_attention: true,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
             batch_size: 32,
             ubatch_size: 32,
-            gpu_layers: GPU_LAYERS_ALL,
+            gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
-            reasoning_budget: 1024,
+            reasoning_budget: 0,
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
@@ -1529,17 +1559,17 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::Q8_0,
-            kv_cache_value_quant: GgmlType::Q8_0,
-            flash_attention: true,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
             batch_size: 32,
             ubatch_size: 32,
-            gpu_layers: GPU_LAYERS_ALL,
+            gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
-            reasoning_budget: 1024,
+            reasoning_budget: 0,
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
@@ -1618,17 +1648,17 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::Q8_0,
-            kv_cache_value_quant: GgmlType::Q8_0,
-            flash_attention: true,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
             batch_size: 32,
             ubatch_size: 32,
-            gpu_layers: GPU_LAYERS_ALL,
+            gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
-            reasoning_budget: 1024,
+            reasoning_budget: 0,
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
@@ -1697,17 +1727,17 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::Q8_0,
-            kv_cache_value_quant: GgmlType::Q8_0,
-            flash_attention: true,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
             batch_size: 32,
             ubatch_size: 32,
-            gpu_layers: GPU_LAYERS_ALL,
+            gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
-            reasoning_budget: 1024,
+            reasoning_budget: 0,
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
