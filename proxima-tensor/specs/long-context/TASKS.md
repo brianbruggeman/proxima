@@ -526,5 +526,30 @@ REBOOT LOSS, 2026-09-30.
   /tmp. All former `/private/tmp/long_ctx_*` paths in this spec now point there.
 - **Survivors:** the root checkout (df3766dd-based slices 1-5, ring, harness, parity
   example) and this spec dir. They are backed up in `.long_ctx_backups/`.
-- **Next:** land the root onto main in coherent commits (owner-authorized
+- **LANDED 2026-09-30** on local main (unpushed): 9 commits, 73fd1cbd..ad787c34.
+  Each was verified green from its own `git archive` tree (check std,metal all-targets;
+  interop nextest 247 at base, growing to 282; tensor 690 at base, growing to 693; 0 failed).
+- **Redo next, in root, as new commits:** P1 chunked prefill, then the gemma4 tokenizer
+  fix with its llama.cpp fixtures.
+- **Earlier plan (done):** land the root onto main in coherent commits (owner-authorized
   2026-09-30), then redo P1, the tokenizer fix and draft-slack in the root.
+
+## resume (2026-09-30)
+
+- **Landed on local main (unpushed):** 9 commits, 73fd1cbd..ad787c34.
+- **On a detached HEAD above ad787c34** (main is held for slot-0-84, which lands its
+  ~50 commits next):
+  - 2ed803b1 chunked prefill (ubatch)
+  - 2bbdc657 gemma4 tokenizer with llama.cpp fixtures
+  - a0e4a5f1 obsolete tokenizer diagnostics removed
+  - Each was verified green from its own `git archive` tree.
+- **Durable tools:** `~/repos/slot-0/.long_ctx_backups/tok/llama-tokenize`, a
+  gemma4-capable build of f1ea20621.
+- **Next:**
+  1. When slot-0-84 sends its sha, rebase the detached commits onto it.
+  2. After its GPU window closes:
+     - the AC23 Metal regression;
+     - Ollama token-count parity;
+     - niah at 8K/16K/32K with chunked prefill;
+     - M0, the per-kernel GPU-time census that must precede any P2 v4.
+- **P2 (fused attention):** v1-v3 are not admitted. Design is paused until M0 data exists.
