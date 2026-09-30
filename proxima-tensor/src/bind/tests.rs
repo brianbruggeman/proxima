@@ -4636,6 +4636,196 @@ mod reduce_epilogue_fusion_tests {
             "2 fold + 27 epilogue + 1 gather index + output + uniforms + fault must exceed Metal's 31 slots"
         );
     }
+
+    /// A projection (`act [seq, k] x weight [k, dim]`) feeding an RMSNorm
+    /// tail: the projection output is read by BOTH the sum-of-squares fold
+    /// and the final `x * inv_rms` multiply, so it is a flagged reduce with
+    /// two readers that sits ahead of `inv_rms` in that multiply's operand
+    /// list -- the shape the first-operand rule gives up on.
+    fn projection_rmsnorm_program(seq: u32, k: u32, dim: u32) -> (Vec<Op>, [NodeId; 5], NodeId) {
+        let mut program = Vec::new();
+        let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
+        let keep_seq = || IndexMap::Affine(map::projection(1, &[0]));
+        let broadcast_scalar_seq = || IndexMap::Affine(map::projection(1, &[]));
+        let broadcast_seq_over_dim = || IndexMap::Affine(map::projection(2, &[0]));
+        let input = |program: &mut Vec<Op>, shape: Vec<Extent>| {
+            append(
+                program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape,
+                    name: None,
+                },
+            )
+        };
+        let act = input(
+            &mut program,
+            alloc::vec![Extent::Static(seq), Extent::Static(k)],
+        );
+        let weight = input(
+            &mut program,
+            alloc::vec![Extent::Static(k), Extent::Static(dim)],
+        );
+        let inv_dim = input(&mut program, Vec::new());
+        let eps = input(&mut program, Vec::new());
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (act, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (weight, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let projected = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let squared = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(projected, full()), (projected, full())],
+                name: None,
+            },
+        );
+        let sum_squares = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: squared,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let mean_square = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(sum_squares, keep_seq()), (inv_dim, broadcast_scalar_seq())],
+                name: None,
+            },
+        );
+        let mean_square_eps = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(mean_square, keep_seq()), (eps, broadcast_scalar_seq())],
+                name: None,
+            },
+        );
+        let rms = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::SquareRoot,
+                operands: alloc::vec![(mean_square_eps, keep_seq())],
+                name: None,
+            },
+        );
+        let inv_rms = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Reciprocal,
+                operands: alloc::vec![(rms, keep_seq())],
+                name: None,
+            },
+        );
+        let normed = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(projected, full()), (inv_rms, broadcast_seq_over_dim())],
+                name: None,
+            },
+        );
+        (program, [act, weight, inv_dim, eps, projected], normed)
+    }
+
+    #[test]
+    fn projection_output_rmsnorm_tail_fuses_only_with_the_epilogue_sources_switch() {
+        const SEQ: u32 = 3;
+        const HIDDEN: u32 = 64;
+        const DIM: u32 = 32;
+        let (program, [act, weight, inv_dim, eps, _projected], normed) =
+            projection_rmsnorm_program(SEQ, HIDDEN, DIM);
+        let shapes = shape::infer(&program, &[]).expect("projection rmsnorm program infers");
+        let switch_off = NumericPolicy::bit_exact();
+        let switch_on = NumericPolicy::bit_exact().with_epilogue_sources(true);
+        let plain = bind_plain(&program, &shapes, &[normed], switch_off).expect("unfused binds");
+        let off = bind(&program, &shapes, &[normed], switch_off).expect("switch-off binds");
+        let on = bind(&program, &shapes, &[normed], switch_on).expect("switch-on binds");
+
+        let epilogue_count = |resolved: &[BoundOp]| {
+            resolved
+                .iter()
+                .filter(|bound| has_real_epilogue(&bound.kind))
+                .count()
+        };
+        assert_eq!(
+            epilogue_count(&off),
+            0,
+            "the first flagged operand is the two-reader projection output, so the narrow \
+             rule never reaches the sum-of-squares fold, got {off:?}"
+        );
+        assert!(
+            on.len() < off.len(),
+            "the widened rule must absorb the sum-of-squares tail, off={} on={}",
+            off.len(),
+            on.len()
+        );
+        assert!(
+            epilogue_count(&on) >= 1,
+            "switch-on must carry a real epilogue, got {on:?}"
+        );
+        assert_no_dangling_operand_references(&program, &on);
+
+        let mut lcg = Lcg(2027);
+        let mut draw = |count: u32| -> Vec<f32> { (0..count).map(|_| lcg.next_unit()).collect() };
+        let inputs = alloc::vec![
+            (act, draw(SEQ * HIDDEN)),
+            (weight, draw(HIDDEN * DIM)),
+            (inv_dim, alloc::vec![1.0f32 / DIM as f32]),
+            (eps, alloc::vec![1e-5f32]),
+        ];
+        let plain_buffers = run_resolved(program.len(), &plain, inputs.clone());
+        let on_buffers = run_resolved(program.len(), &on, inputs);
+        let expected = plain_buffers[normed.0 as usize]
+            .as_ref()
+            .expect("unfused output present");
+        let actual = on_buffers[normed.0 as usize]
+            .as_ref()
+            .expect("fused output present");
+        assert_eq!(expected.len(), actual.len());
+        for (index, (fused_value, plain_value)) in actual.iter().zip(expected).enumerate() {
+            let error = (fused_value - plain_value).abs();
+            assert!(
+                error <= 1e-6 * plain_value.abs().max(1.0),
+                "element {index}: fused {fused_value} vs unfused {plain_value}"
+            );
+        }
+    }
 }
 
 /// `n_tokens == 1`, single physical head axis (`kv_heads == num_v_heads`,
