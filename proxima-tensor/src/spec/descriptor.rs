@@ -90,6 +90,13 @@ pub struct ModelDescriptor {
     /// all -- same "unused when the arm never reads it" precedent
     /// [`Self::qk_norm`]'s own doc already sets.
     pub ple_dim: Option<u32>,
+    /// [`CacheStrategy::TwoRange`] only: lay every windowed layer's KV cache out as
+    /// a ring ([`SLIDING_KV_SYMBOL`], [`SLIDING_CACHED_LEN_INPUT`], and
+    /// [`lfm2_two_range_cached_forward_program_with_experts`]'s own
+    /// `sliding_kv_ring` argument). Inert under [`CacheStrategy::Cacheless`] and
+    /// [`CacheStrategy::SingleRange`], the same "unused when the arm never reads
+    /// it" precedent as [`Self::qk_norm`].
+    pub sliding_kv_ring: bool,
     /// Qwen3-style per-head QK-norm, consulted ONLY by
     /// [`CacheStrategy::SingleRange`]'s arm
     /// (`mistral_cached_forward_program_with_experts_and_layer_taps`'s own
@@ -253,6 +260,7 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
         // build routes through `proxima-model-interop`'s own
         // architecture-derived descriptor instead of this function.
         ple_dim: None,
+        sliding_kv_ring: false,
         // inert: neither `Cacheless` nor `TwoRange` ever reads these four
         // fields (`ModelDescriptor::qk_norm`'s own doc) -- gemma4 has no
         // concept of any of them.
@@ -423,6 +431,7 @@ pub fn mistral_descriptor_from_shape(
         // `CacheStrategy::SingleRange` has no PLE concept at all -- same
         // inertness as `Self::qk_norm`'s own doc.
         ple_dim: None,
+        sliding_kv_ring: false,
         qk_norm,
         qkv_biases,
         paired_gate_up_reduce,
@@ -548,6 +557,7 @@ pub fn build_forward(
                     descriptor.logit_softcap,
                     last_row_only,
                     descriptor.ple_dim,
+                    descriptor.sliding_kv_ring,
                 )?;
             Ok((
                 program,

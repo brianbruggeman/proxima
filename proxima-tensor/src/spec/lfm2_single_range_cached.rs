@@ -20,6 +20,22 @@
 
 use super::*;
 
+/// The `Extent::Symbolic` slot a sliding-window layer's `kv_cache.{layer}.*`
+/// leaves are bounded by when [`lfm2_two_range_cached_forward_program_with_experts`]
+/// builds the sliding ring layout (its `sliding_kv_ring` argument). Slot 0 is
+/// the new-position count and slot 1 the full-attention cache extent, so this
+/// is the first slot after them: a caller binds it to the number of rows the
+/// ring hands the sliding layers this step (at most the window).
+pub const SLIDING_KV_SYMBOL: u16 = 2;
+
+/// The rank-0 `Op::Input` a ring-layout program reads the sliding layers'
+/// live cached-row count from, in place of `cached_len`: the ring keeps the
+/// most recent `window` rows in chronological order, so a sliding layer's
+/// cache holds `min(cached_len, window)` rows and its mask is expressed
+/// against that count (the query-to-key distance is unchanged by dropping the
+/// evicted prefix).
+pub const SLIDING_CACHED_LEN_INPUT: &str = "cached_len_swa";
+
 /// [`append_attention_mixer`]'s single-range-cached counterpart: the same
 /// per-layer knobs ([`ValueSource`], [`RopePairing`], `post_attention_norm`,
 /// `value_norm`), but scored against a MERGED key/value cache
@@ -328,6 +344,7 @@ pub fn append_lfm2_single_range_cached_attention(
 fn causal_mask_cached_windowed(
     program: &mut Vec<Op>,
     cached_len: NodeId,
+    key_extent: Extent,
     window: Option<u32>,
 ) -> Result<(NodeId, NodeId), TensorError> {
     // `query_index`/`query_absolute` are built unconditionally (not only on
@@ -350,7 +367,7 @@ fn causal_mask_cached_windowed(
         program,
         Op::Iota {
             dtype: DType::Float32,
-            extent: Extent::Symbolic(1),
+            extent: key_extent,
         },
     );
     let query_absolute = elementwise(
@@ -1266,6 +1283,12 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     // builder's prior callers (none of whom ever passed a PLE-bearing
     // schedule) see no change in the emitted program.
     ple_dim: Option<u32>,
+    // `true` lays every windowed layer's cache out as a ring
+    // ([`SLIDING_KV_SYMBOL`], [`SLIDING_CACHED_LEN_INPUT`]): its
+    // `kv_cache.{layer}.*` leaves are bounded by the sliding slot instead of
+    // slot 1, and its mask reads the ring's own live-row count. `false`
+    // leaves the program node-for-node what it was before the ring existed.
+    sliding_kv_ring: bool,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1278,6 +1301,19 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
             builder: "lfm2_two_range_cached_forward_program_with_experts",
             feature: "LayerKind::ShortConv (no two-range cache-state contract yet)",
         });
+    }
+    if sliding_kv_ring {
+        let mut windows = schedule
+            .iter()
+            .filter_map(|entry| entry.attention.mask_window.filter(|width| *width > 0));
+        if let Some(first) = windows.next()
+            && windows.any(|width| width != first)
+        {
+            return Err(TensorError::UnsupportedInBuilder {
+                builder: "lfm2_two_range_cached_forward_program_with_experts",
+                feature: "sliding_kv_ring with differing window widths (one sliding slot)",
+            });
+        }
     }
 
     let mut program = Vec::new();
@@ -1344,6 +1380,14 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     // over the same `mask_window` set, since `build_attention_layer_resources`
     // owns exactly one mask slot per layer and the local mask above already
     // claimed it.
+    let sliding_cached_len = sliding_kv_ring.then(|| {
+        input_leaf(
+            &mut program,
+            DType::Float32,
+            Vec::new(),
+            SLIDING_CACHED_LEN_INPUT,
+        )
+    });
     let mut cached_mask_cache: Vec<(Option<u32>, NodeId, NodeId)> = Vec::new();
     let mut cached_masks: Vec<(NodeId, NodeId)> = Vec::with_capacity(schedule.len());
     for entry in schedule {
@@ -1355,7 +1399,21 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
         let pair = match found {
             Some(pair) => pair,
             None => {
-                let built = causal_mask_cached_windowed(&mut program, cached_len, window)?;
+                let ring_len = sliding_cached_len.filter(|_| window.is_some_and(|width| width > 0));
+                let built = match ring_len {
+                    Some(ring_len) => causal_mask_cached_windowed(
+                        &mut program,
+                        ring_len,
+                        Extent::Symbolic(SLIDING_KV_SYMBOL),
+                        window,
+                    )?,
+                    None => causal_mask_cached_windowed(
+                        &mut program,
+                        cached_len,
+                        Extent::Symbolic(1),
+                        window,
+                    )?,
+                };
                 cached_mask_cache.push((window, built.0, built.1));
                 built
             }
@@ -1433,6 +1491,11 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
         // gated on `key_source_kind` alone, so a schedule entry naming
         // `SharedFromLayer` on one axis but not the other is rejected here
         // rather than silently misdeclaring (or missing) a leaf.
+        let cache_bound = if sliding_kv_ring && config.mask_window.is_some_and(|width| width > 0) {
+            Extent::Symbolic(SLIDING_KV_SYMBOL)
+        } else {
+            Extent::Symbolic(1)
+        };
         let shared_source = match (config.key_source_kind, config.value_source_kind) {
             (KeySourceKind::SharedFromLayer(key_source), ValueSourceKind::SharedFromLayer(value_source)) => {
                 if key_source != value_source {
@@ -1503,28 +1566,20 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
                 let k_even_cache = input_leaf(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![
-                        Extent::Symbolic(1),
-                        Extent::Static(kv_heads),
-                        Extent::Static(pairs)
-                    ],
+                    alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
                     &alloc::format!("kv_cache.{layer}.k_even"),
                 );
                 let k_odd_cache = input_leaf(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![
-                        Extent::Symbolic(1),
-                        Extent::Static(kv_heads),
-                        Extent::Static(pairs)
-                    ],
+                    alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
                     &alloc::format!("kv_cache.{layer}.k_odd"),
                 );
                 let v_cache = input_leaf(
                     &mut program,
                     DType::Float32,
                     alloc::vec![
-                        Extent::Symbolic(1),
+                        cache_bound,
                         Extent::Static(kv_heads),
                         Extent::Static(head_dim)
                     ],
