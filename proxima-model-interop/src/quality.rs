@@ -946,15 +946,14 @@ mod real_openchat_file {
     /// env-override shape [`ServingConfig::default`]'s own `model_path`
     /// would use if it read one (it does not; that field is a fixed
     /// constant), so this is a new, test-edge-only knob rather than a reuse
-    /// of an existing one. Defaults to the Q3_K_M checkpoint this slice's
-    /// own task fixture ships, so the test still runs unconfigured on a
-    /// host that has it staged at that path.
+    /// of an existing one. Required: the Q3_K_M checkpoint
+    /// (`openchat-3.5-1210.Q3_K_M.gguf`, llama-quantize output) has no
+    /// in-repo or default location.
     fn variant_model_path() -> String {
         std::env::var("PROXIMA_OPENCHAT_GGUF_VARIANT").unwrap_or_else(|_| {
-            "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/\
-             6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/models/\
-             openchat-3.5-1210.Q3_K_M.gguf"
-                .to_string()
+            panic!(
+                "PROXIMA_OPENCHAT_GGUF_VARIANT is required: path to openchat-3.5-1210.Q3_K_M.gguf (llama-quantize Q3_K_M output)"
+            )
         })
     }
 

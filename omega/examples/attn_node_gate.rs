@@ -77,13 +77,11 @@ struct NodeSpec {
 }
 
 fn r9_root() -> PathBuf {
-    std::env::var("ATTN_R9_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(
-                "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/rootcause/r9",
-            )
-        })
+    std::env::var("ATTN_R9_ROOT").map(PathBuf::from).unwrap_or_else(|_| {
+        panic!(
+            "ATTN_R9_ROOT is required: the directory holding nodes/ (written by the attn_node_dump example) and vectors/ (captured leaf input tensors <node>.bits); the previous session-scratch capture is gone"
+        )
+    })
 }
 
 fn parse_bindings(line: &str) -> Vec<Binding> {

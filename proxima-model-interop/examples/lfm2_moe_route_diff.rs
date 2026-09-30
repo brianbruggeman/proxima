@@ -243,7 +243,7 @@ fn main() {
         "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf".to_string()
     });
     let oracle_dir = env::args().nth(2).unwrap_or_else(|| {
-        "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/oracle/dump_lfm2_routing".to_string()
+        panic!("argv[2] is required: directory holding ffn_moe_topk-<layer>.f32 (plus optionally ffn_moe_logits/probs/probs_biased-<layer>.f32 and model.layers.{{}}.* intra-layer dumps) written by the external llama.h oracle-dump probe hooking build_moe_ffn callbacks on LFM2.5-8B-A1B-Q4_K_M.gguf")
     });
     let prompt = env::args()
         .nth(3)
@@ -262,8 +262,7 @@ fn main() {
     }
     let oracle_path = oracle_dir.join(format!("ffn_moe_topk-{layer}.f32"));
     if !oracle_path.exists() {
-        println!("skipping: no oracle route dump at {oracle_path:?}");
-        return;
+        panic!("no oracle route dump at {oracle_path:?}");
     }
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");

@@ -217,15 +217,13 @@ fn default_env_emits_node_94_shape_for_diffing_against_the_capture() {
         source.contains("q4_0_pair_dot(blk"),
         "node 94's shape must take the batched Q4_0 pair-dot arm:\n{source}"
     );
-    let out_path = std::path::Path::new(
-        "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/\
-         f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/followon/\
-         repeat_attrib/intervention5/emitted_node94_shape.metal",
-    );
-    if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent).expect("scratch dir creates");
-    }
-    std::fs::write(out_path, &source).expect("emitted source writes to the scratch dir");
+    let scratch = tempfile::tempdir().expect("scratch dir creates");
+    let out_dir = std::env::var_os("PROXIMA_EMITTED_MSL_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| scratch.path().to_path_buf());
+    std::fs::create_dir_all(&out_dir).expect("output dir creates");
+    let out_path = out_dir.join("emitted_node94_shape.metal");
+    std::fs::write(&out_path, &source).expect("emitted source writes to the output dir");
 }
 
 /// Tail case: `rows=1540` is not a multiple of 8 (or of 4) -- proves the

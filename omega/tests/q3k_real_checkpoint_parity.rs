@@ -9,9 +9,11 @@
 //! `proxima-gguf/src/quant/q3_k.rs`'s own `#[ignore]`d
 //! `q3_k_real_dequantize_matches_llama_cpp_gguf_py_oracle`).
 //!
-//! Skips (does not fail) when the real file is not present on this host --
-//! matching the sibling real-checkpoint tests' own posture. The checkpoint
-//! path is overridable via `PROXIMA_Q3K_GGUF`.
+//! Gated `#[ignore]`: the checkpoint (an `openchat-3.5-1210.Q3_K_M.gguf`
+//! requantized with llama.cpp `llama-quantize`) is not in the repo. Run with
+//! `PROXIMA_Q3K_GGUF=<path> cargo nextest run -p omega --features metal
+//! --run-ignored only --test q3k_real_checkpoint_parity`; a missing or
+//! wrong-typed file fails the test instead of skipping.
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -29,14 +31,13 @@ use proxima_tensor::{
     ScalarOp, append, evaluate, map,
 };
 
-/// Real `Q3_K_M` GGUF checkpoint path, overridable via `PROXIMA_Q3K_GGUF` --
-/// the hardcoded default only ever resolves on the machine it was captured
-/// on, same shape `q4k_real_checkpoint_parity.rs`'s own
-/// `PROXIMA_BENCH_GGUF_PATH` takes.
+/// Real `Q3_K_M` GGUF checkpoint path, required via `PROXIMA_Q3K_GGUF` -- the
+/// file has no in-repo home and no default location.
 fn real_gguf_path() -> String {
     std::env::var("PROXIMA_Q3K_GGUF").unwrap_or_else(|_| {
-        "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/models/openchat-3.5-1210.Q3_K_M.gguf"
-            .to_string()
+        panic!(
+            "PROXIMA_Q3K_GGUF is required: path to an openchat-3.5-1210.Q3_K_M.gguf (llama-quantize Q3_K_M output) carrying a Q3_K blk.0.ffn_up.weight"
+        )
     })
 }
 
@@ -105,11 +106,10 @@ fn real_tensor_bytes(
         .iter()
         .find(|candidate| candidate.name == name)?;
     if tensor.ggml_type != expect_type {
-        eprintln!(
-            "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
+        panic!(
+            "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?}",
             tensor.ggml_type
         );
-        return None;
     }
     let in_dim = tensor.dims[0] as usize;
     let out_dim = tensor.dims[1] as usize;
@@ -188,12 +188,12 @@ const ROWS_TO_CHECK: usize = 64;
 /// accumulates across four interleaved sub-block partials rather than one
 /// running sum, expected floating-point reordering, not a correctness gap.
 #[test]
+#[ignore = "needs PROXIMA_Q3K_GGUF=<openchat-3.5-1210.Q3_K_M.gguf>"]
 fn metal_matmul_on_real_ffn_up_q3k_bytes_matches_the_dequantized_f32_cpu_path() {
     let path_string = real_gguf_path();
     let path = std::path::Path::new(&path_string);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
-        eprintln!("real gguf file not found at {path_string}; test skipped");
-        return;
+        panic!("real gguf file not found or not a parseable gguf at {path_string}");
     };
     let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
         &mut file,
@@ -202,7 +202,7 @@ fn metal_matmul_on_real_ffn_up_q3k_bytes_matches_the_dequantized_f32_cpu_path() 
         "blk.0.ffn_up.weight",
         GgmlType::Q3_K,
     ) else {
-        return;
+        panic!("{path_string} carries no blk.0.ffn_up.weight tensor");
     };
 
     let blocks_per_row = in_dim / q3_k::QK_K;

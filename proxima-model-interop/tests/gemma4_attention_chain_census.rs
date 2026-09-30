@@ -36,6 +36,9 @@
 //! divide, AV weighted-sum reduce, the cached/new merge) is "chain". In the
 //! fused case a chain BoundOp is simply `BoundOpKind::CachedAttention`.
 //!
+//! Set `PROXIMA_CENSUS_OUT=<dir>` to keep `absorbed_nodes.txt` in a durable
+//! directory; otherwise it goes to a tempdir dropped with the test.
+//!
 //! Skips (does not fail) when the real blob is absent -- same posture as
 //! `gemma4_correctness_gate.rs:112-117`.
 
@@ -56,7 +59,7 @@ use proxima_tensor::{NodeId, NumericPolicy, Op, bind_with_fusion, infer, prune_d
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
-const ABSORBED_NODES_LOG_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/census/absorbed_nodes.txt";
+const ABSORBED_NODES_LOG_NAME: &str = "absorbed_nodes.txt";
 
 const CENSUS_LAYERS: [u32; 5] = [0, 4, 14, 15, 34];
 const GRID_CENSUS_LAYERS: [u32; 3] = [0, 4, 15];
@@ -408,8 +411,13 @@ async fn gemma4_attention_chain_census() {
     // changed from `Reduce`/`Elementwise` to `CachedAttention` without a new
     // id -- `bind_cached_attention_fusion`'s own `planning_outputs.push(fused.node)`,
     // `cached_attention_epilogue_liveness.rs:58-60`).
-    let mut absorbed_log = File::create(ABSORBED_NODES_LOG_PATH)
-        .unwrap_or_else(|error| panic!("create {ABSORBED_NODES_LOG_PATH}: {error}"));
+    let scratch = tempfile::tempdir().expect("scratch dir creates");
+    let out_dir = std::env::var_os("PROXIMA_CENSUS_OUT")
+        .map_or_else(|| scratch.path().to_path_buf(), std::path::PathBuf::from);
+    std::fs::create_dir_all(&out_dir).unwrap_or_else(|error| panic!("create {}: {error}", out_dir.display()));
+    let absorbed_log_path = out_dir.join(ABSORBED_NODES_LOG_NAME);
+    let mut absorbed_log = File::create(&absorbed_log_path)
+        .unwrap_or_else(|error| panic!("create {}: {error}", absorbed_log_path.display()));
     let mut total_absorbed = 0usize;
     for layer in 0..block_count {
         let Some((unfused_q, unfused_wo)) =
@@ -471,10 +479,11 @@ async fn gemma4_attention_chain_census() {
     }
     println!(
         "gemma4_attention_chain_census: total_absorbed_nodes={total_absorbed} \
-         (unfused_total - fused_total = {} - {} = {}) absorbed_nodes_log={ABSORBED_NODES_LOG_PATH}",
+         (unfused_total - fused_total = {} - {} = {}) absorbed_nodes_log={}",
         unfused_bound_ops.len(),
         fused_bound_ops.len(),
-        unfused_bound_ops.len() as i64 - fused_bound_ops.len() as i64
+        unfused_bound_ops.len() as i64 - fused_bound_ops.len() as i64,
+        absorbed_log_path.display()
     );
     // `run_one_bind` now prunes both binds before any of this accounting
     // runs (`bind_with_fusion` alone never prunes a node unreachable from

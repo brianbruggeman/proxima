@@ -65,7 +65,7 @@ fn main() {
         "/Users/brianbruggeman/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct".to_string()
     });
     let oracle_path = env::args().nth(2).unwrap_or_else(|| {
-        "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/diverge/dump_f16/final_logits.f32".to_string()
+        panic!("argv[2] is required: path to final_logits.f32, the raw llama_get_logits_ith dump written by the external llama.h probe run against the f16 SmolLM2-135M-Instruct GGUF on the same BOS-forced prompt")
     });
     let prompt = env::args()
         .nth(3)
@@ -81,8 +81,7 @@ fn main() {
         return;
     }
     if !oracle_path.exists() {
-        println!("skipping: no oracle logit dump at {oracle_path:?}");
-        return;
+        panic!("no oracle logit dump at {oracle_path:?}");
     }
 
     let recorder = Recorder::builder()
