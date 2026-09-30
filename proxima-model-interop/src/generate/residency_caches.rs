@@ -1627,12 +1627,12 @@ pub(crate) struct BackendRuntime {
     /// stayed flat over the same steps, proving the growth was not
     /// GPU-side). Clearing on miss keeps exactly the one entry worth
     /// keeping: the bucket a caller is currently inside.
-    pub(super) plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>), Plan>,
+    pub(super) plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), Plan>,
     /// Plans for the stable pre-gather router/gather partitions. The segment
     /// programs reuse node IDs across layers, so this cache is keyed by the
     /// partition's address and shape rather than the ordinary decode key.
     pub(super) segment_plans:
-        alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>), Plan>,
+        alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), Plan>,
     /// `ServingConfig::math_mode`, read once at construction and narrowed
     /// into every freshly-built [`Plan`] below (`set_math_mode`'s own call
     /// sites) -- a plan-cache hit reuses a `Plan` already carrying it, same
@@ -1665,10 +1665,10 @@ pub(crate) struct BackendRuntime {
     /// single-range plan satisfy a two-range lookup by coincidence of key.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_plans:
-        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>), omega::metal::Plan>,
+        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_segment_plans:
-        alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>), omega::metal::Plan>,
+        alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
     /// `ServingConfig::exact_activations`, read once at construction --
@@ -1759,7 +1759,12 @@ impl BackendRuntime {
         >,
     ) -> Result<Evaluated, InteropError> {
         trace!(rows = symbols[0], "backend evaluation");
-        let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
+        let shape = (
+            symbols[0] as usize,
+            symbols[1] as usize,
+            outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
+        );
         let exact_activations = self.exact_activations;
         // prefill599 retarget: a genuine miss is about to clear `self.plans`
         // (`resolve_cached_plan`'s own doc: it keeps exactly one entry), so
@@ -1879,7 +1884,13 @@ impl BackendRuntime {
             &mut self.segment_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
-            (program_key, new_count, kv_bound_extent, outputs.to_vec()),
+            (
+                program_key,
+                new_count,
+                kv_bound_extent,
+                outputs.to_vec(),
+                self.numeric_policy.epilogue_sources,
+            ),
             || {
                 let mut plan = if exact_activations {
                     plan_named_exact(
@@ -2011,6 +2022,7 @@ impl BackendRuntime {
                 new_count,
                 kv_bound_extent,
                 profile_outputs.clone(),
+                self.numeric_policy.epilogue_sources,
             ),
             || {
                 let mut plan = if exact_activations {
@@ -2103,7 +2115,13 @@ impl BackendRuntime {
             &mut self.placed_segment_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
-            (program_key, new_count, kv_bound_extent, outputs.to_vec()),
+            (
+                program_key,
+                new_count,
+                kv_bound_extent,
+                outputs.to_vec(),
+                self.numeric_policy.epilogue_sources,
+            ),
             || {
                 Self::build_placed_plan(
                     program,
@@ -2148,6 +2166,7 @@ impl BackendRuntime {
             symbols.first().copied().unwrap_or_default() as usize,
             symbols.get(1).copied().unwrap_or_default() as usize,
             outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
         );
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
@@ -2209,7 +2228,12 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
         expert_sources: Option<&BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
     ) -> Result<Evaluated, InteropError> {
-        let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
+        let shape = (
+            symbols[0] as usize,
+            symbols[1] as usize,
+            outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
+        );
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -2344,7 +2368,12 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
-        let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
+        let shape = (
+            symbols[0] as usize,
+            symbols[1] as usize,
+            outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
+        );
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -2417,7 +2446,12 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
-        let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
+        let shape = (
+            symbols[0] as usize,
+            symbols[1] as usize,
+            outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
+        );
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -2614,12 +2648,12 @@ impl BackendRuntime {
 
     pub(super) fn resolve_segment_plan<'cache, PlanType>(
         cache: &'cache mut alloc::collections::BTreeMap<
-            (usize, usize, usize, Vec<NodeId>),
+            (usize, usize, usize, Vec<NodeId>, bool),
             PlanType,
         >,
         plan_hits: &mut usize,
         plan_misses: &mut usize,
-        shape: (usize, usize, usize, Vec<NodeId>),
+        shape: (usize, usize, usize, Vec<NodeId>, bool),
         build: impl FnOnce() -> Result<PlanType, InteropError>,
     ) -> Result<&'cache mut PlanType, InteropError> {
         use alloc::collections::btree_map::Entry;
@@ -2713,7 +2747,12 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
-        let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
+        let shape = (
+            symbols[0] as usize,
+            symbols[1] as usize,
+            outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
+        );
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
@@ -2781,6 +2820,7 @@ impl BackendRuntime {
             symbols[0] as usize,
             symbols[1] as usize,
             profile_outputs.clone(),
+            self.numeric_policy.epilogue_sources,
         );
         let plan = Self::resolve_cached_plan(
             &mut self.plans,

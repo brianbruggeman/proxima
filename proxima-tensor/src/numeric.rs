@@ -39,6 +39,14 @@ pub struct NumericPolicy {
     /// Permits approximate transcendentals/reciprocals with a bounded
     /// relative error. LLVM's `afn`/`arcp`.
     pub approx_functions: bool,
+    /// Permits [`NumericRewrite::WidenedReduceEpilogueFusion`]: the
+    /// reduce-epilogue pass considers every reduce operand of a consumer
+    /// instead of only the first. Changes the bound op count and dispatch
+    /// shape, never the arithmetic of any single fold, so it is a structural
+    /// permission rather than a float-bit one -- and it is part of the plan
+    /// identity, so a plan cache keys on it.
+    #[cfg_attr(feature = "config", serde(default))]
+    pub epilogue_sources: bool,
 }
 
 impl NumericPolicy {
@@ -51,6 +59,7 @@ impl NumericPolicy {
             nan_assumptions: false,
             signed_zero: false,
             approx_functions: false,
+            epilogue_sources: false,
         }
     }
 
@@ -68,6 +77,7 @@ impl NumericPolicy {
             nan_assumptions: false,
             signed_zero: false,
             approx_functions: false,
+            epilogue_sources: false,
         }
     }
 
@@ -81,6 +91,7 @@ impl NumericPolicy {
             nan_assumptions: true,
             signed_zero: true,
             approx_functions: true,
+            epilogue_sources: false,
         }
     }
 
@@ -93,6 +104,7 @@ impl NumericPolicy {
             && (!required.nan_assumptions || self.nan_assumptions)
             && (!required.signed_zero || self.signed_zero)
             && (!required.approx_functions || self.approx_functions)
+            && (!required.epilogue_sources || self.epilogue_sources)
     }
 
     /// Fluent per-permission setters -- `#[non_exhaustive]` blocks a
@@ -131,6 +143,12 @@ impl NumericPolicy {
         self.approx_functions = approx_functions;
         self
     }
+
+    #[must_use]
+    pub const fn with_epilogue_sources(mut self, epilogue_sources: bool) -> Self {
+        self.epilogue_sources = epilogue_sources;
+        self
+    }
 }
 
 /// One rewrite class this crate or a GPU backend may apply, and the exact
@@ -164,6 +182,11 @@ pub enum NumericRewrite {
     /// [`mod@crate::bind`]'s reduce-epilogue fusion. Bit-exact by construction.
     /// Needs nothing.
     ReduceEpilogueFusion,
+    /// [`mod@crate::bind`]'s reduce-epilogue fusion widened to consider every
+    /// reduce operand of a consumer (absorbing at most one per consumer per
+    /// round), which reaches RMSNorm tails whose first reduce operand is a
+    /// multi-reader projection output. Needs `epilogue_sources` alone.
+    WidenedReduceEpilogueFusion,
     /// Merging a multiply and an add into one hardware FMA.
     FmaContraction,
     /// Reordering an associative reduction as a tree instead of a left fold.
@@ -197,6 +220,10 @@ impl NumericRewrite {
             },
             Self::IdentityEliminationNanAssumption => NumericPolicy {
                 nan_assumptions: true,
+                ..NumericPolicy::bit_exact()
+            },
+            Self::WidenedReduceEpilogueFusion => NumericPolicy {
+                epilogue_sources: true,
                 ..NumericPolicy::bit_exact()
             },
             Self::FmaContraction => NumericPolicy {
@@ -294,6 +321,53 @@ mod tests {
             .is_ok()
         );
         assert!(admit(NumericPolicy::fast(), NumericRewrite::ContextChunkMerge).is_ok());
+    }
+
+    #[test]
+    fn widened_reduce_epilogue_fusion_needs_the_epilogue_sources_permission() {
+        for preset in [
+            NumericPolicy::bit_exact(),
+            NumericPolicy::llama_relaxed(),
+            NumericPolicy::fast(),
+        ] {
+            assert!(!preset.epilogue_sources);
+            assert!(admit(preset, NumericRewrite::WidenedReduceEpilogueFusion).is_err());
+        }
+        let granted = NumericPolicy::llama_relaxed().with_epilogue_sources(true);
+        assert!(admit(granted, NumericRewrite::WidenedReduceEpilogueFusion).is_ok());
+        assert!(granted.grants(NumericPolicy::bit_exact().with_epilogue_sources(true)));
+        assert!(
+            !NumericPolicy::fast().grants(NumericPolicy::bit_exact().with_epilogue_sources(true))
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn policy_toml_without_epilogue_sources_deserializes_it_as_false() {
+        let stored_before_the_field_existed = "contraction = true\n\
+             reassociation = true\n\
+             nan_assumptions = false\n\
+             signed_zero = false\n\
+             approx_functions = false\n";
+
+        let policy: NumericPolicy = toml::from_str(stored_before_the_field_existed)
+            .expect("a policy serialized before epilogue_sources existed still parses");
+
+        assert!(!policy.epilogue_sources);
+        assert!(policy.contraction && policy.reassociation);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn policy_with_epilogue_sources_round_trips_through_toml() {
+        let granted = NumericPolicy::llama_relaxed().with_epilogue_sources(true);
+
+        let text = toml::to_string(&granted).expect("policy serializes");
+        let restored: NumericPolicy = toml::from_str(&text).expect("policy deserializes");
+
+        assert!(text.contains("epilogue_sources = true"));
+        assert_eq!(restored, granted);
+        assert!(restored.epilogue_sources);
     }
 
     /// [`NumericRewrite::ContextSplitMerge`] -- the cross-THREADGROUP

@@ -348,6 +348,40 @@ pub(super) fn find_epilogue_source(consumer: &BoundOp, reduce_flags: &[bool]) ->
     found.map(|(node, _)| node)
 }
 
+/// Every reduce-fold operand `consumer` could absorb, in first-occurrence
+/// operand order: [`find_epilogue_source`] widened from "the first flagged
+/// operand" to "every flagged operand". A projection output read by several
+/// ops is flagged too and sits ahead of the sum-of-squares reduce in an
+/// RMSNorm tail's operand list, so the first-operand rule stops at a source
+/// that has other readers and never reaches the reduce behind it. A node read
+/// through two different [`Layout`]s is excluded (the same conflict
+/// [`find_epilogue_source`] declines); a gathered operand disqualifies the
+/// whole consumer. Gated by [`NumericRewrite::WidenedReduceEpilogueFusion`].
+#[cfg(feature = "reduce-epilogue-fusion")]
+pub(super) fn find_epilogue_sources(consumer: &BoundOp, reduce_flags: &[bool]) -> Vec<NodeId> {
+    let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
+        return Vec::new();
+    };
+    if operands.iter().any(|(_, _, gather)| gather.is_some()) {
+        return Vec::new();
+    }
+    let mut seen: Vec<(NodeId, &Layout, bool)> = Vec::new();
+    for (node, layout, _) in operands {
+        if !reduce_flags.get(node.0 as usize).copied().unwrap_or(false) {
+            continue;
+        }
+        match seen.iter_mut().find(|(existing, _, _)| existing == node) {
+            None => seen.push((*node, layout, true)),
+            Some((_, existing_layout, consistent)) => {
+                *consistent &= *existing_layout == layout;
+            }
+        }
+    }
+    seen.into_iter()
+        .filter_map(|(node, _, consistent)| consistent.then_some(node))
+        .collect()
+}
+
 /// One (consumer, reduce) pair a single [`reduce_epilogue_fusion`] pass will
 /// merge: `consumer` is a resolved [`BoundOpKind::Elementwise`] whose sole
 /// reduce-fold operand (per [`find_epilogue_source`]) is `source`, `source`
@@ -362,21 +396,28 @@ pub(super) fn find_epilogue_source(consumer: &BoundOp, reduce_flags: &[bool]) ->
 pub(super) fn reduce_epilogue_candidates(
     resolved: &[BoundOp],
     outputs: &[NodeId],
+    widened: bool,
 ) -> Vec<(NodeId, NodeId)> {
     let reduce_flags = reduce_epilogue_source_flags(resolved);
     let reference_counts = resolved_reference_counts(resolved);
     let mut candidates = Vec::new();
     for bound in resolved {
-        let Some(source) = find_epilogue_source(bound, &reduce_flags) else {
-            continue;
+        let sources = if widened {
+            find_epilogue_sources(bound, &reduce_flags)
+        } else {
+            find_epilogue_source(bound, &reduce_flags)
+                .into_iter()
+                .collect()
         };
-        if reference_counts.get(&source).copied().unwrap_or(0) != 1 {
-            continue; // (b): some OTHER op still reads this fold's output.
+        for source in sources {
+            if reference_counts.get(&source).copied().unwrap_or(0) != 1 {
+                continue; // (b): some OTHER op still reads this fold's output.
+            }
+            if outputs.contains(&source) {
+                continue; // (b): a requested output must still materialize on its own.
+            }
+            candidates.push((bound.node, source));
         }
-        if outputs.contains(&source) {
-            continue; // (b): a requested output must still materialize on its own.
-        }
-        candidates.push((bound.node, source));
     }
     candidates
 }
@@ -403,9 +444,10 @@ pub(super) fn reduce_epilogue_fusion(
     mut resolved: Vec<BoundOp>,
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
+    widened: bool,
 ) -> Result<Vec<BoundOp>, TensorError> {
     for _ in 0..resolved.len() {
-        let candidates = reduce_epilogue_candidates(&resolved, outputs);
+        let candidates = reduce_epilogue_candidates(&resolved, outputs, widened);
         if candidates.is_empty() {
             return Ok(resolved);
         }
@@ -414,7 +456,10 @@ pub(super) fn reduce_epilogue_fusion(
         let mut fused_by_consumer: BTreeMap<NodeId, BoundOp> = BTreeMap::new();
         let mut absorbed: BTreeSet<NodeId> = BTreeSet::new();
         for (consumer, source) in candidates {
-            if absorbed.contains(&consumer) || absorbed.contains(&source) {
+            if absorbed.contains(&consumer)
+                || absorbed.contains(&source)
+                || fused_by_consumer.contains_key(&consumer)
+            {
                 continue; // already spoken for by another pair this same round.
             }
             let Some(reduce_bound) = by_node.get(&source).copied() else {

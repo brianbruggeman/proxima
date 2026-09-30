@@ -322,7 +322,7 @@ pub(super) mod tests {
             &mut cache,
             &mut hits,
             &mut misses,
-            (2, 16, cache_roots),
+            (2, 16, cache_roots, false),
             || Ok::<_, super::InteropError>(11_u32),
         )
         .expect("the cache-only prefill plan resolves");
@@ -332,7 +332,7 @@ pub(super) mod tests {
             &mut cache,
             &mut hits,
             &mut misses,
-            (2, 16, logits_and_cache_roots.clone()),
+            (2, 16, logits_and_cache_roots.clone(), false),
             || Ok::<_, super::InteropError>(22_u32),
         )
         .expect("the final prefill plan with logits resolves independently");
@@ -342,7 +342,7 @@ pub(super) mod tests {
             &mut cache,
             &mut hits,
             &mut misses,
-            (2, 16, logits_and_cache_roots),
+            (2, 16, logits_and_cache_roots, false),
             || Ok::<_, super::InteropError>(33_u32),
         )
         .expect("the identical final prefill plan is reused");
@@ -350,6 +350,53 @@ pub(super) mod tests {
         assert_eq!(cache.len(), 1);
         assert_eq!(hits, 1);
         assert_eq!(misses, 2);
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn full_plan_cache_separates_plans_by_the_epilogue_sources_switch() {
+        let mut cache = BTreeMap::new();
+        let mut hits = 0;
+        let mut misses = 0;
+        let roots = vec![NodeId(41)];
+        let off = proxima_tensor::NumericPolicy::llama_relaxed();
+        let on = off.with_epilogue_sources(true);
+
+        let unwidened = super::BackendRuntime::resolve_cached_plan(
+            &mut cache,
+            &mut hits,
+            &mut misses,
+            (1, 512, roots.clone(), off.epilogue_sources),
+            || Ok::<_, super::InteropError>(11_u32),
+        )
+        .expect("the switch-off plan resolves");
+        assert_eq!(*unwidened, 11);
+
+        let widened = super::BackendRuntime::resolve_cached_plan(
+            &mut cache,
+            &mut hits,
+            &mut misses,
+            (1, 512, roots.clone(), on.epilogue_sources),
+            || Ok::<_, super::InteropError>(22_u32),
+        )
+        .expect("the switch-on plan resolves independently at the same shape");
+        assert_eq!(*widened, 22);
+        assert_eq!(misses, 2);
+        assert_eq!(hits, 0);
+
+        let mut segment_cache = BTreeMap::new();
+        for (epilogue_sources, expected) in [(false, 33_u32), (true, 44_u32)] {
+            let plan = super::BackendRuntime::resolve_segment_plan(
+                &mut segment_cache,
+                &mut hits,
+                &mut misses,
+                (17, 1, 64, roots.clone(), epilogue_sources),
+                || Ok::<_, super::InteropError>(expected),
+            )
+            .expect("segment plan resolves per switch value");
+            assert_eq!(*plan, expected);
+        }
+        assert_eq!(segment_cache.len(), 2);
     }
 
     #[cfg(feature = "metal")]
@@ -362,7 +409,7 @@ pub(super) mod tests {
             &mut cache,
             &mut hits,
             &mut misses,
-            (17, 1, 64, vec![NodeId(3)]),
+            (17, 1, 64, vec![NodeId(3)], false),
             || Ok::<_, super::InteropError>(11_u32),
         )
         .expect("first segment shape resolves");
@@ -371,7 +418,7 @@ pub(super) mod tests {
             &mut cache,
             &mut hits,
             &mut misses,
-            (17, 1, 128, vec![NodeId(3)]),
+            (17, 1, 128, vec![NodeId(3)], false),
             || Ok::<_, super::InteropError>(22_u32),
         )
         .expect("new KV bucket resolves independently");
