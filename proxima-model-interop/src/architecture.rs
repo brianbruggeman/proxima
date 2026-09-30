@@ -49,9 +49,15 @@ pub mod symbols {
     /// foreign architecture's own per-step leaf carries; see the defect
     /// this module's doc links back to.
     pub const KV_BOUND: u16 = 1;
+    /// The rows a sliding-window layer's ring cache hands the program this
+    /// step ([`super::KvLayout::SlidingRing`]): at most the window, and never
+    /// more than [`KV_BOUND`]. Bound by the decode loop itself, so it is
+    /// reserved from foreign [`super::Architecture::step_inputs`] overrides
+    /// too.
+    pub const SLIDING_KV_BOUND: u16 = proxima_tensor::spec::SLIDING_KV_SYMBOL;
     /// The first slot number free for a foreign
     /// [`super::Architecture::step_inputs`] override to claim.
-    pub const FIRST_FREE: u16 = 2;
+    pub const FIRST_FREE: u16 = 3;
 }
 
 /// Assembles the `symbols` slice [`proxima_tensor::infer`] and every
@@ -81,7 +87,10 @@ pub fn bind_symbols(
     let mut highest = symbols::FIRST_FREE.saturating_sub(1) as usize;
     for step_input in step_inputs {
         if let Some((slot, _)) = step_input.symbol {
-            if slot == symbols::NEW_COUNT || slot == symbols::KV_BOUND {
+            if slot == symbols::NEW_COUNT
+                || slot == symbols::KV_BOUND
+                || slot == symbols::SLIDING_KV_BOUND
+            {
                 return Err(InteropError::ReservedSymbolSlot { slot });
             }
             highest = highest.max(slot as usize);
@@ -246,6 +255,23 @@ pub enum FfnRouting {
     Routed,
 }
 
+/// How a bound program lays out the KV cache of its sliding-window layers.
+/// [`Self::Full`] stores every position and lets the window mask hide the
+/// evicted ones, the layout [`Architecture::bind`] has always produced;
+/// [`Self::SlidingRing`] stores only the most recent `window` rows per
+/// sliding layer ([`proxima_tensor::spec::SLIDING_KV_SYMBOL`]). The two are
+/// numerically identical, because the mask already hides every row the ring
+/// drops; the ring only changes how many rows are held.
+///
+/// [`crate::generate::LoadedModel::load`] asks for [`Self::SlidingRing`].
+/// An architecture with no sliding layers ignores the choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KvLayout {
+    Full,
+    #[default]
+    SlidingRing,
+}
+
 /// One checkpoint family's bind + forward-program pipeline, registered
 /// against [`crate::generate::LoadedModel::load`]'s dispatch instead of
 /// hard-coded into it. See `qwen35.rs`'s `Qwen35Arch` for the worked
@@ -306,6 +332,42 @@ pub trait Architecture: Send + Sync {
         let _ = parsed;
         let _ = file_bytes;
         Ok(None)
+    }
+
+    /// [`Architecture::bind`] with an explicit sliding-layer KV layout
+    /// ([`KvLayout`]). Default: ignore `layout` and bind as
+    /// [`Architecture::bind`] does, which is right for every architecture
+    /// with no sliding-window layers.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Architecture::bind`] can fail with.
+    fn bind_with_kv_layout<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        layout: KvLayout,
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        let _ = layout;
+        self.bind(parsed, file_bytes)
+    }
+
+    /// [`Architecture::speculative_verify_program`] with an explicit
+    /// sliding-layer KV layout, which must match the one
+    /// [`Architecture::bind_with_kv_layout`] bound: both programs read and
+    /// write the same per-layer cache.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Architecture::speculative_verify_program`] can fail with.
+    fn speculative_verify_program_with_kv_layout<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        layout: KvLayout,
+    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
+        let _ = layout;
+        self.speculative_verify_program(parsed, file_bytes)
     }
 
     /// This architecture's per-decode-step scratch sizing, re-derived

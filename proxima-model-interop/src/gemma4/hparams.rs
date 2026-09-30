@@ -223,10 +223,10 @@ mod tests {
             .map(|&(kv_heads, head_dim, _)| (kv_heads, head_dim, None))
             .collect();
 
-        let own = MemoryBudget::derive(WeightClassBytes::default(), &uncapped, CONTEXT, 0);
+        let own = MemoryBudget::derive(WeightClassBytes::default(), &uncapped, CONTEXT, 0, 0);
         let every_layer = vec![(1u32, 512u32, None); 35];
         let all_layers =
-            MemoryBudget::derive(WeightClassBytes::default(), &every_layer, CONTEXT, 0);
+            MemoryBudget::derive(WeightClassBytes::default(), &every_layer, CONTEXT, 0, 0);
 
         assert_eq!(layers.len(), 15, "35 blocks minus 20 shared-KV layers");
         assert_eq!(own.kv_cache_bytes, 4_831_838_208);
@@ -242,7 +242,7 @@ mod tests {
             .kv_layers(&parsed)
             .expect("the e2b header carries every key kv_layers reads");
 
-        let capped = MemoryBudget::derive(WeightClassBytes::default(), &layers, CONTEXT, 0);
+        let capped = MemoryBudget::derive(WeightClassBytes::default(), &layers, CONTEXT, 0, 0);
 
         assert_eq!(capped.kv_cache_bytes, 1_623_195_648);
     }

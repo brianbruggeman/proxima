@@ -2425,7 +2425,57 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         registry: &crate::architecture::ArchitectureRegistry,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, false, false, registry)
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            false,
+            false,
+            registry,
+            KvLayout::SlidingRing,
+        )
+    }
+
+    /// [`Self::load`] with the sliding-window layers' KV layout chosen
+    /// explicitly. [`Self::load`] is this call with [`KvLayout::SlidingRing`];
+    /// [`KvLayout::Full`] is the pre-ring layout (every position stored, the
+    /// window mask hiding the evicted ones), kept as the control arm a ring
+    /// parity check compares against. Both decode to the same tokens.
+    ///
+    /// Hidden from docs because production callers want [`Self::load`]; this
+    /// is the seam `examples/gemma4_ring_parity.rs` reaches the control
+    /// through.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::load`].
+    #[doc(hidden)]
+    pub fn load_with_kv_layout(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        layout: KvLayout,
+    ) -> Result<Self, InteropError> {
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            false,
+            false,
+            &crate::architecture::ArchitectureRegistry::with_builtin(),
+            layout,
+        )
+    }
+
+    /// Writes every sliding-ring row `offset` slots away from where the read
+    /// looks for it, which corrupts the window the ring hands the program.
+    /// The control that proves a ring parity check can fail: with offset `0`
+    /// it passes, with any other it must not. Not for production use, and
+    /// hidden from docs for that reason; `examples/gemma4_ring_parity.rs`
+    /// (`--ring-offset`) is its only caller, and a parameter here rather than
+    /// in [`crate::ServingConfig`] keeps it off the config surface.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_ring_write_offset_for_parity_control(mut self, offset: usize) -> Self {
+        self.ring_write_offset = offset;
+        self
     }
 
     /// [`Self::load`] with the paired gate/up reduce
@@ -2454,6 +2504,7 @@ impl<'file> LoadedModel<'file> {
             paired_gate_up_reduce,
             false,
             &crate::architecture::ArchitectureRegistry::with_builtin(),
+            KvLayout::SlidingRing,
         )
     }
 
@@ -2485,6 +2536,7 @@ impl<'file> LoadedModel<'file> {
             false,
             fused_qkv_reduce,
             &crate::architecture::ArchitectureRegistry::with_builtin(),
+            KvLayout::SlidingRing,
         )
     }
 
@@ -2494,6 +2546,7 @@ impl<'file> LoadedModel<'file> {
         paired_gate_up_reduce: bool,
         fused_qkv_reduce: bool,
         registry: &crate::architecture::ArchitectureRegistry,
+        kv_layout: KvLayout,
     ) -> Result<Self, InteropError> {
         // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
         // non-resident page behind the no-copy `MTLBuffer`
@@ -2568,7 +2621,7 @@ impl<'file> LoadedModel<'file> {
         );
         if !resolved.diagnostic_reduce_flags_apply() || (!paired_gate_up_reduce && !fused_qkv_reduce)
         {
-            let bound = resolved.bind(parsed, file_bytes)?;
+            let bound = resolved.bind_with_kv_layout(parsed, file_bytes, kv_layout)?;
             #[cfg(all(feature = "metal", target_os = "macos"))]
             let step_state = resolved.step_state(parsed)?;
             let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
@@ -2617,7 +2670,7 @@ impl<'file> LoadedModel<'file> {
             // every other registered architecture's default `Ok(None)`
             // keeps this field `None`.
             let speculative_verify_program = resolved
-                .speculative_verify_program(parsed, file_bytes)?
+                .speculative_verify_program_with_kv_layout(parsed, file_bytes, kv_layout)?
                 .map(|verify_bound| {
                     (
                         verify_bound.program,
@@ -2629,12 +2682,7 @@ impl<'file> LoadedModel<'file> {
             let expert_slab =
                 crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
             let rope_scaling = RopeScaling::from_gguf(parsed)?;
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            let kv_layers = resolved
-                .kv_layers(parsed)?
-                .into_iter()
-                .map(|(kv_heads, head_dim, _window)| (kv_heads, head_dim, None))
-                .collect();
+            let kv_layers = kv_layers_for_layout(kv_layout, resolved.kv_layers(parsed)?);
             return Self {
                 expert_slab: std::sync::Mutex::new(expert_slab),
                 expert_sidecar: None,
@@ -2643,8 +2691,8 @@ impl<'file> LoadedModel<'file> {
                 architecture_impl: Some(resolved),
                 trained_context_length: resolved.trained_context_length(parsed),
                 rope_scaling,
-                #[cfg(all(feature = "metal", target_os = "macos"))]
                 kv_layers,
+                ring_write_offset: 0,
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                     dense_bytes: dense_weight_bytes,
@@ -2759,7 +2807,6 @@ impl<'file> LoadedModel<'file> {
         };
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         let rope_scaling = RopeScaling::from_gguf(parsed)?;
-        #[cfg(all(feature = "metal", target_os = "macos"))]
         let kv_layers = crate::bind::kv_layers_from_metadata(parsed)?;
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
@@ -2769,8 +2816,8 @@ impl<'file> LoadedModel<'file> {
             architecture_impl: None,
             trained_context_length: crate::dense::DENSE.trained_context_length(parsed),
             rope_scaling,
-            #[cfg(all(feature = "metal", target_os = "macos"))]
             kv_layers,
+            ring_write_offset: 0,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
@@ -2869,7 +2916,6 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
-        #[cfg(all(feature = "metal", target_os = "macos"))]
         let kv_layers = alloc::vec![
             (architecture.kv_heads, architecture.head_dim, None);
             architecture.block_count as usize
@@ -2885,8 +2931,8 @@ impl<'file> LoadedModel<'file> {
             // parses neither), so the limit is the memory fit alone.
             trained_context_length: None,
             rope_scaling: RopeScaling::None,
-            #[cfg(all(feature = "metal", target_os = "macos"))]
             kv_layers,
+            ring_write_offset: 0,
             // safetensors carries no `_exps.`-style naming convention this
             // crate has confirmed against a real checkpoint the way
             // `crate::bind::tensor_bytes_by_class` has for GGUF -- every

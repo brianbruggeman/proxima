@@ -709,6 +709,16 @@ pub enum InteropError {
         found: usize,
     },
 
+    /// The bound program bounds layer `layer`'s `kv_cache.{layer}.*` leaves
+    /// by the sliding-ring slot (`proxima_tensor::spec::SLIDING_KV_SYMBOL`),
+    /// but the checkpoint's own `kv_layers` gives that layer no window to size
+    /// the ring by -- the program and the metadata disagree about whether the
+    /// layer slides.
+    #[error(
+        "layer {layer} is bound as a sliding ring but its checkpoint metadata gives it no window"
+    )]
+    SlidingRingWindowMissing { layer: usize },
+
     /// `crate::generate::LoadedModel::load_inner`'s load-time residency
     /// gate: `mapped_bytes` (the checkpoint mapping's own length, registered
     /// whole as one no-copy `MTLBuffer`) exceeds `available_bytes` (the

@@ -79,7 +79,7 @@ mod transform;
 
 #[cfg(feature = "std")]
 pub use architecture::{
-    Architecture, ArchitectureRegistry, BoundProgram, FfnRouting, KvCacheShape, StepInput,
+    Architecture, ArchitectureRegistry, BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput,
     StepInputContext, StepState, bind_symbols, symbols,
 };
 #[cfg(feature = "std")]

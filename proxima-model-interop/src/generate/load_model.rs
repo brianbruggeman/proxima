@@ -819,12 +819,18 @@ pub struct LoadedModel<'file> {
     /// [`Self::effective_rope_scaling`].
     pub(super) rope_scaling: RopeScaling,
     /// One `(kv_heads, head_dim, window)` entry per layer that owns a KV
-    /// cache ([`Architecture::kv_layers`]), as this decode path allocates it:
-    /// every position is stored, so a sliding layer's window is dropped and
-    /// the fit prices the rows actually written. What
-    /// [`Self::apply_memory_fit_gate`] fits and budgets.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
+    /// cache, as this decode path allocates it
+    /// ([`Architecture::kv_layers`] under this load's [`KvLayout`]: a
+    /// sliding layer keeps its window under [`KvLayout::SlidingRing`], where
+    /// the cache holds exactly that many rows, and loses it under
+    /// [`KvLayout::Full`], where it stores every position). Both what
+    /// [`Self::apply_memory_fit_gate`] fits and budgets, and the width
+    /// [`Self::attention_layer_cache`] gives each ring.
     pub(super) kv_layers: Vec<(u32, u32, Option<u32>)>,
+    /// Rows every sliding ring writes off its true slot. Zero always, except
+    /// on the model [`Self::with_ring_write_offset_for_parity_control`]
+    /// hands back.
+    pub(super) ring_write_offset: usize,
     /// This checkpoint's own weight bytes, by class
     /// (`crate::bind::tensor_bytes_by_class`'s own dense/expert/table
     /// split, plus the SSM state bytes a qwen35 checkpoint's layers hold)
@@ -1347,6 +1353,23 @@ pub(super) fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize
         .div_ceil(bucket_tokens)
         .saturating_mul(bucket_tokens)
         .min(capacity)
+}
+
+/// [`Architecture::kv_layers`] as `layout` allocates it. A ring layout keeps
+/// each sliding layer's window, so [`crate::memory_fit`] prices the rows the
+/// ring holds. A full layout stores every position of a sliding layer too, so
+/// its window is dropped and the fit prices the rows actually written.
+pub(super) fn kv_layers_for_layout(
+    layout: KvLayout,
+    layers: Vec<(u32, u32, Option<u32>)>,
+) -> Vec<(u32, u32, Option<u32>)> {
+    match layout {
+        KvLayout::SlidingRing => layers,
+        KvLayout::Full => layers
+            .into_iter()
+            .map(|(kv_heads, head_dim, _window)| (kv_heads, head_dim, None))
+            .collect(),
+    }
 }
 
 pub(super) const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) -> bool {

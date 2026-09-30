@@ -241,9 +241,9 @@ mod tests {
         let layers = QWEN35MOE
             .kv_layers(&parsed)
             .expect("the header carries every key kv_layers reads");
-        let budget = MemoryBudget::derive(WeightClassBytes::default(), &layers, 262_144, 0);
+        let budget = MemoryBudget::derive(WeightClassBytes::default(), &layers, 262_144, 0, 0);
         let every_layer = vec![(2u32, 256u32, None); 40];
-        let today = MemoryBudget::derive(WeightClassBytes::default(), &every_layer, 262_144, 0);
+        let today = MemoryBudget::derive(WeightClassBytes::default(), &every_layer, 262_144, 0, 0);
 
         assert_eq!(layers.len(), 10, "only layers with head_count_kv != 0");
         assert_eq!(budget.kv_cache_bytes, 10_737_418_240);

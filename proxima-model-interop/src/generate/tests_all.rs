@@ -2439,6 +2439,7 @@ pub(super) mod memory_fit_gate_tests {
             trained_context_length: Some(TRAINED_CONTEXT_LENGTH),
             rope_scaling: RopeScaling::None,
             kv_layers: vec![(2, 64, None); 2],
+            ring_write_offset: 0,
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
                 expert_bytes: 0,
@@ -4365,6 +4366,25 @@ pub(super) mod memory_fit_gate_tests {
 
         const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
+        /// The symbols the decode loop binds at `kv_bound_extent`: the new-position
+        /// count, the full-attention extent, and the sliding ring's extent (the
+        /// checkpoint's own window, capped by the full extent). `LoadedModel::load`
+        /// binds the ring layout, whose sliding layers read that third slot.
+        fn symbols_at(model: &LoadedModel, kv_bound_extent: u64) -> alloc::vec::Vec<u64> {
+            let window = model
+                .kv_layers
+                .iter()
+                .find_map(|&(_, _, window)| window)
+                .map_or(0, u64::from);
+            alloc::vec![1, kv_bound_extent, kv_bound_extent.min(window)]
+        }
+
+        /// Every symbol slot that moves with the KV length: the full-attention
+        /// extent and the sliding ring's.
+        fn kv_bound_bits() -> u64 {
+            (1u64 << symbols::KV_BOUND) | (1u64 << symbols::SLIDING_KV_BOUND)
+        }
+
         /// Positions where the two binds disagree at all -- `BoundOp`'s own
         /// derived `PartialEq` already covers extents, operand layouts,
         /// epilogue operands and every `BoundOpKind` scalar (`cached_key_rows`/
@@ -4431,7 +4451,7 @@ pub(super) mod memory_fit_gate_tests {
         /// `assert_eq!` on lengths before either set is built).
         fn kv_masked_positions(program: &[Op], bound: &[BoundOp]) -> std::collections::BTreeSet<usize> {
             let masks = symbol_dependency_output_masks(program);
-            let kv_bit = 1u64 << symbols::KV_BOUND;
+            let kv_bit = kv_bound_bits();
             bound
                 .iter()
                 .enumerate()
@@ -4499,8 +4519,8 @@ pub(super) mod memory_fit_gate_tests {
             let model =
                 LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
-            let symbols_low = alloc::vec![1u64, low_kv as u64];
-            let symbols_high = alloc::vec![1u64, high_kv as u64];
+            let symbols_low = symbols_at(&model, low_kv as u64);
+            let symbols_high = symbols_at(&model, high_kv as u64);
 
             let shapes_low =
                 infer(&model.program, &symbols_low).expect("infer at the low kv bucket");
@@ -4592,8 +4612,8 @@ pub(super) mod memory_fit_gate_tests {
             let model =
                 LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
-            let shapes_low = infer(&model.program, &[1u64, 32]).expect("infer at kv=32");
-            let shapes_high = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+            let shapes_low = infer(&model.program, &symbols_at(&model, 32)).expect("infer at kv=32");
+            let shapes_high = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
             let bound_low = bind_with_fusion(
                 &model.program,
                 &shapes_low,
@@ -4670,8 +4690,8 @@ pub(super) mod memory_fit_gate_tests {
                 LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
             let outputs = [model.logits_root];
-            let shapes_low = infer(&model.program, &[1u64, low_kv as u64]).expect("infer at low kv");
-            let shapes_high = infer(&model.program, &[1u64, high_kv as u64]).expect("infer at high kv");
+            let shapes_low = infer(&model.program, &symbols_at(&model, low_kv as u64)).expect("infer at low kv");
+            let shapes_high = infer(&model.program, &symbols_at(&model, high_kv as u64)).expect("infer at high kv");
             let bound_low = bind_with_fusion(
                 &model.program,
                 &shapes_low,
@@ -4695,7 +4715,7 @@ pub(super) mod memory_fit_gate_tests {
                 .map(|op| refresh_mask(&model.program, &node_masks, op))
                 .collect();
             let masked = kv_masked_positions(&model.program, &bound_low);
-            let kv_bit = 1u64 << symbols::KV_BOUND;
+            let kv_bit = kv_bound_bits();
 
             let mut positions_refreshed = 0usize;
             let mut mismatches = alloc::vec::Vec::new();
@@ -4807,7 +4827,7 @@ pub(super) mod memory_fit_gate_tests {
                 LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
             let outputs = [model.logits_root];
-            let shapes_low = infer(&model.program, &[1u64, 32]).expect("infer at kv=32");
+            let shapes_low = infer(&model.program, &symbols_at(&model, 32)).expect("infer at kv=32");
             let bound_low = bind_with_fusion(
                 &model.program,
                 &shapes_low,
@@ -4822,9 +4842,9 @@ pub(super) mod memory_fit_gate_tests {
                 .map(|op| refresh_mask(&model.program, &node_masks, op))
                 .collect();
             let masked = kv_masked_positions(&model.program, &bound_low);
-            let kv_bit = 1u64 << symbols::KV_BOUND;
+            let kv_bit = kv_bound_bits();
 
-            let shapes_probe = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+            let shapes_probe = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
             let whole_mask: alloc::vec::Vec<u64> = masks.clone();
             let every_position_refreshes = refresh_bound_ops(
                 &bound_low,
@@ -4840,7 +4860,7 @@ pub(super) mod memory_fit_gate_tests {
             const ITERATIONS: usize = 20;
             let mut full_bind_micros: alloc::vec::Vec<u128> = alloc::vec::Vec::with_capacity(ITERATIONS);
             for _ in 0..ITERATIONS {
-                let shapes_high = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+                let shapes_high = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
                 let started = std::time::Instant::now();
                 let _ = bind_with_fusion(&model.program, &shapes_high, &outputs, true, NumericPolicy::bit_exact())
                     .expect("bind at kv=64");
@@ -4860,7 +4880,7 @@ pub(super) mod memory_fit_gate_tests {
 
             let mut refresh_micros: alloc::vec::Vec<u128> = alloc::vec::Vec::with_capacity(ITERATIONS);
             for _ in 0..ITERATIONS {
-                let shapes_high = infer(&model.program, &[1u64, 64]).expect("infer at kv=64");
+                let shapes_high = infer(&model.program, &symbols_at(&model, 64)).expect("infer at kv=64");
                 let started = std::time::Instant::now();
                 for &position in &masked {
                     let mut single_position_masks = alloc::vec![0u64; masks.len()];
