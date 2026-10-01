@@ -69,6 +69,8 @@ mod serving;
 #[cfg(feature = "std")]
 mod serving_fsm;
 #[cfg(feature = "std")]
+mod prompt_cache_settings;
+#[cfg(feature = "std")]
 mod speculative_settings;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 mod source;
@@ -143,9 +145,11 @@ pub use rope_scaling::RopeScaling;
 pub use serving::GdnPrefillBackend;
 pub use serving::{
     ContextLength, DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, NgramMapParams, NgramModParams,
-    REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
+    PromptCacheConfig, REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
     SpeculativeTypeSet, WeightPrecisionRule, apply_serving_config, resolve_context_length,
 };
+#[cfg(feature = "std")]
+pub use prompt_cache_settings::PromptCacheSettings;
 #[cfg(feature = "std")]
 pub use speculative_settings::{SpeculativeSettings, SpeculativeTypeName, SpeculativeTypeNameSet};
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
