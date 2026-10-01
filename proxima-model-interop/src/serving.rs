@@ -461,6 +461,76 @@ impl Default for SpeculativeConfig<'static> {
     }
 }
 
+/// [`ServingConfig::prompt_cache`]'s data: the per-model prompt cache that
+/// reuses the longest common token prefix across requests
+/// (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R1, R7). Plain `Copy`
+/// numbers for the same reason [`SpeculativeConfig`] is: [`ServingConfig`]
+/// stays `Copy` and this module stays free of `serde`/`bon`/`conflaguration`;
+/// [`crate::PromptCacheSettings`] (`std`-gated) is the env/TOML/builder owner
+/// of the same fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptCacheConfig {
+    /// Most host bytes the cache may hold across all entries; `0` turns the
+    /// cache off (the default), so a request prefills its whole prompt.
+    /// Example: `1_073_741_824` holds a few long gemma4-E2B conversations.
+    pub byte_budget: u64,
+    /// Most entries the cache holds, whatever the byte budget allows.
+    pub max_entries: u32,
+    /// Extra rows each sliding-window ring layer keeps past its window while
+    /// the cache is on, so a rewind of up to this many tokens finds the rows
+    /// the window needs. Raising it costs `slack` rows per ring layer per
+    /// entry; the ring rewinds `stored_len - lcp` only when that is no more
+    /// than the slack. Applied on top of any speculative-decode slack as a
+    /// maximum, never a sum.
+    pub ring_rewind_slack: u32,
+    /// Tokens between sliding-window checkpoints (spec R4, not yet wired).
+    pub checkpoint_interval: u32,
+    /// Checkpoints kept per entry (spec R4, not yet wired).
+    pub max_checkpoints: u32,
+    /// Shortest run of tokens worth shifting after a divergence (spec R5,
+    /// not yet wired); `0` keeps chunk reuse off like llama's `n_cache_reuse`.
+    pub cache_reuse_min: u32,
+}
+
+impl PromptCacheConfig {
+    /// The off switch: nothing is cached and every request prefills in full.
+    #[must_use]
+    pub const fn off() -> Self {
+        Self {
+            byte_budget: 0,
+            max_entries: 4,
+            ring_rewind_slack: 256,
+            checkpoint_interval: 0,
+            max_checkpoints: 0,
+            cache_reuse_min: 0,
+        }
+    }
+
+    /// Whether this config asks for any caching at all.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        self.byte_budget > 0 && self.max_entries > 0
+    }
+
+    /// Rows of ring slack a request under this config needs on top of its
+    /// speculative slack: [`Self::ring_rewind_slack`] when the cache is on,
+    /// `0` when it is off.
+    #[must_use]
+    pub const fn rewind_slack_rows(&self) -> usize {
+        if self.is_enabled() {
+            self.ring_rewind_slack as usize
+        } else {
+            0
+        }
+    }
+}
+
+impl Default for PromptCacheConfig {
+    fn default() -> Self {
+        Self::off()
+    }
+}
+
 /// The forward test's former hardcoded `FIXTURE_PATH`, kept as the
 /// [`ServingConfig::default`] `model_path` so existing tests keep running
 /// unmodified when no caller supplies their own checkpoint.
@@ -912,6 +982,9 @@ pub struct ServingConfig<'model> {
     /// replacing this crate's former process-env toggle. On by default
     /// (`ngram-simple`); `SpeculativeConfig::none()` is the off switch.
     pub speculative: SpeculativeConfig<'model>,
+    /// The per-model prompt cache (`PromptCacheConfig`'s own doc). Off by
+    /// default; consulted by `generate/decode.rs`'s decode-loop entry.
+    pub prompt_cache: PromptCacheConfig,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -936,6 +1009,14 @@ impl<'model> ServingConfig<'model> {
     #[must_use]
     pub const fn with_speculative(mut self, speculative: SpeculativeConfig<'model>) -> Self {
         self.speculative = speculative;
+        self
+    }
+
+    /// Same shape as [`Self::with_weight_precision`], for the prompt-cache
+    /// section.
+    #[must_use]
+    pub const fn with_prompt_cache(mut self, prompt_cache: PromptCacheConfig) -> Self {
+        self.prompt_cache = prompt_cache;
         self
     }
 }
@@ -1033,6 +1114,7 @@ impl Default for ServingConfig<'static> {
                 per_layer_budget_bytes: 0,
             },
             speculative: SpeculativeConfig::default(),
+            prompt_cache: PromptCacheConfig::default(),
         }
     }
 }
@@ -1454,6 +1536,7 @@ mod tests {
                 per_layer_budget_bytes: 0,
             },
             speculative: SpeculativeConfig::default(),
+            prompt_cache: PromptCacheConfig::default(),
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -1626,6 +1709,7 @@ mod tests {
                 per_layer_budget_bytes: 0,
             },
             speculative: SpeculativeConfig::default(),
+            prompt_cache: PromptCacheConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1726,6 +1810,7 @@ mod tests {
                 per_layer_budget_bytes: 0,
             },
             speculative: SpeculativeConfig::default(),
+            prompt_cache: PromptCacheConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1816,6 +1901,7 @@ mod tests {
                 per_layer_budget_bytes: 0,
             },
             speculative: SpeculativeConfig::default(),
+            prompt_cache: PromptCacheConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1896,6 +1982,7 @@ mod tests {
                 per_layer_budget_bytes: 0,
             },
             speculative: SpeculativeConfig::default(),
+            prompt_cache: PromptCacheConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);
