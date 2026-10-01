@@ -1,8 +1,10 @@
-//! Slice M0: per-kernel GPU-time census of ONE warm gemma4-E2B decode step.
+//! Slice M0: per-kernel GPU-time census of ONE warm gemma4-E2B decode evaluation.
 //!
 //! Method: isolated replay. The decode runs through the normal path
 //! (`LoadedModel::generate_streaming`, same `ServingConfig` as
-//! `decode_gbps_baseline`). The last step's dispatches are captured LIVE by
+//! `decode_gbps_baseline`, speculation at the production default). The last
+//! evaluation's dispatches (a verify evaluation is several rows wide; its width
+//! is printed) are captured LIVE by
 //! `omega`'s `PROXIMA_CAPTURE_LIVE` hook (`omega::take_captured_dispatches`:
 //! real pipeline, real resolved buffers, uniform bytes, grid), grouped by
 //! kernel identity plus launch geometry, and each group's representative is
@@ -255,11 +257,21 @@ struct StepStats {
     gpu_exec_ms: Option<f64>,
     physical_dispatch_calls: Option<u64>,
     gpu_busy_ms: Option<f64>,
+    rows_evaluated: Option<usize>,
+    tokens_committed: Option<usize>,
 }
 
+/// A `step` is the decode loop's token index, but only a step that is not a
+/// queued-token pop runs an evaluation, so with speculation on a verify
+/// evaluation at step `s` commits several tokens and steps `s+1..` evaluate
+/// nothing. Each evaluation emits one `token_breakdown_metal` and one
+/// `token_breakdown_gpu` line; the k-th gpu line belongs to the k-th
+/// evaluated step. An evaluation with no `speculative_verify` line is a plain
+/// one-row, one-token step.
 fn parse_step_stats(log: &str) -> BTreeMap<usize, StepStats> {
     let mut steps: BTreeMap<usize, StepStats> = BTreeMap::new();
     let mut gpu_lines: Vec<f64> = Vec::new();
+    let mut verifies: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
     for line in log.lines() {
         if line.contains("token_breakdown_metal:") {
             let Some(step) = field_after(line, "step").and_then(|text| text.parse::<usize>().ok())
@@ -274,12 +286,34 @@ fn parse_step_stats(log: &str) -> BTreeMap<usize, StepStats> {
             && let Some(busy) = field_after(line, "gpu_busy_ms").and_then(|text| text.parse().ok())
         {
             gpu_lines.push(busy);
+        } else if line.contains("speculative_verify")
+            && let Some(step) = field_after(line, "step").and_then(|text| text.parse().ok())
+            && let Some(draft_len) =
+                field_after(line, "draft_len").and_then(|text| text.parse::<usize>().ok())
+            && let Some(emitted) =
+                field_after(line, "emitted").and_then(|text| text.parse::<usize>().ok())
+        {
+            verifies.insert(step, (draft_len + 1, emitted));
         }
     }
-    for (order, busy) in gpu_lines.into_iter().enumerate() {
-        steps.entry(order).or_default().gpu_busy_ms = Some(busy);
+    for (stats, busy) in steps.values_mut().zip(gpu_lines) {
+        stats.gpu_busy_ms = Some(busy);
+    }
+    for (step, stats) in &mut steps {
+        let (rows, committed) = verifies.get(step).copied().unwrap_or((1, 1));
+        stats.rows_evaluated = Some(rows);
+        stats.tokens_committed = Some(committed);
     }
     steps
+}
+
+/// Every decode step from 1 up: step 0 is the prompt prefill, and which later
+/// steps run an evaluation is only known after the run.
+fn capture_steps_arg(max_tokens: usize) -> String {
+    (1..max_tokens)
+        .map(|step| step.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -294,9 +328,7 @@ mod harness {
     use omega::CapturedDispatch;
     use proxima_gguf::parse_complete;
     use proxima_gguf::types::GgmlType;
-    use proxima_model_interop::{
-        GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, TokenEvent,
-    };
+    use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig, TokenEvent};
     use proxima_telemetry::export::Exporter;
     use proxima_telemetry::recorder::Recorder;
 
@@ -370,8 +402,8 @@ mod harness {
         recorder
     }
 
-    fn arm_capture(last_step: usize) {
-        let steps = format!("{},{}", last_step.saturating_sub(1), last_step);
+    fn arm_capture(max_tokens: usize) {
+        let steps = capture_steps_arg(max_tokens);
         // SAFETY: called from `main` before any thread is spawned, so no
         // concurrent environment reader exists.
         unsafe {
@@ -396,7 +428,6 @@ mod harness {
             ubatch_size: 0,
             reasoning_budget: 0,
             dispatch_type: omega::DispatchType::Serial,
-            speculative: SpeculativeConfig::none(),
             ..ServingConfig::default()
         };
         let prompt = std::env::var("PROXIMA_PROMPT").unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
@@ -659,7 +690,7 @@ mod harness {
         std::fs::create_dir_all(&config.out_dir).expect("create M0_OUT_DIR");
         let telemetry_path = config.out_dir.join("decode_telemetry.log");
         let _ = std::fs::remove_file(&telemetry_path);
-        arm_capture(config.max_tokens - 1);
+        arm_capture(config.max_tokens);
         let recorder = install_telemetry(&telemetry_path);
 
         let (generated, text) = decode(&config);
@@ -791,13 +822,15 @@ mod harness {
             floor_samples.len()
         );
         println!(
-            "m0 step (captured step {capture_step}): gpu_busy_ms={:?} gpu_exec_ms={:?} physical_dispatch_calls={:?}",
+            "m0 step (captured step {capture_step}, last evaluation that ran): rows_evaluated={:?} tokens_committed={:?} gpu_busy_ms={:?} gpu_exec_ms={:?} physical_dispatch_calls={:?}",
+            capture_stats.rows_evaluated,
+            capture_stats.tokens_committed,
             capture_stats.gpu_busy_ms,
             capture_stats.gpu_exec_ms,
             capture_stats.physical_dispatch_calls
         );
         println!(
-            "m0 step (median over logged steps >= 2): gpu_busy_ms={:.3} gpu_exec_ms={:.3}",
+            "m0 step (median over logged evaluations at step >= 2, mixed widths): gpu_busy_ms={:.3} gpu_exec_ms={:.3}",
             warm_median(steps, |stats| stats.gpu_busy_ms),
             warm_median(steps, |stats| stats.gpu_exec_ms)
         );
@@ -1058,13 +1091,37 @@ mod tests {
     }
 
     #[test]
-    fn step_stats_parse_metal_and_gpu_lines_by_step_order() {
+    fn step_stats_parse_metal_and_gpu_lines_by_evaluation_order() {
         let log = "t INFO m: token_breakdown_metal: per-decode-step metal stage attribution step=3 prepare_calls=1 physical_dispatch_calls=1154 gpu_exec_ms=14.25 readback_ms=0.1\n\
                    t DEBUG o: token_breakdown_gpu commit_call_ms=0.1 gpu_busy_ms=13.5 chunks=1\n";
         let steps = parse_step_stats(log);
         assert_eq!(steps[&3].physical_dispatch_calls, Some(1154));
         assert_eq!(steps[&3].gpu_exec_ms, Some(14.25));
-        assert_eq!(steps[&0].gpu_busy_ms, Some(13.5));
+        assert_eq!(steps[&3].gpu_busy_ms, Some(13.5));
+    }
+
+    #[test]
+    fn step_stats_pair_gpu_lines_with_evaluated_steps_and_read_verify_width() {
+        let log = "t INFO m: token_breakdown_metal: x step=1 physical_dispatch_calls=900 gpu_exec_ms=20.0\n\
+                   t DEBUG o: token_breakdown_gpu gpu_busy_ms=11.0 chunks=1\n\
+                   t DEBUG d: speculative_verify step=4 draft_len=3 accepted=2 emitted=3 drafter=Some(NgramSimple)\n\
+                   t INFO m: token_breakdown_metal: x step=4 physical_dispatch_calls=1000 gpu_exec_ms=25.0\n\
+                   t DEBUG o: token_breakdown_gpu gpu_busy_ms=14.0 chunks=1\n";
+        let steps = parse_step_stats(log);
+        assert_eq!(steps.keys().copied().collect::<Vec<_>>(), vec![1, 4]);
+        assert_eq!(steps[&1].gpu_busy_ms, Some(11.0));
+        assert_eq!(steps[&4].gpu_busy_ms, Some(14.0));
+        assert_eq!(steps[&1].rows_evaluated, Some(1));
+        assert_eq!(steps[&1].tokens_committed, Some(1));
+        assert_eq!(steps[&4].rows_evaluated, Some(4));
+        assert_eq!(steps[&4].tokens_committed, Some(3));
+    }
+
+    #[test]
+    fn capture_steps_cover_every_decode_step_after_prefill() {
+        assert_eq!(capture_steps_arg(5), "1,2,3,4");
+        assert_eq!(capture_steps_arg(2), "1");
+        assert_eq!(capture_steps_arg(1), "");
     }
 
     #[test]
