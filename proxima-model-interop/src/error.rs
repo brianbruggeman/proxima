@@ -709,6 +709,15 @@ pub enum InteropError {
         found: usize,
     },
 
+    /// The prompt cache stopped a prefill at `position` to snapshot the ring
+    /// layers, and the state could not be brought back to exactly
+    /// `position` tokens after the stretch's sampled token was forwarded.
+    #[error("prompt cache prefill stop at {position} could not rewind: {reason}")]
+    PromptCacheStopRewind {
+        position: usize,
+        reason: &'static str,
+    },
+
     /// The bound program bounds layer `layer`'s `kv_cache.{layer}.*` leaves
     /// by the sliding-ring slot (`proxima_tensor::spec::SLIDING_KV_SYMBOL`),
     /// but the checkpoint's own `kv_layers` gives that layer no window to size

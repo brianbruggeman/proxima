@@ -48,6 +48,10 @@ pub enum CachePath {
     /// The prompt diverges inside the stored sequence: every layer was
     /// rewound to the shared prefix first.
     Rewind,
+    /// The prompt diverges further back than the ring layers can rewind: a
+    /// checkpoint at or before the shared prefix restored their rows, and the
+    /// request prefilled from the checkpoint onward.
+    Checkpoint,
     /// No entry could be reused; the whole prompt was prefilled.
     Miss,
 }
@@ -59,6 +63,7 @@ impl CachePath {
         match self {
             Self::Extend => "extend",
             Self::Rewind => "rewind",
+            Self::Checkpoint => "checkpoint",
             Self::Miss => "miss",
         }
     }
@@ -80,6 +85,13 @@ pub enum MissReason {
         /// Rows the ring keeps past its window.
         slack_rows: usize,
     },
+    /// The entry's ring rows before `restored_at - window` belong to a state a
+    /// checkpoint replaced, so a rewind to before `restored_at` would read
+    /// them.
+    RingRowsStale {
+        /// Position of the checkpoint the entry was last restored to.
+        restored_at: usize,
+    },
     /// A layer holds state that cannot be rewound (a recurrent layer, or a
     /// cache shape this build does not truncate).
     UnrewindableLayer,
@@ -93,6 +105,7 @@ impl MissReason {
             Self::Empty => "empty",
             Self::NoCommonPrefix => "no_common_prefix",
             Self::RingSlackExceeded { .. } => "ring_slack_exceeded",
+            Self::RingRowsStale { .. } => "ring_rows_stale",
             Self::UnrewindableLayer => "unrewindable_layer",
         }
     }
@@ -103,8 +116,13 @@ impl MissReason {
 /// `cache_path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheReport {
-    /// Tokens of the prompt that matched an entry and were reused.
+    /// Tokens the prompt shares with the entry it matched (capped one short
+    /// of the prompt, so the last token is always forwarded).
     pub lcp: usize,
+    /// Tokens served from the cache without a forward pass: `lcp`, or the
+    /// position of the checkpoint restored when `path` is
+    /// [`CachePath::Checkpoint`].
+    pub reused_tokens: usize,
     /// Tokens of the prompt the forward pass had to prefill.
     pub prefilled_tokens: usize,
     /// How the entry was used.
@@ -114,15 +132,10 @@ pub struct CacheReport {
 }
 
 impl CacheReport {
-    /// Tokens served from the cache without a forward pass.
-    #[must_use]
-    pub const fn reused_tokens(&self) -> usize {
-        self.lcp
-    }
-
     fn miss(prompt_tokens: usize, reason: MissReason) -> Self {
         Self {
             lcp: 0,
+            reused_tokens: 0,
             prefilled_tokens: prompt_tokens,
             path: CachePath::Miss,
             miss: Some(reason),
@@ -136,17 +149,32 @@ impl CacheReport {
 /// written; the window needs positions `target_len - window ..` onward, and
 /// the first of them survives iff `first_needed + capacity >= stored_len`.
 /// For `target_len >= window` that is `stored_len - target_len <= slack`.
-fn ring_rewind_fits(stored_len: usize, target_len: usize, ring: &KvRing) -> bool {
+///
+/// `restored_at` is the checkpoint position the rows were last restored to
+/// (`0` for a ring only ever written forward): a restore writes the window
+/// ending there and nothing before it, so a window starting earlier than
+/// `restored_at - window` would read rows of the state the restore replaced.
+fn ring_rewind_fits(
+    stored_len: usize,
+    target_len: usize,
+    restored_at: usize,
+    ring: &KvRing,
+) -> bool {
     let first_needed = target_len.saturating_sub(ring.window);
-    ring.write_offset == 0 && (target_len == 0 || first_needed + ring.capacity >= stored_len)
+    let first_valid = restored_at.saturating_sub(ring.window);
+    ring.write_offset == 0
+        && first_needed >= first_valid
+        && (target_len == 0 || first_needed + ring.capacity >= stored_len)
 }
 
 impl PrefixState {
     /// The first reason this state cannot be rewound to `target_len` tokens,
-    /// `None` when every layer can.
+    /// `None` when every layer can. `restored_at` is the checkpoint position
+    /// the ring rows were last restored to, `0` when never.
     fn rewind_refusal(
         &self,
         target_len: usize,
+        restored_at: usize,
         widths: &[LayerPadRowWidths],
     ) -> Option<MissReason> {
         if widths.len() != self.layer_caches.len() {
@@ -159,22 +187,34 @@ impl PrefixState {
                 (LayerCacheState::SharedFromLayer, _) => None,
                 (LayerCacheState::Attention(cache), _) if cache.ring_geometry().is_some() => cache
                     .ring_geometry()
-                    .and_then(|ring| self.ring_refusal(target_len, ring)),
+                    .and_then(|ring| self.ring_refusal(target_len, restored_at, ring)),
                 (LayerCacheState::Attention(_), LayerPadRowWidths::Attention { .. }) => None,
                 _ => Some(MissReason::UnrewindableLayer),
             })
     }
 
-    fn ring_refusal(&self, target_len: usize, ring: &KvRing) -> Option<MissReason> {
+    fn ring_refusal(
+        &self,
+        target_len: usize,
+        restored_at: usize,
+        ring: &KvRing,
+    ) -> Option<MissReason> {
         if ring.write_offset != 0 {
             return Some(MissReason::UnrewindableLayer);
         }
-        (!ring_rewind_fits(self.cached_len, target_len, ring)).then_some(
+        if ring_rewind_fits(self.cached_len, target_len, restored_at, ring) {
+            return None;
+        }
+        let stale =
+            target_len.saturating_sub(ring.window) < restored_at.saturating_sub(ring.window);
+        Some(if stale {
+            MissReason::RingRowsStale { restored_at }
+        } else {
             MissReason::RingSlackExceeded {
                 rewind_rows: self.cached_len - target_len,
                 slack_rows: ring.capacity - ring.window,
-            },
-        )
+            }
+        })
     }
 
     /// Rewinds this state to its first `target_len` tokens: full-attention
@@ -182,16 +222,18 @@ impl PrefixState {
     /// addressed by position, so rewinding is `cached_len` going back --
     /// [`LayerCache::truncate`]'s own doc) and are checked to still hold the
     /// window, and a shared-KV layer follows its donor. All-or-nothing: on
-    /// `Err` the state is untouched.
+    /// `Err` the state is untouched. Past what the ring holds,
+    /// [`Self::restore_checkpoint`] is the way back.
     pub(super) fn rewind_to(
         &mut self,
         target_len: usize,
+        restored_at: usize,
         widths: &[LayerPadRowWidths],
     ) -> Result<(), MissReason> {
         if target_len >= self.cached_len {
             return Ok(());
         }
-        if let Some(reason) = self.rewind_refusal(target_len, widths) {
+        if let Some(reason) = self.rewind_refusal(target_len, restored_at, widths) {
             return Err(reason);
         }
         for (state, width) in self.layer_caches.iter_mut().zip(widths) {
@@ -237,9 +279,118 @@ impl PrefixState {
     }
 }
 
+/// One cached conversation: the state, the checkpoints that let it rewind
+/// past its ring's slack, and where the rings were last restored to.
+pub(super) struct CacheEntry {
+    pub(super) state: PrefixState,
+    /// Ascending by position, every one a snapshot of `state.ids[..position]`.
+    pub(super) checkpoints: Vec<RingCheckpoint>,
+    /// Position of the checkpoint the rings were last restored to, `0` when
+    /// they were only ever written forward ([`ring_rewind_fits`]).
+    pub(super) restored_at: usize,
+}
+
+impl CacheEntry {
+    pub(super) const fn new(state: PrefixState) -> Self {
+        Self {
+            state,
+            checkpoints: Vec::new(),
+            restored_at: 0,
+        }
+    }
+
+    pub(super) fn checkpoint_positions(&self) -> Vec<usize> {
+        self.checkpoints
+            .iter()
+            .map(RingCheckpoint::position)
+            .collect()
+    }
+
+    pub(super) fn byte_len(&self) -> usize {
+        self.state.byte_len()
+            + self
+                .checkpoints
+                .iter()
+                .map(RingCheckpoint::byte_len)
+                .sum::<usize>()
+    }
+
+    /// The state to hand a decode loop as its seed, `None` while nothing is
+    /// cached yet (the loop builds fresh caches for `None`).
+    pub(super) fn take_state(&mut self) -> Option<PrefixState> {
+        (self.state.cached_len > 0).then(|| {
+            core::mem::replace(
+                &mut self.state,
+                PrefixState {
+                    ids: Vec::new(),
+                    layer_caches: Vec::new(),
+                    cached_len: 0,
+                },
+            )
+        })
+    }
+
+    /// Adds `checkpoint` in position order, then evicts down to `max`
+    /// ([`retained_positions`]).
+    pub(super) fn insert_checkpoint(&mut self, checkpoint: RingCheckpoint, max: usize) {
+        self.checkpoints
+            .retain(|held| held.position() != checkpoint.position());
+        self.checkpoints.push(checkpoint);
+        self.checkpoints.sort_by_key(RingCheckpoint::position);
+        let kept = retained_positions(&self.checkpoint_positions(), max);
+        self.checkpoints
+            .retain(|held| kept.contains(&held.position()));
+    }
+
+    /// Brings the entry to `resume_len` tokens: a rewind when the rings hold
+    /// the window, otherwise the nearest checkpoint at or before `resume_len`.
+    /// Checkpoints past the new length describe a sequence the prompt has left
+    /// and are dropped (llama-server erases `pos_max > pos_next`,
+    /// `server-context.cpp:3367-3378`). On `Err` the entry is untouched.
+    fn resume(
+        &mut self,
+        resume_len: usize,
+        widths: &[LayerPadRowWidths],
+    ) -> Result<CachePath, MissReason> {
+        let path = if resume_len >= self.state.cached_len {
+            CachePath::Extend
+        } else {
+            CachePath::Rewind
+        };
+        match self.state.rewind_to(resume_len, self.restored_at, widths) {
+            Ok(()) => {
+                self.checkpoints
+                    .retain(|held| held.position() <= resume_len);
+                Ok(path)
+            }
+            Err(
+                reason @ (MissReason::RingSlackExceeded { .. } | MissReason::RingRowsStale { .. }),
+            ) => self.restore_nearest(resume_len, widths).ok_or(reason),
+            Err(reason) => Err(reason),
+        }
+    }
+
+    fn restore_nearest(
+        &mut self,
+        resume_len: usize,
+        widths: &[LayerPadRowWidths],
+    ) -> Option<CachePath> {
+        let index = self
+            .checkpoints
+            .iter()
+            .rposition(|held| held.position() <= resume_len)?;
+        self.checkpoints.truncate(index + 1);
+        let position = self.checkpoints[index].position();
+        self.state
+            .restore_checkpoint(&self.checkpoints[index], widths);
+        self.restored_at = position;
+        Some(CachePath::Checkpoint)
+    }
+}
+
 /// The entries one [`LoadedModel`] keeps, least recently used first.
 pub(super) struct PromptCache {
-    entries: Vec<PrefixState>,
+    entries: Vec<CacheEntry>,
     last_report: Option<CacheReport>,
 }
 
@@ -252,75 +403,75 @@ impl PromptCache {
     }
 
     /// Takes the entry sharing the longest prefix with `prompt_ids` out of
-    /// the cache, rewound to that prefix and ready to be resumed from, or
-    /// reports why none can be. `widths` are the model's per-layer row
-    /// widths ([`LoadedModel::declared_layer_cache_names_and_widths`]).
+    /// the cache, brought to that prefix (or to the checkpoint behind it) and
+    /// ready to be resumed from, or reports why none can be. `widths` are the
+    /// model's per-layer row widths
+    /// ([`LoadedModel::declared_layer_cache_names_and_widths`]).
     pub(super) fn take_best(
         &mut self,
         prompt_ids: &[u32],
         widths: &[LayerPadRowWidths],
-    ) -> (Option<PrefixState>, CacheReport) {
+    ) -> (Option<CacheEntry>, CacheReport) {
         let best = self
             .entries
             .iter()
             .enumerate()
-            .map(|(index, entry)| (index, longest_common_prefix(&entry.ids, prompt_ids)))
+            .map(|(index, entry)| (index, longest_common_prefix(&entry.state.ids, prompt_ids)))
             .max_by_key(|(_, lcp)| *lcp);
         let resume = best.map(|(index, lcp)| (index, lcp.min(prompt_ids.len().saturating_sub(1))));
         let outcome = match resume {
             None => Err(MissReason::Empty),
             Some((_, 0)) => Err(MissReason::NoCommonPrefix),
-            Some((index, resume_len)) => self.resume_at(index, resume_len, widths),
+            Some((index, resume_len)) => self
+                .resume_at(index, resume_len, widths)
+                .map(|(entry, path)| (entry, path, resume_len)),
         };
-        let (state, report) = match outcome {
-            Ok((state, path)) => {
-                let resume_len = state.cached_len;
+        let (entry, report) = match outcome {
+            Ok((entry, path, lcp)) => {
+                let reused = entry.state.cached_len;
                 let report = CacheReport {
-                    lcp: resume_len,
-                    prefilled_tokens: prompt_ids.len() - resume_len,
+                    lcp,
+                    reused_tokens: reused,
+                    prefilled_tokens: prompt_ids.len() - reused,
                     path,
                     miss: None,
                 };
-                (Some(state), report)
+                (Some(entry), report)
             }
             Err(reason) => (None, CacheReport::miss(prompt_ids.len(), reason)),
         };
         self.last_report = Some(report);
-        (state, report)
+        (entry, report)
     }
 
-    /// Takes entry `index` out and rewinds it to `resume_len`; an entry that
-    /// cannot be rewound stays in the cache for the next request.
+    /// Takes entry `index` out and brings it to `resume_len`; an entry that
+    /// cannot get there stays in the cache for the next request.
     fn resume_at(
         &mut self,
         index: usize,
         resume_len: usize,
         widths: &[LayerPadRowWidths],
-    ) -> Result<(PrefixState, CachePath), MissReason> {
-        let mut state = self.entries.remove(index);
-        let path = if resume_len >= state.cached_len {
-            CachePath::Extend
-        } else {
-            CachePath::Rewind
-        };
-        match state.rewind_to(resume_len, widths) {
-            Ok(()) => Ok((state, path)),
+    ) -> Result<(CacheEntry, CachePath), MissReason> {
+        let mut entry = self.entries.remove(index);
+        match entry.resume(resume_len, widths) {
+            Ok(path) => Ok((entry, path)),
             Err(reason) => {
-                self.entries.insert(index, state);
+                self.entries.insert(index, entry);
                 Err(reason)
             }
         }
     }
 
-    /// Puts `state` back as the most recently used entry, then evicts from
+    /// Puts `entry` back as the most recently used entry, then evicts from
     /// the least recently used end until the entry count and byte budget in
-    /// `config` hold. A state larger than the whole budget is not stored.
-    pub(super) fn store(&mut self, state: PrefixState, config: &PromptCacheConfig) -> usize {
+    /// `config` hold. An entry larger than the whole budget is not stored.
+    pub(super) fn store(&mut self, entry: CacheEntry, config: &PromptCacheConfig) -> usize {
         let budget = usize::try_from(config.byte_budget).unwrap_or(usize::MAX);
-        if state.cached_len == 0 || state.layer_caches.is_empty() || state.byte_len() > budget {
+        let state = &entry.state;
+        if state.cached_len == 0 || state.layer_caches.is_empty() || entry.byte_len() > budget {
             return self.entries.len();
         }
-        self.entries.push(state);
+        self.entries.push(entry);
         let max_entries = config.max_entries as usize;
         while self.entries.len() > max_entries || self.stored_bytes() > budget {
             self.entries.remove(0);
@@ -329,7 +480,7 @@ impl PromptCache {
     }
 
     pub(super) fn stored_bytes(&self) -> usize {
-        self.entries.iter().map(PrefixState::byte_len).sum()
+        self.entries.iter().map(CacheEntry::byte_len).sum()
     }
 
     pub(super) const fn last_report(&self) -> Option<CacheReport> {
@@ -363,37 +514,99 @@ impl LoadedModel<'_> {
     pub(super) fn prompt_cache_lookup(
         &self,
         prompt_ids: &[u32],
-    ) -> Result<(Option<PrefixState>, CacheReport), InteropError> {
-        let (_, widths) = self.declared_layer_cache_names_and_widths()?;
-        let (state, report) = self
+        widths: &[LayerPadRowWidths],
+    ) -> (Option<CacheEntry>, CacheReport) {
+        let (entry, report) = self
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take_best(prompt_ids, &widths);
+            .take_best(prompt_ids, widths);
         debug!(
             cache_lcp = report.lcp as u64,
-            cache_reused_tokens = report.reused_tokens() as u64,
+            cache_reused_tokens = report.reused_tokens as u64,
             cache_prefilled_tokens = report.prefilled_tokens as u64,
             cache_path = report.path.as_str(),
             cache_miss_reason = report.miss.map_or("none", MissReason::as_str),
             "prompt cache lookup"
         );
-        Ok((state, report))
+        (entry, report)
     }
 
-    /// Hands a finished request's state to the cache.
-    pub(super) fn prompt_cache_store(&self, state: PrefixState, config: &PromptCacheConfig) {
-        let cached_tokens = state.cached_len;
+    /// Hands a finished request's entry to the cache.
+    pub(super) fn prompt_cache_store(&self, entry: CacheEntry, config: &PromptCacheConfig) {
+        let cached_tokens = entry.state.cached_len;
+        let checkpoints = entry.checkpoints.len();
         let entries = self
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .store(state, config);
+            .store(entry, config);
         debug!(
             cache_stored_tokens = cached_tokens as u64,
+            cache_checkpoints = checkpoints as u64,
             cache_entries = entries as u64,
             "prompt cache store"
         );
+    }
+
+    /// Prefills `ids` up to each of `positions` (ascending), snapshotting the
+    /// ring layers at every one, so the entry can come back to it later.
+    ///
+    /// Each stretch is a seeded decode of `max_tokens = 1` over the tokens
+    /// since the last stop -- the same shape [`Self::prefill_prefix`] uses to
+    /// prefill without decoding -- and its sampled token is discarded. A
+    /// sampled end-of-sequence token is forwarded and cached, so the state is
+    /// rewound the one row back to the stop. That rewind fits the ring's
+    /// slack because [`planned_positions`] plans nothing without any.
+    #[allow(clippy::too_many_arguments)] // the seeded decode's own knobs, minus the sinks it fixes
+    fn prefill_through_checkpoints(
+        &self,
+        ids: &[u32],
+        mut entry: CacheEntry,
+        positions: &[usize],
+        widths: &[LayerPadRowWidths],
+        config: &PromptCacheConfig,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        forced_draft_width: Option<u16>,
+    ) -> Result<CacheEntry, InteropError> {
+        for &position in positions {
+            let held = entry.state.cached_len;
+            if position > held {
+                let seed = entry.take_state();
+                let (_, _, _, advanced) = self.run_decode_loop_from_ids(
+                    ids[held..position].to_vec(),
+                    1,
+                    serving_config,
+                    runtime,
+                    None,
+                    &mut LogitsSink::Discard,
+                    &mut NodeValuesSink::Discard,
+                    &mut |_event| ControlFlow::Continue(()),
+                    seed,
+                    true,
+                    None,
+                    forced_draft_width,
+                )?;
+                entry.state = advanced;
+                entry
+                    .state
+                    .rewind_to(position, entry.restored_at, widths)
+                    .map_err(|reason| InteropError::PromptCacheStopRewind {
+                        position,
+                        reason: reason.as_str(),
+                    })?;
+            }
+            if let Some(checkpoint) = RingCheckpoint::capture(&entry.state) {
+                debug!(
+                    cache_checkpoint_position = position as u64,
+                    cache_checkpoint_bytes = checkpoint.byte_len() as u64,
+                    "prompt cache checkpoint"
+                );
+                entry.insert_checkpoint(checkpoint, config.max_checkpoints as usize);
+            }
+        }
+        Ok(entry)
     }
 
     /// The decode loop behind every entry point, with the prompt cache in
@@ -402,6 +615,13 @@ impl LoadedModel<'_> {
     /// forced token stream, or a logits/node-values sink all need the full
     /// prefill to run).
     ///
+    /// `turn_ends` are token counts into `ids` where a turn ends (the index
+    /// just past an end-of-turn token); the prefill stops there to snapshot
+    /// the ring layers ([`RingCheckpoint`]), so a later request that rewrites
+    /// from that turn on can restore it. Checkpoints also land every
+    /// [`PromptCacheConfig::checkpoint_interval`] tokens and at the point the
+    /// request resumed from.
+    ///
     /// On the cached path the returned [`PrefixState`] is hollow: the real
     /// one now lives in the cache, and the only caller that wants the state
     /// back ([`Self::prefill_prefix`]) switches the cache off for its call.
@@ -409,6 +629,7 @@ impl LoadedModel<'_> {
     pub(super) fn run_decode_loop_through_cache(
         &self,
         ids: Vec<u32>,
+        turn_ends: &[usize],
         max_tokens: usize,
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
@@ -444,9 +665,35 @@ impl LoadedModel<'_> {
                 forced_draft_width,
             );
         }
-        let (cache_seed, report) = self.prompt_cache_lookup(&ids)?;
+        let (_, widths) = self.declared_layer_cache_names_and_widths()?;
+        let (found, report) = self.prompt_cache_lookup(&ids, &widths);
+        let entry = found.unwrap_or_else(|| {
+            CacheEntry::new(PrefixState {
+                ids: Vec::new(),
+                layer_caches: Vec::new(),
+                cached_len: 0,
+            })
+        });
+        let positions = planned_positions(
+            &entry.checkpoint_positions(),
+            report.reused_tokens,
+            ids.len(),
+            turn_ends,
+            &config,
+        );
+        let mut entry = self.prefill_through_checkpoints(
+            &ids,
+            entry,
+            &positions,
+            &widths,
+            &config,
+            serving_config,
+            runtime,
+            forced_draft_width,
+        )?;
+        let resumed_at = entry.state.cached_len;
         let (generated_ids, text, stopped_by_eos, final_state) = self.run_decode_loop_from_ids(
-            ids[report.lcp..].to_vec(),
+            ids[resumed_at..].to_vec(),
             max_tokens,
             serving_config,
             runtime,
@@ -454,12 +701,13 @@ impl LoadedModel<'_> {
             logits_sink,
             node_values_sink,
             on_token,
-            cache_seed,
+            entry.take_state(),
             true,
             speculative_stats,
             forced_draft_width,
         )?;
-        self.prompt_cache_store(final_state, &config);
+        entry.state = final_state;
+        self.prompt_cache_store(entry, &config);
         let hollow = PrefixState {
             ids: Vec::new(),
             layer_caches: Vec::new(),
@@ -479,12 +727,12 @@ mod tests {
 
     use super::*;
 
-    fn state_with_ids(ids: &[u32]) -> PrefixState {
-        PrefixState {
+    fn state_with_ids(ids: &[u32]) -> CacheEntry {
+        CacheEntry::new(PrefixState {
             ids: ids.to_vec(),
             layer_caches: vec![LayerCacheState::SharedFromLayer],
             cached_len: ids.len(),
-        }
+        })
     }
 
     fn shared_widths() -> Vec<LayerPadRowWidths> {
@@ -513,7 +761,7 @@ mod tests {
             &shared_widths(),
         );
 
-        assert_eq!(state.expect("entry reused").cached_len, 5);
+        assert_eq!(state.expect("entry reused").state.cached_len, 5);
         assert_eq!(report.path, CachePath::Extend);
         assert_eq!(report.lcp, 5);
         assert_eq!(report.prefilled_tokens, 4);
@@ -554,7 +802,7 @@ mod tests {
         assert_eq!(report.path, CachePath::Rewind);
         assert_eq!(report.lcp, 3);
         assert_eq!(report.prefilled_tokens, 1);
-        assert_eq!(state.expect("entry reused").ids, vec![2, 105, 2364]);
+        assert_eq!(state.expect("entry reused").state.ids, vec![2, 105, 2364]);
     }
 
     #[test]
@@ -688,7 +936,7 @@ mod tests {
         };
 
         state
-            .rewind_to(36, &gemma_like_widths())
+            .rewind_to(36, 0, &gemma_like_widths())
             .expect("a 4-token rewind fits a 4-row slack");
 
         assert_eq!(state.cached_len, 36);
@@ -706,7 +954,7 @@ mod tests {
     fn rewind_beyond_ring_slack_is_refused_and_leaves_the_state_untouched() {
         let mut state = gemma_like_state(40);
 
-        let refusal = state.rewind_to(35, &gemma_like_widths());
+        let refusal = state.rewind_to(35, 0, &gemma_like_widths());
 
         assert_eq!(
             refusal,
@@ -727,7 +975,7 @@ mod tests {
         let mut state = gemma_like_state(WINDOW + SLACK);
 
         state
-            .rewind_to(3, &gemma_like_widths())
+            .rewind_to(3, 0, &gemma_like_widths())
             .expect("a ring holding every position it ever saw can rewind anywhere");
 
         assert_eq!(state.cached_len, 3);
@@ -752,7 +1000,7 @@ mod tests {
                                     == marker(position)
                             });
                         assert_eq!(
-                            ring_rewind_fits(stored_len, target_len, &ring),
+                            ring_rewind_fits(stored_len, target_len, 0, &ring),
                             rows_survive,
                             "window={window} slack={slack} stored={stored_len} target={target_len}"
                         );
@@ -780,17 +1028,17 @@ mod tests {
         }];
 
         assert_eq!(
-            state.rewind_to(3, &widths),
+            state.rewind_to(3, 0, &widths),
             Err(MissReason::UnrewindableLayer)
         );
-        assert_eq!(state.rewind_to(4, &widths), Ok(()));
+        assert_eq!(state.rewind_to(4, 0, &widths), Ok(()));
     }
 
     /// A refused rewind leaves the entry in the cache for the next request.
     #[test]
     fn a_refused_rewind_keeps_the_entry_cached() {
         let mut cache = PromptCache::new();
-        cache.store(gemma_like_state(40), &enabled_config());
+        cache.store(CacheEntry::new(gemma_like_state(40)), &enabled_config());
         let diverging_prompt: Vec<u32> = (0..35).chain([900, 901]).collect();
 
         let (state, report) = cache.take_best(&diverging_prompt, &gemma_like_widths());
@@ -807,6 +1055,227 @@ mod tests {
         let (state, report) = cache.take_best(&extension, &gemma_like_widths());
         assert!(state.is_some());
         assert_eq!(report.path, CachePath::Extend);
+    }
+
+    fn ring_marker(state: &PrefixState, position: usize) -> f32 {
+        match &state.layer_caches[0] {
+            LayerCacheState::Attention(cache) => {
+                let ring = cache.ring_geometry().expect("layer 0 is a ring");
+                cache.k_even[(position % ring.capacity) * EVEN_ODD_ROW]
+            }
+            _ => 0.0,
+        }
+    }
+
+    fn entry_with_checkpoints(stored_len: usize, positions: &[usize]) -> CacheEntry {
+        let mut entry = CacheEntry::new(gemma_like_state(stored_len));
+        for &position in positions {
+            let checkpoint = RingCheckpoint::capture(&gemma_like_state(position))
+                .expect("a state with a ring layer is captured");
+            entry.insert_checkpoint(checkpoint, 8);
+        }
+        entry
+    }
+
+    fn prompt_diverging_after(shared: usize, new_tokens: usize) -> Vec<u32> {
+        (0..shared as u32)
+            .chain((0..new_tokens as u32).map(|offset| 900 + offset))
+            .collect()
+    }
+
+    /// Writes real rows for positions `entry.cached_len..to`, the way a
+    /// prefill after a restore would.
+    fn prefill_to(state: &mut PrefixState, to: usize) {
+        for position in state.cached_len..to {
+            let value = marker(position);
+            for layer in &mut state.layer_caches {
+                if let LayerCacheState::Attention(cache) = layer {
+                    cache.append_at(
+                        position,
+                        &[value; EVEN_ODD_ROW],
+                        &[value; EVEN_ODD_ROW],
+                        &[value; V_ROW],
+                    );
+                }
+            }
+            state.ids.push(position as u32);
+        }
+        state.cached_len = to;
+    }
+
+    /// R4: a rewind of 20 tokens does not fit the 4-row slack, so the entry
+    /// restores the newest checkpoint at or before the shared prefix (32 of
+    /// 16, 32, 48 for a prefix of 40) and the request prefills from there.
+    #[test]
+    fn a_rewind_past_the_slack_restores_the_nearest_checkpoint_at_or_before_the_prefix() {
+        let mut cache = PromptCache::new();
+        cache.store(entry_with_checkpoints(60, &[16, 32, 48]), &enabled_config());
+
+        let (entry, report) = cache.take_best(&prompt_diverging_after(40, 2), &gemma_like_widths());
+
+        let entry = entry.expect("a checkpoint at 32 serves a prefix of 40");
+        assert_eq!(report.path, CachePath::Checkpoint);
+        assert_eq!(report.lcp, 40);
+        assert_eq!(report.reused_tokens, 32);
+        assert_eq!(report.prefilled_tokens, 42 - 32);
+        assert_eq!(entry.state.cached_len, 32);
+        assert_eq!(entry.state.ids.len(), 32);
+        assert_eq!(entry.checkpoint_positions(), vec![16, 32]);
+        assert_eq!(entry.restored_at, 32);
+        assert!(
+            (24..32).all(|position| ring_marker(&entry.state, position) == marker(position)),
+            "the window ending at the checkpoint reads back its own rows"
+        );
+        assert_eq!(full_layer_rows(&entry.state), 32);
+    }
+
+    #[test]
+    fn a_checkpoint_exactly_at_the_prefix_is_used_whole() {
+        let mut cache = PromptCache::new();
+        cache.store(entry_with_checkpoints(60, &[16, 32, 48]), &enabled_config());
+
+        let (entry, report) = cache.take_best(&prompt_diverging_after(48, 2), &gemma_like_widths());
+
+        assert!(entry.is_some());
+        assert_eq!(report.path, CachePath::Checkpoint);
+        assert_eq!(report.reused_tokens, 48);
+        assert_eq!(report.prefilled_tokens, 50 - 48);
+    }
+
+    /// With every checkpoint after the shared prefix nothing can stand in for
+    /// the overwritten rows: the request prefills in full and the entry stays.
+    #[test]
+    fn a_prefix_before_every_checkpoint_is_a_miss_that_keeps_the_entry() {
+        let mut cache = PromptCache::new();
+        cache.store(entry_with_checkpoints(60, &[32, 48]), &enabled_config());
+
+        let (entry, report) = cache.take_best(&prompt_diverging_after(20, 2), &gemma_like_widths());
+
+        assert!(entry.is_none());
+        assert_eq!(
+            report.miss,
+            Some(MissReason::RingSlackExceeded {
+                rewind_rows: 40,
+                slack_rows: SLACK,
+            })
+        );
+        assert_eq!(report.prefilled_tokens, 22);
+        let (entry, _) = cache.take_best(&prompt_diverging_after(48, 2), &gemma_like_widths());
+        assert!(entry.is_some(), "the refused entry is still cached");
+    }
+
+    /// After a restore at 32 and a prefill to 44 the rings hold rows from 24
+    /// on and nothing valid before: a prefix of 20 fits no slack and has no
+    /// row to read, so it falls back to the checkpoint at 16, not to the
+    /// stale rows a bare slack check would have accepted at a prefix of 30.
+    #[test]
+    fn rows_a_restore_replaced_are_never_read_by_a_later_rewind() {
+        let mut restored = entry_with_checkpoints(60, &[16, 32, 48]);
+        restored
+            .resume(40, &gemma_like_widths())
+            .expect("the checkpoint at 32 restores");
+        prefill_to(&mut restored.state, 44);
+        let mut cache = PromptCache::new();
+        cache.store(restored, &enabled_config());
+
+        let stale = prompt_diverging_after(30, 2);
+        let (entry, report) = cache.take_best(&stale, &gemma_like_widths());
+
+        let entry = entry.expect("the checkpoint at 16 serves a prefix of 30");
+        assert_eq!(report.path, CachePath::Checkpoint);
+        assert_eq!(report.reused_tokens, 16);
+        assert_eq!(entry.restored_at, 16);
+        assert_eq!(entry.checkpoint_positions(), vec![16]);
+    }
+
+    #[test]
+    fn the_rows_after_a_restore_are_reported_stale_to_a_rewind_without_checkpoints() {
+        let mut restored = entry_with_checkpoints(60, &[32]);
+        restored
+            .resume(40, &gemma_like_widths())
+            .expect("the checkpoint at 32 restores");
+        prefill_to(&mut restored.state, 36);
+
+        let refusal = restored
+            .state
+            .rewind_to(30, restored.restored_at, &gemma_like_widths());
+
+        assert_eq!(refusal, Err(MissReason::RingRowsStale { restored_at: 32 }));
+        assert_eq!(restored.state.cached_len, 36);
+    }
+
+    /// A rewind that fits the slack keeps the checkpoints at or before the
+    /// target and drops the ones that described the abandoned tail.
+    #[test]
+    fn a_rewind_inside_the_slack_drops_only_the_checkpoints_past_the_target() {
+        let mut cache = PromptCache::new();
+        cache.store(
+            entry_with_checkpoints(60, &[16, 32, 48, 58]),
+            &enabled_config(),
+        );
+
+        let (entry, report) = cache.take_best(&prompt_diverging_after(57, 3), &gemma_like_widths());
+
+        let entry = entry.expect("a 3-row rewind fits the slack");
+        assert_eq!(report.path, CachePath::Rewind);
+        assert_eq!(report.reused_tokens, 57);
+        assert_eq!(entry.checkpoint_positions(), vec![16, 32, 48]);
+        assert_eq!(entry.restored_at, 0);
+    }
+
+    #[test]
+    fn an_extension_keeps_every_checkpoint() {
+        let mut cache = PromptCache::new();
+        cache.store(entry_with_checkpoints(60, &[16, 32, 48]), &enabled_config());
+
+        let (entry, report) = cache.take_best(
+            &prompt_diverging_after(60, 0)
+                .into_iter()
+                .chain([7])
+                .collect::<Vec<_>>(),
+            &gemma_like_widths(),
+        );
+
+        assert_eq!(report.path, CachePath::Extend);
+        assert_eq!(
+            entry.expect("extended").checkpoint_positions(),
+            vec![16, 32, 48]
+        );
+    }
+
+    /// The cap pins the earliest checkpoint and evicts the oldest of the
+    /// rest as newer ones arrive.
+    #[test]
+    fn checkpoints_past_the_cap_evict_the_oldest_but_the_first() {
+        let mut entry = CacheEntry::new(gemma_like_state(60));
+        for position in [8, 16, 24, 32, 40] {
+            let checkpoint = RingCheckpoint::capture(&gemma_like_state(position))
+                .expect("a state with a ring layer is captured");
+            entry.insert_checkpoint(checkpoint, 3);
+        }
+
+        assert_eq!(entry.checkpoint_positions(), vec![8, 32, 40]);
+    }
+
+    #[test]
+    fn checkpoint_bytes_count_against_the_entry_and_the_budget() {
+        let plain = CacheEntry::new(gemma_like_state(60));
+        let checkpointed = entry_with_checkpoints(60, &[16, 32]);
+        let one_checkpoint = RingCheckpoint::capture(&gemma_like_state(32)).expect("captured");
+
+        assert_eq!(
+            checkpointed.byte_len(),
+            plain.byte_len()
+                + RingCheckpoint::capture(&gemma_like_state(16))
+                    .expect("captured")
+                    .byte_len()
+                + one_checkpoint.byte_len()
+        );
+        let tight = PromptCacheConfig {
+            byte_budget: plain.byte_len() as u64,
+            ..enabled_config()
+        };
+        assert_eq!(PromptCache::new().store(checkpointed, &tight), 0);
     }
 
     fn naive_common_prefix(left: &[u32], right: &[u32]) -> usize {

@@ -2270,6 +2270,30 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        self.generate_from_ids_with_turn_ends(prompt_ids, &[], max_tokens, serving_config, on_token)
+    }
+
+    /// [`Self::generate_from_ids`], with the caller marking where turns end.
+    /// `turn_ends` are token counts into `prompt_ids` -- the index just past an
+    /// end-of-turn token -- and the prefill stops at each to snapshot the
+    /// sliding-window layers ([`PromptCacheConfig::max_checkpoints`] bounds how
+    /// many are kept). A later request that rewrites the conversation from one
+    /// of those turns on restores the snapshot and prefills only from there,
+    /// where without it a rewrite past the ring's slack prefills everything.
+    /// Marks at or past the end of the prompt, and with the cache off, are
+    /// ignored.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`].
+    pub fn generate_from_ids_with_turn_ends(
+        &self,
+        prompt_ids: &[u32],
+        turn_ends: &[usize],
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let effective_serving_config = {
             let mut effective_serving_config = *serving_config;
             self.apply_command_buffer_chunks_default(&mut effective_serving_config);
@@ -2283,6 +2307,7 @@ impl<'file> LoadedModel<'file> {
         let (generated_ids, text, stopped_by_eos, _final_state) = self
             .run_decode_loop_through_cache(
                 prompt_ids.to_vec(),
+                turn_ends,
                 max_tokens,
                 &effective_serving_config,
                 &mut runtime,
@@ -2921,6 +2946,7 @@ impl<'file> LoadedModel<'file> {
         };
         self.run_decode_loop_through_cache(
             ids,
+            &[],
             max_tokens,
             serving_config,
             runtime,
