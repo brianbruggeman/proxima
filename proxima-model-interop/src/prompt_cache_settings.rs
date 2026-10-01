@@ -19,8 +19,8 @@ use crate::serving::PromptCacheConfig;
 #[builder(derive(Clone, Debug))]
 pub struct PromptCacheSettings {
     /// See [`crate::PromptCacheConfig::byte_budget`].
-    #[setting(default = 0)]
-    #[builder(default = 0)]
+    #[setting(default = 2147483648)]
+    #[builder(default = 2147483648)]
     pub byte_budget: u64,
     /// See [`crate::PromptCacheConfig::max_entries`].
     #[setting(default = 4)]
@@ -132,13 +132,32 @@ mod tests {
         assert!(lowered.is_enabled());
     }
 
-    /// With nothing set, every loader lands on the off switch.
+    /// With nothing set, every loader lands on the shipped default: the
+    /// cache is on.
     #[test]
-    fn default_settings_lower_to_the_disabled_config() {
+    fn default_settings_lower_to_the_standard_config() {
         temp_env::with_vars(cleared_env(), || {
             let from_env = PromptCacheSettings::from_env()
                 .unwrap_or_else(|err| panic!("from_env failed: {err}"));
             assert_eq!(from_env, PromptCacheSettings::builder().build());
+            assert_eq!(
+                from_env.as_prompt_cache_config(),
+                PromptCacheConfig::standard()
+            );
+            assert_eq!(PromptCacheConfig::default(), PromptCacheConfig::standard());
+            assert!(from_env.as_prompt_cache_config().is_enabled());
+        });
+    }
+
+    /// `PROXIMA_PROMPT_CACHE_BYTE_BUDGET=0` is the off switch and lowers to
+    /// the same config as [`PromptCacheConfig::off`].
+    #[test]
+    fn a_zero_byte_budget_from_the_environment_turns_the_cache_off() {
+        let mut env = cleared_env();
+        env[0].1 = Some("0");
+        temp_env::with_vars(env, || {
+            let from_env = PromptCacheSettings::from_env()
+                .unwrap_or_else(|err| panic!("from_env failed: {err}"));
             assert_eq!(from_env.as_prompt_cache_config(), PromptCacheConfig::off());
             assert!(!from_env.as_prompt_cache_config().is_enabled());
         });

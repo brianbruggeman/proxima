@@ -2523,6 +2523,10 @@ impl<'file> LoadedModel<'file> {
             draft_slack,
             omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
         );
+        serving_config.prompt_cache.byte_budget = serving_config
+            .prompt_cache
+            .byte_budget
+            .min(limit.headroom_after(&per_class_budget));
         crate::memory_fit::fit_per_class_budgets(
             per_class_budget,
             crate::memory_fit::PerClassBudgets {

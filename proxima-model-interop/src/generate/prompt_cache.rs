@@ -211,10 +211,13 @@ impl PrefixState {
         Ok(())
     }
 
-    /// Host bytes this state holds: its ids plus every layer's cache rows.
+    /// Host bytes this state holds: its ids plus every layer's cache rows,
+    /// counted by allocated capacity because that is what the heap keeps.
     pub(super) fn byte_len(&self) -> usize {
         let float_bytes = |rows: &[&Vec<f32>]| -> usize {
-            rows.iter().map(|rows| rows.len() * size_of::<f32>()).sum()
+            rows.iter()
+                .map(|rows| rows.capacity() * size_of::<f32>())
+                .sum()
         };
         let layer_bytes: usize = self
             .layer_caches
@@ -230,7 +233,7 @@ impl PrefixState {
                 LayerCacheState::SharedFromLayer => 0,
             })
             .sum();
-        layer_bytes + self.ids.len() * size_of::<u32>()
+        layer_bytes + self.ids.capacity() * size_of::<u32>()
     }
 }
 
@@ -319,13 +322,13 @@ impl PromptCache {
         }
         self.entries.push(state);
         let max_entries = config.max_entries as usize;
-        while self.entries.len() > max_entries || self.total_bytes() > budget {
+        while self.entries.len() > max_entries || self.stored_bytes() > budget {
             self.entries.remove(0);
         }
         self.entries.len()
     }
 
-    fn total_bytes(&self) -> usize {
+    pub(super) fn stored_bytes(&self) -> usize {
         self.entries.iter().map(PrefixState::byte_len).sum()
     }
 
@@ -335,6 +338,15 @@ impl PromptCache {
 }
 
 impl LoadedModel<'_> {
+    /// Host bytes the prompt cache holds across all entries.
+    #[must_use]
+    pub fn prompt_cache_bytes(&self) -> usize {
+        self.prompt_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stored_bytes()
+    }
+
     /// The report of the most recent request that went through the prompt
     /// cache, `None` before the first. Concurrent requests overwrite it; read
     /// it right after the request it describes.
