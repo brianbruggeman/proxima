@@ -524,6 +524,13 @@ pub struct PromptCacheConfig {
     /// branches differ only by seed, so `0` makes every draft the same
     /// greedy one and all but the first are dropped as duplicates.
     pub follow_up_temperature_milli: u32,
+    /// How much of a prompt, in thousandths, an entry's shared prefix must
+    /// cover for the request to reuse that entry (`100` is 10%); below it the
+    /// request builds an entry of its own and the older one stays cached.
+    /// llama-server's `--slot-prompt-similarity` default, 0.1, and its strict
+    /// greater-than. An entry the prompt extends whole is reused at any
+    /// similarity; `0` reuses any entry sharing the first token.
+    pub min_similarity_milli: u32,
 }
 
 impl PromptCacheConfig {
@@ -543,6 +550,7 @@ impl PromptCacheConfig {
             follow_up_branches: 0,
             follow_up_max_tokens: 48,
             follow_up_temperature_milli: 800,
+            min_similarity_milli: 100,
         }
     }
 

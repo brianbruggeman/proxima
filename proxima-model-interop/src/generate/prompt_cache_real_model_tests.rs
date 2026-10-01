@@ -184,6 +184,130 @@ fn three_turn_extension_matches_fresh_prefill_with_speculation_on() {
     three_turn_extension(SpeculativeConfig::default());
 }
 
+fn chat_prompt_of(document_id: &str, document_chars: usize) -> String {
+    let document: String = corpus_document(document_id)
+        .chars()
+        .take(document_chars)
+        .collect();
+    format!("<|turn>user\n{document}<turn|>\n<|turn>model\n")
+}
+
+struct Interleaving {
+    held_by_a: usize,
+    first_b: CacheReport,
+    second_a: TurnOutcome,
+    fresh_a: Vec<u32>,
+}
+
+/// Conversation A of `a_chars` characters of one document, an unrelated
+/// conversation B that shares only the chat header with it, then A's next
+/// turn, all through one cache under `min_similarity_milli`.
+fn interleave_unrelated_conversation(
+    model: &LoadedModel<'_>,
+    a_chars: usize,
+    min_similarity_milli: u32,
+) -> Interleaving {
+    let base = cached_config(SpeculativeConfig::none());
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig {
+            min_similarity_milli,
+            ..base.prompt_cache
+        },
+        ..base
+    };
+    let document = corpus_document("rag004");
+    let mut conversation_a = encode_opening(model, &chat_prompt_of("rag004", a_chars));
+    let conversation_b = encode_opening(model, &chat_prompt_of("rag011", a_chars));
+
+    let first_a = run_cached(model, config, &conversation_a);
+    let held_by_a = cached_tokens_after(conversation_a.len(), &first_a);
+    let first_b = run_cached(model, config, &conversation_b);
+    conversation_a.extend_from_slice(&first_a.generated);
+    conversation_a.extend(encode_continuation(
+        model,
+        &next_user_turn(&document, a_chars, 400),
+    ));
+    let second_a = run_cached(model, config, &conversation_a);
+    let fresh_a = run_fresh(
+        model,
+        uncached_config(SpeculativeConfig::none()),
+        &conversation_a,
+    );
+    eprintln!(
+        "CACHE_THRASH a_chars={a_chars} min_similarity_milli={min_similarity_milli} a_held={held_by_a} b_tokens={} b_report={:?} a_second_report={:?}",
+        conversation_b.len(),
+        first_b.report,
+        second_a.report
+    );
+    Interleaving {
+        held_by_a,
+        first_b: first_b.report,
+        second_a,
+        fresh_a,
+    }
+}
+
+/// Conversation A (over 1,000 tokens), an unrelated conversation B, then A's
+/// next turn: B must miss on similarity and build its own entry, and A's next
+/// turn must extend A's entry with ids equal to a full prefill.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn an_unrelated_conversation_does_not_destroy_the_cached_one() {
+    with_model(|model| {
+        let outcome = interleave_unrelated_conversation(
+            model,
+            4500,
+            PromptCacheConfig::standard().min_similarity_milli,
+        );
+
+        assert!(
+            outcome.held_by_a > 1000,
+            "conversation A must be over 1,000 tokens"
+        );
+        assert_eq!(outcome.first_b.miss, Some(MissReason::BelowSimilarity));
+        assert_eq!(outcome.first_b.reused_tokens, 0);
+        assert_eq!(outcome.second_a.report.path, CachePath::Extend);
+        assert!(
+            outcome.second_a.report.reused_tokens >= outcome.held_by_a,
+            "A's second turn reused {} of the {} tokens A held",
+            outcome.second_a.report.reused_tokens,
+            outcome.held_by_a
+        );
+        assert_eq!(outcome.second_a.generated, outcome.fresh_a);
+    });
+}
+
+/// The same interleaving on a conversation short enough that its sliding
+/// rings never wrapped, so a rewind to the shared header is always legal:
+/// with the similarity floor B leaves A whole, and with the floor off
+/// (`0`, the unconditional longest-prefix reuse) B rewinds A to the header
+/// and A's next turn prefills nearly from scratch. Both arms must still
+/// generate what a full prefill generates.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn an_unrelated_conversation_destroys_a_short_entry_only_when_the_similarity_floor_is_off() {
+    let guarded = with_model(|model| {
+        interleave_unrelated_conversation(
+            model,
+            1400,
+            PromptCacheConfig::standard().min_similarity_milli,
+        )
+    });
+    let unguarded = with_model(|model| interleave_unrelated_conversation(model, 1400, 0));
+
+    assert_eq!(guarded.first_b.miss, Some(MissReason::BelowSimilarity));
+    assert!(guarded.second_a.report.reused_tokens >= guarded.held_by_a);
+    assert_eq!(unguarded.first_b.path, CachePath::Rewind);
+    assert!(
+        unguarded.second_a.report.reused_tokens < unguarded.held_by_a / 2,
+        "without the floor B rewound A: reused {} of {}",
+        unguarded.second_a.report.reused_tokens,
+        unguarded.held_by_a
+    );
+    assert_eq!(guarded.second_a.generated, guarded.fresh_a);
+    assert_eq!(unguarded.second_a.generated, unguarded.fresh_a);
+}
+
 struct Rewrite {
     report: CacheReport,
     opening_tokens: usize,

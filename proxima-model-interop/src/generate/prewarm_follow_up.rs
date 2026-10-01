@@ -110,7 +110,7 @@ impl LoadedModel<'_> {
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take_for_prewarm(base_ids, &key, &widths);
+            .take_for_prewarm(base_ids, &key, &widths, config.min_similarity_milli);
         let Some(base) = found else {
             return Ok(Vec::new());
         };

@@ -43,6 +43,22 @@ pub(super) fn longest_common_prefix(left: &[u32], right: &[u32]) -> usize {
         .count()
 }
 
+/// Whether an entry whose stored sequence shares `lcp` tokens with a prompt
+/// of `prompt_len` tokens may be reused. An entry the prompt extends whole
+/// (`lcp == stored_len`) always may: nothing is rewound, so nothing is lost.
+/// Otherwise the shared prefix must cover more than `min_similarity_milli`
+/// thousandths of the prompt, llama-server's `f_sim_cur > slot_prompt_similarity`
+/// with `f_sim_cur = lcp / prompt_len` (`server-context.cpp:1563-1571`);
+/// `0` accepts any overlap past the first token.
+const fn entry_is_reusable(
+    lcp: usize,
+    stored_len: usize,
+    prompt_len: usize,
+    min_similarity_milli: u32,
+) -> bool {
+    lcp > 0 && (lcp == stored_len || lcp * 1000 > min_similarity_milli as usize * prompt_len)
+}
+
 /// How a request used the cache (spec R8's `cache_path`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePath {
@@ -82,6 +98,12 @@ pub enum MissReason {
     ConfigMismatch,
     /// No entry shares even the first token with the prompt.
     NoCommonPrefix,
+    /// Entries share a prefix with the prompt, but none covers enough of it
+    /// ([`crate::PromptCacheConfig::min_similarity_milli`]) and none is
+    /// extended whole: reusing one would rewind it to a few rows and destroy
+    /// what it caches, so the request builds an entry of its own and every
+    /// older one stays.
+    BelowSimilarity,
     /// A sliding-window layer would need rows its ring has already
     /// overwritten: rewinding `rewind_rows` tokens exceeds the `slack_rows`
     /// the ring keeps past its window.
@@ -111,6 +133,7 @@ impl MissReason {
             Self::Empty => "empty",
             Self::ConfigMismatch => "config_mismatch",
             Self::NoCommonPrefix => "no_common_prefix",
+            Self::BelowSimilarity => "below_similarity",
             Self::RingSlackExceeded { .. } => "ring_slack_exceeded",
             Self::RingRowsStale { .. } => "ring_rows_stale",
             Self::UnrewindableLayer => "unrewindable_layer",
@@ -515,35 +538,63 @@ impl PromptCache {
         prompt_ids: &[u32],
         key: &CacheKey,
         widths: &[LayerPadRowWidths],
+        min_similarity_milli: u32,
     ) -> (Option<CacheEntry>, CacheReport) {
         let previous = self.last_report;
-        let taken = self.take_best(prompt_ids, key, widths);
+        let taken = self.take_best(prompt_ids, key, widths, min_similarity_milli);
         self.last_report = previous;
         taken
     }
 
     /// Takes the entry sharing the longest prefix with `prompt_ids` out of
-    /// the cache, among the entries whose [`CacheKey`] equals `key`, brought to that prefix (or to the checkpoint behind it) and
-    /// ready to be resumed from, or reports why none can be. `widths` are the
-    /// model's per-layer row widths
+    /// the cache, among the entries whose [`CacheKey`] equals `key`, brought
+    /// to that prefix (or to the checkpoint behind it) and ready to be
+    /// resumed from, or reports why none can be. `widths` are the model's
+    /// per-layer row widths
     /// ([`LoadedModel::declared_layer_cache_names_and_widths`]).
+    ///
+    /// An entry is only a candidate when [`entry_is_reusable`] holds for it:
+    /// llama-server's `slot_prompt_similarity` rule
+    /// (`tools/server/server-context.cpp:1542-1571`), which takes a slot only
+    /// when its common prefix covers more than the threshold of the incoming
+    /// prompt and otherwise falls to a different slot, leaving the first
+    /// slot's context alone (`:1587-1601`). Here the different slot is a new
+    /// entry the request builds, and [`Self::store`]'s least-recently-used
+    /// eviction decides what makes room for it.
     pub(super) fn take_best(
         &mut self,
         prompt_ids: &[u32],
         key: &CacheKey,
         widths: &[LayerPadRowWidths],
+        min_similarity_milli: u32,
     ) -> (Option<CacheEntry>, CacheReport) {
-        let best = self
+        let overlaps: Vec<(usize, usize, usize)> = self
             .entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.key == *key)
-            .map(|(index, entry)| (index, longest_common_prefix(&entry.state.ids, prompt_ids)))
-            .max_by_key(|(_, lcp)| *lcp);
-        let resume = best.map(|(index, lcp)| (index, lcp.min(prompt_ids.len().saturating_sub(1))));
+            .map(|(index, entry)| {
+                (
+                    index,
+                    longest_common_prefix(&entry.state.ids, prompt_ids),
+                    entry.state.ids.len(),
+                )
+            })
+            .collect();
+        let longest = overlaps.iter().map(|&(_, lcp, _)| lcp).max();
+        let best = overlaps
+            .iter()
+            .filter(|&&(_, lcp, stored)| {
+                entry_is_reusable(lcp, stored, prompt_ids.len(), min_similarity_milli)
+            })
+            .max_by_key(|&&(_, lcp, _)| lcp);
+        let resume =
+            best.map(|&(index, lcp, _)| (index, lcp.min(prompt_ids.len().saturating_sub(1))));
         let outcome = match resume {
             None if self.entries.is_empty() => Err(MissReason::Empty),
-            None => Err(MissReason::ConfigMismatch),
+            None if longest.is_none() => Err(MissReason::ConfigMismatch),
+            None if longest == Some(0) => Err(MissReason::NoCommonPrefix),
+            None => Err(MissReason::BelowSimilarity),
             Some((_, 0)) => Err(MissReason::NoCommonPrefix),
             Some((index, resume_len)) => self
                 .resume_at(index, resume_len, widths)
@@ -693,12 +744,14 @@ impl LoadedModel<'_> {
         key: &CacheKey,
         widths: &[LayerPadRowWidths],
         waited: Duration,
+        min_similarity_milli: u32,
     ) -> (Option<CacheEntry>, CacheReport) {
         let mut cache = self
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (mut entry, mut report) = cache.take_best(prompt_ids, key, widths);
+        let (mut entry, mut report) =
+            cache.take_best(prompt_ids, key, widths, min_similarity_milli);
         report.prewarm_wait = waited;
         cache.last_report = Some(report);
         drop(cache);
@@ -870,7 +923,13 @@ impl LoadedModel<'_> {
         apply_serving_config(serving_config, ids.len())?;
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let key = self.cache_key(serving_config, runtime, forced_draft_width);
-        let (found, report) = self.prompt_cache_lookup(&ids, &key, &widths, pending.waited());
+        let (found, report) = self.prompt_cache_lookup(
+            &ids,
+            &key,
+            &widths,
+            pending.waited(),
+            config.min_similarity_milli,
+        );
         let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
         let positions = planned_positions(
             &entry.checkpoint_positions(),
@@ -943,6 +1002,8 @@ mod tests {
     use super::*;
     use crate::serving::{ContextLength, GdnPrefillBackend};
 
+    const ANY_OVERLAP: u32 = 0;
+
     fn base_key() -> CacheKey {
         CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0)
     }
@@ -983,6 +1044,7 @@ mod tests {
             &[2, 105, 2364, 107, 9259, 106, 107, 105, 4368],
             &base_key(),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert_eq!(state.expect("entry reused").state.cached_len, 5);
@@ -996,7 +1058,8 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(state_with_ids(&[2, 105, 2364]), &enabled_config());
 
-        let (state, report) = cache.take_best(&[7, 105, 2364], &base_key(), &shared_widths());
+        let (state, report) =
+            cache.take_best(&[7, 105, 2364], &base_key(), &shared_widths(), ANY_OVERLAP);
 
         assert!(state.is_none());
         assert_eq!(report.miss, Some(MissReason::NoCommonPrefix));
@@ -1007,7 +1070,8 @@ mod tests {
     fn an_empty_cache_reports_empty_and_prefills_the_whole_prompt() {
         let mut cache = PromptCache::new();
 
-        let (state, report) = cache.take_best(&[2, 105, 2364], &base_key(), &shared_widths());
+        let (state, report) =
+            cache.take_best(&[2, 105, 2364], &base_key(), &shared_widths(), ANY_OVERLAP);
 
         assert!(state.is_none());
         assert_eq!(report.miss, Some(MissReason::Empty));
@@ -1021,7 +1085,12 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
 
-        let (state, report) = cache.take_best(&[2, 105, 2364, 107], &base_key(), &shared_widths());
+        let (state, report) = cache.take_best(
+            &[2, 105, 2364, 107],
+            &base_key(),
+            &shared_widths(),
+            ANY_OVERLAP,
+        );
 
         assert_eq!(report.path, CachePath::Rewind);
         assert_eq!(report.lcp, 3);
@@ -1046,6 +1115,7 @@ mod tests {
             &[2, 105, 2364, 107, 9259, 106, 107, 105, 4368],
             &base_key(),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert_eq!(report.path, CachePath::Extend);
@@ -1062,6 +1132,7 @@ mod tests {
             &[2, 105, 2364, 107, 9259, 106, 9, 9, 9],
             &base_key(),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert_eq!(report.path, CachePath::Rewind);
@@ -1077,6 +1148,7 @@ mod tests {
             &[2, 105, 2364, 107, 9, 9, 9, 9, 9],
             &base_key(),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert_eq!(report.prewarm_hit_tokens, 0);
@@ -1101,10 +1173,15 @@ mod tests {
     fn a_prewarm_lookup_leaves_the_last_requests_report_alone() {
         let mut cache = PromptCache::new();
         cache.store(state_with_ids(&[2, 105, 2364]), &enabled_config());
-        let (_, request_report) = cache.take_best(&[7, 105], &base_key(), &shared_widths());
+        let (_, request_report) =
+            cache.take_best(&[7, 105], &base_key(), &shared_widths(), ANY_OVERLAP);
 
-        let (taken, _) =
-            cache.take_for_prewarm(&[2, 105, 2364, 107], &base_key(), &shared_widths());
+        let (taken, _) = cache.take_for_prewarm(
+            &[2, 105, 2364, 107],
+            &base_key(),
+            &shared_widths(),
+            ANY_OVERLAP,
+        );
 
         assert!(taken.is_some());
         assert_eq!(cache.last_report(), Some(request_report));
@@ -1129,6 +1206,7 @@ mod tests {
             &[2, 105, 2364, 107, 7, 8, 55, 56],
             &base_key(),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert_eq!(report.lcp, 6);
@@ -1147,8 +1225,12 @@ mod tests {
             &enabled_config(),
         );
 
-        let (_, report) =
-            cache.take_best(&[2, 105, 2364, 107, 55, 56], &base_key(), &shared_widths());
+        let (_, report) = cache.take_best(
+            &[2, 105, 2364, 107, 55, 56],
+            &base_key(),
+            &shared_widths(),
+            ANY_OVERLAP,
+        );
 
         assert_eq!(report.lcp, 4);
         assert_eq!(report.follow_up_hit_tokens, 0);
@@ -1168,7 +1250,10 @@ mod tests {
         cache.store(state_with_ids(&[3, 3, 3]), &config);
 
         let held = |cache: &mut PromptCache, prompt: &[u32]| {
-            cache.take_best(prompt, &base_key(), &shared_widths()).1.lcp
+            cache
+                .take_best(prompt, &base_key(), &shared_widths(), ANY_OVERLAP)
+                .1
+                .lcp
         };
         assert_eq!(
             held(&mut cache, &[1, 1, 1, 5, 9]),
@@ -1192,21 +1277,21 @@ mod tests {
 
         assert_eq!(
             cache
-                .take_best(&[1, 1, 9], &base_key(), &shared_widths())
+                .take_best(&[1, 1, 9], &base_key(), &shared_widths(), ANY_OVERLAP)
                 .1
                 .miss,
             Some(MissReason::NoCommonPrefix)
         );
         assert_eq!(
             cache
-                .take_best(&[2, 2, 9], &base_key(), &shared_widths())
+                .take_best(&[2, 2, 9], &base_key(), &shared_widths(), ANY_OVERLAP)
                 .1
                 .path,
             CachePath::Extend
         );
         assert_eq!(
             cache
-                .take_best(&[3, 3, 9], &base_key(), &shared_widths())
+                .take_best(&[3, 3, 9], &base_key(), &shared_widths(), ANY_OVERLAP)
                 .1
                 .path,
             CachePath::Extend
@@ -1240,7 +1325,7 @@ mod tests {
         assert_eq!(entries, Some(1));
         assert_eq!(
             cache
-                .take_best(&[5, 6, 7, 8, 9], &base_key(), &shared_widths())
+                .take_best(&[5, 6, 7, 8, 9], &base_key(), &shared_widths(), ANY_OVERLAP)
                 .1
                 .path,
             CachePath::Extend
@@ -1430,7 +1515,12 @@ mod tests {
         );
         let diverging_prompt: Vec<u32> = (0..35).chain([900, 901]).collect();
 
-        let (state, report) = cache.take_best(&diverging_prompt, &base_key(), &gemma_like_widths());
+        let (state, report) = cache.take_best(
+            &diverging_prompt,
+            &base_key(),
+            &gemma_like_widths(),
+            ANY_OVERLAP,
+        );
 
         assert!(state.is_none());
         assert_eq!(
@@ -1441,7 +1531,8 @@ mod tests {
             })
         );
         let extension: Vec<u32> = (0..40).chain([900]).collect();
-        let (state, report) = cache.take_best(&extension, &base_key(), &gemma_like_widths());
+        let (state, report) =
+            cache.take_best(&extension, &base_key(), &gemma_like_widths(), ANY_OVERLAP);
         assert!(state.is_some());
         assert_eq!(report.path, CachePath::Extend);
     }
@@ -1504,6 +1595,7 @@ mod tests {
             &prompt_diverging_after(40, 2),
             &base_key(),
             &gemma_like_widths(),
+            ANY_OVERLAP,
         );
 
         let entry = entry.expect("a checkpoint at 32 serves a prefix of 40");
@@ -1531,6 +1623,7 @@ mod tests {
             &prompt_diverging_after(48, 2),
             &base_key(),
             &gemma_like_widths(),
+            ANY_OVERLAP,
         );
 
         assert!(entry.is_some());
@@ -1550,6 +1643,7 @@ mod tests {
             &prompt_diverging_after(20, 2),
             &base_key(),
             &gemma_like_widths(),
+            ANY_OVERLAP,
         );
 
         assert!(entry.is_none());
@@ -1565,6 +1659,7 @@ mod tests {
             &prompt_diverging_after(48, 2),
             &base_key(),
             &gemma_like_widths(),
+            ANY_OVERLAP,
         );
         assert!(entry.is_some(), "the refused entry is still cached");
     }
@@ -1584,7 +1679,8 @@ mod tests {
         cache.store(restored, &enabled_config());
 
         let stale = prompt_diverging_after(30, 2);
-        let (entry, report) = cache.take_best(&stale, &base_key(), &gemma_like_widths());
+        let (entry, report) =
+            cache.take_best(&stale, &base_key(), &gemma_like_widths(), ANY_OVERLAP);
 
         let entry = entry.expect("the checkpoint at 16 serves a prefix of 30");
         assert_eq!(report.path, CachePath::Checkpoint);
@@ -1623,6 +1719,7 @@ mod tests {
             &prompt_diverging_after(57, 3),
             &base_key(),
             &gemma_like_widths(),
+            ANY_OVERLAP,
         );
 
         let entry = entry.expect("a 3-row rewind fits the slack");
@@ -1644,6 +1741,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             &base_key(),
             &gemma_like_widths(),
+            ANY_OVERLAP,
         );
 
         assert_eq!(report.path, CachePath::Extend);
@@ -1730,6 +1828,173 @@ mod tests {
 
         assert_eq!(executed.get(), CASES);
     }
+    const GEMMA_HEADER: [u32; 5] = [2, 105, 2364, 107, 9259];
+    const LLAMA_DEFAULT_MILLI: u32 = 100;
+
+    fn conversation(header: &[u32], body_start: u32, body_len: u32) -> Vec<u32> {
+        header
+            .iter()
+            .copied()
+            .chain((0..body_len).map(|offset| body_start + offset))
+            .collect()
+    }
+
+    /// llama-server's rule (`server-context.cpp:1571`): the prefix must
+    /// cover strictly more than the threshold of the incoming prompt.
+    #[proxima::test]
+    #[case::exactly_at_the_threshold_is_refused(5, 50, 100, false)]
+    #[case::one_token_past_the_threshold_is_taken(6, 50, 100, true)]
+    #[case::five_tokens_of_a_long_prompt_is_refused(5, 1000, 100, false)]
+    #[case::zero_threshold_takes_any_overlap(1, 1000, 0, true)]
+    #[case::half_the_prompt_under_a_high_threshold_is_refused(500, 1000, 600, false)]
+    #[case::no_overlap_is_refused_at_any_threshold(0, 1000, 0, false)]
+    async fn an_entry_is_reusable_only_above_the_similarity_threshold(
+        #[case] lcp: usize,
+        #[case] prompt_len: usize,
+        #[case] min_similarity_milli: u32,
+        #[case] reusable: bool,
+    ) {
+        let stored_len = lcp + 40;
+
+        assert_eq!(
+            entry_is_reusable(lcp, stored_len, prompt_len, min_similarity_milli),
+            reusable
+        );
+    }
+
+    #[test]
+    fn an_extension_is_reused_whatever_its_share_of_the_prompt() {
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&GEMMA_HEADER), &enabled_config());
+        let long_prompt = conversation(&GEMMA_HEADER, 5000, 995);
+
+        let (taken, report) = cache.take_best(
+            &long_prompt,
+            &base_key(),
+            &shared_widths(),
+            LLAMA_DEFAULT_MILLI,
+        );
+
+        assert_eq!(report.path, CachePath::Extend);
+        assert_eq!(report.reused_tokens, 5);
+        assert_eq!(taken.expect("the extension is served").state.cached_len, 5);
+    }
+
+    /// The thrash: an unrelated prompt sharing five header tokens with a long
+    /// conversation used to rewind it to those five rows.
+    #[test]
+    fn an_unrelated_prompt_sharing_a_header_misses_and_leaves_the_long_entry_intact() {
+        let conversation_a = conversation(&GEMMA_HEADER, 1000, 1000);
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&conversation_a), &enabled_config());
+        let unrelated = conversation(&GEMMA_HEADER, 7000, 200);
+
+        let (taken, report) = cache.take_best(
+            &unrelated,
+            &base_key(),
+            &shared_widths(),
+            LLAMA_DEFAULT_MILLI,
+        );
+
+        assert!(taken.is_none());
+        assert_eq!(report.miss, Some(MissReason::BelowSimilarity));
+        assert_eq!(report.prefilled_tokens, unrelated.len());
+        let next_turn = conversation(&conversation_a, 3000, 20);
+        let (kept, next_report) = cache.take_best(
+            &next_turn,
+            &base_key(),
+            &shared_widths(),
+            LLAMA_DEFAULT_MILLI,
+        );
+        assert_eq!(next_report.path, CachePath::Extend);
+        assert_eq!(
+            kept.expect("conversation A survived").state.cached_len,
+            1005
+        );
+    }
+
+    /// Two conversations alternating through a cache: each misses once, builds
+    /// its own entry, and from then on every turn extends its own.
+    #[test]
+    fn two_alternating_conversations_each_keep_their_own_entry() {
+        let mut cache = PromptCache::new();
+        let config = enabled_config();
+        let mut turns = [
+            conversation(&GEMMA_HEADER, 1000, 400),
+            conversation(&GEMMA_HEADER, 7000, 400),
+        ];
+        let mut paths = Vec::new();
+
+        for round in 0..3_u32 {
+            for turn in &mut turns {
+                let (taken, report) =
+                    cache.take_best(turn, &base_key(), &shared_widths(), LLAMA_DEFAULT_MILLI);
+                paths.push(report.path);
+                let mut entry = taken.unwrap_or_else(|| CacheEntry::empty(base_key()));
+                entry.state = PrefixState {
+                    ids: turn.clone(),
+                    layer_caches: vec![LayerCacheState::SharedFromLayer],
+                    cached_len: turn.len(),
+                };
+                cache.store(entry, &config);
+                turn.extend((0..50).map(|offset| 20_000 + round * 100 + offset));
+            }
+        }
+
+        assert_eq!(
+            paths,
+            vec![
+                CachePath::Miss,
+                CachePath::Miss,
+                CachePath::Extend,
+                CachePath::Extend,
+                CachePath::Extend,
+                CachePath::Extend,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_zero_threshold_reproduces_the_unconditional_longest_prefix_reuse() {
+        let mut cache = PromptCache::new();
+        cache.store(
+            state_with_ids(&conversation(&GEMMA_HEADER, 1000, 1000)),
+            &enabled_config(),
+        );
+
+        let (taken, report) = cache.take_best(
+            &conversation(&GEMMA_HEADER, 7000, 200),
+            &base_key(),
+            &shared_widths(),
+            ANY_OVERLAP,
+        );
+
+        assert_eq!(report.path, CachePath::Rewind);
+        assert_eq!(taken.expect("rewound").state.cached_len, 5);
+    }
+
+    #[test]
+    fn the_most_similar_eligible_entry_serves_the_request() {
+        let mut cache = PromptCache::new();
+        cache.store(
+            state_with_ids(&conversation(&GEMMA_HEADER, 1000, 60)),
+            &enabled_config(),
+        );
+        let mut near = conversation(&GEMMA_HEADER, 2000, 20);
+        near.extend(conversation(&[], 9000, 40));
+        cache.store(state_with_ids(&near), &enabled_config());
+        let prompt = conversation(&near[..45], 8000, 5);
+
+        let (taken, report) =
+            cache.take_best(&prompt, &base_key(), &shared_widths(), LLAMA_DEFAULT_MILLI);
+
+        assert_eq!(report.lcp, 45);
+        assert_eq!(
+            taken.expect("the near entry").state.ids,
+            near[..45].to_vec()
+        );
+    }
+
     fn key_under(
         config: &ServingConfig,
         rope: RopeScaling,
@@ -1773,6 +2038,7 @@ mod tests {
                 0,
             ),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert!(
@@ -1805,6 +2071,7 @@ mod tests {
             &[2, 105, 2364, 107, 9259],
             &CacheKey::of(&config, uses_gpu, rope, slack, offset),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert!(taken.is_none());
@@ -1832,6 +2099,7 @@ mod tests {
             &[2, 105, 2364, 107, 9259],
             &key_under(&changed_config, RopeScaling::None, 0, 0),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert!(
@@ -1855,8 +2123,10 @@ mod tests {
         cache.store(linear_entry, &enabled_config());
         let prompt = [2, 105, 2364, 107, 9259];
 
-        let (base_taken, base_report) = cache.take_best(&prompt, &base_key(), &shared_widths());
-        let (linear_taken, linear_report) = cache.take_best(&prompt, &linear_key, &shared_widths());
+        let (base_taken, base_report) =
+            cache.take_best(&prompt, &base_key(), &shared_widths(), ANY_OVERLAP);
+        let (linear_taken, linear_report) =
+            cache.take_best(&prompt, &linear_key, &shared_widths(), ANY_OVERLAP);
 
         assert_eq!(base_taken.expect("base entry").key, base_key());
         assert_eq!(linear_taken.expect("linear entry").key, linear_key);
@@ -1870,7 +2140,7 @@ mod tests {
     fn an_empty_cache_reports_empty_not_config_mismatch() {
         let mut cache = PromptCache::new();
 
-        let (_, report) = cache.take_best(&[2, 105], &base_key(), &shared_widths());
+        let (_, report) = cache.take_best(&[2, 105], &base_key(), &shared_widths(), ANY_OVERLAP);
 
         assert_eq!(report.miss, Some(MissReason::Empty));
     }
@@ -1895,6 +2165,7 @@ mod tests {
             &[2, 105, 2364, 107, 9259],
             &key_under(&relaxed, RopeScaling::None, 0, 0),
             &shared_widths(),
+            ANY_OVERLAP,
         );
 
         assert!(taken.is_none());

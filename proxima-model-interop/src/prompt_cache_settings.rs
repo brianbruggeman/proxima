@@ -58,6 +58,10 @@ pub struct PromptCacheSettings {
     #[setting(default = 800)]
     #[builder(default = 800)]
     pub follow_up_temperature_milli: u32,
+    /// See [`crate::PromptCacheConfig::min_similarity_milli`].
+    #[setting(default = 100)]
+    #[builder(default = 100)]
+    pub min_similarity_milli: u32,
 }
 
 impl PromptCacheSettings {
@@ -75,6 +79,7 @@ impl PromptCacheSettings {
             follow_up_branches: self.follow_up_branches,
             follow_up_max_tokens: self.follow_up_max_tokens,
             follow_up_temperature_milli: self.follow_up_temperature_milli,
+            min_similarity_milli: self.min_similarity_milli,
         }
     }
 }
@@ -88,7 +93,7 @@ mod tests {
 
     use super::*;
 
-    const PROMPT_CACHE_ENV_KEYS: [&str; 10] = [
+    const PROMPT_CACHE_ENV_KEYS: [&str; 11] = [
         "PROXIMA_PROMPT_CACHE_BYTE_BUDGET",
         "PROXIMA_PROMPT_CACHE_MAX_ENTRIES",
         "PROXIMA_PROMPT_CACHE_RING_REWIND_SLACK",
@@ -99,6 +104,7 @@ mod tests {
         "PROXIMA_PROMPT_CACHE_FOLLOW_UP_BRANCHES",
         "PROXIMA_PROMPT_CACHE_FOLLOW_UP_MAX_TOKENS",
         "PROXIMA_PROMPT_CACHE_FOLLOW_UP_TEMPERATURE_MILLI",
+        "PROXIMA_PROMPT_CACHE_MIN_SIMILARITY_MILLI",
     ];
 
     fn cleared_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -124,6 +130,7 @@ mod tests {
             .follow_up_branches(3)
             .follow_up_max_tokens(64)
             .follow_up_temperature_milli(700)
+            .min_similarity_milli(250)
             .build();
 
         let mut toml_file = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
@@ -132,7 +139,7 @@ mod tests {
             "byte_budget = 1073741824\nmax_entries = 8\nring_rewind_slack = 512\n\
              checkpoint_interval = 1024\nmax_checkpoints = 4\ncache_reuse_min = 64\n\
              prewarm_chunk_tokens = 128\nfollow_up_branches = 3\nfollow_up_max_tokens = 64\n\
-             follow_up_temperature_milli = 700"
+             follow_up_temperature_milli = 700\nmin_similarity_milli = 250"
         )
         .expect("write temp toml file");
         let via_file: PromptCacheSettings = conflaguration::from_file(toml_file.path())
@@ -151,6 +158,7 @@ mod tests {
                 "PROXIMA_PROMPT_CACHE_PREWARM_CHUNK_TOKENS" => Some("128"),
                 "PROXIMA_PROMPT_CACHE_FOLLOW_UP_BRANCHES" => Some("3"),
                 "PROXIMA_PROMPT_CACHE_FOLLOW_UP_MAX_TOKENS" => Some("64"),
+                "PROXIMA_PROMPT_CACHE_MIN_SIMILARITY_MILLI" => Some("250"),
                 _ => Some("700"),
             };
         });
@@ -167,6 +175,7 @@ mod tests {
         assert_eq!(lowered.follow_up_branches, 3);
         assert_eq!(lowered.follow_up_max_tokens, 64);
         assert_eq!(lowered.follow_up_temperature_milli, 700);
+        assert_eq!(lowered.min_similarity_milli, 250);
         assert!(lowered.is_enabled());
     }
 
