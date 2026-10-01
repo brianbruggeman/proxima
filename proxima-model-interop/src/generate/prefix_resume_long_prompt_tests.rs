@@ -38,7 +38,7 @@ pub(super) fn greedy_config() -> ServingConfig<'static> {
     }
 }
 
-fn corpus_document(id: &str) -> String {
+pub(super) fn corpus_document(id: &str) -> String {
     SPECULATIVE_CORPUS
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("corpus line is json"))
