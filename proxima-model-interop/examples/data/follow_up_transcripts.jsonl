@@ -1,0 +1,8 @@
+{"id":"mutex","turns":["What's the difference between a mutex and a semaphore?","Can you show me an example of that in Rust?","Thanks. How does that change when the code is async?"]}
+{"id":"rebase","turns":["How do I undo my last commit but keep the changes?","What if I already pushed it?","Okay, and how do I make sure that doesn't happen again?"]}
+{"id":"sourdough","turns":["I want to start baking sourdough bread. Where do I begin?","How long does the starter take to become active?","What flour should I use for the first loaf?"]}
+{"id":"sql_index","turns":["When should I add an index to a Postgres column?","Does an index slow down inserts?","Can you explain what a partial index is?"]}
+{"id":"tokio","turns":["Why does my tokio program hang when I call block_on inside an async function?","What should I use instead?","Can you show me how to spawn a blocking task?"]}
+{"id":"marathon","turns":["I'm training for my first marathon. How many weeks of training do I need?","What should my long run look like in week 10?","How do I avoid getting injured?"]}
+{"id":"capital_gains","turns":["Can you explain how long-term capital gains are taxed in the US?","What counts as long term?","Does that change if I held the stock in an IRA?"]}
+{"id":"kubernetes","turns":["What is the difference between a Deployment and a StatefulSet in Kubernetes?","When would I pick a StatefulSet?","How do I scale one down safely?"]}
