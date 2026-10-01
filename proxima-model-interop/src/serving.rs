@@ -489,9 +489,17 @@ pub struct PromptCacheConfig {
     /// than the slack. Applied on top of any speculative-decode slack as a
     /// maximum, never a sum.
     pub ring_rewind_slack: u32,
-    /// Tokens between sliding-window checkpoints (spec R4, not yet wired).
+    /// Tokens between sliding-window checkpoints (spec R4): a request
+    /// stops its prefill at every multiple of this inside the range it
+    /// prefills and snapshots the ring layers, so a later rewind past
+    /// [`Self::ring_rewind_slack`] restores the nearest one and prefills from
+    /// there. `0` takes none at intervals (caller-marked turn ends and the
+    /// resume point still count).
     pub checkpoint_interval: u32,
-    /// Checkpoints kept per entry (spec R4, not yet wired).
+    /// Checkpoints kept per entry, `0` for none. The earliest is pinned and
+    /// the oldest of the rest evicted first. One gemma4-E2B checkpoint is 12
+    /// MiB (12 ring layers x 512 rows x 2,048 bytes), counted against
+    /// [`Self::byte_budget`].
     pub max_checkpoints: u32,
     /// Shortest run of tokens worth shifting after a divergence (spec R5,
     /// not yet wired); `0` keeps chunk reuse off like llama's `n_cache_reuse`.
@@ -499,15 +507,16 @@ pub struct PromptCacheConfig {
 }
 
 impl PromptCacheConfig {
-    /// The shipped default: 2 GiB, four entries, 256 rows of ring slack.
+    /// The shipped default: 2 GiB, four entries, 256 rows of ring slack, and
+    /// up to four checkpoints per entry every 2,048 tokens.
     #[must_use]
     pub const fn standard() -> Self {
         Self {
             byte_budget: 2 << 30,
             max_entries: 4,
             ring_rewind_slack: 256,
-            checkpoint_interval: 0,
-            max_checkpoints: 0,
+            checkpoint_interval: 2048,
+            max_checkpoints: 4,
             cache_reuse_min: 0,
         }
     }
@@ -2058,7 +2067,10 @@ mod tests {
         let off = supported_default().with_speculative(SpeculativeConfig::none());
 
         assert!(off.speculative.speculative_types.is_empty());
-        assert_eq!(off.speculative.ngram_simple, SpeculativeConfig::default().ngram_simple);
+        assert_eq!(
+            off.speculative.ngram_simple,
+            SpeculativeConfig::default().ngram_simple
+        );
         apply_serving_config(&off, 6).expect("speculation off must pass serving-config validation");
     }
 

@@ -31,12 +31,12 @@ pub struct PromptCacheSettings {
     #[builder(default = 256)]
     pub ring_rewind_slack: u32,
     /// See [`crate::PromptCacheConfig::checkpoint_interval`].
-    #[setting(default = 0)]
-    #[builder(default = 0)]
+    #[setting(default = 2048)]
+    #[builder(default = 2048)]
     pub checkpoint_interval: u32,
     /// See [`crate::PromptCacheConfig::max_checkpoints`].
-    #[setting(default = 0)]
-    #[builder(default = 0)]
+    #[setting(default = 4)]
+    #[builder(default = 4)]
     pub max_checkpoints: u32,
     /// See [`crate::PromptCacheConfig::cache_reuse_min`].
     #[setting(default = 0)]

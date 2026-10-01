@@ -201,6 +201,7 @@ mod decode;
 mod drafter;
 mod kv_ring;
 mod prompt_cache;
+mod ring_checkpoint;
 mod serving_backend;
 mod tests_all;
 #[cfg(test)]
@@ -223,5 +224,6 @@ use kv_ring::{
 pub use load_model::*;
 pub use prompt_cache::{CachePath, CacheReport, MissReason};
 use prompt_cache::PromptCache;
+use ring_checkpoint::{RingCheckpoint, planned_positions, retained_positions};
 pub(crate) use pregather::*;
 pub use residency_caches::*;

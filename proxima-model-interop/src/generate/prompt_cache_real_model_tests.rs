@@ -8,9 +8,10 @@ use proxima_gguf::parse_complete;
 
 use super::prefix_resume_long_prompt_tests::{chat_prompt, corpus_document, greedy_config};
 use super::prompt_cache::longest_common_prefix;
+use super::ring_checkpoint::RingCheckpoint;
 use super::wants_bos;
 use crate::LoadedModel;
-use crate::generate::{CachePath, CacheReport, MissReason};
+use crate::generate::{CachePath, CacheReport};
 use crate::serving::{PromptCacheConfig, ServingConfig, SpeculativeConfig};
 
 const GENERATED_TOKENS: usize = 16;
@@ -18,9 +19,23 @@ const REWRITTEN_TOKENS: usize = 50;
 const BEYOND_SLACK_TOKENS: usize = 300;
 
 fn cached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'static> {
+    checkpointed_config(
+        speculative,
+        PromptCacheConfig::standard().checkpoint_interval,
+    )
+}
+
+fn checkpointed_config(
+    speculative: SpeculativeConfig<'static>,
+    checkpoint_interval: u32,
+) -> ServingConfig<'static> {
     ServingConfig {
         speculative,
-        prompt_cache: PromptCacheConfig::standard(),
+        prompt_cache: PromptCacheConfig {
+            checkpoint_interval,
+            max_checkpoints: 8,
+            ..PromptCacheConfig::standard()
+        },
         ..greedy_config()
     }
 }
@@ -160,6 +175,7 @@ fn three_turn_extension_matches_fresh_prefill_with_speculation_on() {
 
 struct Rewrite {
     report: CacheReport,
+    opening_tokens: usize,
     kept_tokens: usize,
     tail_tokens: usize,
 }
@@ -171,11 +187,13 @@ struct Rewrite {
 fn rewrite_last_tokens(
     speculative: SpeculativeConfig<'static>,
     rewritten_tokens: usize,
+    opening: &str,
+    cached: ServingConfig<'static>,
 ) -> Rewrite {
     with_model(|model| {
         let document = corpus_document("rag004");
-        let opening_ids = encode_opening(model, &chat_prompt(3000));
-        let first = run_cached(model, cached_config(speculative), &opening_ids);
+        let opening_ids = encode_opening(model, opening);
+        let first = run_cached(model, cached, &opening_ids);
         let held_tokens = cached_tokens_after(opening_ids.len(), &first);
         let mut stored_ids = opening_ids.clone();
         stored_ids.extend_from_slice(&first.generated);
@@ -200,15 +218,16 @@ fn rewrite_last_tokens(
             kept_tokens
         );
 
-        let cached = run_cached(model, cached_config(speculative), &rewritten_ids);
+        let rewritten = run_cached(model, cached, &rewritten_ids);
         let fresh = run_fresh(model, uncached_config(speculative), &rewritten_ids);
 
         assert_eq!(
-            cached.generated, fresh,
+            rewritten.generated, fresh,
             "ids after rewriting {rewritten_tokens} tokens must equal a full prefill"
         );
         Rewrite {
-            report: cached.report,
+            report: rewritten.report,
+            opening_tokens: opening_ids.len(),
             kept_tokens,
             tail_tokens: rewritten_tail.len(),
         }
@@ -219,7 +238,12 @@ fn rewrite_last_tokens(
 /// is `rewind` and the prefilled tokens are the 50 replaced ones plus the new
 /// tokens.
 fn rewrite_within_slack(speculative: SpeculativeConfig<'static>) {
-    let rewrite = rewrite_last_tokens(speculative, REWRITTEN_TOKENS);
+    let rewrite = rewrite_last_tokens(
+        speculative,
+        REWRITTEN_TOKENS,
+        &chat_prompt(3000),
+        cached_config(speculative),
+    );
 
     assert_eq!(
         rewrite.report.path,
@@ -235,21 +259,73 @@ fn rewrite_within_slack(speculative: SpeculativeConfig<'static>) {
     assert_eq!(rewrite.report.prefilled_tokens, rewrite.tail_tokens);
 }
 
-/// R3's other half: a rewrite past the slack cannot reuse the wrapped rings,
-/// so the request prefills in full, says why, and still matches a full prefill.
+/// R3's other half, now served by R4: a 300-token rewrite on a roughly
+/// 1,000-token transcript is past the 256-row slack, but turn 1 stopped its
+/// prefill every 256 tokens to snapshot the rings, so the request restores the
+/// checkpoint at or before the shared prefix instead of prefilling in full.
 fn rewrite_beyond_slack(speculative: SpeculativeConfig<'static>) {
-    let rewritten_tokens = BEYOND_SLACK_TOKENS;
-    let rewrite = rewrite_last_tokens(speculative, rewritten_tokens);
-
-    assert_eq!(rewrite.report.path, CachePath::Miss, "{:?}", rewrite.report);
-    assert_eq!(
-        rewrite.report.miss,
-        Some(MissReason::RingSlackExceeded {
-            rewind_rows: rewritten_tokens,
-            slack_rows: PromptCacheConfig::off().ring_rewind_slack as usize,
-        })
+    const INTERVAL: u32 = 256;
+    let rewrite = rewrite_last_tokens(
+        speculative,
+        BEYOND_SLACK_TOKENS,
+        &chat_prompt(3000),
+        checkpointed_config(speculative, INTERVAL),
     );
-    assert_eq!(rewrite.report.lcp, 0);
+
+    assert_restored_nearest_checkpoint(&rewrite, INTERVAL as usize);
+}
+
+/// AC4: a 2,000-token rewrite on a transcript of more than 3,000 tokens is
+/// far past the ring's slack. Turn 1 snapshotted the rings every 512 tokens,
+/// so the request restores the newest snapshot at or before the shared prefix
+/// and prefills the gap to the prefix plus the new tokens. Whatever it does,
+/// its ids equal a full prefill's (asserted inside `rewrite_last_tokens`).
+fn rewrite_two_thousand_tokens_back(speculative: SpeculativeConfig<'static>) {
+    const INTERVAL: u32 = 512;
+    const REWRITTEN: usize = 2000;
+    let rewrite = rewrite_last_tokens(
+        speculative,
+        REWRITTEN,
+        &long_chat_prompt(12_000),
+        checkpointed_config(speculative, INTERVAL),
+    );
+
+    assert!(
+        rewrite.opening_tokens > 3000,
+        "the transcript must exceed 3,000 tokens, got {}",
+        rewrite.opening_tokens
+    );
+    assert_restored_nearest_checkpoint(&rewrite, INTERVAL as usize);
+}
+
+fn assert_restored_nearest_checkpoint(rewrite: &Rewrite, interval: usize) {
+    let report = &rewrite.report;
+    eprintln!(
+        "CHECKPOINT_RESTORE opening_tokens={} kept_tokens={} tail_tokens={} {report:?}",
+        rewrite.opening_tokens, rewrite.kept_tokens, rewrite.tail_tokens
+    );
+    let checkpoint = rewrite.kept_tokens / interval * interval;
+
+    assert_eq!(report.path, CachePath::Checkpoint, "{report:?}");
+    assert_eq!(report.lcp, rewrite.kept_tokens, "{report:?}");
+    assert_eq!(report.reused_tokens, checkpoint, "{report:?}");
+    assert_eq!(
+        report.prefilled_tokens,
+        (rewrite.kept_tokens - checkpoint) + rewrite.tail_tokens,
+        "prefilled tokens are the gap from the checkpoint to the shared prefix plus the new tokens: {report:?}"
+    );
+}
+
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn rewriting_two_thousand_tokens_back_restores_a_checkpoint_with_speculation_off() {
+    rewrite_two_thousand_tokens_back(SpeculativeConfig::none());
+}
+
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn rewriting_two_thousand_tokens_back_restores_a_checkpoint_with_speculation_on() {
+    rewrite_two_thousand_tokens_back(SpeculativeConfig::default());
 }
 
 #[test]
@@ -266,13 +342,13 @@ fn rewriting_the_last_fifty_tokens_rewinds_with_speculation_on() {
 
 #[test]
 #[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
-fn rewriting_past_the_ring_slack_prefills_in_full_with_speculation_off() {
+fn rewriting_past_the_ring_slack_restores_a_checkpoint_with_speculation_off() {
     rewrite_beyond_slack(SpeculativeConfig::none());
 }
 
 #[test]
 #[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
-fn rewriting_past_the_ring_slack_prefills_in_full_with_speculation_on() {
+fn rewriting_past_the_ring_slack_restores_a_checkpoint_with_speculation_on() {
     rewrite_beyond_slack(SpeculativeConfig::default());
 }
 
@@ -307,10 +383,10 @@ fn stored_bytes_after_prefill(model: &LoadedModel<'_>, tokens: usize) -> (usize,
 /// The default byte budget is justified by what one gemma4-E2B entry costs:
 /// the host bytes the cache holds after a 2,048- and an 8,192-token request.
 /// The default has to hold the four entries `max_entries` allows at 8k
-/// tokens, each with room for the same bytes again in checkpoints.
+/// tokens, with the checkpoints the default config takes inside each.
 #[test]
 #[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
-fn default_byte_budget_holds_four_8k_conversations_with_room_for_checkpoints() {
+fn default_byte_budget_holds_four_8k_conversations_with_their_checkpoints() {
     with_model(|model| {
         let (tokens_2k, bytes_2k) = stored_bytes_after_prefill(model, 2048);
         let (tokens_8k, bytes_8k) = stored_bytes_after_prefill(model, 8192);
@@ -323,10 +399,36 @@ fn default_byte_budget_holds_four_8k_conversations_with_room_for_checkpoints() {
             "an entry grows with the tokens it holds"
         );
         assert!(
-            4 * 2 * bytes_8k <= config.byte_budget as usize,
-            "four 8k entries and as many checkpoint bytes are {} bytes, budget {}",
-            4 * 2 * bytes_8k,
+            4 * bytes_8k <= config.byte_budget as usize,
+            "four 8k entries are {} bytes, budget {}",
+            4 * bytes_8k,
             config.byte_budget
         );
+    });
+}
+
+/// Sizing a checkpoint: the twelve sliding layers of gemma4-E2B each hold
+/// their 512-row window of `k_even` (128), `k_odd` (128) and `v` (256) floats,
+/// 2,048 bytes a row, 12,582,912 bytes in all, whatever the prompt length.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn a_gemma4_checkpoint_is_twelve_mebibytes() {
+    with_model(|model| {
+        let state = model
+            .prefill_prefix(
+                &long_chat_prompt(6000),
+                &uncached_config(SpeculativeConfig::none()),
+            )
+            .expect("prefill a prompt past the 512-row window");
+
+        let checkpoint = RingCheckpoint::capture(&state).expect("a gemma4 state is captured");
+
+        eprintln!(
+            "CHECKPOINT_BYTES position={} bytes={}",
+            checkpoint.position(),
+            checkpoint.byte_len()
+        );
+        assert!(checkpoint.position() > 512);
+        assert_eq!(checkpoint.byte_len(), 12 * 512 * 2048);
     });
 }
