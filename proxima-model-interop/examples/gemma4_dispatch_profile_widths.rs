@@ -40,7 +40,9 @@ use std::time::Duration;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig};
+use proxima_model_interop::{
+    ContextLength, GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig,
+};
 use proxima_telemetry::export::Exporter;
 use proxima_telemetry::recorder::Recorder;
 
@@ -81,6 +83,7 @@ fn profile_step(model: &LoadedModel<'_>, step: usize, max_tokens: usize, prompt:
         ubatch_size: 0,
         gpu_layers: GPU_LAYERS_ALL,
         reasoning_budget: 0,
+        prompt_cache: PromptCacheConfig::off(),
         ..ServingConfig::default()
     };
     // SAFETY: single-threaded example, no concurrent reader of this var --

@@ -30,7 +30,9 @@ use std::time::Instant;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::GgmlType;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, classify_task};
+use proxima_model_interop::{
+    GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, classify_task,
+};
 
 struct TtntJson(Option<f64>);
 
@@ -245,6 +247,7 @@ fn main() {
         gpu_layers: if backend != "cpu" { GPU_LAYERS_ALL } else { 0 },
         gpu_memory_limit_bytes,
         gpu_correctness_fallback: env::var_os("PROXIMA_GPU_CORRECTNESS_FALLBACK").is_some(),
+        prompt_cache: PromptCacheConfig::off(),
         ..ServingConfig::default()
     };
     let execution_backend = if serving_config.gpu_correctness_fallback && backend == "vulkan" {
