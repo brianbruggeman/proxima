@@ -237,6 +237,18 @@ pub(super) fn speculative_draft_limit(
     enabled.chain(forced_draft_width).max().map(usize::from)
 }
 
+/// Rows every sliding ring keeps past its window: the wider of the speculative
+/// verify width and the prompt cache's own rewind slack. One reader for the
+/// ring a fresh state is built with and the key a cached state is matched on.
+pub(super) fn ring_slack_rows(
+    serving_config: &ServingConfig,
+    forced_draft_width: Option<u16>,
+) -> usize {
+    speculative_draft_limit(&serving_config.speculative, forced_draft_width)
+        .unwrap_or(0)
+        .max(serving_config.prompt_cache.rewind_slack_rows())
+}
+
 /// The ring geometry the sliding layers of `layer_caches` share, `None` when
 /// no layer is a ring. A program binds one sliding slot, so every ring layer
 /// has the same window.

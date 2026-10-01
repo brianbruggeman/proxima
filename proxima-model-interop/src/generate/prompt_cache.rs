@@ -74,6 +74,9 @@ impl CachePath {
 pub enum MissReason {
     /// The cache holds no entry.
     Empty,
+    /// Every entry was built under a different [`CacheKey`]: its rows are not
+    /// the rows this request would compute.
+    ConfigMismatch,
     /// No entry shares even the first token with the prompt.
     NoCommonPrefix,
     /// A sliding-window layer would need rows its ring has already
@@ -103,6 +106,7 @@ impl MissReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Empty => "empty",
+            Self::ConfigMismatch => "config_mismatch",
             Self::NoCommonPrefix => "no_common_prefix",
             Self::RingSlackExceeded { .. } => "ring_slack_exceeded",
             Self::RingRowsStale { .. } => "ring_rows_stale",
@@ -283,6 +287,9 @@ impl PrefixState {
 /// past its ring's slack, and where the rings were last restored to.
 pub(super) struct CacheEntry {
     pub(super) state: PrefixState,
+    /// What `state` was built under; only a request with an equal key may
+    /// resume it.
+    pub(super) key: CacheKey,
     /// Ascending by position, every one a snapshot of `state.ids[..position]`.
     pub(super) checkpoints: Vec<RingCheckpoint>,
     /// Position of the checkpoint the rings were last restored to, `0` when
@@ -291,9 +298,10 @@ pub(super) struct CacheEntry {
 }
 
 impl CacheEntry {
-    pub(super) const fn new(state: PrefixState) -> Self {
+    pub(super) const fn new(state: PrefixState, key: CacheKey) -> Self {
         Self {
             state,
+            key,
             checkpoints: Vec::new(),
             restored_at: 0,
         }
@@ -403,24 +411,27 @@ impl PromptCache {
     }
 
     /// Takes the entry sharing the longest prefix with `prompt_ids` out of
-    /// the cache, brought to that prefix (or to the checkpoint behind it) and
+    /// the cache, among the entries whose [`CacheKey`] equals `key`, brought to that prefix (or to the checkpoint behind it) and
     /// ready to be resumed from, or reports why none can be. `widths` are the
     /// model's per-layer row widths
     /// ([`LoadedModel::declared_layer_cache_names_and_widths`]).
     pub(super) fn take_best(
         &mut self,
         prompt_ids: &[u32],
+        key: &CacheKey,
         widths: &[LayerPadRowWidths],
     ) -> (Option<CacheEntry>, CacheReport) {
         let best = self
             .entries
             .iter()
             .enumerate()
+            .filter(|(_, entry)| entry.key == *key)
             .map(|(index, entry)| (index, longest_common_prefix(&entry.state.ids, prompt_ids)))
             .max_by_key(|(_, lcp)| *lcp);
         let resume = best.map(|(index, lcp)| (index, lcp.min(prompt_ids.len().saturating_sub(1))));
         let outcome = match resume {
-            None => Err(MissReason::Empty),
+            None if self.entries.is_empty() => Err(MissReason::Empty),
+            None => Err(MissReason::ConfigMismatch),
             Some((_, 0)) => Err(MissReason::NoCommonPrefix),
             Some((index, resume_len)) => self
                 .resume_at(index, resume_len, widths)
@@ -486,9 +497,23 @@ impl PromptCache {
     pub(super) const fn last_report(&self) -> Option<CacheReport> {
         self.last_report
     }
+
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 impl LoadedModel<'_> {
+    /// Drops every entry. A model-level input the key does not carry (the
+    /// expert sidecar, [`Self::attach_expert_sidecar`]) just changed, so every
+    /// stored row was built under a model this one no longer is.
+    pub(super) fn clear_prompt_cache(&mut self) {
+        self.prompt_cache
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     /// Host bytes the prompt cache holds across all entries.
     #[must_use]
     pub fn prompt_cache_bytes(&self) -> usize {
@@ -514,13 +539,14 @@ impl LoadedModel<'_> {
     pub(super) fn prompt_cache_lookup(
         &self,
         prompt_ids: &[u32],
+        key: &CacheKey,
         widths: &[LayerPadRowWidths],
     ) -> (Option<CacheEntry>, CacheReport) {
         let (entry, report) = self
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take_best(prompt_ids, widths);
+            .take_best(prompt_ids, key, widths);
         debug!(
             cache_lcp = report.lcp as u64,
             cache_reused_tokens = report.reused_tokens as u64,
@@ -666,13 +692,23 @@ impl LoadedModel<'_> {
             );
         }
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
-        let (found, report) = self.prompt_cache_lookup(&ids, &widths);
+        let key = CacheKey::of(
+            serving_config,
+            runtime.uses_gpu(),
+            self.effective_rope_scaling(serving_config),
+            ring_slack_rows(serving_config, forced_draft_width),
+            self.ring_write_offset,
+        );
+        let (found, report) = self.prompt_cache_lookup(&ids, &key, &widths);
         let entry = found.unwrap_or_else(|| {
-            CacheEntry::new(PrefixState {
-                ids: Vec::new(),
-                layer_caches: Vec::new(),
-                cached_len: 0,
-            })
+            CacheEntry::new(
+                PrefixState {
+                    ids: Vec::new(),
+                    layer_caches: Vec::new(),
+                    cached_len: 0,
+                },
+                key,
+            )
         });
         let positions = planned_positions(
             &entry.checkpoint_positions(),
@@ -724,15 +760,24 @@ mod tests {
 
     use proptest::collection::vec;
     use proptest::test_runner::{Config, TestRunner};
+    use proxima_tensor::NumericPolicy;
 
     use super::*;
+    use crate::serving::{ContextLength, GdnPrefillBackend};
+
+    fn base_key() -> CacheKey {
+        CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0)
+    }
 
     fn state_with_ids(ids: &[u32]) -> CacheEntry {
-        CacheEntry::new(PrefixState {
-            ids: ids.to_vec(),
-            layer_caches: vec![LayerCacheState::SharedFromLayer],
-            cached_len: ids.len(),
-        })
+        CacheEntry::new(
+            PrefixState {
+                ids: ids.to_vec(),
+                layer_caches: vec![LayerCacheState::SharedFromLayer],
+                cached_len: ids.len(),
+            },
+            base_key(),
+        )
     }
 
     fn shared_widths() -> Vec<LayerPadRowWidths> {
@@ -758,6 +803,7 @@ mod tests {
 
         let (state, report) = cache.take_best(
             &[2, 105, 2364, 107, 9259, 106, 107, 105, 4368],
+            &base_key(),
             &shared_widths(),
         );
 
@@ -772,7 +818,7 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(state_with_ids(&[2, 105, 2364]), &enabled_config());
 
-        let (state, report) = cache.take_best(&[7, 105, 2364], &shared_widths());
+        let (state, report) = cache.take_best(&[7, 105, 2364], &base_key(), &shared_widths());
 
         assert!(state.is_none());
         assert_eq!(report.miss, Some(MissReason::NoCommonPrefix));
@@ -783,7 +829,7 @@ mod tests {
     fn an_empty_cache_reports_empty_and_prefills_the_whole_prompt() {
         let mut cache = PromptCache::new();
 
-        let (state, report) = cache.take_best(&[2, 105, 2364], &shared_widths());
+        let (state, report) = cache.take_best(&[2, 105, 2364], &base_key(), &shared_widths());
 
         assert!(state.is_none());
         assert_eq!(report.miss, Some(MissReason::Empty));
@@ -797,7 +843,7 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
 
-        let (state, report) = cache.take_best(&[2, 105, 2364, 107], &shared_widths());
+        let (state, report) = cache.take_best(&[2, 105, 2364, 107], &base_key(), &shared_widths());
 
         assert_eq!(report.path, CachePath::Rewind);
         assert_eq!(report.lcp, 3);
@@ -817,15 +863,24 @@ mod tests {
         cache.store(state_with_ids(&[3, 3]), &config);
 
         assert_eq!(
-            cache.take_best(&[1, 1, 9], &shared_widths()).1.miss,
+            cache
+                .take_best(&[1, 1, 9], &base_key(), &shared_widths())
+                .1
+                .miss,
             Some(MissReason::NoCommonPrefix)
         );
         assert_eq!(
-            cache.take_best(&[2, 2, 9], &shared_widths()).1.path,
+            cache
+                .take_best(&[2, 2, 9], &base_key(), &shared_widths())
+                .1
+                .path,
             CachePath::Extend
         );
         assert_eq!(
-            cache.take_best(&[3, 3, 9], &shared_widths()).1.path,
+            cache
+                .take_best(&[3, 3, 9], &base_key(), &shared_widths())
+                .1
+                .path,
             CachePath::Extend
         );
     }
@@ -856,7 +911,10 @@ mod tests {
 
         assert_eq!(entries, 1);
         assert_eq!(
-            cache.take_best(&[5, 6, 7, 8, 9], &shared_widths()).1.path,
+            cache
+                .take_best(&[5, 6, 7, 8, 9], &base_key(), &shared_widths())
+                .1
+                .path,
             CachePath::Extend
         );
     }
@@ -1038,10 +1096,13 @@ mod tests {
     #[test]
     fn a_refused_rewind_keeps_the_entry_cached() {
         let mut cache = PromptCache::new();
-        cache.store(CacheEntry::new(gemma_like_state(40)), &enabled_config());
+        cache.store(
+            CacheEntry::new(gemma_like_state(40), base_key()),
+            &enabled_config(),
+        );
         let diverging_prompt: Vec<u32> = (0..35).chain([900, 901]).collect();
 
-        let (state, report) = cache.take_best(&diverging_prompt, &gemma_like_widths());
+        let (state, report) = cache.take_best(&diverging_prompt, &base_key(), &gemma_like_widths());
 
         assert!(state.is_none());
         assert_eq!(
@@ -1052,7 +1113,7 @@ mod tests {
             })
         );
         let extension: Vec<u32> = (0..40).chain([900]).collect();
-        let (state, report) = cache.take_best(&extension, &gemma_like_widths());
+        let (state, report) = cache.take_best(&extension, &base_key(), &gemma_like_widths());
         assert!(state.is_some());
         assert_eq!(report.path, CachePath::Extend);
     }
@@ -1068,7 +1129,7 @@ mod tests {
     }
 
     fn entry_with_checkpoints(stored_len: usize, positions: &[usize]) -> CacheEntry {
-        let mut entry = CacheEntry::new(gemma_like_state(stored_len));
+        let mut entry = CacheEntry::new(gemma_like_state(stored_len), base_key());
         for &position in positions {
             let checkpoint = RingCheckpoint::capture(&gemma_like_state(position))
                 .expect("a state with a ring layer is captured");
@@ -1111,7 +1172,11 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(entry_with_checkpoints(60, &[16, 32, 48]), &enabled_config());
 
-        let (entry, report) = cache.take_best(&prompt_diverging_after(40, 2), &gemma_like_widths());
+        let (entry, report) = cache.take_best(
+            &prompt_diverging_after(40, 2),
+            &base_key(),
+            &gemma_like_widths(),
+        );
 
         let entry = entry.expect("a checkpoint at 32 serves a prefix of 40");
         assert_eq!(report.path, CachePath::Checkpoint);
@@ -1134,7 +1199,11 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(entry_with_checkpoints(60, &[16, 32, 48]), &enabled_config());
 
-        let (entry, report) = cache.take_best(&prompt_diverging_after(48, 2), &gemma_like_widths());
+        let (entry, report) = cache.take_best(
+            &prompt_diverging_after(48, 2),
+            &base_key(),
+            &gemma_like_widths(),
+        );
 
         assert!(entry.is_some());
         assert_eq!(report.path, CachePath::Checkpoint);
@@ -1149,7 +1218,11 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(entry_with_checkpoints(60, &[32, 48]), &enabled_config());
 
-        let (entry, report) = cache.take_best(&prompt_diverging_after(20, 2), &gemma_like_widths());
+        let (entry, report) = cache.take_best(
+            &prompt_diverging_after(20, 2),
+            &base_key(),
+            &gemma_like_widths(),
+        );
 
         assert!(entry.is_none());
         assert_eq!(
@@ -1160,7 +1233,11 @@ mod tests {
             })
         );
         assert_eq!(report.prefilled_tokens, 22);
-        let (entry, _) = cache.take_best(&prompt_diverging_after(48, 2), &gemma_like_widths());
+        let (entry, _) = cache.take_best(
+            &prompt_diverging_after(48, 2),
+            &base_key(),
+            &gemma_like_widths(),
+        );
         assert!(entry.is_some(), "the refused entry is still cached");
     }
 
@@ -1179,7 +1256,7 @@ mod tests {
         cache.store(restored, &enabled_config());
 
         let stale = prompt_diverging_after(30, 2);
-        let (entry, report) = cache.take_best(&stale, &gemma_like_widths());
+        let (entry, report) = cache.take_best(&stale, &base_key(), &gemma_like_widths());
 
         let entry = entry.expect("the checkpoint at 16 serves a prefix of 30");
         assert_eq!(report.path, CachePath::Checkpoint);
@@ -1214,7 +1291,11 @@ mod tests {
             &enabled_config(),
         );
 
-        let (entry, report) = cache.take_best(&prompt_diverging_after(57, 3), &gemma_like_widths());
+        let (entry, report) = cache.take_best(
+            &prompt_diverging_after(57, 3),
+            &base_key(),
+            &gemma_like_widths(),
+        );
 
         let entry = entry.expect("a 3-row rewind fits the slack");
         assert_eq!(report.path, CachePath::Rewind);
@@ -1233,6 +1314,7 @@ mod tests {
                 .into_iter()
                 .chain([7])
                 .collect::<Vec<_>>(),
+            &base_key(),
             &gemma_like_widths(),
         );
 
@@ -1247,7 +1329,7 @@ mod tests {
     /// rest as newer ones arrive.
     #[test]
     fn checkpoints_past_the_cap_evict_the_oldest_but_the_first() {
-        let mut entry = CacheEntry::new(gemma_like_state(60));
+        let mut entry = CacheEntry::new(gemma_like_state(60), base_key());
         for position in [8, 16, 24, 32, 40] {
             let checkpoint = RingCheckpoint::capture(&gemma_like_state(position))
                 .expect("a state with a ring layer is captured");
@@ -1259,7 +1341,7 @@ mod tests {
 
     #[test]
     fn checkpoint_bytes_count_against_the_entry_and_the_budget() {
-        let plain = CacheEntry::new(gemma_like_state(60));
+        let plain = CacheEntry::new(gemma_like_state(60), base_key());
         let checkpointed = entry_with_checkpoints(60, &[16, 32]);
         let one_checkpoint = RingCheckpoint::capture(&gemma_like_state(32)).expect("captured");
 
@@ -1319,5 +1401,175 @@ mod tests {
             .expect("the shared-prefix scan must agree with the naive scan on every pair");
 
         assert_eq!(executed.get(), CASES);
+    }
+    fn key_under(
+        config: &ServingConfig,
+        rope: RopeScaling,
+        slack: usize,
+        offset: usize,
+    ) -> CacheKey {
+        CacheKey::of(config, false, rope, slack, offset)
+    }
+
+    /// Two requests that differ in one input the rows depend on never share an
+    /// entry: the entry stored under the base key is not offered to the
+    /// request, which reports `ConfigMismatch` and leaves the entry in place.
+    #[proxima::test]
+    #[case::rope_linear_scaling(|config| ServingConfig { rope_scaling: Some(RopeScaling::Linear { factor: 2.0 }), ..config })]
+    #[case::numeric_policy_bit_exact(|config| ServingConfig { numeric_policy: NumericPolicy::bit_exact(), ..config })]
+    #[case::numeric_policy_fast(|config| ServingConfig { numeric_policy: NumericPolicy::fast(), ..config })]
+    #[case::exact_activations(|config| ServingConfig { exact_activations: !config.exact_activations, ..config })]
+    #[case::cached_attention_fusion(|config| ServingConfig { cached_attention_fusion: !config.cached_attention_fusion, ..config })]
+    #[case::gated_delta_net_fusion(|config| ServingConfig { gated_delta_net_fusion: !config.gated_delta_net_fusion, ..config })]
+    #[case::moe_topk_fusion(|config| ServingConfig { moe_topk_fusion: !config.moe_topk_fusion, ..config })]
+    #[case::gdn_prefill_backend(|config| ServingConfig { gdn_prefill_backend: GdnPrefillBackend::Mlx, ..config })]
+    #[case::qwen35moe_pre_gather(|config| ServingConfig { qwen35moe_pre_gather: !config.qwen35moe_pre_gather, ..config })]
+    #[case::qwen35moe_monolithic_all_low(|config| ServingConfig { qwen35moe_monolithic_all_low: !config.qwen35moe_monolithic_all_low, ..config })]
+    #[case::qwen35moe_monolithic_high_mmap(|config| ServingConfig { qwen35moe_monolithic_high_mmap: !config.qwen35moe_monolithic_high_mmap, ..config })]
+    #[case::qwen35moe_layer_window(|config| ServingConfig { qwen35moe_layer_window: config.qwen35moe_layer_window + 1, ..config })]
+    #[case::qwen35moe_residency_budget(|config| ServingConfig { qwen35moe_residency_budget_bytes: config.qwen35moe_residency_budget_bytes + (1 << 30), ..config })]
+    async fn a_request_differing_in_a_row_affecting_config_field_misses(
+        #[case] change: fn(ServingConfig<'static>) -> ServingConfig<'static>,
+    ) {
+        let base_config = ServingConfig::default();
+        let changed_config = change(base_config);
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
+
+        let (taken, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9259],
+            &key_under(
+                &changed_config,
+                changed_config.rope_scaling.unwrap_or(RopeScaling::None),
+                0,
+                0,
+            ),
+            &shared_widths(),
+        );
+
+        assert!(
+            taken.is_none(),
+            "an entry built under other settings was offered"
+        );
+        assert_eq!(report.miss, Some(MissReason::ConfigMismatch));
+        assert!(
+            cache.stored_bytes() > 0,
+            "the mismatched entry must stay for its own config"
+        );
+    }
+
+    #[proxima::test]
+    #[case::cpu_versus_metal_route(true, RopeScaling::None, 0, 0)]
+    #[case::rope_yarn_scaling(false, RopeScaling::yarn(4.0, 32_768), 0, 0)]
+    #[case::speculative_ring_slack(false, RopeScaling::None, 8, 0)]
+    #[case::ring_write_offset(false, RopeScaling::None, 0, 3)]
+    async fn a_request_differing_in_a_derived_input_misses(
+        #[case] uses_gpu: bool,
+        #[case] rope: RopeScaling,
+        #[case] slack: usize,
+        #[case] offset: usize,
+    ) {
+        let config = ServingConfig::default();
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
+
+        let (taken, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9259],
+            &CacheKey::of(&config, uses_gpu, rope, slack, offset),
+            &shared_widths(),
+        );
+
+        assert!(taken.is_none());
+        assert_eq!(report.miss, Some(MissReason::ConfigMismatch));
+    }
+
+    /// Fields the rows do not depend on: sampling, chunk widths, the memory
+    /// gates, scheduling. A request differing only in these reuses the entry.
+    #[proxima::test]
+    #[case::sampling_temperature_and_seed(|config| ServingConfig { temperature: 0.8, seed: 7, ..config })]
+    #[case::ubatch_and_batch_widths(|config| ServingConfig { ubatch_size: 8, batch_size: 64, ..config })]
+    #[case::kv_bucket_tokens(|config| ServingConfig { kv_bucket_tokens: 64, ..config })]
+    #[case::command_buffer_chunks(|config| ServingConfig { command_buffer_chunks: 4, ..config })]
+    #[case::context_length_resolution(|config| ServingConfig { context_length: ContextLength::Within(4096), ..config })]
+    #[case::prompt_cache_policy(|config| ServingConfig { prompt_cache: PromptCacheConfig { max_entries: 9, ..config.prompt_cache }, ..config })]
+    async fn a_request_differing_only_in_a_row_independent_field_shares_the_entry(
+        #[case] change: fn(ServingConfig<'static>) -> ServingConfig<'static>,
+    ) {
+        let base_config = ServingConfig::default();
+        let changed_config = change(base_config);
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
+
+        let (taken, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9259],
+            &key_under(&changed_config, RopeScaling::None, 0, 0),
+            &shared_widths(),
+        );
+
+        assert!(
+            taken.is_some(),
+            "a row-independent setting must not evict reuse"
+        );
+        assert_eq!(report.path, CachePath::Extend);
+    }
+
+    #[test]
+    fn entries_under_two_configs_coexist_and_each_serves_its_own() {
+        let linear = ServingConfig {
+            rope_scaling: Some(RopeScaling::Linear { factor: 2.0 }),
+            ..ServingConfig::default()
+        };
+        let linear_key = key_under(&linear, RopeScaling::Linear { factor: 2.0 }, 0, 0);
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
+        let mut linear_entry = state_with_ids(&[2, 105, 2364, 107]);
+        linear_entry.key = linear_key;
+        cache.store(linear_entry, &enabled_config());
+        let prompt = [2, 105, 2364, 107, 9259];
+
+        let (base_taken, base_report) = cache.take_best(&prompt, &base_key(), &shared_widths());
+        let (linear_taken, linear_report) = cache.take_best(&prompt, &linear_key, &shared_widths());
+
+        assert_eq!(base_taken.expect("base entry").key, base_key());
+        assert_eq!(linear_taken.expect("linear entry").key, linear_key);
+        assert_eq!(
+            (base_report.path, linear_report.path),
+            (CachePath::Extend, CachePath::Extend)
+        );
+    }
+
+    #[test]
+    fn an_empty_cache_reports_empty_not_config_mismatch() {
+        let mut cache = PromptCache::new();
+
+        let (_, report) = cache.take_best(&[2, 105], &base_key(), &shared_widths());
+
+        assert_eq!(report.miss, Some(MissReason::Empty));
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn a_request_under_another_metal_math_mode_misses() {
+        let safe = ServingConfig {
+            math_mode: omega::MathMode::Safe,
+            ..ServingConfig::default()
+        };
+        let relaxed = ServingConfig {
+            math_mode: omega::MathMode::Relaxed,
+            ..ServingConfig::default()
+        };
+        let mut cache = PromptCache::new();
+        let mut entry = state_with_ids(&[2, 105, 2364, 107]);
+        entry.key = key_under(&safe, RopeScaling::None, 0, 0);
+        cache.store(entry, &enabled_config());
+
+        let (taken, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9259],
+            &key_under(&relaxed, RopeScaling::None, 0, 0),
+            &shared_widths(),
+        );
+
+        assert!(taken.is_none());
+        assert_eq!(report.miss, Some(MissReason::ConfigMismatch));
     }
 }

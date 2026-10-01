@@ -1935,6 +1935,7 @@ impl<'file> LoadedModel<'file> {
             omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
         }
         self.expert_sidecar = Some(sidecar);
+        self.clear_prompt_cache();
         Ok(())
     }
 
@@ -3127,7 +3128,7 @@ impl<'file> LoadedModel<'file> {
         let positions_needed = seed_cached_len + ids.len() + max_tokens;
         let draft_limit =
             speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
-        let ring_slack = draft_limit.max(serving_config.prompt_cache.rewind_slack_rows());
+        let ring_slack = ring_slack_rows(serving_config, forced_draft_width);
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
             None => self.fresh_layer_caches(
