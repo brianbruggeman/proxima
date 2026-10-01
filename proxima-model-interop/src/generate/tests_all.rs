@@ -2718,6 +2718,7 @@ pub(super) mod memory_fit_gate_tests {
             let mut config =
                 supported_serving_config(GPU_LAYERS_ALL, crate::test_support::math_mode_from_env());
             config.temperature = 0.0;
+            config.prompt_cache = crate::PromptCacheConfig::off();
             config
         }
 
@@ -3365,6 +3366,7 @@ pub(super) mod memory_fit_gate_tests {
             let mut config =
                 supported_serving_config(GPU_LAYERS_ALL, crate::test_support::math_mode_from_env());
             config.temperature = 0.0;
+            config.prompt_cache = crate::PromptCacheConfig::off();
             config
         }
 
