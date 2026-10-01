@@ -1022,6 +1022,7 @@ fn multi_row_generic_arm_current(
     };
     if fast_q4k_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
         || fast_q4_0_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
+        || fast_q6k_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
     {
         return None;
     }
@@ -1213,6 +1214,30 @@ pub(super) fn fast_q4_0_active(
         && quantized[block.other].is_none()
         && is_plain_product_reduce(resolved, reduce_op, block.weight, block.other)
         && q4_0_multi_row_hoist_override()
+}
+
+/// [`push_packed_row_multi_row_body`]'s `fast_q6k` gate: the multi-row twin
+/// of the single-row [`push_q6k_ggml_port_body`] admission in
+/// `push_packed_row_blocked_body` (`use_ggml_port && Q6K`), so a token group
+/// takes the ggml `Q6_K` lane map exactly when a lone token would. The two
+/// bodies share the per-lane accumulation order, which is what lets a
+/// multi-row dispatch reproduce the single-row result bit for bit.
+pub(super) fn fast_q6k_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
+    reduce_op: ScalarOp,
+    expert_source_mode: bool,
+) -> bool {
+    cfg!(feature = "metal-q4k-ggml-port")
+        && !cfg!(feature = "metal-q4k-split-k")
+        && !expert_source_mode
+        && gather_slots(resolved)[block.weight].is_none()
+        && block.codec == Codec::Q6K
+        && resolved.dtype == DType::Float32
+        && quantized[block.weight] == Some(Codec::Q6K)
+        && quantized[block.other].is_none()
+        && is_plain_product_reduce(resolved, reduce_op, block.weight, block.other)
 }
 
 /// Cheap structural + compile-option identity for the kernel [`emit`] would
