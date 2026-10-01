@@ -202,6 +202,7 @@ mod drafter;
 mod kv_ring;
 mod prompt_cache;
 mod prompt_cache_key;
+mod block_index;
 mod prewarm;
 mod prewarm_follow_up;
 mod prewarm_gate;

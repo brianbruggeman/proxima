@@ -531,6 +531,18 @@ pub struct PromptCacheConfig {
     /// greater-than. An entry the prompt extends whole is reused at any
     /// similarity; `0` reuses any entry sharing the first token.
     pub min_similarity_milli: u32,
+    /// Tokens per block of the prefix index: each cached entry is cut into
+    /// whole blocks of this many tokens, hashed with the block before it, and
+    /// a request finds the entry sharing its longest prefix by looking its own
+    /// blocks up instead of comparing every entry. Smaller blocks find shorter
+    /// overlaps and cost more index entries per cached token.
+    pub block_tokens: u32,
+    /// Bits of the bloom filter each entry keeps over its blocks' content, which
+    /// says whether a block of a prompt probably appears anywhere in the entry
+    /// once the prefix has stopped matching. One filter costs `bits / 8` bytes.
+    pub bloom_bits_per_entry: u32,
+    /// Probes per block in that filter.
+    pub bloom_hashes: u32,
 }
 
 impl PromptCacheConfig {
@@ -551,6 +563,9 @@ impl PromptCacheConfig {
             follow_up_max_tokens: 48,
             follow_up_temperature_milli: 800,
             min_similarity_milli: 100,
+            block_tokens: 64,
+            bloom_bits_per_entry: 4096,
+            bloom_hashes: 4,
         }
     }
 

@@ -41,6 +41,7 @@ std = [
     "interop-bgpool",
     "dep:proxima-tokenizer",
     "dep:fastrand",
+    "dep:xxhash-rust",
     "conflaguration",
     "bon",
     "memmap2",
@@ -327,6 +328,7 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 # `proxima-safetensors`'s identical `serde_json.workspace = true`.
 serde_json.workspace = true
 thiserror.workspace = true
+xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 
 [lints]
 workspace = true

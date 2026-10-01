@@ -4580,6 +4580,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "thiserror 2.0.19",
+ "xxhash-rust",
 ]
 
 [[package]]
