@@ -460,6 +460,11 @@ impl LoadedModel<'_> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use core::cell::Cell;
+
+    use proptest::collection::vec;
+    use proptest::test_runner::{Config, TestRunner};
+
     use super::*;
 
     fn state_with_ids(ids: &[u32]) -> PrefixState {
@@ -790,5 +795,48 @@ mod tests {
         let (state, report) = cache.take_best(&extension, &gemma_like_widths());
         assert!(state.is_some());
         assert_eq!(report.path, CachePath::Extend);
+    }
+
+    fn naive_common_prefix(left: &[u32], right: &[u32]) -> usize {
+        let mut shared = 0;
+        while shared < left.len() && shared < right.len() && left[shared] == right[shared] {
+            shared += 1;
+        }
+        shared
+    }
+
+    /// AC1: over 10,000 generated pairs the prefix length equals a plain
+    /// index scan. A six-token vocabulary and a generated shared head make
+    /// every case a near-collision, the shape real prompts that differ late
+    /// have; the case count is asserted so a zero-case run cannot pass.
+    #[test]
+    fn longest_common_prefix_equals_a_naive_scan_over_10000_generated_pairs() {
+        const CASES: usize = 10_000;
+        let mut runner = TestRunner::new(Config {
+            cases: CASES as u32,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        let executed = Cell::new(0_usize);
+        let token_run = || vec(0_u32..6, 0..64);
+
+        runner
+            .run(
+                &(token_run(), token_run(), token_run()),
+                |(head, left_tail, right_tail)| {
+                    let left: Vec<u32> = head.iter().chain(&left_tail).copied().collect();
+                    let right: Vec<u32> = head.iter().chain(&right_tail).copied().collect();
+                    let expected = naive_common_prefix(&left, &right);
+
+                    assert_eq!(longest_common_prefix(&left, &right), expected);
+                    assert_eq!(longest_common_prefix(&right, &left), expected);
+                    assert!(expected >= head.len());
+                    executed.set(executed.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("the shared-prefix scan must agree with the naive scan on every pair");
+
+        assert_eq!(executed.get(), CASES);
     }
 }
