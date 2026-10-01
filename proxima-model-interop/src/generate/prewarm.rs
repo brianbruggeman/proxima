@@ -182,7 +182,7 @@ impl LoadedModel<'_> {
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take_for_prewarm(ids, &key, &widths);
+            .take_for_prewarm(ids, &key, &widths, config.min_similarity_milli);
         let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
         let held = entry.state.cached_len;
         let checkpoints =
