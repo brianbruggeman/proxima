@@ -184,7 +184,7 @@ fn three_turn_extension_matches_fresh_prefill_with_speculation_on() {
     three_turn_extension(SpeculativeConfig::default());
 }
 
-fn chat_prompt_of(document_id: &str, document_chars: usize) -> String {
+pub(super) fn chat_prompt_of(document_id: &str, document_chars: usize) -> String {
     let document: String = corpus_document(document_id)
         .chars()
         .take(document_chars)

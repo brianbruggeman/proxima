@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use super::prefix_resume_long_prompt_tests::{chat_prompt, corpus_document};
 use super::prompt_cache_real_model_tests::long_chat_prompt;
 use super::prompt_cache_real_model_tests::{
-    TurnOutcome, cached_config, cached_tokens_after, encode_continuation, encode_opening,
-    run_cached, run_fresh, uncached_config, with_model,
+    TurnOutcome, cached_config, cached_tokens_after, chat_prompt_of, encode_continuation,
+    encode_opening, run_cached, run_fresh, uncached_config, with_model,
 };
 use super::{LoadedModel, PrewarmReport};
 use crate::serving::{PromptCacheConfig, ServingConfig, SpeculativeConfig};
@@ -105,6 +105,10 @@ fn end_of_answer_trigger(speculative: SpeculativeConfig<'static>) {
         let suffix = turn_boundary_suffix(model);
         model.set_prewarm_suffix(&suffix);
         let first = run_cached(model, cached_config(speculative), &opening);
+        model
+            .run_pending_prewarm(&cached_config(speculative))
+            .expect("the queued prewarm runs")
+            .expect("the answer queued its next prefix");
         let held = cached_tokens_after(opening.len(), &first);
         let next = next_turn(model, &opening, &first.generated, &suffix);
         let turn = run_cached(model, cached_config(speculative), &next.prompt);
@@ -372,6 +376,9 @@ fn the_end_of_answer_trigger_leaves_a_branch_entry_per_drafted_follow_up() {
             let mut config = follow_up_config();
             config.prompt_cache.follow_up_branches = branches;
             run_cached(model, config, &opening);
+            model
+                .run_pending_prewarm(&config)
+                .expect("the queued prewarm runs");
             model.prompt_cache_bytes()
         })
     };
@@ -465,4 +472,166 @@ fn reference_chunk_time(model: &LoadedModel<'_>, config: &ServingConfig<'_>) -> 
         })
         .expect("prewarm a reference document");
     boundaries[2] - boundaries[1]
+}
+
+/// The answer's call returns with the end-of-answer prefill still queued: the
+/// rows it will add are not in the cache until something runs the queue, and
+/// running it prefills the suffix the registered boundary added.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn an_answer_returns_with_its_end_of_answer_prefill_still_queued() {
+    with_model(|model| {
+        let config = cached_config(SpeculativeConfig::none());
+        let opening = encode_opening(model, &chat_prompt(USER_FROM_CHAR));
+        let suffix = turn_boundary_suffix(model);
+        model.set_prewarm_suffix(&suffix);
+
+        let first = run_cached(model, config, &opening);
+        let held = cached_tokens_after(opening.len(), &first);
+        let bytes_when_the_answer_returned = model.prompt_cache_bytes();
+        let warmed = model
+            .run_pending_prewarm(&config)
+            .expect("the queued prewarm runs")
+            .expect("the answer queued its next prefix");
+        let nothing_left = model
+            .run_pending_prewarm(&config)
+            .expect("polling an empty queue is not an error");
+
+        assert_eq!(warmed.reused_tokens, held);
+        assert_eq!(
+            warmed.prefilled_tokens,
+            first.generated.len() + opening.len() + suffix.len() - held
+        );
+        assert!(
+            model.prompt_cache_bytes() > bytes_when_the_answer_returned,
+            "the prewarm added rows after the answer had returned"
+        );
+        assert!(nothing_left.is_none());
+        println!(
+            "WORKER answer_returned_with held={held} queued_prefill={}",
+            warmed.prefilled_tokens
+        );
+    });
+}
+
+/// With a worker attached, no call after the answer is needed beyond waiting
+/// for the user to type: the next turn prefills only the user's tokens and its
+/// ids equal a full prefill's.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn a_worker_prewarms_the_answer_so_the_next_turn_prefills_only_the_user_tokens() {
+    with_model(|model| {
+        let config = cached_config(SpeculativeConfig::none());
+        let opening = encode_opening(model, &chat_prompt(USER_FROM_CHAR));
+        let suffix = turn_boundary_suffix(model);
+        model.set_prewarm_suffix(&suffix);
+
+        let (first, next, turn) = model
+            .with_prewarm_worker(&config, || {
+                let first = run_cached(model, config, &opening);
+                model.wait_for_prewarm();
+                let next = next_turn(model, &opening, &first.generated, &suffix);
+                let turn = run_cached(model, config, &next.prompt);
+                (first, next, turn)
+            })
+            .expect("start the prewarm worker");
+        let fresh = run_fresh(
+            model,
+            uncached_config(SpeculativeConfig::none()),
+            &next.prompt,
+        );
+
+        assert_eq!(turn.generated, fresh);
+        assert_prefilled_only_the_user_turn(
+            &turn,
+            &next,
+            cached_tokens_after(opening.len(), &first),
+            suffix.len(),
+            first.generated.len(),
+            opening.len(),
+        );
+    });
+}
+
+const CONCURRENT_TURNS: usize = 3;
+
+/// One conversation's turns, each prompt the previous one plus its answer, the
+/// boundary suffix and a new user excerpt of `document_id`; returns every
+/// prompt with the ids the cache produced for it.
+fn converse_through_the_cache(
+    model: &LoadedModel<'_>,
+    config: ServingConfig<'static>,
+    document_id: &str,
+    suffix: &[u32],
+) -> Vec<(Vec<u32>, TurnOutcome)> {
+    let document = corpus_document(document_id);
+    let mut prompt = encode_opening(model, &chat_prompt_of(document_id, USER_FROM_CHAR));
+    let mut turns = Vec::new();
+    for turn in 0..CONCURRENT_TURNS {
+        let outcome = run_cached(model, config, &prompt);
+        let mut following = prompt.clone();
+        following.extend_from_slice(&outcome.generated);
+        following.extend_from_slice(suffix);
+        let excerpt: String = document
+            .chars()
+            .skip(USER_FROM_CHAR + turn * USER_CHARS)
+            .take(USER_CHARS)
+            .collect();
+        following.extend(encode_continuation(
+            model,
+            &format!("{excerpt}<turn|>\n<|turn>model\n"),
+        ));
+        turns.push((prompt, outcome));
+        prompt = following;
+    }
+    turns
+}
+
+/// Two conversations answering on two threads while the worker prewarms behind
+/// both: the gate serializes who holds the device and an entry is out of the
+/// cache while anyone uses it, so no turn may see another's rows. Every turn
+/// of both conversations must generate what a full prefill generates.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn two_requests_and_a_background_prewarm_never_share_an_entry() {
+    with_model(|model| {
+        let config = cached_config(SpeculativeConfig::none());
+        let suffix = turn_boundary_suffix(model);
+        model.set_prewarm_suffix(&suffix);
+
+        let (first, second) = model
+            .with_prewarm_worker(&config, || {
+                std::thread::scope(|scope| {
+                    let first = scope
+                        .spawn(|| converse_through_the_cache(model, config, "rag004", &suffix));
+                    let second = scope
+                        .spawn(|| converse_through_the_cache(model, config, "rag011", &suffix));
+                    (
+                        first.join().expect("conversation one finishes"),
+                        second.join().expect("conversation two finishes"),
+                    )
+                })
+            })
+            .expect("start the prewarm worker");
+
+        let mut compared = 0;
+        for (prompt, outcome) in first.iter().chain(&second) {
+            let fresh = run_fresh(model, uncached_config(SpeculativeConfig::none()), prompt);
+            assert_eq!(
+                outcome.generated,
+                fresh,
+                "a turn of {} tokens diverged from a full prefill: {:?}",
+                prompt.len(),
+                outcome.report
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, 2 * CONCURRENT_TURNS);
+        let reused: Vec<usize> = first
+            .iter()
+            .chain(&second)
+            .map(|(_, outcome)| outcome.report.reused_tokens)
+            .collect();
+        println!("WORKER concurrent reused_per_turn={reused:?}");
+    });
 }

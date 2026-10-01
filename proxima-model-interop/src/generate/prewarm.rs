@@ -6,7 +6,10 @@
 //! type. The end of a generation is the built-in point
 //! ([`LoadedModel::set_prewarm_suffix`]): the answer is complete and the
 //! device idle while the user reads, so the answer's trailing tokens plus the
-//! registered turn-boundary suffix are prefilled with no further call.
+//! registered turn-boundary suffix are queued ([`super::prewarm_queue`]) as the
+//! request returns, and prefilled by [`LoadedModel::with_prewarm_worker`]'s
+//! thread or a [`LoadedModel::run_pending_prewarm`] call -- never on the
+//! answer's own return path.
 //!
 //! There is no second matching path. A prewarm takes its entry out through
 //! the same [`PromptCache::take_best`] a request uses, extends or rewinds it
@@ -16,10 +19,10 @@
 //! runs, with chunk boundaries added as extra stops. It then stores the entry
 //! back, and the next request's ordinary lookup finds it.
 //!
-//! Preemption is caller-driven, not a background executor: proxima has none
-//! here, and the request entry points are synchronous. `prewarm` runs on the
-//! caller's thread, and at every chunk boundary asks [`PrewarmGate`] whether a
-//! request is pending; if one is, the rows prefilled so far are stored (usable
+//! Preemption is chunk-driven, not an executor's: proxima has none here, and
+//! the request entry points are synchronous. `prewarm` runs on the thread that
+//! calls it (the worker's, for a queued one), and at every chunk boundary asks
+//! [`PrewarmGate`] whether a request is pending; if one is, the rows prefilled so far are stored (usable
 //! up to what was prefilled) and `prewarm` returns early with
 //! [`PrewarmReport::preempted`] set. A request that arrives mid-chunk waits
 //! for that chunk only. Reach for a plain [`LoadedModel::generate_from_ids`]
@@ -32,6 +35,7 @@ use std::time::{Duration, Instant};
 
 use proxima_telemetry::{debug, warn};
 
+use super::prewarm_queue::PrewarmJob;
 use super::prompt_cache::{CacheEntry, log_entry_dropped};
 use super::*;
 
@@ -44,6 +48,9 @@ pub enum PrewarmSkip {
     NoIds,
     /// Another prewarm holds the device.
     Busy,
+    /// The queued prefix was built under a cache key the prewarming config
+    /// does not derive, so no request could reuse its rows.
+    ConfigMismatch,
 }
 
 /// What one prewarm did.
@@ -243,16 +250,17 @@ impl LoadedModel<'_> {
         Ok(report)
     }
 
-    /// The end-of-answer trigger: prefills `ids` + `generated` + the
-    /// registered suffix into the entry the request just stored. Does nothing
-    /// without a suffix. The request has already succeeded, so a prewarm that
-    /// fails is logged, not returned.
-    pub(super) fn prewarm_after_answer(
+    /// The end-of-answer trigger: queues `ids` + `generated` + the registered
+    /// suffix as the prefix the next turn will share, for
+    /// [`Self::with_prewarm_worker`] or [`Self::run_pending_prewarm`] to
+    /// prefill into the entry the request just stored. Does nothing without a
+    /// suffix. It only queues: the answer's caller must not wait for a
+    /// prefill nobody asked it to.
+    pub(super) fn queue_prewarm_after_answer(
         &self,
         ids: &[u32],
         generated: &[u32],
-        serving_config: &ServingConfig,
-        runtime: &mut BackendRuntime,
+        key: CacheKey,
         forced_draft_width: Option<u16>,
     ) {
         let suffix = self
@@ -264,39 +272,149 @@ impl LoadedModel<'_> {
         if suffix.is_empty() {
             return;
         }
-        let next_prefix: Vec<u32> = ids
+        let prefix: Vec<u32> = ids
             .iter()
             .chain(generated)
             .chain(&suffix)
             .copied()
             .collect();
-        match self.prewarm_ids(
-            &next_prefix,
-            serving_config,
-            runtime,
+        let queued_tokens = prefix.len() as u64;
+        let replaced = self.prewarm_queue.submit(PrewarmJob {
+            prefix,
+            key,
             forced_draft_width,
-            &mut |_position| {},
-        ) {
-            Ok(report) if report.skipped.is_none() && !report.preempted => {
-                if let Err(error) = self.follow_up_branches(
-                    &next_prefix,
-                    serving_config,
-                    runtime,
-                    forced_draft_width,
-                    &mut |_kept| {},
-                ) {
-                    warn!(
-                        follow_up_error = %error,
-                        "follow-up prewarm failed after the request succeeded"
-                    );
-                }
-            }
-            Ok(_) => {}
-            Err(error) => warn!(
-                prewarm_error = %error,
-                "end-of-answer prewarm failed after the request succeeded"
-            ),
+        });
+        debug!(
+            prewarm_queued_tokens = queued_tokens,
+            prewarm_replaced_unserved_job = replaced,
+            "end-of-answer prewarm queued"
+        );
+    }
+
+    /// Runs the end-of-answer prewarm a request queued, on the calling
+    /// thread, under `serving_config`; `None` when nothing is queued. For a
+    /// caller with no worker thread to hand over: call it when the device is
+    /// idle, between requests. [`Self::with_prewarm_worker`] is this in a
+    /// loop on a thread of its own.
+    ///
+    /// A queued prefix is skipped ([`PrewarmSkip::ConfigMismatch`]) when
+    /// `serving_config` derives another cache key than the request that
+    /// queued it ran under: its rows could not be reused.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::prewarm`].
+    pub fn run_pending_prewarm(
+        &self,
+        serving_config: &ServingConfig,
+    ) -> Result<Option<PrewarmReport>, InteropError> {
+        let effective = self.effective_serving_config(serving_config)?;
+        let mut runtime = BackendRuntime::new(&effective);
+        self.run_queued_prewarm(&effective, &mut runtime)
+    }
+
+    fn run_queued_prewarm(
+        &self,
+        effective: &ServingConfig,
+        runtime: &mut BackendRuntime,
+    ) -> Result<Option<PrewarmReport>, InteropError> {
+        self.prewarm_queue
+            .run_next(|job| self.prewarm_queued(&job, effective, runtime))
+            .transpose()
+    }
+
+    fn prewarm_queued(
+        &self,
+        job: &PrewarmJob,
+        effective: &ServingConfig,
+        runtime: &mut BackendRuntime,
+    ) -> Result<PrewarmReport, InteropError> {
+        let key = self.cache_key(effective, runtime, job.forced_draft_width);
+        if key != job.key {
+            return Ok(PrewarmReport::idle(
+                Some(PrewarmSkip::ConfigMismatch),
+                false,
+            ));
         }
+        let report = self.prewarm_ids(
+            &job.prefix,
+            effective,
+            runtime,
+            job.forced_draft_width,
+            &mut |_position| {},
+        )?;
+        if report.skipped.is_none()
+            && !report.preempted
+            && let Err(error) = self.follow_up_branches(
+                &job.prefix,
+                effective,
+                runtime,
+                job.forced_draft_width,
+                &mut |_kept| {},
+            )
+        {
+            warn!(
+                follow_up_error = %error,
+                "follow-up prewarm failed after the request succeeded"
+            );
+        }
+        Ok(report)
+    }
+
+    /// Runs `body` with a worker thread prefilling the end-of-answer prewarms
+    /// that requests queue, under `serving_config`, and stops the worker when
+    /// `body` returns. The worker waits for a queued prefix, runs it behind
+    /// [`PrewarmGate`] so a request arriving mid-prefill waits one chunk at
+    /// most, and goes back to waiting; a request itself returns the moment its
+    /// answer is stored. The worker keeps one [`BackendRuntime`] for every
+    /// job: a fresh one costs the first forward it runs about 225 ms on
+    /// gemma4-E2B (317 ms against 93 ms for a 5-token prewarm).
+    ///
+    /// The thread is scoped, not owned by the model: a [`LoadedModel`] borrows
+    /// the checkpoint bytes for `'file`, so no thread that outlives the
+    /// caller's borrow may hold it. Wrap the code that serves requests, as
+    /// `std::thread::scope` is wrapped around any threaded use of the model.
+    /// With no worker and no [`Self::run_pending_prewarm`] caller, a queued
+    /// prefix is replaced by the next answer's and never prefilled.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`], before `body` runs.
+    pub fn with_prewarm_worker<T>(
+        &self,
+        serving_config: &ServingConfig,
+        body: impl FnOnce() -> T,
+    ) -> Result<T, InteropError> {
+        let effective = self.effective_serving_config(serving_config)?;
+        Ok(std::thread::scope(|scope| {
+            let (_attached, life) = self.prewarm_queue.attach_worker();
+            scope.spawn(|| {
+                let _life = life;
+                self.serve_queued_prewarms(&effective);
+            });
+            body()
+        }))
+    }
+
+    fn serve_queued_prewarms(&self, effective: &ServingConfig) {
+        let mut runtime = BackendRuntime::new(effective);
+        while self.prewarm_queue.wait_for_work() {
+            if let Err(error) = self.run_queued_prewarm(effective, &mut runtime) {
+                warn!(
+                    prewarm_error = %error,
+                    "end-of-answer prewarm failed after the request succeeded"
+                );
+            }
+        }
+    }
+
+    /// Blocks until the prewarm now running, and the one queued behind it for
+    /// a worker [`Self::with_prewarm_worker`] attached, have finished: the
+    /// point where a user who has read the answer would start typing. Returns
+    /// at once when nothing is running, and does not wait for a queued prefix
+    /// no worker will run.
+    pub fn wait_for_prewarm(&self) {
+        self.prewarm_queue.wait_idle();
     }
 }
 
