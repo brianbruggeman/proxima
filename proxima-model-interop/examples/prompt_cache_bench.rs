@@ -12,6 +12,12 @@
 //! interleaved pairs; then, with `--llama-server-bin`, the same prompt ids against llama-server
 //! with `cache_prompt` on and off.
 //!
+//! `--mode prewarm`: spec S6 AC11. A multi-turn transcript where every turn after the first is
+//! the previous prompt, its answer, the turn-boundary suffix and new user text. For each turn the
+//! previous turn runs through the cache, then the turn's time to first token is timed with the
+//! end-of-answer prewarm registered and with no suffix registered, as interleaved pairs; ids are
+//! checked against an uncached run.
+//!
 //! `--mode split`: one cold full-prompt prefill with checkpoint splitting off, at the default
 //! interval, and at swept intervals.
 //!
@@ -57,6 +63,7 @@ enum Mode {
     Oracle,
     Ttft,
     Split,
+    Prewarm,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,7 +130,8 @@ fn parse_mode(value: &str) -> Mode {
         "oracle" => Mode::Oracle,
         "ttft" => Mode::Ttft,
         "split" => Mode::Split,
-        other => panic!("--mode is oracle, ttft or split, got {other}"),
+        "prewarm" => Mode::Prewarm,
+        other => panic!("--mode is oracle, ttft, split or prewarm, got {other}"),
     }
 }
 
@@ -473,6 +481,8 @@ fn path_label(report: Option<CacheReport>) -> Value {
             "reused_tokens": report.reused_tokens,
             "prefilled_tokens": report.prefilled_tokens,
             "miss": report.miss.map(|reason| reason.as_str()),
+            "prewarm_hit_tokens": report.prewarm_hit_tokens,
+            "prewarm_wait_ms": report.prewarm_wait.as_secs_f64() * 1000.0,
         })
     })
 }
@@ -1110,6 +1120,156 @@ fn print_split_summary(length: usize, arms: &[SplitArm], ttft: &[Vec<f64>]) {
     }
 }
 
+const TURN_BOUNDARY: &str = "<turn|>\n<|turn>user\n";
+
+fn turn_boundary_suffix(vocab: &Vocab) -> Vec<u32> {
+    encode_continuation(vocab, TURN_BOUNDARY)
+}
+
+fn next_user_ids(vocab: &Vocab, user_text: &str) -> Vec<u32> {
+    encode_continuation(vocab, &format!("{user_text}<turn|>\n<|turn>model\n"))
+}
+
+struct PrewarmPlan {
+    prompt_ids: Vec<u32>,
+    reference: Vec<u32>,
+    user_tokens: usize,
+}
+
+fn build_prewarm_plans(model: &LoadedModel<'_>, vocab: &Vocab, kind: TranscriptKind, max_tokens: usize) -> Vec<PrewarmPlan> {
+    model.set_prewarm_suffix(&[]);
+    clear_cache(model, vocab);
+    let suffix = turn_boundary_suffix(vocab);
+    let mut plans: Vec<PrewarmPlan> = Vec::new();
+    for text in &user_texts(kind) {
+        let (prompt_ids, user_tokens) = match plans.last() {
+            None => (encode_opening(vocab, &opening_turn(text)), 0),
+            Some(previous) => {
+                let user_ids = next_user_ids(vocab, text);
+                let mut ids = previous.prompt_ids.clone();
+                ids.extend_from_slice(&previous.reference);
+                ids.extend_from_slice(&suffix);
+                ids.extend_from_slice(&user_ids);
+                (ids, user_ids.len())
+            }
+        };
+        let reference = timed_request(model, &prompt_ids, max_tokens, &uncached()).generated;
+        plans.push(PrewarmPlan { prompt_ids, reference, user_tokens });
+    }
+    plans
+}
+
+#[derive(Default)]
+struct PrewarmSamples {
+    with_prewarm: Vec<f64>,
+    without: Vec<f64>,
+    prefilled_with: Vec<usize>,
+    prefilled_without: Vec<usize>,
+    hit_tokens: Vec<usize>,
+    identical: usize,
+    pairs: usize,
+}
+
+fn run_prewarm_arm(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    plans: &[PrewarmPlan],
+    turn: usize,
+    prewarm: bool,
+    max_tokens: usize,
+) -> Timed {
+    let cached = config_with(PromptCacheConfig::standard());
+    model.set_prewarm_suffix(&[]);
+    clear_cache(model, vocab);
+    if prewarm {
+        model.set_prewarm_suffix(&turn_boundary_suffix(vocab));
+    }
+    timed_request(model, &plans[turn - 1].prompt_ids, max_tokens, &cached);
+    let timed = timed_request(model, &plans[turn].prompt_ids, max_tokens, &cached);
+    model.set_prewarm_suffix(&[]);
+    timed
+}
+
+fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder: &mut Recorder) -> (Vec<PrewarmSamples>, Vec<PrewarmPlan>) {
+    let plans = build_prewarm_plans(model, vocab, args.transcript, args.max_tokens);
+    for (turn, plan) in plans.iter().enumerate() {
+        recorder.write(&json!({
+            "kind": "plan", "mode": "prewarm", "turn": turn, "prompt_tokens": plan.prompt_ids.len(),
+            "user_tokens": plan.user_tokens, "reference": plan.reference,
+        }));
+    }
+    let mut samples: Vec<PrewarmSamples> = plans.iter().map(|_| PrewarmSamples::default()).collect();
+    for pair in 0..=args.pairs {
+        recorder.write(&host_snapshot(&format!("prewarm_pair_{pair}_start")));
+        for turn in 1..plans.len() {
+            let order = if (pair + turn) % 2 == 0 { [true, false] } else { [false, true] };
+            for (position, prewarm) in order.into_iter().enumerate() {
+                let timed = run_prewarm_arm(model, vocab, &plans, turn, prewarm, args.max_tokens);
+                let report = timed.report.expect("a cached request records its report");
+                recorder.write(&json!({
+                    "kind": "request", "mode": "prewarm", "pair": pair, "warmup": pair == 0, "turn": turn,
+                    "arm": if prewarm { "prewarm" } else { "no_prewarm" }, "order_position": position,
+                    "prompt_tokens": plans[turn].prompt_ids.len(), "ttft_ms": timed.ttft_ms,
+                    "total_ms": timed.total_ms, "generated": timed.generated.len(),
+                    "ids_identical": timed.generated == plans[turn].reference, "cache": path_label(timed.report),
+                }));
+                if pair == 0 {
+                    continue;
+                }
+                let sample = &mut samples[turn];
+                if prewarm {
+                    sample.with_prewarm.push(timed.ttft_ms);
+                    sample.prefilled_with.push(report.prefilled_tokens);
+                    sample.hit_tokens.push(report.prewarm_hit_tokens);
+                    sample.pairs += 1;
+                } else {
+                    sample.without.push(timed.ttft_ms);
+                    sample.prefilled_without.push(report.prefilled_tokens);
+                }
+                sample.identical += usize::from(timed.generated == plans[turn].reference);
+            }
+        }
+        recorder.write(&host_snapshot(&format!("prewarm_pair_{pair}_end")));
+    }
+    (samples, plans)
+}
+
+fn print_prewarm_summary(samples: &[PrewarmSamples], plans: &[PrewarmPlan]) {
+    println!("end-of-answer prewarm, ttft ms of turn N+1 (turn N ran through the cache first)");
+    for (turn, (turn_samples, plan)) in samples.iter().zip(plans).enumerate().skip(1) {
+        println!(
+            "turn={turn} prompt_tokens={} user_tokens={} ids_identical_to_uncached={}/{}",
+            plan.prompt_ids.len(),
+            plan.user_tokens,
+            turn_samples.identical,
+            turn_samples.pairs * 2
+        );
+        println!("  with_prewarm    {}", spread(&turn_samples.with_prewarm).text());
+        println!("  without_prewarm {}", spread(&turn_samples.without).text());
+        println!(
+            "  median_with/median_without={:.3} prefilled_tokens with={:?} without={:?} prewarm_hit_tokens={:?}",
+            median(&turn_samples.with_prewarm) / median(&turn_samples.without),
+            distinct(&turn_samples.prefilled_with),
+            distinct(&turn_samples.prefilled_without),
+            distinct(&turn_samples.hit_tokens)
+        );
+    }
+}
+
+fn distinct(values: &[usize]) -> Vec<usize> {
+    let mut copy = values.to_vec();
+    copy.sort_unstable();
+    copy.dedup();
+    copy
+}
+
+fn run_prewarm(args: &Args, recorder: &mut Recorder) {
+    with_model(&args.model_path, |model, vocab| {
+        let (samples, plans) = run_prewarm_pairs(model, vocab, args, recorder);
+        print_prewarm_summary(&samples, &plans);
+    });
+}
+
 fn main() {
     let args = parse_args();
     let mut recorder = Recorder::create(&args.out);
@@ -1119,6 +1279,7 @@ fn main() {
         Mode::Oracle => run_oracle(&args, &mut recorder),
         Mode::Ttft => run_ttft(&args, &mut recorder),
         Mode::Split => run_split(&args, &mut recorder),
+        Mode::Prewarm => run_prewarm(&args, &mut recorder),
     }
     recorder.write(&host_snapshot("end"));
 }
