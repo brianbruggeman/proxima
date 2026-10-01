@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "instrument")]
+use objc2_metal::MTLBlitCommandEncoder;
 
 /// CARD 6.5: whole-`MetalBuffer` device output arena, hung off the cached
 /// [`Plan`] and built exactly once, in [`plan`], from
@@ -819,6 +821,66 @@ fn capture_dispatch(
             });
         });
     }
+    if std::env::var_os("PROXIMA_CAPTURE_LIVE").is_some() {
+        let mut live_buffers = Vec::new();
+        let mut uniforms_index = None;
+        let mut fault_index = None;
+        let mut unreplayable = None;
+        for (index, binding) in bindings.iter().enumerate() {
+            let resolved = match binding {
+                Binding::Input(node) | Binding::Indices(node) => device_buffers.get(node).cloned(),
+                Binding::Output(_) => Some((output.0.clone(), output.1)),
+                Binding::Uniforms => {
+                    uniforms_index = Some(index);
+                    continue;
+                }
+                Binding::Fault => {
+                    fault_index = Some(index);
+                    continue;
+                }
+                Binding::Scratch | Binding::ExpertPayloads(_) | Binding::ExpertDescriptors(_) => None,
+            };
+            match resolved {
+                Some((buffer, offset)) => live_buffers.push((index, buffer, offset)),
+                None => unreplayable = Some(format!("binding {index} ({binding:?}) not resolvable")),
+            }
+        }
+        let extras_reason = live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers);
+        // SAFETY: `uniforms` is a live shared buffer of `length()` bytes.
+        let uniform_bytes = unsafe {
+            core::slice::from_raw_parts(uniforms.contents().as_ptr().cast::<u8>(), uniforms.length())
+        }
+        .to_vec();
+        let live_operands = bound
+            .operands()
+            .iter()
+            .map(|(node, _layout, _lookup)| {
+                let codec = packed_operands
+                    .get(node)
+                    .map_or("unpacked".to_string(), |codec| format!("{codec:?}"));
+                (node.0, codec)
+            })
+            .collect();
+        CAPTURE_LIVE_PENDING.with(|pending| {
+            pending.borrow_mut().push(CapturedDispatch {
+                step,
+                node: bound.node.0,
+                kind_name: bound.kind.name(),
+                entry: entry.clone(),
+                msl_sha256: msl_sha256.clone(),
+                operands: live_operands,
+                extents: bound.extents.clone(),
+                grid,
+                bindings: bindings.to_vec(),
+                unreplayable: unreplayable.or(extras_reason),
+                uniform_bytes,
+                pipeline: pipeline.clone(),
+                buffers: live_buffers,
+                uniforms_index,
+                fault_index,
+            });
+        });
+    }
     debug!(
         step,
         node = bound.node.0,
@@ -1002,6 +1064,243 @@ pub(super) fn flush_pending_capture_dumps() {
             "capture dump: buffers and metadata flushed"
         );
     }
+}
+
+/// One dispatch of the captured decode step, kept LIVE (pipeline, real
+/// resolved buffers, uniform bytes) so a harness can re-encode it alone in
+/// its own command buffer -- the isolated-replay half of the per-kernel GPU
+/// time census. Recorded by [`capture_dispatch`] when `PROXIMA_CAPTURE_LIVE`
+/// is set, on top of the same `PROXIMA_CAPTURE_NODES`/`PROXIMA_CAPTURE_STEPS`
+/// selection the file dump uses; drained by [`take_captured_dispatches`].
+#[cfg(feature = "instrument")]
+pub struct CapturedDispatch {
+    /// decode step this dispatch was encoded in, e.g. `23`
+    pub step: u64,
+    /// `NodeId` of the bound op, e.g. `4521`
+    pub node: u32,
+    /// `BoundOpKind::name`, e.g. `keep::reduce fold`
+    pub kind_name: &'static str,
+    /// emitted MSL entry name, e.g. `omega_reduce_r3_o2_n2_multiply_add_zero`
+    pub entry: String,
+    /// sha256 hex of the emitted MSL source, the kernel identity
+    pub msl_sha256: String,
+    /// `(operand node, codec)` per bound operand; codec is `unpacked` or a
+    /// `Codec` debug name such as `Q4_0`
+    pub operands: Vec<(u32, String)>,
+    /// the op's iteration-space extents, e.g. `[1, 1, 512]`
+    pub extents: Vec<u64>,
+    pub grid: GridSpec,
+    pub bindings: Vec<Binding>,
+    /// `Some(reason)` when a buffer this kernel needs was not recoverable
+    /// at the dispatch site, so [`Self::time_gpu_ns`] refuses it
+    pub unreplayable: Option<String>,
+    /// raw bytes of the bound `Uniforms` struct at encode time
+    pub uniform_bytes: Vec<u8>,
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    buffers: Vec<(usize, MetalBuffer, usize)>,
+    uniforms_index: Option<usize>,
+    fault_index: Option<usize>,
+}
+
+#[cfg(feature = "instrument")]
+thread_local! {
+    static CAPTURE_LIVE_PENDING: RefCell<Vec<CapturedDispatch>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Drains every [`CapturedDispatch`] queued on this thread since the last
+/// call. Empty unless `PROXIMA_CAPTURE_LIVE` was set while the decode step
+/// ran on this same thread.
+#[cfg(feature = "instrument")]
+pub fn take_captured_dispatches() -> Vec<CapturedDispatch> {
+    CAPTURE_LIVE_PENDING.with(|pending| core::mem::take(&mut *pending.borrow_mut()))
+}
+
+#[cfg(feature = "instrument")]
+const FAULT_REPLAY_BYTES: usize = 4096;
+
+#[cfg(feature = "instrument")]
+fn live_extra_buffers(
+    bound: &BoundOp,
+    slot_base: usize,
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    buffers: &mut Vec<(usize, MetalBuffer, usize)>,
+) -> Option<String> {
+    let extra_nodes: Vec<NodeId> = match &bound.kind {
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_weight_sum,
+            new_weight_sum,
+            new_attended,
+            ..
+        } => vec![*cached_weight_sum, *new_weight_sum, *new_attended],
+        BoundOpKind::GatedDeltaNet { .. } | BoundOpKind::MoeTopK { .. } => {
+            return Some(format!("{} binds extra outputs outside `bindings`", bound.kind.name()));
+        }
+        _ => return None,
+    };
+    for (offset, node) in extra_nodes.iter().enumerate() {
+        let Some((buffer, buffer_offset)) = device_buffers.get(node).cloned() else {
+            return Some(format!("extra output node {} has no device buffer", node.0));
+        };
+        buffers.push((slot_base + offset, buffer, buffer_offset));
+    }
+    None
+}
+
+#[cfg(feature = "instrument")]
+fn gpu_span_ns(command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<f64, MetalError> {
+    if command_buffer.status() == MTLCommandBufferStatus::Error {
+        let reason = command_buffer
+            .error()
+            .map_or("no NSError".to_string(), |error| error.localizedDescription().to_string());
+        return Err(MetalError::CompileFailed {
+            log: format!("replay command buffer failed: {reason}"),
+        });
+    }
+    Ok(((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0))
+}
+
+#[cfg(feature = "instrument")]
+fn shared_buffer_from(
+    device: &ProtocolObject<dyn MTLDevice>,
+    bytes: &[u8],
+) -> Result<MetalBuffer, MetalError> {
+    let buffer = device
+        .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "device refused to allocate a replay buffer".to_string(),
+        })?;
+    // SAFETY: freshly allocated shared buffer of at least `bytes.len()` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            buffer.contents().as_ptr().cast::<u8>(),
+            bytes.len(),
+        );
+    }
+    Ok(buffer)
+}
+
+#[cfg(feature = "instrument")]
+impl CapturedDispatch {
+    /// GPU time in nanoseconds (`GPUEndTime - GPUStartTime`) of ONE command
+    /// buffer holding `batch` back-to-back copies of this dispatch in one
+    /// serial encoder over the captured buffers. `batch == 1` is the
+    /// isolated-replay number, floor included; the marginal per-dispatch
+    /// cost is `(time(k) - time(1)) / (k - 1)`.
+    ///
+    /// # Errors
+    ///
+    /// [`MetalError::CompileFailed`] when the dispatch is
+    /// [`Self::unreplayable`], the device refuses an allocation, or the
+    /// command buffer ends in an error status.
+    pub fn time_gpu_ns(&self, batch: usize) -> Result<f64, MetalError> {
+        if let Some(reason) = &self.unreplayable {
+            return Err(MetalError::CompileFailed { log: reason.clone() });
+        }
+        let (device, queue) = device_and_queue()?;
+        let uniforms = shared_buffer_from(&device, &self.uniform_bytes)?;
+        let fault = shared_buffer_from(&device, &[0u8; FAULT_REPLAY_BYTES])?;
+        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+            log: "queue refused a replay command buffer".to_string(),
+        })?;
+        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| MetalError::CompileFailed {
+            log: "command buffer refused a replay encoder".to_string(),
+        })?;
+        for _ in 0..batch {
+            encoder.setComputePipelineState(&self.pipeline);
+            for (index, buffer, offset) in &self.buffers {
+                // SAFETY: the captured buffer and offset are the exact pair `encode_op` bound.
+                unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), *offset, *index) };
+            }
+            if let Some(index) = self.uniforms_index {
+                unsafe { encoder.setBuffer_offset_atIndex(Some(&uniforms), 0, index) };
+            }
+            if let Some(index) = self.fault_index {
+                unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
+            }
+            dispatch(&encoder, &self.pipeline, self.grid);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        gpu_span_ns(&command_buffer)
+    }
+}
+
+/// GPU time of one command buffer whose only work is a one-thread no-op
+/// kernel -- the per-command-buffer floor every isolated replay pays and the
+/// in-situ shared encoder does not.
+#[cfg(feature = "instrument")]
+pub fn time_empty_command_buffer_gpu_ns() -> Result<f64, MetalError> {
+    let (device, queue) = device_and_queue()?;
+    let source = "#include <metal_stdlib>\nusing namespace metal;\nkernel void m0_empty(device float* sink [[buffer(0)]], uint gid [[thread_position_in_grid]]) { }\n";
+    let library = device
+        .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&MTLCompileOptions::new()))
+        .map_err(|error| MetalError::CompileFailed { log: error.localizedDescription().to_string() })?;
+    let function = library.newFunctionWithName(&NSString::from_str("m0_empty")).ok_or_else(|| {
+        MetalError::CompileFailed { log: "m0_empty entry missing".to_string() }
+    })?;
+    let pipeline = device
+        .newComputePipelineStateWithFunction_error(&function)
+        .map_err(|error| MetalError::CompileFailed { log: error.localizedDescription().to_string() })?;
+    let sink = shared_buffer_from(&device, &[0u8; 16])?;
+    let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+        log: "queue refused a floor command buffer".to_string(),
+    })?;
+    let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| MetalError::CompileFailed {
+        log: "command buffer refused a floor encoder".to_string(),
+    })?;
+    encoder.setComputePipelineState(&pipeline);
+    unsafe { encoder.setBuffer_offset_atIndex(Some(&sink), 0, 0) };
+    encoder.dispatchThreads_threadsPerThreadgroup(
+        MTLSize { width: 1, height: 1, depth: 1 },
+        MTLSize { width: 1, height: 1, depth: 1 },
+    );
+    encoder.endEncoding();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    gpu_span_ns(&command_buffer)
+}
+
+/// Streams `bytes` of blit-fill through the memory system in its own
+/// command buffer, untimed, so the next replay's weights come from DRAM
+/// rather than the system-level cache a back-to-back replay would warm.
+#[cfg(feature = "instrument")]
+pub fn flush_gpu_caches(bytes: usize) -> Result<(), MetalError> {
+    let (device, queue) = device_and_queue()?;
+    let scratch = FLUSH_SCRATCH.with(|slot| -> Result<MetalBuffer, MetalError> {
+        let mut slot = slot.borrow_mut();
+        if let Some(existing) = slot.as_ref().filter(|buffer| buffer.length() >= bytes) {
+            return Ok(existing.clone());
+        }
+        let buffer = device
+            .newBufferWithLength_options(bytes, MTLResourceOptions::StorageModeShared)
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "device refused the cache-flush buffer".to_string(),
+            })?;
+        *slot = Some(buffer.clone());
+        Ok(buffer)
+    })?;
+    let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+        log: "queue refused a flush command buffer".to_string(),
+    })?;
+    let encoder = command_buffer.blitCommandEncoder().ok_or_else(|| MetalError::CompileFailed {
+        log: "command buffer refused a flush blit encoder".to_string(),
+    })?;
+    encoder.fillBuffer_range_value(
+        &scratch,
+        objc2_foundation::NSRange { location: 0, length: bytes },
+        0xA5,
+    );
+    encoder.endEncoding();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    gpu_span_ns(&command_buffer).map(|_| ())
+}
+
+#[cfg(feature = "instrument")]
+thread_local! {
+    static FLUSH_SCRATCH: RefCell<Option<MetalBuffer>> = const { RefCell::new(None) };
 }
 
 /// [`chunk_audit_record_dispatch`]'s per-dispatch feed: walks the SAME

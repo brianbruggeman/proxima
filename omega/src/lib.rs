@@ -97,7 +97,9 @@ pub use metal::{
 };
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 pub use metal::{
-    execute_plan_timed, pipeline_cache_keys, pipeline_key_audit_counts, set_capture_step,
+    CapturedDispatch, execute_plan_timed, flush_gpu_caches, pipeline_cache_keys,
+    pipeline_key_audit_counts, set_capture_step, take_captured_dispatches,
+    time_empty_command_buffer_gpu_ns,
 };
 #[cfg(feature = "alloc")]
 pub use msl::{
