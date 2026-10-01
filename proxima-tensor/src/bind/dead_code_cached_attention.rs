@@ -648,8 +648,11 @@ pub(super) fn cached_attention_candidates(
     resolved: &[BoundOp],
     effective_outputs: &[NodeId],
     require_output_resolved: bool,
+    numeric_policy: NumericPolicy,
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
+    #[cfg(not(feature = "metal-attn-split-decode"))]
+    let _ = numeric_policy;
     // resolved once: every caller supplies this leaf unconditionally
     // (`find_named_input`'s own doc), and both the padding-select walk below
     // and the ninth-operand push near the end of this loop need the SAME
@@ -1238,7 +1241,16 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
-            softmax_weights_eligible = via_gemma_template;
+            // the split-KV form needs both reassociations: the cross-threadgroup
+            // merge and the in-block tree reduce; `bit_exact` keeps the
+            // byte-exact `CachedSoftmaxWeights` lowering.
+            #[cfg(feature = "metal-attn-split-decode")]
+            let split_decode_admitted = admit(numeric_policy, NumericRewrite::ContextSplitMerge)
+                .is_ok()
+                && admit(numeric_policy, NumericRewrite::TreeReduce).is_ok();
+            #[cfg(not(feature = "metal-attn-split-decode"))]
+            let split_decode_admitted = false;
+            softmax_weights_eligible = via_gemma_template && !split_decode_admitted;
         }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
             continue;

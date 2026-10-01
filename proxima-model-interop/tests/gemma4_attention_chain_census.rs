@@ -419,6 +419,7 @@ async fn gemma4_attention_chain_census() {
     let mut absorbed_log = File::create(&absorbed_log_path)
         .unwrap_or_else(|error| panic!("create {}: {error}", absorbed_log_path.display()));
     let mut total_absorbed = 0usize;
+    let mut span_absorbed_ids: BTreeSet<u32> = BTreeSet::new();
     for layer in 0..block_count {
         let Some((unfused_q, unfused_wo)) =
             find_layer_span_bounds(&unfused_bound_ops, &named, layer)
@@ -442,6 +443,7 @@ async fn gemma4_attention_chain_census() {
             .filter(|bound| !unfused_ids.contains(&bound.node.0))
             .collect();
         total_absorbed += absorbed.len();
+        span_absorbed_ids.extend(absorbed.iter().map(|bound| bound.node.0));
         println!(
             "gemma4_attention_chain_census: layer={layer} absorbed_count={} only_fused_count={}",
             absorbed.len(),
@@ -498,12 +500,37 @@ async fn gemma4_attention_chain_census() {
     // online-softmax construction emits alongside the ONE the recognizer's
     // own walk actually uses (152, correctly absorbed already) -- dead in
     // BOTH binds, present in neither once pruned) inflating one side.
+    // A constant the program emits once ahead of layer 0 and every layer's
+    // chain reads (an attention scale, a mask bound) has no consumer once the
+    // fused or split attention absorbs all of them, so it is pruned without
+    // sitting inside any layer's [q,wo) span. Nothing else may be.
+    let fused_ids: BTreeSet<u32> = fused_bound_ops.iter().map(|bound| bound.node.0).collect();
+    let orphaned_outside_spans: Vec<&BoundOp> = unfused_bound_ops
+        .iter()
+        .filter(|bound| !fused_ids.contains(&bound.node.0))
+        .filter(|bound| !span_absorbed_ids.contains(&bound.node.0))
+        .collect();
+    println!(
+        "gemma4_attention_chain_census: outside_span_absorbed={} kinds={:?}",
+        orphaned_outside_spans.len(),
+        orphaned_outside_spans
+            .iter()
+            .map(|bound| (bound.node.0, bound.kind.name()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        orphaned_outside_spans
+            .iter()
+            .all(|bound| bound.kind.name() == "constant"),
+        "a node outside every layer's [q,wo) span was absorbed and it is not a constant whose \
+         readers were all absorbed"
+    );
     assert_eq!(
-        total_absorbed,
+        total_absorbed + orphaned_outside_spans.len(),
         unfused_bound_ops.len() - fused_bound_ops.len(),
-        "summed per-layer absorbed_count must equal the pruned unfused/fused total delta -- a \
-         mismatch means either a layer's span window missed a node or a node outside every \
-         layer's [q,wo) span was absorbed"
+        "summed per-layer absorbed_count plus the constants orphaned outside every span must \
+         equal the pruned unfused/fused total delta -- a mismatch means a layer's span window \
+         missed a node"
     );
 
     // Attribution of the 2-op gap (1663 raw vs. the stored 1661

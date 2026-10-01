@@ -40,23 +40,26 @@ pub(super) fn grid_threads(
             // against a bucket-padded, compile-time-fixed `context_length`, so
             // its live `chunks`/`splits` never grow between calls the way the
             // single-range path's do (`render_cached_attention`'s own doc).
-            let single_range_dynamic = (resolved.operands().len() == 9
-                || resolved.operands().len() == 12)
-                && *cached_key_rows == 0;
-            let (chunks, splits) = if single_range_dynamic {
-                (
+            // The decode split form dispatches exactly its bind-time
+            // `(splits, chunks)`: one threadgroup per `(head, split)`.
+            let (chunks, splits) = match cached_attention_form(&resolved.kind, numeric_policy) {
+                Some(CachedAttentionForm::SingleRangeDynamic { merge }) => (
                     effective_context_chunk_cap(*query_groups, *head_dim),
-                    if cached_attention_merge_needed(&resolved.kind, numeric_policy) {
+                    if merge {
                         crate::sized::ATTENTION_SPLIT_MAX
                     } else {
                         1
                     },
-                )
-            } else {
-                (
+                ),
+                #[cfg(feature = "metal-attn-split-decode")]
+                Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, chunks }) => {
+                    (chunks, splits)
+                }
+                Some(CachedAttentionForm::Static | CachedAttentionForm::TwoRangeCachedBound)
+                | None => (
                     context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy),
                     1,
-                )
+                ),
             };
             let attention_vectors =
                 checked_product(resolved.node, resolved.extents.iter().copied())?
@@ -270,7 +273,7 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
 /// fetch code) — which operands gather. That last part is a suffix appended
 /// only when at least one operand gathers, so a gather-free `BoundOp`'s name is
 /// unchanged from before this existed.
-pub(super) fn entry_name(resolved: &BoundOp) -> String {
+pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
     let base = match &resolved.kind {
@@ -297,14 +300,28 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             // range's own live row count, but `new_upper_inclusive` is still
             // the real, query-independent compiled bound (this path's causal
             // band never depends on it), so that token is real, not "dyn".
-            let single_range_dynamic = operand_count == 9 && *cached_key_rows == 0;
-            let two_range_cached_bound = operand_count == 9 && *cached_key_rows != 0;
+            let form = cached_attention_form(&resolved.kind, numeric_policy);
+            let single_range_dynamic =
+                matches!(form, Some(CachedAttentionForm::SingleRangeDynamic { .. }));
+            let two_range_cached_bound =
+                matches!(form, Some(CachedAttentionForm::TwoRangeCachedBound));
             let upper_token = if single_range_dynamic {
                 "dyn".to_string()
             } else {
                 signed_name_part(*new_upper_inclusive)
             };
-            if single_range_dynamic {
+            if form.is_some_and(CachedAttentionForm::is_decode_split) {
+                // the decode split kernel reads `cached_key_rows`, `splits` and
+                // `chunks` at runtime and sizes its threadgroup arrays from the
+                // shape-bounded cap, so no bucket extent belongs in the name.
+                format!(
+                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_ds",
+                    scale.to_bits(),
+                    signed_name_part(*cached_lower_inclusive),
+                    effective_context_chunk_cap(1, *head_dim),
+                    crate::sized::ATTENTION_BLOCK_WIDTH,
+                )
+            } else if single_range_dynamic {
                 // `_b{width}` names the build-time block-staging width
                 // (`block_width_for`) -- a build-time constant, so a build
                 // whose `OMEGA_ATTENTION_BLOCK_WIDTH` override changed emits
@@ -1513,23 +1530,209 @@ pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
 /// (`:2477`) already compute correctly, so all four call sites now agree by
 /// construction instead of by convention.
 pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericPolicy) -> bool {
+    cached_attention_form(kind, policy).is_some_and(CachedAttentionForm::needs_merge)
+}
+
+/// The dispatch shape one `BoundOpKind::CachedAttention` op takes, decided
+/// once from the op's operand count, `cached_key_rows` discriminator and the
+/// active [`NumericPolicy`]. Every site that used to recompute
+/// `(operands == 9 || operands == 12) && cached_key_rows == 0` as a bool --
+/// the renderer, `grid_threads`, `entry_name`, the threadgroup width, the
+/// uniforms packer -- matches on this value instead, so a new form is a
+/// compile error at every site rather than an out-of-bounds read at one.
+/// Compose with [`cached_attention_merge_needed`], [`splits_for`] and
+/// [`context_chunks_for`], which answer the per-form sizing questions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CachedAttentionForm {
+    /// 8 or 11 operands: row counts compiled in, one dispatch.
+    Static,
+    /// 9 or 12 operands with `cached_key_rows == 0`: one merged range, the
+    /// ninth operand is the runtime `new_upper`. `merge` is whether the
+    /// key range is sliced across threadgroups and a companion merge
+    /// dispatch follows.
+    SingleRangeDynamic { merge: bool },
+    /// 9 or 12 operands with `cached_key_rows != 0`: the ninth operand is the
+    /// live cached row count, and the whole op runs in one dispatch.
+    TwoRangeCachedBound,
+    /// The two-range decode op (`query_rows == 1`, `new_key_rows == 1`)
+    /// sliced into `splits` threadgroups per query head with `chunks`
+    /// simdgroups each, both fixed at bind time from the bucket capacity.
+    /// `splits == 1` writes the normalized row directly; above that a merge
+    /// dispatch follows.
+    #[cfg(feature = "metal-attn-split-decode")]
+    TwoRangeDecodeSplit { splits: u64, chunks: u64 },
+}
+
+impl CachedAttentionForm {
+    /// Whether a companion merge dispatch follows the main kernel, which also
+    /// decides whether the main kernel's output binding is scratch.
+    #[must_use]
+    pub(crate) const fn needs_merge(self) -> bool {
+        match self {
+            Self::Static | Self::TwoRangeCachedBound => false,
+            Self::SingleRangeDynamic { merge } => merge,
+            #[cfg(feature = "metal-attn-split-decode")]
+            Self::TwoRangeDecodeSplit { splits, .. } => splits > 1,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_decode_split(self) -> bool {
+        match self {
+            Self::Static | Self::SingleRangeDynamic { .. } | Self::TwoRangeCachedBound => false,
+            #[cfg(feature = "metal-attn-split-decode")]
+            Self::TwoRangeDecodeSplit { .. } => true,
+        }
+    }
+}
+
+/// [`CachedAttentionForm`] of `kind`, or `None` when `kind` is not a
+/// `CachedAttention` op. The ninth operand exists exactly when the operand
+/// count is one past the base layout (8, or 11 with the partial-rotary pass
+/// plane); `cached_key_rows == 0` then names the single-range form
+/// (`BoundOpKind::CachedAttention`'s own doc).
+#[must_use]
+pub(crate) fn cached_attention_form(
+    kind: &BoundOpKind,
+    policy: NumericPolicy,
+) -> Option<CachedAttentionForm> {
     let BoundOpKind::CachedAttention {
         operands,
         cached_key_rows,
         new_key_rows,
+        head_dim,
+        rotary_dim,
         ..
     } = kind
     else {
-        return false;
+        return None;
     };
-    let single_range_dynamic =
-        (operands.len() == 9 || operands.len() == 12) && *cached_key_rows == 0;
-    if !single_range_dynamic {
-        return false;
+    let base_operand_len = if rotary_dim < head_dim { 11 } else { 8 };
+    if operands.len() != base_operand_len + 1 {
+        return Some(CachedAttentionForm::Static);
     }
-    let context_length = cached_key_rows + new_key_rows;
-    splits_for(context_length, policy) > 1
-        && context_length >= crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
+    if *cached_key_rows == 0 {
+        let context_length = cached_key_rows + new_key_rows;
+        let merge = splits_for(context_length, policy) > 1
+            && context_length >= crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE;
+        return Some(CachedAttentionForm::SingleRangeDynamic { merge });
+    }
+    #[cfg(feature = "metal-attn-split-decode")]
+    if let Some(split) = decode_split_form(kind, policy) {
+        return Some(split);
+    }
+    Some(CachedAttentionForm::TwoRangeCachedBound)
+}
+
+/// The decode split form of a two-range cached-bound op, when the op and the
+/// policy both admit it: a single decode row, a single new key, a full-rotary
+/// head whose width is a whole number of float4 lanes (the block-staged body's
+/// V accumulate), and a policy granting both the cross-threadgroup merge and
+/// the in-block tree reduce. Anything else stays
+/// [`CachedAttentionForm::TwoRangeCachedBound`].
+#[cfg(feature = "metal-attn-split-decode")]
+#[must_use]
+fn decode_split_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAttentionForm> {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        head_dim,
+        rotary_dim,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
+        && admit(policy, NumericRewrite::TreeReduce).is_ok();
+    let shape_fits = *query_rows == 1
+        && *new_key_rows == 1
+        && rotary_dim == head_dim
+        && head_dim.is_multiple_of(32);
+    if !admitted || !shape_fits {
+        return None;
+    }
+    let capacity = cached_key_rows + new_key_rows;
+    Some(CachedAttentionForm::TwoRangeDecodeSplit {
+        splits: decode_splits_for(capacity),
+        chunks: decode_chunks_for(capacity, *head_dim),
+    })
+}
+
+/// Threadgroups per query head for the decode split form, from the bucket
+/// capacity (`cached_key_rows + new_key_rows`, compiled per
+/// `kv-capacity-bucket`): one per `[attention_splits].keys_per_split_decode`
+/// keys, capped at `[attention_splits].max`. llama.cpp's fixed `nwg = 32`
+/// launches 192-248 idle groups at short contexts (`ggml-metal-ops.cpp:3602`);
+/// a bind that already knows the capacity dispatches exactly this many.
+#[cfg(feature = "metal-attn-split-decode")]
+#[must_use]
+pub(crate) fn decode_splits_for(context_capacity: u64) -> u64 {
+    context_capacity
+        .div_ceil(crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_DECODE)
+        .clamp(1, crate::sized::ATTENTION_SPLIT_MAX)
+}
+
+/// Simdgroups per decode-split threadgroup: llama.cpp's `nsg` doubling rule
+/// (`ggml-metal-ops.cpp:3602-3606`, `nwg` mapped to `[attention_splits].max`,
+/// `C` to `[attention_block].width`), capped by the threadgroup-memory budget
+/// of one query head -- `effective_context_chunk_cap(1, head_dim)` over
+/// `[attention_context_chunks].cap`.
+#[cfg(feature = "metal-attn-split-decode")]
+#[must_use]
+pub(crate) fn decode_chunks_for(context_capacity: u64, head_dim: u64) -> u64 {
+    let keys_per_pass = 2 * crate::sized::ATTENTION_SPLIT_MAX * crate::sized::ATTENTION_BLOCK_WIDTH;
+    let cap = effective_context_chunk_cap(1, head_dim);
+    let mut chunks = 1;
+    while keys_per_pass * chunks < context_capacity && chunks < cap {
+        chunks = (chunks * 2).min(cap);
+    }
+    chunks
+}
+
+/// The live split count the merge kernel reads back: the decode form's
+/// bind-time `splits`, otherwise [`splits_for`] over the compiled capacity.
+/// One source for the split writer's `u.splits` and the merge's, so the two
+/// dispatches cannot disagree on the scratch stride.
+#[must_use]
+pub(crate) fn cached_attention_live_splits(kind: &BoundOpKind, policy: NumericPolicy) -> u64 {
+    match cached_attention_form(kind, policy) {
+        #[cfg(feature = "metal-attn-split-decode")]
+        Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, .. }) => splits,
+        Some(
+            CachedAttentionForm::Static
+            | CachedAttentionForm::SingleRangeDynamic { .. }
+            | CachedAttentionForm::TwoRangeCachedBound,
+        )
+        | None => match kind {
+            BoundOpKind::CachedAttention {
+                cached_key_rows,
+                new_key_rows,
+                ..
+            } => splits_for(cached_key_rows + new_key_rows, policy),
+            _ => 1,
+        },
+    }
+}
+
+/// Rejects a sizing config whose split ceiling exceeds one simdgroup. The
+/// merge kernel maps split `i` to lane `i` of one simdgroup, so a
+/// `[attention_splits].max` above [`SIMD_WIDTH`] would silently drop splits
+/// past lane 31 from the running max and the normalizer. Takes `max` as a
+/// parameter so the rule is testable against a value the build never emits.
+///
+/// # Errors
+/// [`EmitError::AttentionSplitsExceedSimdWidth`] when `max > SIMD_WIDTH`.
+pub(super) fn validate_attention_split_limit(node: NodeId, max: u64) -> Result<(), EmitError> {
+    if max > SIMD_WIDTH {
+        return Err(EmitError::AttentionSplitsExceedSimdWidth {
+            node,
+            max,
+            limit: SIMD_WIDTH,
+        });
+    }
+    Ok(())
 }
 
 /// Whether `render_cached_attention`'s single-range dynamic path dispatches

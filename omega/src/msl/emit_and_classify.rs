@@ -34,7 +34,7 @@ pub(super) fn emit_inner(
     expert_source_mode: bool,
 ) -> Result<Kernel, EmitError> {
     validate(resolved)?;
-    let entry = entry_name(resolved);
+    let entry = entry_name(resolved, numeric_policy);
     let quantized = operand_codecs(resolved, packed_operands);
     let grid = grid_spec(resolved, &quantized, numeric_policy, expert_source_mode)?;
     let extras = metal_specialization(resolved, packed_operands, numeric_policy, &grid);

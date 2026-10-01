@@ -31,7 +31,7 @@ pub(super) fn bind_cached_attention_fusion(
         // rebuild -- requiring a resolved binding here would make discovery
         // depend on the very materialization it exists to produce.
         let mut initial_candidates =
-            cached_attention_candidates(program, shapes, &built, outputs, false);
+            cached_attention_candidates(program, shapes, &built, outputs, false, numeric_policy);
         initial_candidates.extend(cached_attention_single_range_candidates(
             program, shapes, &built, outputs,
         ));
@@ -111,7 +111,8 @@ pub(super) fn bind_cached_attention_fusion(
             }
         }
         let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
-        let mut candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs, true);
+        let mut candidates =
+            cached_attention_candidates(program, shapes, &rebuilt, outputs, true, numeric_policy);
         candidates.extend(cached_attention_single_range_candidates(
             program, shapes, &rebuilt, outputs,
         ));

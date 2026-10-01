@@ -185,6 +185,14 @@ metal-fuse-attn-decode = [
     "proxima-tensor/metal-fuse-attn-decode",
     "omega?/metal-fuse-attn-decode",
 ]
+# Default-off passthrough to `proxima-tensor/metal-attn-split-decode` and
+# `omega/metal-attn-split-decode` -- gemma4 decode attention as a split-KV
+# partial plus a llama.cpp-shaped merge (2 dispatches per layer).
+metal-attn-split-decode = [
+    "metal-fuse-attn-decode",
+    "proxima-tensor/metal-attn-split-decode",
+    "omega?/metal-attn-split-decode",
+]
 # Passthrough to `proxima-tensor/gated-delta-net-fusion` and
 # `omega/gated-delta-net-fusion` -- same shape as `cached-attention-streaming`
 # above: default-off, individually selectable so a caller can exercise the

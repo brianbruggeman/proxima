@@ -112,6 +112,8 @@ mod emit_and_classify;
 mod signature_tokens_prelude;
 #[macro_use]
 mod cached_attention_render;
+#[cfg(feature = "metal-attn-split-decode")]
+mod cached_attention_decode_split;
 mod cached_softmax_weights_render;
 #[macro_use]
 mod elementwise_reduce_core;
@@ -140,6 +142,8 @@ pub use signature_tokens_prelude::context_chunks_for;
 // needed) is `tests.rs`'s `#[cfg(test)]` module -- gating this `use` any
 // wider leaves it unused in a plain (non-test) `metal`+macos lib build,
 // since nothing else ever names it through `msl`'s namespace.
+#[cfg(feature = "metal-attn-split-decode")]
+use cached_attention_decode_split::render_cached_attention_decode_split;
 use cached_attention_render::render_cached_attention;
 // Same "plain reexport for descendant modules" shape as
 // `render_cached_attention` immediately above -- `render_cached_softmax_
@@ -169,6 +173,12 @@ pub(crate) use tiled_gemm_cooperative_scan::wide_cooperative_reduce_width;
 // softmax_weights` itself emits.
 pub(crate) use kernel_types_identity::softmax_runtime_rows_override;
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod attn_golden_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod attn_split_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

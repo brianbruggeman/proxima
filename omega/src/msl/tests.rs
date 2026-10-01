@@ -5132,6 +5132,7 @@ fn per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads(
 /// -- an off-by-one in either is a device OOB write (design risk 3), so
 /// this pins the exact rendered arithmetic rather than trusting the
 /// hand-derivation.
+#[cfg(not(feature = "metal-attn-split-decode"))]
 #[test]
 fn split_kernel_emits_the_slice_formula_and_scratch_index() {
     let mut bound = cached_attention_op_dynamic(200, 56);
@@ -5199,6 +5200,7 @@ fn split_kernel_emits_the_slice_formula_and_scratch_index() {
 /// the emitted MSL text -- `simd_max`/`simd_sum` over the up-to-32
 /// per-split partials, exactly llama.cpp's `kernel_flash_attn_ext_vec_
 /// reduce` shape (`ggml-metal-ops.cpp:2063-2097` on `origin/master`).
+#[cfg(not(feature = "metal-attn-split-decode"))]
 #[test]
 fn merge_kernel_emits_the_online_softmax_combine() {
     let bound = cached_attention_op_dynamic(200, 56);
@@ -5243,8 +5245,8 @@ fn dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets
         "the fixture must actually cross a different compiled capacity"
     );
 
-    let smaller_name = entry_name(&smaller_bucket);
-    let larger_name = entry_name(&larger_bucket);
+    let smaller_name = entry_name(&smaller_bucket, NumericPolicy::bit_exact());
+    let larger_name = entry_name(&larger_bucket, NumericPolicy::bit_exact());
     assert_eq!(
         smaller_name, larger_name,
         "kernel identity must be capacity-free on the dynamic path: got {smaller_name:?} \
@@ -5694,7 +5696,7 @@ kernel void omega_cached_softmax_weights_c32_a8_d256(\n\
         text.ends_with(expected_tail),
         "switch-off emit must stay byte-identical to the literal-bound kernel:\n{text}"
     );
-    let entry = entry_name(&narrow);
+    let entry = entry_name(&narrow, NumericPolicy::bit_exact());
     assert_eq!(
         entry, "omega_cached_softmax_weights_c32_a8_d256",
         "switch-off entry name must keep the c{{n}} token"
@@ -5726,13 +5728,10 @@ fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
         render_cached_softmax_weights(&narrow, "omega_cached_softmax_weights_c32_a8_d256")
             .expect("switch-off renders")
     });
-    let (on_text, on_entry, on_key) = temp_env::with_var(
-        "PROXIMA_SOFTMAX_RUNTIME_ROWS",
-        Some("1"),
-        || {
-            let entry = entry_name(&narrow);
-            let text = render_cached_softmax_weights(&narrow, &entry)
-                .expect("switch-on renders");
+    let (on_text, on_entry, on_key) =
+        temp_env::with_var("PROXIMA_SOFTMAX_RUNTIME_ROWS", Some("1"), || {
+            let entry = entry_name(&narrow, NumericPolicy::bit_exact());
+            let text = render_cached_softmax_weights(&narrow, &entry).expect("switch-on renders");
             let key = kernel_cache_key(&narrow, &BTreeMap::new(), NumericPolicy::default())
                 .expect("switch-on cache key computes");
             (text, entry, key)
@@ -6485,7 +6484,17 @@ mod flat_grid_form {
     #[test]
     fn the_cached_attention_merge_kernel_past_the_thread_index_takes_the_flat_form_and_compiles() {
         let mut bound = cached_attention_op_dynamic(0, 1_000_000);
-        bound.extents = vec![300_000_000, 1, 1, 4];
+        bound.extents = vec![300_000_000, 1, 1, 8];
+        let BoundOpKind::CachedAttention {
+            head_dim,
+            rotary_dim,
+            ..
+        } = &mut bound.kind
+        else {
+            unreachable!("cached_attention_op_dynamic builds a CachedAttention")
+        };
+        *head_dim = 8;
+        *rotary_dim = 8;
 
         let merge = emit_cached_attention_merge(&bound, NumericPolicy::llama_relaxed())
             .expect("emits")

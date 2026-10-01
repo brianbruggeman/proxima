@@ -1715,7 +1715,14 @@ fn a_perturbed_pass_plane_map_declines_the_qwen35_fusion() {
 
     let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
         .expect("plain bind still succeeds on the perturbed program");
-    let candidates = cached_attention_candidates(&program, &shapes, &resolved, &outputs, true);
+    let candidates = cached_attention_candidates(
+        &program,
+        &shapes,
+        &resolved,
+        &outputs,
+        true,
+        NumericPolicy::bit_exact(),
+    );
     assert!(
         candidates.is_empty(),
         "a perturbed pass-plane product must not still match the qwen35 fusion"

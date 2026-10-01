@@ -269,6 +269,13 @@ head_k_dim_max = 256
 keys_per_split = 16
 keys_per_split_at_scale = 128
 max = 32
+# two-range decode split form (`msl::CachedAttentionForm::TwoRangeDecodeSplit`):
+# keys per threadgroup split, llama.cpp's C = 32-key block
+# (ggml-metal-impl.h:117). raising it gives fewer, longer serial chains per
+# threadgroup; lowering it adds merge width. must be a multiple of
+# [attention_block].width. override via
+# OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT_DECODE.
+keys_per_split_decode = 32
 
 [cached_attention]
 # Metal's per-threadgroup `threadgroup` memory ceiling on every GPU family
