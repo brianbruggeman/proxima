@@ -1383,6 +1383,7 @@ fn run_chat(
         base.extend_from_slice(&timed.generated);
         base.extend_from_slice(&suffix);
         let drafted = if branches > 0 && turn + 1 < turns.len() {
+            model.run_pending_prewarm(&request_config).expect("prewarm the answer entry");
             let started = Instant::now();
             let drafts = model
                 .prewarm_follow_ups(&base, &follow_up_config(branches))
