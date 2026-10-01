@@ -81,6 +81,7 @@ mod attention_forward;
 mod lfm2_single_range_cached;
 mod descriptor;
 pub use attention_forward::*;
+pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};
 pub use descriptor::*;
 pub use hyperconn_qwen35_dense::*;
 pub use lfm2_qwen35_gdn::*;

@@ -655,13 +655,13 @@ pub(super) fn cached_attention_candidates(
     // and the ninth-operand push near the end of this loop need the SAME
     // node identity to agree it is the one true `cached_len`.
     let named_cached_len = find_named_input(program, "cached_len");
-    // a sliding-ring program (`crate::spec::SLIDING_CACHED_LEN_INPUT`) bounds
+    // a sliding-ring program (`crate::op::SLIDING_CACHED_LEN_INPUT`) bounds
     // its windowed layers by their own live-row count, a second rank-0 leaf;
     // a layer's mask names whichever of the two it reads, and that same node
     // is what its ninth operand must bind.
     let named_cached_lens: Vec<NodeId> = [
         named_cached_len,
-        find_named_input(program, crate::spec::SLIDING_CACHED_LEN_INPUT),
+        find_named_input(program, crate::op::SLIDING_CACHED_LEN_INPUT),
     ]
     .into_iter()
     .flatten()

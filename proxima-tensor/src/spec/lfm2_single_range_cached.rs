@@ -20,22 +20,6 @@
 
 use super::*;
 
-/// The `Extent::Symbolic` slot a sliding-window layer's `kv_cache.{layer}.*`
-/// leaves are bounded by when [`lfm2_two_range_cached_forward_program_with_experts`]
-/// builds the sliding ring layout (its `sliding_kv_ring` argument). Slot 0 is
-/// the new-position count and slot 1 the full-attention cache extent, so this
-/// is the first slot after them: a caller binds it to the number of rows the
-/// ring hands the sliding layers this step (at most the window).
-pub const SLIDING_KV_SYMBOL: u16 = 2;
-
-/// The rank-0 `Op::Input` a ring-layout program reads the sliding layers'
-/// live cached-row count from, in place of `cached_len`: the ring keeps the
-/// most recent `window` rows in chronological order, so a sliding layer's
-/// cache holds `min(cached_len, window)` rows and its mask is expressed
-/// against that count (the query-to-key distance is unchanged by dropping the
-/// evicted prefix).
-pub const SLIDING_CACHED_LEN_INPUT: &str = "cached_len_swa";
-
 /// [`append_attention_mixer`]'s single-range-cached counterpart: the same
 /// per-layer knobs ([`ValueSource`], [`RopePairing`], `post_attention_norm`,
 /// `value_norm`), but scored against a MERGED key/value cache
