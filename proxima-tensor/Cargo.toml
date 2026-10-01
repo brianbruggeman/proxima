@@ -40,11 +40,12 @@ cached-attention-streaming = ["std"]
 # Default-off: the byte-equivalence acceptance bar is not yet met (attn_decode_
 # fusion_review.md 4b/4c).
 metal-fuse-attn-decode = ["cached-attention-streaming"]
-# Default-off: routes gemma4-shaped decode attention to `BoundOpKind::CachedAttention`
+# Default-on one level up (`omega/metal`, `proxima-model-interop/metal`); off in this crate's own default so CPU-only builds keep the
+# unfused chain. Routes gemma4-shaped decode attention to `BoundOpKind::CachedAttention`
 # (the split-KV form `omega` renders) instead of `CachedSoftmaxWeights`, when the
 # bind policy admits `ContextSplitMerge` and `TreeReduce`.
 metal-attn-split-decode = ["metal-fuse-attn-decode"]
-# Default-off: routes gemma4-shaped attention at K > 1 new query rows (speculative verify,
+# Default-on one level up with `metal-attn-split-decode`; routes gemma4-shaped attention at K > 1 new query rows (speculative verify,
 # small prefill chunks) to the row-tiled `BoundOpKind::CachedAttention` form under a policy that
 # admits `ContextSplitMerge` and `TreeReduce`, and generalizes the `bit_exact`
 # `CachedSoftmaxWeights` lowering from one query row to K.

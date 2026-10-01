@@ -142,6 +142,8 @@ metal = [
     "metal-q4k-ggml-port",
     "gated-delta-net-fusion",
     "moe-topk-fusion",
+    "metal-attn-split-decode",
+    "metal-attn-split-rows",
 ]
 mlx-gdn = ["metal", "omega/mlx-gdn"]
 # Default-off passthrough to `omega/metal-horizontal-merge` (plan-time
@@ -176,16 +178,17 @@ cached-attention-streaming = [
 ]
 # Default-off passthrough to `proxima-tensor/metal-fuse-attn-decode` and
 # `omega/metal-fuse-attn-decode` -- the gemma4-shaped windowed/padded
-# cached-attention recognizer extension. Deliberately NOT in `metal`'s
-# default shape above: the byte-equivalence acceptance bar against the
-# feature-off Metal oracle is not yet met.
+# cached-attention recognizer extension. Not named in `metal`'s list above,
+# but `metal-attn-split-decode` (which is) implies it; a build that names
+# `--no-default-features` plus the `metal` members individually gets the
+# feature-off oracle.
 metal-fuse-attn-decode = [
     "dep:omega",
     "cached-attention-streaming",
     "proxima-tensor/metal-fuse-attn-decode",
     "omega?/metal-fuse-attn-decode",
 ]
-# Default-off passthrough to `proxima-tensor/metal-attn-split-decode` and
+# Passthrough, in `metal`'s list above (ROW C4.21), to `proxima-tensor/metal-attn-split-decode` and
 # `omega/metal-attn-split-decode` -- gemma4 decode attention as a split-KV
 # partial plus a llama.cpp-shaped merge (2 dispatches per layer).
 metal-attn-split-decode = [

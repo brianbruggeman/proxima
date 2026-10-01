@@ -20,18 +20,22 @@ std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "de
 mlx-gdn = ["std"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
-# Default-off passthrough to `proxima-tensor/metal-fuse-attn-decode` (the
+# Passthrough (implied by `metal-attn-split-decode`) to `proxima-tensor/metal-fuse-attn-decode` (the
 # gemma4-shaped windowed/padded cached-attention matcher extension) -- same
 # shape as `cached-attention-streaming` above; the renderer this feeds
 # (`cached_attention_render.rs`) is always compiled, so this flag's only
 # effect is whether `proxima-tensor::bind` ever emits the kind for the
 # gemma4-shaped masks.
 metal-fuse-attn-decode = ["proxima-tensor/metal-fuse-attn-decode"]
-# Default-off: the split-KV decode attention form (`CachedAttentionForm::TwoRangeDecodeSplit`)
-# and its llama.cpp-shaped merge scratch layout; passthrough to the recognizer feature.
+# The split-KV decode attention form (`CachedAttentionForm::TwoRangeDecodeSplit`) and its llama.cpp-shaped merge scratch layout;
+# passthrough to the recognizer feature. Joins `metal`'s default list (see the comment above `metal`); a build that needs the
+# unfused-attention control names `--no-default-features` and the `metal` members individually.
+# Measured evidence (gemma4-E2B, `docs/model-interop/discipline.md` ROW C4.21): decode ms/token 19.98 -> 18.42 (26-token prompt) and
+# 26.83 -> 22.52 (1765-token prompt); speculative verify ms/step at width 2/4/8 61.6 -> 48.1, 87.7 -> 63.8, 148.6 -> 105.7; llama.cpp greedy oracle 7/7
+# `first_divergence=None` with speculation off and on.
 metal-attn-split-decode = ["metal-fuse-attn-decode", "proxima-tensor/metal-attn-split-decode"]
-# Default-off: the row-tiled cached-attention form (`CachedAttentionForm::TwoRangeRowTiled`) for K > 1
-# query rows and the generalized K-row `CachedSoftmaxWeights` lowering; implies the decode split form.
+# The row-tiled cached-attention form (`CachedAttentionForm::TwoRangeRowTiled`) for K > 1 query rows and the generalized K-row
+# `CachedSoftmaxWeights` lowering; implies the decode split form. Joins `metal`'s default list with it.
 metal-attn-split-rows = ["metal-attn-split-decode", "proxima-tensor/metal-attn-split-rows"]
 # Default-off passthrough to `proxima-tensor/gated-delta-net-fusion` (the
 # `BoundOpKind::GatedDeltaNet` bind-time matcher) -- same shape as
@@ -152,6 +156,8 @@ metal-core = ["alloc"]
 # heavy external-contention noise inflating both arms' round-to-round CoV
 # (pooled CoV 53-68%, dominated by two other GPU benches sharing the device,
 # not by this change).
+# `metal-attn-split-decode` and `metal-attn-split-rows` join per `docs/model-interop/discipline.md` ROW C4.21 (split-KV decode attention and
+# row-tiled K > 1 verify attention; evidence on the feature definitions below).
 # `metal-tiled-gemm` joins per `docs/model-interop/discipline.md` ROW C4.6
 # (Q4_0 admitted onto the `simdgroup_matrix`-tiled path: isolated 44.8-45.8x
 # per projection, real p5 prefill 7760 -> 5835 ms, byte-exact vs the f32 CPU
@@ -193,6 +199,8 @@ metal = [
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
     "metal-tiled-gemm",
+    "metal-attn-split-decode",
+    "metal-attn-split-rows",
 ]
 # `Vulkan`/`Npu`/`Ane` name-reservation features were deleted with the
 # `Backend` variants they backed (design §B.4, 2026-09-04): no emitter and no
