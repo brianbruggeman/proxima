@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::prefix_resume_long_prompt_tests::{chat_prompt, corpus_document};
 use super::prompt_cache_real_model_tests::long_chat_prompt;
@@ -210,28 +210,31 @@ fn a_request_arriving_mid_prewarm_waits_one_chunk_and_reuses_the_partial_prewarm
                 "<turn|>\n<|turn>user\nSummarize it.<turn|>\n<|turn>model\n",
             ))
             .collect();
-        let (first_chunk_sender, first_chunk_receiver) = mpsc::channel();
+        let (first_chunk_sender, first_chunk_receiver) = mpsc::channel::<()>();
 
-        let (turn, warmed): (TurnOutcome, PrewarmReport) = std::thread::scope(|scope| {
-            let warming = scope.spawn(|| {
-                let mut announced = false;
-                model
-                    .prewarm_with_progress(&prefix, &config, &mut |position| {
-                        if !announced {
-                            announced = true;
-                            first_chunk_sender
-                                .send(position)
-                                .expect("the request side listens");
-                        }
-                    })
-                    .expect("prewarm the long prefix")
+        let (turn, warmed, boundaries): (TurnOutcome, PrewarmReport, Vec<Instant>) =
+            std::thread::scope(|scope| {
+                let warming = scope.spawn(|| {
+                    let mut boundaries = vec![Instant::now()];
+                    let report = model
+                        .prewarm_with_progress(&prefix, &config, &mut |_position| {
+                            boundaries.push(Instant::now());
+                            if boundaries.len() == 2 {
+                                first_chunk_sender
+                                    .send(())
+                                    .expect("the request side listens");
+                            }
+                        })
+                        .expect("prewarm the long prefix");
+                    (report, boundaries)
+                });
+                first_chunk_receiver
+                    .recv()
+                    .expect("the prewarm reached its first chunk");
+                let turn = run_cached(model, config, &request);
+                let (report, boundaries) = warming.join().expect("the prewarm thread finishes");
+                (turn, report, boundaries)
             });
-            first_chunk_receiver
-                .recv()
-                .expect("the prewarm reached its first chunk");
-            let turn = run_cached(model, config, &request);
-            (turn, warming.join().expect("the prewarm thread finishes"))
-        });
         let fresh = run_fresh(model, uncached_config(SpeculativeConfig::none()), &request);
 
         assert!(warmed.preempted, "{warmed:?}");
@@ -244,13 +247,17 @@ fn a_request_arriving_mid_prewarm_waits_one_chunk_and_reuses_the_partial_prewarm
             turn.report
         );
         assert!(
-            turn.report.prewarm_wait <= warmed.longest_chunk * 2,
+            turn.report.prewarm_wait <= warmed.longest_chunk,
             "waited {:?} against a longest chunk of {:?}",
             turn.report.prewarm_wait,
             warmed.longest_chunk
         );
+        let chunk_ms: Vec<String> = boundaries
+            .windows(2)
+            .map(|pair| format!("{:.1}", millis(pair[1] - pair[0])))
+            .collect();
         println!(
-            "AC12 chunk_tokens={chunk} prefix_tokens={} prewarmed_tokens={} chunks={} longest_chunk_ms={:.1} request_wait_ms={:.1} hit_tokens={} prefilled={}",
+            "AC12 chunk_tokens={chunk} chunk_ms={chunk_ms:?} prefix_tokens={} prewarmed_tokens={} chunks={} longest_chunk_ms={:.1} request_wait_ms={:.1} hit_tokens={} prefilled={}",
             prefix.len(),
             warmed.prefilled_tokens,
             warmed.chunks,
