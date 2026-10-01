@@ -541,6 +541,13 @@ required-features = ["std"]
 name = "speculative_bench"
 required-features = ["std", "metal"]
 
+# Prompt-cache oracle (token ids against llama-server) and timing harness for
+# `proxima-tensor/specs/prefix-cache-reuse/SPEC.md` slice S4; same `std` +
+# `metal` reason as `speculative_bench`.
+[[example]]
+name = "prompt_cache_bench"
+required-features = ["std", "metal"]
+
 # Task brief "attribute a real gemma4-E2B forward's GPU time onto op/kernel
 # types" -- drives `generate_with_serving_config` through
 # `PROXIMA_METAL_DISPATCH_PROFILE_STEP` (already-wired production per-
