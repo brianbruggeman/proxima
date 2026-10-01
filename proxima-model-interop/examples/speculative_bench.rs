@@ -1217,6 +1217,9 @@ struct ArmResult {
     rss_bytes: u64,
     cpu_percent: f64,
     gpu: Option<GpuUtilizationSummary>,
+    tokens_generated: usize,
+    decode_wall_ms: f64,
+    max_gap_token_index: usize,
 }
 
 /// Every arm's own cached context -- a [`PrefixState`] a single per-prompt
@@ -1294,6 +1297,12 @@ fn run_one_arm(
         .map(|(_, _, elapsed_ms)| *elapsed_ms)
         .collect();
     let ttft_ms = token_elapsed_ms.first().copied().unwrap_or(0) as f64;
+    let max_gap_token_index = token_elapsed_ms
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .enumerate()
+        .max_by_key(|&(index, gap)| (gap, std::cmp::Reverse(index)))
+        .map_or(0, |(index, _)| index + 1);
     let mut per_token_deltas: Vec<f64> = token_elapsed_ms
         .windows(2)
         .map(|pair| (pair[1] - pair[0]) as f64)
@@ -1320,6 +1329,9 @@ fn run_one_arm(
         rss_bytes: peak_rss_bytes(),
         cpu_percent,
         gpu,
+        tokens_generated,
+        decode_wall_ms: wall_ms - prefill_elapsed_ms as f64,
+        max_gap_token_index,
     }
 }
 
@@ -1581,7 +1593,8 @@ fn format_arm(label: &str, arm: &ArmResult) -> String {
     format!(
         "{label}_ms_per_token={:.3} {label}_ttft_ms={:.3} {label}_p50_token_ms={:.3} \
          {label}_p99_token_ms={:.3} {label}_verify_steps={} {label}_accepted_total={} \
-         {label}_drafted_total={} {label}_rss_bytes={} {label}_cpu_percent={:.2} {gpu}",
+         {label}_drafted_total={} {label}_max_gap_token_index={} {label}_rss_bytes={} \
+         {label}_cpu_percent={:.2} {gpu}",
         arm.ms_per_token,
         arm.ttft_ms,
         arm.p50_token_ms,
@@ -1589,6 +1602,7 @@ fn format_arm(label: &str, arm: &ArmResult) -> String {
         arm.verify_steps,
         arm.accepted_total,
         arm.drafted_total,
+        arm.max_gap_token_index,
         arm.rss_bytes,
         arm.cpu_percent,
     )
@@ -1596,15 +1610,6 @@ fn format_arm(label: &str, arm: &ArmResult) -> String {
 
 fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasured_label: &str) {
     let drafter = args.drafter.unwrap_or(SpeculativeType::NgramSimple);
-    if drafter != SpeculativeType::NgramSimple {
-        eprintln!(
-            "speculative_bench: --drafter {}: not wired in the decode loop yet -- \
-             `speculative-decode-llama-parity/TASKS.md` slice 9 (Drafter enum + \
-             --drafter flag) wires every type besides ngram-simple",
-            drafter.llama_name()
-        );
-        std::process::exit(2);
-    }
 
     if let Some(incumbent) = &args.incumbent
         && incumbent != "llama-server"
@@ -1632,7 +1637,7 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     let sample_gpu = args.gpu_layers != 0 && cfg!(target_os = "macos");
     let off_config = base_serving_config(args.gpu_layers);
     let on_config = off_config.with_speculative(SpeculativeConfig {
-        speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
+        speculative_types: SpeculativeTypeSet::single(drafter),
         ..SpeculativeConfig::none()
     });
 
@@ -1705,7 +1710,7 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
         // Exactly one forward pass over this prompt's own tokens, kept
         // alive across every pair below -- the performance-harness
         // invariant (`speculative_bench` no longer re-prefills per arm).
-        let cached = prefill_prompt_once(model, prompt, &off_config);
+        let cached = prefill_prompt_once(model, prompt, &on_config);
         println!(
             "{unmeasured_label} prefill prompt_index={prompt_index} \
              prefill_ttft_ms={:.3} prefix_tokens={} suffix_chars={}",
@@ -1850,6 +1855,8 @@ const LLAMA_CONTEXT_HEADROOM_TOKENS: usize = 256;
 
 const LLAMA_PARITY_PORT: u16 = 18_082;
 
+const SWEEP_RUNS_PER_WIDTH: usize = 7;
+
 /// One non-streaming greedy `/completion` call that returns llama's own
 /// generated token ids (`return_tokens`), with `cache_prompt` off so every
 /// prompt is prefilled from scratch: the correctness oracle must not lean on
@@ -1871,6 +1878,30 @@ fn run_llama_greedy_ids(port: u16, token_ids: &[u32], max_tokens: usize) -> Vec<
         .iter()
         .map(|value| value.as_u64().unwrap_or_else(|| panic!("non-integer token id in {value}")))
         .collect()
+}
+
+/// The exact decode call the timed arms use (`run_one_arm`): resumed from the
+/// per-prompt cached prefix, with the speculative stats read off its return
+/// path so an ON arm that never drafted is visible as `drafted_total == 0`.
+fn greedy_ids_from_prefix(
+    model: &LoadedModel,
+    cached: &CachedPrompt<'_>,
+    max_tokens: usize,
+    serving_config: ServingConfig,
+) -> (Vec<u64>, SpeculativeDecodeStats) {
+    let mut stats = SpeculativeDecodeStats::default();
+    let (ids, ..) = model
+        .generate_from_prefix_with_speculative_stats(
+            &cached.prefix_state,
+            cached.suffix,
+            max_tokens,
+            serving_config,
+            &mut |_event| ControlFlow::Continue(()),
+            &mut stats,
+            None,
+        )
+        .expect("resumed greedy decode for the parity arm");
+    (ids.iter().map(|&id| u64::from(id)).collect(), stats)
 }
 
 fn first_divergence(proxima: &[u64], llama: &[u64]) -> Option<usize> {
@@ -1914,6 +1945,10 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
             .expect("longest prompt + max_tokens + headroom fits in a u32 context size");
 
     let config = base_serving_config(args.gpu_layers);
+    let on_config = config.with_speculative(SpeculativeConfig {
+        speculative_types: SpeculativeTypeSet::single(args.drafter.unwrap_or(SpeculativeType::NgramSimple)),
+        ..SpeculativeConfig::none()
+    });
     let mut server_args = base_llama_server_args(&config, llama_context_length);
     server_args.push("--spec-type".to_string());
     server_args.push("none".to_string());
@@ -1942,6 +1977,19 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
             token_ids.len(),
             divergence.is_none(),
         );
+
+        let cached = prefill_prompt_once(model, prompt, &on_config);
+        let (off_resumed_ids, off_stats) = greedy_ids_from_prefix(model, &cached, args.max_tokens, config);
+        let (on_resumed_ids, on_stats) = greedy_ids_from_prefix(model, &cached, args.max_tokens, on_config);
+        let off_vs_llama = first_divergence(&off_resumed_ids, &llama_ids);
+        let on_vs_off = first_divergence(&on_resumed_ids, &off_resumed_ids);
+        let on_vs_llama = first_divergence(&on_resumed_ids, &llama_ids);
+        println!(
+            "llama_parity_spec prompt={prompt_index} off_vs_llama={off_vs_llama:?} on_vs_off={on_vs_off:?} \
+             on_vs_llama={on_vs_llama:?} off_verify_steps={} on_verify_steps={} on_drafted={} \
+             on_accepted={} off_ids={off_resumed_ids:?} on_ids={on_resumed_ids:?}",
+            off_stats.verify_steps, on_stats.verify_steps, on_stats.drafted_total, on_stats.accepted_total,
+        );
     }
     println!("llama_parity prompts={} diverged={diverged}", prompts.len());
     handle.stop();
@@ -1965,14 +2013,30 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
     // Joined by newline, never `.repeat` -- `split_prompt_at_hard_boundary`
     // needs a newline with real suffix text after it, not one at the very
     // end (an empty suffix has no tokens left to forward-evaluate).
-    let prompt = [REPEATED_PARAGRAPH; 6].join("\n");
+    let prompt = match &args.corpus_path {
+        Some(corpus_path) => chat_prompt(
+            load_corpus(corpus_path)
+                .first()
+                .expect("--corpus given to the sweep must hold at least one prompt"),
+        ),
+        None => [REPEATED_PARAGRAPH; 6].join("\n"),
+    };
     let sample_gpu = args.gpu_layers != 0 && cfg!(target_os = "macos");
     let serving_config = base_serving_config(args.gpu_layers);
 
     // Same prefill-once path `run_pairs_mode` uses (invariant 3): one
     // forward pass over this fixed prompt, reused across every width and
     // every one of the 3 runs per width below.
-    let cached = prefill_prompt_once(model, &prompt, &serving_config);
+    let widest_width = widths.iter().copied().max().unwrap_or(0);
+    let prefill_config = serving_config.with_speculative(SpeculativeConfig {
+        speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
+        ngram_simple: NgramMapParams {
+            size_m: u16::try_from(widest_width).expect("sweep width fits in a u16"),
+            ..NgramMapParams::default()
+        },
+        ..SpeculativeConfig::none()
+    });
+    let cached = prefill_prompt_once(model, &prompt, &prefill_config);
     println!(
         "{unmeasured_label} prefill prompt_index=0 prefill_ttft_ms={:.3} prefix_tokens={} \
          suffix_chars={}",
@@ -1991,7 +2055,7 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
 
     for &width in widths {
         let mut samples_ms_per_verify = Vec::new();
-        for _run in 0..3 {
+        for run in 0..SWEEP_RUNS_PER_WIDTH {
             let forced_draft_width = if width == 0 { None } else { Some(width as u16) };
             let arm = run_one_arm(
                 model,
@@ -2000,6 +2064,19 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
                 serving_config,
                 sample_gpu,
                 forced_draft_width,
+            );
+            println!(
+                "{unmeasured_label} sweep_run k={width} run={run} tokens={} verify_steps={} \
+                 drafted={} accepted={} decode_wall_ms={:.3} ms_per_token={:.4} \
+                 ms_per_verify_step={:.4} cpu_percent={:.2}",
+                arm.tokens_generated,
+                arm.verify_steps,
+                arm.drafted_total,
+                arm.accepted_total,
+                arm.decode_wall_ms,
+                arm.ms_per_token,
+                arm.decode_wall_ms / arm.verify_steps.max(1) as f64,
+                arm.cpu_percent,
             );
             let steps = arm.verify_steps.max(1);
             let wall_over_decode = arm.ms_per_token * (steps as f64).max(1.0);
