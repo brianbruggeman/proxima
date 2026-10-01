@@ -161,6 +161,14 @@ pub(crate) struct MetalOnlyExtras {
     /// `_pr{rows}` suffix below so the 4-row and 8-row variants compile as
     /// two distinct pipelines and coexist in the same binary.
     pub packed_row_block_rows_override: Option<usize>,
+    /// activation rows one simdgroup folds against a streamed weight row,
+    /// `Some(cap)` only when [`crate::msl::packed_row_activation_cap`] chose
+    /// fewer than `PACKED_ROW_ACTIVATION_GROUP` for this op's concrete token
+    /// extent -- the cap is baked into `sumf[cap][rows]`, the unrolled
+    /// accumulator init and the dispatch grid, so two ops that differ only in
+    /// token extent class must not share a pipeline. Full-group ops fold no
+    /// token, keeping their key byte-identical. Feeds the `_ac{cap}` suffix.
+    pub packed_row_activation_cap: Option<u64>,
     /// `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` (`docs/discipline.md`, prefill
     /// header-decode hoist): `true` only when
     /// [`crate::msl::push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast
@@ -800,6 +808,10 @@ mod gated {
         if let Some(rows) = metal.packed_row_block_rows_override {
             identity.push_str("_pr");
             identity.push_str(&rows.to_string());
+        }
+        if let Some(cap) = metal.packed_row_activation_cap {
+            identity.push_str("_ac");
+            identity.push_str(&cap.to_string());
         }
         if metal.q4_0_multi_row_hoist {
             identity.push_str("_q0h");

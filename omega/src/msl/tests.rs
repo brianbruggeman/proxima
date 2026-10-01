@@ -6717,3 +6717,77 @@ fn the_merge_splice_has_no_scalar_gid_to_widen_in_a_tile_form_kernel() {
         );
     });
 }
+
+#[test]
+fn packed_row_activation_cap_is_the_smallest_power_of_two_holding_the_tokens_up_to_the_group() {
+    let group = crate::sized::PACKED_ROW_ACTIVATION_GROUP;
+    let cases: [(u64, u64); 9] = [
+        (0, 1),
+        (1, 1),
+        (2, 2),
+        (3, 4),
+        (4, 4),
+        (5, 8),
+        (8, 8),
+        (9, 8),
+        (27, 8),
+    ];
+
+    for (token_total, expected_cap) in cases {
+        assert_eq!(
+            packed_row_activation_cap(token_total),
+            expected_cap.min(group),
+            "token_total {token_total} must fold {expected_cap} rows per streamed weight row \
+             (bounded by the group {group})"
+        );
+    }
+}
+
+/// gemma4-E2B's verify forward at width 2 arrives as a 2-token `Q4_0` matmul:
+/// the kernel must fold exactly 2 activation rows (not the full group's 8),
+/// carry that cap in its identity so a 4-token op never reuses it, and tile
+/// the grid by that same cap. Token counts needing the full group keep
+/// today's key. Stays below 8 tokens: with `metal-tiled-gemm` compiled in,
+/// 8 and up belong to the tiled kernel, not this body.
+#[test]
+fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
+    let cases: [(u32, Option<&str>, &str, u64); 4] = [
+        (2, Some("_ac2"), "float sumf[2][4];", 1),
+        (3, Some("_ac4"), "float sumf[4][4];", 1),
+        (4, Some("_ac4"), "float sumf[4][4];", 1),
+        (5, None, "float sumf[8][4];", 1),
+    ];
+
+    for (tokens, cap_suffix, accumulator_decl, token_groups) in cases {
+        let bound = packed_row_multi_token_op(tokens, 256, 256);
+        let weight_node = bound.operands()[0].0;
+        let mut q4_0 = BTreeMap::new();
+        q4_0.insert(weight_node, Codec::Q4_0);
+
+        let (key, source, threads) = with_every_multi_row_env_unset(|| {
+            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
+                .expect("multi-row cache key");
+            let source = emit(&bound, &q4_0, NumericPolicy::default())
+                .expect("multi-row emits")
+                .source;
+            let (_, grid) = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
+                .expect("multi-row dispatch shape");
+            (key, source, grid.threads)
+        });
+
+        match cap_suffix {
+            Some(suffix) => assert!(key.contains(suffix), "{tokens} tokens: {key} lacks {suffix}"),
+            None => assert!(!key.contains("_ac"), "{tokens} tokens: {key} must carry no cap"),
+        }
+        assert!(
+            source.contains(accumulator_decl),
+            "{tokens} tokens must declare {accumulator_decl}"
+        );
+        let feature_simdgroups = 256 / 4;
+        assert_eq!(
+            threads,
+            feature_simdgroups * token_groups * 32,
+            "{tokens} tokens must dispatch {token_groups} token group(s) of {feature_simdgroups} simdgroups"
+        );
+    }
+}

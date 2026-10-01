@@ -1297,6 +1297,11 @@ pub(super) fn metal_specialization(
             let rows = codec_rows_per_simdgroup(block.codec);
             (rows != codec_rows_per_simdgroup_default(block.codec)).then_some(rows)
         }),
+        packed_row_activation_cap: packed_row_block(resolved, &quantized).and_then(|block| {
+            let token_total = packed_row_block_token_total(&block, &resolved.extents);
+            let cap = packed_row_activation_cap(token_total);
+            (token_total > 1 && cap != crate::sized::PACKED_ROW_ACTIVATION_GROUP).then_some(cap)
+        }),
         q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized),
         // no real `expert_source_mode` at cache-key time -- see
         // `multi_row_generic_arm_current`'s own doc for why `false` is safe
@@ -3352,9 +3357,23 @@ pub(super) fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 
     1
 }
 
+/// Activation rows one simdgroup folds per streamed weight row for an op with
+/// `token_total` activation rows: the smallest power of two that holds them,
+/// capped at `crate::sized::PACKED_ROW_ACTIVATION_GROUP`. A fixed cap makes a
+/// 2-row verify forward compute and load the full group's 8 rows, six of them
+/// clamped duplicates -- gemma4-E2B width 2 measured 97.8 ms/step at cap 8
+/// against 61.5 at cap 2. The multi-row body, the dispatch grid and the
+/// kernel identity all read this one function so they cannot disagree.
+pub(crate) fn packed_row_activation_cap(token_total: u64) -> u64 {
+    token_total
+        .max(1)
+        .next_power_of_two()
+        .min(crate::sized::PACKED_ROW_ACTIVATION_GROUP)
+}
+
 /// Single source of truth for the row-blocked packed path's base simdgroup
 /// count (one per [`codec_rows_per_simdgroup`] feature rows, tiled
-/// again by `ceil(token_total / crate::sized::PACKED_ROW_ACTIVATION_GROUP)`
+/// again by `ceil(token_total / packed_row_activation_cap(token_total))`
 /// once more than one activation row folds per streamed weight row) and its
 /// derived split-K factor -- both [`grid_threads`] and
 /// [`tiled_gemm_threadgroup_width`] need the SAME pair, and
@@ -3366,7 +3385,7 @@ pub(super) fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 
 pub(super) fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: Codec) -> (u64, u64) {
     let base = feature_total.div_ceil(codec_rows_per_simdgroup(codec) as u64);
     let split = packed_row_split_factor(base, feature_total);
-    let token_groups = token_total.div_ceil(crate::sized::PACKED_ROW_ACTIVATION_GROUP);
+    let token_groups = token_total.div_ceil(packed_row_activation_cap(token_total));
     (base * token_groups, split)
 }
 
