@@ -1008,8 +1008,10 @@ pub struct ServingConfig<'model> {
     /// replacing this crate's former process-env toggle. On by default
     /// (`ngram-simple`); `SpeculativeConfig::none()` is the off switch.
     pub speculative: SpeculativeConfig<'model>,
-    /// The per-model prompt cache (`PromptCacheConfig`'s own doc). Off by
-    /// default; consulted by `generate/decode.rs`'s decode-loop entry.
+    /// The per-model prompt cache (`PromptCacheConfig`'s own doc). On by
+    /// default (`PromptCacheConfig::standard()`, 2 GiB); turn it off with
+    /// `PromptCacheConfig::off()` or `PROXIMA_PROMPT_CACHE_BYTE_BUDGET=0`.
+    /// Consulted by `generate/decode.rs`'s decode-loop entry.
     pub prompt_cache: PromptCacheConfig,
 }
 
