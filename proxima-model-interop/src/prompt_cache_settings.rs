@@ -62,6 +62,18 @@ pub struct PromptCacheSettings {
     #[setting(default = 100)]
     #[builder(default = 100)]
     pub min_similarity_milli: u32,
+    /// See [`crate::PromptCacheConfig::block_tokens`].
+    #[setting(default = 64)]
+    #[builder(default = 64)]
+    pub block_tokens: u32,
+    /// See [`crate::PromptCacheConfig::bloom_bits_per_entry`].
+    #[setting(default = 4096)]
+    #[builder(default = 4096)]
+    pub bloom_bits_per_entry: u32,
+    /// See [`crate::PromptCacheConfig::bloom_hashes`].
+    #[setting(default = 4)]
+    #[builder(default = 4)]
+    pub bloom_hashes: u32,
 }
 
 impl PromptCacheSettings {
@@ -80,6 +92,9 @@ impl PromptCacheSettings {
             follow_up_max_tokens: self.follow_up_max_tokens,
             follow_up_temperature_milli: self.follow_up_temperature_milli,
             min_similarity_milli: self.min_similarity_milli,
+            block_tokens: self.block_tokens,
+            bloom_bits_per_entry: self.bloom_bits_per_entry,
+            bloom_hashes: self.bloom_hashes,
         }
     }
 }
@@ -93,7 +108,7 @@ mod tests {
 
     use super::*;
 
-    const PROMPT_CACHE_ENV_KEYS: [&str; 11] = [
+    const PROMPT_CACHE_ENV_KEYS: [&str; 14] = [
         "PROXIMA_PROMPT_CACHE_BYTE_BUDGET",
         "PROXIMA_PROMPT_CACHE_MAX_ENTRIES",
         "PROXIMA_PROMPT_CACHE_RING_REWIND_SLACK",
@@ -105,6 +120,9 @@ mod tests {
         "PROXIMA_PROMPT_CACHE_FOLLOW_UP_MAX_TOKENS",
         "PROXIMA_PROMPT_CACHE_FOLLOW_UP_TEMPERATURE_MILLI",
         "PROXIMA_PROMPT_CACHE_MIN_SIMILARITY_MILLI",
+        "PROXIMA_PROMPT_CACHE_BLOCK_TOKENS",
+        "PROXIMA_PROMPT_CACHE_BLOOM_BITS_PER_ENTRY",
+        "PROXIMA_PROMPT_CACHE_BLOOM_HASHES",
     ];
 
     fn cleared_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -131,6 +149,9 @@ mod tests {
             .follow_up_max_tokens(64)
             .follow_up_temperature_milli(700)
             .min_similarity_milli(250)
+            .block_tokens(32)
+            .bloom_bits_per_entry(8192)
+            .bloom_hashes(6)
             .build();
 
         let mut toml_file = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
@@ -139,7 +160,7 @@ mod tests {
             "byte_budget = 1073741824\nmax_entries = 8\nring_rewind_slack = 512\n\
              checkpoint_interval = 1024\nmax_checkpoints = 4\ncache_reuse_min = 64\n\
              prewarm_chunk_tokens = 128\nfollow_up_branches = 3\nfollow_up_max_tokens = 64\n\
-             follow_up_temperature_milli = 700\nmin_similarity_milli = 250"
+             follow_up_temperature_milli = 700\nmin_similarity_milli = 250\nblock_tokens = 32\nbloom_bits_per_entry = 8192\nbloom_hashes = 6"
         )
         .expect("write temp toml file");
         let via_file: PromptCacheSettings = conflaguration::from_file(toml_file.path())
@@ -159,6 +180,9 @@ mod tests {
                 "PROXIMA_PROMPT_CACHE_FOLLOW_UP_BRANCHES" => Some("3"),
                 "PROXIMA_PROMPT_CACHE_FOLLOW_UP_MAX_TOKENS" => Some("64"),
                 "PROXIMA_PROMPT_CACHE_MIN_SIMILARITY_MILLI" => Some("250"),
+                "PROXIMA_PROMPT_CACHE_BLOCK_TOKENS" => Some("32"),
+                "PROXIMA_PROMPT_CACHE_BLOOM_BITS_PER_ENTRY" => Some("8192"),
+                "PROXIMA_PROMPT_CACHE_BLOOM_HASHES" => Some("6"),
                 _ => Some("700"),
             };
         });
@@ -176,6 +200,9 @@ mod tests {
         assert_eq!(lowered.follow_up_max_tokens, 64);
         assert_eq!(lowered.follow_up_temperature_milli, 700);
         assert_eq!(lowered.min_similarity_milli, 250);
+        assert_eq!(lowered.block_tokens, 32);
+        assert_eq!(lowered.bloom_bits_per_entry, 8192);
+        assert_eq!(lowered.bloom_hashes, 6);
         assert!(lowered.is_enabled());
     }
 

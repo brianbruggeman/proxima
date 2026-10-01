@@ -28,11 +28,13 @@
 //! device when a request and a prewarm meet.
 
 use core::ops::{ControlFlow, Range};
+use std::collections::BTreeMap;
 use std::sync::PoisonError;
 use std::time::Duration;
 
 use proxima_telemetry::debug;
 
+use super::block_index::{BlockBloom, BlockIndex, content_hashes};
 use super::*;
 
 /// Length of the shared token prefix of `left` and `right`.
@@ -354,6 +356,9 @@ pub(super) struct CacheEntry {
     /// shares with the entry it was cloned from. An unused branch is evicted
     /// before any entry a request produced.
     pub(super) branch_base: Option<usize>,
+    /// Which content blocks the stored ids hold, set when the cache stores
+    /// the entry ([`PromptCache::bloom_candidates`]).
+    pub(super) bloom: Option<BlockBloom>,
 }
 
 impl CacheEntry {
@@ -365,6 +370,7 @@ impl CacheEntry {
             restored_at: 0,
             prewarmed: None,
             branch_base: None,
+            bloom: None,
         }
     }
 
@@ -421,6 +427,7 @@ impl CacheEntry {
                 .iter()
                 .map(RingCheckpoint::byte_len)
                 .sum::<usize>()
+            + self.bloom.as_ref().map_or(0, BlockBloom::byte_len)
     }
 
     /// The state to hand a decode loop as its seed, `None` while nothing is
@@ -496,18 +503,39 @@ impl CacheEntry {
     }
 }
 
-/// The entries one [`LoadedModel`] keeps, least recently used first.
+/// The entries one [`LoadedModel`] keeps, keyed by the stamp each was stored
+/// under, so the least recently used is the lowest stamp.
 pub(super) struct PromptCache {
-    entries: Vec<CacheEntry>,
+    entries: BTreeMap<u64, CacheEntry>,
+    index: BlockIndex,
+    next_stamp: u64,
+    bloom_bits: u32,
+    bloom_hashes: u32,
     last_report: Option<CacheReport>,
     prewarm_suffix: Vec<u32>,
     follow_up_closing: Vec<u32>,
 }
 
+/// What the per-entry bloom filters say about a prompt whose prefix stopped
+/// matching: how many entries probably hold a block of its later content, and
+/// at which of the prompt's blocks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct BloomCandidates {
+    /// Entries with at least one probable block.
+    pub(super) entries: usize,
+    /// `(entry stamp, prompt block index)` for every probable block.
+    pub(super) blocks: Vec<(u64, usize)>,
+}
+
 impl PromptCache {
-    pub(super) const fn new() -> Self {
+    pub(super) fn new() -> Self {
+        let standard = PromptCacheConfig::standard();
         Self {
-            entries: Vec::new(),
+            entries: BTreeMap::new(),
+            index: BlockIndex::new(standard.block_tokens as usize),
+            next_stamp: 0,
+            bloom_bits: standard.bloom_bits_per_entry,
+            bloom_hashes: standard.bloom_hashes,
             last_report: None,
             prewarm_suffix: Vec::new(),
             follow_up_closing: Vec::new(),
@@ -561,6 +589,9 @@ impl PromptCache {
     /// slot's context alone (`:1587-1601`). Here the different slot is a new
     /// entry the request builds, and [`Self::store`]'s least-recently-used
     /// eviction decides what makes room for it.
+    ///
+    /// The candidates come from [`BlockIndex`], not from comparing every entry
+    /// ([`Self::best_candidate`]).
     pub(super) fn take_best(
         &mut self,
         prompt_ids: &[u32],
@@ -568,36 +599,13 @@ impl PromptCache {
         widths: &[LayerPadRowWidths],
         min_similarity_milli: u32,
     ) -> (Option<CacheEntry>, CacheReport) {
-        let overlaps: Vec<(usize, usize, usize)> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.key == *key)
-            .map(|(index, entry)| {
-                (
-                    index,
-                    longest_common_prefix(&entry.state.ids, prompt_ids),
-                    entry.state.ids.len(),
-                )
-            })
-            .collect();
-        let longest = overlaps.iter().map(|&(_, lcp, _)| lcp).max();
-        let best = overlaps
-            .iter()
-            .filter(|&&(_, lcp, stored)| {
-                entry_is_reusable(lcp, stored, prompt_ids.len(), min_similarity_milli)
-            })
-            .max_by_key(|&&(_, lcp, _)| lcp);
-        let resume =
-            best.map(|&(index, lcp, _)| (index, lcp.min(prompt_ids.len().saturating_sub(1))));
+        let best = self.best_candidate(prompt_ids, key, min_similarity_milli);
+        let resume = best.map(|(stamp, lcp)| (stamp, lcp.min(prompt_ids.len().saturating_sub(1))));
         let outcome = match resume {
-            None if self.entries.is_empty() => Err(MissReason::Empty),
-            None if longest.is_none() => Err(MissReason::ConfigMismatch),
-            None if longest == Some(0) => Err(MissReason::NoCommonPrefix),
-            None => Err(MissReason::BelowSimilarity),
+            None => Err(self.miss_reason(prompt_ids, key)),
             Some((_, 0)) => Err(MissReason::NoCommonPrefix),
-            Some((index, resume_len)) => self
-                .resume_at(index, resume_len, widths)
+            Some((stamp, resume_len)) => self
+                .resume_at(stamp, resume_len, widths)
                 .map(|(entry, path)| (entry, path, resume_len)),
         };
         let (entry, report) = match outcome {
@@ -624,21 +632,172 @@ impl PromptCache {
         (entry, report)
     }
 
-    /// Takes entry `index` out and brings it to `resume_len`; an entry that
-    /// cannot get there stays in the cache for the next request.
+    /// The reusable entry sharing the longest prefix with `prompt_ids`, and
+    /// that prefix's length; the most recently stored among equals. Walks the
+    /// chained block hashes from the deepest block any entry still matches
+    /// outward, so the first level with a reusable entry holds the longest
+    /// reusable prefix: an entry that stopped matching at one level shares
+    /// fewer tokens than any that went on to the next. Entries sharing less
+    /// than a block are found through the first token, and only when such an
+    /// overlap could still clear the similarity floor or the entry is itself
+    /// shorter than a block.
+    fn best_candidate(
+        &self,
+        prompt_ids: &[u32],
+        key: &CacheKey,
+        min_similarity_milli: u32,
+    ) -> Option<(u64, usize)> {
+        let block = self.index.block_tokens();
+        let entry_of = |stamp: u64| self.entries.get(&stamp).filter(|entry| entry.key == *key);
+        let walk = self.index.walk(prompt_ids, |stamp, depth| {
+            entry_of(stamp).is_some_and(|entry| {
+                let span = depth * block..(depth + 1) * block;
+                entry.state.ids.get(span.clone()) == prompt_ids.get(span)
+            })
+        });
+        let reusable = |stamp: u64, from: usize| {
+            let entry = entry_of(stamp)?;
+            let lcp = from + longest_common_prefix(&entry.state.ids[from..], &prompt_ids[from..]);
+            entry_is_reusable(
+                lcp,
+                entry.state.ids.len(),
+                prompt_ids.len(),
+                min_similarity_milli,
+            )
+            .then_some((stamp, lcp))
+        };
+        for depth in (0..walk.levels.len()).rev() {
+            let from = (depth + 1) * block;
+            let best = walk.levels[depth]
+                .iter()
+                .filter(|stamp| {
+                    walk.levels
+                        .get(depth + 1)
+                        .is_none_or(|deeper| !deeper.contains(stamp))
+                })
+                .filter_map(|stamp| reusable(*stamp, from))
+                .max_by_key(|&(stamp, lcp)| (lcp, stamp));
+            if best.is_some() {
+                return best;
+            }
+        }
+        let overlap_below_a_block_can_clear_the_floor =
+            (block - 1) * 1000 > min_similarity_milli as usize * prompt_ids.len();
+        let sub_block: &[u64] = if overlap_below_a_block_can_clear_the_floor {
+            self.index.sharing_first_token(prompt_ids)
+        } else {
+            self.index.shorter_than_a_block()
+        };
+        sub_block
+            .iter()
+            .filter(|stamp| {
+                walk.levels
+                    .first()
+                    .is_none_or(|first| !first.contains(stamp))
+            })
+            .filter_map(|stamp| reusable(*stamp, 0))
+            .max_by_key(|&(stamp, lcp)| (lcp, stamp))
+    }
+
+    fn miss_reason(&self, prompt_ids: &[u32], key: &CacheKey) -> MissReason {
+        if self.entries.is_empty() {
+            return MissReason::Empty;
+        }
+        let mut same_key = self.entries.values().filter(|entry| entry.key == *key);
+        let Some(first) = same_key.next() else {
+            return MissReason::ConfigMismatch;
+        };
+        let shares_first_token = core::iter::once(first)
+            .chain(same_key)
+            .any(|entry| entry.state.ids.first() == prompt_ids.first());
+        if shares_first_token {
+            MissReason::BelowSimilarity
+        } else {
+            MissReason::NoCommonPrefix
+        }
+    }
+
+    /// Takes entry `stamp` out and brings it to `resume_len`; an entry that
+    /// cannot get there stays in the cache, under its stamp, for the next
+    /// request.
     fn resume_at(
         &mut self,
-        index: usize,
+        stamp: u64,
         resume_len: usize,
         widths: &[LayerPadRowWidths],
     ) -> Result<(CacheEntry, CachePath), MissReason> {
-        let mut entry = self.entries.remove(index);
+        let mut entry = self
+            .drop_entry(stamp)
+            .ok_or(MissReason::UnrewindableLayer)?;
         match entry.resume(resume_len, widths) {
             Ok(path) => Ok((entry, path)),
             Err(reason) => {
-                self.entries.insert(index, entry);
+                self.index.insert(stamp, &entry.state.ids);
+                self.entries.insert(stamp, entry);
                 Err(reason)
             }
+        }
+    }
+
+    fn drop_entry(&mut self, stamp: u64) -> Option<CacheEntry> {
+        let entry = self.entries.remove(&stamp)?;
+        self.index.remove(stamp, &entry.state.ids);
+        Some(entry)
+    }
+
+    /// The bloom filters' answer for `prompt_ids`: the entries under `key`
+    /// that probably hold a block of its content that starts at or past token
+    /// `from_token` (the end of the prefix already reused), and which of its
+    /// blocks. A filter can say yes wrongly,
+    /// never no wrongly ([`BlockBloom`]).
+    pub(super) fn bloom_candidates(
+        &self,
+        prompt_ids: &[u32],
+        key: &CacheKey,
+        from_token: usize,
+    ) -> BloomCandidates {
+        let block = self.index.block_tokens();
+        let from_block = from_token.div_ceil(block);
+        let hashes = content_hashes(prompt_ids, block);
+        let blocks: Vec<(u64, usize)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.key == *key)
+            .filter_map(|(stamp, entry)| entry.bloom.as_ref().map(|bloom| (*stamp, bloom)))
+            .flat_map(|(stamp, bloom)| {
+                hashes
+                    .iter()
+                    .enumerate()
+                    .skip(from_block)
+                    .filter(|(_, hash)| bloom.maybe_contains(**hash))
+                    .map(move |(block_index, _)| (stamp, block_index))
+            })
+            .collect();
+        let mut stamps: Vec<u64> = blocks.iter().map(|(stamp, _)| *stamp).collect();
+        stamps.dedup();
+        BloomCandidates {
+            entries: stamps.len(),
+            blocks,
+        }
+    }
+
+    /// Re-cuts every entry into `config`'s blocks and re-sizes their filters
+    /// when the config asks for other ones than the index holds.
+    fn reconfigure(&mut self, config: &PromptCacheConfig) {
+        let block = (config.block_tokens as usize).max(1);
+        let unchanged = self.index.block_tokens() == block
+            && self.bloom_bits == config.bloom_bits_per_entry
+            && self.bloom_hashes == config.bloom_hashes;
+        if unchanged {
+            return;
+        }
+        self.bloom_bits = config.bloom_bits_per_entry;
+        self.bloom_hashes = config.bloom_hashes;
+        self.index = BlockIndex::new(block);
+        let (bits, hashes) = (self.bloom_bits, self.bloom_hashes);
+        for (stamp, entry) in &mut self.entries {
+            entry.bloom = Some(BlockBloom::of(&entry.state.ids, block, bits, hashes));
+            self.index.insert(*stamp, &entry.state.ids);
         }
     }
 
@@ -646,27 +805,42 @@ impl PromptCache {
     /// the least recently used end until the entry count and byte budget in
     /// `config` hold, returning how many entries are held; `None` when `entry`
     /// was not stored (it holds nothing, or is larger than the whole budget).
-    pub(super) fn store(&mut self, entry: CacheEntry, config: &PromptCacheConfig) -> Option<usize> {
+    pub(super) fn store(
+        &mut self,
+        mut entry: CacheEntry,
+        config: &PromptCacheConfig,
+    ) -> Option<usize> {
+        self.reconfigure(config);
         let budget = usize::try_from(config.byte_budget).unwrap_or(usize::MAX);
+        entry.bloom = Some(BlockBloom::of(
+            &entry.state.ids,
+            self.index.block_tokens(),
+            self.bloom_bits,
+            self.bloom_hashes,
+        ));
         let state = &entry.state;
         if state.cached_len == 0 || state.layer_caches.is_empty() || entry.byte_len() > budget {
             return None;
         }
-        self.entries.push(entry);
+        let stamp = self.next_stamp;
+        self.next_stamp += 1;
+        self.index.insert(stamp, &entry.state.ids);
+        self.entries.insert(stamp, entry);
         let max_entries = config.max_entries as usize;
         while self.entries.len() > max_entries || self.stored_bytes() > budget {
             let victim = self
                 .entries
                 .iter()
-                .position(|held| held.branch_base.is_some())
-                .unwrap_or(0);
-            self.entries.remove(victim);
+                .find(|(_, held)| held.branch_base.is_some())
+                .or_else(|| self.entries.iter().next())
+                .map(|(stamp, _)| *stamp)?;
+            self.drop_entry(victim);
         }
         Some(self.entries.len())
     }
 
     pub(super) fn stored_bytes(&self) -> usize {
-        self.entries.iter().map(CacheEntry::byte_len).sum()
+        self.entries.values().map(CacheEntry::byte_len).sum()
     }
 
     pub(super) const fn last_report(&self) -> Option<CacheReport> {
@@ -675,6 +849,7 @@ impl PromptCache {
 
     pub(super) fn clear(&mut self) {
         self.entries.clear();
+        self.index = BlockIndex::new(self.index.block_tokens());
     }
 }
 
@@ -754,6 +929,7 @@ impl LoadedModel<'_> {
             cache.take_best(prompt_ids, key, widths, min_similarity_milli);
         report.prewarm_wait = waited;
         cache.last_report = Some(report);
+        let bloom = cache.bloom_candidates(prompt_ids, key, report.reused_tokens);
         drop(cache);
         if let Some(taken) = entry.as_mut() {
             taken.prewarmed = None;
@@ -768,6 +944,8 @@ impl LoadedModel<'_> {
             prewarm_hit_tokens = report.prewarm_hit_tokens as u64,
             follow_up_hit_tokens = report.follow_up_hit_tokens as u64,
             prewarm_wait_ns = u64::try_from(report.prewarm_wait.as_nanos()).unwrap_or(u64::MAX),
+            bloom_candidate_entries = bloom.entries as u64,
+            bloom_candidate_blocks = bloom.blocks.len() as u64,
             "prompt cache lookup"
         );
         (entry, report)
@@ -1307,8 +1485,9 @@ mod tests {
 
     #[test]
     fn the_byte_budget_evicts_older_entries_to_fit_a_newer_one() {
+        let bloom_bytes = u64::from(PromptCacheConfig::standard().bloom_bits_per_entry / 8);
         let config = PromptCacheConfig {
-            byte_budget: 24,
+            byte_budget: 24 + bloom_bytes,
             ..enabled_config()
         };
         let mut cache = PromptCache::new();
@@ -2027,6 +2206,251 @@ mod tests {
         assert_eq!(prewarm_report.miss, Some(MissReason::Empty));
         assert!(after_store.is_some());
         assert_eq!(after_report.path, CachePath::Extend);
+    }
+
+    fn indexed_config(block_tokens: u32) -> PromptCacheConfig {
+        PromptCacheConfig {
+            block_tokens,
+            max_entries: 64,
+            ..enabled_config()
+        }
+    }
+
+    /// The scan `take_best` replaced: every entry's common prefix against the
+    /// prompt, the reusable ones, the longest, the most recently stored among
+    /// equals.
+    fn scan_reference(
+        stored: &[Vec<u32>],
+        prompt: &[u32],
+        min_similarity_milli: u32,
+    ) -> Option<(usize, usize)> {
+        stored
+            .iter()
+            .enumerate()
+            .map(|(position, ids)| (position, naive_common_prefix(ids, prompt), ids.len()))
+            .filter(|&(_, lcp, stored_len)| {
+                entry_is_reusable(lcp, stored_len, prompt.len(), min_similarity_milli)
+            })
+            .max_by_key(|&(position, lcp, _)| (lcp, position))
+            .map(|(position, lcp, _)| (position, lcp))
+    }
+
+    /// AC17: over 10,000 generated caches and prompts the block index nominates
+    /// the same entry, at the same prefix length, as the scan it replaced. A
+    /// four-token vocabulary and four-token blocks make most cases share
+    /// several whole blocks and diverge inside one, which is where an index
+    /// that drops an entry between two levels would disagree.
+    #[test]
+    fn the_block_index_picks_the_entry_and_prefix_the_old_scan_picked_over_10000_cases() {
+        const CASES: usize = 10_000;
+        let mut runner = TestRunner::new(Config {
+            cases: CASES as u32,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        let executed = Cell::new(0_usize);
+        let tokens = |shortest: usize, longest: usize| vec(0_u32..4, shortest..longest);
+
+        runner
+            .run(
+                &(
+                    vec(tokens(0, 40), 0..7),
+                    tokens(0, 12),
+                    tokens(1, 40),
+                    0_u32..400,
+                ),
+                |(entries, shared_head, prompt_tail, min_similarity_milli)| {
+                    let config = indexed_config(4);
+                    let mut cache = PromptCache::new();
+                    let stored: Vec<Vec<u32>> = entries
+                        .iter()
+                        .map(|tail| {
+                            shared_head
+                                .iter()
+                                .chain(tail)
+                                .copied()
+                                .collect::<Vec<u32>>()
+                        })
+                        .filter(|ids| !ids.is_empty())
+                        .collect();
+                    stored.iter().for_each(|ids| {
+                        cache.store(state_with_ids(ids), &config);
+                    });
+                    let prompt: Vec<u32> =
+                        shared_head.iter().chain(&prompt_tail).copied().collect();
+                    let expected = scan_reference(&stored, &prompt, min_similarity_milli)
+                        .map(|(position, lcp)| (position, lcp.min(prompt.len() - 1)))
+                        .filter(|&(_, resume)| resume > 0);
+
+                    let (taken, report) = cache.take_best(
+                        &prompt,
+                        &base_key(),
+                        &shared_widths(),
+                        min_similarity_milli,
+                    );
+
+                    match expected {
+                        Some((position, resume)) => {
+                            let taken = taken.expect("the scan found a reusable entry");
+                            assert_eq!(taken.state.ids, stored[position][..resume].to_vec());
+                            assert_eq!(report.lcp, resume);
+                        }
+                        None => assert!(taken.is_none(), "{report:?}"),
+                    }
+                    executed.set(executed.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("the index must agree with the scan on every case");
+
+        assert_eq!(executed.get(), CASES);
+    }
+
+    #[test]
+    fn a_block_whose_hash_collides_is_never_reused_on_the_hash_alone() {
+        let mut cache = PromptCache::new();
+        cache.store(
+            state_with_ids(&[1, 2, 3, 4, 5, 6, 7, 8]),
+            &indexed_config(4),
+        );
+        let impostor = cache.index.walk(&[9, 9, 9, 9], |_, _| false);
+
+        assert!(impostor.levels.is_empty());
+    }
+
+    /// The false-positive rate of the default filter against blocks no entry
+    /// holds, and that it never misses a block it was given.
+    #[test]
+    fn the_default_bloom_filter_has_no_false_negatives_and_a_low_false_positive_rate() {
+        let standard = PromptCacheConfig::standard();
+        let mut rng = fastrand::Rng::with_seed(7);
+        let block = standard.block_tokens as usize;
+        let held: Vec<u32> = (0..128 * block).map(|_| rng.u32(0..262_144)).collect();
+        let absent: Vec<u32> = (0..10_000 * block).map(|_| rng.u32(0..262_144)).collect();
+        let bloom = BlockBloom::of(
+            &held,
+            block,
+            standard.bloom_bits_per_entry,
+            standard.bloom_hashes,
+        );
+
+        let missed = content_hashes(&held, block)
+            .iter()
+            .filter(|hash| !bloom.maybe_contains(**hash))
+            .count();
+        let false_positives = content_hashes(&absent, block)
+            .iter()
+            .filter(|hash| bloom.maybe_contains(**hash))
+            .count();
+
+        println!(
+            "BLOOM held_blocks=128 absent_blocks=10000 false_positives={false_positives} bits={} hashes={}",
+            standard.bloom_bits_per_entry, standard.bloom_hashes
+        );
+        assert_eq!(missed, 0);
+        assert!(
+            false_positives < 100,
+            "{false_positives} of 10000 absent blocks matched"
+        );
+    }
+
+    #[test]
+    fn the_bloom_candidates_name_the_prompt_blocks_an_earlier_entry_holds_after_its_prefix_diverged()
+     {
+        let mut cache = PromptCache::new();
+        let config = indexed_config(4);
+        let history: Vec<u32> = (100..140).collect();
+        cache.store(state_with_ids(&history), &config);
+        let squashed: Vec<u32> = [1, 2, 3, 4]
+            .iter()
+            .chain(&history[8..24])
+            .chain(&[7, 7, 7, 7])
+            .copied()
+            .collect();
+
+        let candidates = cache.bloom_candidates(&squashed, &base_key(), 4);
+
+        assert_eq!(candidates.entries, 1);
+        let blocks: Vec<usize> = candidates.blocks.iter().map(|(_, block)| *block).collect();
+        assert!(blocks.starts_with(&[1, 2, 3, 4]), "{blocks:?}");
+    }
+
+    fn random_conversation(rng: &mut fastrand::Rng, tokens: usize) -> Vec<u32> {
+        std::iter::once(2)
+            .chain((1..tokens).map(|_| rng.u32(4..262_144)))
+            .collect()
+    }
+
+    fn median_nanos(mut samples: Vec<u128>) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    /// AC17, cost: the time one lookup takes with 4 and with 256 cached
+    /// 1,024-token conversations (every one opening with the same BOS token),
+    /// for a prompt that extends one of them, for one that shares nothing past
+    /// BOS, and for the scan the index replaced. Median of 2,000 lookups each.
+    #[test]
+    #[ignore = "timing probe: run alone, it prints the numbers it measured"]
+    fn block_index_lookup_cost_against_the_entry_count() {
+        const LOOKUPS: usize = 2000;
+        let config = PromptCacheConfig {
+            byte_budget: 1 << 32,
+            max_entries: 1024,
+            ..indexed_config(64)
+        };
+        for entry_count in [4_usize, 256] {
+            let mut rng = fastrand::Rng::with_seed(11);
+            let stored: Vec<Vec<u32>> = (0..entry_count)
+                .map(|_| random_conversation(&mut rng, 1024))
+                .collect();
+            let mut cache = PromptCache::new();
+            stored
+                .iter()
+                .for_each(|ids| assert!(cache.store(state_with_ids(ids), &config).is_some()));
+            let extends: Vec<u32> = stored[entry_count / 2]
+                .iter()
+                .copied()
+                .chain((0..100).map(|_| rng.u32(4..262_144)))
+                .collect();
+            let unrelated = random_conversation(&mut rng, 1124);
+            let timed_take = |cache: &mut PromptCache, prompt: &[u32]| -> Vec<u128> {
+                (0..LOOKUPS)
+                    .map(|_| {
+                        let started = std::time::Instant::now();
+                        let (taken, _) =
+                            cache.take_best(prompt, &base_key(), &shared_widths(), 100);
+                        let nanos = started.elapsed().as_nanos();
+                        if let Some(entry) = taken {
+                            let mut whole = entry;
+                            whole.state.ids = stored[entry_count / 2].clone();
+                            whole.state.cached_len = whole.state.ids.len();
+                            cache.store(whole, &config);
+                        }
+                        nanos
+                    })
+                    .collect()
+            };
+            let hit = median_nanos(timed_take(&mut cache, &extends));
+            let miss = median_nanos(timed_take(&mut cache, &unrelated));
+            let scan = median_nanos(
+                (0..LOOKUPS)
+                    .map(|_| {
+                        let started = std::time::Instant::now();
+                        std::hint::black_box(scan_reference(&stored, &extends, 100));
+                        started.elapsed().as_nanos()
+                    })
+                    .collect(),
+            );
+            println!(
+                "BLOCK_INDEX entries={entry_count} index_hit_ns={hit} index_miss_ns={miss} scan_hit_ns={scan} profile={}",
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                }
+            );
+        }
     }
 
     fn key_under(
