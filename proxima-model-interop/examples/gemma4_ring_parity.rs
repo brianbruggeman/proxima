@@ -22,6 +22,10 @@
 //! many slots away from where the read looks for it, so `ring vs head` must
 //! fall below K while `full vs head` stays K. A ring check that still
 //! passes with an offset is not reading the ring.
+//!
+//! Speculation runs at the production default, so the ring is built with its
+//! draft slack and verify evaluations rewind it; greedy ids are unchanged by
+//! speculation, which is what the comparison to the head recording relies on.
 
 use std::env;
 use std::fs;
@@ -33,9 +37,7 @@ use std::process::ExitCode;
 use memmap2::Mmap;
 use proxima_gguf::GgmlType;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{
-    GPU_LAYERS_ALL, InteropError, KvLayout, LoadedModel, ServingConfig, SpeculativeConfig,
-};
+use proxima_model_interop::{GPU_LAYERS_ALL, InteropError, KvLayout, LoadedModel, ServingConfig};
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, Vocab, encode_with_bos_eos};
 use serde_json::{Value, json};
@@ -254,7 +256,6 @@ fn serving_config() -> ServingConfig<'static> {
         batch_size: 0,
         ubatch_size: 0,
         reasoning_budget: 0,
-        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     }
 }
@@ -285,7 +286,11 @@ fn read_head_ids(path: &Path) -> Result<Vec<u32>, ExampleError> {
 fn compare_to_head(ids: &[u32], head: &[u32]) -> Divergence {
     let compared = ids.len().max(head.len());
     let first = (0..compared).find(|&index| ids.get(index) != head.get(index));
-    let matched = ids.iter().zip(head).filter(|(left, right)| left == right).count();
+    let matched = ids
+        .iter()
+        .zip(head)
+        .filter(|(left, right)| left == right)
+        .count();
     Divergence {
         matched,
         compared: head.len(),

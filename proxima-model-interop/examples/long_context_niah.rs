@@ -17,7 +17,9 @@
 //! `kv_bytes` prices the checkpoint's own per-layer KV layout
 //! (`Architecture::kv_layers`, window included) at the arm's element size.
 //! `peak_metal_bytes` is the largest `MTLDevice.currentAllocatedSize` sampled
-//! after load, at the prefill boundary and at every generated token. A KV type
+//! after load, at the prefill boundary and at every generated token event.
+//! Speculation runs at the production default: a verify evaluation delivers
+//! several token events after one evaluation, so samples land per evaluation. A KV type
 //! or scaling the runtime refuses fails that arm with the runtime's own error.
 
 #[path = "long_context_niah/haystack.rs"]
@@ -38,7 +40,7 @@ use memmap2::Mmap;
 use proxima_gguf::{GgmlType, parse_complete};
 use proxima_model_interop::{
     ArchitectureRegistry, ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel, RopeScaling,
-    ServingConfig, SpeculativeConfig,
+    ServingConfig,
 };
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, encode_with_bos_eos};
@@ -290,7 +292,6 @@ fn serving_config<'model>(
         ubatch_size: 0,
         reasoning_budget: 0,
         prefill_chunk_positions: options.prefill_chunk_positions,
-        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     }
 }

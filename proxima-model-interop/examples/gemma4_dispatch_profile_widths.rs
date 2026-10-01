@@ -24,7 +24,10 @@
 //! two SEPARATE `generate_with_serving_config` calls, each naming a
 //! different step to instrument so only that step pays for
 //! `MTLCounterSampleBuffer` sampling -- every other step runs the
-//! unmodified production path.
+//! unmodified production path. Speculation runs at the production default;
+//! with `max_tokens` 1 and 2 the draft budget at the profiled step is 0
+//! (`draft_limit_for_step`: `max_tokens - step - 1`), so both arms keep the
+//! width they name.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::env;
@@ -37,9 +40,7 @@ use std::time::Duration;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{
-    ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig,
-};
+use proxima_model_interop::{ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig};
 use proxima_telemetry::export::Exporter;
 use proxima_telemetry::recorder::Recorder;
 
@@ -80,7 +81,6 @@ fn profile_step(model: &LoadedModel<'_>, step: usize, max_tokens: usize, prompt:
         ubatch_size: 0,
         gpu_layers: GPU_LAYERS_ALL,
         reasoning_budget: 0,
-        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     };
     // SAFETY: single-threaded example, no concurrent reader of this var --
@@ -118,10 +118,14 @@ fn main() {
     // -- this is `new_count=2` at step 0, the WIDTH-2 arm.
     let prompt = "Paris";
 
-    eprintln!("gemma4_dispatch_profile_widths run=prefill_width step=0 (new_count observed, BOS-inflated)");
+    eprintln!(
+        "gemma4_dispatch_profile_widths run=prefill_width step=0 (new_count observed, BOS-inflated)"
+    );
     profile_step(&model, 0, 1, prompt);
 
-    eprintln!("gemma4_dispatch_profile_widths run=decode_width1 step=1 (new_count=1, first real decode step)");
+    eprintln!(
+        "gemma4_dispatch_profile_widths run=decode_width1 step=1 (new_count=1, first real decode step)"
+    );
     profile_step(&model, 1, 2, prompt);
 
     let total = drained_total.load(Ordering::Relaxed) + _recorder.drain();
