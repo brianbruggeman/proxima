@@ -3,7 +3,7 @@ use core::ops::ControlFlow;
 use alloc::collections::VecDeque;
 
 use super::*;
-use super::drafter::DrafterSet;
+use super::drafter::{DrafterSet, draft_limit_for_step};
 
 /// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
 /// bools into the process env vars `proxima_tensor::bind::bind_with_fusion`
@@ -3463,14 +3463,24 @@ impl<'file> LoadedModel<'file> {
                     // verify program's own shape at that width), so the
                     // just-sampled token is reused -- a real vocab id,
                     // avoiding an out-of-range lookup.
+                    let step_draft_limit = draft_limit_for_step(
+                        drafter_context_length as usize,
+                        cached_len,
+                        max_tokens,
+                        _step,
+                    );
                     if let Some(forced_width) = forced_draft_width {
                         speculative_draft.clear();
-                        speculative_draft.resize(usize::from(forced_width), next_ids[0]);
+                        speculative_draft.resize(
+                            usize::from(forced_width).min(step_draft_limit),
+                            next_ids[0],
+                        );
                     } else {
                         let history_len = token_history.len().saturating_sub(1);
                         drafter_set.draft(
                             &token_history[..history_len],
                             next_ids[0],
+                            step_draft_limit,
                             &mut speculative_draft,
                         );
                     }
