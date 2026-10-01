@@ -202,6 +202,10 @@ mod drafter;
 mod kv_ring;
 mod prompt_cache;
 mod prompt_cache_key;
+#[cfg(test)]
+mod alloc_probe;
+#[cfg(test)]
+mod arena;
 mod block_index;
 mod prewarm;
 mod prewarm_follow_up;
