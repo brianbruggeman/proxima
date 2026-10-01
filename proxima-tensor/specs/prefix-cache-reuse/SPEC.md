@@ -51,6 +51,8 @@ doing its job and the spec is reopened.
 | R6 | Output through the cache is token-identical to output from a fresh prefill of the same token ids, for every reuse path (pure extension, rewind within slack, checkpoint restore, chunk shift), and token-identical to llama-server on the same ids (the oracle). |
 | R7 | Config surface: `PromptCacheConfig` (byte budget, checkpoint interval, max checkpoints, cache_reuse_min) via builder and conflaguration, both producing identical configs; `ServingConfig` carries it. |
 | R8 | Telemetry per request: `cache_lcp`, `cache_reused_tokens`, `cache_prefilled_tokens`, `cache_path` (extend / rewind / checkpoint / shift / miss), at debug; a miss with a reason. |
+| R9 | Speculative caching: the speculative drafter's state is cached with the prompt cache entry and survives across requests. The drafter history and n-gram tables (`DrafterSet`: ngram-simple / map-k / map-k4v / mod / cache) for the reused prefix are restored instead of rebuilt, and rewound to the LCP like the KV (tables built from tokens past the LCP are dropped or rebuilt). The ngram-cache drafter's dynamic cache persists across requests and sessions and can be saved and loaded in llama.cpp's format (`common_ngram_cache_save` / `common_ngram_cache_load`; proxima already ports the loader at `proxima-tokenizer/src/draft/ngram_cache.rs:738`), with an optional static cache path in config (llama `-lcs` / `-lcd`). |
+| R10 | Anticipatory prefill: a `prewarm(ids)` API prefills token ids into the prompt cache before any request needs them, at low priority. It runs only while no request is decoding, in chunks, and a real request preempts it at the next chunk boundary; the partially prewarmed entry stays usable up to what was prefilled. The existing LCP lookup consumes prewarmed entries; there is no second path. The end of a generation (EOS or stop) is the built-in prewarm point, because the answer is complete and the GPU is idle while the user reads. At that moment proxima prewarms automatically, in order: (1) the answer's own trailing tokens plus the turn-boundary suffix (end-of-turn and next-user-turn opener token ids, supplied once through config or registration by the caller, so proxima applies it with no per-request policy); (2) optional deeper anticipation: the model drafts K likely follow-up user turns from the formed answer (config: count, max tokens, default off), each prefilled as a branch entry sharing the prefix; the next request's LCP lookup picks whichever branch matches, and unused branches are evicted first. The caller may also hand proxima a prefix it expects (a system prompt at load, retrieved documents while a tool call runs, a user's partial input as they type); what to anticipate beyond the end-of-answer trigger is the caller's policy. Proxima provides prewarm, preemption and accounting (telemetry: `prewarm_tokens`, `prewarm_preempted`, `prewarm_hit_tokens` on the request that consumed it). |
 
 ## acceptance criteria
 
@@ -64,6 +66,12 @@ doing its job and the spec is reopened.
 | AC6 | oracle: AC2-AC5 prompts through llama-server f1ea20621 with `cache_prompt` on | proxima ids equal llama's ids on every prompt (count reported) |
 | AC7 | TTFT, quiet box, 10 interleaved pairs, cache on vs off, AC2 transcript turn 3 | median TTFT ratio reported with p10/p90; refutation condition applied |
 | AC8 | builder vs conflaguration parity fixture for `PromptCacheConfig` | identical config, 1 fixture |
+| AC9 | multi-turn transcript, speculation on: drafted and accepted counts and output ids with drafter state restored from the cache vs a run that rebuilds the drafter from the full prompt each turn | identical on every turn; per-turn drafter rebuild work drops to the new tokens only (count reported) |
+| AC10 | save the dynamic ngram cache, reload in a fresh process; llama's `common_ngram_cache_load` reads proxima's file and proxima reads llama's | round trip, byte and entry counts equal |
+| AC11 | prewarm the next-turn prefix after turn N; turn N+1's request | prefills only the user's new tokens (count); ids identical to a fresh prefill; TTFT ratio with vs without prewarm reported (10 interleaved pairs) |
+| AC12 | a real request arrives mid-prewarm | the request's first prefill dispatch starts within one prewarm chunk's time (measured delay); the partial prewarm is reused (`prewarm_hit_tokens` > 0) |
+| AC13 | after an answer ends, with no further call from the caller, the next turn's request | prefills only the user's new tokens (count), proving the end-of-answer trigger fired; ids identical to a fresh prefill |
+| AC14 | deeper anticipation, default off: K follow-up branches prewarmed | hit rate (requests whose LCP extended into a branch) and tokens saved per hit reported on a multi-turn transcript set; preemption still within one chunk |
 
 ## slices
 
@@ -73,6 +81,8 @@ doing its job and the spec is reopened.
 | S2 | R4 checkpoints | AC4 |
 | S3 | R5 chunk shift with K re-rotation | AC5 |
 | S4 | oracle + timing | AC6, AC7 |
+| S5 | R9 drafter state cached with the entry, ngram-cache persistence in llama's format | AC9, AC10 |
+| S6 | R10 prewarm API, end-of-answer trigger, chunked preemption, optional follow-up branches | AC11, AC12, AC13, AC14 |
 
 ## out of scope here, owned elsewhere
 
