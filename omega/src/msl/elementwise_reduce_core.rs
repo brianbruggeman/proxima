@@ -1304,80 +1304,97 @@ pub(super) fn push_packed_row_multi_row_body(
         source.push_str("    }\n");
     }
 
-    if unroll_active {
-        // Literal `s`/`q` at every one of the `cap * rows` epilogue sites --
-        // same reasoning as the zero-init loop above: `sumf[s][q]` here is
-        // the THIRD (and last) site that must be constant-indexed. Per-(s,q)
-        // order, `combine_fn`, the `lane == 0u` guard, and the write
-        // addressing are all byte-identical to the dynamic-loop version --
-        // only the induction variables became literals.
-        for s in 0..cap {
-            for q in 0..rows {
-                source.push_str("    {\n");
-                source.push_str(&format!(
-                    "        {element_type} reduced = {combine_fn}(sumf[{s}][{q}]);\n"
-                ));
-                source.push_str("        if (lane == 0u) {\n");
-                source.push_str(&format!("            long token_flat = token_first + {s};\n"));
-                source.push_str(&format!("            long feature_flat = feature_first + {q};\n"));
-                source.push_str(
-                    "            if (token_flat < token_total && feature_flat < feature_total) {\n",
-                );
-                source.push_str("                long out_offset = u.out_base;\n");
-                for &dim in feature_axes {
-                    source.push_str(&format!(
-                        "                out_offset += feature_coord[{q}][{dim}] * u.out_strides[{dim}];\n"
-                    ));
-                }
-                for &dim in token_axes {
-                    source.push_str(&format!(
-                        "                out_offset += token_coord[{s}][{dim}] * u.out_strides[{dim}];\n"
-                    ));
-                }
-                let output_rank = token_axes.len() + feature_axes.len();
-                push_reduce_epilogue_write(
-                    source,
-                    epilogue_body,
-                    epilogue_operands,
-                    output_rank,
-                    element_type,
-                    "                ",
-                    |dim| {
-                        if dim < token_axes.len() {
-                            format!("token_coord[{s}][{}]", token_axes[dim])
-                        } else {
-                            format!("feature_coord[{q}][{}]", feature_axes[dim - token_axes.len()])
-                        }
-                    },
-                    "reduced",
-                    "out_offset",
-                );
-                source.push_str("            }\n");
-                source.push_str("        }\n");
-                source.push_str("    }\n");
-            }
-        }
-    } else {
-        source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
-        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-        source.push_str(&format!(
-            "            {element_type} reduced = {combine_fn}(sumf[s][q]);\n"
-        ));
-        source.push_str("            if (lane == 0u) {\n");
-        source.push_str("                long token_flat = token_first + s;\n");
-        source.push_str("                long feature_flat = feature_first + q;\n");
-        source.push_str(
-            "                if (token_flat < token_total && feature_flat < feature_total) {\n",
-        );
-        source.push_str("                    long out_offset = u.out_base;\n");
-        for &dim in feature_axes {
+    push_multi_row_lane_epilogue(
+        source,
+        &MultiRowEpilogue {
+            element_type,
+            identity,
+            combine_fn,
+            cap,
+            rows,
+            token_axes,
+            feature_axes,
+            epilogue_body,
+            epilogue_operands,
+        },
+    );
+    Ok(())
+}
+
+/// What [`push_multi_row_lane_epilogue`] needs to render the write-back of a
+/// `cap`-token by `rows`-row accumulator group.
+struct MultiRowEpilogue<'a> {
+    element_type: &'a str,
+    identity: &'a str,
+    combine_fn: &'a str,
+    cap: usize,
+    rows: usize,
+    token_axes: &'a [u16],
+    feature_axes: &'a [u16],
+    epilogue_body: &'a ComposedBody,
+    epilogue_operands: &'a [(NodeId, Layout, Option<Lookup>)],
+}
+
+/// Renders [`push_packed_row_multi_row_body`]'s write-back: every `(token,
+/// row)` accumulator is reduced across the simdgroup (`combine_fn`, which hands
+/// the total to every lane), then lane `p` of each 32-wide round writes pair
+/// `p`. Writing from lane 0 alone ran the whole fused epilogue -- its operand
+/// reads included -- serially once per pair, so a fused `ffn_up` at 8 tokens
+/// spent half its time there; one lane per pair runs all of them side by side.
+/// The reduced values and the write addressing are the ones the single-lane
+/// form used, so the output is unchanged bit for bit.
+fn push_multi_row_lane_epilogue(source: &mut String, epilogue: &MultiRowEpilogue<'_>) {
+    let MultiRowEpilogue {
+        element_type,
+        identity,
+        combine_fn,
+        cap,
+        rows,
+        token_axes,
+        feature_axes,
+        epilogue_body,
+        epilogue_operands,
+    } = epilogue;
+    let pair_total = cap * rows;
+    for token in 0..*cap {
+        for row in 0..*rows {
             source.push_str(&format!(
-                "                    out_offset += feature_coord[q][{dim}] * u.out_strides[{dim}];\n"
+                "    {element_type} reduced_{token}_{row} = {combine_fn}(sumf[{token}][{row}]);\n"
             ));
         }
-        for &dim in token_axes {
+    }
+    for round_first in (0..pair_total).step_by(SIMD_WIDTH as usize) {
+        let round_last = (round_first + SIMD_WIDTH as usize).min(pair_total);
+        source.push_str("    {\n");
+        source.push_str(&format!("        {element_type} pair_value = {identity};\n"));
+        for pair in round_first..round_last {
             source.push_str(&format!(
-                "                    out_offset += token_coord[s][{dim}] * u.out_strides[{dim}];\n"
+                "        pair_value = (lane == {}u) ? reduced_{}_{} : pair_value;\n",
+                pair - round_first,
+                pair / rows,
+                pair % rows
+            ));
+        }
+        source.push_str(&format!(
+            "        uint pair_index = (uint)lane + {round_first}u;\n"
+        ));
+        source.push_str(&format!("        if (pair_index < {pair_total}u) {{\n"));
+        source.push_str(&format!("            uint token_slot = pair_index / {rows}u;\n"));
+        source.push_str(&format!("            uint feature_slot = pair_index % {rows}u;\n"));
+        source.push_str("            long token_flat = token_first + (long)token_slot;\n");
+        source.push_str("            long feature_flat = feature_first + (long)feature_slot;\n");
+        source.push_str(
+            "            if (token_flat < token_total && feature_flat < feature_total) {\n",
+        );
+        source.push_str("                long out_offset = u.out_base;\n");
+        for &dim in feature_axes.iter() {
+            source.push_str(&format!(
+                "                out_offset += feature_coord[feature_slot][{dim}] * u.out_strides[{dim}];\n"
+            ));
+        }
+        for &dim in token_axes.iter() {
+            source.push_str(&format!(
+                "                out_offset += token_coord[token_slot][{dim}] * u.out_strides[{dim}];\n"
             ));
         }
         let output_rank = token_axes.len() + feature_axes.len();
@@ -1387,23 +1404,24 @@ pub(super) fn push_packed_row_multi_row_body(
             epilogue_operands,
             output_rank,
             element_type,
-            "                    ",
+            "                ",
             |dim| {
                 if dim < token_axes.len() {
-                    format!("token_coord[s][{}]", token_axes[dim])
+                    format!("token_coord[token_slot][{}]", token_axes[dim])
                 } else {
-                    format!("feature_coord[q][{}]", feature_axes[dim - token_axes.len()])
+                    format!(
+                        "feature_coord[feature_slot][{}]",
+                        feature_axes[dim - token_axes.len()]
+                    )
                 }
             },
-            "reduced",
+            "pair_value",
             "out_offset",
         );
-        source.push_str("                }\n");
         source.push_str("            }\n");
         source.push_str("        }\n");
         source.push_str("    }\n");
     }
-    Ok(())
 }
 
 /// Renders [`push_packed_row_multi_row_body`]'s `Q4_K` fast-path reduction
