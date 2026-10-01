@@ -635,3 +635,66 @@ fn two_requests_and_a_background_prewarm_never_share_an_entry() {
         println!("WORKER concurrent reused_per_turn={reused:?}");
     });
 }
+
+/// A gemma4 answer that finishes comes back with its end-of-turn token
+/// repeated until the end-of-sequence token; the client's next prompt carries
+/// that token once. The prewarm must prefill the client's boundary, not one
+/// with the marker doubled.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn an_answer_that_ended_on_end_of_turn_tokens_is_prewarmed_for_the_clients_prompt() {
+    with_model(|model| {
+        const END_OF_TURN: u32 = 106;
+        let config = cached_config(SpeculativeConfig::none());
+        let prompt = encode_opening(
+            model,
+            "<|turn>user\nReply with only the word yes.<turn|>\n<|turn>model\n",
+        );
+        let suffix = turn_boundary_suffix(model);
+        model.set_prewarm_suffix(&suffix);
+
+        let first = run_cached(model, config, &prompt);
+        let warmed = model
+            .run_pending_prewarm(&config)
+            .expect("the queued prewarm runs")
+            .expect("the answer queued its next prefix");
+        let answer_text: Vec<u32> = first
+            .generated
+            .iter()
+            .copied()
+            .filter(|id| *id != END_OF_TURN)
+            .collect();
+        let user_ids =
+            encode_continuation(model, "And without the word no?<turn|>\n<|turn>model\n");
+        let next: Vec<u32> = prompt
+            .iter()
+            .chain(&answer_text)
+            .chain(&suffix)
+            .chain(&user_ids)
+            .copied()
+            .collect();
+        let turn = run_cached(model, config, &next);
+        let fresh = run_fresh(model, uncached_config(SpeculativeConfig::none()), &next);
+
+        assert!(first.stopped_by_eos, "the answer must finish on its own");
+        assert!(
+            first
+                .generated
+                .iter()
+                .filter(|id| **id == END_OF_TURN)
+                .count()
+                > 1,
+            "{:?}",
+            first.generated
+        );
+        assert_eq!(turn.generated, fresh);
+        assert_eq!(
+            turn.report.prefilled_tokens,
+            user_ids.len(),
+            "{:?}",
+            turn.report
+        );
+        assert!(turn.report.prewarm_hit_tokens > 0, "{:?}", turn.report);
+        println!("EOS_ANSWER warmed={warmed:?} turn={:?}", turn.report);
+    });
+}

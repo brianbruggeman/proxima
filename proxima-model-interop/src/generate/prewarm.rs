@@ -110,6 +110,25 @@ pub(super) fn prewarm_stops(
     stops
 }
 
+/// The prefix the next turn's prompt shares with this one: `ids`, the
+/// answer, then `suffix`. The model ends a gemma4 answer with its end-of-turn
+/// token, and keeps sampling it until the end-of-sequence token (a real answer
+/// came back as `[.., 4443, 106, 106, 106, 106]`), while a client re-renders
+/// the turn with that token once, as the first token of the suffix. Counting
+/// the generated ones as well would put the boundary in twice and diverge from
+/// every real next prompt at the second.
+fn next_turn_prefix(ids: &[u32], generated: &[u32], suffix: &[u32]) -> Vec<u32> {
+    let answer_len = generated
+        .iter()
+        .rposition(|id| Some(id) != suffix.first())
+        .map_or(0, |last| last + 1);
+    ids.iter()
+        .chain(&generated[..answer_len])
+        .chain(suffix)
+        .copied()
+        .collect()
+}
+
 impl LoadedModel<'_> {
     /// Registers the turn-boundary suffix -- the token ids that follow an
     /// answer in the next request's prompt, for gemma4 its end-of-turn token
@@ -272,12 +291,7 @@ impl LoadedModel<'_> {
         if suffix.is_empty() {
             return;
         }
-        let prefix: Vec<u32> = ids
-            .iter()
-            .chain(generated)
-            .chain(&suffix)
-            .copied()
-            .collect();
+        let prefix = next_turn_prefix(ids, generated, &suffix);
         let queued_tokens = prefix.len() as u64;
         let replaced = self.prewarm_queue.submit(PrewarmJob {
             prefix,
@@ -421,6 +435,40 @@ impl LoadedModel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GEMMA_PROMPT: [u32; 4] = [2, 105, 2364, 107];
+    const GEMMA_BOUNDARY: [u32; 5] = [106, 107, 105, 2364, 107];
+
+    #[test]
+    fn an_answer_that_repeated_the_end_of_turn_token_keeps_it_once_in_the_prefix() {
+        let generated = [4443, 106, 106, 106, 106];
+
+        let prefix = next_turn_prefix(&GEMMA_PROMPT, &generated, &GEMMA_BOUNDARY);
+
+        assert_eq!(
+            prefix,
+            vec![2, 105, 2364, 107, 4443, 106, 107, 105, 2364, 107]
+        );
+    }
+
+    #[test]
+    fn an_answer_cut_off_by_the_token_budget_gets_the_suffix_appended_whole() {
+        let generated = [4443, 5018, 563];
+
+        let prefix = next_turn_prefix(&GEMMA_PROMPT, &generated, &GEMMA_BOUNDARY);
+
+        assert_eq!(
+            prefix,
+            vec![2, 105, 2364, 107, 4443, 5018, 563, 106, 107, 105, 2364, 107]
+        );
+    }
+
+    #[test]
+    fn an_answer_of_nothing_but_the_end_of_turn_token_is_just_the_suffix() {
+        let prefix = next_turn_prefix(&GEMMA_PROMPT, &[106, 106], &GEMMA_BOUNDARY);
+
+        assert_eq!(prefix, vec![2, 105, 2364, 107, 106, 107, 105, 2364, 107]);
+    }
 
     #[test]
     fn stops_are_every_chunk_then_the_target() {
