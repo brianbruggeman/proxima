@@ -223,6 +223,8 @@ mod prompt_cache_real_model_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prewarm_real_model_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod block_index_real_model_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod follow_up_conditioning_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod thread_index_census_tests;
