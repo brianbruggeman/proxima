@@ -21,7 +21,7 @@ const GENERATED_TOKENS: usize = 16;
 const REWRITTEN_TOKENS: usize = 50;
 const BEYOND_SLACK_TOKENS: usize = 300;
 
-fn cached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'static> {
+pub(super) fn cached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'static> {
     checkpointed_config(
         speculative,
         PromptCacheConfig::standard().checkpoint_interval,
@@ -43,7 +43,7 @@ fn checkpointed_config(
     }
 }
 
-fn uncached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'static> {
+pub(super) fn uncached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'static> {
     ServingConfig {
         speculative,
         prompt_cache: PromptCacheConfig::off(),
@@ -51,7 +51,7 @@ fn uncached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'st
     }
 }
 
-fn with_model<T>(body: impl FnOnce(&LoadedModel<'_>) -> T) -> T {
+pub(super) fn with_model<T>(body: impl FnOnce(&LoadedModel<'_>) -> T) -> T {
     let model_path = crate::test_support::gemma4_e2b_gguf_path();
     crate::test_support::require_fixture(&model_path, Some("PROXIMA_GEMMA4_E2B_GGUF"));
     let file = File::open(&model_path).expect("open the real gemma4-E2B checkpoint");
@@ -63,7 +63,7 @@ fn with_model<T>(body: impl FnOnce(&LoadedModel<'_>) -> T) -> T {
     body(&model)
 }
 
-fn encode_opening(model: &LoadedModel<'_>, text: &str) -> Vec<u32> {
+pub(super) fn encode_opening(model: &LoadedModel<'_>, text: &str) -> Vec<u32> {
     proxima_tokenizer::encode_with_bos_eos(
         text,
         &model.vocab,
@@ -73,7 +73,7 @@ fn encode_opening(model: &LoadedModel<'_>, text: &str) -> Vec<u32> {
     .expect("tokenize the opening prompt")
 }
 
-fn encode_continuation(model: &LoadedModel<'_>, text: &str) -> Vec<u32> {
+pub(super) fn encode_continuation(model: &LoadedModel<'_>, text: &str) -> Vec<u32> {
     proxima_tokenizer::encode_with_bos_eos(text, &model.vocab, false, false)
         .expect("tokenize a continuation")
 }
@@ -83,13 +83,17 @@ fn next_user_turn(document: &str, from_char: usize, chars: usize) -> String {
     format!("<turn|>\n<|turn>user\n{excerpt}<turn|>\n<|turn>model\n")
 }
 
-struct TurnOutcome {
-    generated: Vec<u32>,
-    stopped_by_eos: bool,
-    report: CacheReport,
+pub(super) struct TurnOutcome {
+    pub(super) generated: Vec<u32>,
+    pub(super) stopped_by_eos: bool,
+    pub(super) report: CacheReport,
 }
 
-fn run_cached(model: &LoadedModel<'_>, config: ServingConfig<'_>, ids: &[u32]) -> TurnOutcome {
+pub(super) fn run_cached(
+    model: &LoadedModel<'_>,
+    config: ServingConfig<'_>,
+    ids: &[u32],
+) -> TurnOutcome {
     let (generated, _text, stopped_by_eos) = model
         .generate_from_ids(ids, GENERATED_TOKENS, &config, &mut |_event| {
             ControlFlow::Continue(())
@@ -105,7 +109,11 @@ fn run_cached(model: &LoadedModel<'_>, config: ServingConfig<'_>, ids: &[u32]) -
     }
 }
 
-fn run_fresh(model: &LoadedModel<'_>, config: ServingConfig<'_>, ids: &[u32]) -> Vec<u32> {
+pub(super) fn run_fresh(
+    model: &LoadedModel<'_>,
+    config: ServingConfig<'_>,
+    ids: &[u32],
+) -> Vec<u32> {
     let (generated, ..) = model
         .generate_from_ids(ids, GENERATED_TOKENS, &config, &mut |_event| {
             ControlFlow::Continue(())
@@ -117,7 +125,7 @@ fn run_fresh(model: &LoadedModel<'_>, config: ServingConfig<'_>, ids: &[u32]) ->
 /// Tokens the cache holds after a request: the prompt plus every generated
 /// token the forward pass consumed (the last sampled one is not forwarded
 /// unless the model stopped on its end token).
-fn cached_tokens_after(prompt_len: usize, outcome: &TurnOutcome) -> usize {
+pub(super) fn cached_tokens_after(prompt_len: usize, outcome: &TurnOutcome) -> usize {
     let unforwarded = usize::from(!outcome.stopped_by_eos);
     prompt_len + outcome.generated.len() - unforwarded.min(outcome.generated.len())
 }
