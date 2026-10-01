@@ -2686,6 +2686,7 @@ impl<'file> LoadedModel<'file> {
             return Self {
                 expert_slab: std::sync::Mutex::new(expert_slab),
                 expert_sidecar: None,
+            prompt_cache: std::sync::Mutex::new(PromptCache::new()),
                 weights: bound.weights,
                 architecture: bound.architecture,
                 architecture_impl: Some(resolved),
@@ -2811,6 +2812,7 @@ impl<'file> LoadedModel<'file> {
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
             expert_sidecar: None,
+            prompt_cache: std::sync::Mutex::new(PromptCache::new()),
             weights,
             architecture,
             architecture_impl: None,
@@ -2923,6 +2925,7 @@ impl<'file> LoadedModel<'file> {
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
             expert_sidecar: None,
+            prompt_cache: std::sync::Mutex::new(PromptCache::new()),
             weights,
             architecture,
             architecture_impl: None,

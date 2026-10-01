@@ -188,7 +188,7 @@ use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;
 use crate::serving::apply_serving_config;
-use crate::serving::{GdnPrefillBackend, ServingConfig, resolve_context_length};
+use crate::serving::{GdnPrefillBackend, PromptCacheConfig, ServingConfig, resolve_context_length};
 
 #[macro_use]
 mod load_model;
@@ -200,6 +200,7 @@ mod residency_caches;
 mod decode;
 mod drafter;
 mod kv_ring;
+mod prompt_cache;
 mod serving_backend;
 mod tests_all;
 #[cfg(test)]
@@ -218,5 +219,7 @@ use kv_ring::{
     sliding_ring_geometry, speculative_draft_limit,
 };
 pub use load_model::*;
+pub use prompt_cache::{CachePath, CacheReport, MissReason};
+use prompt_cache::PromptCache;
 pub(crate) use pregather::*;
 pub use residency_caches::*;

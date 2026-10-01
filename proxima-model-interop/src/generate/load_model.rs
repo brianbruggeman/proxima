@@ -1005,6 +1005,11 @@ pub struct LoadedModel<'file> {
     /// installs the low copies once; router boundaries subsequently switch
     /// only the selected expert's three projection entries.
     pub(super) expert_sidecar: Option<crate::expert_sidecar::MappedExpertSidecar>,
+    /// The per-model prompt cache ([`super::prompt_cache`]'s module doc).
+    /// `std::sync::Mutex` for the same reason as `expert_slab` above (this
+    /// type stays `Sync` behind an `Arc`); held only to take an entry out or
+    /// put one back, never across a decode.
+    pub(super) prompt_cache: std::sync::Mutex<super::PromptCache>,
 }
 
 /// Concrete qwen35moe router/gather partitions for one KV shape bucket.
