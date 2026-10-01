@@ -13,8 +13,11 @@
 //! `&mut |_| Continue` so `TokenEvent::elapsed_ms` (Instant-based, compiled
 //! on every build) is readable without the diagnostic-only `instrument`
 //! feature. Run with `PROXIMA_DEBUG_METAL_STAGES=1` set in the environment;
-//! every decode step then emits one `token_breakdown_wall` and one
-//! `token_breakdown_metal` line to stderr, parsed by the caller.
+//! every decode EVALUATION then emits one `token_breakdown_wall` and one
+//! `token_breakdown_metal` line to stderr, parsed by the caller. Speculation
+//! runs at the production default, so a verify evaluation commits several
+//! tokens and the following steps evaluate nothing: lines are per evaluation,
+//! `step_time` and `decode_ms_per_token` are per token.
 //! `PROXIMA_RUNS=<n>` (default `1`) repeats the same generation `n` times in
 //! this one process, reusing the loaded model/runtime so runs after the
 //! first skip step-0 pipeline compilation.
@@ -35,9 +38,7 @@ use std::time::Instant;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, SpeculativeConfig, TokenEvent,
-};
+use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, TokenEvent};
 #[cfg(feature = "instrument")]
 use proxima_telemetry::export::Exporter;
 #[cfg(feature = "instrument")]
@@ -64,7 +65,10 @@ const DEFAULT_MAX_TOKENS: usize = 48;
 // proxima-telemetry is only a dependency under `instrument`, so events
 // otherwise had no console sink to reach.
 #[cfg(feature = "instrument")]
-fn install_console_telemetry() -> (Arc<AtomicUsize>, Arc<Recorder<proxima_telemetry::clock::GlobalClock>>) {
+fn install_console_telemetry() -> (
+    Arc<AtomicUsize>,
+    Arc<Recorder<proxima_telemetry::clock::GlobalClock>>,
+) {
     // result lines stay at info even when RUST_LOG is unset
     let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
     let filter = if rust_log.is_empty() {
@@ -111,7 +115,10 @@ fn print_capture_binary() {
     let argv0 = std::env::current_exe().expect("resolve running binary path");
     let bytes = std::fs::read(&argv0).expect("read running binary for md5");
     let digest = Md5::digest(&bytes);
-    let md5_hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let md5_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     proxima_telemetry::info!(
         argv0 = ?argv0,
         md5 = %md5_hex,
@@ -135,7 +142,8 @@ fn main() {
     // `token_breakdown`/`report_*` event compiled anywhere in this crate.
     // the pump is never joined, so drain to empty or the last result line is lost
     #[cfg(feature = "instrument")]
-    let _telemetry = if std::env::var_os("PROXIMA_CONSOLE_TELEMETRY").as_deref() == Some(std::ffi::OsStr::new("0"))
+    let _telemetry = if std::env::var_os("PROXIMA_CONSOLE_TELEMETRY").as_deref()
+        == Some(std::ffi::OsStr::new("0"))
     {
         None
     } else {
@@ -196,7 +204,6 @@ fn main() {
         kv_bucket_tokens,
         #[cfg(all(feature = "metal", target_os = "macos"))]
         dispatch_type,
-        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     };
 
@@ -254,7 +261,9 @@ fn main() {
     // OWNER_BRIEF_prefill_correction (2026-09-23): per-step deltas from the
     // SAME generation's own `TokenEvent::elapsed_ms` stream, so a caller can
     // read the first-decode-step cost separately from later steps within one
-    // run instead of fitting it across prompts of different lengths.
+    // run instead of fitting it across prompts of different lengths. A step
+    // is a token, not an evaluation: tokens a verify evaluation committed
+    // arrive back to back, so those later steps read ~0 ms.
     let step_times = std::env::var_os("PROXIMA_STEP_TIMES").is_some();
 
     for run_index in 0..runs {
@@ -302,7 +311,8 @@ fn main() {
         // `(wall - first-step time) / (tokens - 1)`: prefill (step 0, 26
         // prompt tokens here) is included identically in both K=1 and K=8
         // arms, so subtracting its own measured `elapsed_ms` isolates the
-        // per-decode-step cost the K sweep is actually meant to move.
+        // per-committed-token decode cost the K sweep is actually meant to
+        // move; with speculation it is wall per token, not per evaluation.
         if tokens_generated > 1 {
             let decode_ms_per_token =
                 (wall_ms - prefill_elapsed_ms as f64) / (tokens_generated - 1) as f64;

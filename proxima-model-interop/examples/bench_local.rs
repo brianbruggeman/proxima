@@ -9,7 +9,10 @@
 //! `--features std,metal` and `metal` for Metal (macOS only). The
 //! callback timestamps are wall-clock observations from the same client call:
 //! TTFT is the prefill event boundary and TTNT is the mean interval between
-//! generated-token events.  No derived number is presented as device time.
+//! generated-token events.  Speculation runs at the production default, so a
+//! verify evaluation delivers several tokens back to back: single intervals are
+//! bimodal and the mean is wall time per committed token, not per forward.
+//! No derived number is presented as device time.
 //!
 //! Set `PROXIMA_VERIFY_GPU=1` to run the same prompt through CPU after the
 //! measured GPU call and fail if greedy token IDs differ. This is an explicit
@@ -27,9 +30,7 @@ use std::time::Instant;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::GgmlType;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, SpeculativeConfig, classify_task,
-};
+use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, classify_task};
 
 struct TtntJson(Option<f64>);
 
@@ -244,7 +245,6 @@ fn main() {
         gpu_layers: if backend != "cpu" { GPU_LAYERS_ALL } else { 0 },
         gpu_memory_limit_bytes,
         gpu_correctness_fallback: env::var_os("PROXIMA_GPU_CORRECTNESS_FALLBACK").is_some(),
-        speculative: SpeculativeConfig::none(),
         ..ServingConfig::default()
     };
     let execution_backend = if serving_config.gpu_correctness_fallback && backend == "vulkan" {
