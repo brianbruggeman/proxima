@@ -509,6 +509,21 @@ pub struct PromptCacheConfig {
     /// so a request that arrives mid-prewarm waits at most one chunk. `0`
     /// runs the whole prewarm as one chunk, which a request cannot preempt.
     pub prewarm_chunk_tokens: u32,
+    /// How many likely next user turns the model drafts from a finished
+    /// answer, each prefilled as a branch entry behind the answer's
+    /// turn-boundary suffix (spec R10, optional deeper anticipation); `0`
+    /// drafts none. Each branch holds a full copy of the entry's rows, so
+    /// every one counts against [`Self::byte_budget`] and
+    /// [`Self::max_entries`], and an unused branch is evicted before any
+    /// entry a request produced.
+    pub follow_up_branches: u32,
+    /// Most tokens one drafted user turn runs to; the draft stops earlier
+    /// at the end-of-turn token.
+    pub follow_up_max_tokens: u32,
+    /// Sampling temperature of the draft in thousandths (`800` is 0.8): the
+    /// branches differ only by seed, so `0` makes every draft the same
+    /// greedy one and all but the first are dropped as duplicates.
+    pub follow_up_temperature_milli: u32,
 }
 
 impl PromptCacheConfig {
@@ -525,6 +540,9 @@ impl PromptCacheConfig {
             max_checkpoints: 4,
             cache_reuse_min: 0,
             prewarm_chunk_tokens: 256,
+            follow_up_branches: 0,
+            follow_up_max_tokens: 48,
+            follow_up_temperature_milli: 800,
         }
     }
 
