@@ -1923,6 +1923,41 @@ pub(super) const fn q4_0_multi_row_hoist_override() -> bool {
     false
 }
 
+/// `PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE` A/B switch: selects
+/// [`crate::msl::push_packed_row_multi_row_q4_0_pair_lane_body`], the
+/// `Q4_0` multi-row body that decodes each lane's four weight elements once and folds them
+/// against every token of the group, over the generic per-element
+/// arm. Default ON -- unset keeps the pair-lane body; only explicit `"0"`
+/// falls back, so the same binary measures both arms. Takes priority over
+/// [`q4_0_multi_row_hoist_override`] when both are set.
+#[cfg(feature = "std")]
+pub(super) fn q4_0_multi_row_pair_lane_override() -> bool {
+    let active = !matches!(std::env::var("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE"), Ok(value) if value.trim() == "0");
+    log_q4_0_multi_row_pair_lane_once(active);
+    active
+}
+
+#[cfg(feature = "instrument")]
+fn log_q4_0_multi_row_pair_lane_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if std::env::var_os("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE").is_some() {
+            "env"
+        } else {
+            "default"
+        };
+        proxima_telemetry::debug!(active, source, "q4_0_multi_row_pair_lane");
+    });
+}
+
+#[cfg(all(feature = "std", not(feature = "instrument")))]
+fn log_q4_0_multi_row_pair_lane_once(_active: bool) {}
+
+#[cfg(not(feature = "std"))]
+pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
+    true
+}
+
 /// `PROXIMA_TILED_GEMM_Q4_0` A/B switch: admits `Codec::Q4_0` into
 /// [`crate::msl::classify_tiled_gemm`], the same `simdgroup_matrix`-tiled
 /// GEMM ([`crate::msl::push_tiled_gemm_body`]) today's `Codec::Q4_K`-only

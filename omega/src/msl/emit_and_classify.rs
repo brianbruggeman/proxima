@@ -972,6 +972,24 @@ fn q4_0_multi_row_hoist_active(resolved: &BoundOp, quantized: &[Option<Codec>]) 
         && q4_0_multi_row_hoist_override()
 }
 
+/// Whether [`push_packed_row_multi_row_body`] renders the `Q4_0` pair-lane
+/// arm for this op -- the cache-key twin of [`fast_q4_0_pair_lane_active`],
+/// split from it only because a key is built without `expert_source_mode`
+/// (see [`q4_0_multi_row_hoist_active`]'s own doc for why `!weight_gathered`
+/// stands in for it).
+fn q4_0_multi_row_pair_lane_active(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+    let Some(block) = packed_row_block(resolved, quantized) else {
+        return false;
+    };
+    if packed_row_block_token_total(&block, &resolved.extents) <= 1 {
+        return false;
+    }
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return false;
+    };
+    fast_q4_0_pair_lane_active(resolved, quantized, &block, *reduce_op, false)
+}
+
 /// The multi-row-experiment family's ONE shared admission prefix -- every
 /// experiment built on the generic multi-row arm calls this rather than
 /// re-deriving it, so they can never disagree on
@@ -1203,6 +1221,37 @@ pub(super) fn fast_q4_0_active(
     reduce_op: ScalarOp,
     expert_source_mode: bool,
 ) -> bool {
+    fast_q4_0_admitted(resolved, quantized, block, reduce_op, expert_source_mode)
+        && q4_0_multi_row_hoist_override()
+}
+
+/// [`push_packed_row_multi_row_body`]'s `Q4_0` pair-lane arm: the structural
+/// admission [`fast_q4_0_active`] shares, a stride-one activation (the body
+/// reads it as adjacent `float2` pairs), the `PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE`
+/// switch (default on), and `multi_row_index32_active`: the body addresses
+/// blocks from the block-origin pointer with `uint` indices, because the same
+/// loop over 64-bit absolute indices measured 79.5 us against 44.6 us for a
+/// `[2, 1536, 6144]` projection.
+pub(super) fn fast_q4_0_pair_lane_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
+    reduce_op: ScalarOp,
+    expert_source_mode: bool,
+) -> bool {
+    fast_q4_0_admitted(resolved, quantized, block, reduce_op, expert_source_mode)
+        && resolved.operands()[block.other].1.stride(block.reduce_dim as u16) == 1
+        && q4_0_multi_row_pair_lane_override()
+        && multi_row_index32_active(resolved, quantized, expert_source_mode)
+}
+
+fn fast_q4_0_admitted(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
+    reduce_op: ScalarOp,
+    expert_source_mode: bool,
+) -> bool {
     let Ok(element_type) = type_token(resolved.node, resolved.dtype) else {
         return false;
     };
@@ -1213,7 +1262,6 @@ pub(super) fn fast_q4_0_active(
         && quantized[block.weight] == Some(Codec::Q4_0)
         && quantized[block.other].is_none()
         && is_plain_product_reduce(resolved, reduce_op, block.weight, block.other)
-        && q4_0_multi_row_hoist_override()
 }
 
 /// [`push_packed_row_multi_row_body`]'s `fast_q6k` gate: the multi-row twin
@@ -1328,6 +1376,7 @@ pub(super) fn metal_specialization(
             (token_total > 1 && cap != crate::sized::PACKED_ROW_ACTIVATION_GROUP).then_some(cap)
         }),
         q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized),
+        q4_0_multi_row_pair_lane: q4_0_multi_row_pair_lane_active(resolved, &quantized),
         // no real `expert_source_mode` at cache-key time -- see
         // `multi_row_generic_arm_current`'s own doc for why `false` is safe
         // here (the `!weight_gathered` check inside already excludes a

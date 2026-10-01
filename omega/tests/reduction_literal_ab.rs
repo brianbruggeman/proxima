@@ -699,6 +699,7 @@ fn q4_0_multi_row_prefill_shaped_literal_matches_runtime() {
         (
             "generic",
             [
+                ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0")),
                 ("PROXIMA_MULTI_ROW_UNROLL", Some("0")),
                 ("PROXIMA_MULTI_ROW_INDEX32", Some("0")),
             ]
@@ -707,6 +708,7 @@ fn q4_0_multi_row_prefill_shaped_literal_matches_runtime() {
         (
             "q4_0_hoist",
             [
+                ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0")),
                 ("PROXIMA_Q4_0_MULTI_ROW_HOIST", Some("1")),
                 ("PROXIMA_MULTI_ROW_UNROLL", Some("0")),
             ]
@@ -714,8 +716,13 @@ fn q4_0_multi_row_prefill_shaped_literal_matches_runtime() {
         ),
         (
             "unroll",
-            [("PROXIMA_MULTI_ROW_UNROLL", Some("1"))].as_slice(),
+            [
+                ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0")),
+                ("PROXIMA_MULTI_ROW_UNROLL", Some("1")),
+            ]
+            .as_slice(),
         ),
+        ("q4_0_pair_dot", [].as_slice()),
     ] {
         for policy in [
             NumericPolicy::bit_exact(),
