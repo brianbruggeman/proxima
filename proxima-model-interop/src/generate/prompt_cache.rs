@@ -781,6 +781,21 @@ impl PromptCache {
         }
     }
 
+    /// Whole blocks of `prompt_ids` that some entry shares from the start.
+    #[cfg(all(test, feature = "metal", target_os = "macos"))]
+    pub(super) fn matched_blocks(&self, prompt_ids: &[u32]) -> usize {
+        let block = self.index.block_tokens();
+        self.index
+            .walk(prompt_ids, |stamp, depth| {
+                self.entries.get(&stamp).is_some_and(|entry| {
+                    let span = depth * block..(depth + 1) * block;
+                    entry.state.ids.get(span.clone()) == prompt_ids.get(span)
+                })
+            })
+            .levels
+            .len()
+    }
+
     /// Re-cuts every entry into `config`'s blocks and re-sizes their filters
     /// when the config asks for other ones than the index holds.
     fn reconfigure(&mut self, config: &PromptCacheConfig) {
