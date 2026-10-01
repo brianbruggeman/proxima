@@ -96,6 +96,25 @@ impl Drafter {
     }
 }
 
+/// `slot.get_n_draft_max()` (`tools/server/server-context.cpp:453-472`):
+/// `n_ctx - prompt.n_tokens() - 2`, then `min(.., n_remaining() - 1)`. The
+/// `- 2` leaves room for the sampled token and a context shift; the
+/// `- 1` is the sampled token itself, because a verify of `k` drafts emits
+/// up to `k + 1` tokens. `cached_len` excludes the sampled token (llama's
+/// "slot.prompt is not yet expanded with the `id`"); `generated` counts
+/// tokens already produced, the sampled one included (`n_remaining() =
+/// n_predict - n_gen`). Saturates at `0`, which means "do not speculate".
+pub(crate) fn draft_limit_for_step(
+    context_length: usize,
+    cached_len: usize,
+    max_tokens: usize,
+    generated: usize,
+) -> usize {
+    let context_room = context_length.saturating_sub(cached_len).saturating_sub(2);
+    let budget_room = max_tokens.saturating_sub(generated).saturating_sub(1);
+    context_room.min(budget_room)
+}
+
 /// The set of [`Drafter`]s driven each generation, in llama's own fixed
 /// priority order -- built once per decode call from
 /// [`SpeculativeConfig::speculative_types`]
@@ -171,10 +190,26 @@ impl DrafterSet {
     /// remembers which one so [`Self::accept`] can route to it. `out` is
     /// cleared by the losing drafters' own `clear()`-then-refill contract,
     /// so a caller sees either the winner's draft or an empty buffer.
-    pub(crate) fn draft(&mut self, history: &[u32], sampled: u32, out: &mut Vec<u32>) {
+    ///
+    /// `n_max` is `dp.n_max` (`common/speculative.cpp:2847-2851`): the
+    /// winning draft is truncated to it after the drafter ran, and
+    /// `n_max == 0` never drafts at all (`server-context.cpp:2985`,
+    /// `if (n_draft_max > 0)`).
+    pub(crate) fn draft(
+        &mut self,
+        history: &[u32],
+        sampled: u32,
+        n_max: usize,
+        out: &mut Vec<u32>,
+    ) {
         self.active = None;
+        out.clear();
+        if n_max == 0 {
+            return;
+        }
         for (index, drafter) in self.drafters.iter_mut().enumerate() {
             drafter.draft(history, sampled, out);
+            out.truncate(n_max);
             if !out.is_empty() {
                 self.active = Some(index);
                 return;
@@ -209,7 +244,7 @@ mod tests {
 
     use crate::serving::{NgramMapParams, SpeculativeConfig, SpeculativeType, SpeculativeTypeSet};
 
-    use super::DrafterSet;
+    use super::{DrafterSet, draft_limit_for_step};
 
     /// A history both `ngram-simple` and `ngram-map-k` could match (small
     /// sizes so the default `size_n=12, size_m=48` guard does not need a
@@ -244,7 +279,7 @@ mod tests {
 
         set.begin(&history);
         let mut out = Vec::new();
-        set.draft(&history, sampled, &mut out);
+        set.draft(&history, sampled, usize::MAX, &mut out);
         assert!(!out.is_empty(), "this history has a real repeated pattern to draft from");
         assert_eq!(
             set.active_type(),
@@ -272,7 +307,7 @@ mod tests {
         let history: Vec<u32> = (0..70u32).chain(0..12u32).collect();
         set.begin(&history);
         let mut out = Vec::new();
-        set.draft(&history, 12, &mut out);
+        set.draft(&history, 12, usize::MAX, &mut out);
         assert!(!out.is_empty(), "size_n 12 pattern recurs in this history");
         assert_eq!(set.active_type(), Some(SpeculativeType::NgramSimple));
     }
@@ -288,5 +323,52 @@ mod tests {
         let mut set = DrafterSet::build(&config, 4096);
         set.accept(0);
         assert_eq!(set.active_type(), None);
+    }
+
+    fn default_set_and_history() -> (DrafterSet, Vec<u32>) {
+        let mut set = DrafterSet::build(&SpeculativeConfig::default(), 4096);
+        let history: Vec<u32> = (0..70u32).chain(0..12u32).collect();
+        set.begin(&history);
+        (set, history)
+    }
+
+    #[test]
+    fn drafter_offering_48_tokens_is_truncated_to_the_limit() {
+        let (mut set, history) = default_set_and_history();
+        let mut out = Vec::new();
+        set.draft(&history, 12, usize::MAX, &mut out);
+        assert_eq!(out.len(), 48, "ngram-simple offers size_m=48 unclamped");
+
+        let limit = draft_limit_for_step(4096, 82, 48, 43);
+        set.draft(&history, 12, limit, &mut out);
+
+        assert_eq!(limit, 4);
+        assert_eq!(out.len(), 4);
+        assert_eq!(set.active_type(), Some(SpeculativeType::NgramSimple));
+    }
+
+    #[test]
+    fn one_token_remaining_never_speculates() {
+        let (mut set, history) = default_set_and_history();
+        let mut out = vec![99u32];
+
+        let limit = draft_limit_for_step(4096, 82, 48, 47);
+        set.draft(&history, 12, limit, &mut out);
+
+        assert_eq!(limit, 0);
+        assert!(out.is_empty());
+        assert_eq!(set.active_type(), None);
+    }
+
+    #[test]
+    fn draft_limit_for_step_takes_the_tighter_of_context_and_budget() {
+        assert_eq!(draft_limit_for_step(4096, 100, 48, 0), 47);
+        assert_eq!(draft_limit_for_step(4096, 100, 48, 42), 5);
+        assert_eq!(draft_limit_for_step(4096, 100, 48, 48), 0);
+        assert_eq!(draft_limit_for_step(4096, 100, 48, 60), 0);
+        assert_eq!(draft_limit_for_step(110, 100, 48, 0), 8);
+        assert_eq!(draft_limit_for_step(102, 100, 48, 0), 0);
+        assert_eq!(draft_limit_for_step(100, 100, 48, 0), 0);
+        assert_eq!(draft_limit_for_step(90, 100, 48, 0), 0);
     }
 }
