@@ -571,3 +571,93 @@ REBOOT LOSS, 2026-09-30.
   - proxima keeps generating past 106. Known: gemma4's 106 is text-suppressed but not a
     stop (the stop-set is downstream chat policy). The re-record is compared up to and including the
     first 106.
+- **Ring-parity re-record on main 27d88bdf (2026-09-30):** 15/51 against the file above,
+  diverging at index 15 (llama 192846 " Gettysburg", proxima 8115 " opening"). Full and
+  ring arms agree 64/64. Cause: the oracle's prompt ids came from the pre-fix byte-level
+  tokenizer, not from a proxima numerics fault.
+  - The example's 2048 prompt ids on main equal `llama-tokenize` (f1ea20621) at 2048/2048.
+    They differ from `ring_prompt_ids.json` at 5 positions, the first at index 3
+    (107 vs 247723).
+  - The same prompt ids through llama-server f1ea20621 (Metal, temperature 0, top_k 1)
+    give 66 ids ending at 106. Vendored at
+    `proxima-model-interop/examples/data/gemma4_ring_llama_ids.txt`. proxima's 64 recorded
+    ids equal its first 64.
+  - Step-15 margin, top-1 minus top-2 in log space:
+
+    | prompt | proxima (logits) | llama (logprobs) |
+    |---|---|---|
+    | main ids (fixed tokenizer) | 18.199 − 17.449 = 0.750, top-1 8115 | −0.708 − (−1.451) = 0.743, top-1 8115 |
+    | `ring_prompt_ids.json` fed verbatim | 16.932 − 15.908 = 1.024, top-1 192846 | −0.469 − (−1.499) = 1.030, top-1 192846 |
+
+  - Evidence: `.long_ctx_backups/parity/div15/`.
+  - The ring-parity oracle is now the vendored file, compared up to and including the
+    first 106.
+- **AC23 Metal regression at 27d88bdf (2026-09-30, after the 14:01 kernel panic):**
+  - Run: `cargo nextest run -p proxima-model-interop -p proxima-tensor -p omega --features
+    proxima-model-interop/std,proxima-model-interop/metal --no-fail-fast`. nextest 0.9.146;
+    model tests serialized by the resident-model lock.
+  - Result: 1544 run, 1542 passed, 2 failed, 91 skipped. `before.txt` holds 1410 passes; the
+    new run adds 138.
+  - Six baseline names are absent:
+    - The two `tiled_gemm..._without_the_metal_tiled_gemm_feature` tests are cfg-excluded,
+      because tiled-gemm is default-on since 421543ab.
+    - `serving::tests::owner_default_invocation...` was renamed by 249aad1c to
+      `serving_default_admission_{accepts_the_default,rejects_the_controls}`.
+    - omega `q3k_real_checkpoint_parity` is `#[ignore]` and needs `PROXIMA_Q3K_GGUF`, because
+      the reboot wiped its /tmp checkpoint. It was rebuilt at
+      `.long_ctx_backups/models/qwen3-0.6b-q3km.gguf`: Qwen3-0.6B requantized Q3_K_M by
+      llama-quantize f1ea20621, with `blk.0.ffn_up.weight` q4_K to q3_K. With it, the test
+      runs 1 and passes 1 (`models/q3k_run.log`).
+    - `qwen35_ssm_mixer_..._at_real_dims::{production_args_m13, v_head_reordered_m13}` hit the
+      60 s `body_timeout` (`proxima-test/src/harness.rs:446`) under box load. Alone, each
+      passes 2/2 at 24.6-31.6 s, with load averages of 12-55 from peer builds
+      (`ac23/timeouts.log`).
+  - In a debug build these two cases use half the body timeout even when alone, so
+    in-suite CPU starvation reads as a hang.
+    - Fix: a `.config/nextest.toml` override gives every real-dims case
+      `threads-required = "num-test-threads"`, the same pattern as omega's index32 A/B.
+    - Validated with `cargo nextest run -p proxima-tensor`: 695 run, 695 passed, 8 skipped.
+      The six cases ran consecutively at positions 637-642; m13 took 26.2 s and 26.9 s, at
+      load 10-14 (`ac23/tensor_override.log`).
+  - Evidence: `.long_ctx_backups/ac23/`.
+- **M0 per-kernel census, first run (2026-09-30 21:37):**
+  - Run on gemma4-E2B decode, from `main` 7fad5924 exported plus the uncommitted harness,
+    release, features `std,metal,instrument,metal-fuse-attn-decode`.
+  - Box state: Ollama quit; a downstream daemon at 66% CPU and suggestd at 78%; load-1m 4.24.
+  - Capture: step 23, 1154 dispatches in 132 groups. Invariant 1154=1154=1154; 0 replay
+    failures.
+  - Step GPU busy: 15.31 ms median. Isolated-replay sum: 17.97 ms cold (1.154x busy),
+    9.56 ms cold minus floor (0.614x), 12.92 ms marginal (0.829x).
+  - Empty command buffer floor: 7.83 us median.
+  - Classes, marginal us (cold minus floor us), dispatches:
+
+    | class | marginal us | cold minus floor us | dispatches |
+    |---|---|---|---|
+    | matvec Q4_0 | 6725.7 | 5841.5 | 275 |
+    | head | 1121.3 | 1167.1 | 1 |
+    | norm-sumsq + fused epilogue | 877.3 | 824.1 | 106 |
+    | norm apply | 842.5 | 357.8 | 170 |
+    | RMSNorm sumsq | 746.3 | 41.3 | 170 |
+    | attention dot | 633.7 | 181.7 | 140 |
+    | attention AV | 610.6 | 722.8 | 35 |
+    | RoPE | 482.3 | 140.2 | 100 |
+    | Candidate B | 451.5 | 145.4 | 35 |
+    | identity copy | 254.0 | 11.9 | 105 |
+    | matvec F16 | 114.4 | 112.0 | 1 |
+
+  - Unexplained: the 17% gap between the marginal sum and busy, and gpu_exec_ms at the
+    captured step (7.83) vs its median (12.00).
+  - One run on a box that was not quiet; repeat interleaved before any decision.
+  - Evidence: `.long_ctx_backups/m0/run1.log`.
+- **M0 repeats, runs 2-4 (2026-09-30 21:58-22:05):** same tree and features.
+  - Box state: a downstream daemon at 67-200% CPU, mds_stores and mediaanalysisd at about 50%; load-1m 4.7-8.8.
+  - Step GPU busy median (ms): run1 15.31, run2 17.37, run3 15.96, run4 15.54.
+  - matvec Q4_0 marginal (ms): 6.73 / 7.98 / 10.02 / 9.19. Its per-dispatch cold time spans
+    29-42 us.
+  - head marginal (ms): 1.12 / 1.12 / 1.10 / 1.08. The ~1.1 ms single dispatch is stable
+    across runs.
+  - Small-op classes vary up to 2x run to run. For example, norm apply marginal is
+    0.84 / 1.35 / 1.06 / 1.04 ms.
+  - Marginal sum vs busy: 0.83 / 0.95 / 1.10 / 1.08.
+  - Invariant held (1154) and 0 replay failures in all 4 runs.
+  - Evidence: `.long_ctx_backups/m0/run{2,3,4}.log`, `run{2,3,4}_state.txt`.
