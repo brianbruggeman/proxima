@@ -1478,7 +1478,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
     };
 
     use super::classify_kind;
-    use crate::msl::diagnose_packed_row_block;
+    use crate::msl::{diagnose_packed_row_block, emit};
     use crate::{Codec, PackedOperands};
 
     /// The last node `program` builds -- see `msl::tests::terminal`'s own
@@ -1631,6 +1631,80 @@ pub(super) mod classify_kind_packed_row_marker_tests {
                  reduce-packed-row-blocked, not fall through to reduce-cooperative"
             );
         }
+    }
+
+    fn multi_token_matmul(tokens: u32, k: u32, rows: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(tokens), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                    (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: proxima_tensor::Keep::Reduce,
+                name: Some("multi_token_matmul".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("multi-token matmul infers");
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+            .expect("multi-token matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    /// gemma4-E2B's width-2 verify matmul: a 2-token `Q4_0` reduce whose
+    /// weight and activation each keep `k` contiguous. Default `index32`
+    /// reads the weight through the block-origin pointer `wblk0`, a spelling
+    /// no marker matched, so `op_profile_kind` reported all 275 of these
+    /// `reduce-cooperative` while `op_profile_codec` counted them `Q4_0`.
+    #[test]
+    fn q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked() {
+        let bound = multi_token_matmul(2, 6144, 1536);
+        let packed_operands = packed_operands_for(&bound, Codec::Q4_0);
+        let kernel = emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
+            .expect("two-token q4_0 matmul emits");
+        assert!(
+            kernel.source.contains("q4_0_element(wblk0"),
+            "precondition: default index32 must render the block-origin read"
+        );
+        assert_eq!(
+            classify_kind(&bound, &packed_operands),
+            "reduce-packed-row-blocked",
+            "block-origin multi-row dispatch must classify as reduce-packed-row-blocked, \
+             not fall through to reduce-cooperative"
+        );
     }
 
     /// The `[sequence, selected, d_in, d_out]` gather

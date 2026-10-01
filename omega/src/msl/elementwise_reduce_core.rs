@@ -1950,5 +1950,8 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // single-row arm above), so it needs its own, distinct marker text.
     "q4_0_element(in",
     "q8_0_element(in",
+    // index32 multi-row reads the weight from the block-origin pointer, which
+    // renders `<codec>_element(wblk0` for every codec instead of `(in`/`(blk`
+    "_element(wblk0",
 ];
 
