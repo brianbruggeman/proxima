@@ -201,6 +201,7 @@ mod decode;
 mod drafter;
 mod kv_ring;
 mod prompt_cache;
+mod prompt_cache_key;
 mod ring_checkpoint;
 mod serving_backend;
 mod tests_all;
@@ -218,12 +219,13 @@ mod prompt_cache_real_model_tests;
 mod thread_index_census_tests;
 use decode::*;
 use kv_ring::{
-    KvRing, attention_cache, rings_cover_speculation, sliding_cached_len_scalar,
+    KvRing, attention_cache, ring_slack_rows, rings_cover_speculation, sliding_cached_len_scalar,
     sliding_ring_geometry, speculative_draft_limit,
 };
 pub use load_model::*;
 pub use prompt_cache::{CachePath, CacheReport, MissReason};
 use prompt_cache::PromptCache;
+use prompt_cache_key::CacheKey;
 use ring_checkpoint::{RingCheckpoint, planned_positions, retained_positions};
 pub(crate) use pregather::*;
 pub use residency_caches::*;
