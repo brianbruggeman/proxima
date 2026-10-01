@@ -39,8 +39,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use memmap2::Mmap;
 use proxima_gguf::{GgmlType, parse_complete};
 use proxima_model_interop::{
-    ArchitectureRegistry, ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel, RopeScaling,
-    ServingConfig,
+    ArchitectureRegistry, ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel,
+    PromptCacheConfig, RopeScaling, ServingConfig,
 };
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, encode_with_bos_eos};
@@ -292,6 +292,7 @@ fn serving_config<'model>(
         ubatch_size: 0,
         reasoning_budget: 0,
         prefill_chunk_positions: options.prefill_chunk_positions,
+        prompt_cache: PromptCacheConfig::off(),
         ..ServingConfig::default()
     }
 }
