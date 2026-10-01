@@ -273,9 +273,14 @@ fn direct_store_matches_restage_path_with_a_partial_edge_tile() {
     check_direct_store_byte_identity("blk.0.attn_q.weight", 510, 100, "partial_edge_tile");
 }
 
-/// Small token count (`8`, `TILED_GEMM_MIN_TOKENS` itself) keeps the run
+/// Small token count (`TILED_GEMM_MIN_TOKENS` itself) keeps the run
 /// fast while still exercising a single dispatched threadgroup end to end.
 #[test]
 fn direct_store_matches_restage_path_at_the_minimum_admitted_token_count() {
-    check_direct_store_byte_identity("blk.0.attn_q.weight", 8, 64, "min_tokens");
+    check_direct_store_byte_identity(
+        "blk.0.attn_q.weight",
+        omega::sized::TILED_GEMM_MIN_TOKENS as usize,
+        64,
+        "min_tokens",
+    );
 }
