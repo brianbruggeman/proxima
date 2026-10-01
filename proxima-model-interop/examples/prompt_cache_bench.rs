@@ -1411,6 +1411,9 @@ fn print_follow_up_summary(label: &str, totals: &FollowUpTotals) {
         totals.saved_tokens,
         spread(&totals.ttft).text()
     );
+    let hit_tokens: Vec<usize> = totals.saved_tokens.iter().copied().filter(|saved| *saved > 0).collect();
+    let mean_per_hit = hit_tokens.iter().sum::<usize>() as f64 / hit_tokens.len().max(1) as f64;
+    println!("  hits={} shared_tokens_per_hit_mean={mean_per_hit:.1}", hit_tokens.len());
     if !totals.draft_ms.is_empty() {
         println!("  drafting ms per answer {}  cache_bytes_after_drafting {:?}", spread(&totals.draft_ms).text(), totals.cache_bytes);
     }
