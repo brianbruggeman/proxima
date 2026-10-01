@@ -1010,6 +1010,9 @@ pub struct LoadedModel<'file> {
     /// type stays `Sync` behind an `Arc`); held only to take an entry out or
     /// put one back, never across a decode.
     pub(super) prompt_cache: std::sync::Mutex<super::PromptCache>,
+    /// Who may use the device, a request or an anticipatory prefill
+    /// ([`super::prewarm_gate`]'s module doc).
+    pub(super) prewarm_gate: super::PrewarmGate,
 }
 
 /// Concrete qwen35moe router/gather partitions for one KV shape bucket.

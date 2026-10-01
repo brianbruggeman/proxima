@@ -202,6 +202,8 @@ mod drafter;
 mod kv_ring;
 mod prompt_cache;
 mod prompt_cache_key;
+mod prewarm;
+mod prewarm_gate;
 mod ring_checkpoint;
 mod serving_backend;
 mod tests_all;
@@ -223,8 +225,10 @@ use kv_ring::{
     sliding_ring_geometry, speculative_draft_limit,
 };
 pub use load_model::*;
+pub use prewarm::{PrewarmReport, PrewarmSkip};
 pub use prompt_cache::{CachePath, CacheReport, MissReason};
 use prompt_cache::PromptCache;
+use prewarm_gate::PrewarmGate;
 use prompt_cache_key::CacheKey;
 use ring_checkpoint::{RingCheckpoint, planned_positions, retained_positions};
 pub(crate) use pregather::*;
