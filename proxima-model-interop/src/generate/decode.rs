@@ -2295,15 +2295,7 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let effective_serving_config = {
-            let mut effective_serving_config = *serving_config;
-            self.apply_command_buffer_chunks_default(&mut effective_serving_config);
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            self.apply_memory_fit_gate(&mut effective_serving_config)?;
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            self.apply_dispatch_type_override(&mut effective_serving_config)?;
-            effective_serving_config
-        };
+        let effective_serving_config = self.effective_serving_config(serving_config)?;
         let mut runtime = BackendRuntime::new(&effective_serving_config);
         let (generated_ids, text, stopped_by_eos, _final_state) = self
             .run_decode_loop_through_cache(
@@ -2381,6 +2373,23 @@ impl<'file> LoadedModel<'file> {
                 forced_draft_width,
             )?;
         Ok((generated_ids, text, stopped_by_eos))
+    }
+
+    /// `serving_config` with the model-dependent defaults every request entry
+    /// point applies before it builds a runtime: the command-buffer chunk
+    /// default, and on Metal the memory-fit gate and the dispatch-type
+    /// override.
+    pub(super) fn effective_serving_config<'config>(
+        &self,
+        serving_config: &ServingConfig<'config>,
+    ) -> Result<ServingConfig<'config>, InteropError> {
+        let mut effective_serving_config = *serving_config;
+        self.apply_command_buffer_chunks_default(&mut effective_serving_config);
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        self.apply_memory_fit_gate(&mut effective_serving_config)?;
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        self.apply_dispatch_type_override(&mut effective_serving_config)?;
+        Ok(effective_serving_config)
     }
 
     /// Applies this checkpoint's own resolved
