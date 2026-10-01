@@ -109,6 +109,18 @@ fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]
     outputs
 }
 
+/// The pruned production op count: 1661 in the stored `ENCODE_DISPATCH_CALLS`
+/// log, which predates the `identity-copy-alias` rule. With that feature on
+/// (it is in the production feature set) the rule aliases 70 elementwise
+/// identity copies: the census prints 488 elementwise ops without it and 418
+/// with it, and every other op kind's count is the same either way.
+const IDENTITY_COPIES_ALIASED: usize = 70;
+const STORED_PRODUCTION_TOTAL: usize = if cfg!(feature = "identity-copy-alias") {
+    1661 - IDENTITY_COPIES_ALIASED
+} else {
+    1661
+};
+
 fn truncated_debug(kind: &BoundOpKind) -> String {
     let full = format!("{kind:?}");
     if full.len() > 200 {
@@ -216,10 +228,10 @@ fn run_one_bind(
         outputs.len()
     );
     if !fuse_cached_attention {
-        const OBSERVED_PRODUCTION_TOTAL: usize = 1661;
+        const OBSERVED_PRODUCTION_TOTAL: usize = STORED_PRODUCTION_TOTAL;
         println!(
             "gemma4_attention_chain_census[{label}]: total_bound_ops={} \
-             equals_stored_production_log_1661={} -- requested_outputs={} new_count={NEW_COUNT} \
+             equals_stored_production_log={STORED_PRODUCTION_TOTAL}:{} -- requested_outputs={} new_count={NEW_COUNT} \
              kv_bucket_extent={KV_BUCKET_EXTENT} (this test's own s/bucket/outputs, spelled out so \
              a mismatch can be attributed rather than guessed)",
             bound_ops.len(),
@@ -541,7 +553,7 @@ async fn gemma4_attention_chain_census() {
     // gone), confirmed by this assertion itself passing.
     assert_eq!(
         unfused_bound_ops.len(),
-        1661,
+        STORED_PRODUCTION_TOTAL,
         "unfused_production, pruned, must match the stored ENCODE_DISPATCH_CALLS log"
     );
     println!("gemma4_attention_chain_census: physical launches remain unmeasured");
