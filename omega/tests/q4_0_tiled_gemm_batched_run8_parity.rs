@@ -4,8 +4,8 @@
 //! `q4_0_real_checkpoint_parity.rs` already reads). Two real weight
 //! tensors: `blk.0.attn_q.weight` (the attention Q projection) and
 //! `blk.0.ffn_gate.weight` (the FFN gate, `in_dim=1536` -> ffn width), at
-//! `T = 8, 64, 510` tokens -- `8` is `TILED_GEMM_MIN_TOKENS` itself (the
-//! boundary the tiled path's admission gate opens at), `510` is this
+//! `T = TILED_GEMM_MIN_TOKENS, 64, 510` tokens -- the first is the
+//! boundary the tiled path's admission gate opens at, `510` is this
 //! session's own prefill-length target.
 //!
 //! Compares THREE things per shape: the new batched-`q4_0_run8` tiled path
@@ -504,28 +504,28 @@ fn check_real_tensor_epilogue_at_token_count(tensor_name: &str, tokens: usize) {
 
 #[test]
 fn attn_q_projection_batched_run8_matches_row_blocked_and_f32_oracle_with_a_fused_epilogue() {
-    for tokens in [8usize, 64, 510] {
+    for tokens in [omega::sized::TILED_GEMM_MIN_TOKENS as usize, 64, 510] {
         check_real_tensor_epilogue_at_token_count("blk.0.attn_q.weight", tokens);
     }
 }
 
 #[test]
 fn ffn_gate_projection_batched_run8_matches_row_blocked_and_f32_oracle_with_a_fused_epilogue() {
-    for tokens in [8usize, 64, 510] {
+    for tokens in [omega::sized::TILED_GEMM_MIN_TOKENS as usize, 64, 510] {
         check_real_tensor_epilogue_at_token_count("blk.0.ffn_gate.weight", tokens);
     }
 }
 
 #[test]
 fn attn_q_projection_batched_run8_matches_row_blocked_and_f32_oracle() {
-    for tokens in [8usize, 64, 510] {
+    for tokens in [omega::sized::TILED_GEMM_MIN_TOKENS as usize, 64, 510] {
         check_real_tensor_at_token_count("blk.0.attn_q.weight", tokens);
     }
 }
 
 #[test]
 fn ffn_gate_projection_batched_run8_matches_row_blocked_and_f32_oracle() {
-    for tokens in [8usize, 64, 510] {
+    for tokens in [omega::sized::TILED_GEMM_MIN_TOKENS as usize, 64, 510] {
         check_real_tensor_at_token_count("blk.0.ffn_gate.weight", tokens);
     }
 }

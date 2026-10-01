@@ -13,7 +13,7 @@
 //! `PROXIMA_TILED_GEMM_Q4_0=1` to admit Q4_0 into the tiled path at all,
 //! each experiment layered on top, one at a time and combined, compared
 //! against the independent dequantize+f32-CPU-matmul oracle. Token counts
-//! `8` (`TILED_GEMM_MIN_TOKENS` itself), `37` (deliberately NOT a multiple
+//! `TILED_GEMM_MIN_TOKENS` itself, `37` (deliberately NOT a multiple
 //! of `BLOCK_N`=32, so every arm exercises a genuine boundary/edge column
 //! tile as well as interior ones), and `510` (this session's own
 //! prefill-length target) are used.
@@ -293,7 +293,7 @@ fn check_real_tensor_at_token_count(tensor_name: &str, tokens: usize) {
 
 #[test]
 fn attn_q_all_staging_switches_match_the_f32_oracle_at_min_tokens() {
-    check_real_tensor_at_token_count("blk.0.attn_q.weight", 8);
+    check_real_tensor_at_token_count("blk.0.attn_q.weight", omega::sized::TILED_GEMM_MIN_TOKENS as usize);
 }
 
 #[test]

@@ -47,8 +47,10 @@ split_k_max_rows = 4096
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the
 # `simdgroup_matrix`-tiled path (`push_tiled_gemm_body`) — see
 # sized::TILED_GEMM_MIN_TOKENS. `feature = "metal-tiled-gemm"`-only; emitted
-# only when that feature is active.
-min_tokens = 8
+# only when that feature is active. 9 because gemma4-E2B's 8-token verify step
+# measured 149.764 ms on the row-blocked body against 178.214 ms tiled
+# (N=14 each, KV ~1600, speculative_bench --verify-width-sweep).
+min_tokens = 9
 
 # per-threadgroup output tile shape (ROW 109 redesign) — ports
 # `ggml-metal.metal:6487` (`BLOCK_SIZE_M`). Must be a multiple of 16 (2
