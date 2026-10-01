@@ -1,0 +1,5 @@
+{"turn":0,"doc_id":"rag008","from_char":0,"chars":3200,"instruction":"I'm debugging gemma4 generation on Metal. Below is the section of our notes on the eviction bug. In two sentences, what was the root cause and what fixed it?"}
+{"turn":1,"doc_id":"rag009","from_char":0,"chars":2400,"instruction":"Got it. A different area now: this is how we describe the pipe algebra. Which of its forms would a prompt cache fall under, and why?"}
+{"turn":2,"doc_id":"rag010","from_char":0,"chars":2400,"instruction":"Next excerpt, from the ring buffer work. Does anything in it constrain how we would checkpoint a sliding-window ring?"}
+{"turn":3,"doc_id":"rag015","from_char":0,"chars":2400,"instruction":"Here is the builder design note. List the two builders and say what state they share."}
+{"turn":4,"doc_id":"rag016","from_char":0,"chars":2400,"instruction":"One more, on logging cost. What is the trade-off it names, and what does it propose?"}
