@@ -1130,6 +1130,58 @@ mod tests {
     }
 
     #[test]
+    fn a_block_the_hash_names_is_never_matched_when_the_owners_tokens_differ() {
+        let mut held = Held::with_capacity(4);
+        let conversation = run(100, 3);
+        held.add(&conversation).unwrap();
+        let impostor = run(900, 3);
+        let impostor_of = |_: u64| Some(impostor.as_slice());
+
+        let found = held
+            .trie
+            .best(&conversation, &impostor_of, SubBlock::ShortOnly, |_, _| {
+                Some(1)
+            });
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn a_lookup_offers_only_the_entries_below_the_deepest_node_the_prompt_reaches() {
+        let mut held = Held::with_capacity(16);
+        let header = run(100, 8);
+        let conversations: Vec<Vec<u32>> = (0..8)
+            .map(|branch| joined(&[&header, &run(1000 + branch * 100, 4)]))
+            .collect();
+        let unrelated: Vec<Vec<u32>> = (0..8).map(|branch| run(5000 + branch * 100, 8)).collect();
+        conversations.iter().chain(&unrelated).for_each(|ids| {
+            held.add(ids).unwrap();
+        });
+        let offers = |prompt: &[u32]| {
+            let entries = &held.entries;
+            let mut offered = 0;
+            held.trie.best(
+                prompt,
+                &|stamp| entries.get(&stamp).map(Vec::as_slice),
+                SubBlock::ShortOnly,
+                |_, _| {
+                    offered += 1;
+                    Some(1)
+                },
+            );
+            offered
+        };
+
+        let extending_one = offers(&joined(&[&conversations[3], &[7]]));
+        let sharing_the_header = offers(&joined(&[&header, &run(9000, 4)]));
+        let sharing_nothing = offers(&run(8000, 12));
+
+        assert_eq!(extending_one, 1, "the leaf of the conversation it extends");
+        assert_eq!(sharing_the_header, 8, "every conversation under the header");
+        assert_eq!(sharing_nothing, 0, "no entry is touched");
+    }
+
+    #[test]
     fn a_node_stays_within_one_cache_line() {
         assert!(
             PrefixTrie::node_bytes() <= 64,
