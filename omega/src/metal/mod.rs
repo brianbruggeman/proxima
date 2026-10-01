@@ -269,6 +269,10 @@ use prepare_uniforms_pack::*;
 pub use pipeline_buffers_upload::*;
 pub use resident_nocopy_cache::*;
 use arena_encode_dispatch_finish::*;
+#[cfg(feature = "instrument")]
+pub use arena_encode_dispatch_finish::{
+    CapturedDispatch, flush_gpu_caches, take_captured_dispatches, time_empty_command_buffer_gpu_ns,
+};
 
 /// Commits `command_buffer` and blocks until the GPU finishes it, THEN
 /// checks the outcome -- `waitUntilCompleted` returning is proof the buffer
