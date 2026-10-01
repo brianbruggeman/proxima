@@ -35,6 +35,7 @@ use std::time::Duration;
 use proxima_telemetry::{debug, error};
 
 use super::block_bloom::{BlockBloom, content_hashes};
+use super::chunk_shift::MovedRun;
 use super::prefix_trie::{PrefixTrie, SubBlock, TrieError};
 use super::*;
 
@@ -74,6 +75,11 @@ pub enum CachePath {
     /// checkpoint at or before the shared prefix restored their rows, and the
     /// request prefilled from the checkpoint onward.
     Checkpoint,
+    /// Runs of the prompt past the shared prefix were found elsewhere in the
+    /// entry and moved to their new positions with their keys re-rotated
+    /// ([`crate::PromptCacheConfig::cache_reuse_min`], spec R5); the tokens
+    /// between them were prefilled.
+    Shift,
     /// No entry could be reused; the whole prompt was prefilled.
     Miss,
 }
@@ -86,6 +92,7 @@ impl CachePath {
             Self::Extend => "extend",
             Self::Rewind => "rewind",
             Self::Checkpoint => "checkpoint",
+            Self::Shift => "shift",
             Self::Miss => "miss",
         }
     }
@@ -153,8 +160,9 @@ pub struct CacheReport {
     /// of the prompt, so the last token is always forwarded).
     pub lcp: usize,
     /// Tokens served from the cache without a forward pass: `lcp`, or the
-    /// position of the checkpoint restored when `path` is
-    /// [`CachePath::Checkpoint`].
+    /// position of the checkpoint restored when the entry came back through a
+    /// checkpoint, plus [`Self::shifted_tokens`] when `path` is
+    /// [`CachePath::Shift`].
     pub reused_tokens: usize,
     /// Tokens of the prompt the forward pass had to prefill.
     pub prefilled_tokens: usize,
@@ -174,6 +182,10 @@ pub struct CacheReport {
     /// prefilled; `0` when the entry was not a branch or the request left it
     /// at the shared answer.
     pub follow_up_hit_tokens: usize,
+    /// Tokens of `reused_tokens` that were moved from another position of the
+    /// entry rather than kept in place; `0` unless `path` is
+    /// [`CachePath::Shift`].
+    pub shifted_tokens: usize,
 }
 
 impl CacheReport {
@@ -187,6 +199,7 @@ impl CacheReport {
             prewarm_hit_tokens: 0,
             prewarm_wait: Duration::ZERO,
             follow_up_hit_tokens: 0,
+            shifted_tokens: 0,
         }
     }
 }
@@ -360,6 +373,10 @@ pub(super) struct CacheEntry {
     /// Which content blocks the stored ids hold, set when the cache stores
     /// the entry ([`PromptCache::bloom_candidates`]).
     pub(super) bloom: Option<BlockBloom>,
+    /// Chunks the lookup lifted out of the stored rows before it rewound them,
+    /// in prompt order; the request writes each at its position as its prefill
+    /// reaches it ([`CacheEntry::apply_moved`]).
+    pub(super) moved: Vec<MovedRun>,
 }
 
 impl CacheEntry {
@@ -372,6 +389,7 @@ impl CacheEntry {
             prewarmed: None,
             branch_base: None,
             bloom: None,
+            moved: Vec::new(),
         }
     }
 
@@ -504,6 +522,11 @@ impl CacheEntry {
     }
 }
 
+/// What lifts the chunks out of an entry the prompt shares past its prefix,
+/// given the entry before it is rewound and the prefix length
+/// ([`LoadedModel::lift_chunks`]).
+pub(super) type Lift<'lift> = &'lift mut dyn FnMut(&CacheEntry, usize) -> Vec<MovedRun>;
+
 fn ids_in(entries: &BTreeMap<u64, CacheEntry>, stamp: u64) -> Option<&[u32]> {
     entries.get(&stamp).map(|entry| entry.state.ids.as_slice())
 }
@@ -607,19 +630,37 @@ impl PromptCache {
         widths: &[LayerPadRowWidths],
         min_similarity_milli: u32,
     ) -> (Option<CacheEntry>, CacheReport) {
+        self.take_best_shifting(prompt_ids, key, widths, min_similarity_milli, None)
+    }
+
+    /// [`Self::take_best`] that also lifts the chunks of the entry the prompt
+    /// shares past the prefix (`lift`, given the entry before it is rewound
+    /// and the prefix length), so the request moves them instead of
+    /// prefilling them. A request that lifted any reports
+    /// [`CachePath::Shift`].
+    pub(super) fn take_best_shifting(
+        &mut self,
+        prompt_ids: &[u32],
+        key: &CacheKey,
+        widths: &[LayerPadRowWidths],
+        min_similarity_milli: u32,
+        lift: Option<Lift<'_>>,
+    ) -> (Option<CacheEntry>, CacheReport) {
         let best = self.best_candidate(prompt_ids, key, min_similarity_milli);
         let resume = best.map(|(stamp, lcp)| (stamp, lcp.min(prompt_ids.len().saturating_sub(1))));
         let outcome = match resume {
             None => Err(self.miss_reason(prompt_ids, key)),
             Some((_, 0)) => Err(MissReason::NoCommonPrefix),
             Some((stamp, resume_len)) => self
-                .resume_at(stamp, resume_len, widths)
+                .resume_at(stamp, resume_len, widths, lift)
                 .map(|(entry, path)| (entry, path, resume_len)),
         };
         let (entry, report) = match outcome {
             Ok((mut entry, path, lcp)) => {
                 entry.clamp_prewarmed();
-                let reused = entry.state.cached_len;
+                let shifted: usize = entry.moved.iter().map(|moved| moved.run.len).sum();
+                let held = entry.state.cached_len;
+                let reused = held + shifted;
                 let report = CacheReport {
                     lcp,
                     reused_tokens: reused,
@@ -630,7 +671,8 @@ impl PromptCache {
                     prewarm_wait: Duration::ZERO,
                     follow_up_hit_tokens: entry
                         .branch_base
-                        .map_or(0, |base| reused.saturating_sub(base)),
+                        .map_or(0, |base| held.saturating_sub(base)),
+                    shifted_tokens: shifted,
                 };
                 (Some(entry), report)
             }
@@ -702,12 +744,22 @@ impl PromptCache {
         stamp: u64,
         resume_len: usize,
         widths: &[LayerPadRowWidths],
+        lift: Option<Lift<'_>>,
     ) -> Result<(CacheEntry, CachePath), MissReason> {
         let mut entry = self
             .drop_entry(stamp)
             .ok_or(MissReason::UnrewindableLayer)?;
+        let moved = lift.map_or_else(Vec::new, |lift| lift(&entry, resume_len));
         match entry.resume(resume_len, widths) {
-            Ok(path) => Ok((entry, path)),
+            Ok(path) => {
+                let path = if moved.is_empty() {
+                    path
+                } else {
+                    CachePath::Shift
+                };
+                entry.moved = moved;
+                Ok((entry, path))
+            }
             Err(reason) => {
                 self.keep(stamp, entry);
                 Err(reason)
@@ -990,14 +1042,24 @@ impl LoadedModel<'_> {
         key: &CacheKey,
         widths: &[LayerPadRowWidths],
         waited: Duration,
-        min_similarity_milli: u32,
+        serving_config: &ServingConfig,
     ) -> (Option<CacheEntry>, CacheReport) {
+        let config = serving_config.prompt_cache;
+        let mut lift = |entry: &CacheEntry, from: usize| {
+            self.lift_chunks(entry, prompt_ids, from, widths, serving_config)
+        };
+        let shifting = config.cache_reuse_min > 0 && config.ring_rewind_slack > 0;
         let mut cache = self
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (mut entry, mut report) =
-            cache.take_best(prompt_ids, key, widths, min_similarity_milli);
+        let (mut entry, mut report) = cache.take_best_shifting(
+            prompt_ids,
+            key,
+            widths,
+            config.min_similarity_milli,
+            shifting.then_some(&mut lift as Lift<'_>),
+        );
         report.prewarm_wait = waited;
         cache.last_report = Some(report);
         let bloom = cache.bloom_candidates(prompt_ids, key, report.reused_tokens);
@@ -1009,6 +1071,7 @@ impl LoadedModel<'_> {
         debug!(
             cache_lcp = report.lcp as u64,
             cache_reused_tokens = report.reused_tokens as u64,
+            cache_shifted_tokens = report.shifted_tokens as u64,
             cache_prefilled_tokens = report.prefilled_tokens as u64,
             cache_path = report.path.as_str(),
             cache_miss_reason = report.miss.map_or("none", MissReason::as_str),
@@ -1172,33 +1235,26 @@ impl LoadedModel<'_> {
         apply_serving_config(serving_config, ids.len())?;
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let key = self.cache_key(serving_config, runtime, forced_draft_width);
-        let (found, report) = self.prompt_cache_lookup(
-            &ids,
-            &key,
-            &widths,
-            pending.waited(),
-            config.min_similarity_milli,
-        );
+        let (found, _) =
+            self.prompt_cache_lookup(&ids, &key, &widths, pending.waited(), serving_config);
         let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
         let positions = planned_positions(
             &entry.checkpoint_positions(),
-            report.reused_tokens,
+            entry.state.cached_len,
             ids.len(),
             turn_ends,
             &config,
         );
         let mut entry = self
-            .prefill_through_stops(
+            .prefill_through_runs(
                 &ids,
                 entry,
-                &positions,
                 &positions,
                 &widths,
                 &config,
                 serving_config,
                 runtime,
                 forced_draft_width,
-                &mut |_position| ControlFlow::Continue(()),
             )
             .inspect_err(log_entry_dropped)?;
         let resumed_at = entry.state.cached_len;
@@ -1243,6 +1299,7 @@ mod tests {
     use proxima_tensor::NumericPolicy;
 
     use super::*;
+    use crate::generate::chunk_shift::ChunkRun;
     use crate::serving::{ContextLength, GdnPrefillBackend};
 
     const ANY_OVERLAP: u32 = 0;
@@ -1271,6 +1328,100 @@ mod tests {
             byte_budget: 1 << 20,
             ..PromptCacheConfig::off()
         }
+    }
+
+    fn stored_conversation_and_squashed_prompt() -> (Vec<u32>, Vec<u32>) {
+        let stored: Vec<u32> = (1..=40).collect();
+        let prompt: Vec<u32> = (1..=10)
+            .chain(100..=103)
+            .chain(21..=35)
+            .chain([200])
+            .collect();
+        (stored, prompt)
+    }
+
+    fn lifted_run() -> MovedRun {
+        MovedRun {
+            run: ChunkRun {
+                old_start: 20,
+                new_start: 14,
+                len: 15,
+            },
+            ids: (21..=35).collect(),
+            layers: Vec::new(),
+        }
+    }
+
+    /// Worked example, by hand. The cache holds 40 tokens (1..=40); the prompt
+    /// keeps 1..=10, puts four new tokens (100..=103) where 11..=20 were,
+    /// keeps 21..=35 and ends on 200: 30 tokens, a shared prefix of 10. The
+    /// lift sees the entry whole (40 rows, before any rewind) and finds the
+    /// 15 tokens 21..=35 at stored 20, prompt 14. The entry comes back at the
+    /// 10 shared rows with the run attached; the request reports a shift that
+    /// reused 10 + 15 = 25 tokens and has 30 - 25 = 5 left to prefill.
+    #[test]
+    fn a_lifted_run_turns_the_request_into_a_shift_that_counts_the_moved_tokens_as_reused() {
+        let (stored, prompt) = stored_conversation_and_squashed_prompt();
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&stored), &enabled_config());
+        let mut lift = |entry: &CacheEntry, from: usize| {
+            assert_eq!(from, 10, "the lift gets the shared prefix");
+            assert_eq!(
+                entry.state.cached_len, 40,
+                "the lift runs before the rewind"
+            );
+            vec![lifted_run()]
+        };
+
+        let (entry, report) = cache.take_best_shifting(
+            &prompt,
+            &base_key(),
+            &shared_widths(),
+            ANY_OVERLAP,
+            Some(&mut lift),
+        );
+
+        let entry = entry.expect("the entry is taken");
+        assert_eq!(report.path, CachePath::Shift);
+        assert_eq!(report.lcp, 10);
+        assert_eq!(report.shifted_tokens, 15);
+        assert_eq!(report.reused_tokens, 25);
+        assert_eq!(report.prefilled_tokens, 5);
+        assert_eq!(entry.state.cached_len, 10);
+        assert_eq!(entry.moved.len(), 1);
+    }
+
+    #[test]
+    fn a_lift_that_finds_nothing_leaves_the_path_a_rewind() {
+        let (stored, prompt) = stored_conversation_and_squashed_prompt();
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&stored), &enabled_config());
+        let mut lift = |_entry: &CacheEntry, _from: usize| Vec::new();
+
+        let (entry, report) = cache.take_best_shifting(
+            &prompt,
+            &base_key(),
+            &shared_widths(),
+            ANY_OVERLAP,
+            Some(&mut lift),
+        );
+
+        assert_eq!(report.path, CachePath::Rewind);
+        assert_eq!(report.shifted_tokens, 0);
+        assert_eq!(report.reused_tokens, 10);
+        assert!(entry.expect("the entry is taken").moved.is_empty());
+    }
+
+    #[test]
+    fn without_a_lift_the_same_request_is_a_plain_rewind() {
+        let (stored, prompt) = stored_conversation_and_squashed_prompt();
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&stored), &enabled_config());
+
+        let (_, report) = cache.take_best(&prompt, &base_key(), &shared_widths(), ANY_OVERLAP);
+
+        assert_eq!(report.path, CachePath::Rewind);
+        assert_eq!(report.reused_tokens, 10);
     }
 
     /// A conversation turn extends the previous prompt and its generated

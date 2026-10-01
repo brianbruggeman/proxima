@@ -718,6 +718,14 @@ pub enum InteropError {
         reason: &'static str,
     },
 
+    /// The prompt cache could not write a shifted chunk of cached rows at
+    /// `position`, the first token of the chunk in the new prompt.
+    #[error("prompt cache chunk shift at {position} refused: {reason}")]
+    PromptCacheShift {
+        position: usize,
+        reason: &'static str,
+    },
+
     /// The bound program bounds layer `layer`'s `kv_cache.{layer}.*` leaves
     /// by the sliding-ring slot (`proxima_tensor::spec::SLIDING_KV_SYMBOL`),
     /// but the checkpoint's own `kv_layers` gives that layer no window to size

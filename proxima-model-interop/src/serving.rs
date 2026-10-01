@@ -502,7 +502,18 @@ pub struct PromptCacheConfig {
     /// [`Self::byte_budget`].
     pub max_checkpoints: u32,
     /// Shortest run of tokens worth shifting after a divergence (spec R5,
-    /// not yet wired); `0` keeps chunk reuse off like llama's `n_cache_reuse`.
+    /// llama's `n_cache_reuse`): a run of at least this many tokens that the
+    /// prompt shares with the entry at another position is moved with its keys
+    /// re-rotated by the position delta instead of prefilled, e.g. `256` for
+    /// the turns kept after a summary replaced the middle of a conversation.
+    /// The moved rows were computed under the entry's older context, so the
+    /// layers past the first full-attention layer hold keys and values that
+    /// differ from a fresh prefill of the new prompt, and the ids generated
+    /// from them can differ too, as they do under llama-server; an entry built
+    /// from a shift carries those rows into later requests. Needs
+    /// [`Self::ring_rewind_slack`] above zero, and a run whose sliding-window
+    /// rows the entry's ring has overwritten is prefilled instead. `0` keeps
+    /// chunk reuse off like llama's `n_cache_reuse`.
     pub cache_reuse_min: u32,
     /// Tokens one anticipatory-prefill chunk covers (spec R10): a prewarm
     /// stops at every multiple of this to check whether a request is waiting,

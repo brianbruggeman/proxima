@@ -23,12 +23,13 @@
 
 use super::*;
 
-/// One ring layer's live rows at a checkpoint position, oldest first.
-struct LayerRows {
-    layer: usize,
-    k_even: Vec<f32>,
-    k_odd: Vec<f32>,
-    v: Vec<f32>,
+/// One layer's rows, oldest first: a ring layer's live window at a checkpoint
+/// position, or the rows of a chunk a request moves ([`super::chunk_shift`]).
+pub(super) struct LayerRows {
+    pub(super) layer: usize,
+    pub(super) k_even: Vec<f32>,
+    pub(super) k_odd: Vec<f32>,
+    pub(super) v: Vec<f32>,
 }
 
 /// The ring rows every sliding layer needs at `position` tokens.
