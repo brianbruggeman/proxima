@@ -181,6 +181,12 @@ pub(crate) struct MetalOnlyExtras {
     /// binary, matching [`Self::packed_row_block_rows_override`]'s own
     /// same-binary A/B posture.
     pub q4_0_multi_row_hoist: bool,
+    /// `PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE` (default on): `true` only when
+    /// [`crate::msl::push_packed_row_multi_row_body`] renders its `Q4_0`
+    /// pair-lane arm for this op. Feeds the `_q0l` suffix below so the
+    /// pair-lane and generic `Q4_0` multi-row variants compile as two
+    /// distinct pipelines and coexist in the same binary.
+    pub q4_0_multi_row_pair_lane: bool,
     /// literal `q`/`s` indices let the accumulator promote out of private
     /// memory. Feeds the `_u` suffix.
     pub multi_row_unroll: bool,
@@ -824,6 +830,9 @@ mod gated {
         }
         if metal.q4_0_multi_row_hoist {
             identity.push_str("_q0h");
+        }
+        if metal.q4_0_multi_row_pair_lane {
+            identity.push_str("_q0l");
         }
         if metal.tiled_gemm_q4_0 {
             identity.push_str("_tgq0");

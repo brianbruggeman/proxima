@@ -1010,6 +1010,8 @@ pub(super) fn push_packed_row_multi_row_body(
     // must unroll to literals or the array never promotes out of memory.
     let unroll_active = multi_row_unroll_active(resolved, quantized, expert_source_mode);
     let index32_active = multi_row_index32_active(resolved, quantized, expert_source_mode);
+    let pair_lane_active =
+        fast_q4_0_pair_lane_active(resolved, quantized, block, reduce_op, expert_source_mode);
 
     source.push_str("    long feature_total = 1;\n");
     for index in 0..feature_axes.len() {
@@ -1180,6 +1182,15 @@ pub(super) fn push_packed_row_multi_row_body(
         push_packed_row_multi_row_q4k_body(
             source,
             weight,
+            other,
+            rows,
+            cap,
+            codec_block_bytes(block.codec),
+            metal,
+        );
+    } else if pair_lane_active {
+        push_packed_row_multi_row_q4_0_pair_lane_body(
+            source,
             other,
             rows,
             cap,
@@ -1617,6 +1628,102 @@ pub(super) fn push_packed_row_multi_row_q6k_body(
     ));
     source.push_str("        y_offset += y_step;\n");
     source.push_str("    }\n");
+}
+
+/// Renders [`push_packed_row_multi_row_body`]'s `Codec::Q4_0` reduction loop
+/// (`PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE`, default on). Eight lanes read one
+/// block's 16 packed bytes two at a time (`ushort`), four blocks per step
+/// across the 32 lanes, so each lane owns four elements of one block --
+/// elements `2m`, `2m + 1` (low nibbles) and `16 + 2m`, `17 + 2m` (high
+/// nibbles) of lane pair `m`.
+///
+/// Each lane decodes its four elements once per row and folds them against
+/// every token of the group: the weight work is independent of the token
+/// count, where the generic arm's lane-per-element walk pays a header read, a
+/// nibble select and a conversion per element. Nibbles are masked in place
+/// (`pk & 0x0F00` is `256 * nibble`) and the scale pre-divided by the same
+/// power of two, so `fma(level, scale, -8 * d)` is exactly `(nibble - 8) * d`.
+/// Activations are read as two adjacent `float2` per token, eight lanes
+/// covering a contiguous 64-byte run, so a load touches a few cache lines
+/// where a lane-per-block gather touches one per lane.
+///
+/// `packed_row_block` only admits a reduction extent that is a whole number of
+/// 256-element super-blocks, so the four-block step never leaves a tail.
+// `q`/`s` are literals so `sumf` keeps promoting out of private memory under
+// the unrolled init/epilogue the caller renders.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_packed_row_multi_row_q4_0_pair_lane_body(
+    source: &mut String,
+    other: usize,
+    rows: usize,
+    cap: usize,
+    block_bytes: usize,
+    metal: &MetalOnlyExtras,
+) {
+    let reduction_bound = packed_row_reduction_bound_token(metal);
+    source.push_str("    uint block_slot = (uint)lane / 8u;\n");
+    source.push_str("    uint pair = (uint)lane % 8u;\n");
+    source.push_str(&format!(
+        "    uint block_total = (uint)({reduction_bound}) / {Q4_0_BLOCK_ELEMENTS}u;\n"
+    ));
+    source.push_str("    uint groups = block_total / 4u;\n");
+    for row in 0..rows {
+        source.push_str(&format!(
+            "    device const uchar *blk{row} = wblk0 + (ulong)(weight_base[{row}] / {Q4_0_BLOCK_ELEMENTS}u + block_slot) * {block_bytes}UL;\n"
+        ));
+    }
+    for token in 0..cap {
+        source.push_str(&format!(
+            "    device const float *act{token} = in{other} + other_base[{token}] + (long)block_slot * {Q4_0_BLOCK_ELEMENTS} + (long)(2u * pair);\n"
+        ));
+    }
+    source.push_str("    for (uint group = 0u; group < groups; ++group) {\n");
+    push_q4_0_pair_lane_step(source, rows, cap, block_bytes);
+    source.push_str("    }\n");
+}
+
+fn push_q4_0_pair_lane_step(source: &mut String, rows: usize, cap: usize, block_bytes: usize) {
+    for token in 0..cap {
+        source.push_str(&format!(
+            "        float2 act_low{token} = float2(*(device const packed_float2 *)(act{token}));\n"
+        ));
+        source.push_str(&format!(
+            "        float2 act_high{token} = float2(*(device const packed_float2 *)(act{token} + 16));\n"
+        ));
+        source.push_str(&format!(
+            "        act{token} += 4 * {Q4_0_BLOCK_ELEMENTS};\n"
+        ));
+    }
+    for row in 0..rows {
+        source.push_str("        {\n");
+        source.push_str(&format!(
+            "            float scale = (float)(*(device const half *)blk{row});\n"
+        ));
+        source.push_str("            float offset = -8.0f * scale;\n");
+        source.push_str(&format!(
+            "            uint packed_pair = (uint)(*(device const ushort *)(blk{row} + 2u + 2u * pair));\n"
+        ));
+        source.push_str("            float w0 = fma((float)(packed_pair & 0x000Fu), scale, offset);\n");
+        source.push_str("            float w1 = fma((float)(packed_pair & 0x0F00u), scale * 0.00390625f, offset);\n");
+        source.push_str("            float w2 = fma((float)(packed_pair & 0x00F0u), scale * 0.0625f, offset);\n");
+        source.push_str("            float w3 = fma((float)(packed_pair & 0xF000u), scale * 0.000244140625f, offset);\n");
+        for token in 0..cap {
+            source.push_str(&format!(
+                "            sumf[{token}][{row}] = sumf[{token}][{row}] + w0 * act_low{token}.x;\n"
+            ));
+            source.push_str(&format!(
+                "            sumf[{token}][{row}] = sumf[{token}][{row}] + w1 * act_low{token}.y;\n"
+            ));
+            source.push_str(&format!(
+                "            sumf[{token}][{row}] = sumf[{token}][{row}] + w2 * act_high{token}.x;\n"
+            ));
+            source.push_str(&format!(
+                "            sumf[{token}][{row}] = sumf[{token}][{row}] + w3 * act_high{token}.y;\n"
+            ));
+        }
+        source.push_str("        }\n");
+        source.push_str(&format!("        blk{row} += 4 * {block_bytes};\n"));
+    }
 }
 
 /// Renders [`push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast-path
@@ -2107,6 +2214,7 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // `"reduce-cooperative"`.
     "q4_0_pair_dot(blk",
     "q8_0_pair_dot(blk",
+    "packed_pair = (uint)(*(device const ushort *)(blk",
     // `push_packed_row_multi_row_body`'s generic (non-`fast_q4k`) loop reads
     // through `signature_tokens_prelude::operand_read` instead of the
     // single-row body's named helpers -- for `Q4_0`/`Q8_0` that renders

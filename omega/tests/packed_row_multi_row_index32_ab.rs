@@ -168,7 +168,7 @@ fn run_bits(
     // row-blocked `push_packed_row_multi_row_body` this file's index32/
     // unroll knobs live in, rather than silently diverting to the tiled
     // path and testing nothing about either knob.
-    let output = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+    let output = temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
         temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
             temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", index32_env, || {
                 let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
@@ -202,7 +202,7 @@ fn plan_kernel_keys(
         },
         QuantizedBlock::Float32(&activation),
     ];
-    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+    temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
         temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
             temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", index32_env, || {
                 let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
