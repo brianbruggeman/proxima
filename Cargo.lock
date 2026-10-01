@@ -4563,6 +4563,7 @@ dependencies = [
  "memmap2",
  "omega",
  "prime",
+ "proptest",
  "proxima",
  "proxima-core",
  "proxima-gguf",
