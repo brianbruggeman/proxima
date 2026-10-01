@@ -6752,6 +6752,60 @@ fn packed_row_activation_cap_is_the_smallest_power_of_two_holding_the_tokens_up_
     }
 }
 
+/// The tied LM head is a `Q6_K` matmul, and a token group must not fall back
+/// to the per-element arm: that arm re-derives `d`, `ql`, `qh` and the scale
+/// byte for every element of every token (`q6k_element`), which cost the
+/// gemma4-E2B head 8.58 ms at width 2 against 1.17 ms at width 1. The fast arm
+/// decodes a lane's 16 levels once per super-block (`level0..level3`) and
+/// reads no per-element helper.
+#[cfg(all(feature = "metal-q4k-ggml-port", not(feature = "metal-q4k-split-k")))]
+#[test]
+fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
+    let cases: [(u32, &str, &str); 4] = [
+        (2, "_ac2", "float sumf[2][1];"),
+        (3, "_ac4", "float sumf[4][1];"),
+        (4, "_ac4", "float sumf[4][1];"),
+        (5, "", "float sumf[8][1];"),
+    ];
+
+    for (tokens, cap_suffix, accumulator_decl) in cases {
+        let bound = packed_row_multi_token_op(tokens, 1536, 1024);
+        let weight_node = bound.operands()[0].0;
+        let mut q6k = BTreeMap::new();
+        q6k.insert(weight_node, Codec::Q6K);
+
+        let (key, source) = with_every_multi_row_env_unset(|| {
+            let key = kernel_cache_key(&bound, &q6k, NumericPolicy::default())
+                .expect("q6k multi-row cache key");
+            let source = emit(&bound, &q6k, NumericPolicy::default())
+                .expect("q6k multi-row emits")
+                .source;
+            (key, source)
+        });
+
+        assert!(
+            source.contains("level0[l] = (float)((int)q_lo0 - 32);"),
+            "{tokens} tokens must decode the lane's levels once per super-block"
+        );
+        assert!(
+            !source.contains("q6k_element(in") && !source.contains("q6k_element(wblk0"),
+            "{tokens} tokens must not read the weight through the per-element decode"
+        );
+        assert!(
+            source.contains(accumulator_decl),
+            "{tokens} tokens must declare {accumulator_decl}"
+        );
+        assert!(
+            key.contains(cap_suffix),
+            "{tokens} tokens: {key} lacks {cap_suffix:?}"
+        );
+        assert!(
+            !key.contains("_u") && !key.contains("_i32"),
+            "{tokens} tokens: {key} carries an unroll/index32 token the fast arm never renders"
+        );
+    }
+}
+
 /// gemma4-E2B's verify forward at width 2 arrives as a 2-token `Q4_0` matmul:
 /// the kernel must fold exactly 2 activation rows (not the full group's 8),
 /// carry that cap in its identity so a 4-token op never reuses it, and tile

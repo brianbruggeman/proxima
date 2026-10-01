@@ -1154,9 +1154,9 @@ pub(super) fn push_packed_row_multi_row_body(
     // header/nibble decode is shared across the whole `cap`-token activation
     // group via `q4k_pair_dot_mr` (this file's own multi-row generalization
     // of the M=1 decode path's `q4k_pair_dot`), instead of the per-element
-    // `operand_read` below paying that decode once per token. Every other
-    // codec (`Q3_K`/`Q5_K`/`Q6_K`) keeps the generic loop -- they have no
-    // multi-row port yet, this landing only proves the pattern on `Q4_K`.
+    // `operand_read` below paying that decode once per token. `Q6_K` has its
+    // own twin (`fast_q6k` below); `Q3_K`/`Q5_K` keep the generic loop -- they
+    // have no multi-row port yet.
     // A gathered weight is excluded here -- `q4k_pair_dot_mr` hoists one
     // decode shared across every token slot, which is only sound when every
     // slot reads the SAME expert row; the generic loop below re-reads per
@@ -1175,6 +1175,7 @@ pub(super) fn push_packed_row_multi_row_body(
     // Delegates to [`fast_q4_0_active`] for the same reason `fast_q4k` now
     // delegates to [`fast_q4k_active`].
     let fast_q4_0 = fast_q4_0_active(resolved, quantized, block, reduce_op, expert_source_mode);
+    let fast_q6k = fast_q6k_active(resolved, quantized, block, reduce_op, expert_source_mode);
     if fast_q4k {
         push_packed_row_multi_row_q4k_body(
             source,
@@ -1196,6 +1197,18 @@ pub(super) fn push_packed_row_multi_row_body(
             cap,
             element_type,
             operand_count,
+            metal,
+        );
+    } else if fast_q6k {
+        let other_stride_is_one = resolved.operands()[other].1.stride(reduce_dim as u16) == 1;
+        push_packed_row_multi_row_q6k_body(
+            source,
+            weight,
+            other,
+            rows,
+            cap,
+            codec_block_bytes(block.codec),
+            other_stride_is_one,
             metal,
         );
     } else if unroll_active && !weight_gathered {
@@ -1452,6 +1465,139 @@ pub(super) fn push_packed_row_multi_row_q4k_body(
         "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
     ));
     source.push_str("        other_ib_offset += y4_step;\n");
+    source.push_str("    }\n");
+}
+
+/// Renders [`push_packed_row_multi_row_body`]'s `Q6_K` fast-path reduction
+/// loop: [`push_q6k_ggml_port_body`]'s lane map (`tid = lane / 2`, `ix = lane
+/// % 2`, super-block stride 2) and its exact per-lane accumulation order,
+/// generalized to a `cap`-token activation group. Each lane decodes its 16
+/// weight levels of a super-block ONCE into registers and folds them against
+/// every token's 16 activations, instead of the generic arm re-deriving `d`,
+/// `ql`, `qh` and the scale byte for every element of every token. Because
+/// the per-token `sums0..sums3` partials, the `dall * (..)` fold and the
+/// super-block order match the single-row body operation for operation, each
+/// token's result is bit-identical to a single-row dispatch of that token.
+// the argument list mirrors `push_q6k_ggml_port_body`'s plus the token cap, so the two
+// bodies stay diffable line-for-line against each other.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_packed_row_multi_row_q6k_body(
+    source: &mut String,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    cap: usize,
+    block_bytes: usize,
+    other_stride_is_one: bool,
+    metal: &MetalOnlyExtras,
+) {
+    let reduction_bound = packed_row_reduction_bound_token(metal);
+    source.push_str("    uint tid = (uint)lane / 2u;\n");
+    source.push_str("    uint ix = (uint)lane % 2u;\n");
+    source.push_str("    uint ip = tid / 8u;\n");
+    source.push_str("    uint il = tid % 8u;\n");
+    source.push_str("    uint l0 = 4u * il;\n");
+    source.push_str("    uint is = 8u * ip + l0 / 16u;\n");
+    source.push_str("    uint q_offset_l = 64u * ip + l0;\n");
+    source.push_str("    uint q_offset_h = 32u * ip + l0;\n");
+    source.push_str(&format!(
+        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
+    ));
+    source.push_str("    int ib_first = (int)ix;\n    int ib_step = 2;\n");
+    source.push_str(&format!(
+        "    long blk_step = (long)ib_step * {block_bytes};\n"
+    ));
+    source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
+    ));
+    source.push_str("    }\n");
+    let scale = if other_stride_is_one {
+        ""
+    } else {
+        " * other_stride"
+    };
+    let index = |offset: &str| {
+        if other_stride_is_one {
+            format!("y4[{offset}]")
+        } else {
+            format!("y4[(long)({offset}) * other_stride]")
+        }
+    };
+    source.push_str(&format!(
+        "    long y_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS}{scale};\n"
+    ));
+    source.push_str(&format!(
+        "    long y_offset = (long)ib_first * {Q4K_BLOCK_ELEMENTS}{scale} + (long)(128u * ip + l0){scale};\n"
+    ));
+    source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str("            device const uchar *blk = blk_ptr[q];\n");
+    source.push_str("            device const uchar *ql = blk;\n");
+    source.push_str("            device const uchar *qh = blk + 128u;\n");
+    source.push_str("            device const uchar *sc = blk + 192u + is;\n");
+    source.push_str("            device const half *dh = (device const half *)(blk + 208u);\n");
+    source.push_str("            float dall = (float)dh[0];\n");
+    source.push_str(
+        "            float level0[4]; float level1[4]; float level2[4]; float level3[4];\n",
+    );
+    source.push_str("            for (uint l = 0u; l < 4u; ++l) {\n");
+    source.push_str("                uchar q1l = ql[q_offset_l + l];\n");
+    source.push_str("                uchar q2l = ql[q_offset_l + 32u + l];\n");
+    source.push_str("                uchar qhl = qh[q_offset_h + l];\n");
+    source.push_str(
+        "                uint q_lo0 = (uint)(q1l & 0x0Fu) | (((uint)qhl & 0x03u) << 4u);\n",
+    );
+    source.push_str(
+        "                uint q_lo1 = (uint)(q2l & 0x0Fu) | (((uint)qhl & 0x0Cu) << 2u);\n",
+    );
+    source.push_str("                uint q_hi0 = (uint)(q1l >> 4u) | ((uint)qhl & 0x30u);\n");
+    source.push_str(
+        "                uint q_hi1 = (uint)(q2l >> 4u) | (((uint)qhl & 0xC0u) >> 2u);\n",
+    );
+    source.push_str("                level0[l] = (float)((int)q_lo0 - 32);\n");
+    source.push_str("                level1[l] = (float)((int)q_lo1 - 32);\n");
+    source.push_str("                level2[l] = (float)((int)q_hi0 - 32);\n");
+    source.push_str("                level3[l] = (float)((int)q_hi1 - 32);\n");
+    source.push_str("            }\n");
+    source.push_str(
+        "            float scale0 = (float)(char)sc[0]; float scale1 = (float)(char)sc[2]; float scale2 = (float)(char)sc[4]; float scale3 = (float)(char)sc[6];\n",
+    );
+    source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str(&format!(
+        "                device const float *y4 = in{other} + other_base[s] + y_offset;\n"
+    ));
+    source.push_str(
+        "                float sums0 = 0.0f; float sums1 = 0.0f; float sums2 = 0.0f; float sums3 = 0.0f;\n",
+    );
+    source.push_str("                for (uint l = 0u; l < 4u; ++l) {\n");
+    source.push_str(&format!(
+        "                    sums0 += {} * level0[l];\n",
+        index("l")
+    ));
+    source.push_str(&format!(
+        "                    sums1 += {} * level1[l];\n",
+        index("l + 32u")
+    ));
+    source.push_str(&format!(
+        "                    sums2 += {} * level2[l];\n",
+        index("l + 64u")
+    ));
+    source.push_str(&format!(
+        "                    sums3 += {} * level3[l];\n",
+        index("l + 96u")
+    ));
+    source.push_str("                }\n");
+    source.push_str(
+        "                sumf[s][q] = sumf[s][q] + dall * (sums0 * scale0 + sums1 * scale1 + sums2 * scale2 + sums3 * scale3);\n",
+    );
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+    ));
+    source.push_str("        y_offset += y_step;\n");
     source.push_str("    }\n");
 }
 
