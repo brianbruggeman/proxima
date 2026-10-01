@@ -2161,6 +2161,8 @@ impl<'file> LoadedModel<'file> {
             self.apply_memory_fit_gate(&mut effective_serving_config)?;
             #[cfg(all(feature = "metal", target_os = "macos"))]
             self.apply_dispatch_type_override(&mut effective_serving_config)?;
+            // the caller keeps this state, so the cache must not take it
+            effective_serving_config.prompt_cache = PromptCacheConfig::off();
             effective_serving_config
         };
         let mut runtime = BackendRuntime::new(&effective_serving_config);
@@ -2243,6 +2245,52 @@ impl<'file> LoadedModel<'file> {
                 &mut NodeValuesSink::Discard,
                 on_token,
                 Some(seed),
+                true,
+                None,
+                None,
+            )?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
+    /// Generates from the full prompt token ids `prompt_ids` (BOS and chat
+    /// template already applied by the caller), reusing whatever the prompt
+    /// cache holds for their longest common prefix -- see
+    /// [`crate::ServingConfig::prompt_cache`] and [`CacheReport`]. With the
+    /// cache off this is a plain full-prompt generate over the same ids.
+    /// Matching is on ids, so the caller tokenizes once and the same ids reach
+    /// both the cache and the model.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`].
+    pub fn generate_from_ids(
+        &self,
+        prompt_ids: &[u32],
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let effective_serving_config = {
+            let mut effective_serving_config = *serving_config;
+            self.apply_command_buffer_chunks_default(&mut effective_serving_config);
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_memory_fit_gate(&mut effective_serving_config)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            self.apply_dispatch_type_override(&mut effective_serving_config)?;
+            effective_serving_config
+        };
+        let mut runtime = BackendRuntime::new(&effective_serving_config);
+        let (generated_ids, text, stopped_by_eos, _final_state) = self
+            .run_decode_loop_through_cache(
+                prompt_ids.to_vec(),
+                max_tokens,
+                &effective_serving_config,
+                &mut runtime,
+                None,
+                &mut LogitsSink::Discard,
+                &mut NodeValuesSink::Discard,
+                on_token,
+                None,
                 true,
                 None,
                 None,
@@ -2447,7 +2495,8 @@ impl<'file> LoadedModel<'file> {
         };
         let requested_context_length = self.serving_context_length(serving_config)?;
         let draft_slack = speculative_draft_limit(&serving_config.speculative, None)
-            .map_or(0, |limit| limit as u32);
+            .map_or(0, |limit| limit as u32)
+            .max(serving_config.prompt_cache.rewind_slack_rows() as u32);
         let (context_length, outcome) = crate::memory_fit::fit_context_length(
             weights,
             &self.kv_layers,
@@ -2853,6 +2902,51 @@ impl<'file> LoadedModel<'file> {
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
         seed: Option<PrefixState>,
         force_two_range: bool,
+        speculative_stats: Option<&mut SpeculativeDecodeStats>,
+        forced_draft_width: Option<u16>,
+    ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let ids = if seed.is_some() {
+            proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, false, false)?
+        } else {
+            proxima_tokenizer::encode_with_bos_eos(
+                prompt,
+                &self.vocab,
+                wants_bos(&self.vocab),
+                self.vocab.add_eos_token().unwrap_or(false),
+            )?
+        };
+        self.run_decode_loop_through_cache(
+            ids,
+            max_tokens,
+            serving_config,
+            runtime,
+            token_override,
+            logits_sink,
+            node_values_sink,
+            on_token,
+            seed,
+            force_two_range,
+            speculative_stats,
+            forced_draft_width,
+        )
+    }
+
+    /// [`Self::run_decode_loop_observed_seeded`]'s body from the tokenized
+    /// `ids` on: `ids` are the tokens to prefill, continuing `seed`'s
+    /// sequence when there is one.
+    #[allow(clippy::too_many_arguments)] // the seeded loop's own parameter list, split at the tokenization
+    pub(super) fn run_decode_loop_from_ids(
+        &self,
+        ids: Vec<u32>,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        token_override: Option<&[u32]>,
+        logits_sink: &mut LogitsSink,
+        node_values_sink: &mut NodeValuesSink,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        seed: Option<PrefixState>,
+        force_two_range: bool,
         mut speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
@@ -2864,16 +2958,6 @@ impl<'file> LoadedModel<'file> {
         // "macos"))]` below, so a build without that cfg combination never
         // reads this parameter otherwise, and would warn on it as unused.
         let _ = force_two_range;
-        let ids = if seed.is_some() {
-            proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, false, false)?
-        } else {
-            proxima_tokenizer::encode_with_bos_eos(
-                prompt,
-                &self.vocab,
-                wants_bos(&self.vocab),
-                self.vocab.add_eos_token().unwrap_or(false),
-            )?
-        };
         let seed_cached_len = seed.as_ref().map_or(0, PrefixState::len);
         let seed_ids: Vec<u32> = seed
             .as_ref()
@@ -3013,13 +3097,14 @@ impl<'file> LoadedModel<'file> {
         let positions_needed = seed_cached_len + ids.len() + max_tokens;
         let draft_limit =
             speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
+        let ring_slack = draft_limit.max(serving_config.prompt_cache.rewind_slack_rows());
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
             None => self.fresh_layer_caches(
                 &cache_names,
                 &layer_row_widths,
                 positions_needed,
-                draft_limit,
+                ring_slack,
             )?,
         };
         for state in &mut layer_caches {

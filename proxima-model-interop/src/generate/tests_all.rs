@@ -2514,6 +2514,7 @@ pub(super) mod memory_fit_gate_tests {
             speculative_verify_program: None,
             expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,
+            prompt_cache: std::sync::Mutex::new(crate::generate::PromptCache::new()),
         }
     }
 
