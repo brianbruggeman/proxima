@@ -11,7 +11,8 @@ use super::prompt_cache::longest_common_prefix;
 use super::ring_checkpoint::RingCheckpoint;
 use super::wants_bos;
 use crate::LoadedModel;
-use crate::generate::{CachePath, CacheReport};
+use crate::RopeScaling;
+use crate::generate::{CachePath, CacheReport, MissReason};
 use crate::serving::{PromptCacheConfig, ServingConfig, SpeculativeConfig};
 
 const GENERATED_TOKENS: usize = 16;
@@ -430,5 +431,56 @@ fn a_gemma4_checkpoint_is_twelve_mebibytes() {
         );
         assert!(checkpoint.position() > 512);
         assert_eq!(checkpoint.byte_len(), 12 * 512 * 2048);
+    });
+}
+
+/// A request under another rope scaling on the same `LoadedModel` and prompt
+/// finds the first arm's entry, whose key rows were rotated under the first
+/// arm's scaling. It must miss with `ConfigMismatch`, generate what a fresh
+/// prefill under its own scaling generates, and leave the first arm's entry
+/// for the first arm to reuse.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn another_rope_scaling_on_the_same_model_misses_and_never_reuses_the_other_arms_rows() {
+    with_model(|model| {
+        let scaling_b = RopeScaling::Linear { factor: 2.0 };
+        assert_ne!(
+            model.rope_scaling, scaling_b,
+            "arm B must differ from the checkpoint's own scaling"
+        );
+        let arm_a = cached_config(SpeculativeConfig::none());
+        let arm_b = ServingConfig {
+            rope_scaling: Some(scaling_b),
+            ..arm_a
+        };
+        let fresh_b = ServingConfig {
+            prompt_cache: PromptCacheConfig::off(),
+            ..arm_b
+        };
+        let prompt_ids = encode_opening(model, &chat_prompt(1200));
+
+        let first_a = run_cached(model, arm_a, &prompt_ids);
+        let first_b = run_cached(model, arm_b, &prompt_ids);
+        let expected_b = run_fresh(model, fresh_b, &prompt_ids);
+        let second_a = run_cached(model, arm_a, &prompt_ids);
+
+        assert_eq!(first_a.report.miss, Some(MissReason::Empty));
+        assert_eq!(
+            first_b.generated, expected_b,
+            "arm B's ids must equal a fresh prefill under arm B's scaling"
+        );
+        assert_eq!(first_b.report.path, CachePath::Miss);
+        assert_eq!(
+            first_b.report.miss,
+            Some(MissReason::ConfigMismatch),
+            "arm B found arm A's entry"
+        );
+        assert_ne!(
+            second_a.report.path,
+            CachePath::Miss,
+            "arm A must reuse its own entry after arm B stored one"
+        );
+        assert!(second_a.report.reused_tokens > 0);
+        assert_eq!(second_a.generated, first_a.generated);
     });
 }
