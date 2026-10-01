@@ -1174,9 +1174,18 @@ struct PrewarmSamples {
     without: Vec<f64>,
     prefilled_with: Vec<usize>,
     prefilled_without: Vec<usize>,
+    answer_total_with: Vec<f64>,
+    answer_total_without: Vec<f64>,
+    prewarm_ms: Vec<f64>,
     hit_tokens: Vec<usize>,
     identical: usize,
     pairs: usize,
+}
+
+struct PrewarmArm {
+    previous: Timed,
+    prewarm_ms: f64,
+    timed: Timed,
 }
 
 fn run_prewarm_arm(
@@ -1186,17 +1195,23 @@ fn run_prewarm_arm(
     turn: usize,
     prewarm: bool,
     max_tokens: usize,
-) -> (Timed, Timed) {
+) -> PrewarmArm {
     let cached = config_with(PromptCacheConfig::standard());
     model.set_prewarm_suffix(&[]);
     clear_cache(model, vocab);
     if prewarm {
         model.set_prewarm_suffix(&turn_boundary_suffix(vocab));
     }
-    let previous = timed_request(model, &plans[turn - 1].prompt_ids, max_tokens, &cached);
-    let timed = timed_request(model, &plans[turn].prompt_ids, max_tokens, &cached);
+    let arm = model.with_prewarm_worker(&cached, || {
+        let previous = timed_request(model, &plans[turn - 1].prompt_ids, max_tokens, &cached);
+        let waiting = Instant::now();
+        model.wait_for_prewarm();
+        let prewarm_ms = waiting.elapsed().as_secs_f64() * 1000.0;
+        let timed = timed_request(model, &plans[turn].prompt_ids, max_tokens, &cached);
+        PrewarmArm { previous, prewarm_ms, timed }
+    }).expect("start the prewarm worker");
     model.set_prewarm_suffix(&[]);
-    (previous, timed)
+    arm
 }
 
 fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder: &mut Recorder) -> (Vec<PrewarmSamples>, Vec<PrewarmPlan>) {
@@ -1213,14 +1228,14 @@ fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, record
         for turn in 1..plans.len() {
             let order = if (pair + turn) % 2 == 0 { [true, false] } else { [false, true] };
             for (position, prewarm) in order.into_iter().enumerate() {
-                let (previous, timed) = run_prewarm_arm(model, vocab, &plans, turn, prewarm, args.max_tokens);
+                let PrewarmArm { previous, prewarm_ms, timed } = run_prewarm_arm(model, vocab, &plans, turn, prewarm, args.max_tokens);
                 let report = timed.report.expect("a cached request records its report");
                 recorder.write(&json!({
                     "kind": "request", "mode": "prewarm", "pair": pair, "warmup": pair == 0, "turn": turn,
                     "arm": if prewarm { "prewarm" } else { "no_prewarm" }, "order_position": position,
                     "prompt_tokens": plans[turn].prompt_ids.len(), "ttft_ms": timed.ttft_ms,
                     "total_ms": timed.total_ms, "generated": timed.generated.len(),
-                    "previous_turn_total_ms": previous.total_ms, "previous_turn_ttft_ms": previous.ttft_ms,
+                    "previous_turn_total_ms": previous.total_ms, "previous_turn_ttft_ms": previous.ttft_ms, "idle_wait_after_answer_ms": prewarm_ms,
                     "ids_identical": timed.generated == plans[turn].reference, "cache": path_label(timed.report),
                 }));
                 if pair == 0 {
@@ -1231,10 +1246,13 @@ fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, record
                     sample.with_prewarm.push(timed.ttft_ms);
                     sample.prefilled_with.push(report.prefilled_tokens);
                     sample.hit_tokens.push(report.prewarm_hit_tokens);
+                    sample.answer_total_with.push(previous.total_ms);
+                    sample.prewarm_ms.push(prewarm_ms);
                     sample.pairs += 1;
                 } else {
                     sample.without.push(timed.ttft_ms);
                     sample.prefilled_without.push(report.prefilled_tokens);
+                    sample.answer_total_without.push(previous.total_ms);
                 }
                 sample.identical += usize::from(timed.generated == plans[turn].reference);
             }
@@ -1256,6 +1274,9 @@ fn print_prewarm_summary(samples: &[PrewarmSamples], plans: &[PrewarmPlan]) {
         );
         println!("  with_prewarm    {}", spread(&turn_samples.with_prewarm).text());
         println!("  without_prewarm {}", spread(&turn_samples.without).text());
+        println!("  answer_call_total_ms with_suffix    {}", spread(&turn_samples.answer_total_with).text());
+        println!("  answer_call_total_ms without_suffix {}", spread(&turn_samples.answer_total_without).text());
+        println!("  prewarm_ms_after_answer (worker, off the return path) {}", spread(&turn_samples.prewarm_ms).text());
         println!(
             "  median_with/median_without={:.3} prefilled_tokens with={:?} without={:?} prewarm_hit_tokens={:?}",
             median(&turn_samples.with_prewarm) / median(&turn_samples.without),
