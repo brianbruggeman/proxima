@@ -369,16 +369,22 @@ fn run_arms(options: &Options, model: &LoadedModel, case: &Case, layers: &[KvLay
             let config = serving_config(options, &model_path, kv, rope);
             let arm = kv_cache_bytes(layers, options.context, kv)
                 .and_then(|kv_bytes| run_proxima_arm(model, case, &config, kv_bytes));
-            match arm {
-                Ok(line) => println!("{label} {line}"),
-                Err(error) => {
-                    failures += 1;
-                    println!("{label} error={error}");
-                }
-            }
+            let (line, failed) = report_arm(arm);
+            println!("{label} {line}");
+            failures += usize::from(failed);
         }
     }
     failures
+}
+
+fn report_arm(arm: Result<String, NiahError>) -> (String, bool) {
+    match arm {
+        Ok(line) => (line, false),
+        Err(NiahError::Interop(InteropError::UnsupportedServingConfig(reason))) => {
+            (format!("rejected={reason}"), false)
+        }
+        Err(error) => (format!("error={error}"), true),
+    }
 }
 
 fn run() -> Result<usize, NiahError> {
@@ -450,6 +456,36 @@ mod tests {
             .split_whitespace()
             .map(|word| word.chars().count().div_ceil(4))
             .sum())
+    }
+
+    #[test]
+    fn refused_serving_config_is_rejected_not_failed() {
+        let refusal = NiahError::Interop(InteropError::UnsupportedServingConfig(
+            "flash_attention=true is not served".to_string(),
+        ));
+
+        let (line, failed) = report_arm(Err(refusal));
+
+        assert_eq!(line, "rejected=flash_attention=true is not served");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn other_errors_still_count_as_failures() {
+        let broken = NiahError::Failed("generation diverged".to_string());
+
+        let (line, failed) = report_arm(Err(broken));
+
+        assert_eq!(line, "error=generation diverged");
+        assert!(failed);
+    }
+
+    #[test]
+    fn completed_arm_is_not_a_failure() {
+        let (line, failed) = report_arm(Ok("found=1/1".to_string()));
+
+        assert_eq!(line, "found=1/1");
+        assert!(!failed);
     }
 
     fn gemma4_vocab() -> Option<Vocab> {
