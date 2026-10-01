@@ -973,13 +973,7 @@ impl LoadedModel<'_> {
         let stored = self.prompt_cache_store(entry, &config);
         drop(pending);
         if stored {
-            self.prewarm_after_answer(
-                &ids,
-                &generated_ids,
-                serving_config,
-                runtime,
-                forced_draft_width,
-            );
+            self.queue_prewarm_after_answer(&ids, &generated_ids, key, forced_draft_width);
         }
         let hollow = PrefixState {
             ids: Vec::new(),
@@ -1993,6 +1987,46 @@ mod tests {
             taken.expect("the near entry").state.ids,
             near[..45].to_vec()
         );
+    }
+
+    /// A request and a prewarm each take their entry out of the cache for the
+    /// whole of their forward, so two parties never write the same rows: the
+    /// second sees nothing until the first stores its entry back.
+    #[test]
+    fn an_entry_taken_by_one_party_is_not_offered_to_another_until_stored_back() {
+        let mut cache = PromptCache::new();
+        let prompt = conversation(&GEMMA_HEADER, 1000, 200);
+        cache.store(state_with_ids(&prompt), &enabled_config());
+        let next_turn = conversation(&prompt, 3000, 20);
+
+        let (request_entry, request_report) = cache.take_best(
+            &next_turn,
+            &base_key(),
+            &shared_widths(),
+            LLAMA_DEFAULT_MILLI,
+        );
+        let (prewarm_entry, prewarm_report) = cache.take_for_prewarm(
+            &next_turn,
+            &base_key(),
+            &shared_widths(),
+            LLAMA_DEFAULT_MILLI,
+        );
+        cache.store(
+            request_entry.expect("the request held it"),
+            &enabled_config(),
+        );
+        let (after_store, after_report) = cache.take_for_prewarm(
+            &next_turn,
+            &base_key(),
+            &shared_widths(),
+            LLAMA_DEFAULT_MILLI,
+        );
+
+        assert_eq!(request_report.path, CachePath::Extend);
+        assert!(prewarm_entry.is_none());
+        assert_eq!(prewarm_report.miss, Some(MissReason::Empty));
+        assert!(after_store.is_some());
+        assert_eq!(after_report.path, CachePath::Extend);
     }
 
     fn key_under(

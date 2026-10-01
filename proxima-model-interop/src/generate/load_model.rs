@@ -1013,6 +1013,9 @@ pub struct LoadedModel<'file> {
     /// Who may use the device, a request or an anticipatory prefill
     /// ([`super::prewarm_gate`]'s module doc).
     pub(super) prewarm_gate: super::PrewarmGate,
+    /// The end-of-answer prefix a request queued for the prewarm worker
+    /// ([`super::prewarm_queue`]'s module doc).
+    pub(super) prewarm_queue: super::PrewarmQueue,
 }
 
 /// Concrete qwen35moe router/gather partitions for one KV shape bucket.
