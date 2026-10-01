@@ -71,8 +71,18 @@ pub enum MissReason {
     Empty,
     /// No entry shares even the first token with the prompt.
     NoCommonPrefix,
-    /// The best entry needs a rewind this build cannot apply yet.
-    RewindUnsupported,
+    /// A sliding-window layer would need rows its ring has already
+    /// overwritten: rewinding `rewind_rows` tokens exceeds the `slack_rows`
+    /// the ring keeps past its window.
+    RingSlackExceeded {
+        /// Tokens the rewind would drop from the stored sequence.
+        rewind_rows: usize,
+        /// Rows the ring keeps past its window.
+        slack_rows: usize,
+    },
+    /// A layer holds state that cannot be rewound (a recurrent layer, or a
+    /// cache shape this build does not truncate).
+    UnrewindableLayer,
 }
 
 impl MissReason {
@@ -82,7 +92,8 @@ impl MissReason {
         match self {
             Self::Empty => "empty",
             Self::NoCommonPrefix => "no_common_prefix",
-            Self::RewindUnsupported => "rewind_unsupported",
+            Self::RingSlackExceeded { .. } => "ring_slack_exceeded",
+            Self::UnrewindableLayer => "unrewindable_layer",
         }
     }
 }
@@ -119,7 +130,87 @@ impl CacheReport {
     }
 }
 
+/// Whether a ring layer that has seen `stored_len` positions still holds
+/// every row a window ending at `target_len` reads. Position `p` lives in row
+/// `p % capacity`, so it is overwritten once position `p + capacity` has been
+/// written; the window needs positions `target_len - window ..` onward, and
+/// the first of them survives iff `first_needed + capacity >= stored_len`.
+/// For `target_len >= window` that is `stored_len - target_len <= slack`.
+fn ring_rewind_fits(stored_len: usize, target_len: usize, ring: &KvRing) -> bool {
+    let first_needed = target_len.saturating_sub(ring.window);
+    ring.write_offset == 0 && (target_len == 0 || first_needed + ring.capacity >= stored_len)
+}
+
 impl PrefixState {
+    /// The first reason this state cannot be rewound to `target_len` tokens,
+    /// `None` when every layer can.
+    fn rewind_refusal(
+        &self,
+        target_len: usize,
+        widths: &[LayerPadRowWidths],
+    ) -> Option<MissReason> {
+        if widths.len() != self.layer_caches.len() {
+            return Some(MissReason::UnrewindableLayer);
+        }
+        self.layer_caches
+            .iter()
+            .zip(widths)
+            .find_map(|(state, width)| match (state, width) {
+                (LayerCacheState::SharedFromLayer, _) => None,
+                (LayerCacheState::Attention(cache), _) if cache.ring_geometry().is_some() => cache
+                    .ring_geometry()
+                    .and_then(|ring| self.ring_refusal(target_len, ring)),
+                (LayerCacheState::Attention(_), LayerPadRowWidths::Attention { .. }) => None,
+                _ => Some(MissReason::UnrewindableLayer),
+            })
+    }
+
+    fn ring_refusal(&self, target_len: usize, ring: &KvRing) -> Option<MissReason> {
+        if ring.write_offset != 0 {
+            return Some(MissReason::UnrewindableLayer);
+        }
+        (!ring_rewind_fits(self.cached_len, target_len, ring)).then_some(
+            MissReason::RingSlackExceeded {
+                rewind_rows: self.cached_len - target_len,
+                slack_rows: ring.capacity - ring.window,
+            },
+        )
+    }
+
+    /// Rewinds this state to its first `target_len` tokens: full-attention
+    /// layers truncate their rows, ring layers keep theirs (their rows are
+    /// addressed by position, so rewinding is `cached_len` going back --
+    /// [`LayerCache::truncate`]'s own doc) and are checked to still hold the
+    /// window, and a shared-KV layer follows its donor. All-or-nothing: on
+    /// `Err` the state is untouched.
+    pub(super) fn rewind_to(
+        &mut self,
+        target_len: usize,
+        widths: &[LayerPadRowWidths],
+    ) -> Result<(), MissReason> {
+        if target_len >= self.cached_len {
+            return Ok(());
+        }
+        if let Some(reason) = self.rewind_refusal(target_len, widths) {
+            return Err(reason);
+        }
+        for (state, width) in self.layer_caches.iter_mut().zip(widths) {
+            if let (
+                LayerCacheState::Attention(cache),
+                LayerPadRowWidths::Attention {
+                    even_odd_row,
+                    v_row,
+                },
+            ) = (state, width)
+            {
+                cache.truncate(target_len, *even_odd_row, *v_row);
+            }
+        }
+        self.ids.truncate(target_len);
+        self.cached_len = target_len;
+        Ok(())
+    }
+
     /// Host bytes this state holds: its ids plus every layer's cache rows.
     pub(super) fn byte_len(&self) -> usize {
         let float_bytes = |rows: &[&Vec<f32>]| -> usize {
@@ -158,44 +249,64 @@ impl PromptCache {
     }
 
     /// Takes the entry sharing the longest prefix with `prompt_ids` out of
-    /// the cache, ready to be resumed from, or reports why none can be.
-    pub(super) fn take_best(&mut self, prompt_ids: &[u32]) -> (Option<PrefixState>, CacheReport) {
+    /// the cache, rewound to that prefix and ready to be resumed from, or
+    /// reports why none can be. `widths` are the model's per-layer row
+    /// widths ([`LoadedModel::declared_layer_cache_names_and_widths`]).
+    pub(super) fn take_best(
+        &mut self,
+        prompt_ids: &[u32],
+        widths: &[LayerPadRowWidths],
+    ) -> (Option<PrefixState>, CacheReport) {
         let best = self
             .entries
             .iter()
             .enumerate()
             .map(|(index, entry)| (index, longest_common_prefix(&entry.ids, prompt_ids)))
             .max_by_key(|(_, lcp)| *lcp);
-        let report = match best {
-            None => CacheReport::miss(prompt_ids.len(), MissReason::Empty),
-            Some((_, 0)) => CacheReport::miss(prompt_ids.len(), MissReason::NoCommonPrefix),
-            Some((index, lcp)) => return self.resume_at(index, lcp, prompt_ids.len()),
+        let resume = best.map(|(index, lcp)| (index, lcp.min(prompt_ids.len().saturating_sub(1))));
+        let outcome = match resume {
+            None => Err(MissReason::Empty),
+            Some((_, 0)) => Err(MissReason::NoCommonPrefix),
+            Some((index, resume_len)) => self.resume_at(index, resume_len, widths),
+        };
+        let (state, report) = match outcome {
+            Ok((state, path)) => {
+                let resume_len = state.cached_len;
+                let report = CacheReport {
+                    lcp: resume_len,
+                    prefilled_tokens: prompt_ids.len() - resume_len,
+                    path,
+                    miss: None,
+                };
+                (Some(state), report)
+            }
+            Err(reason) => (None, CacheReport::miss(prompt_ids.len(), reason)),
         };
         self.last_report = Some(report);
-        (None, report)
+        (state, report)
     }
 
+    /// Takes entry `index` out and rewinds it to `resume_len`; an entry that
+    /// cannot be rewound stays in the cache for the next request.
     fn resume_at(
         &mut self,
         index: usize,
-        lcp: usize,
-        prompt_tokens: usize,
-    ) -> (Option<PrefixState>, CacheReport) {
-        let resume_len = lcp.min(prompt_tokens.saturating_sub(1));
-        if resume_len != self.entries[index].cached_len {
-            let report = CacheReport::miss(prompt_tokens, MissReason::RewindUnsupported);
-            self.last_report = Some(report);
-            return (None, report);
-        }
-        let state = self.entries.remove(index);
-        let report = CacheReport {
-            lcp: resume_len,
-            prefilled_tokens: prompt_tokens - resume_len,
-            path: CachePath::Extend,
-            miss: None,
+        resume_len: usize,
+        widths: &[LayerPadRowWidths],
+    ) -> Result<(PrefixState, CachePath), MissReason> {
+        let mut state = self.entries.remove(index);
+        let path = if resume_len >= state.cached_len {
+            CachePath::Extend
+        } else {
+            CachePath::Rewind
         };
-        self.last_report = Some(report);
-        (Some(state), report)
+        match state.rewind_to(resume_len, widths) {
+            Ok(()) => Ok((state, path)),
+            Err(reason) => {
+                self.entries.insert(index, state);
+                Err(reason)
+            }
+        }
     }
 
     /// Puts `state` back as the most recently used entry, then evicts from
@@ -240,12 +351,13 @@ impl LoadedModel<'_> {
     pub(super) fn prompt_cache_lookup(
         &self,
         prompt_ids: &[u32],
-    ) -> (Option<PrefixState>, CacheReport) {
+    ) -> Result<(Option<PrefixState>, CacheReport), InteropError> {
+        let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let (state, report) = self
             .prompt_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take_best(prompt_ids);
+            .take_best(prompt_ids, &widths);
         debug!(
             cache_lcp = report.lcp as u64,
             cache_reused_tokens = report.reused_tokens() as u64,
@@ -254,7 +366,7 @@ impl LoadedModel<'_> {
             cache_miss_reason = report.miss.map_or("none", MissReason::as_str),
             "prompt cache lookup"
         );
-        (state, report)
+        Ok((state, report))
     }
 
     /// Hands a finished request's state to the cache.
@@ -320,7 +432,7 @@ impl LoadedModel<'_> {
                 forced_draft_width,
             );
         }
-        let (cache_seed, report) = self.prompt_cache_lookup(&ids);
+        let (cache_seed, report) = self.prompt_cache_lookup(&ids)?;
         let (generated_ids, text, stopped_by_eos, final_state) = self.run_decode_loop_from_ids(
             ids[report.lcp..].to_vec(),
             max_tokens,
@@ -358,6 +470,10 @@ mod tests {
         }
     }
 
+    fn shared_widths() -> Vec<LayerPadRowWidths> {
+        vec![LayerPadRowWidths::SharedFromLayer]
+    }
+
     fn enabled_config() -> PromptCacheConfig {
         PromptCacheConfig {
             byte_budget: 1 << 20,
@@ -375,7 +491,10 @@ mod tests {
             &enabled_config(),
         );
 
-        let (state, report) = cache.take_best(&[2, 105, 2364, 107, 9259, 106, 107, 105, 4368]);
+        let (state, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9259, 106, 107, 105, 4368],
+            &shared_widths(),
+        );
 
         assert_eq!(state.expect("entry reused").cached_len, 5);
         assert_eq!(report.path, CachePath::Extend);
@@ -388,7 +507,7 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(state_with_ids(&[2, 105, 2364]), &enabled_config());
 
-        let (state, report) = cache.take_best(&[7, 105, 2364]);
+        let (state, report) = cache.take_best(&[7, 105, 2364], &shared_widths());
 
         assert!(state.is_none());
         assert_eq!(report.miss, Some(MissReason::NoCommonPrefix));
@@ -399,7 +518,7 @@ mod tests {
     fn an_empty_cache_reports_empty_and_prefills_the_whole_prompt() {
         let mut cache = PromptCache::new();
 
-        let (state, report) = cache.take_best(&[2, 105, 2364]);
+        let (state, report) = cache.take_best(&[2, 105, 2364], &shared_widths());
 
         assert!(state.is_none());
         assert_eq!(report.miss, Some(MissReason::Empty));
@@ -413,10 +532,12 @@ mod tests {
         let mut cache = PromptCache::new();
         cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
 
-        let (_, report) = cache.take_best(&[2, 105, 2364, 107]);
+        let (state, report) = cache.take_best(&[2, 105, 2364, 107], &shared_widths());
 
-        assert_eq!(report.lcp + report.prefilled_tokens, 4);
-        assert!(report.prefilled_tokens >= 1);
+        assert_eq!(report.path, CachePath::Rewind);
+        assert_eq!(report.lcp, 3);
+        assert_eq!(report.prefilled_tokens, 1);
+        assert_eq!(state.expect("entry reused").ids, vec![2, 105, 2364]);
     }
 
     #[test]
@@ -431,11 +552,17 @@ mod tests {
         cache.store(state_with_ids(&[3, 3]), &config);
 
         assert_eq!(
-            cache.take_best(&[1, 1, 9]).1.miss,
+            cache.take_best(&[1, 1, 9], &shared_widths()).1.miss,
             Some(MissReason::NoCommonPrefix)
         );
-        assert_eq!(cache.take_best(&[2, 2, 9]).1.path, CachePath::Extend);
-        assert_eq!(cache.take_best(&[3, 3, 9]).1.path, CachePath::Extend);
+        assert_eq!(
+            cache.take_best(&[2, 2, 9], &shared_widths()).1.path,
+            CachePath::Extend
+        );
+        assert_eq!(
+            cache.take_best(&[3, 3, 9], &shared_widths()).1.path,
+            CachePath::Extend
+        );
     }
 
     #[test]
@@ -463,6 +590,205 @@ mod tests {
         let entries = cache.store(state_with_ids(&[5, 6, 7, 8]), &config);
 
         assert_eq!(entries, 1);
-        assert_eq!(cache.take_best(&[5, 6, 7, 8, 9]).1.path, CachePath::Extend);
+        assert_eq!(
+            cache.take_best(&[5, 6, 7, 8, 9], &shared_widths()).1.path,
+            CachePath::Extend
+        );
+    }
+
+    const WINDOW: usize = 8;
+    const SLACK: usize = 4;
+    const EVEN_ODD_ROW: usize = 2;
+    const V_ROW: usize = 3;
+
+    fn marker(position: usize) -> f32 {
+        position as f32 + 1.0
+    }
+
+    fn full_layer(positions: usize) -> LayerCache {
+        let mut cache = LayerCache::new();
+        (0..positions).for_each(|position| {
+            let value = marker(position);
+            cache.append(
+                &[value; EVEN_ODD_ROW],
+                &[value; EVEN_ODD_ROW],
+                &[value; V_ROW],
+            );
+        });
+        cache
+    }
+
+    fn ring_layer(window: usize, slack: usize, positions: usize) -> LayerCache {
+        let ring = KvRing::new(window, slack, EVEN_ODD_ROW, V_ROW, 0);
+        let mut cache = LayerCache::ring(ring, positions);
+        (0..positions).for_each(|position| {
+            let value = marker(position);
+            cache.append_at(
+                position,
+                &[value; EVEN_ODD_ROW],
+                &[value; EVEN_ODD_ROW],
+                &[value; V_ROW],
+            );
+        });
+        cache
+    }
+
+    fn gemma_like_state(stored_len: usize) -> PrefixState {
+        PrefixState {
+            ids: (0..stored_len as u32).collect(),
+            layer_caches: vec![
+                LayerCacheState::Attention(ring_layer(WINDOW, SLACK, stored_len)),
+                LayerCacheState::Attention(full_layer(stored_len)),
+                LayerCacheState::SharedFromLayer,
+            ],
+            cached_len: stored_len,
+        }
+    }
+
+    fn gemma_like_widths() -> Vec<LayerPadRowWidths> {
+        let attention = || LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        };
+        vec![attention(), attention(), LayerPadRowWidths::SharedFromLayer]
+    }
+
+    fn full_layer_rows(state: &PrefixState) -> usize {
+        match &state.layer_caches[1] {
+            LayerCacheState::Attention(cache) => cache.k_even.len() / EVEN_ODD_ROW,
+            _ => 0,
+        }
+    }
+
+    /// R3: a rewind inside the ring's slack truncates the full layer to the
+    /// shared prefix and leaves the ring layer's rows untouched.
+    #[test]
+    fn rewind_within_ring_slack_truncates_the_full_layer_and_keeps_the_ring() {
+        let mut state = gemma_like_state(40);
+        let ring_before = match &state.layer_caches[0] {
+            LayerCacheState::Attention(cache) => cache.k_even.clone(),
+            _ => Vec::new(),
+        };
+
+        state
+            .rewind_to(36, &gemma_like_widths())
+            .expect("a 4-token rewind fits a 4-row slack");
+
+        assert_eq!(state.cached_len, 36);
+        assert_eq!(state.ids.len(), 36);
+        assert_eq!(full_layer_rows(&state), 36);
+        match &state.layer_caches[0] {
+            LayerCacheState::Attention(cache) => assert_eq!(cache.k_even, ring_before),
+            _ => panic!("layer 0 is an attention layer"),
+        }
+    }
+
+    /// R3: past the slack the ring has overwritten rows the window needs, so
+    /// the rewind is refused with the numbers, and the state is untouched.
+    #[test]
+    fn rewind_beyond_ring_slack_is_refused_and_leaves_the_state_untouched() {
+        let mut state = gemma_like_state(40);
+
+        let refusal = state.rewind_to(35, &gemma_like_widths());
+
+        assert_eq!(
+            refusal,
+            Err(MissReason::RingSlackExceeded {
+                rewind_rows: 5,
+                slack_rows: SLACK,
+            })
+        );
+        assert_eq!(state.cached_len, 40);
+        assert_eq!(state.ids.len(), 40);
+        assert_eq!(full_layer_rows(&state), 40);
+    }
+
+    /// A rewind into the first window of a ring that never wrapped keeps
+    /// every row, however far back it goes.
+    #[test]
+    fn rewind_of_a_ring_that_never_wrapped_always_fits() {
+        let mut state = gemma_like_state(WINDOW + SLACK);
+
+        state
+            .rewind_to(3, &gemma_like_widths())
+            .expect("a ring holding every position it ever saw can rewind anywhere");
+
+        assert_eq!(state.cached_len, 3);
+    }
+
+    /// The closed-form check agrees with the ring's real rows: for every
+    /// geometry and every stored/target pair in a small box, the check says
+    /// "fits" exactly when every position in `target - window .. target`
+    /// still reads back its own marker from the ring after the writes.
+    #[test]
+    fn ring_rewind_check_matches_the_rows_the_ring_actually_holds() {
+        let mut cases = 0;
+        for window in 1..=6_usize {
+            for slack in 0..=6_usize {
+                for stored_len in 0..=30_usize {
+                    let cache = ring_layer(window, slack, stored_len);
+                    let ring = KvRing::new(window, slack, EVEN_ODD_ROW, V_ROW, 0);
+                    for target_len in 0..=stored_len {
+                        let rows_survive =
+                            (target_len.saturating_sub(window)..target_len).all(|position| {
+                                cache.k_even[(position % ring.capacity) * EVEN_ODD_ROW]
+                                    == marker(position)
+                            });
+                        assert_eq!(
+                            ring_rewind_fits(stored_len, target_len, &ring),
+                            rows_survive,
+                            "window={window} slack={slack} stored={stored_len} target={target_len}"
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            cases,
+            6 * 7 * (0..=30).map(|stored| stored + 1).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn a_recurrent_layer_blocks_any_rewind_but_not_an_extension() {
+        let mut state = PrefixState {
+            ids: vec![1, 2, 3, 4],
+            layer_caches: vec![LayerCacheState::Ssm(SsmLayerCache::new(4, 4))],
+            cached_len: 4,
+        };
+        let widths = vec![LayerPadRowWidths::Ssm {
+            conv_history_len: 4,
+            state_len: 4,
+        }];
+
+        assert_eq!(
+            state.rewind_to(3, &widths),
+            Err(MissReason::UnrewindableLayer)
+        );
+        assert_eq!(state.rewind_to(4, &widths), Ok(()));
+    }
+
+    /// A refused rewind leaves the entry in the cache for the next request.
+    #[test]
+    fn a_refused_rewind_keeps_the_entry_cached() {
+        let mut cache = PromptCache::new();
+        cache.store(gemma_like_state(40), &enabled_config());
+        let diverging_prompt: Vec<u32> = (0..35).chain([900, 901]).collect();
+
+        let (state, report) = cache.take_best(&diverging_prompt, &gemma_like_widths());
+
+        assert!(state.is_none());
+        assert_eq!(
+            report.miss,
+            Some(MissReason::RingSlackExceeded {
+                rewind_rows: 5,
+                slack_rows: SLACK,
+            })
+        );
+        let extension: Vec<u32> = (0..40).chain([900]).collect();
+        let (state, report) = cache.take_best(&extension, &gemma_like_widths());
+        assert!(state.is_some());
+        assert_eq!(report.path, CachePath::Extend);
     }
 }
