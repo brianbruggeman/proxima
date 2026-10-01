@@ -22,8 +22,9 @@
 //! run, through one fixed table keyed by (parent, block hash) and chained
 //! through the nodes; a hit is verified against the owner's ids before it
 //! counts, so a collision costs a comparison and never a wrong reuse. Keying
-//! by first token instead was measured out: every conversation opens with the
-//! same BOS and chat-header tokens, so the first token names no child.
+//! by first token was ruled out by the data it would face: the lookup probe's
+//! 1,024 conversations all open with the same BOS token, so one first token
+//! would name 1,024 children.
 //!
 //! Compose it with [`super::prompt_cache::PromptCache`], which owns the
 //! entries and the stamps; it is the trie's only caller. No `Box`, and after
