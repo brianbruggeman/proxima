@@ -270,17 +270,32 @@ impl LoadedModel<'_> {
             .chain(&suffix)
             .copied()
             .collect();
-        if let Err(error) = self.prewarm_ids(
+        match self.prewarm_ids(
             &next_prefix,
             serving_config,
             runtime,
             forced_draft_width,
             &mut |_position| {},
         ) {
-            warn!(
+            Ok(report) if report.skipped.is_none() && !report.preempted => {
+                if let Err(error) = self.follow_up_branches(
+                    &next_prefix,
+                    serving_config,
+                    runtime,
+                    forced_draft_width,
+                    &mut |_kept| {},
+                ) {
+                    warn!(
+                        follow_up_error = %error,
+                        "follow-up prewarm failed after the request succeeded"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => warn!(
                 prewarm_error = %error,
                 "end-of-answer prewarm failed after the request succeeded"
-            );
+            ),
         }
     }
 }

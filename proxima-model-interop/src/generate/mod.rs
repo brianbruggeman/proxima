@@ -203,6 +203,7 @@ mod kv_ring;
 mod prompt_cache;
 mod prompt_cache_key;
 mod prewarm;
+mod prewarm_follow_up;
 mod prewarm_gate;
 mod ring_checkpoint;
 mod serving_backend;

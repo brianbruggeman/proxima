@@ -143,6 +143,11 @@ pub struct CacheReport {
     /// How long the request waited for a running prewarm to yield the device
     /// before its own lookup could start; zero when none was running.
     pub prewarm_wait: Duration,
+    /// Tokens of the reused rows past the answer, which a drafted follow-up
+    /// branch ([`crate::PromptCacheConfig::follow_up_branches`]) had already
+    /// prefilled; `0` when the entry was not a branch or the request left it
+    /// at the shared answer.
+    pub follow_up_hit_tokens: usize,
 }
 
 impl CacheReport {
@@ -155,6 +160,7 @@ impl CacheReport {
             miss: Some(reason),
             prewarm_hit_tokens: 0,
             prewarm_wait: Duration::ZERO,
+            follow_up_hit_tokens: 0,
         }
     }
 }
@@ -184,6 +190,17 @@ fn ring_rewind_fits(
 }
 
 impl PrefixState {
+    /// A full copy of this state's rows, for a branch that diverges from it.
+    /// This clones every layer's cache, so its cost is the entry's own
+    /// [`Self::byte_len`].
+    pub(super) fn branch(&self) -> Self {
+        Self {
+            ids: self.ids.clone(),
+            layer_caches: self.layer_caches.clone(),
+            cached_len: self.cached_len,
+        }
+    }
+
     /// The first reason this state cannot be rewound to `target_len` tokens,
     /// `None` when every layer can. `restored_at` is the checkpoint position
     /// the ring rows were last restored to, `0` when never.
@@ -310,6 +327,10 @@ pub(super) struct CacheEntry {
     /// The rows of `state` an anticipatory prefill produced, so the request
     /// that reuses them can report what the prewarm saved it.
     pub(super) prewarmed: Option<Range<usize>>,
+    /// Set on a drafted follow-up branch: the length of the answer prefix it
+    /// shares with the entry it was cloned from. An unused branch is evicted
+    /// before any entry a request produced.
+    pub(super) branch_base: Option<usize>,
 }
 
 impl CacheEntry {
@@ -320,6 +341,7 @@ impl CacheEntry {
             checkpoints: Vec::new(),
             restored_at: 0,
             prewarmed: None,
+            branch_base: None,
         }
     }
 
@@ -456,6 +478,7 @@ pub(super) struct PromptCache {
     entries: Vec<CacheEntry>,
     last_report: Option<CacheReport>,
     prewarm_suffix: Vec<u32>,
+    follow_up_closing: Vec<u32>,
 }
 
 impl PromptCache {
@@ -464,7 +487,16 @@ impl PromptCache {
             entries: Vec::new(),
             last_report: None,
             prewarm_suffix: Vec::new(),
+            follow_up_closing: Vec::new(),
         }
+    }
+
+    pub(super) fn set_follow_up_closing(&mut self, closing: &[u32]) {
+        self.follow_up_closing = closing.to_vec();
+    }
+
+    pub(super) fn follow_up_closing(&self) -> &[u32] {
+        &self.follow_up_closing
     }
 
     pub(super) fn set_prewarm_suffix(&mut self, suffix: &[u32]) {
@@ -529,6 +561,9 @@ impl PromptCache {
                     miss: None,
                     prewarm_hit_tokens: entry.prewarmed_len(),
                     prewarm_wait: Duration::ZERO,
+                    follow_up_hit_tokens: entry
+                        .branch_base
+                        .map_or(0, |base| reused.saturating_sub(base)),
                 };
                 (Some(entry), report)
             }
@@ -569,7 +604,12 @@ impl PromptCache {
         self.entries.push(entry);
         let max_entries = config.max_entries as usize;
         while self.entries.len() > max_entries || self.stored_bytes() > budget {
-            self.entries.remove(0);
+            let victim = self
+                .entries
+                .iter()
+                .position(|held| held.branch_base.is_some())
+                .unwrap_or(0);
+            self.entries.remove(victim);
         }
         Some(self.entries.len())
     }
@@ -664,6 +704,7 @@ impl LoadedModel<'_> {
         drop(cache);
         if let Some(taken) = entry.as_mut() {
             taken.prewarmed = None;
+            taken.branch_base = None;
         }
         debug!(
             cache_lcp = report.lcp as u64,
@@ -672,6 +713,7 @@ impl LoadedModel<'_> {
             cache_path = report.path.as_str(),
             cache_miss_reason = report.miss.map_or("none", MissReason::as_str),
             prewarm_hit_tokens = report.prewarm_hit_tokens as u64,
+            follow_up_hit_tokens = report.follow_up_hit_tokens as u64,
             prewarm_wait_ns = u64::try_from(report.prewarm_wait.as_nanos()).unwrap_or(u64::MAX),
             "prompt cache lookup"
         );
@@ -1066,6 +1108,75 @@ mod tests {
 
         assert!(taken.is_some());
         assert_eq!(cache.last_report(), Some(request_report));
+    }
+
+    fn branch_entry(ids: &[u32], base: usize) -> CacheEntry {
+        let mut entry = state_with_ids(ids);
+        entry.branch_base = Some(base);
+        entry
+    }
+
+    #[test]
+    fn a_request_reusing_a_branch_reports_the_rows_it_took_past_the_answer() {
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&[2, 105, 2364, 107]), &enabled_config());
+        cache.store(
+            branch_entry(&[2, 105, 2364, 107, 7, 8, 9], 4),
+            &enabled_config(),
+        );
+
+        let (taken, report) = cache.take_best(
+            &[2, 105, 2364, 107, 7, 8, 55, 56],
+            &base_key(),
+            &shared_widths(),
+        );
+
+        assert_eq!(report.lcp, 6);
+        assert_eq!(report.follow_up_hit_tokens, 2);
+        assert_eq!(
+            taken.expect("the branch served").state.ids,
+            vec![2, 105, 2364, 107, 7, 8]
+        );
+    }
+
+    #[test]
+    fn a_request_that_stops_at_the_shared_answer_has_no_follow_up_hit() {
+        let mut cache = PromptCache::new();
+        cache.store(
+            branch_entry(&[2, 105, 2364, 107, 7, 8, 9], 4),
+            &enabled_config(),
+        );
+
+        let (_, report) =
+            cache.take_best(&[2, 105, 2364, 107, 55, 56], &base_key(), &shared_widths());
+
+        assert_eq!(report.lcp, 4);
+        assert_eq!(report.follow_up_hit_tokens, 0);
+    }
+
+    #[test]
+    fn unused_branches_are_evicted_before_entries_a_request_produced() {
+        let config = PromptCacheConfig {
+            max_entries: 3,
+            ..enabled_config()
+        };
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&[1, 1, 1]), &config);
+        cache.store(branch_entry(&[1, 1, 1, 5], 3), &config);
+        cache.store(state_with_ids(&[2, 2, 2]), &config);
+
+        cache.store(state_with_ids(&[3, 3, 3]), &config);
+
+        let held = |cache: &mut PromptCache, prompt: &[u32]| {
+            cache.take_best(prompt, &base_key(), &shared_widths()).1.lcp
+        };
+        assert_eq!(
+            held(&mut cache, &[1, 1, 1, 5, 9]),
+            3,
+            "only the base kept the answer"
+        );
+        assert_eq!(held(&mut cache, &[2, 2, 2, 9]), 3);
+        assert_eq!(held(&mut cache, &[3, 3, 3, 9]), 3);
     }
 
     #[test]
