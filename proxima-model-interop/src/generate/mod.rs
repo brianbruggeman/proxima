@@ -212,6 +212,8 @@ mod prefix_resume_long_prompt_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod cpu_forward_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod prompt_cache_real_model_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod thread_index_census_tests;
 use decode::*;
 use kv_ring::{
