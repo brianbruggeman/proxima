@@ -35,6 +35,16 @@ retries = 3
 filter = 'package(omega) and binary(packed_row_multi_row_index32_ab)'
 threads-required = "num-test-threads"
 
+# the qwen35 ssm mixer real-dims oracle runs production gdn shapes on the cpu:
+# alone in a debug build each case takes 25-32 s (2026-09-30, box load 12-55),
+# half of proxima::test's 60 s body_timeout. in parallel with the rest of the
+# proxima-tensor suite, the m13 cases starved past it and read as hangs. they run
+# with no other test in flight rather than on smaller shapes that would no longer
+# cover the production dims the test exists for.
+[[profile.default.overrides]]
+filter = 'package(proxima-tensor) and test(qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims)'
+threads-required = "num-test-threads"
+
 # Scoped timeout for the lossless-backpressure tests: elastic producer-assist
 # guarantees forward progress, so these complete in well under a second. If a
 # regression reintroduces the hang-on-full-ring failure mode, terminate-after
