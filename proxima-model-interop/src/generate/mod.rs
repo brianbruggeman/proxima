@@ -199,6 +199,7 @@ mod residency_caches;
 #[macro_use]
 mod decode;
 mod drafter;
+mod chunk_shift;
 mod kv_ring;
 mod prompt_cache;
 mod prompt_cache_key;
