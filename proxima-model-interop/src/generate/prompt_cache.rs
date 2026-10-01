@@ -796,6 +796,11 @@ impl PromptCache {
             .len()
     }
 
+    #[cfg(test)]
+    pub(super) fn index_byte_len(&self) -> usize {
+        self.index.byte_len()
+    }
+
     /// Re-cuts every entry into `config`'s blocks and re-sizes their filters
     /// when the config asks for other ones than the index holds.
     fn reconfigure(&mut self, config: &PromptCacheConfig) {
@@ -2401,10 +2406,13 @@ mod tests {
         samples[samples.len() / 2]
     }
 
-    /// AC17, cost: the time one lookup takes with 4 and with 256 cached
+    /// AC17, cost: the time one lookup takes with 4, 64, 256 and 1,024 cached
     /// 1,024-token conversations (every one opening with the same BOS token),
     /// for a prompt that extends one of them, for one that shares nothing past
-    /// BOS, and for the scan the index replaced. Median of 2,000 lookups each.
+    /// BOS, and for the scan the index replaced. `lookup` is the candidate
+    /// search alone; `take` is the whole `take_best` (the lookup, the entry's
+    /// removal and rewind on a hit, the miss reason on a miss). Median of 2,000
+    /// lookups each.
     #[test]
     #[ignore = "timing probe: run alone, it prints the numbers it measured"]
     fn block_index_lookup_cost_against_the_entry_count() {
@@ -2414,7 +2422,8 @@ mod tests {
             max_entries: 1024,
             ..indexed_config(64)
         };
-        for entry_count in [4_usize, 256] {
+        let key = base_key();
+        for entry_count in [4_usize, 64, 256, 1024] {
             let mut rng = fastrand::Rng::with_seed(11);
             let stored: Vec<Vec<u32>> = (0..entry_count)
                 .map(|_| random_conversation(&mut rng, 1024))
@@ -2433,8 +2442,7 @@ mod tests {
                 (0..LOOKUPS)
                     .map(|_| {
                         let started = std::time::Instant::now();
-                        let (taken, _) =
-                            cache.take_best(prompt, &base_key(), &shared_widths(), 100);
+                        let (taken, _) = cache.take_best(prompt, &key, &shared_widths(), 100);
                         let nanos = started.elapsed().as_nanos();
                         if let Some(entry) = taken {
                             let mut whole = entry;
@@ -2446,9 +2454,28 @@ mod tests {
                     })
                     .collect()
             };
-            let hit = median_nanos(timed_take(&mut cache, &extends));
-            let miss = median_nanos(timed_take(&mut cache, &unrelated));
-            let scan = median_nanos(
+            let timed_lookup = |cache: &PromptCache, prompt: &[u32]| -> u128 {
+                median_nanos(
+                    (0..LOOKUPS)
+                        .map(|_| {
+                            let started = std::time::Instant::now();
+                            std::hint::black_box(cache.best_candidate(prompt, &key, 100));
+                            started.elapsed().as_nanos()
+                        })
+                        .collect(),
+                )
+            };
+            let lookup_hit = timed_lookup(&cache, &extends);
+            let lookup_miss = timed_lookup(&cache, &unrelated);
+            let index_bytes = cache.index_byte_len();
+            let bloom_bytes: usize = cache
+                .entries
+                .values()
+                .map(|entry| entry.bloom.as_ref().map_or(0, BlockBloom::byte_len))
+                .sum();
+            let take_hit = median_nanos(timed_take(&mut cache, &extends));
+            let take_miss = median_nanos(timed_take(&mut cache, &unrelated));
+            let scan_hit = median_nanos(
                 (0..LOOKUPS)
                     .map(|_| {
                         let started = std::time::Instant::now();
@@ -2457,8 +2484,19 @@ mod tests {
                     })
                     .collect(),
             );
+            let scan_miss = median_nanos(
+                (0..LOOKUPS)
+                    .map(|_| {
+                        let started = std::time::Instant::now();
+                        std::hint::black_box(scan_reference(&stored, &unrelated, 100));
+                        started.elapsed().as_nanos()
+                    })
+                    .collect(),
+            );
             println!(
-                "BLOCK_INDEX entries={entry_count} index_hit_ns={hit} index_miss_ns={miss} scan_hit_ns={scan} profile={}",
+                "BLOCK_INDEX entries={entry_count} lookup_hit_ns={lookup_hit} lookup_miss_ns={lookup_miss} take_hit_ns={take_hit} take_miss_ns={take_miss} scan_hit_ns={scan_hit} scan_miss_ns={scan_miss} index_bytes={index_bytes} index_bytes_per_entry={} bloom_bytes_per_entry={} profile={}",
+                index_bytes / entry_count,
+                bloom_bytes / entry_count,
                 if cfg!(debug_assertions) {
                     "debug"
                 } else {

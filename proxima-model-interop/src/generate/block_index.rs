@@ -170,6 +170,22 @@ impl BlockIndex {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn byte_len(&self) -> usize {
+        Self::table_bytes::<u64>(&self.chained)
+            + Self::table_bytes::<u32>(&self.by_first_token)
+            + self.short.capacity() * size_of::<u64>()
+    }
+
+    #[cfg(test)]
+    fn table_bytes<Key>(map: &HashMap<Key, Vec<u64>>) -> usize {
+        map.capacity() * (size_of::<Key>() + size_of::<Vec<u64>>() + 1)
+            + map
+                .values()
+                .map(|stamps| stamps.capacity() * size_of::<u64>())
+                .sum::<usize>()
+    }
+
     /// The stamps of entries too short to hold a whole block.
     pub(super) fn shorter_than_a_block(&self) -> &[u64] {
         &self.short
