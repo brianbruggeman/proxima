@@ -272,3 +272,197 @@ fn a_request_arriving_mid_prewarm_waits_one_chunk_and_reuses_the_partial_prewarm
 fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
+
+const MODEL_TURN_CLOSING: &str = "<turn|>\n<|turn>model\n";
+const FOLLOW_UP_BRANCHES: u32 = 3;
+
+fn follow_up_config() -> ServingConfig<'static> {
+    let base = cached_config(SpeculativeConfig::none());
+    ServingConfig {
+        prompt_cache: PromptCacheConfig {
+            follow_up_branches: FOLLOW_UP_BRANCHES,
+            max_entries: 8,
+            prewarm_chunk_tokens: PREWARM_CHUNK_TOKENS,
+            ..base.prompt_cache
+        },
+        ..base
+    }
+}
+
+struct AnsweredTurn {
+    base: Vec<u32>,
+    closing: Vec<u32>,
+}
+
+fn answered_turn(model: &LoadedModel<'_>) -> AnsweredTurn {
+    let opening = encode_opening(model, &chat_prompt(USER_FROM_CHAR));
+    let first = run_cached(model, cached_config(SpeculativeConfig::none()), &opening);
+    let base: Vec<u32> = opening
+        .iter()
+        .chain(&first.generated)
+        .chain(&turn_boundary_suffix(model))
+        .copied()
+        .collect();
+    AnsweredTurn {
+        base,
+        closing: encode_continuation(model, MODEL_TURN_CLOSING),
+    }
+}
+
+/// AC14: the model drafts follow-up user turns behind an answer; a request
+/// whose user turn begins like a draft reuses the rows of the matching
+/// branch past the answer, and the ids still equal a full prefill's.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn a_user_turn_that_begins_like_a_drafted_follow_up_reuses_the_branch_past_the_answer() {
+    with_model(|model| {
+        let turn = answered_turn(model);
+        model.set_follow_up_closing(&turn.closing);
+        let config = follow_up_config();
+        model
+            .prewarm(&turn.base, &config)
+            .expect("prewarm the answer and its suffix");
+
+        let drafts = model
+            .prewarm_follow_ups(&turn.base, &config)
+            .expect("draft follow-up user turns");
+
+        assert!(!drafts.is_empty(), "the model drafted no follow-up");
+        for (index, draft) in drafts.iter().enumerate() {
+            let text = proxima_tokenizer::decode(draft, &model.vocab).expect("decode a draft");
+            println!("AC14 draft {index} tokens={} text={text:?}", draft.len());
+        }
+        let matched = &drafts[0];
+        let half = matched.len().div_ceil(2);
+        let diverging_tail = encode_continuation(model, " and then what about the weather?");
+        let mut request: Vec<u32> = turn.base.clone();
+        request.extend_from_slice(&matched[..half]);
+        request.extend_from_slice(&diverging_tail);
+
+        let outcome = run_cached(model, cached_config(SpeculativeConfig::none()), &request);
+        let fresh = run_fresh(model, uncached_config(SpeculativeConfig::none()), &request);
+
+        assert_eq!(outcome.generated, fresh);
+        assert_eq!(
+            outcome.report.follow_up_hit_tokens, half,
+            "the request shared {half} drafted tokens past the answer: {:?}",
+            outcome.report
+        );
+        assert_eq!(outcome.report.reused_tokens, turn.base.len() + half);
+        println!(
+            "AC14 branches={} draft0_tokens={} shared={half} report={:?}",
+            drafts.len(),
+            matched.len(),
+            outcome.report
+        );
+    });
+}
+
+/// AC14, trigger: with follow-up drafting on, the end-of-answer prewarm leaves
+/// the answer entry and a branch per draft behind, where the same request
+/// with it off leaves the answer entry alone.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn the_end_of_answer_trigger_leaves_a_branch_entry_per_drafted_follow_up() {
+    let bytes_with = |branches: u32| {
+        with_model(|model| {
+            let opening = encode_opening(model, &chat_prompt(USER_FROM_CHAR));
+            model.set_prewarm_suffix(&turn_boundary_suffix(model));
+            model.set_follow_up_closing(&encode_continuation(model, MODEL_TURN_CLOSING));
+            let mut config = follow_up_config();
+            config.prompt_cache.follow_up_branches = branches;
+            run_cached(model, config, &opening);
+            model.prompt_cache_bytes()
+        })
+    };
+
+    let answer_only = bytes_with(0);
+    let with_branches = bytes_with(FOLLOW_UP_BRANCHES);
+
+    assert!(
+        with_branches > answer_only * 2,
+        "{FOLLOW_UP_BRANCHES} branches left {with_branches} bytes against {answer_only} for the answer alone"
+    );
+    println!("AC14 trigger answer_only_bytes={answer_only} with_branches_bytes={with_branches}");
+}
+
+/// AC14, preemption: a request arriving while a later branch is drafting
+/// waits for the forward in flight and the one-token restore of the answer
+/// entry, less than one prewarm chunk, and reuses the answer entry whole.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn a_request_arriving_mid_follow_up_drafting_waits_less_than_one_prewarm_chunk() {
+    with_model(|model| {
+        let config = follow_up_config();
+        let reference_chunk = reference_chunk_time(model, &config);
+        let turn = answered_turn(model);
+        model.set_follow_up_closing(&turn.closing);
+        model
+            .prewarm(&turn.base, &config)
+            .expect("prewarm the answer and its suffix");
+        let mut request = turn.base.clone();
+        request.extend(encode_continuation(model, "Thanks, and why?"));
+
+        let (first_branch_sender, first_branch_receiver) = mpsc::channel::<()>();
+        let (outcome, drafts) = std::thread::scope(|scope| {
+            let drafting = scope.spawn(|| {
+                model
+                    .prewarm_follow_ups_with_progress(&turn.base, &config, &mut |kept| {
+                        if kept == 1 {
+                            first_branch_sender
+                                .send(())
+                                .expect("the request side listens");
+                        }
+                    })
+                    .expect("draft follow-up user turns")
+            });
+            first_branch_receiver
+                .recv()
+                .expect("the first branch was stored");
+            let outcome = run_cached(model, cached_config(SpeculativeConfig::none()), &request);
+            (outcome, drafting.join().expect("the drafting thread ends"))
+        });
+        let fresh = run_fresh(model, uncached_config(SpeculativeConfig::none()), &request);
+
+        assert_eq!(outcome.generated, fresh);
+        assert!(
+            drafts.len() < FOLLOW_UP_BRANCHES as usize,
+            "the request arrived after every branch was drafted"
+        );
+        assert_eq!(
+            outcome.report.reused_tokens,
+            turn.base.len(),
+            "the request must find the whole answer entry: {:?}",
+            outcome.report
+        );
+        assert!(
+            outcome.report.prewarm_wait <= reference_chunk,
+            "waited {:?} against a {:?} chunk",
+            outcome.report.prewarm_wait,
+            reference_chunk
+        );
+        println!(
+            "AC14 preempt branches_kept={} request_wait_ms={:.1} reference_chunk_ms={:.1} report={:?}",
+            drafts.len(),
+            millis(outcome.report.prewarm_wait),
+            millis(reference_chunk),
+            outcome.report
+        );
+    });
+}
+
+/// The time one warm [`PREWARM_CHUNK_TOKENS`]-token chunk takes: the second
+/// chunk of a prewarm over a long document. Run before the conversation is
+/// cached, because a prewarm reuses the entry with the longest common prefix
+/// and any entry sharing the opening tokens would be rewound into it.
+fn reference_chunk_time(model: &LoadedModel<'_>, config: &ServingConfig<'_>) -> Duration {
+    let chunk = PREWARM_CHUNK_TOKENS as usize;
+    let document = encode_opening(model, &long_chat_prompt(LONG_PREFIX_CHARS));
+    let mut boundaries = vec![Instant::now()];
+    model
+        .prewarm_with_progress(&document[..chunk * 3], config, &mut |_position| {
+            boundaries.push(Instant::now());
+        })
+        .expect("prewarm a reference document");
+    boundaries[2] - boundaries[1]
+}
