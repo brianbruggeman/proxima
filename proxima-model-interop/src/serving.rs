@@ -471,8 +471,14 @@ impl Default for SpeculativeConfig<'static> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptCacheConfig {
     /// Most host bytes the cache may hold across all entries; `0` turns the
-    /// cache off (the default), so a request prefills its whole prompt.
-    /// Example: `1_073_741_824` holds a few long gemma4-E2B conversations.
+    /// cache off, so a request prefills its whole prompt. The default is
+    /// `2_147_483_648` (2 GiB). Measured on gemma4-E2B, one entry holds 69.2
+    /// MB after a 2,063-token request and 220.3 MB after an 8,207-token one:
+    /// 18.9 MB of ring rows that never grow, plus the three full-attention
+    /// layers' rows at 12,288 bytes per token, allocated by doubling. That
+    /// puts four 8k-token conversations at 0.88 GB, with room for their
+    /// checkpoints. The memory-fit gate lowers this to what the host limit
+    /// has left after the model's own budget.
     pub byte_budget: u64,
     /// Most entries the cache holds, whatever the byte budget allows.
     pub max_entries: u32,
@@ -493,16 +499,27 @@ pub struct PromptCacheConfig {
 }
 
 impl PromptCacheConfig {
-    /// The off switch: nothing is cached and every request prefills in full.
+    /// The shipped default: 2 GiB, four entries, 256 rows of ring slack.
     #[must_use]
-    pub const fn off() -> Self {
+    pub const fn standard() -> Self {
         Self {
-            byte_budget: 0,
+            byte_budget: 2 << 30,
             max_entries: 4,
             ring_rewind_slack: 256,
             checkpoint_interval: 0,
             max_checkpoints: 0,
             cache_reuse_min: 0,
+        }
+    }
+
+    /// The off switch (`byte_budget` `0`): nothing is cached and every
+    /// request prefills in full. Set it per request, or through
+    /// `PROXIMA_PROMPT_CACHE_BYTE_BUDGET=0`.
+    #[must_use]
+    pub const fn off() -> Self {
+        Self {
+            byte_budget: 0,
+            ..Self::standard()
         }
     }
 
@@ -527,7 +544,7 @@ impl PromptCacheConfig {
 
 impl Default for PromptCacheConfig {
     fn default() -> Self {
-        Self::off()
+        Self::standard()
     }
 }
 

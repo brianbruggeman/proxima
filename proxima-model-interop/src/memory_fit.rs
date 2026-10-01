@@ -184,6 +184,14 @@ impl HostMemoryLimit {
     pub fn available_bytes(&self) -> u64 {
         self.limit_bytes.saturating_sub(self.os_headroom_bytes)
     }
+
+    /// Bytes still free once `budget` is charged: the most a host-resident
+    /// cache (the prompt cache) may hold without pushing the model's own
+    /// budget past this limit. Zero when the budget alone fills it.
+    #[must_use]
+    pub fn headroom_after(&self, budget: &MemoryBudget) -> u64 {
+        self.available_bytes().saturating_sub(budget.total_bytes())
+    }
 }
 
 /// What [`fit_context_length`] did to reach a fitting budget.
@@ -443,6 +451,39 @@ mod tests {
         );
     }
 
+    /// The prompt cache lives in host memory the model's budget did not
+    /// charge; its allowance is exactly what the limit has left after the
+    /// model's own total, and never negative.
+    #[test]
+    fn headroom_after_is_the_limit_minus_the_models_total_and_saturates_at_zero() {
+        let budget = MemoryBudget::derive(
+            weights(3_000_000_000),
+            &uniform_layers(BLOCK_COUNT, KV_HEADS, HEAD_DIM),
+            8192,
+            0,
+            ARENA_ALLOWANCE_BYTES,
+        );
+        let roomy = HostMemoryLimit {
+            limit_bytes: 16u64 * 1024 * 1024 * 1024,
+            os_headroom_bytes: OS_HEADROOM_BYTES,
+        };
+        let full = HostMemoryLimit {
+            limit_bytes: OS_HEADROOM_BYTES + budget.total_bytes(),
+            os_headroom_bytes: OS_HEADROOM_BYTES,
+        };
+        let overfull = HostMemoryLimit {
+            limit_bytes: OS_HEADROOM_BYTES + budget.total_bytes() - 1,
+            os_headroom_bytes: OS_HEADROOM_BYTES,
+        };
+
+        assert_eq!(
+            roomy.headroom_after(&budget),
+            roomy.available_bytes() - budget.total_bytes()
+        );
+        assert_eq!(full.headroom_after(&budget), 0);
+        assert_eq!(overfull.headroom_after(&budget), 0);
+    }
+
     /// (a) fits -- generous limit, requested context length unchanged.
     #[test]
     fn fits_within_a_generous_limit_without_reducing_context() {
@@ -658,8 +699,9 @@ mod tests {
             os_headroom_bytes: 0,
         };
 
-        let (context_length, outcome) = fit_context_length(weights(0), &layers, 262_144, 0, 0, limit)
-            .expect("a zero-weight checkpoint must fit some context in 4.096 GB");
+        let (context_length, outcome) =
+            fit_context_length(weights(0), &layers, 262_144, 0, 0, limit)
+                .expect("a zero-weight checkpoint must fit some context in 4.096 GB");
 
         assert_eq!(context_length, 100_000);
         assert_eq!(

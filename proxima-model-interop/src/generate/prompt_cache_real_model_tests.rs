@@ -20,10 +20,7 @@ const BEYOND_SLACK_TOKENS: usize = 300;
 fn cached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'static> {
     ServingConfig {
         speculative,
-        prompt_cache: PromptCacheConfig {
-            byte_budget: 1 << 30,
-            ..PromptCacheConfig::off()
-        },
+        prompt_cache: PromptCacheConfig::standard(),
         ..greedy_config()
     }
 }
@@ -31,6 +28,7 @@ fn cached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'stat
 fn uncached_config(speculative: SpeculativeConfig<'static>) -> ServingConfig<'static> {
     ServingConfig {
         speculative,
+        prompt_cache: PromptCacheConfig::off(),
         ..greedy_config()
     }
 }
@@ -276,4 +274,59 @@ fn rewriting_past_the_ring_slack_prefills_in_full_with_speculation_off() {
 #[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
 fn rewriting_past_the_ring_slack_prefills_in_full_with_speculation_on() {
     rewrite_beyond_slack(SpeculativeConfig::default());
+}
+
+fn long_document(chars: usize) -> String {
+    ["rag011", "rag016", "rag013", "rag008", "rag012", "rag004"]
+        .iter()
+        .map(|id| corpus_document(id))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .chars()
+        .take(chars)
+        .collect()
+}
+
+pub(super) fn long_chat_prompt(chars: usize) -> String {
+    format!(
+        "<|turn>user\n{}<turn|>\n<|turn>model\n",
+        long_document(chars)
+    )
+}
+
+fn stored_bytes_after_prefill(model: &LoadedModel<'_>, tokens: usize) -> (usize, usize) {
+    let mut ids = encode_opening(model, &long_chat_prompt(40_000));
+    ids.truncate(tokens);
+    let outcome = run_cached(model, cached_config(SpeculativeConfig::none()), &ids);
+    (
+        cached_tokens_after(ids.len(), &outcome),
+        model.prompt_cache_bytes(),
+    )
+}
+
+/// The default byte budget is justified by what one gemma4-E2B entry costs:
+/// the host bytes the cache holds after a 2,048- and an 8,192-token request.
+/// The default has to hold the four entries `max_entries` allows at 8k
+/// tokens, each with room for the same bytes again in checkpoints.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
+fn default_byte_budget_holds_four_8k_conversations_with_room_for_checkpoints() {
+    with_model(|model| {
+        let (tokens_2k, bytes_2k) = stored_bytes_after_prefill(model, 2048);
+        let (tokens_8k, bytes_8k) = stored_bytes_after_prefill(model, 8192);
+        eprintln!("PREFIX_STATE_BYTES cached_tokens={tokens_2k} bytes={bytes_2k}");
+        eprintln!("PREFIX_STATE_BYTES cached_tokens={tokens_8k} bytes={bytes_8k}");
+        let config = PromptCacheConfig::standard();
+
+        assert!(
+            bytes_8k > bytes_2k,
+            "an entry grows with the tokens it holds"
+        );
+        assert!(
+            4 * 2 * bytes_8k <= config.byte_budget as usize,
+            "four 8k entries and as many checkpoint bytes are {} bytes, budget {}",
+            4 * 2 * bytes_8k,
+            config.byte_budget
+        );
+    });
 }
