@@ -28,6 +28,7 @@ pub(super) fn render_cached_attention_decode_split(
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
+        new_key_rows,
         ..
     } = &resolved.kind
     else {
@@ -54,6 +55,7 @@ pub(super) fn render_cached_attention_decode_split(
         ("@SCALE@", msl_literal(*scale)),
         ("@CACHED_LOWER@", cached_lower),
         ("@NEW_UPPER@", format!("{new_upper_inclusive}L")),
+        ("@NEW_KEY_ROWS@", new_key_rows.to_string()),
         (
             "@CAP@",
             effective_context_chunk_cap(1, *head_dim).to_string(),
@@ -78,7 +80,7 @@ const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long
 kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @T@* in2 [[buffer(2)]], device const @T@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @T@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     long splits = u.splits;
     if ((long)tgid >= u.total_elements * splits) { return; }
-    constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@; constexpr long new_key_rows = 1; constexpr long cap = @CAP@; constexpr long block_width = @BLOCK_WIDTH@; constexpr long v_registers = @V_REGISTERS@;
+    constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@; constexpr long new_key_rows = @NEW_KEY_ROWS@; constexpr long cap = @CAP@; constexpr long block_width = @BLOCK_WIDTH@; constexpr long v_registers = @V_REGISTERS@;
     long cached_key_rows = (long)in8[0];
     long chunks = u.context_chunks;
     long chunk = (long)simdgroup_slot;

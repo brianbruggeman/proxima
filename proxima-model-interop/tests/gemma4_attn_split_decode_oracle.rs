@@ -20,6 +20,8 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "metal-attn-split-rows")]
+use core::ops::ControlFlow;
 use std::fs::File;
 use std::path::PathBuf;
 
@@ -27,6 +29,8 @@ use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig};
+#[cfg(feature = "metal-attn-split-rows")]
+use proxima_model_interop::{SpeculativeConfig, SpeculativeDecodeStats, TokenEvent};
 use serde_json::Value;
 
 const GEMMA4_E2B_DEFAULT_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
@@ -331,4 +335,132 @@ async fn record_feature_off_first_divergences() {
         serde_json::to_string_pretty(&Value::Object(baseline)).expect("serializes"),
     )
     .expect("the baseline fixture is writable");
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+fn decode_with_speculation(
+    model: &LoadedModel<'_>,
+    record: &OracleRecord,
+    config: ServingConfig<'_>,
+) -> (Vec<u32>, String, SpeculativeDecodeStats) {
+    let mut stats = SpeculativeDecodeStats::default();
+    let mut on_token = |_event: TokenEvent<'_>| ControlFlow::Continue(());
+    let (ids, text, _stopped_by_eos) = model
+        .generate_streaming_with_speculative_stats(
+            &record.prompt,
+            record.oracle_ids.len(),
+            config,
+            &mut on_token,
+            &mut stats,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{} greedy decode failed: {error}", record.name));
+    assert!(
+        !ids.is_empty(),
+        "{}: a decode that produced zero tokens compares nothing",
+        record.name
+    );
+    (ids, text, stats)
+}
+
+/// The row-tiled verify against llama.cpp's own greedy ids, speculation off
+/// then on. Off must take the non-speculative path (zero verify steps) and
+/// match the oracle exactly as the split-decode gate does; on drives the
+/// verify program through `metal-attn-split-rows`, and its ids must match the
+/// same oracle records. A run whose verify branch never fired, or never
+/// accepted a draft, would compare only the decode path again, so the totals
+/// are asserted nonzero.
+///
+/// The degenerate control is a second build of the same test with
+/// `OMEGA_ATTENTION_SPLITS_MAX=1` in the environment: one split per
+/// threadgroup column changes the partition and the merge, and the ids must
+/// still match.
+#[cfg(feature = "metal-attn-split-rows")]
+#[proxima::test]
+#[ignore = "requires the real gemma4 E2B blob and the llama.cpp oracle fixture (ORACLE.md)"]
+async fn the_row_tiled_verify_matches_the_llama_cpp_greedy_ids_with_speculation_on() {
+    let records = load_oracle_records();
+    let baseline = read_fixture(
+        &baseline_path(),
+        "record it by running `record_feature_off_first_divergences` on a build without metal-attn-split-decode",
+    );
+    let mut failures = Vec::new();
+    let mut decoded_tokens = 0_usize;
+    let mut speculative = SpeculativeDecodeStats::default();
+
+    with_mapped_blob(|bytes| {
+        let model = load_model(bytes);
+        for record in &records {
+            let (off_ids, _off_text, off_stats) = decode_with_speculation(
+                &model,
+                record,
+                serving_config().with_speculative(SpeculativeConfig::none()),
+            );
+            if off_stats != SpeculativeDecodeStats::default() {
+                failures.push(format!(
+                    "{}: speculation off must take the non-speculative path, found {off_stats:?}",
+                    record.name
+                ));
+            }
+            let (on_ids, on_text, on_stats) =
+                decode_with_speculation(&model, record, serving_config());
+            decoded_tokens += on_ids.len();
+            speculative.verify_steps += on_stats.verify_steps;
+            speculative.drafted_total += on_stats.drafted_total;
+            speculative.accepted_total += on_stats.accepted_total;
+            let (off_divergence, _) = report_decode(record, &off_ids, "");
+            let (divergence, oracle_cut_len) = report_decode(record, &on_ids, &on_text);
+            println!(
+                "{}: speculation on stats={on_stats:?} off_first_divergence={off_divergence:?}",
+                record.name
+            );
+
+            if GATE_PROMPTS.contains(&record.name.as_str())
+                && (divergence.is_some() || off_divergence.is_some())
+            {
+                failures.push(format!(
+                    "{}: gate prompt diverged from the oracle (on {divergence:?}, off {off_divergence:?})",
+                    record.name
+                ));
+            }
+            if let Some(expected) = &record.expected_substring
+                && !on_text.to_lowercase().contains(expected.as_str())
+            {
+                failures.push(format!(
+                    "{}: expected substring {expected:?} not found in {on_text:?}",
+                    record.name
+                ));
+            }
+            if record.name.starts_with("long_") {
+                let off = baseline[record.name.as_str()].as_u64().unwrap_or_else(|| {
+                    panic!(
+                        "{}: no feature-off baseline divergence recorded",
+                        record.name
+                    )
+                });
+                let on = divergence.unwrap_or(oracle_cut_len) as u64;
+                if on < off {
+                    failures.push(format!(
+                        "{}: first divergence {on} with speculation on is earlier than the feature-off {off}",
+                        record.name
+                    ));
+                }
+            }
+        }
+    });
+
+    assert!(
+        decoded_tokens > 0,
+        "zero decoded tokens across {} records is a red gate",
+        records.len()
+    );
+    assert!(
+        speculative.verify_steps > 0 && speculative.accepted_total > 0,
+        "the verify program never ran or never accepted a draft: {speculative:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "row-tiled verify oracle gate failed:\n{}",
+        failures.join("\n")
+    );
 }

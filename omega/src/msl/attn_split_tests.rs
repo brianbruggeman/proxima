@@ -1,20 +1,44 @@
 use super::attn_golden_tests::attention_op;
 use super::*;
 
-/// Feature-off byte identity: each kernel text, merge included, equals what
-/// `main` emitted before `metal-attn-split-decode` existed. The goldens come
-/// from `attn_golden_tests::record_main_goldens` run on an unpatched export.
-#[cfg(not(feature = "metal-attn-split-decode"))]
-mod feature_off {
-    use super::super::attn_golden_tests::{golden_cases, golden_dir, rendered};
+/// Byte identity: each kernel text, merge included, equals what `main`
+/// emitted before `metal-attn-split-rows` existed -- the five base cases with
+/// every attention feature off, and with `metal-attn-split-decode` on those
+/// five plus the six K=1 decode-split cases (global and sliding at capacities
+/// 33/513/2049). The goldens come from `attn_golden_tests::record_main_goldens`
+/// run on an unpatched export of `main` under each feature set.
+mod golden_identity {
+    use super::super::attn_golden_tests::{
+        GOLDEN_PREFIX, golden_cases, golden_dir, preamble_of, rendered,
+    };
 
     #[test]
-    #[ignore = "needs the goldens recorded from an unpatched main export (record_main_goldens); fails loudly without them"]
     fn attention_sources_match_the_recorded_main_goldens() {
         let cases = golden_cases();
-        assert!(!cases.is_empty(), "zero golden cases would compare nothing");
+        let expected_cases = if cfg!(feature = "metal-attn-split-decode") {
+            11
+        } else {
+            5
+        };
+        assert_eq!(
+            cases.len(),
+            expected_cases,
+            "the golden set must have run over every case"
+        );
+        let preamble_path = golden_dir().join(format!("{GOLDEN_PREFIX}preamble.msl"));
+        let preamble_golden = std::fs::read_to_string(&preamble_path).unwrap_or_else(|error| {
+            panic!(
+                "no recorded preamble golden at {}: {error}",
+                preamble_path.display()
+            )
+        });
         for (name, op, policy) in &cases {
-            let path = golden_dir().join(format!("main_{name}.msl"));
+            assert_eq!(
+                preamble_of(op, *policy),
+                preamble_golden,
+                "{name}: the kernel preamble must be byte-identical to main's"
+            );
+            let path = golden_dir().join(format!("{GOLDEN_PREFIX}{name}.msl"));
             let golden = std::fs::read_to_string(&path).unwrap_or_else(|error| {
                 panic!(
                     "no recorded main golden at {}: {error}; record it with `cargo test -p omega \
@@ -26,7 +50,7 @@ mod feature_off {
             assert_eq!(
                 rendered(op, *policy),
                 golden,
-                "{name}: the feature-off kernel text must be byte-identical to main's"
+                "{name}: the kernel text must be byte-identical to main's"
             );
         }
     }

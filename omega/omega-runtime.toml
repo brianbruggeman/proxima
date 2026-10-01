@@ -277,6 +277,31 @@ max = 32
 # OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT_DECODE.
 keys_per_split_decode = 32
 
+[attention_rows]
+# row-tiled cached attention (`msl::CachedAttentionForm::TwoRangeRowTiled`, K > 1 query rows):
+# keys per staged block, llama.cpp's OP_FLASH_ATTN_EXT_NCPSG = 64 (ggml-metal-impl.h:114).
+# split slices are whole blocks. raising it grows the score tile (threadgroup memory) and
+# lowers the barriers per key. must be a multiple of 32. override via
+# OMEGA_ATTENTION_ROWS_KEYS_PER_BLOCK.
+keys_per_block = 64
+# head dims per simdgroup: simdgroups = clamp(head_dim / this, 1, 8), llama.cpp's
+# `ne00 >= 512 ? 8 : 4` (ggml-metal-ops.cpp:3406) for head dims 256 and 512. raising it
+# runs fewer, longer simdgroups. must be a multiple of 8. override via
+# OMEGA_ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP.
+head_dims_per_simdgroup = 64
+# smallest K that takes the MMA form; below it K rows replicate the decode split body.
+# must be >= 2 (K = 1 is always the decode split form). the crossover sweep moves this, not
+# code. override via OMEGA_ATTENTION_ROWS_MMA_MIN_QUERY_ROWS.
+mma_min_query_rows = 2
+# largest K the form admits; above it the op stays TwoRangeCachedBound. the new range is
+# scalar, so a prefill-sized causal triangle is not this kernel's design point. must be >=
+# mma_min_query_rows. override via OMEGA_ATTENTION_ROWS_MAX_QUERY_ROWS.
+max_query_rows = 64
+# threadgroups the split rule fills to: the decode split form's count at 2048 keys
+# (8 heads x 32 splits). raising it adds splits (scratch, merge width) at large K.
+# override via OMEGA_ATTENTION_ROWS_TARGET_THREADGROUPS.
+target_threadgroups = 256
+
 [cached_attention]
 # Metal's per-threadgroup `threadgroup` memory ceiling on every GPU family
 # this crate targets -- `render_cached_attention`'s single-range dynamic

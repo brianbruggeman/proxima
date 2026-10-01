@@ -421,6 +421,11 @@ pub(super) fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Opti
 /// Prefill's context length cannot grow after this call the way decode's
 /// does, so there is nothing to protect against by over-reserving: sizing
 /// against the real split count is exact, not merely smaller.
+///
+/// Above one query row the two split forms (`metal-attn-split-rows`) size
+/// against their own bind-time `splits`, the count their partial and merge
+/// kernels stride the scratch by, which [`crate::msl::splits_for`] does not
+/// reproduce.
 pub(super) fn cached_attention_scratch_len(bound: &BoundOp, numeric_policy: NumericPolicy) -> Option<u64> {
     let BoundOpKind::CachedAttention {
         head_dim,
@@ -437,12 +442,59 @@ pub(super) fn cached_attention_scratch_len(bound: &BoundOp, numeric_policy: Nume
         .iter()
         .product::<u64>()
         .checked_div(*head_dim)?;
-    let splits = if *query_rows > 1 {
-        crate::msl::splits_for(cached_key_rows + new_key_rows, numeric_policy)
-    } else {
-        crate::sized::ATTENTION_SPLIT_MAX
+    #[cfg(feature = "metal-attn-split-rows")]
+    let form_splits = match crate::msl::cached_attention_form(&bound.kind, numeric_policy) {
+        Some(
+            crate::msl::CachedAttentionForm::TwoRangeRowTiled { splits, .. }
+            | crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { splits, .. },
+        ) if *query_rows > 1 => Some(splits),
+        _ => None,
+    };
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    let form_splits: Option<u64> = None;
+    let splits = match form_splits {
+        Some(splits) => splits,
+        None if *query_rows > 1 => {
+            crate::msl::splits_for(cached_key_rows + new_key_rows, numeric_policy)
+        }
+        None => crate::sized::ATTENTION_SPLIT_MAX,
     };
     Some(total_elements * splits * (2 + head_dim))
+}
+
+/// Whether `bound`'s form shares one plan-level scratch buffer with the
+/// plan's other ops of that form (`CachedAttentionForm::shares_scratch`).
+#[cfg(any(test, feature = "metal-plan-stable-buffers"))]
+fn scratch_is_shared(bound: &BoundOp, numeric_policy: NumericPolicy) -> bool {
+    crate::msl::cached_attention_form(&bound.kind, numeric_policy)
+        .is_some_and(crate::msl::CachedAttentionForm::shares_scratch)
+}
+
+/// The one scratch buffer every position that shares it reads and writes,
+/// sized at the largest of their own lengths; `None` when no position
+/// shares. One allocation per plan instead of one per attention op: a
+/// verify step at K = 49 would otherwise reserve 135.8 MB across the 35
+/// layers where this holds the 4.84 MB of the widest.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn shared_attention_scratch(
+    device: &ProtocolObject<dyn MTLDevice>,
+    plan: &Plan,
+) -> Result<Option<MetalBuffer>, MetalError> {
+    shared_scratch_elements(&plan.prepared.resolved, plan.numeric_policy)
+        .map(|elements| allocate_buffer(device, elements as usize, DType::Float32))
+        .transpose()
+}
+
+/// [`shared_attention_scratch`]'s sizing: the widest scratch length among the
+/// positions that share, `None` when none does. Separate from the allocation
+/// so a plan's sharing is checkable without a device.
+#[cfg(any(test, feature = "metal-plan-stable-buffers"))]
+fn shared_scratch_elements(resolved: &[BoundOp], numeric_policy: NumericPolicy) -> Option<u64> {
+    resolved
+        .iter()
+        .filter(|bound| scratch_is_shared(bound, numeric_policy))
+        .filter_map(|bound| cached_attention_scratch_len(bound, numeric_policy))
+        .max()
 }
 
 /// [`Plan::attention_scratch`]'s lazy builder, built alongside [`PlanUniforms`]
@@ -456,8 +508,10 @@ pub(super) fn attention_scratch_buffer(
     if plan.attention_scratch.get().is_none() {
         let (device, _queue) = device_and_queue()?;
         let mut buffers = Vec::with_capacity(plan.prepared.resolved.len());
+        let shared = shared_attention_scratch(&device, plan)?;
         for bound in &plan.prepared.resolved {
             let buffer = match cached_attention_scratch_len(bound, plan.numeric_policy) {
+                Some(_) if scratch_is_shared(bound, plan.numeric_policy) => shared.clone(),
                 Some(elements) => {
                     Some(allocate_buffer(&device, elements as usize, DType::Float32)?)
                 }
@@ -3920,6 +3974,8 @@ pub(super) mod attention_scratch_len_tests {
     use proxima_tensor::{BoundOpKind, DType, Layout, NodeId, NumericPolicy};
 
     use super::{BoundOp, cached_attention_scratch_len};
+    #[cfg(feature = "metal-attn-split-rows")]
+    use super::{scratch_is_shared, shared_scratch_elements};
 
     /// The real openchat decode shape's own dims (`omega/tests/
     /// row_376_cached_attention_batched.rs`'s `QUERY_HEADS`/`KV_HEADS`/
@@ -4026,6 +4082,137 @@ pub(super) mod attention_scratch_len_tests {
             after_bytes < before_bytes,
             "the fix must always request fewer bytes than the pre-fix always-max formula: \
              before={before_bytes} after={after_bytes}"
+        );
+    }
+
+    /// One gemma4-E2B attention op as speculative verify binds it: eight query
+    /// groups on one kv head, `rows` new rows over the `cached_key_rows`
+    /// bucket, the sliding window (head_dim 256) or the full range (512).
+    #[cfg(feature = "metal-attn-split-rows")]
+    fn gemma_verify_bound(head_dim: u64, cached_key_rows: u64, rows: u64) -> BoundOp {
+        const GROUPS: u64 = 8;
+        let operands = (0..9)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(9),
+            dtype: DType::Float32,
+            extents: vec![rows, 1, GROUPS, head_dim],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: rows,
+                cached_key_rows,
+                new_key_rows: rows,
+                kv_heads: 1,
+                query_groups: GROUPS,
+                head_dim,
+                rotary_dim: head_dim,
+                scale: 1.0,
+                cached_lower_inclusive: if head_dim == 256 { -511 } else { i64::MIN },
+                new_upper_inclusive: 0,
+            },
+        }
+    }
+
+    /// The row-tiled partial and the merge stride the scratch by the form's own
+    /// bind-time `splits`; `splits_for` would size it by a different divisor.
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn row_tiled_scratch_is_sized_by_the_forms_own_split_count() {
+        let policy = NumericPolicy::llama_relaxed();
+        let bound = gemma_verify_bound(512, 1632, 49);
+        let elements = cached_attention_scratch_len(&bound, policy)
+            .expect("a CachedAttention bound always yields a scratch length");
+
+        let splits = crate::msl::cached_attention_live_splits(&bound.kind, policy);
+        assert_eq!(
+            splits, 6,
+            "49 row tiles at 1 row each, 1681 keys: 256/49 -> 6 splits"
+        );
+        assert_eq!(elements, 49 * 8 * splits * (2 + 512));
+        assert_ne!(
+            splits,
+            crate::msl::splits_for(1632 + 49, policy),
+            "the generic rule gives another count, which would mis-stride the merge"
+        );
+        assert_eq!(
+            elements * 4,
+            4_835_712,
+            "4.84 MB of scratch for the widest op"
+        );
+    }
+
+    /// 35 attention positions of one verify plan (7 global, 28 sliding) share
+    /// one scratch buffer sized at the widest, where one buffer per position
+    /// would reserve 135.8 MB.
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn the_row_tiled_positions_of_a_plan_share_one_scratch_sized_at_the_widest() {
+        let policy = NumericPolicy::llama_relaxed();
+        let mut resolved = Vec::new();
+        for layer in 0..35 {
+            let global = layer % 5 == 4;
+            resolved.push(if global {
+                gemma_verify_bound(512, 1632, 49)
+            } else {
+                gemma_verify_bound(256, 512, 49)
+            });
+        }
+        let global_count = resolved
+            .iter()
+            .filter(|bound| {
+                matches!(
+                    &bound.kind,
+                    BoundOpKind::CachedAttention { head_dim: 512, .. }
+                )
+            })
+            .count();
+        assert_eq!((global_count, resolved.len() - global_count), (7, 28));
+
+        let sharing = resolved
+            .iter()
+            .filter(|bound| scratch_is_shared(bound, policy))
+            .count();
+        assert_eq!(sharing, 35, "every row-tiled position shares");
+
+        let per_position: u64 = resolved
+            .iter()
+            .filter_map(|bound| cached_attention_scratch_len(bound, policy))
+            .sum();
+        let shared = shared_scratch_elements(&resolved, policy)
+            .expect("35 sharing positions need one buffer");
+        assert_eq!(
+            shared, 1_208_928,
+            "the widest op: 392 vectors x 6 splits x 514 floats"
+        );
+        assert_eq!(per_position, 33_948_768, "7 x 4.84 MB + 28 x 3.64 MB");
+        assert_eq!(per_position * 4, 135_795_072);
+    }
+
+    /// The single-row decode keeps its per-position reservation at the compiled
+    /// maximum split count, so nothing is shared there.
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn decode_split_positions_keep_their_own_scratch() {
+        let policy = NumericPolicy::llama_relaxed();
+        let decode = gemma_verify_bound(256, 512, 1);
+        assert!(!scratch_is_shared(&decode, policy));
+        assert_eq!(
+            shared_scratch_elements(&[decode.clone(), decode.clone()], policy),
+            None
+        );
+        assert_eq!(
+            cached_attention_scratch_len(&decode, policy),
+            Some(8 * crate::sized::ATTENTION_SPLIT_MAX * (2 + 256))
         );
     }
 }

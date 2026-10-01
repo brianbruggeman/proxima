@@ -612,6 +612,8 @@ mod gated {
                     Some(crate::msl::CachedAttentionForm::TwoRangeCachedBound) => "_cb",
                     #[cfg(feature = "metal-attn-split-decode")]
                     Some(crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { .. }) => "_cbds",
+                    #[cfg(feature = "metal-attn-split-rows")]
+                    Some(crate::msl::CachedAttentionForm::TwoRangeRowTiled { .. }) => "_cbrt",
                     Some(
                         crate::msl::CachedAttentionForm::Static
                         | crate::msl::CachedAttentionForm::SingleRangeDynamic { .. },
@@ -746,15 +748,19 @@ mod gated {
             // variant exists -- reported as a deviation, not silently done.
             BoundOpKind::CachedSoftmaxWeights {
                 cached_key_rows,
+                query_rows,
                 attention_rows,
                 head_dim,
                 ..
             } => {
+                let rows_token = crate::msl::softmax_weights_rows_token(*query_rows);
                 if metal.softmax_runtime_rows {
-                    format!("{prefix}_cached_softmax_weights_rtrows_a{attention_rows}_d{head_dim}")
+                    format!(
+                        "{prefix}_cached_softmax_weights_rtrows_a{attention_rows}{rows_token}_d{head_dim}"
+                    )
                 } else {
                     format!(
-                        "{prefix}_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
+                        "{prefix}_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}{rows_token}_d{head_dim}"
                     )
                 }
             }

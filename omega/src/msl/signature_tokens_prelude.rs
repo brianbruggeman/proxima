@@ -55,6 +55,21 @@ pub(super) fn grid_threads(
                 Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, chunks }) => {
                     (chunks, splits)
                 }
+                #[cfg(feature = "metal-attn-split-rows")]
+                Some(CachedAttentionForm::TwoRangeRowTiled {
+                    splits,
+                    rows_per_threadgroup,
+                    simdgroups,
+                }) => {
+                    return checked_product(
+                        resolved.node,
+                        [
+                            row_tiled_threadgroups(&resolved.kind, rows_per_threadgroup, splits),
+                            simdgroups,
+                            SIMD_WIDTH,
+                        ],
+                    );
+                }
                 Some(CachedAttentionForm::Static | CachedAttentionForm::TwoRangeCachedBound)
                 | None => (
                     context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy),
@@ -310,7 +325,13 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
             } else {
                 signed_name_part(*new_upper_inclusive)
             };
-            if form.is_some_and(CachedAttentionForm::is_decode_split) {
+            #[cfg(feature = "metal-attn-split-rows")]
+            let row_tiled_name = row_tiled_entry_name(&resolved.kind, form, &upper_token);
+            #[cfg(not(feature = "metal-attn-split-rows"))]
+            let row_tiled_name: Option<String> = None;
+            if let Some(name) = row_tiled_name {
+                name
+            } else if form.is_some_and(CachedAttentionForm::is_split) {
                 // the decode split kernel reads `cached_key_rows`, `splits` and
                 // `chunks` at runtime and sizes its threadgroup arrays from the
                 // shape-bounded cap, so no bucket extent belongs in the name.
@@ -475,15 +496,19 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
         // is a real, reachable cache key, shaped like every other arm here.
         BoundOpKind::CachedSoftmaxWeights {
             cached_key_rows,
+            query_rows,
             attention_rows,
             head_dim,
             ..
         } => {
+            let rows_token = softmax_weights_rows_token(*query_rows);
             if softmax_runtime_rows_override() {
-                format!("omega_cached_softmax_weights_rtrows_a{attention_rows}_d{head_dim}")
+                format!(
+                    "omega_cached_softmax_weights_rtrows_a{attention_rows}{rows_token}_d{head_dim}"
+                )
             } else {
                 format!(
-                    "omega_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
+                    "omega_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}{rows_token}_d{head_dim}"
                 )
             }
         }
@@ -1558,9 +1583,27 @@ pub(crate) enum CachedAttentionForm {
     /// sliced into `splits` threadgroups per query head with `chunks`
     /// simdgroups each, both fixed at bind time from the bucket capacity.
     /// `splits == 1` writes the normalized row directly; above that a merge
-    /// dispatch follows.
+    /// dispatch follows. With `metal-attn-split-rows` it also serves the K
+    /// rows below `mma_min_query_rows`, one threadgroup per query row, the
+    /// baseline the row-tiled form is measured against.
     #[cfg(feature = "metal-attn-split-decode")]
     TwoRangeDecodeSplit { splits: u64, chunks: u64 },
+    /// The two-range op at `K = query_rows = new_key_rows` rows
+    /// (`mma_min_query_rows <= K <= max_query_rows`, speculative verify and
+    /// small prefill chunks) as one threadgroup per `(kv_head, row tile,
+    /// split)`: each stages a 64-key block of the cache once and scores it
+    /// against `rows_per_threadgroup * query_groups` query vectors with
+    /// `simdgroup_matrix` MMA, where [`Self::TwoRangeDecodeSplit`] re-reads
+    /// every K and V byte once per query row. `simdgroups` is the
+    /// threadgroup width in simdgroups. `splits == 1` writes the normalized
+    /// rows directly; above that the same merge dispatch as the decode split
+    /// follows.
+    #[cfg(feature = "metal-attn-split-rows")]
+    TwoRangeRowTiled {
+        splits: u64,
+        rows_per_threadgroup: u64,
+        simdgroups: u64,
+    },
 }
 
 impl CachedAttentionForm {
@@ -1573,17 +1616,88 @@ impl CachedAttentionForm {
             Self::SingleRangeDynamic { merge } => merge,
             #[cfg(feature = "metal-attn-split-decode")]
             Self::TwoRangeDecodeSplit { splits, .. } => splits > 1,
+            #[cfg(feature = "metal-attn-split-rows")]
+            Self::TwoRangeRowTiled { splits, .. } => splits > 1,
         }
     }
 
+    /// Whether the form slices the key range across threadgroups, so its
+    /// partial writes the interleaved scratch layout.
     #[must_use]
-    pub(crate) const fn is_decode_split(self) -> bool {
+    pub(crate) const fn is_split(self) -> bool {
         match self {
             Self::Static | Self::SingleRangeDynamic { .. } | Self::TwoRangeCachedBound => false,
             #[cfg(feature = "metal-attn-split-decode")]
             Self::TwoRangeDecodeSplit { .. } => true,
+            #[cfg(feature = "metal-attn-split-rows")]
+            Self::TwoRangeRowTiled { .. } => true,
         }
     }
+
+    /// Whether every position of this form in one plan shares a single
+    /// scratch buffer. Only attention ops of different layers do, and each
+    /// layer's partial reads the previous layer's output, so no two are in
+    /// flight together; the decode split keeps a buffer per position.
+    #[cfg(any(test, all(feature = "metal-plan-stable-buffers", target_os = "macos")))]
+    #[must_use]
+    pub(crate) const fn shares_scratch(self) -> bool {
+        match self {
+            Self::Static | Self::SingleRangeDynamic { .. } | Self::TwoRangeCachedBound => false,
+            #[cfg(feature = "metal-attn-split-decode")]
+            Self::TwoRangeDecodeSplit { .. } => false,
+            #[cfg(feature = "metal-attn-split-rows")]
+            Self::TwoRangeRowTiled { .. } => true,
+        }
+    }
+}
+
+/// The query-row token of a `CachedSoftmaxWeights` name: empty at the one decode
+/// row, where `attention_rows` already fixes the kernel, and `_q{rows}` above
+/// it, where the same `attention_rows` splits into different `(query row, row)`
+/// pairs that render different text.
+pub(crate) fn softmax_weights_rows_token(query_rows: u64) -> String {
+    if query_rows == 1 {
+        String::new()
+    } else {
+        format!("_q{query_rows}")
+    }
+}
+
+/// The row-tiled form's kernel name, which carries its sizing but neither the
+/// row count nor the bucket extent: the partial reads `total_elements` and the
+/// live cached rows at runtime, so one compiled kernel serves every K and
+/// every `kv-capacity-bucket`. `None` for every other form.
+#[cfg(feature = "metal-attn-split-rows")]
+fn row_tiled_entry_name(
+    kind: &BoundOpKind,
+    form: Option<CachedAttentionForm>,
+    upper_token: &str,
+) -> Option<String> {
+    let BoundOpKind::CachedAttention {
+        kv_heads,
+        query_groups,
+        head_dim,
+        scale,
+        cached_lower_inclusive,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    let Some(CachedAttentionForm::TwoRangeRowTiled {
+        rows_per_threadgroup,
+        simdgroups,
+        ..
+    }) = form
+    else {
+        return None;
+    };
+    Some(format!(
+        "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{}_rt",
+        scale.to_bits(),
+        signed_name_part(*cached_lower_inclusive),
+        crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK,
+    ))
 }
 
 /// [`CachedAttentionForm`] of `kind`, or `None` when `kind` is not a
@@ -1617,6 +1731,10 @@ pub(crate) fn cached_attention_form(
             && context_length >= crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE;
         return Some(CachedAttentionForm::SingleRangeDynamic { merge });
     }
+    #[cfg(feature = "metal-attn-split-rows")]
+    if let Some(tiled) = row_tiled_form(kind, policy) {
+        return Some(tiled);
+    }
     #[cfg(feature = "metal-attn-split-decode")]
     if let Some(split) = decode_split_form(kind, policy) {
         return Some(split);
@@ -1625,7 +1743,9 @@ pub(crate) fn cached_attention_form(
 }
 
 /// The decode split form of a two-range cached-bound op, when the op and the
-/// policy both admit it: a single decode row, a single new key, a full-rotary
+/// policy both admit it: one new key per query row and a row count
+/// [`decode_split_serves_rows`] admits (a single decode row, with
+/// `metal-attn-split-rows` also the rows below the row-tiled form), a full-rotary
 /// head whose width is a whole number of float4 lanes (the block-staged body's
 /// V accumulate), and a policy granting both the cross-threadgroup merge and
 /// the in-block tree reduce. Anything else stays
@@ -1646,8 +1766,8 @@ fn decode_split_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<Cached
     };
     let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
         && admit(policy, NumericRewrite::TreeReduce).is_ok();
-    let shape_fits = *query_rows == 1
-        && *new_key_rows == 1
+    let shape_fits = *query_rows == *new_key_rows
+        && decode_split_serves_rows(*query_rows)
         && rotary_dim == head_dim
         && head_dim.is_multiple_of(32);
     if !admitted || !shape_fits {
@@ -1691,15 +1811,165 @@ pub(crate) fn decode_chunks_for(context_capacity: u64, head_dim: u64) -> u64 {
     chunks
 }
 
-/// The live split count the merge kernel reads back: the decode form's
-/// bind-time `splits`, otherwise [`splits_for`] over the compiled capacity.
-/// One source for the split writer's `u.splits` and the merge's, so the two
-/// dispatches cannot disagree on the scratch stride.
+/// Whether the decode split serves `query_rows` new rows: the single decode
+/// row always, and with `metal-attn-split-rows` also the rows below
+/// `[attention_rows].mma_min_query_rows`, where each row stays its own set of
+/// threadgroups instead of a tile of the row-tiled form.
+#[cfg(feature = "metal-attn-split-decode")]
+#[must_use]
+fn decode_split_serves_rows(query_rows: u64) -> bool {
+    #[cfg(feature = "metal-attn-split-rows")]
+    {
+        (1..crate::sized::ATTENTION_ROWS_MMA_MIN_QUERY_ROWS).contains(&query_rows)
+    }
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    {
+        query_rows == 1
+    }
+}
+
+/// The row-tiled form of a two-range cached-bound op, when the op and the
+/// policy both admit it: `K = query_rows = new_key_rows` rows inside
+/// `[attention_rows].mma_min_query_rows..=max_query_rows`, a full-rotary head
+/// whose width is a whole number of 8-wide MMA fragments per simdgroup, query
+/// groups that fill whole 8-row MMA blocks (so every block is eight heads of
+/// one query row, with one causal and one window boundary), a bucket extent
+/// that is a whole number of 8-key fragments (so no fragment read leaves the
+/// cache buffer), a single row's tile that fits the threadgroup memory budget,
+/// and a policy granting both the cross-threadgroup merge and the in-block
+/// tree reduce. Anything else falls through to
+/// [`decode_split_form`] or [`CachedAttentionForm::TwoRangeCachedBound`].
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+fn row_tiled_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAttentionForm> {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        rotary_dim,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
+        && admit(policy, NumericRewrite::TreeReduce).is_ok();
+    let simdgroups = row_tiled_simdgroups(*head_dim);
+    let shape_fits = *query_rows == *new_key_rows
+        && (crate::sized::ATTENTION_ROWS_MMA_MIN_QUERY_ROWS
+            ..=crate::sized::ATTENTION_ROWS_MAX_QUERY_ROWS)
+            .contains(query_rows)
+        && rotary_dim == head_dim
+        && query_groups.is_multiple_of(8)
+        && head_dim.is_multiple_of(16)
+        && head_dim.is_multiple_of(8 * simdgroups)
+        && cached_key_rows.is_multiple_of(8)
+        && row_tile_bytes(*query_groups, *head_dim)
+            <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES;
+    if !admitted || !shape_fits {
+        return None;
+    }
+    let rows_per_threadgroup = rows_per_threadgroup(*query_groups, *head_dim);
+    let tiles = query_rows.div_ceil(rows_per_threadgroup);
+    Some(CachedAttentionForm::TwoRangeRowTiled {
+        splits: row_tiled_splits(cached_key_rows + new_key_rows, *kv_heads, tiles),
+        rows_per_threadgroup,
+        simdgroups,
+    })
+}
+
+/// Threadgroups the row-tiled partial dispatches: one per `(kv_head, row tile,
+/// split)`, the row tiles being `query_rows` over `rows_per_threadgroup`. The
+/// one count the dispatch grid and the kernel's own `tgid` decode share.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn row_tiled_threadgroups(
+    kind: &BoundOpKind,
+    rows_per_threadgroup: u64,
+    splits: u64,
+) -> u64 {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        kv_heads,
+        ..
+    } = kind
+    else {
+        return 0;
+    };
+    kv_heads * query_rows.div_ceil(rows_per_threadgroup) * splits
+}
+
+/// Threadgroup bytes of one query row's tile in the row-tiled partial: the f32
+/// output accumulator (`head_dim` per query vector), the score block
+/// (`[attention_rows].keys_per_block` per query vector) and the running
+/// maximum and sum (two f32 per query vector), over the row's `query_groups`
+/// vectors.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn row_tile_bytes(query_groups: u64, head_dim: u64) -> u64 {
+    4 * query_groups * (head_dim + crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK + 2)
+}
+
+/// Query rows one row-tiled threadgroup carries: as many as the
+/// `[cached_attention].threadgroup_memory_bytes` budget holds a tile for
+/// ([`row_tile_bytes`]), at least one, at most `[attention_rows].max_query_rows`.
+/// The f32 output accumulator is what bounds it: 1 row at head_dim 512, 3 at 256.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn rows_per_threadgroup(query_groups: u64, head_dim: u64) -> u64 {
+    crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
+        .checked_div(row_tile_bytes(query_groups, head_dim))
+        .unwrap_or(1)
+        .clamp(1, crate::sized::ATTENTION_ROWS_MAX_QUERY_ROWS)
+}
+
+/// Simdgroups per row-tiled threadgroup: `head_dim` over
+/// `[attention_rows].head_dims_per_simdgroup`, within 1 to 8 -- llama.cpp's
+/// `nsg = ne00 >= 512 ? 8 : 4` (`ggml-metal-ops.cpp:3406`) at head dims 256
+/// and 512.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn row_tiled_simdgroups(head_dim: u64) -> u64 {
+    head_dim
+        .checked_div(crate::sized::ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP)
+        .unwrap_or(1)
+        .clamp(1, 8)
+}
+
+/// Splits of the key range per row-tiled threadgroup column: one per
+/// `[attention_rows].keys_per_block` keys of the bucket capacity, capped so
+/// `kv_heads * row_tiles * splits` reaches
+/// `[attention_rows].target_threadgroups` and no further, within
+/// `[attention_splits].max`. The target is the decode split's threadgroup
+/// count at 2048 keys (8 heads x 32 splits), so a small K, with few row
+/// tiles, gets the occupancy the split gives and a large K, with many tiles,
+/// does not pay merge width for threadgroups it already has.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn row_tiled_splits(context_capacity: u64, kv_heads: u64, row_tiles: u64) -> u64 {
+    let by_keys = context_capacity.div_ceil(crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK);
+    let by_occupancy =
+        crate::sized::ATTENTION_ROWS_TARGET_THREADGROUPS.div_ceil((kv_heads * row_tiles).max(1));
+    by_keys
+        .min(by_occupancy)
+        .clamp(1, crate::sized::ATTENTION_SPLIT_MAX)
+}
+
+/// The live split count the merge kernel reads back: the decode and row-tiled
+/// forms' bind-time `splits`, otherwise [`splits_for`] over the compiled
+/// capacity. One source for the split writer's `u.splits` and the merge's, so
+/// the two dispatches cannot disagree on the scratch stride.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 #[must_use]
 pub(crate) fn cached_attention_live_splits(kind: &BoundOpKind, policy: NumericPolicy) -> u64 {
     match cached_attention_form(kind, policy) {
         #[cfg(feature = "metal-attn-split-decode")]
         Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, .. }) => splits,
+        #[cfg(feature = "metal-attn-split-rows")]
+        Some(CachedAttentionForm::TwoRangeRowTiled { splits, .. }) => splits,
         Some(
             CachedAttentionForm::Static
             | CachedAttentionForm::SingleRangeDynamic { .. }
@@ -1724,6 +1994,11 @@ pub(crate) fn cached_attention_live_splits(kind: &BoundOpKind, policy: NumericPo
 ///
 /// # Errors
 /// [`EmitError::AttentionSplitsExceedSimdWidth`] when `max > SIMD_WIDTH`.
+#[cfg(any(
+    test,
+    feature = "metal-attn-split-decode",
+    all(feature = "metal", target_os = "macos")
+))]
 pub(super) fn validate_attention_split_limit(node: NodeId, max: u64) -> Result<(), EmitError> {
     if max > SIMD_WIDTH {
         return Err(EmitError::AttentionSplitsExceedSimdWidth {

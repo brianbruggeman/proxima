@@ -1,0 +1,148 @@
+struct Uniforms { long total_elements; long cached_key_rows; long new_key_rows; long context_chunks; long splits; };
+
+kernel void omega_cached_attention_q1_h1_g1_d8_s3f800000_ln9223372036854775808_udyn_x4_b32_qh0(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], device const float* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const float* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint gid [[thread_position_in_grid]], uint tgid [[threadgroup_position_in_grid]]) {
+    if ((long)gid >= u.total_elements * 32L) { return; }
+    long cached_key_rows = u.cached_key_rows; long new_key_rows = u.new_key_rows; constexpr long kv_heads = 1; constexpr long query_groups = 1; constexpr long head_dim = 8; constexpr float scale = 1.0; constexpr long cached_lower = -9223372036854775807L; long new_upper = (long)in8[0];
+    long vector_index = (long)gid / 32L; uint lane = gid % 32u;
+    if (vector_index >= u.total_elements) { return; }
+    constexpr long cap = 4;
+    long chunks = u.context_chunks;
+    long splits = u.splits;
+    long chunk = vector_index % cap;
+    long group = (vector_index / cap) % query_groups;
+    long kv_head = (long)tgid % kv_heads;
+    long query_row_and_split = (long)tgid / kv_heads;
+    constexpr long grid_splits = 32;
+    long split = query_row_and_split % grid_splits;
+    long query_row = query_row_and_split / grid_splits;
+    if (split >= splits) { return; }
+    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;
+    long query_head = kv_head * query_groups + group;
+    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);
+    long local_group_index = group * cap + chunk;
+    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];
+    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }
+    long last_key = cached_key_rows + min(new_key_rows - 1L, query_row + new_upper);
+    threadgroup float shared_m[query_groups * cap]; threadgroup float shared_l[query_groups * cap]; threadgroup float shared_o[query_groups * cap * head_dim];
+    long live = last_key + 1L;
+    long slice_len = (live + splits - 1L) / splits;
+    long lo = split * slice_len;
+    long hi = min(lo + slice_len, live);
+    constexpr long block_width = 32;
+    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);
+    threadgroup float ss[query_groups * cap * block_width];
+    if (chunk < chunks) {
+    long slice_start = lo + chunk;
+    long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;
+    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {
+        for (long cc = 0L; cc < block_width / 4L; cc++) {
+            long local_index = block_start + 4L * cc + (long)ty;
+            bool valid = local_index < num_local_keys;
+            long key = slice_start + local_index * chunks;
+            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;
+            if (valid) {
+                long relative = (cached ? key - cached_key_rows : new_index) - query_row;
+                if (cached && relative < cached_lower) { valid = false; }
+                if (!cached && relative > new_upper) { valid = false; }
+            }
+            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+            float partial_score = 0.0f;
+            if (valid) {
+                device const float4* qr4 = (device const float4*)(in0 + qbase);
+                device const float4* qi4 = (device const float4*)(in1 + qbase);
+                device const float4* kr4 = (device const float4*)((cached ? in2 : in4) + kbase);
+                device const float4* ki4 = (device const float4*)((cached ? in3 : in5) + kbase);
+                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {
+                    partial_score += dot(kr4[index], qr4[index]);
+                    partial_score += dot(ki4[index], qi4[index]);
+                }
+            }
+            partial_score += simd_shuffle_down(partial_score, 4);
+            partial_score += simd_shuffle_down(partial_score, 2);
+            partial_score += simd_shuffle_down(partial_score, 1);
+            if (tx == 0) { ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        for (long sub = 0L; sub < block_width; sub += 32L) {
+            long lane_index = sub + (long)lane;
+            float raw_score = ss[local_group_index * block_width + lane_index];
+            float next_max = simd_max(max(maximum, raw_score));
+            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);
+            float weight = exp(raw_score - next_max);
+            sum = sum * rescale + simd_sum(weight);
+            ss[local_group_index * block_width + lane_index] = weight;
+            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] *= rescale; }
+            maximum = next_max;
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {
+                long key = slice_start + local_index * chunks;
+                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;
+                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];
+                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
+                    long local_dimension = dimension / 32L;
+                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    }
+    if (lane == 0u) { shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }
+    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) { shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (chunk == 0L) {
+        float merged_max = -INFINITY;
+        for (long c = 0; c < cap; c++) { merged_max = max(merged_max, shared_m[group * cap + c]); }
+        float merged_sum = 0.0f;
+        for (long c = 0; c < cap; c++) {
+            float partial_max = shared_m[group * cap + c];
+            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);
+            merged_sum += shared_l[group * cap + c] * rescale;
+        }
+        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
+            long local_dimension = dimension / 32L;
+            float acc = 0.0f;
+            for (long c = 0; c < cap; c++) {
+                float partial_max = shared_m[group * cap + c];
+                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);
+                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;
+            }
+            weighted[local_dimension] = acc;
+        }
+        sum = merged_sum;
+        device float* attn_scratch = (device float*)out;
+        long scratch_index = (query_index * splits + split) * (2L + head_dim);
+        if (lane == 0u) { attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }
+        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) { long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }
+    }
+}
+
+//// merge
+struct Uniforms { long total_elements; long splits; };
+
+kernel void omega_cached_attention_q1_h1_g1_d8_s3f800000_ln9223372036854775808_udyn_x4_b32_qh0_merge(device const float* in0 [[buffer(0)]], device float* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
+    long vector_index = (long)gid / 32L; uint lane = gid % 32u;
+    if (vector_index >= u.total_elements) { return; }
+    constexpr long head_dim = 8;
+    long query_index = vector_index;
+    long splits = u.splits;
+    long iwg = (long)lane;
+    long own_scratch = (query_index * splits + iwg) * (2L + head_dim);
+    float own_max = (iwg < splits) ? in0[own_scratch] : -INFINITY;
+    float own_sum = (iwg < splits) ? in0[own_scratch + 1] : 0.0f;
+    float global_max = simd_max(own_max);
+    float own_weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);
+    float total_sum = simd_sum(own_weight * own_sum);
+    float inv_sum = (total_sum == 0.0f) ? 0.0f : 1.0f / total_sum;
+    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
+        float accumulated = 0.0f;
+        for (long split = 0; split < splits; split++) {
+            long scratch_index = (query_index * splits + split) * (2L + head_dim);
+            float split_max = in0[scratch_index];
+            float split_weight = (split_max == -INFINITY) ? 0.0f : exp(split_max - global_max);
+            accumulated += split_weight * in0[scratch_index + 2L + dimension];
+        }
+        out[query_index * head_dim + dimension] = (float)(accumulated * inv_sum);
+    }
+}

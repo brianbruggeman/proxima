@@ -1,0 +1,84 @@
+struct Uniforms { long total_elements; };
+
+kernel void omega_cached_softmax_weights_c2048_a8_d256(
+	device const float* cached_scores [[buffer(0)]],
+	device const float* new_scores [[buffer(1)]],
+	device const float* new_value [[buffer(2)]],
+	device float* out [[buffer(3)]],
+	constant Uniforms& u [[buffer(4)]],
+	device float* cached_weight_sum [[buffer(5)]],
+	device float* new_weight_sum [[buffer(6)]],
+	device float* new_attended [[buffer(7)]],
+	uint local [[thread_position_in_threadgroup]],
+	uint tg [[threadgroup_position_in_grid]])
+{
+	(void)u;
+	long row = (long)tg;
+
+	float accumulator0 = -INFINITY;
+	bool seeded0 = false;
+	for (long key = (long)local; key < 2048; key += 256) {
+		long offset = 0 + key * 8 + row * 1;
+		float value = cached_scores[offset];
+		accumulator0 = seeded0 ? max(accumulator0, value) : value;
+		seeded0 = true;
+	}
+	threadgroup float partials0[8];
+	float partial0 = simd_max(accumulator0);
+	if (local % 32u == 0u) { partials0[local / 32u] = partial0; }
+	threadgroup_barrier(mem_flags::mem_threadgroup);
+	threadgroup float reduced0_shared;
+	if (local == 0u) {
+		float reduced0 = partials0[0];
+		for (uint fold_index = 1u; fold_index < 8u; ++fold_index) {
+			reduced0 = max(reduced0, partials0[fold_index]);
+		}
+		reduced0_shared = reduced0;
+	}
+	threadgroup_barrier(mem_flags::mem_threadgroup);
+	float reduced0 = reduced0_shared;
+	float group_max = reduced0;
+
+	long new_offset = 0 + row * 1;
+	group_max = max(group_max, new_scores[new_offset]);
+
+	for (long key = (long)local; key < 2048; key += 256) {
+		long offset = 0 + key * 8 + row * 1;
+		float step0 = (cached_scores[offset] - group_max);
+		out[key * 8 + row] = exp(step0);
+	}
+	threadgroup_barrier(mem_flags::mem_device);
+
+	float new_shifted = exp(new_scores[new_offset] - group_max);
+
+	float accumulator1 = 0.0f;
+	bool seeded1 = false;
+	for (long key = (long)local; key < 2048; key += 256) {
+		float value = out[key * 8 + row];
+		accumulator1 = seeded1 ? (accumulator1 + value) : value;
+		seeded1 = true;
+	}
+	threadgroup float partials1[8];
+	float partial1 = simd_sum(accumulator1);
+	if (local % 32u == 0u) { partials1[local / 32u] = partial1; }
+	threadgroup_barrier(mem_flags::mem_threadgroup);
+	threadgroup float reduced1_shared;
+	if (local == 0u) {
+		float reduced1 = partials1[0];
+		for (uint fold_index = 1u; fold_index < 8u; ++fold_index) {
+			reduced1 = (reduced1 + partials1[fold_index]);
+		}
+		reduced1_shared = reduced1;
+	}
+	threadgroup_barrier(mem_flags::mem_threadgroup);
+	float reduced1 = reduced1_shared;
+	if (local == 0u) {
+		cached_weight_sum[row] = reduced1;
+		new_weight_sum[row] = new_shifted;
+	}
+
+	for (long dim = (long)local; dim < 256; dim += 256) {
+		long voffset = 0 + row * 0 + dim * 1;
+		new_attended[row * 256 + dim] = new_shifted * new_value[voffset];
+	}
+}

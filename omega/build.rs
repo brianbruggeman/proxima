@@ -165,6 +165,19 @@ fn require_split_k_headroom(max_split: usize) -> usize {
     max_split
 }
 
+/// `[attention_rows]`'s two row-count bounds: `mma_min_query_rows` below 2
+/// would route K = 1 off the decode split form, and `max_query_rows` below
+/// `mma_min_query_rows` would admit no K at all.
+fn require_at_least(name: &str, minimum: usize, value: i64) -> usize {
+    let value = usize::try_from(value)
+        .unwrap_or_else(|_| panic!("{name} must be a non-negative integer; got {value}"));
+    assert!(
+        value >= minimum,
+        "{name} must be at least {minimum}; got {value}"
+    );
+    value
+}
+
 /// Thin panic-on-error wrapper over `proxima_build::sizing::SizingSource`'s
 /// `resolve_int` (principle 12: every override consulted emits its own
 /// `cargo:rerun-if-env-changed` line, so a cached build never ignores it) --
@@ -429,6 +442,50 @@ fn emit_sizing_consts() {
     );
     out.push_str(&format!(
         "pub const ATTENTION_SPLIT_MAX: u64 = {attention_splits_max};\n"
+    ));
+
+    let attention_rows_keys_per_block = require_multiple_of_thirty_two(
+        "attention_rows.keys_per_block",
+        require_nonzero(
+            "attention_rows.keys_per_block",
+            resolve_int(&root, "attention_rows", "keys_per_block"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_KEYS_PER_BLOCK: u64 = {attention_rows_keys_per_block};\n"
+    ));
+    let attention_rows_head_dims_per_simdgroup = require_multiple_of_eight(
+        "attention_rows.head_dims_per_simdgroup",
+        require_nonzero(
+            "attention_rows.head_dims_per_simdgroup",
+            resolve_int(&root, "attention_rows", "head_dims_per_simdgroup"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP: u64 = {attention_rows_head_dims_per_simdgroup};\n"
+    ));
+    let attention_rows_mma_min_query_rows = require_at_least(
+        "attention_rows.mma_min_query_rows",
+        2,
+        resolve_int(&root, "attention_rows", "mma_min_query_rows"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_MMA_MIN_QUERY_ROWS: u64 = {attention_rows_mma_min_query_rows};\n"
+    ));
+    let attention_rows_max_query_rows = require_at_least(
+        "attention_rows.max_query_rows",
+        attention_rows_mma_min_query_rows,
+        resolve_int(&root, "attention_rows", "max_query_rows"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_MAX_QUERY_ROWS: u64 = {attention_rows_max_query_rows};\n"
+    ));
+    let attention_rows_target_threadgroups = require_nonzero(
+        "attention_rows.target_threadgroups",
+        resolve_int(&root, "attention_rows", "target_threadgroups"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_TARGET_THREADGROUPS: u64 = {attention_rows_target_threadgroups};\n"
     ));
 
     let workgroup_size = require_nonzero(
