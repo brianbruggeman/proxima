@@ -48,7 +48,10 @@ pub(super) fn corpus_document(id: &str) -> String {
 }
 
 pub(super) fn chat_prompt(document_chars: usize) -> String {
-    let document: String = corpus_document("rag004").chars().take(document_chars).collect();
+    let document: String = corpus_document("rag004")
+        .chars()
+        .take(document_chars)
+        .collect();
     format!("<|turn>user\n{document}<turn|>\n<|turn>model\n")
 }
 
@@ -58,10 +61,54 @@ struct Outcome {
     resumed: Vec<u32>,
 }
 
+fn split_at_model_turn_opener(templated: &str) -> (&str, &str) {
+    let boundary = templated
+        .rfind('\n')
+        .expect("the chat template ends in a newline");
+    templated.split_at(boundary)
+}
+
+/// Rows `prefill_prefix` caches for `document_chars` characters of the
+/// document: the token count of the templated prompt up to the model-turn
+/// opener, with the vocabulary's own BOS policy.
+fn prefix_rows(model: &LoadedModel<'_>, document_chars: usize) -> usize {
+    let templated = chat_prompt(document_chars);
+    let (prefix_text, _) = split_at_model_turn_opener(&templated);
+    proxima_tokenizer::encode_with_bos_eos(
+        prefix_text,
+        &model.vocab,
+        super::wants_bos(&model.vocab),
+        model.vocab.add_eos_token().unwrap_or(false),
+    )
+    .expect("tokenize the prefix text")
+    .len()
+}
+
+/// The smallest `document_chars` whose prefix reaches
+/// [`LAST_ROW_COUNT_AT_FULL_LANE_WIDTH`] rows, found by bisection over the
+/// tokenizer so the case pair straddles the overflow row count whatever the
+/// vocabulary's characters-per-token ratio is.
+fn first_document_chars_past_the_overflow(model: &LoadedModel<'_>) -> usize {
+    let mut below = 0;
+    let mut at_or_past = 8192;
+    assert!(
+        prefix_rows(model, at_or_past) >= LAST_ROW_COUNT_AT_FULL_LANE_WIDTH,
+        "the corpus document must be long enough to pass the overflow row count"
+    );
+    while at_or_past - below > 1 {
+        let middle = below + (at_or_past - below) / 2;
+        if prefix_rows(model, middle) >= LAST_ROW_COUNT_AT_FULL_LANE_WIDTH {
+            at_or_past = middle;
+        } else {
+            below = middle;
+        }
+    }
+    at_or_past
+}
+
 fn decode_fresh_and_resumed(model: &LoadedModel<'_>, document_chars: usize) -> Outcome {
     let templated = chat_prompt(document_chars);
-    let boundary = templated.rfind('\n').expect("the chat template ends in a newline");
-    let (prefix_text, suffix) = templated.split_at(boundary);
+    let (prefix_text, suffix) = split_at_model_turn_opener(&templated);
 
     let (fresh, ..) = model
         .generate_with_serving_config(&templated, GREEDY_TOKENS, greedy_config())
@@ -70,9 +117,13 @@ fn decode_fresh_and_resumed(model: &LoadedModel<'_>, document_chars: usize) -> O
         .prefill_prefix(prefix_text, &greedy_config())
         .expect("prefill the templated prompt through the model-turn opener");
     let (resumed, ..) = model
-        .generate_from_prefix(&prefix, suffix, GREEDY_TOKENS, &greedy_config(), &mut |_event| {
-            ControlFlow::Continue(())
-        })
+        .generate_from_prefix(
+            &prefix,
+            suffix,
+            GREEDY_TOKENS,
+            &greedy_config(),
+            &mut |_event| ControlFlow::Continue(()),
+        )
         .expect("resume greedy decode from the cached prefix");
     Outcome {
         prefix_rows: prefix.len(),
@@ -108,9 +159,15 @@ fn resumed_decode_matches_fresh_decode_across_the_thread_index_overflow_row_coun
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B header");
     let model = LoadedModel::load(&parsed, bytes).expect("bind the real gemma4-E2B checkpoint");
 
-    let outcomes: Vec<(usize, Outcome)> = [4250, 4260, 5145]
+    let first_past = first_document_chars_past_the_overflow(&model);
+    let outcomes: Vec<(usize, Outcome)> = [first_past - 1, first_past, first_past + 900]
         .into_iter()
-        .map(|document_chars| (document_chars, decode_fresh_and_resumed(&model, document_chars)))
+        .map(|document_chars| {
+            (
+                document_chars,
+                decode_fresh_and_resumed(&model, document_chars),
+            )
+        })
         .collect();
 
     let (_, below) = &outcomes[0];
