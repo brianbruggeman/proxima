@@ -206,6 +206,8 @@ mod prompt_cache_key;
 mod alloc_probe;
 #[cfg(test)]
 mod arena;
+#[cfg(test)]
+mod prefix_trie;
 mod block_index;
 mod prewarm;
 mod prewarm_follow_up;
