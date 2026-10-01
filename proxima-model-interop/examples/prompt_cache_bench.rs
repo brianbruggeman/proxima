@@ -18,6 +18,12 @@
 //! end-of-answer prewarm registered and with no suffix registered, as interleaved pairs; ids are
 //! checked against an uncached run.
 //!
+//! `--mode follow_up`: spec S6 AC14. A set of short multi-turn chats
+//! (`data/follow_up_transcripts.jsonl`). After each answer the answer's turn-boundary suffix is
+//! prewarmed and, in the branch arm, the model drafts follow-up user turns as branch entries; the
+//! next real user turn is then sent. Reports the hit rate (requests whose lookup extended into a
+//! branch), the tokens each hit saved, and what the drafting cost, against an arm with no branches.
+//!
 //! `--mode split`: one cold full-prompt prefill with checkpoint splitting off, at the default
 //! interval, and at swept intervals.
 //!
@@ -64,6 +70,7 @@ enum Mode {
     Ttft,
     Split,
     Prewarm,
+    FollowUp,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,7 +138,8 @@ fn parse_mode(value: &str) -> Mode {
         "ttft" => Mode::Ttft,
         "split" => Mode::Split,
         "prewarm" => Mode::Prewarm,
-        other => panic!("--mode is oracle, ttft, split or prewarm, got {other}"),
+        "follow_up" => Mode::FollowUp,
+        other => panic!("--mode is oracle, ttft, split, prewarm or follow_up, got {other}"),
     }
 }
 
@@ -483,6 +491,7 @@ fn path_label(report: Option<CacheReport>) -> Value {
             "miss": report.miss.map(|reason| reason.as_str()),
             "prewarm_hit_tokens": report.prewarm_hit_tokens,
             "prewarm_wait_ms": report.prewarm_wait.as_secs_f64() * 1000.0,
+            "follow_up_hit_tokens": report.follow_up_hit_tokens,
         })
     })
 }
@@ -1271,6 +1280,137 @@ fn run_prewarm(args: &Args, recorder: &mut Recorder) {
     });
 }
 
+const FOLLOW_UPS: &str = include_str!("data/follow_up_transcripts.jsonl");
+const MODEL_TURN_CLOSING: &str = "<turn|>\n<|turn>model\n";
+const FOLLOW_UP_BRANCHES: u32 = 3;
+
+fn chat_turns() -> Vec<(String, Vec<String>)> {
+    FOLLOW_UPS
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("follow-up line is json"))
+        .map(|record| {
+            let turns = record["turns"]
+                .as_array()
+                .expect("turns is a list")
+                .iter()
+                .map(|turn| turn.as_str().expect("a turn is text").to_owned())
+                .collect();
+            (record["id"].as_str().expect("id").to_owned(), turns)
+        })
+        .collect()
+}
+
+fn follow_up_config(branches: u32) -> ServingConfig<'static> {
+    config_with(PromptCacheConfig {
+        follow_up_branches: branches,
+        follow_up_max_tokens: 48,
+        max_entries: 8,
+        ..PromptCacheConfig::standard()
+    })
+}
+
+#[derive(Default)]
+struct FollowUpTotals {
+    follow_ups: usize,
+    hits: usize,
+    saved_tokens: Vec<usize>,
+    ttft: Vec<f64>,
+    draft_ms: Vec<f64>,
+    cache_bytes: Vec<usize>,
+}
+
+fn run_chat(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    chat: &(String, Vec<String>),
+    branches: u32,
+    max_tokens: usize,
+    totals: &mut FollowUpTotals,
+    recorder: &mut Recorder,
+) {
+    let (id, turns) = chat;
+    model.set_prewarm_suffix(&[]);
+    clear_cache(model, vocab);
+    let suffix = turn_boundary_suffix(vocab);
+    let closing = encode_continuation(vocab, MODEL_TURN_CLOSING);
+    model.set_prewarm_suffix(&suffix);
+    model.set_follow_up_closing(&closing);
+    let request_config = follow_up_config(0);
+    let mut prompt = encode_opening(vocab, &opening_turn(&turns[0]));
+    let mut answer_prefix_tokens = 0;
+    for (turn, user_text) in turns.iter().enumerate() {
+        if turn > 0 {
+            answer_prefix_tokens = prompt.len();
+            prompt.extend(next_user_ids(vocab, user_text));
+        }
+        let timed = timed_request(model, &prompt, max_tokens, &request_config);
+        let report = timed.report.expect("a cached request records its report");
+        let reference = timed_request(model, &prompt, max_tokens, &uncached()).generated;
+        if turn > 0 {
+            let hit = report.follow_up_hit_tokens;
+            totals.follow_ups += 1;
+            totals.hits += usize::from(hit > 0);
+            totals.saved_tokens.push(hit);
+            totals.ttft.push(timed.ttft_ms);
+            recorder.write(&json!({
+                "kind": "request", "mode": "follow_up", "chat": id, "branches": branches, "turn": turn,
+                "prompt_tokens": prompt.len(), "answer_prefix_tokens": answer_prefix_tokens, "ttft_ms": timed.ttft_ms,
+                "ids_identical": timed.generated == reference, "cache": path_label(timed.report),
+            }));
+        }
+        let mut base = prompt.clone();
+        base.extend_from_slice(&timed.generated);
+        base.extend_from_slice(&suffix);
+        let drafted = if branches > 0 && turn + 1 < turns.len() {
+            let started = Instant::now();
+            let drafts = model
+                .prewarm_follow_ups(&base, &follow_up_config(branches))
+                .expect("draft follow-up branches");
+            totals.draft_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            totals.cache_bytes.push(model.prompt_cache_bytes());
+            drafts
+        } else {
+            Vec::new()
+        };
+        recorder.write(&json!({
+            "kind": "drafts", "mode": "follow_up", "chat": id, "branches": branches, "turn": turn,
+            "next_user_turn": turns.get(turn + 1),
+            "drafts": drafted.iter().map(|draft| proxima_tokenizer::decode(draft, vocab).expect("decode a draft")).collect::<Vec<_>>(),
+        }));
+        prompt = base;
+    }
+}
+
+fn print_follow_up_summary(label: &str, totals: &FollowUpTotals) {
+    println!(
+        "{label}: follow_up_requests={} hits={} hit_rate={:.3} saved_tokens_per_request={:?} ttft {}",
+        totals.follow_ups,
+        totals.hits,
+        totals.hits as f64 / totals.follow_ups as f64,
+        totals.saved_tokens,
+        spread(&totals.ttft).text()
+    );
+    if !totals.draft_ms.is_empty() {
+        println!("  drafting ms per answer {}  cache_bytes_after_drafting {:?}", spread(&totals.draft_ms).text(), totals.cache_bytes);
+    }
+}
+
+fn run_follow_up(args: &Args, recorder: &mut Recorder) {
+    with_model(&args.model_path, |model, vocab| {
+        let chats = chat_turns();
+        let mut with_branches = FollowUpTotals::default();
+        let mut without = FollowUpTotals::default();
+        for chat in &chats {
+            recorder.write(&host_snapshot(&format!("follow_up_{}_start", chat.0)));
+            run_chat(model, vocab, chat, FOLLOW_UP_BRANCHES, args.max_tokens, &mut with_branches, recorder);
+            run_chat(model, vocab, chat, 0, args.max_tokens, &mut without, recorder);
+        }
+        println!("follow-up branches, {} chats, max_tokens={}", chats.len(), args.max_tokens);
+        print_follow_up_summary("branches", &with_branches);
+        print_follow_up_summary("no_branches", &without);
+    });
+}
+
 fn main() {
     let args = parse_args();
     let mut recorder = Recorder::create(&args.out);
@@ -1281,6 +1421,7 @@ fn main() {
         Mode::Ttft => run_ttft(&args, &mut recorder),
         Mode::Split => run_split(&args, &mut recorder),
         Mode::Prewarm => run_prewarm(&args, &mut recorder),
+        Mode::FollowUp => run_follow_up(&args, &mut recorder),
     }
     recorder.write(&host_snapshot("end"));
 }
