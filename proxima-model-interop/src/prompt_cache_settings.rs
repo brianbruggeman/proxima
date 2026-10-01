@@ -42,6 +42,10 @@ pub struct PromptCacheSettings {
     #[setting(default = 0)]
     #[builder(default = 0)]
     pub cache_reuse_min: u32,
+    /// See [`crate::PromptCacheConfig::prewarm_chunk_tokens`].
+    #[setting(default = 256)]
+    #[builder(default = 256)]
+    pub prewarm_chunk_tokens: u32,
 }
 
 impl PromptCacheSettings {
@@ -55,6 +59,7 @@ impl PromptCacheSettings {
             checkpoint_interval: self.checkpoint_interval,
             max_checkpoints: self.max_checkpoints,
             cache_reuse_min: self.cache_reuse_min,
+            prewarm_chunk_tokens: self.prewarm_chunk_tokens,
         }
     }
 }
@@ -68,13 +73,14 @@ mod tests {
 
     use super::*;
 
-    const PROMPT_CACHE_ENV_KEYS: [&str; 6] = [
+    const PROMPT_CACHE_ENV_KEYS: [&str; 7] = [
         "PROXIMA_PROMPT_CACHE_BYTE_BUDGET",
         "PROXIMA_PROMPT_CACHE_MAX_ENTRIES",
         "PROXIMA_PROMPT_CACHE_RING_REWIND_SLACK",
         "PROXIMA_PROMPT_CACHE_CHECKPOINT_INTERVAL",
         "PROXIMA_PROMPT_CACHE_MAX_CHECKPOINTS",
         "PROXIMA_PROMPT_CACHE_CACHE_REUSE_MIN",
+        "PROXIMA_PROMPT_CACHE_PREWARM_CHUNK_TOKENS",
     ];
 
     fn cleared_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -96,13 +102,15 @@ mod tests {
             .checkpoint_interval(1024)
             .max_checkpoints(4)
             .cache_reuse_min(64)
+            .prewarm_chunk_tokens(128)
             .build();
 
         let mut toml_file = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
         writeln!(
             toml_file,
             "byte_budget = 1073741824\nmax_entries = 8\nring_rewind_slack = 512\n\
-             checkpoint_interval = 1024\nmax_checkpoints = 4\ncache_reuse_min = 64"
+             checkpoint_interval = 1024\nmax_checkpoints = 4\ncache_reuse_min = 64\n\
+             prewarm_chunk_tokens = 128"
         )
         .expect("write temp toml file");
         let via_file: PromptCacheSettings = conflaguration::from_file(toml_file.path())
@@ -117,7 +125,8 @@ mod tests {
                 "PROXIMA_PROMPT_CACHE_RING_REWIND_SLACK" => Some("512"),
                 "PROXIMA_PROMPT_CACHE_CHECKPOINT_INTERVAL" => Some("1024"),
                 "PROXIMA_PROMPT_CACHE_MAX_CHECKPOINTS" => Some("4"),
-                _ => Some("64"),
+                "PROXIMA_PROMPT_CACHE_CACHE_REUSE_MIN" => Some("64"),
+                _ => Some("128"),
             };
         });
         temp_env::with_vars(env, || {
@@ -129,6 +138,7 @@ mod tests {
         let lowered = via_builder.as_prompt_cache_config();
         assert_eq!(lowered.byte_budget, 1_073_741_824);
         assert_eq!(lowered.ring_rewind_slack, 512);
+        assert_eq!(lowered.prewarm_chunk_tokens, 128);
         assert!(lowered.is_enabled());
     }
 

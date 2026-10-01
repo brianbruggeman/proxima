@@ -504,11 +504,17 @@ pub struct PromptCacheConfig {
     /// Shortest run of tokens worth shifting after a divergence (spec R5,
     /// not yet wired); `0` keeps chunk reuse off like llama's `n_cache_reuse`.
     pub cache_reuse_min: u32,
+    /// Tokens one anticipatory-prefill chunk covers (spec R10): a prewarm
+    /// stops at every multiple of this to check whether a request is waiting,
+    /// so a request that arrives mid-prewarm waits at most one chunk. `0`
+    /// runs the whole prewarm as one chunk, which a request cannot preempt.
+    pub prewarm_chunk_tokens: u32,
 }
 
 impl PromptCacheConfig {
     /// The shipped default: 2 GiB, four entries, 256 rows of ring slack, and
-    /// up to four checkpoints per entry every 2,048 tokens.
+    /// up to four checkpoints per entry every 2,048 tokens, prewarmed in
+    /// 256-token chunks.
     #[must_use]
     pub const fn standard() -> Self {
         Self {
@@ -518,6 +524,7 @@ impl PromptCacheConfig {
             checkpoint_interval: 2048,
             max_checkpoints: 4,
             cache_reuse_min: 0,
+            prewarm_chunk_tokens: 256,
         }
     }
 
