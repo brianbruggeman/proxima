@@ -204,11 +204,9 @@ mod prompt_cache;
 mod prompt_cache_key;
 #[cfg(test)]
 mod alloc_probe;
-#[cfg(test)]
 mod arena;
-#[cfg(test)]
 mod prefix_trie;
-mod block_index;
+mod block_bloom;
 mod prewarm;
 mod prewarm_follow_up;
 mod prewarm_gate;

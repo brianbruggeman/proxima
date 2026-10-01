@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::block_index::content_hashes;
+use super::block_bloom::content_hashes;
 use super::prompt_cache::{BloomCandidates, CacheEntry, PromptCache};
 use super::prompt_cache_real_model_tests::{
     cached_config, encode_continuation, encode_opening, run_cached, with_model,
