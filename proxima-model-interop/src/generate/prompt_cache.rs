@@ -307,6 +307,18 @@ impl CacheEntry {
         }
     }
 
+    /// An entry holding nothing yet, for a request no entry served.
+    pub(super) const fn empty(key: CacheKey) -> Self {
+        Self::new(
+            PrefixState {
+                ids: Vec::new(),
+                layer_caches: Vec::new(),
+                cached_len: 0,
+            },
+            key,
+        )
+    }
+
     pub(super) fn checkpoint_positions(&self) -> Vec<usize> {
         self.checkpoints
             .iter()
@@ -543,6 +555,22 @@ impl LoadedModel<'_> {
             .last_report()
     }
 
+    /// The key a request under these inputs may reuse rows from.
+    pub(super) fn cache_key(
+        &self,
+        serving_config: &ServingConfig,
+        runtime: &BackendRuntime,
+        forced_draft_width: Option<u16>,
+    ) -> CacheKey {
+        CacheKey::of(
+            serving_config,
+            runtime.uses_gpu(),
+            self.effective_rope_scaling(serving_config),
+            ring_slack_rows(serving_config, forced_draft_width),
+            self.ring_write_offset,
+        )
+    }
+
     /// Looks `prompt_ids` up in the cache and emits spec R8's per-request
     /// telemetry for the outcome.
     pub(super) fn prompt_cache_lookup(
@@ -584,8 +612,12 @@ impl LoadedModel<'_> {
         );
     }
 
-    /// Prefills `ids` up to each of `positions` (ascending), snapshotting the
-    /// ring layers at every one, so the entry can come back to it later.
+    /// Prefills `ids` up to each of `stops` (ascending), snapshotting the
+    /// ring layers at every stop that is also one of `checkpoints`, so the
+    /// entry can come back to it later. `after_stop` runs at every stop with
+    /// its position and may end the prefill there (`Break`): a request has no
+    /// reason to, a prewarm yields to a waiting request. The entry returned
+    /// holds whatever was reached.
     ///
     /// Each stretch is a seeded decode of `max_tokens = 1` over the tokens
     /// since the last stop -- the same shape [`Self::prefill_prefix`] uses to
@@ -594,18 +626,20 @@ impl LoadedModel<'_> {
     /// rewound the one row back to the stop. That rewind fits the ring's
     /// slack because [`planned_positions`] plans nothing without any.
     #[allow(clippy::too_many_arguments)] // the seeded decode's own knobs, minus the sinks it fixes
-    fn prefill_through_checkpoints(
+    pub(super) fn prefill_through_stops(
         &self,
         ids: &[u32],
         mut entry: CacheEntry,
-        positions: &[usize],
+        stops: &[usize],
+        checkpoints: &[usize],
         widths: &[LayerPadRowWidths],
         config: &PromptCacheConfig,
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
         forced_draft_width: Option<u16>,
+        after_stop: &mut dyn FnMut(usize) -> ControlFlow<(), ()>,
     ) -> Result<CacheEntry, InteropError> {
-        for &position in positions {
+        for &position in stops {
             let held = entry.state.cached_len;
             if position > held {
                 let seed = entry.take_state();
@@ -632,13 +666,18 @@ impl LoadedModel<'_> {
                         reason: reason.as_str(),
                     })?;
             }
-            if let Some(checkpoint) = RingCheckpoint::capture(&entry.state) {
+            if checkpoints.contains(&position)
+                && let Some(checkpoint) = RingCheckpoint::capture(&entry.state)
+            {
                 debug!(
                     cache_checkpoint_position = position as u64,
                     cache_checkpoint_bytes = checkpoint.byte_len() as u64,
                     "prompt cache checkpoint"
                 );
                 entry.insert_checkpoint(checkpoint, config.max_checkpoints as usize);
+            }
+            if after_stop(position).is_break() {
+                break;
             }
         }
         Ok(entry)
@@ -703,24 +742,9 @@ impl LoadedModel<'_> {
         // before the lookup: a request this rejects must not take an entry out
         apply_serving_config(serving_config, ids.len())?;
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
-        let key = CacheKey::of(
-            serving_config,
-            runtime.uses_gpu(),
-            self.effective_rope_scaling(serving_config),
-            ring_slack_rows(serving_config, forced_draft_width),
-            self.ring_write_offset,
-        );
+        let key = self.cache_key(serving_config, runtime, forced_draft_width);
         let (found, report) = self.prompt_cache_lookup(&ids, &key, &widths);
-        let entry = found.unwrap_or_else(|| {
-            CacheEntry::new(
-                PrefixState {
-                    ids: Vec::new(),
-                    layer_caches: Vec::new(),
-                    cached_len: 0,
-                },
-                key,
-            )
-        });
+        let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
         let positions = planned_positions(
             &entry.checkpoint_positions(),
             report.reused_tokens,
@@ -729,15 +753,17 @@ impl LoadedModel<'_> {
             &config,
         );
         let mut entry = self
-            .prefill_through_checkpoints(
+            .prefill_through_stops(
                 &ids,
                 entry,
+                &positions,
                 &positions,
                 &widths,
                 &config,
                 serving_config,
                 runtime,
                 forced_draft_width,
+                &mut |_position| ControlFlow::Continue(()),
             )
             .inspect_err(log_entry_dropped)?;
         let resumed_at = entry.state.cached_len;
