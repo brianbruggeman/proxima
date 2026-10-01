@@ -128,13 +128,17 @@ pub(super) fn build_buffer_arena(
     effective_outputs: &[NodeId],
     resident_nodes: &BTreeSet<NodeId>,
     query_rows: u64,
+    numeric_policy: NumericPolicy,
 ) -> Result<BufferArena, MetalError> {
     let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
     let naive_transient_bytes: usize = resolved
         .iter()
         .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
         .sum();
-    let uniform_bytes: usize = resolved.iter().map(pack_uniforms_byte_len).sum();
+    let uniform_bytes: usize = resolved
+        .iter()
+        .map(|bound| pack_uniforms_byte_len(bound, numeric_policy))
+        .sum();
     let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows.max(1) as usize);
     let device_limit = device.recommendedMaxWorkingSetSize();
     debug!(
@@ -345,6 +349,7 @@ pub(super) fn arena_placement(
             &plan.prepared.effective_outputs,
             &plan.resident_nodes,
             plan.bind_row_count,
+            plan.numeric_policy,
         )?;
         // a fresh, still-empty `OnceCell` can only fail to accept this set
         // if another call already raced it in -- impossible here since

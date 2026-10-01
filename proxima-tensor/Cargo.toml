@@ -40,6 +40,10 @@ cached-attention-streaming = ["std"]
 # Default-off: the byte-equivalence acceptance bar is not yet met (attn_decode_
 # fusion_review.md 4b/4c).
 metal-fuse-attn-decode = ["cached-attention-streaming"]
+# Default-off: routes gemma4-shaped decode attention to `BoundOpKind::CachedAttention`
+# (the split-KV form `omega` renders) instead of `CachedSoftmaxWeights`, when the
+# bind policy admits `ContextSplitMerge` and `TreeReduce`.
+metal-attn-split-decode = ["metal-fuse-attn-decode"]
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.

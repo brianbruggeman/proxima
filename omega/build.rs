@@ -410,9 +410,22 @@ fn emit_sizing_consts() {
     out.push_str(&format!(
         "pub const ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE: u64 = {attention_splits_keys_per_split_at_scale};\n"
     ));
-    let attention_splits_max = require_nonzero(
+    let attention_splits_keys_per_split_decode = require_multiple_of_thirty_two(
+        "attention_splits.keys_per_split_decode",
+        require_nonzero(
+            "attention_splits.keys_per_split_decode",
+            resolve_int(&root, "attention_splits", "keys_per_split_decode"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_SPLIT_KEYS_PER_SPLIT_DECODE: u64 = {attention_splits_keys_per_split_decode};\n"
+    ));
+    let attention_splits_max = require_power_of_two_le_32(
         "attention_splits.max",
-        resolve_int(&root, "attention_splits", "max"),
+        require_nonzero(
+            "attention_splits.max",
+            resolve_int(&root, "attention_splits", "max"),
+        ),
     );
     out.push_str(&format!(
         "pub const ATTENTION_SPLIT_MAX: u64 = {attention_splits_max};\n"

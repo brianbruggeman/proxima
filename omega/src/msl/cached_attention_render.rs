@@ -100,10 +100,23 @@ pub(super) fn render_cached_attention(
     // needs no dynamic `new_upper` at all, since its "new" range is never
     // bucketed. `entry_name`'s own "dyn"/"cb" markers are what let one
     // compiled kernel serve every live value on each path.
-    let base_operand_len = if pass_present { 11 } else { 8 };
-    let has_ninth_operand = resolved.operands().len() == base_operand_len + 1;
-    let single_range_dynamic = has_ninth_operand && *cached_key_rows == 0;
-    let two_range_cached_bound = has_ninth_operand && *cached_key_rows != 0;
+    let Some(form) = cached_attention_form(&resolved.kind, numeric_policy) else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "cached_attention",
+            found: resolved.kind.name(),
+        });
+    };
+    let (single_range_dynamic, two_range_cached_bound) = match form {
+        CachedAttentionForm::Static => (false, false),
+        CachedAttentionForm::SingleRangeDynamic { .. } => (true, false),
+        CachedAttentionForm::TwoRangeCachedBound => (false, true),
+        #[cfg(feature = "metal-attn-split-decode")]
+        CachedAttentionForm::TwoRangeDecodeSplit { .. } => {
+            return render_cached_attention_decode_split(resolved, entry);
+        }
+    };
+    let has_ninth_operand = single_range_dynamic || two_range_cached_bound;
     let (cached_len_param, new_upper_decl) = if single_range_dynamic {
         (
             format!(", device const {element_type}* in8 [[buffer(8)]]"),
@@ -445,7 +458,11 @@ pub(super) fn render_cached_attention(
         // derived from `tgid` above -- at `u.splits == 1` it is always `0`,
         // so this reduces to exactly the prior forced-`0L` behaviour byte
         // for byte.
-        let final_store = if merge_needed {
+        let final_store = if merge_needed && INTERLEAVED_SPLIT_SCRATCH {
+            format!(
+                "        device float* attn_scratch = (device float*)out;\n        constexpr long total_rows = {query_rows} * kv_heads * query_groups;\n        long value_base = query_index * (head_dim / 4L);\n        long stats_index = total_rows * head_dim * splits + (query_index * splits + split) * 2L;\n        if (lane == 0u) {{ attn_scratch[stats_index] = merged_max; attn_scratch[stats_index + 1L] = merged_sum; }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; attn_scratch[((value_base + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L)] = weighted[local_dimension]; }}\n"
+            )
+        } else if merge_needed {
             "        device float* attn_scratch = (device float*)out;\n        long scratch_index = (query_index * splits + split) * (2L + head_dim);\n        if (lane == 0u) { attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) { long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }\n".to_string()
         } else {
             format!(
@@ -537,10 +554,21 @@ pub(super) fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> 
             found: resolved.kind.name(),
         });
     };
+    validate_attention_split_limit(resolved.node, crate::sized::ATTENTION_SPLIT_MAX)?;
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let mut source = String::new();
     preamble(&mut source, false);
     source.push_str("struct Uniforms { long total_elements; long splits; };\n\n");
+    if INTERLEAVED_SPLIT_SCRATCH {
+        if !head_dim.is_multiple_of(8) {
+            return Err(EmitError::AttentionBlockMisaligned {
+                node: resolved.node,
+                head_dim: *head_dim,
+            });
+        }
+        source.push_str(&interleaved_merge_body(entry, element_type, *head_dim));
+        return Ok(source);
+    }
     source.push_str(&format!(
         "kernel void {entry}(device const float* in0 [[buffer(0)]], device {element_type}* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint gid [[thread_position_in_grid]]) {{\n"
     ));
@@ -560,6 +588,31 @@ pub(super) fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> 
     ));
     Ok(source)
 }
+
+/// [`render_cached_attention_merge`]'s body for the interleaved scratch layout,
+/// transcribed from llama.cpp's `kernel_flash_attn_ext_vec_reduce`
+/// (`fa.metal:2256-2296`): one threadgroup per output row with one simdgroup
+/// per potential split, lane `i` holding split `i`'s `(max, sum)`. `simd_max`
+/// and a rescaled `simd_sum` give the global max and normalizer once; then
+/// each simdgroup strides over the row's `head_dim / 4` float4 slots, one
+/// `simd_sum` per slot, so a row's merge costs `head_dim / 4 / simdgroups`
+/// dependent steps instead of `head_dim / 32 * splits`. The partial for
+/// `(row, dim4, split)` sits at float4 index `(row * head_dim/4 + dim4) *
+/// splits + split`, which the lane-contiguous read here coalesces.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+fn interleaved_merge_body(entry: &str, element_type: &str, head_dim: u64) -> String {
+    format!(
+        "kernel void {entry}(device const float* in0 [[buffer(0)]], device {element_type}* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]], ushort simdgroup_count [[simdgroups_per_threadgroup]]) {{\n    if ((long)tg >= u.total_elements) {{ return; }}\n    constexpr long head_dim = {head_dim};\n    long splits = u.splits;\n    device const float* stats = in0 + u.total_elements * head_dim * splits;\n    bool live = (long)lane < splits;\n    float own_max = live ? stats[((long)tg * splits + (long)lane) * 2L] : -INFINITY;\n    float own_sum = live ? stats[((long)tg * splits + (long)lane) * 2L + 1L] : 0.0f;\n    float global_max = simd_max(own_max);\n    float weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);\n    float total = simd_sum(own_sum * weight);\n    float inverse = (total == 0.0f) ? 0.0f : 1.0f / total;\n    device const float4* partial4 = (device const float4*)in0 + (long)tg * (head_dim / 4L) * splits;\n    device {element_type}* out_row = out + (long)tg * head_dim;\n    for (long dim4 = (long)simdgroup_slot; dim4 < head_dim / 4L; dim4 += (long)simdgroup_count) {{\n        float4 summed = simd_sum(live ? partial4[dim4 * splits + (long)lane] * weight : float4(0.0f));\n        if (lane == 0) {{\n            out_row[dim4 * 4L] = ({element_type})(summed.x * inverse);\n            out_row[dim4 * 4L + 1L] = ({element_type})(summed.y * inverse);\n            out_row[dim4 * 4L + 2L] = ({element_type})(summed.z * inverse);\n            out_row[dim4 * 4L + 3L] = ({element_type})(summed.w * inverse);\n        }}\n    }}\n}}\n"
+    )
+}
+
+/// Whether the split writers and the merge kernel use llama.cpp's interleaved
+/// scratch layout (`fa.metal:1781,1787-1788`) rather than the row-major
+/// `(max, sum, weighted[head_dim])` triples. One constant for both ends of the
+/// scratch hop so the writer and the reader cannot disagree on the layout;
+/// on only under `metal-attn-split-decode`, which keeps every feature-off
+/// kernel text identical to before it existed.
+const INTERLEAVED_SPLIT_SCRATCH: bool = cfg!(feature = "metal-attn-split-decode");
 
 /// Whether `resolved` needs a companion merge dispatch under `numeric_policy`
 /// and, if so, that dispatch's [`Kernel`] -- `None` for every op kind other
@@ -582,7 +635,7 @@ pub(crate) fn emit_cached_attention_merge(
         return Ok(None);
     }
     validate(resolved)?;
-    let entry = alloc::format!("{}_merge", entry_name(resolved));
+    let entry = alloc::format!("{}_merge", entry_name(resolved, numeric_policy));
     let source = render_cached_attention_merge(resolved, &entry)?;
     let total_elements = checked_product(resolved.node, resolved.extents.iter().copied())?
         .checked_div(match &resolved.kind {
@@ -590,21 +643,37 @@ pub(crate) fn emit_cached_attention_merge(
             _ => 1,
         })
         .unwrap_or(0);
-    let threads = checked_product(resolved.node, [total_elements, SIMD_WIDTH])?;
-    let grid2d = exceeds_linear_grid(threads)
-        .then(|| flat_grid2d(resolved.node, threads, None, false))
-        .transpose()?;
-    let source = widen_for_grid(resolved.node, source, grid2d)?;
+    let grid = merge_grid(resolved.node, total_elements)?;
+    let source = widen_for_grid(resolved.node, source, grid.grid2d)?;
     Ok(Some(Kernel {
         source,
         entry,
         bindings: merge_bindings(resolved),
-        grid: GridSpec {
-            threads,
-            threadgroup_width: None,
-            depth: 1,
-            grid2d,
-        },
+        grid,
     }))
 }
 
+/// The merge dispatch's grid, from the one flat-grid rule every kernel takes
+/// (`exceeds_linear_grid` / `flat_grid2d`, the decision `grid2d_for` makes for
+/// `emit_inner` kernels). The interleaved reduce is one threadgroup per row
+/// with a simdgroup per potential split (llama.cpp's `32 * nwg` threads,
+/// `ggml-metal-ops.cpp:3712`), a pinned width `flat_grid2d` launches exactly;
+/// the row-major reduce is one simdgroup per row at the driver's width.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> {
+    let threadgroup_width =
+        INTERLEAVED_SPLIT_SCRATCH.then_some(SIMD_WIDTH * crate::sized::ATTENTION_SPLIT_MAX);
+    let threads = checked_product(
+        node,
+        [total_elements, threadgroup_width.unwrap_or(SIMD_WIDTH)],
+    )?;
+    let grid2d = exceeds_linear_grid(threads)
+        .then(|| flat_grid2d(node, threads, threadgroup_width, false))
+        .transpose()?;
+    Ok(GridSpec {
+        threads,
+        threadgroup_width,
+        depth: 1,
+        grid2d,
+    })
+}

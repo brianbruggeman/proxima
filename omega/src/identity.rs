@@ -574,7 +574,11 @@ mod gated {
                 // "dyn" here would let two ops with different real bounds share
                 // one compiled kernel with the WRONG bound baked in, so this path
                 // keeps the real, varying token.
-                let upper_token = if operand_count == 9 && *cached_key_rows == 0 {
+                let form = crate::msl::cached_attention_form(&resolved.kind, numeric_policy);
+                let upper_token = if matches!(
+                    form,
+                    Some(crate::msl::CachedAttentionForm::SingleRangeDynamic { .. })
+                ) {
                     String::from("dyn")
                 } else {
                     signed_name_part(*new_upper_inclusive)
@@ -598,10 +602,15 @@ mod gated {
                 // `c{cached_key_rows}` token as a compiled `constexpr` -- without
                 // this marker the two would collide on one identity string
                 // despite generating different kernel bodies.
-                let cached_bound_token = if operand_count == 9 && *cached_key_rows != 0 {
-                    "_cb"
-                } else {
-                    ""
+                let cached_bound_token = match form {
+                    Some(crate::msl::CachedAttentionForm::TwoRangeCachedBound) => "_cb",
+                    #[cfg(feature = "metal-attn-split-decode")]
+                    Some(crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { .. }) => "_cbds",
+                    Some(
+                        crate::msl::CachedAttentionForm::Static
+                        | crate::msl::CachedAttentionForm::SingleRangeDynamic { .. },
+                    )
+                    | None => "",
                 };
                 // `rotary_dim == head_dim` (every caller before qwen35's
                 // partial-rotary dense attention) is byte-identical to this

@@ -13844,16 +13844,14 @@ mod gemma4_synthetic_parity {
         // deleted -- it always chose the SAME kernel now that the
         // softmax-weights arm claims every candidate it used to gate),
         // which no longer fires there once the new arm accepts.
-        let accepted = |new_count: u64, kv_extent: u64| -> (usize, usize) {
+        let accepted_under = |new_count: u64,
+                              kv_extent: u64,
+                              policy: crate::numeric::NumericPolicy|
+         -> (usize, usize) {
             let shapes = crate::shape::infer(&program, &[new_count, kv_extent])
                 .expect("the gemma4-shaped recognizer fixture shape-infers");
-            let resolved = crate::bind::bind(
-                &program,
-                &shapes,
-                &[logits],
-                crate::numeric::NumericPolicy::llama_relaxed(),
-            )
-            .expect("the gemma4-shaped recognizer fixture binds");
+            let resolved = crate::bind::bind(&program, &shapes, &[logits], policy)
+                .expect("the gemma4-shaped recognizer fixture binds");
             let softmax_weights_count = resolved
                 .iter()
                 .filter(|bound| {
@@ -13872,6 +13870,13 @@ mod gemma4_synthetic_parity {
             (softmax_weights_count, cached_attention_count)
         };
 
+        let accepted = |new_count: u64, kv_extent: u64| -> (usize, usize) {
+            accepted_under(
+                new_count,
+                kv_extent,
+                crate::numeric::NumericPolicy::llama_relaxed(),
+            )
+        };
         let (decode_softmax_weights, decode_accepted) = accepted(1, SWA_WINDOW as u64 / 2);
         let (prefill_softmax_weights, prefill_accepted) = accepted(600, 0);
 
@@ -13880,7 +13885,39 @@ mod gemma4_synthetic_parity {
             "prefill (new_key_rows > 1) declines the softmax-weights arm regardless of feature"
         );
 
-        #[cfg(feature = "metal-fuse-attn-decode")]
+        #[cfg(feature = "metal-attn-split-decode")]
+        {
+            assert_eq!(
+                decode_softmax_weights, 0,
+                "split-decode on, llama_relaxed grants ContextSplitMerge and TreeReduce: decode \
+                 must route to CachedAttention, never CachedSoftmaxWeights"
+            );
+            assert_eq!(
+                decode_accepted, 2,
+                "split-decode on: both the sliding and the global decode layer bind as \
+                 CachedAttention"
+            );
+            assert_eq!(
+                prefill_accepted, 0,
+                "split-decode on: prefill still declines both layers (the decode-only guard runs \
+                 before the routing decision)"
+            );
+            let (bit_exact_softmax_weights, bit_exact_attention) = accepted_under(
+                1,
+                SWA_WINDOW as u64 / 2,
+                crate::numeric::NumericPolicy::bit_exact(),
+            );
+            assert_eq!(
+                (bit_exact_softmax_weights, bit_exact_attention),
+                (2, 0),
+                "split-decode on, bit_exact withholds the reassociations: decode keeps the \
+                 byte-exact CachedSoftmaxWeights lowering"
+            );
+        }
+        #[cfg(all(
+            feature = "metal-fuse-attn-decode",
+            not(feature = "metal-attn-split-decode")
+        ))]
         {
             assert_eq!(
                 decode_softmax_weights, 2,

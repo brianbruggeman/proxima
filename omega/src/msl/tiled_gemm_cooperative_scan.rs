@@ -1526,19 +1526,27 @@ pub(super) fn tiled_gemm_threadgroup_width(
         // `local_group_index`'s own `cap`-sized addressing assumes, which is
         // an out-of-bounds `threadgroup` memory write, not merely a wrong
         // answer.
-        // Same `cached_key_rows == 0` discriminator as `grid_threads`'s own
-        // `CachedAttention` arm -- `two_range_cached_bound` never widens to
-        // the compiled cap, since its `context_length` is already the
-        // bucket-padded compile-time value.
-        let dynamic_cached_len = (resolved.operands().len() == 9
-            || resolved.operands().len() == 12)
-            && *cached_key_rows == 0;
+        // Same form classification as `grid_threads`'s own `CachedAttention`
+        // arm -- `two_range_cached_bound` never widens to the compiled cap,
+        // since its `context_length` is already the bucket-padded
+        // compile-time value. The decode split form is one query head per
+        // threadgroup, so its width carries no `query_groups` factor.
         let context_length = *cached_key_rows + *new_key_rows;
-        let chunks = if dynamic_cached_len {
-            effective_context_chunk_cap(*query_groups, *head_dim)
-        } else {
-            context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy)
-        };
+        let (dynamic_cached_len, chunks) =
+            match cached_attention_form(&resolved.kind, numeric_policy) {
+                Some(CachedAttentionForm::SingleRangeDynamic { .. }) => {
+                    (true, effective_context_chunk_cap(*query_groups, *head_dim))
+                }
+                #[cfg(feature = "metal-attn-split-decode")]
+                Some(CachedAttentionForm::TwoRangeDecodeSplit { chunks, .. }) => {
+                    return Some(chunks * SIMD_WIDTH);
+                }
+                Some(CachedAttentionForm::Static | CachedAttentionForm::TwoRangeCachedBound)
+                | None => (
+                    false,
+                    context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy),
+                ),
+            };
         // Below the split-at-scale knee, `cached_attention_per_query_head_grid`
         // moves `query_groups` out of this width and into a threadgroup-count
         // factor instead (`grid_threads`' own total stays unchanged -- see

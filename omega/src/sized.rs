@@ -65,6 +65,10 @@
 //!   level above `ATTENTION_CONTEXT_KEYS_PER_CHUNK`'s intra-threadgroup
 //!   split), gated by `NumericRewrite::ContextSplitMerge`; see
 //!   `omega-runtime.toml`'s `[attention_splits]`.
+//! - `ATTENTION_SPLIT_KEYS_PER_SPLIT_DECODE` (always compiled) — the two-range
+//!   decode split form's keys-per-threadgroup-split divisor
+//!   (`crate::msl::decode_splits_for`), read only under
+//!   `metal-attn-split-decode`; see `omega-runtime.toml`'s `[attention_splits]`.
 //! - `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES` (always compiled) —
 //!   Metal's per-threadgroup `threadgroup` memory ceiling; `crate::msl::
 //!   effective_context_chunk_cap` clamps `ATTENTION_CONTEXT_CHUNK_CAP`

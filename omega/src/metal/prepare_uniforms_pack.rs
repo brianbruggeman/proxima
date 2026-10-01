@@ -743,16 +743,14 @@ pub(super) fn gather_uniform_byte_len(gather_count: usize, rank_len: usize) -> u
 /// just to read `.len()` off the result, allocating and filling a real byte
 /// vector — for every op in the plan — purely to throw it away; this
 /// mirrors [`pack_uniforms`]'s own match arms field-for-field instead.
-pub(super) fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
+pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPolicy) -> usize {
     const WORD: usize = size_of::<i64>();
     let rank_len = bound.extents.len().max(1);
     let operand_count = bound.operands().len();
     let gather = gather_count(bound);
 
     match &bound.kind {
-        BoundOpKind::CachedAttention {
-            cached_key_rows, ..
-        } => {
+        BoundOpKind::CachedAttention { .. } => {
             // Mirrors `pack_cached_attention_uniforms`: the single-range
             // fused form (nine operands, `cached_key_rows == 0`) appends
             // `cached_key_rows`, `new_key_rows`, `context_chunks`, and
@@ -762,11 +760,17 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
             // 0`) reads its runtime bound straight off `in8` in the kernel
             // body instead (`render_cached_attention`'s own doc) and keeps
             // the minimal one-word struct, so only the single-range form
-            // widens the uniform blob.
-            if operand_count == 9 && *cached_key_rows == 0 {
-                5 * WORD
-            } else {
-                WORD
+            // widens the uniform blob. The decode split form carries
+            // `total_elements`, `context_chunks` and `splits`.
+            match crate::msl::cached_attention_form(&bound.kind, numeric_policy) {
+                Some(crate::msl::CachedAttentionForm::SingleRangeDynamic { .. }) => 5 * WORD,
+                #[cfg(feature = "metal-attn-split-decode")]
+                Some(crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { .. }) => 3 * WORD,
+                Some(
+                    crate::msl::CachedAttentionForm::Static
+                    | crate::msl::CachedAttentionForm::TwoRangeCachedBound,
+                )
+                | None => WORD,
             }
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => WORD,
@@ -1228,12 +1232,66 @@ pub(super) mod pack_uniforms_byte_len_tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    #[cfg(feature = "metal-attn-split-decode")]
+    use proxima_tensor::Layout;
     use proxima_tensor::{
         BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce,
         ReduceInit, ScalarOp, append, bind, infer, map,
     };
 
     use super::{pack_uniforms, pack_uniforms_byte_len};
+
+    /// The decode split form packs `(rows * heads, chunks, splits)` -- three
+    /// words, not the one a two-range op otherwise gets -- and the byte length
+    /// estimate must agree or the arena's uniform accounting undercounts it.
+    #[cfg(feature = "metal-attn-split-decode")]
+    #[test]
+    fn decode_split_uniforms_carry_the_bind_time_counts_and_match_the_byte_len() {
+        let bound = BoundOp {
+            node: NodeId(9),
+            dtype: DType::Float32,
+            extents: vec![1, 1, 8, 256],
+            kind: BoundOpKind::CachedAttention {
+                operands: (0..9)
+                    .map(|index| {
+                        (
+                            NodeId(index),
+                            Layout {
+                                base: 0,
+                                strides: vec![1_i64].into(),
+                            },
+                            None,
+                        )
+                    })
+                    .collect(),
+                query_rows: 1,
+                cached_key_rows: 512,
+                new_key_rows: 1,
+                kv_heads: 1,
+                query_groups: 8,
+                head_dim: 256,
+                rotary_dim: 256,
+                scale: 1.0,
+                cached_lower_inclusive: -511,
+                new_upper_inclusive: 0,
+            },
+        };
+        let policy = NumericPolicy::llama_relaxed();
+
+        let packed = pack_uniforms(&bound, policy).expect("packs uniforms");
+        let (chunks, _) = packed.as_chunks::<{ size_of::<i64>() }>();
+        let words: Vec<i64> = chunks
+            .iter()
+            .map(|chunk| i64::from_ne_bytes(*chunk))
+            .collect();
+
+        assert_eq!(packed.len(), pack_uniforms_byte_len(&bound, policy));
+        assert_eq!(
+            words,
+            vec![8, 1, 17],
+            "eight heads, one simdgroup per threadgroup at 513 keys, 17 splits"
+        );
+    }
 
     /// The last node `program` builds -- see `msl::tests::terminal`'s own
     /// doc (ROW 541, `proxima-tensor/docs/discipline.md`): every fixture
@@ -1340,7 +1398,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
             "fixture must actually lower to an Elementwise BoundOp"
         );
         assert_eq!(
-            pack_uniforms_byte_len(&bound),
+            pack_uniforms_byte_len(&bound, NumericPolicy::default()),
             pack_uniforms(&bound, NumericPolicy::default())
                 .expect("packs uniforms")
                 .len()
@@ -1361,7 +1419,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
             "fixture must actually lower to a Keep::Reduce BoundOp"
         );
         assert_eq!(
-            pack_uniforms_byte_len(&bound),
+            pack_uniforms_byte_len(&bound, NumericPolicy::default()),
             pack_uniforms(&bound, NumericPolicy::default())
                 .expect("packs uniforms")
                 .len()
@@ -1394,8 +1452,27 @@ pub(super) fn pack_cached_attention_uniforms(
     // inside the kernel body instead of widening the dispatch or the
     // uniforms struct, so it takes the same path as the eight-operand,
     // unbucketed case below.
-    let dynamic_cached_len =
-        (bound.operands().len() == 9 || bound.operands().len() == 12) && *cached_key_rows == 0;
+    let form = crate::msl::cached_attention_form(&bound.kind, numeric_policy);
+    #[cfg(feature = "metal-attn-split-decode")]
+    if let Some(crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { splits, chunks }) = form {
+        // one uniforms blob for the split kernel: the `(row, head)` count the
+        // merge also uses, then the bind-time chunk and split counts. The
+        // grid multiplies `total_elements` by both, so no widened total here.
+        let rows_and_heads: i64 = bound
+            .extents
+            .iter()
+            .map(|extent| *extent as i64)
+            .product::<i64>()
+            / *head_dim as i64;
+        push_i64(bytes, rows_and_heads);
+        push_i64(bytes, i64::try_from(chunks).unwrap_or(1));
+        push_i64(bytes, i64::try_from(splits).unwrap_or(1));
+        return Ok(());
+    }
+    let dynamic_cached_len = matches!(
+        form,
+        Some(crate::msl::CachedAttentionForm::SingleRangeDynamic { .. })
+    );
     let context_length = *cached_key_rows + *new_key_rows;
     let chunks =
         crate::msl::context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy)
@@ -1487,13 +1564,7 @@ pub(super) fn pack_cached_attention_merge_uniforms(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<u8>, EmitError> {
-    let BoundOpKind::CachedAttention {
-        head_dim,
-        cached_key_rows,
-        new_key_rows,
-        ..
-    } = &bound.kind
-    else {
+    let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
         return Err(EmitError::RenderKindMismatch {
             node: bound.node,
             expected: "cached_attention_merge",
@@ -1506,7 +1577,11 @@ pub(super) fn pack_cached_attention_merge_uniforms(
         .map(|extent| *extent as i64)
         .product::<i64>()
         / *head_dim as i64;
-    let splits = crate::msl::splits_for(*cached_key_rows + *new_key_rows, numeric_policy) as i64;
+    let splits = i64::try_from(crate::msl::cached_attention_live_splits(
+        &bound.kind,
+        numeric_policy,
+    ))
+    .unwrap_or(1);
     let mut bytes = Vec::with_capacity(16);
     push_i64(&mut bytes, total);
     push_i64(&mut bytes, splits);

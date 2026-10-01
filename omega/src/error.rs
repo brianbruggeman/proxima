@@ -267,6 +267,15 @@ pub enum EmitError {
     )]
     AttentionBlockMisaligned { node: NodeId, head_dim: u64 },
 
+    /// The cached-attention merge kernel holds one split per simdgroup lane,
+    /// so `[attention_splits].max` above `SIMD_WIDTH` would silently drop the
+    /// splits past lane 31 from the running max and the normalizer. Rejected
+    /// here, at bind time, rather than merging a wrong softmax.
+    #[error(
+        "node {node} attention_splits.max {max} exceeds the merge kernel's {limit} lanes, so splits past lane {limit} would be dropped from the softmax merge"
+    )]
+    AttentionSplitsExceedSimdWidth { node: NodeId, max: u64, limit: u64 },
+
     /// `multi_row_index32_active`'s own doc: the index32 body's `base_blocks
     /// = operand_base / block_elements` split is only exact (bit-identical
     /// to the wide/unsplit decode) when `operand_base % block_elements ==
