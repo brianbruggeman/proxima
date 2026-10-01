@@ -112,6 +112,7 @@ pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
 pub use generate::{
     CachePath, CacheReport, DecodeMetrics, LoadedModel, MissReason, Phase, PrefixState,
+    PrewarmReport, PrewarmSkip,
     SpeculativeDecodeStats, SpeculativeTypeStats, TokenEvent,
 };
 #[cfg(feature = "std")]

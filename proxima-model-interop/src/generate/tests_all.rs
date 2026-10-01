@@ -2515,6 +2515,7 @@ pub(super) mod memory_fit_gate_tests {
             expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,
             prompt_cache: std::sync::Mutex::new(crate::generate::PromptCache::new()),
+            prewarm_gate: crate::generate::PrewarmGate::new(),
         }
     }
 

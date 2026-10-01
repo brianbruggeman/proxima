@@ -23,10 +23,13 @@
 //! The lock is held only to take an entry out, or put one back, never across
 //! a decode: a request owns its taken state for the whole generation, so a
 //! second request on the same model sees no entry and prefills in full rather
-//! than waiting.
+//! than waiting. [`super::prewarm`] fills the same entries ahead of a request
+//! through the same lookup, and [`super::prewarm_gate`] decides who holds the
+//! device when a request and a prewarm meet.
 
-use core::ops::ControlFlow;
+use core::ops::{ControlFlow, Range};
 use std::sync::PoisonError;
+use std::time::Duration;
 
 use proxima_telemetry::debug;
 
@@ -133,6 +136,13 @@ pub struct CacheReport {
     pub path: CachePath,
     /// Why nothing was reused, when `path` is [`CachePath::Miss`].
     pub miss: Option<MissReason>,
+    /// Tokens of the reused rows an anticipatory prefill produced
+    /// ([`LoadedModel::prewarm`], the end-of-answer trigger) rather than an
+    /// earlier request: the part of `reused_tokens` the prewarm paid for.
+    pub prewarm_hit_tokens: usize,
+    /// How long the request waited for a running prewarm to yield the device
+    /// before its own lookup could start; zero when none was running.
+    pub prewarm_wait: Duration,
 }
 
 impl CacheReport {
@@ -143,6 +153,8 @@ impl CacheReport {
             prefilled_tokens: prompt_tokens,
             path: CachePath::Miss,
             miss: Some(reason),
+            prewarm_hit_tokens: 0,
+            prewarm_wait: Duration::ZERO,
         }
     }
 }
@@ -295,6 +307,9 @@ pub(super) struct CacheEntry {
     /// Position of the checkpoint the rings were last restored to, `0` when
     /// they were only ever written forward ([`ring_rewind_fits`]).
     pub(super) restored_at: usize,
+    /// The rows of `state` an anticipatory prefill produced, so the request
+    /// that reuses them can report what the prewarm saved it.
+    pub(super) prewarmed: Option<Range<usize>>,
 }
 
 impl CacheEntry {
@@ -304,10 +319,11 @@ impl CacheEntry {
             key,
             checkpoints: Vec::new(),
             restored_at: 0,
+            prewarmed: None,
         }
     }
 
-    /// An entry holding nothing yet, for a request no entry served.
+    /// An entry holding nothing yet, for a request or prewarm no entry served.
     pub(super) const fn empty(key: CacheKey) -> Self {
         Self::new(
             PrefixState {
@@ -317,6 +333,33 @@ impl CacheEntry {
             },
             key,
         )
+    }
+
+    /// Records that rows `start..end` came from a prewarm, joining a range
+    /// that ends where this one starts.
+    pub(super) fn mark_prewarmed(&mut self, start: usize, end: usize) {
+        if end <= start {
+            return;
+        }
+        let joined = match self.prewarmed.take() {
+            Some(held) if held.end >= start => held.start.min(start)..end,
+            _ => start..end,
+        };
+        self.prewarmed = Some(joined);
+    }
+
+    /// Cuts the prewarmed range down to the rows the entry still holds.
+    fn clamp_prewarmed(&mut self) {
+        let held = self.state.cached_len;
+        self.prewarmed = self
+            .prewarmed
+            .take()
+            .map(|range| range.start..range.end.min(held))
+            .filter(|range| range.start < range.end);
+    }
+
+    pub(super) fn prewarmed_len(&self) -> usize {
+        self.prewarmed.as_ref().map_or(0, ExactSizeIterator::len)
     }
 
     pub(super) fn checkpoint_positions(&self) -> Vec<usize> {
@@ -412,6 +455,7 @@ impl CacheEntry {
 pub(super) struct PromptCache {
     entries: Vec<CacheEntry>,
     last_report: Option<CacheReport>,
+    prewarm_suffix: Vec<u32>,
 }
 
 impl PromptCache {
@@ -419,7 +463,31 @@ impl PromptCache {
         Self {
             entries: Vec::new(),
             last_report: None,
+            prewarm_suffix: Vec::new(),
         }
+    }
+
+    pub(super) fn set_prewarm_suffix(&mut self, suffix: &[u32]) {
+        self.prewarm_suffix = suffix.to_vec();
+    }
+
+    pub(super) fn prewarm_suffix(&self) -> &[u32] {
+        &self.prewarm_suffix
+    }
+
+    /// [`Self::take_best`] for a prewarm: the lookup is the same, but the
+    /// request-facing report it leaves is the previous request's, not this
+    /// one's.
+    pub(super) fn take_for_prewarm(
+        &mut self,
+        prompt_ids: &[u32],
+        key: &CacheKey,
+        widths: &[LayerPadRowWidths],
+    ) -> (Option<CacheEntry>, CacheReport) {
+        let previous = self.last_report;
+        let taken = self.take_best(prompt_ids, key, widths);
+        self.last_report = previous;
+        taken
     }
 
     /// Takes the entry sharing the longest prefix with `prompt_ids` out of
@@ -450,7 +518,8 @@ impl PromptCache {
                 .map(|(entry, path)| (entry, path, resume_len)),
         };
         let (entry, report) = match outcome {
-            Ok((entry, path, lcp)) => {
+            Ok((mut entry, path, lcp)) => {
+                entry.clamp_prewarmed();
                 let reused = entry.state.cached_len;
                 let report = CacheReport {
                     lcp,
@@ -458,6 +527,8 @@ impl PromptCache {
                     prefilled_tokens: prompt_ids.len() - reused,
                     path,
                     miss: None,
+                    prewarm_hit_tokens: entry.prewarmed_len(),
+                    prewarm_wait: Duration::ZERO,
                 };
                 (Some(entry), report)
             }
@@ -487,19 +558,20 @@ impl PromptCache {
 
     /// Puts `entry` back as the most recently used entry, then evicts from
     /// the least recently used end until the entry count and byte budget in
-    /// `config` hold. An entry larger than the whole budget is not stored.
-    pub(super) fn store(&mut self, entry: CacheEntry, config: &PromptCacheConfig) -> usize {
+    /// `config` hold, returning how many entries are held; `None` when `entry`
+    /// was not stored (it holds nothing, or is larger than the whole budget).
+    pub(super) fn store(&mut self, entry: CacheEntry, config: &PromptCacheConfig) -> Option<usize> {
         let budget = usize::try_from(config.byte_budget).unwrap_or(usize::MAX);
         let state = &entry.state;
         if state.cached_len == 0 || state.layer_caches.is_empty() || entry.byte_len() > budget {
-            return self.entries.len();
+            return None;
         }
         self.entries.push(entry);
         let max_entries = config.max_entries as usize;
         while self.entries.len() > max_entries || self.stored_bytes() > budget {
             self.entries.remove(0);
         }
-        self.entries.len()
+        Some(self.entries.len())
     }
 
     pub(super) fn stored_bytes(&self) -> usize {
@@ -517,7 +589,7 @@ impl PromptCache {
 
 /// A forward that failed after the lookup has partly written the taken
 /// entry's rows, so it is dropped rather than put back.
-fn log_entry_dropped(error: &InteropError) {
+pub(super) fn log_entry_dropped(error: &InteropError) {
     debug!(
         cache_drop_reason = %error,
         "prompt cache entry dropped after a failed forward"
@@ -555,7 +627,7 @@ impl LoadedModel<'_> {
             .last_report()
     }
 
-    /// The key a request under these inputs may reuse rows from.
+    /// The key a request (or prewarm) under these inputs may reuse rows from.
     pub(super) fn cache_key(
         &self,
         serving_config: &ServingConfig,
@@ -572,31 +644,42 @@ impl LoadedModel<'_> {
     }
 
     /// Looks `prompt_ids` up in the cache and emits spec R8's per-request
-    /// telemetry for the outcome.
+    /// telemetry for the outcome. `waited` is how long the request waited for
+    /// a running prewarm; the entry it takes is no longer a prewarm's, so its
+    /// prewarmed range is spent.
     pub(super) fn prompt_cache_lookup(
         &self,
         prompt_ids: &[u32],
         key: &CacheKey,
         widths: &[LayerPadRowWidths],
+        waited: Duration,
     ) -> (Option<CacheEntry>, CacheReport) {
-        let (entry, report) = self
+        let mut cache = self
             .prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take_best(prompt_ids, key, widths);
+            .unwrap_or_else(PoisonError::into_inner);
+        let (mut entry, mut report) = cache.take_best(prompt_ids, key, widths);
+        report.prewarm_wait = waited;
+        cache.last_report = Some(report);
+        drop(cache);
+        if let Some(taken) = entry.as_mut() {
+            taken.prewarmed = None;
+        }
         debug!(
             cache_lcp = report.lcp as u64,
             cache_reused_tokens = report.reused_tokens as u64,
             cache_prefilled_tokens = report.prefilled_tokens as u64,
             cache_path = report.path.as_str(),
             cache_miss_reason = report.miss.map_or("none", MissReason::as_str),
+            prewarm_hit_tokens = report.prewarm_hit_tokens as u64,
+            prewarm_wait_ns = u64::try_from(report.prewarm_wait.as_nanos()).unwrap_or(u64::MAX),
             "prompt cache lookup"
         );
         (entry, report)
     }
 
-    /// Hands a finished request's entry to the cache.
-    pub(super) fn prompt_cache_store(&self, entry: CacheEntry, config: &PromptCacheConfig) {
+    /// Hands a finished request's entry to the cache, `true` when it is held.
+    pub(super) fn prompt_cache_store(&self, entry: CacheEntry, config: &PromptCacheConfig) -> bool {
         let cached_tokens = entry.state.cached_len;
         let checkpoints = entry.checkpoints.len();
         let entries = self
@@ -607,9 +690,10 @@ impl LoadedModel<'_> {
         debug!(
             cache_stored_tokens = cached_tokens as u64,
             cache_checkpoints = checkpoints as u64,
-            cache_entries = entries as u64,
+            cache_entries = entries.unwrap_or(0) as u64,
             "prompt cache store"
         );
+        entries.is_some()
     }
 
     /// Prefills `ids` up to each of `stops` (ascending), snapshotting the
@@ -716,6 +800,7 @@ impl LoadedModel<'_> {
         speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let pending = self.prewarm_gate.enter_request();
         let config = serving_config.prompt_cache;
         let cacheable = config.is_enabled()
             && seed.is_none()
@@ -743,7 +828,7 @@ impl LoadedModel<'_> {
         apply_serving_config(serving_config, ids.len())?;
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let key = self.cache_key(serving_config, runtime, forced_draft_width);
-        let (found, report) = self.prompt_cache_lookup(&ids, &key, &widths);
+        let (found, report) = self.prompt_cache_lookup(&ids, &key, &widths, pending.waited());
         let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
         let positions = planned_positions(
             &entry.checkpoint_positions(),
@@ -784,7 +869,17 @@ impl LoadedModel<'_> {
             )
             .inspect_err(log_entry_dropped)?;
         entry.state = final_state;
-        self.prompt_cache_store(entry, &config);
+        let stored = self.prompt_cache_store(entry, &config);
+        drop(pending);
+        if stored {
+            self.prewarm_after_answer(
+                &ids,
+                &generated_ids,
+                serving_config,
+                runtime,
+                forced_draft_width,
+            );
+        }
         let hollow = PrefixState {
             ids: Vec::new(),
             layer_caches: Vec::new(),
@@ -892,6 +987,87 @@ mod tests {
         assert_eq!(state.expect("entry reused").state.ids, vec![2, 105, 2364]);
     }
 
+    fn prewarmed_entry() -> CacheEntry {
+        let mut entry = state_with_ids(&[2, 105, 2364, 107, 9259, 106, 107, 105]);
+        entry.mark_prewarmed(5, 8);
+        entry
+    }
+
+    /// The suffix a prewarm appended (end-of-turn, newline, the next user
+    /// turn's opener) is what the next prompt shares in full.
+    #[test]
+    fn a_request_extending_prewarmed_rows_reports_the_rows_the_prewarm_paid_for() {
+        let mut cache = PromptCache::new();
+        cache.store(prewarmed_entry(), &enabled_config());
+
+        let (_, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9259, 106, 107, 105, 4368],
+            &base_key(),
+            &shared_widths(),
+        );
+
+        assert_eq!(report.path, CachePath::Extend);
+        assert_eq!(report.prewarm_hit_tokens, 3);
+        assert_eq!(report.prefilled_tokens, 1);
+    }
+
+    #[test]
+    fn a_rewind_into_prewarmed_rows_counts_only_the_rows_it_kept() {
+        let mut cache = PromptCache::new();
+        cache.store(prewarmed_entry(), &enabled_config());
+
+        let (_, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9259, 106, 9, 9, 9],
+            &base_key(),
+            &shared_widths(),
+        );
+
+        assert_eq!(report.path, CachePath::Rewind);
+        assert_eq!(report.prewarm_hit_tokens, 1);
+    }
+
+    #[test]
+    fn a_rewind_before_the_prewarmed_rows_reports_no_hit() {
+        let mut cache = PromptCache::new();
+        cache.store(prewarmed_entry(), &enabled_config());
+
+        let (_, report) = cache.take_best(
+            &[2, 105, 2364, 107, 9, 9, 9, 9, 9],
+            &base_key(),
+            &shared_widths(),
+        );
+
+        assert_eq!(report.prewarm_hit_tokens, 0);
+    }
+
+    #[test]
+    fn prewarmed_ranges_that_touch_join_and_ranges_that_do_not_replace() {
+        let mut entry = state_with_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+        entry.mark_prewarmed(2, 4);
+        entry.mark_prewarmed(4, 6);
+        assert_eq!(entry.prewarmed, Some(2..6));
+
+        entry.mark_prewarmed(8, 10);
+        assert_eq!(entry.prewarmed, Some(8..10));
+
+        entry.mark_prewarmed(10, 10);
+        assert_eq!(entry.prewarmed, Some(8..10));
+    }
+
+    #[test]
+    fn a_prewarm_lookup_leaves_the_last_requests_report_alone() {
+        let mut cache = PromptCache::new();
+        cache.store(state_with_ids(&[2, 105, 2364]), &enabled_config());
+        let (_, request_report) = cache.take_best(&[7, 105], &base_key(), &shared_widths());
+
+        let (taken, _) =
+            cache.take_for_prewarm(&[2, 105, 2364, 107], &base_key(), &shared_widths());
+
+        assert!(taken.is_some());
+        assert_eq!(cache.last_report(), Some(request_report));
+    }
+
     #[test]
     fn the_least_recently_used_entry_is_evicted_past_max_entries() {
         let config = PromptCacheConfig {
@@ -936,7 +1112,7 @@ mod tests {
 
         let entries = cache.store(state_with_ids(&[1, 2, 3, 4]), &config);
 
-        assert_eq!(entries, 0);
+        assert_eq!(entries, None);
     }
 
     #[test]
@@ -950,7 +1126,7 @@ mod tests {
 
         let entries = cache.store(state_with_ids(&[5, 6, 7, 8]), &config);
 
-        assert_eq!(entries, 1);
+        assert_eq!(entries, Some(1));
         assert_eq!(
             cache
                 .take_best(&[5, 6, 7, 8, 9], &base_key(), &shared_widths())
@@ -1398,7 +1574,7 @@ mod tests {
             byte_budget: plain.byte_len() as u64,
             ..enabled_config()
         };
-        assert_eq!(PromptCache::new().store(checkpointed, &tight), 0);
+        assert_eq!(PromptCache::new().store(checkpointed, &tight), None);
     }
 
     fn naive_common_prefix(left: &[u32], right: &[u32]) -> usize {
