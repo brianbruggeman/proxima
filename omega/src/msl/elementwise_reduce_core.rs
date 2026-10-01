@@ -999,7 +999,8 @@ pub(super) fn push_packed_row_multi_row_body(
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
     let rows = codec_rows_per_simdgroup(block.codec);
-    let cap = crate::sized::PACKED_ROW_ACTIVATION_GROUP as usize;
+    let cap_token_total = packed_row_block_token_total(block, &resolved.extents);
+    let cap = packed_row_activation_cap(cap_token_total) as usize;
     let (init_expr, _) = fold_init_tokens(init);
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     let combine_fn = simd_combine_fn(resolved.node, reduce_op)?;
