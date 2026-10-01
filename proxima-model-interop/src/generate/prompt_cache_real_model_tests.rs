@@ -5,11 +5,13 @@ use std::fs::File;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
+use proxima_gguf::types::GgmlType;
 
 use super::prefix_resume_long_prompt_tests::{chat_prompt, corpus_document, greedy_config};
 use super::prompt_cache::longest_common_prefix;
 use super::ring_checkpoint::RingCheckpoint;
 use super::wants_bos;
+use crate::InteropError;
 use crate::LoadedModel;
 use crate::RopeScaling;
 use crate::generate::{CachePath, CacheReport, MissReason};
@@ -482,5 +484,45 @@ fn another_rope_scaling_on_the_same_model_misses_and_never_reuses_the_other_arms
         );
         assert!(second_a.report.reused_tokens > 0);
         assert_eq!(second_a.generated, first_a.generated);
+    });
+}
+
+/// A request whose serving config `apply_serving_config` rejects errors
+/// before any forward, so the entry a prior request stored is still there for
+/// the next valid request.
+#[test]
+#[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo"]
+fn a_request_rejected_by_the_serving_config_leaves_the_stored_entry_for_the_next_one() {
+    with_model(|model| {
+        let valid = ServingConfig {
+            gpu_layers: 0,
+            ..cached_config(SpeculativeConfig::none())
+        };
+        let rejected = ServingConfig {
+            kv_cache_key_quant: GgmlType::Q8_0,
+            kv_cache_value_quant: GgmlType::Q8_0,
+            ..valid
+        };
+        let mut prompt_ids = encode_opening(model, "The quick brown fox jumps over the lazy dog. ");
+        let first = run_cached(model, valid, &prompt_ids);
+        let stored_bytes = model.prompt_cache_bytes();
+        prompt_ids.extend(&first.generated);
+
+        let refusal = model.generate_from_ids(&prompt_ids, 1, &rejected, &mut |_event| {
+            ControlFlow::Continue(())
+        });
+        let second = run_cached(model, valid, &prompt_ids);
+
+        assert!(stored_bytes > 0, "the first request must store an entry");
+        assert!(
+            matches!(refusal, Err(InteropError::UnsupportedServingConfig(_))),
+            "Q8 KV must be rejected, got {refusal:?}"
+        );
+        assert_ne!(
+            second.report.path,
+            CachePath::Miss,
+            "the rejected request took the entry"
+        );
+        assert!(second.report.reused_tokens > 0);
     });
 }

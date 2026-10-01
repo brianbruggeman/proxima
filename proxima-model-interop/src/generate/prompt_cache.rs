@@ -503,6 +503,15 @@ impl PromptCache {
     }
 }
 
+/// A forward that failed after the lookup has partly written the taken
+/// entry's rows, so it is dropped rather than put back.
+fn log_entry_dropped(error: &InteropError) {
+    debug!(
+        cache_drop_reason = %error,
+        "prompt cache entry dropped after a failed forward"
+    );
+}
+
 impl LoadedModel<'_> {
     /// Drops every entry. A model-level input the key does not carry (the
     /// expert sidecar, [`Self::attach_expert_sidecar`]) just changed, so every
@@ -691,6 +700,8 @@ impl LoadedModel<'_> {
                 forced_draft_width,
             );
         }
+        // before the lookup: a request this rejects must not take an entry out
+        apply_serving_config(serving_config, ids.len())?;
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let key = CacheKey::of(
             serving_config,
@@ -717,31 +728,35 @@ impl LoadedModel<'_> {
             turn_ends,
             &config,
         );
-        let mut entry = self.prefill_through_checkpoints(
-            &ids,
-            entry,
-            &positions,
-            &widths,
-            &config,
-            serving_config,
-            runtime,
-            forced_draft_width,
-        )?;
+        let mut entry = self
+            .prefill_through_checkpoints(
+                &ids,
+                entry,
+                &positions,
+                &widths,
+                &config,
+                serving_config,
+                runtime,
+                forced_draft_width,
+            )
+            .inspect_err(log_entry_dropped)?;
         let resumed_at = entry.state.cached_len;
-        let (generated_ids, text, stopped_by_eos, final_state) = self.run_decode_loop_from_ids(
-            ids[resumed_at..].to_vec(),
-            max_tokens,
-            serving_config,
-            runtime,
-            None,
-            logits_sink,
-            node_values_sink,
-            on_token,
-            entry.take_state(),
-            true,
-            speculative_stats,
-            forced_draft_width,
-        )?;
+        let (generated_ids, text, stopped_by_eos, final_state) = self
+            .run_decode_loop_from_ids(
+                ids[resumed_at..].to_vec(),
+                max_tokens,
+                serving_config,
+                runtime,
+                None,
+                logits_sink,
+                node_values_sink,
+                on_token,
+                entry.take_state(),
+                true,
+                speculative_stats,
+                forced_draft_width,
+            )
+            .inspect_err(log_entry_dropped)?;
         entry.state = final_state;
         self.prompt_cache_store(entry, &config);
         let hollow = PrefixState {
