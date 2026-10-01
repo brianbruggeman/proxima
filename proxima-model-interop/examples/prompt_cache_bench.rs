@@ -1177,17 +1177,17 @@ fn run_prewarm_arm(
     turn: usize,
     prewarm: bool,
     max_tokens: usize,
-) -> Timed {
+) -> (Timed, Timed) {
     let cached = config_with(PromptCacheConfig::standard());
     model.set_prewarm_suffix(&[]);
     clear_cache(model, vocab);
     if prewarm {
         model.set_prewarm_suffix(&turn_boundary_suffix(vocab));
     }
-    timed_request(model, &plans[turn - 1].prompt_ids, max_tokens, &cached);
+    let previous = timed_request(model, &plans[turn - 1].prompt_ids, max_tokens, &cached);
     let timed = timed_request(model, &plans[turn].prompt_ids, max_tokens, &cached);
     model.set_prewarm_suffix(&[]);
-    timed
+    (previous, timed)
 }
 
 fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder: &mut Recorder) -> (Vec<PrewarmSamples>, Vec<PrewarmPlan>) {
@@ -1204,13 +1204,14 @@ fn run_prewarm_pairs(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, record
         for turn in 1..plans.len() {
             let order = if (pair + turn) % 2 == 0 { [true, false] } else { [false, true] };
             for (position, prewarm) in order.into_iter().enumerate() {
-                let timed = run_prewarm_arm(model, vocab, &plans, turn, prewarm, args.max_tokens);
+                let (previous, timed) = run_prewarm_arm(model, vocab, &plans, turn, prewarm, args.max_tokens);
                 let report = timed.report.expect("a cached request records its report");
                 recorder.write(&json!({
                     "kind": "request", "mode": "prewarm", "pair": pair, "warmup": pair == 0, "turn": turn,
                     "arm": if prewarm { "prewarm" } else { "no_prewarm" }, "order_position": position,
                     "prompt_tokens": plans[turn].prompt_ids.len(), "ttft_ms": timed.ttft_ms,
                     "total_ms": timed.total_ms, "generated": timed.generated.len(),
+                    "previous_turn_total_ms": previous.total_ms, "previous_turn_ttft_ms": previous.ttft_ms,
                     "ids_identical": timed.generated == plans[turn].reference, "cache": path_label(timed.report),
                 }));
                 if pair == 0 {
