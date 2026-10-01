@@ -52,7 +52,7 @@ pub(super) fn longest_common_prefix(left: &[u32], right: &[u32]) -> usize {
 /// thousandths of the prompt, llama-server's `f_sim_cur > slot_prompt_similarity`
 /// with `f_sim_cur = lcp / prompt_len` (`server-context.cpp:1563-1571`);
 /// `0` accepts any overlap past the first token.
-const fn entry_is_reusable(
+pub(super) const fn entry_is_reusable(
     lcp: usize,
     stored_len: usize,
     prompt_len: usize,
