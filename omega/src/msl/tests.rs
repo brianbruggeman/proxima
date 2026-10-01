@@ -5567,7 +5567,7 @@ fn cached_softmax_weights_op(attention_rows: u64, cached_key_rows: u64, head_dim
             new_attended: NodeId(6),
             cached_key_rows,
             new_key_rows: 1,
-            query_rows: attention_rows,
+            query_rows: 1,
             attention_rows,
             head_dim,
         },

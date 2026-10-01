@@ -1541,6 +1541,10 @@ pub(super) fn tiled_gemm_threadgroup_width(
                 Some(CachedAttentionForm::TwoRangeDecodeSplit { chunks, .. }) => {
                     return Some(chunks * SIMD_WIDTH);
                 }
+                #[cfg(feature = "metal-attn-split-rows")]
+                Some(CachedAttentionForm::TwoRangeRowTiled { simdgroups, .. }) => {
+                    return Some(simdgroups * SIMD_WIDTH);
+                }
                 Some(CachedAttentionForm::Static | CachedAttentionForm::TwoRangeCachedBound)
                 | None => (
                     false,

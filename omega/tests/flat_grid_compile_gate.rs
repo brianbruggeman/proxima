@@ -277,7 +277,7 @@ fn cached_softmax_weights() -> BoundOp {
             new_attended: NodeId(6),
             cached_key_rows: 1024,
             new_key_rows: 1,
-            query_rows: attention_rows,
+            query_rows: 1,
             attention_rows,
             head_dim,
         },

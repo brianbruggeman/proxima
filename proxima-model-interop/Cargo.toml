@@ -193,6 +193,13 @@ metal-attn-split-decode = [
     "proxima-tensor/metal-attn-split-decode",
     "omega?/metal-attn-split-decode",
 ]
+# Passthrough to `proxima-tensor/metal-attn-split-rows` and `omega/metal-attn-split-rows` -- gemma4
+# attention at K > 1 new query rows (speculative verify) as one row-tiled split partial plus the merge.
+metal-attn-split-rows = [
+    "metal-attn-split-decode",
+    "proxima-tensor/metal-attn-split-rows",
+    "omega?/metal-attn-split-rows",
+]
 # Passthrough to `proxima-tensor/gated-delta-net-fusion` and
 # `omega/gated-delta-net-fusion` -- same shape as `cached-attention-streaming`
 # above: default-off, individually selectable so a caller can exercise the

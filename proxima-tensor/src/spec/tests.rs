@@ -13897,10 +13897,17 @@ mod gemma4_synthetic_parity {
                 "split-decode on: both the sliding and the global decode layer bind as \
                  CachedAttention"
             );
+            #[cfg(not(feature = "metal-attn-split-rows"))]
             assert_eq!(
                 prefill_accepted, 0,
                 "split-decode on: prefill still declines both layers (the decode-only guard runs \
                  before the routing decision)"
+            );
+            #[cfg(feature = "metal-attn-split-rows")]
+            assert_eq!(
+                prefill_accepted, 1,
+                "split-rows on: prefill past the sliding window still declines the sliding layer \
+                 (local_window_not_vacuous) and the global layer binds as CachedAttention"
             );
             let (bit_exact_softmax_weights, bit_exact_attention) = accepted_under(
                 1,
@@ -13950,6 +13957,435 @@ mod gemma4_synthetic_parity {
                 prefill_accepted, 0,
                 "feature off: the gemma4-shaped masks stay declined at prefill"
             );
+        }
+    }
+
+    /// The K-row recognizer and CPU oracle (`metal-attn-split-rows`): the
+    /// gemma4-shaped sliding + global two-layer program, bound at K new query
+    /// rows over a cached history, fused against the literal unfused chain.
+    #[cfg(feature = "metal-attn-split-rows")]
+    mod k_rows {
+        use core::pin::pin;
+        use core::task::{Context, Poll, Waker};
+
+        use proxima_primitives::pipe::Pipe;
+
+        use super::*;
+        use crate::bind::{
+            BoundOp, BoundOpKind, READY_BATCH_CAPACITY, ReadyBatch, bind_with_fusion,
+            block_node_ids,
+        };
+        use crate::cpu::Interpreter;
+        use crate::numeric::NumericPolicy;
+
+        const KEY_ROWS_TOTAL: usize = 8;
+
+        fn two_layer_schedule() -> Vec<LayerSchedule> {
+            let ffn_config = LayerFfnConfig {
+                post_attention_norm: true,
+                combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                    dense_post_norm: true,
+                    routed_post_norm: true,
+                    combined_post_norm: true,
+                    routed_pre_norm: true,
+                    router_scale: true,
+                    expert_output_scale: true,
+                }),
+                output_scale: true,
+                routed_gating: ExpertGatingFunc::Softmax,
+                routed_expert_bias: false,
+                dense_feed_forward: None,
+                exclusive_dense_post_norm: false,
+                activation: Activation::GeluTanh,
+                ple: false,
+            };
+            let attention =
+                |window: Option<u32>, value: ValueSourceKind, full: bool| LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: window,
+                    value_source_kind: value,
+                    key_source_kind: KeySourceKind::ProjectedK,
+                    rope_table: if full {
+                        RopeTableSel {
+                            cos_name: "rope_cos",
+                            sin_name: "rope_sin",
+                        }
+                    } else {
+                        RopeTableSel {
+                            cos_name: "rope_cos_swa",
+                            sin_name: "rope_sin_swa",
+                        }
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32,
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                };
+            alloc::vec![
+                LayerSchedule {
+                    kind: LayerKind::Attention,
+                    attention: attention(
+                        Some(SWA_WINDOW as u32),
+                        ValueSourceKind::ProjectedV,
+                        false
+                    ),
+                    ffn: ffn_config,
+                },
+                LayerSchedule {
+                    kind: LayerKind::Attention,
+                    attention: attention(None, ValueSourceKind::SharedWithKey, true),
+                    ffn: ffn_config,
+                },
+            ]
+        }
+
+        struct Fixture {
+            program: Vec<Op>,
+            logits: NodeId,
+            weights: Vec<(String, Vec<f32>)>,
+        }
+
+        fn fixture() -> Fixture {
+            let schedule = two_layer_schedule();
+            let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
+                lfm2_two_range_cached_forward_program_with_experts(
+                    VOCAB as u32,
+                    EMBEDDING as u32,
+                    FEED_FORWARD as u32,
+                    EXPERT_FF as u32,
+                    QUERY_HEADS as u32,
+                    2,
+                    EXPERT_COUNT as u32,
+                    EXPERT_USED as u32,
+                    0,
+                    &schedule,
+                    Some(EmbeddingScale::Sqrt),
+                    Some(SOFTCAP),
+                    false,
+                    None,
+                    false,
+                )
+                .expect("the gemma4-shaped two-range program lowers at any new_count");
+            let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
+            let mut tied_lm_head = alloc::vec![0.0f32; EMBEDDING * VOCAB];
+            for token in 0..VOCAB {
+                for column in 0..EMBEDDING {
+                    tied_lm_head[column * VOCAB + token] =
+                        embedding_table[token * EMBEDDING + column];
+                }
+            }
+            let mut weights: Vec<(String, Vec<f32>)> = alloc::vec![
+                ("token_embd.weight".into(), embedding_table),
+                (
+                    "output_norm.weight".into(),
+                    norm_wave("output_norm.weight", EMBEDDING)
+                ),
+                ("output.weight".into(), tied_lm_head),
+            ];
+            for layer in 0..2usize {
+                let sliding = layer == 0;
+                let layer_weights = layer_weights(layer, sliding);
+                weights.extend(ring_layer_weight_blocks(layer, &layer_weights, true));
+            }
+            Fixture {
+                program,
+                logits,
+                weights,
+            }
+        }
+
+        fn step_inputs(count: usize, cached_len: usize, padding: usize) -> Vec<(String, Vec<f32>)> {
+            let total = KEY_ROWS_TOTAL;
+            let positions: Vec<usize> = (0..total).collect();
+            let (cos_full, sin_full) =
+                rope_table_partial(&positions, ROPE_BASE_FULL, HEAD_DIM, ROTARY_PAIRS_FULL);
+            let (cos_swa, sin_swa) = rope_table(&positions, ROPE_BASE_SWA, HEAD_DIM);
+            let span = cached_len..cached_len + count;
+            let ids: Vec<f32> = (0..count)
+                .map(|index| ((cached_len + index) % VOCAB) as f32)
+                .collect();
+            let mut inputs: Vec<(String, Vec<f32>)> = alloc::vec![
+                ("ids".into(), ids),
+                ("eps".into(), alloc::vec![EPS; count]),
+                ("rope_cos_swa".into(), flatten(&cos_swa[span.clone()])),
+                ("rope_sin_swa".into(), flatten(&sin_swa[span.clone()])),
+                ("rope_cos".into(), flatten(&cos_full[span.clone()])),
+                ("rope_sin".into(), flatten(&sin_full[span])),
+                ("cached_len".into(), alloc::vec![cached_len as f32]),
+            ];
+            let rows = cached_len + padding;
+            for layer in 0..2usize {
+                let history = |leaf: &str, width: usize| {
+                    let mut data = wave(
+                        &alloc::format!("kv_cache.{layer}.{leaf}"),
+                        cached_len * width,
+                    );
+                    data.resize(rows * width, 0.0);
+                    data
+                };
+                inputs.push((
+                    alloc::format!("kv_cache.{layer}.k_even"),
+                    history("k_even", KV_HEADS * PAIRS),
+                ));
+                inputs.push((
+                    alloc::format!("kv_cache.{layer}.k_odd"),
+                    history("k_odd", KV_HEADS * PAIRS),
+                ));
+                inputs.push((
+                    alloc::format!("kv_cache.{layer}.v"),
+                    history("v", KV_HEADS * HEAD_DIM),
+                ));
+            }
+            inputs
+        }
+
+        fn run_resolved(
+            program: &[Op],
+            resolved: &[BoundOp],
+            owned: &[(String, Vec<f32>)],
+        ) -> Vec<Option<Vec<f32>>> {
+            let mut buffers: Vec<Option<Vec<f32>>> = alloc::vec![None; program.len()];
+            for node in block_node_ids(program) {
+                let Op::Input {
+                    name: Some(name), ..
+                } = &program[node.0 as usize]
+                else {
+                    unreachable!("block_node_ids only returns named inputs");
+                };
+                let data = owned
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+                    .unwrap_or_else(|| panic!("missing named input {name}"))
+                    .1
+                    .clone();
+                buffers[node.0 as usize] = Some(data);
+            }
+            let interpreter = Interpreter::new(&mut buffers);
+            for chunk in resolved.chunks(READY_BATCH_CAPACITY) {
+                let batch: ReadyBatch = chunk.iter().cloned().collect();
+                let waker = Waker::noop();
+                let mut context = Context::from_waker(waker);
+                let mut future = pin!(interpreter.call(batch));
+                match future.as_mut().poll(&mut context) {
+                    Poll::Ready(result) => result.expect("resolved batch computes"),
+                    Poll::Pending => unreachable!("cpu pipes never yield: no internal .await"),
+                }
+            }
+            buffers
+        }
+
+        fn bind_at(
+            fixture: &Fixture,
+            count: usize,
+            cached_len: usize,
+            padding: usize,
+            fusion: bool,
+            policy: NumericPolicy,
+        ) -> Vec<BoundOp> {
+            let symbols = [count as u64, (cached_len + padding) as u64];
+            let shapes = crate::shape::infer(&fixture.program, &symbols)
+                .expect("the K-row fixture shape-infers");
+            bind_with_fusion(&fixture.program, &shapes, &[fixture.logits], fusion, policy)
+                .expect("the K-row fixture binds")
+        }
+
+        fn count_of(resolved: &[BoundOp], is_kind: fn(&BoundOpKind) -> bool) -> usize {
+            resolved.iter().filter(|bound| is_kind(&bound.kind)).count()
+        }
+
+        fn is_softmax_weights(kind: &BoundOpKind) -> bool {
+            matches!(kind, BoundOpKind::CachedSoftmaxWeights { .. })
+        }
+
+        fn is_cached_attention(kind: &BoundOpKind) -> bool {
+            matches!(kind, BoundOpKind::CachedAttention { .. })
+        }
+
+        /// Logits of the fused bind and of the literal unfused chain over the
+        /// same inputs, and how many fused attention ops the fused bind carries.
+        fn fused_against_unfused(
+            count: usize,
+            cached_len: usize,
+            padding: usize,
+            policy: NumericPolicy,
+            is_kind: fn(&BoundOpKind) -> bool,
+        ) -> (usize, f32) {
+            let fixture = fixture();
+            let mut owned = fixture.weights.clone();
+            owned.extend(step_inputs(count, cached_len, padding));
+            let fused = bind_at(&fixture, count, cached_len, padding, true, policy);
+            let unfused = bind_at(&fixture, count, cached_len, padding, false, policy);
+            assert_eq!(count_of(&unfused, is_softmax_weights), 0);
+            assert_eq!(count_of(&unfused, is_cached_attention), 0);
+            let fused_ops = count_of(&fused, is_kind);
+            let fused_buffers = run_resolved(&fixture.program, &fused, &owned);
+            let unfused_buffers = run_resolved(&fixture.program, &unfused, &owned);
+            let fused_logits = fused_buffers[fixture.logits.0 as usize]
+                .as_ref()
+                .expect("fused logits present");
+            let unfused_logits = unfused_buffers[fixture.logits.0 as usize]
+                .as_ref()
+                .expect("unfused logits present");
+            assert_eq!(fused_logits.len(), count * VOCAB);
+            assert_eq!(fused_logits.len(), unfused_logits.len());
+            (fused_ops, max_abs_diff(fused_logits, unfused_logits))
+        }
+
+        /// One cell of the accept/decline matrix: the K=1 decode, the K=2 verify
+        /// that fits the sliding window, and K=3 that does not (the sliding
+        /// layer's `local_window_not_vacuous`), under both policies.
+        #[test]
+        fn the_row_count_and_the_policy_choose_the_fused_form_per_layer() {
+            let fixture = fixture();
+            let relaxed = NumericPolicy::llama_relaxed();
+            let exact = NumericPolicy::bit_exact();
+            let cases: [(&str, usize, NumericPolicy, usize, usize); 6] = [
+                ("k1_relaxed", 1, relaxed, 0, 2),
+                ("k1_exact", 1, exact, 2, 0),
+                ("k2_relaxed", 2, relaxed, 0, 2),
+                ("k2_exact", 2, exact, 2, 0),
+                ("k3_relaxed_sliding_window_exceeded", 3, relaxed, 0, 1),
+                ("k3_exact_sliding_window_exceeded", 3, exact, 1, 0),
+            ];
+            for (label, count, policy, softmax_weights, attention) in cases {
+                let resolved = bind_at(&fixture, count, 3, 2, true, policy);
+                assert_eq!(
+                    (
+                        count_of(&resolved, is_softmax_weights),
+                        count_of(&resolved, is_cached_attention)
+                    ),
+                    (softmax_weights, attention),
+                    "{label}: (softmax weights, cached attention) ops"
+                );
+            }
+        }
+
+        /// The collapsed layouts at K=2 equal the dense strides of the unfused
+        /// chain's `stug` scores, `swug` scores and `wud` value, so the fused op
+        /// reads exactly the bytes the chain it replaced read.
+        #[test]
+        fn the_softmax_weights_layouts_at_k_rows_equal_the_dense_chain_strides() {
+            let fixture = fixture();
+            let (count, cached_len, padding) = (2usize, 3usize, 2usize);
+            let resolved = bind_at(
+                &fixture,
+                count,
+                cached_len,
+                padding,
+                true,
+                NumericPolicy::bit_exact(),
+            );
+            let ops: Vec<&BoundOp> = resolved
+                .iter()
+                .filter(|bound| is_softmax_weights(&bound.kind))
+                .collect();
+            assert_eq!(ops.len(), 2, "both layers fuse at K=2");
+            let cached_rows = cached_len + padding;
+            for bound in ops {
+                let BoundOpKind::CachedSoftmaxWeights {
+                    operands,
+                    cached_key_rows,
+                    new_key_rows,
+                    query_rows,
+                    attention_rows,
+                    head_dim,
+                    ..
+                } = &bound.kind
+                else {
+                    unreachable!("filtered to softmax weights");
+                };
+                assert_eq!(
+                    (*cached_key_rows, *new_key_rows, *query_rows),
+                    (cached_rows as u64, count as u64, count as u64)
+                );
+                assert_eq!(*attention_rows, (count * KV_HEADS * GROUP) as u64);
+                assert_eq!(*head_dim, HEAD_DIM as u64);
+                assert_eq!(
+                    bound.extents.to_vec(),
+                    alloc::vec![
+                        count as u64,
+                        cached_rows as u64,
+                        KV_HEADS as u64,
+                        GROUP as u64
+                    ],
+                    "the primary output is the chain's [query row, key, kv head, group] weights"
+                );
+                let rows_per_query = (KV_HEADS * GROUP) as i64;
+                let expected = [
+                    alloc::vec![cached_rows as i64 * rows_per_query, rows_per_query, 1],
+                    alloc::vec![count as i64 * rows_per_query, rows_per_query, 1],
+                    alloc::vec![(KV_HEADS * HEAD_DIM) as i64, 0, 1],
+                ];
+                for ((_, layout, _), expected_strides) in operands.iter().zip(&expected) {
+                    assert_eq!(layout.strides.to_vec(), *expected_strides);
+                }
+            }
+        }
+
+        /// The CPU oracle's K-row fold is the unfused chain, bit for bit: same
+        /// max, same exponentials, same sums in the same order.
+        #[test]
+        fn the_k_row_softmax_weights_oracle_equals_the_unfused_chain_exactly() {
+            let mut cells = 0usize;
+            for (count, cached_len, padding, fused_layers) in [
+                (2usize, 3usize, 0usize, 2usize),
+                (2, 3, 2, 2),
+                (2, 5, 1, 2),
+                (3, 3, 2, 1),
+                (5, 3, 2, 1),
+            ] {
+                let (fused_ops, difference) = fused_against_unfused(
+                    count,
+                    cached_len,
+                    padding,
+                    NumericPolicy::bit_exact(),
+                    is_softmax_weights,
+                );
+                assert_eq!(
+                    fused_ops, fused_layers,
+                    "K={count} cached={cached_len} padding={padding}: fused softmax-weights ops"
+                );
+                assert_eq!(
+                    difference, 0.0,
+                    "K={count} cached={cached_len} padding={padding}: the fused op must reproduce the unfused logits exactly"
+                );
+                cells += 1;
+            }
+            assert_eq!(cells, 5, "every cell must have run");
+        }
+
+        /// The relaxed lowering reassociates the softmax, so it holds the unfused
+        /// logits to the crate's cached-attention tolerance rather than bitwise.
+        #[test]
+        fn the_k_row_cached_attention_oracle_holds_the_unfused_chain_within_tolerance() {
+            let mut cells = 0usize;
+            for (count, cached_len, padding, fused_layers) in [
+                (2usize, 3usize, 0usize, 2usize),
+                (2, 3, 2, 2),
+                (2, 0, 0, 2),
+                (3, 3, 2, 1),
+                (5, 3, 2, 1),
+            ] {
+                let (fused_ops, difference) = fused_against_unfused(
+                    count,
+                    cached_len,
+                    padding,
+                    NumericPolicy::llama_relaxed(),
+                    is_cached_attention,
+                );
+                assert_eq!(
+                    fused_ops, fused_layers,
+                    "K={count} cached={cached_len} padding={padding}: fused cached-attention ops"
+                );
+                assert!(
+                    difference < TOLERANCE,
+                    "K={count} cached={cached_len} padding={padding}: logits differ by {difference}"
+                );
+                cells += 1;
+            }
+            assert_eq!(cells, 5, "every cell must have run");
         }
     }
 

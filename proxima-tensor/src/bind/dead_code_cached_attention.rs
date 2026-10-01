@@ -304,6 +304,30 @@ pub(super) fn collapsed_operand_layout(
     })
 }
 
+/// The axes of the unfused chain's iteration space that the three
+/// [`BoundOpKind::CachedSoftmaxWeights`] operand layouts are collapsed to, as
+/// `(cached_scores, new_scores, new_value)`, for `query_rows` new query rows.
+/// The chain's axes are `[query row, cached key, kv head, group, head_dim]`
+/// for the cached scores (`stug`) and `[query row, new key, kv head, group,
+/// head_dim]` for the new scores and value (`swug`/`swugd`): axis 0 is the
+/// query row, axis 1 the key, axis 3 the group, axis 4 the head dim. One
+/// query row has extent-1 row and new-key axes, which the layouts drop, so
+/// the K=1 collapse is `[key, row]` / `[row]` / `[row, dim]`; K rows keep both
+/// axes, `[row, key, group]` / `[row, new key, group]` / `[new key, group,
+/// dim]`. Axis 2 (the kv head) is not collapsed in, as at K=1: the row is
+/// addressed by the group stride alone, which is exact for the one-kv-head
+/// shape gemma4-E2B binds.
+#[cfg(feature = "metal-fuse-attn-decode")]
+pub(super) const fn softmax_weights_axes(
+    query_rows: u64,
+) -> (&'static [u16], &'static [u16], &'static [u16]) {
+    if query_rows == 1 {
+        (&[1, 3], &[3], &[3, 4])
+    } else {
+        (&[0, 1, 3], &[0, 1, 3], &[1, 3, 4])
+    }
+}
+
 #[cfg(feature = "cached-attention-streaming")]
 pub(super) fn decode_rotary_terms(
     program: &[Op],
@@ -1220,7 +1244,10 @@ pub(super) fn cached_attention_candidates(
             // mask/window shape. `via_gemma_template` being `false` (qwen,
             // mistral, or no match at all) skips both declines entirely --
             // those candidates are untouched by this feature, exactly as
-            // before.
+            // before. With `metal-attn-split-rows` the one-row restriction is
+            // lifted: a K-row candidate binds `CachedSoftmaxWeights` (byte-exact
+            // policy) or the row-tiled `CachedAttention` (relaxed policy).
+            #[cfg(not(feature = "metal-attn-split-rows"))]
             if via_gemma_template && new_key_shape[0] != 1 {
                 #[cfg(feature = "instrument")]
                 debug!(
@@ -1407,7 +1434,18 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
-            let attention_rows = query_shape[1] * query_shape[2];
+            if query_shape[0] != new_key_shape[0] {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "softmax_weights_rows_mismatch",
+                    query_rows = query_shape[0],
+                    new_key_rows = new_key_shape[0],
+                    "cached_softmax_weights decline -- the new range is not one key per query row"
+                );
+                continue;
+            }
+            let attention_rows = query_shape[0] * query_shape[1] * query_shape[2];
             let Some(softmax_node) = resolved.iter().find(|bound| bound.node == cached_weights)
             else {
                 #[cfg(feature = "instrument")]
@@ -1453,18 +1491,20 @@ pub(super) fn cached_attention_candidates(
             // attention_rows` is a real collision at some real decode
             // step, and matching by size alone silently picks the wrong
             // axis on that step.
+            let (cached_scores_axes, new_scores_axes, new_value_axes) =
+                softmax_weights_axes(query_shape[0]);
             let Some(cached_scores_layout) =
-                collapsed_operand_layout(softmax_node, cached_score_parts[0], &[1, 3])
+                collapsed_operand_layout(softmax_node, cached_score_parts[0], cached_scores_axes)
             else {
                 continue;
             };
             let Some(new_scores_layout) =
-                collapsed_operand_layout(new_shift_node, new_masked, &[3])
+                collapsed_operand_layout(new_shift_node, new_masked, new_scores_axes)
             else {
                 continue;
             };
             let Some(new_value_layout) =
-                collapsed_operand_layout(new_av_node, new_value, &[3, 4])
+                collapsed_operand_layout(new_av_node, new_value, new_value_axes)
             else {
                 continue;
             };

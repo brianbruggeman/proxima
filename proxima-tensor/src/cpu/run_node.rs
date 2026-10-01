@@ -841,12 +841,22 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
 ///    that did not account for it being 152's own epilogue operand.
 /// 2. `node[row, k] = exp(cached_scores[row, k] - group_max[row])` for every
 ///    cached key `k` — this op's own primary output (154).
-/// 3. `new_shifted[row] = exp(new_scores[row, 0] - group_max[row])` (156).
+/// 3. `new_shifted[row, w] = exp(new_scores[row, w] - group_max[row])` for each
+///    new key `w` (156).
 /// 4. `cached_weight_sum[row] = sum_k node[row, k]` (157).
-/// 5. `new_weight_sum[row] = new_shifted[row]` (158, a one-element sum).
-/// 6. `new_attended[row, d] = new_shifted[row] * new_value[row, d]` for every
-///    head-dim column `d` (164, `reduction_total == 1` so this is plain
-///    elementwise, no cooperation).
+/// 5. `new_weight_sum[row] = sum_w new_shifted[row, w]` (158; a one-element sum
+///    at one query row).
+/// 6. `new_attended[row, d] = sum_w new_shifted[row, w] * new_value[w, row, d]`
+///    for every head-dim column `d` (164; plain elementwise at one query row,
+///    where the new range is a single key).
+///
+/// At `query_rows` > 1 `row` is the `(query row, kv head, group)` triple and
+/// the new range is the causal triangle the upstream masked `new_scores`
+/// already carries as `-inf`, so the sums over `w` fold in new-key order and
+/// every exact-zero weight adds exactly zero. The weighted-value sum is the
+/// unfused reduce's own fold: the first term is the plain product, each later
+/// term a fused multiply-add where the target has one (`FUSED_MULTIPLY_ADD`),
+/// so the two agree bit for bit.
 ///
 /// `extra_sink`, when `Some`, is filled in this fixed order:
 /// [`BoundOpKind::CachedSoftmaxWeights::cached_weight_sum`] (157, one value
@@ -871,14 +881,18 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
 /// `stride(row) == 1`) — the opposite of a naive row-major-by-query-row
 /// guess. `cached_layout`/`new_layout`/`value_layout` are each collapsed to
 /// exactly the axes this op iterates (`[key, row]`, `[row]`, `[row, dim]`
-/// respectively) by the recognizer, so this function addresses them at
-/// THOSE ranks, not the original wider iteration-space rank. This op's own
+/// respectively at one query row; `[query row, key, row]`, `[query row, new
+/// key, row]`, `[new key, row, dim]` above it) by the recognizer, so this
+/// function addresses them at THOSE ranks, not the original wider
+/// iteration-space rank. This op's own
 /// OUTPUT (node 154) is written in the ordinary DENSE convention every
 /// other [`BoundOpKind`] uses (row-major over `resolved.extents`, last axis
 /// fastest) — unaffected by the read-side layout question, and verified
 /// against the same two real dumps: `key * attention_rows + row` is exactly
 /// what `157`/`162`'s own recorded `Layout::stride(key) == attention_rows`,
-/// `Layout::stride(row) == 1` addresses when reading 154 back.
+/// `Layout::stride(row) == 1` addresses when reading 154 back. Above one
+/// query row the dense form is `(query row * cached_key_rows + key) *
+/// rows_per_query + row`, which that formula specializes to.
 pub(super) fn run_cached_softmax_weights<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
@@ -889,6 +903,7 @@ pub(super) fn run_cached_softmax_weights<B: Deref<Target = [f32]> + Sync>(
         operands,
         cached_key_rows,
         new_key_rows,
+        query_rows,
         attention_rows,
         head_dim,
         ..
@@ -907,26 +922,41 @@ pub(super) fn run_cached_softmax_weights<B: Deref<Target = [f32]> + Sync>(
             reason: "cached softmax weights requires exactly three operands",
         });
     };
-    if *new_key_rows != 1 {
-        return Err(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "cached softmax weights is decode-only (new_key_rows must be 1)",
-        });
-    }
     if cached_lookup.is_some() || new_lookup.is_some() || value_lookup.is_some() {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
             reason: "cached softmax weights requires gather-free operands",
         });
     }
-    if cached_layout.strides.len() != 2 || new_layout.strides.len() != 1 || value_layout.strides.len() != 2
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    if *new_key_rows != 1 {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached softmax weights is decode-only (new_key_rows must be 1)",
+        });
+    }
+    let single_row = *query_rows == 1;
+    let expected_ranks = if single_row { (2, 1, 2) } else { (3, 3, 3) };
+    if (
+        cached_layout.strides.len(),
+        new_layout.strides.len(),
+        value_layout.strides.len(),
+    ) != expected_ranks
     {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
-            reason: "cached softmax weights requires operand layouts collapsed to [key,row]/[row]/[row,dim]",
+            reason: "cached softmax weights requires operand layouts collapsed to [key,row]/[row]/[row,dim] at one query row and [query row,key,row]/[query row,new key,row]/[new key,row,dim] above it",
+        });
+    }
+    if *new_key_rows != *query_rows {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached softmax weights requires one new key per query row",
         });
     }
     let attention_rows = *attention_rows as usize;
+    let rows_per_query = attention_rows / (*query_rows as usize).max(1);
+    let new_keys = *new_key_rows as usize;
     let cached_key_rows = *cached_key_rows as usize;
     let head_dim = *head_dim as usize;
     let cached_scores = buffer_of(buffers, *cached_scores_node)?;
@@ -938,65 +968,97 @@ pub(super) fn run_cached_softmax_weights<B: Deref<Target = [f32]> + Sync>(
             reason: "cached softmax weights source or output extents do not match its bound domain",
         });
     }
-    let cached_at = |key: usize, row: usize| -> Result<f32, TensorError> {
-        let offset = cached_layout.offset_of(&[key as u64, row as u64]);
-        cached_scores
+    let read = |buffer: &[f32], offset: i64, reason: &'static str| -> Result<f32, TensorError> {
+        buffer
             .get(usize::try_from(offset).unwrap_or(usize::MAX))
             .copied()
             .ok_or(TensorError::NotLowerable {
                 node: resolved.node,
-                reason: "cached softmax weights cached_scores read is out of bounds",
+                reason,
             })
     };
-    let new_score_at = |row: usize| -> Result<f32, TensorError> {
-        let offset = new_layout.offset_of(&[row as u64]);
-        new_scores
-            .get(usize::try_from(offset).unwrap_or(usize::MAX))
-            .copied()
-            .ok_or(TensorError::NotLowerable {
-                node: resolved.node,
-                reason: "cached softmax weights new_scores read is out of bounds",
-            })
+    let cached_at = |query: usize, key: usize, row: usize| -> Result<f32, TensorError> {
+        let offset = if single_row {
+            cached_layout.offset_of(&[key as u64, row as u64])
+        } else {
+            cached_layout.offset_of(&[query as u64, key as u64, row as u64])
+        };
+        read(
+            cached_scores,
+            offset,
+            "cached softmax weights cached_scores read is out of bounds",
+        )
     };
-    let value_at = |row: usize, dim: usize| -> Result<f32, TensorError> {
-        let offset = value_layout.offset_of(&[row as u64, dim as u64]);
-        new_value
-            .get(usize::try_from(offset).unwrap_or(usize::MAX))
-            .copied()
-            .ok_or(TensorError::NotLowerable {
-                node: resolved.node,
-                reason: "cached softmax weights new_value read is out of bounds",
-            })
+    let new_score_at = |query: usize, new_key: usize, row: usize| -> Result<f32, TensorError> {
+        let offset = if single_row {
+            new_layout.offset_of(&[row as u64])
+        } else {
+            new_layout.offset_of(&[query as u64, new_key as u64, row as u64])
+        };
+        read(
+            new_scores,
+            offset,
+            "cached softmax weights new_scores read is out of bounds",
+        )
+    };
+    let value_at = |new_key: usize, row: usize, dim: usize| -> Result<f32, TensorError> {
+        let offset = if single_row {
+            value_layout.offset_of(&[row as u64, dim as u64])
+        } else {
+            value_layout.offset_of(&[new_key as u64, row as u64, dim as u64])
+        };
+        read(
+            new_value,
+            offset,
+            "cached softmax weights new_value read is out of bounds",
+        )
     };
     let mut cached_sums = Vec::with_capacity(attention_rows);
     let mut new_sums = Vec::with_capacity(attention_rows);
     let mut attended = Vec::with_capacity(attention_rows * head_dim);
-    for row in 0..attention_rows {
-        let new_row_score = new_score_at(row)?;
-        // `group_max` folds `cached_scores` (152's own reduce) THEN
-        // `new_row_score` (151's own max, folded in via 152's own
-        // epilogue in production) -- this function's own doc, proven
-        // against the harness's byte-exact production oracle
-        // (`gate3/REPORT.md`).
+    for flat_row in 0..attention_rows {
+        let query = flat_row / rows_per_query;
+        let row = flat_row % rows_per_query;
+        // `group_max` folds `cached_scores` (152's own reduce) THEN every new
+        // score (151's own max, folded in via 152's own epilogue in
+        // production) -- this function's own doc, proven against the harness's
+        // byte-exact production oracle (`gate3/REPORT.md`).
         let mut group_max = f32::NEG_INFINITY;
         for key in 0..cached_key_rows {
-            group_max = group_max.max(cached_at(key, row)?);
+            group_max = group_max.max(cached_at(query, key, row)?);
         }
-        group_max = group_max.max(new_row_score);
+        for new_key in 0..new_keys {
+            group_max = group_max.max(new_score_at(query, new_key, row)?);
+        }
         let mut cached_weight_sum = 0.0f32;
         for key in 0..cached_key_rows {
-            let shifted = (cached_at(key, row)? - group_max).exp();
-            // dense row-major write over `resolved.extents` (key outer, row
-            // inner) -- this function's own doc, cross-checked against the
-            // real 157/162 dumps' own read strides for node 154.
-            output[key * attention_rows + row] = shifted;
+            let shifted = (cached_at(query, key, row)? - group_max).exp();
+            // dense row-major write over `resolved.extents` (query row, key,
+            // row) -- this function's own doc, cross-checked against the real
+            // 157/162 dumps' own read strides for node 154.
+            output[(query * cached_key_rows + key) * rows_per_query + row] = shifted;
             cached_weight_sum += shifted;
         }
-        let new_weight_sum = (new_row_score - group_max).exp();
+        let mut new_weight_sum = 0.0f32;
+        let mut new_weights = Vec::with_capacity(new_keys);
+        for new_key in 0..new_keys {
+            let weight = (new_score_at(query, new_key, row)? - group_max).exp();
+            new_weight_sum += weight;
+            new_weights.push(weight);
+        }
         cached_sums.push(cached_weight_sum);
         new_sums.push(new_weight_sum);
         for dim in 0..head_dim {
-            attended.push(value_at(row, dim)? * new_weight_sum);
+            let mut accumulated: Option<f32> = None;
+            for (new_key, weight) in new_weights.iter().enumerate() {
+                let value = value_at(new_key, row, dim)?;
+                accumulated = Some(match accumulated {
+                    None => value * weight,
+                    Some(sum) if FUSED_MULTIPLY_ADD => value.mul_add(*weight, sum),
+                    Some(sum) => sum + value * weight,
+                });
+            }
+            attended.push(accumulated.unwrap_or(0.0));
         }
     }
     if let Some(sink) = extra_sink {

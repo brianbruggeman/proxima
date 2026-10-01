@@ -34,6 +34,11 @@ pub(super) fn render_cached_softmax_weights(
             found: resolved.kind.name(),
         });
     };
+    #[cfg(feature = "metal-attn-split-rows")]
+    if matches!(&resolved.kind, BoundOpKind::CachedSoftmaxWeights { query_rows, .. } if *query_rows != 1)
+    {
+        return render_cached_softmax_weights_rows(resolved, entry);
+    }
     if *new_key_rows != 1 {
         return Err(EmitError::CachedSoftmaxWeightsNotSupported { node: resolved.node });
     }
@@ -209,6 +214,220 @@ pub(super) fn render_cached_softmax_weights(
         "\tfor (long dim = (long)local; dim < {head_dim}; dim += {width}) {{\n\
          \t\tlong voffset = {value_base} + row * {value_stride_row} + dim * {value_stride_dim};\n\
          \t\tnew_attended[row * {head_dim} + dim] = new_shifted * new_value[voffset];\n\
+         \t}}\n\
+         }}\n"
+    );
+
+    Ok(source)
+}
+
+/// [`render_cached_softmax_weights`]'s K-row form (`metal-attn-split-rows`):
+/// one threadgroup per `(query row, kv head, group)` attention row, the new
+/// range now `K = query_rows` keys per row (the causal triangle arrives as
+/// `-inf` in the already-masked `new_scores`, so every fold below runs over
+/// all K and an exact-zero weight adds exactly zero). Operand layouts are
+/// `[query row, key, row]` / `[query row, new key, row]` / `[new key, row,
+/// dim]`, and the primary output is dense `[query row, key, row]`, the
+/// unfused chain's own `[query row, key, kv head, group]` weights.
+///
+/// The cached folds are [`render_cached_softmax_weights`]'s own. The folds
+/// over the new keys (158's weight sum, 164's weighted-value sum) are left
+/// folds in key order, one lane per output element: the unfused chain's
+/// per-node reduce is serial under `bit_exact` (`NumericRewrite::TreeReduce`
+/// needs the reassociation permission, which `bit_exact` withholds), and a
+/// `simd_sum` tree over the K new keys rounds differently from a left fold
+/// from four terms on (measured: 0 differing bytes at K 1..=3, 63 and 127
+/// differing `new_attended` elements at K 4 and 5 on the device). The kernel
+/// carries no K-sized array, so any K renders and the serial fold is the same
+/// order at every K.
+#[cfg(feature = "metal-attn-split-rows")]
+fn render_cached_softmax_weights_rows(
+    resolved: &BoundOp,
+    entry: &str,
+) -> Result<String, EmitError> {
+    let BoundOpKind::CachedSoftmaxWeights {
+        operands,
+        new_key_rows,
+        cached_key_rows,
+        query_rows,
+        attention_rows,
+        head_dim,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "cached_softmax_weights",
+            found: resolved.kind.name(),
+        });
+    };
+    let unsupported = || EmitError::CachedSoftmaxWeightsNotSupported {
+        node: resolved.node,
+    };
+    let [
+        (_, cached_layout, cached_lookup),
+        (_, new_layout, new_lookup),
+        (_, value_layout, value_lookup),
+    ] = operands.as_slice()
+    else {
+        return Err(unsupported());
+    };
+    if cached_lookup.is_some()
+        || new_lookup.is_some()
+        || value_lookup.is_some()
+        || *new_key_rows != *query_rows
+        || *query_rows == 0
+        || cached_layout.strides.len() != 3
+        || new_layout.strides.len() != 3
+        || value_layout.strides.len() != 3
+    {
+        return Err(unsupported());
+    }
+    let cached_key_rows = *cached_key_rows;
+    let rows_per_query = *attention_rows / *query_rows;
+    let head_dim = *head_dim;
+    let width = wide_cooperative_reduce_width(cached_key_rows);
+
+    let cached_base = cached_layout.base;
+    let [cached_stride_query, cached_stride_key, cached_stride_row] = cached_layout.strides[..]
+    else {
+        return Err(unsupported());
+    };
+    let new_base = new_layout.base;
+    let [new_stride_query, new_stride_key, new_stride_row] = new_layout.strides[..] else {
+        return Err(unsupported());
+    };
+    let value_base = value_layout.base;
+    let [value_stride_key, value_stride_row, value_stride_dim] = value_layout.strides[..] else {
+        return Err(unsupported());
+    };
+
+    let runtime_rows = softmax_runtime_rows_override();
+    let uniforms_struct = if runtime_rows {
+        "struct Uniforms { long total_elements; long cached_key_rows; };\n\n"
+    } else {
+        "struct Uniforms { long total_elements; };\n\n"
+    };
+    let uniforms_use = if runtime_rows {
+        "\tlong cached_key_rows = u.cached_key_rows;\n"
+    } else {
+        "\t(void)u;\n"
+    };
+    let cached_key_rows_bound = if runtime_rows {
+        "cached_key_rows".to_string()
+    } else {
+        cached_key_rows.to_string()
+    };
+    let cached_offset = format!(
+        "{cached_base} + query * {cached_stride_query} + key * {cached_stride_key} + group * {cached_stride_row}"
+    );
+    let output_index =
+        format!("(query * {cached_key_rows_bound} + key) * {rows_per_query} + group");
+    let new_offset = format!(
+        "{new_base} + query * {new_stride_query} + new_key * {new_stride_key} + group * {new_stride_row}"
+    );
+
+    let mut source = String::new();
+    preamble(&mut source, false);
+    source.push_str(uniforms_struct);
+    let _ = write!(
+        source,
+        "kernel void {entry}(\n\
+         \tdevice const float* cached_scores [[buffer(0)]],\n\
+         \tdevice const float* new_scores [[buffer(1)]],\n\
+         \tdevice const float* new_value [[buffer(2)]],\n\
+         \tdevice float* out [[buffer(3)]],\n\
+         \tconstant Uniforms& u [[buffer(4)]],\n\
+         \tdevice float* cached_weight_sum [[buffer(5)]],\n\
+         \tdevice float* new_weight_sum [[buffer(6)]],\n\
+         \tdevice float* new_attended [[buffer(7)]],\n\
+         \tuint local [[thread_position_in_threadgroup]],\n\
+         \tuint tg [[threadgroup_position_in_grid]])\n\
+         {{\n\
+         {uniforms_use}\
+         \tlong row = (long)tg;\n\
+         \tlong query = row / {rows_per_query};\n\
+         \tlong group = row % {rows_per_query};\n\n"
+    );
+
+    let _ = write!(
+        source,
+        "\tfloat accumulator0 = -INFINITY;\n\
+         \tbool seeded0 = false;\n\
+         \tfor (long key = (long)local; key < {cached_key_rows_bound}; key += {width}) {{\n\
+         \t\tlong offset = {cached_offset};\n\
+         \t\tfloat value = cached_scores[offset];\n\
+         \t\taccumulator0 = seeded0 ? max(accumulator0, value) : value;\n\
+         \t\tseeded0 = true;\n\
+         \t}}\n"
+    );
+    push_cooperative_fold(&mut source, width, 0, "simd_max");
+    if width == SIMD_WIDTH {
+        source.push_str(
+            "\tthreadgroup float group_max_shared;\n\
+             \tif (local == 0u) { group_max_shared = reduced0; }\n\
+             \tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+             \tfloat group_max = group_max_shared;\n\n",
+        );
+    } else {
+        source.push_str("\tfloat group_max = reduced0;\n\n");
+    }
+    let _ = write!(
+        source,
+        "\tfor (long new_key = 0; new_key < {new_key_rows}; new_key++) {{\n\
+         \t\tgroup_max = max(group_max, new_scores[{new_offset}]);\n\
+         \t}}\n\n"
+    );
+
+    let _ = write!(
+        source,
+        "\tfor (long key = (long)local; key < {cached_key_rows_bound}; key += {width}) {{\n\
+         \t\tlong offset = {cached_offset};\n\
+         \t\tfloat step0 = (cached_scores[offset] - group_max);\n\
+         \t\tout[{output_index}] = exp(step0);\n\
+         \t}}\n\
+         \tthreadgroup_barrier(mem_flags::mem_device);\n\n"
+    );
+
+    let _ = write!(
+        source,
+        "\tfloat accumulator1 = 0.0f;\n\
+         \tbool seeded1 = false;\n\
+         \tfor (long key = (long)local; key < {cached_key_rows_bound}; key += {width}) {{\n\
+         \t\tfloat value = out[{output_index}];\n\
+         \t\taccumulator1 = seeded1 ? (accumulator1 + value) : value;\n\
+         \t\tseeded1 = true;\n\
+         \t}}\n"
+    );
+    push_cooperative_fold(&mut source, width, 1, "simd_sum");
+    source.push_str("\tif (local == 0u) { cached_weight_sum[row] = reduced1; }\n\n");
+
+    let _ = write!(
+        source,
+        "\tif (local == 0u) {{\n\
+         \t\tfloat accumulator2 = 0.0f;\n\
+         \t\tbool seeded2 = false;\n\
+         \t\tfor (long new_key = 0; new_key < {new_key_rows}; new_key++) {{\n\
+         \t\t\tfloat weight = exp(new_scores[{new_offset}] - group_max);\n\
+         \t\t\taccumulator2 = seeded2 ? (accumulator2 + weight) : weight;\n\
+         \t\t\tseeded2 = true;\n\
+         \t\t}}\n\
+         \t\tnew_weight_sum[row] = accumulator2;\n\
+         \t}}\n\n"
+    );
+
+    let _ = write!(
+        source,
+        "\tfor (long dim = (long)local; dim < {head_dim}; dim += {width}) {{\n\
+         \t\tfloat accumulator3 = 0.0f;\n\
+         \t\tbool seeded3 = false;\n\
+         \t\tfor (long new_key = 0; new_key < {new_key_rows}; new_key++) {{\n\
+         \t\t\tfloat weight = exp(new_scores[{new_offset}] - group_max);\n\
+         \t\t\tfloat step1 = (weight * new_value[{value_base} + new_key * {value_stride_key} + group * {value_stride_row} + dim * {value_stride_dim}]);\n\
+         \t\t\taccumulator3 = seeded3 ? (accumulator3 + step1) : step1;\n\
+         \t\t\tseeded3 = true;\n\
+         \t\t}}\n\
+         \t\tnew_attended[row * {head_dim} + dim] = accumulator3;\n\
          \t}}\n\
          }}\n"
     );

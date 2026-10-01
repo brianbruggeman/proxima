@@ -69,6 +69,13 @@
 //!   decode split form's keys-per-threadgroup-split divisor
 //!   (`crate::msl::decode_splits_for`), read only under
 //!   `metal-attn-split-decode`; see `omega-runtime.toml`'s `[attention_splits]`.
+//! - `ATTENTION_ROWS_KEYS_PER_BLOCK`/`ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP`/
+//!   `ATTENTION_ROWS_MMA_MIN_QUERY_ROWS`/`ATTENTION_ROWS_MAX_QUERY_ROWS`/
+//!   `ATTENTION_ROWS_TARGET_THREADGROUPS` (always compiled) -- the row-tiled
+//!   cached attention form's block width, simdgroup rule, K admission window and
+//!   split target (`crate::msl::rows_per_threadgroup`, `row_tiled_simdgroups`,
+//!   `row_tiled_splits`), read only under `metal-attn-split-rows`; see
+//!   `omega-runtime.toml`'s `[attention_rows]`.
 //! - `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES` (always compiled) —
 //!   Metal's per-threadgroup `threadgroup` memory ceiling; `crate::msl::
 //!   effective_context_chunk_cap` clamps `ATTENTION_CONTEXT_CHUNK_CAP`

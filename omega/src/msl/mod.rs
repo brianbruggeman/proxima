@@ -114,6 +114,8 @@ mod signature_tokens_prelude;
 mod cached_attention_render;
 #[cfg(feature = "metal-attn-split-decode")]
 mod cached_attention_decode_split;
+#[cfg(feature = "metal-attn-split-rows")]
+mod cached_attention_row_tiled;
 mod cached_softmax_weights_render;
 #[macro_use]
 mod elementwise_reduce_core;
@@ -144,6 +146,8 @@ pub use signature_tokens_prelude::context_chunks_for;
 // since nothing else ever names it through `msl`'s namespace.
 #[cfg(feature = "metal-attn-split-decode")]
 use cached_attention_decode_split::render_cached_attention_decode_split;
+#[cfg(feature = "metal-attn-split-rows")]
+use cached_attention_row_tiled::render_cached_attention_row_tiled;
 use cached_attention_render::render_cached_attention;
 // Same "plain reexport for descendant modules" shape as
 // `render_cached_attention` immediately above -- `render_cached_softmax_
@@ -176,6 +180,9 @@ pub(crate) use kernel_types_identity::softmax_runtime_rows_override;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod attn_golden_tests;
+#[cfg(all(test, feature = "metal-attn-split-rows"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod attn_rows_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod attn_split_tests;

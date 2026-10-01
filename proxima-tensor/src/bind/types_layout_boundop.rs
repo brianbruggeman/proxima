@@ -502,14 +502,18 @@ pub enum BoundOpKind {
         /// cooperative_scan`) reads for the surviving 152/157/162 folds, so
         /// this kernel's own cooperative width matches theirs exactly.
         cached_key_rows: u64,
-        /// Always `1` on this arm (`staged_decode_only`'s own decline
-        /// already restricts the surviving recognizer to `new_key_rows ==
-        /// 1`); carried as a real field rather than assumed so a renderer
-        /// can assert it instead of hard-coding it.
+        /// `1` for decode; `query_rows` for a K-row verify or prefill chunk
+        /// (`metal-attn-split-rows`), one new key per query row. Carried as a
+        /// real field so a renderer sees which it is.
         new_key_rows: u64,
+        /// New query rows: the unfused chain's row axis. The operand layouts
+        /// carry that axis (and the new-key axis) only when this exceeds one
+        /// (`bind::softmax_weights_axes`).
         query_rows: u64,
-        /// `kv_heads * query_groups` — the number of independent softmax
-        /// rows this kernel's grid covers, one per threadgroup.
+        /// `query_rows * kv_heads * query_groups` — the number of independent
+        /// softmax rows this kernel's grid covers, one per threadgroup, in
+        /// `(query row, kv head, group)` order. `attention_rows / query_rows`
+        /// is the rows one query row carries.
         attention_rows: u64,
         head_dim: u64,
     },

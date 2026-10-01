@@ -115,6 +115,19 @@ pub(super) fn render_cached_attention(
         CachedAttentionForm::TwoRangeDecodeSplit { .. } => {
             return render_cached_attention_decode_split(resolved, entry);
         }
+        #[cfg(feature = "metal-attn-split-rows")]
+        CachedAttentionForm::TwoRangeRowTiled {
+            rows_per_threadgroup,
+            simdgroups,
+            ..
+        } => {
+            return render_cached_attention_row_tiled(
+                resolved,
+                entry,
+                rows_per_threadgroup,
+                simdgroups,
+            );
+        }
     };
     let has_ninth_operand = single_range_dynamic || two_range_cached_bound;
     let (cached_len_param, new_upper_decl) = if single_range_dynamic {

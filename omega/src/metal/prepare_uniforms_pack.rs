@@ -761,11 +761,14 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPol
             // body instead (`render_cached_attention`'s own doc) and keeps
             // the minimal one-word struct, so only the single-range form
             // widens the uniform blob. The decode split form carries
-            // `total_elements`, `context_chunks` and `splits`.
+            // `total_elements`, `context_chunks` and `splits`; the row-tiled
+            // form `total_elements` and `splits`.
             match crate::msl::cached_attention_form(&bound.kind, numeric_policy) {
                 Some(crate::msl::CachedAttentionForm::SingleRangeDynamic { .. }) => 5 * WORD,
                 #[cfg(feature = "metal-attn-split-decode")]
                 Some(crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { .. }) => 3 * WORD,
+                #[cfg(feature = "metal-attn-split-rows")]
+                Some(crate::msl::CachedAttentionForm::TwoRangeRowTiled { .. }) => 2 * WORD,
                 Some(
                     crate::msl::CachedAttentionForm::Static
                     | crate::msl::CachedAttentionForm::TwoRangeCachedBound,
@@ -1293,6 +1296,69 @@ pub(super) mod pack_uniforms_byte_len_tests {
         );
     }
 
+    /// The row-tiled form packs `(rows * heads, splits)` -- two words, the row
+    /// count and so the tile count being derived in the kernel -- and the
+    /// byte-length estimate must agree.
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn row_tiled_uniforms_carry_the_row_head_count_and_the_split_count_and_match_the_byte_len() {
+        let mut bound = BoundOp {
+            node: NodeId(9),
+            dtype: DType::Float32,
+            extents: vec![5, 1, 8, 256],
+            kind: BoundOpKind::CachedAttention {
+                operands: (0..9)
+                    .map(|index| {
+                        (
+                            NodeId(index),
+                            Layout {
+                                base: 0,
+                                strides: vec![1_i64].into(),
+                            },
+                            None,
+                        )
+                    })
+                    .collect(),
+                query_rows: 5,
+                cached_key_rows: 512,
+                new_key_rows: 5,
+                kv_heads: 1,
+                query_groups: 8,
+                head_dim: 256,
+                rotary_dim: 256,
+                scale: 1.0,
+                cached_lower_inclusive: -511,
+                new_upper_inclusive: 0,
+            },
+        };
+        let policy = NumericPolicy::llama_relaxed();
+
+        let packed = pack_uniforms(&bound, policy).expect("packs uniforms");
+        let (chunks, _) = packed.as_chunks::<{ size_of::<i64>() }>();
+        let words: Vec<i64> = chunks
+            .iter()
+            .map(|chunk| i64::from_ne_bytes(*chunk))
+            .collect();
+
+        assert_eq!(packed.len(), pack_uniforms_byte_len(&bound, policy));
+        assert_eq!(
+            words,
+            vec![40, 9],
+            "five rows of eight heads, nine splits at 517 keys of capacity"
+        );
+
+        let BoundOpKind::CachedAttention { new_key_rows, .. } = &mut bound.kind else {
+            unreachable!("the fixture is a CachedAttention");
+        };
+        *new_key_rows = 4;
+        let decode_words = pack_uniforms(&bound, policy).expect("packs uniforms");
+        assert_ne!(
+            decode_words.len(),
+            packed.len(),
+            "an unequal new-key count leaves the row-tiled form for the one-dispatch blob"
+        );
+    }
+
     /// The last node `program` builds -- see `msl::tests::terminal`'s own
     /// doc (ROW 541, `proxima-tensor/docs/discipline.md`): every fixture
     /// here treats it as "the answer", and `bind_plain`'s reachability pass
@@ -1466,6 +1532,21 @@ pub(super) fn pack_cached_attention_uniforms(
             / *head_dim as i64;
         push_i64(bytes, rows_and_heads);
         push_i64(bytes, i64::try_from(chunks).unwrap_or(1));
+        push_i64(bytes, i64::try_from(splits).unwrap_or(1));
+        return Ok(());
+    }
+    #[cfg(feature = "metal-attn-split-rows")]
+    if let Some(crate::msl::CachedAttentionForm::TwoRangeRowTiled { splits, .. }) = form {
+        // the `(query row, head)` count the merge also uses, then the bind-time
+        // split count; the partial derives the row count, and so the tile
+        // count, from the first.
+        let rows_and_heads: i64 = bound
+            .extents
+            .iter()
+            .map(|extent| *extent as i64)
+            .product::<i64>()
+            / *head_dim as i64;
+        push_i64(bytes, rows_and_heads);
         push_i64(bytes, i64::try_from(splits).unwrap_or(1));
         return Ok(());
     }
