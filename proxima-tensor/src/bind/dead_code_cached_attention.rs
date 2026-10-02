@@ -703,6 +703,7 @@ pub(super) fn cached_attention_candidates(
     numeric_policy: NumericPolicy,
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
+    let consumers = core::cell::OnceCell::new();
     #[cfg(not(feature = "metal-attn-split-decode"))]
     let _ = numeric_policy;
     // resolved once: every caller supplies this leaf unconditionally
@@ -1734,7 +1735,12 @@ pub(super) fn cached_attention_candidates(
             }
             continue;
         }
-        let absorbed = removable_attention_dependencies(program, &dependencies, output);
+        let absorbed = removable_attention_dependencies(
+            program,
+            consumers.get_or_init(|| program_consumers(program)),
+            &dependencies,
+            output,
+        );
         if absorbed.is_empty() {
             #[cfg(feature = "instrument")]
             debug!(
@@ -1851,6 +1857,7 @@ pub(super) fn cached_attention_single_range_candidates(
     effective_outputs: &[NodeId],
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
+    let consumers = core::cell::OnceCell::new();
     for output_position in (0..program.len()).rev() {
         let output = NodeId(output_position as u32);
         let Some(attended_product) =
@@ -2073,7 +2080,12 @@ pub(super) fn cached_attention_single_range_candidates(
             }
             continue;
         }
-        let absorbed = removable_attention_dependencies(program, &dependencies, output);
+        let absorbed = removable_attention_dependencies(
+            program,
+            consumers.get_or_init(|| program_consumers(program)),
+            &dependencies,
+            output,
+        );
         if absorbed.is_empty() {
             continue;
         }
@@ -2138,58 +2150,70 @@ pub(super) fn attention_dependencies(
 
 #[cfg(feature = "cached-attention-streaming")]
 pub(super) fn has_external_attention_consumer(
-    consumers: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+    consumers: &ProgramConsumers,
     dependencies: &BTreeSet<NodeId>,
     dependency: NodeId,
     output: NodeId,
 ) -> bool {
     consumers
-        .get(&dependency)
-        .into_iter()
-        .flatten()
+        .of(dependency)
+        .iter()
         .any(|consumer| !dependencies.contains(consumer) && *consumer != output)
 }
 
+/// Every node's distinct consuming nodes, indexed by `NodeId`, built in one
+/// pass over the program. Both attention matchers ask "who else reads this
+/// dependency" once per candidate (one candidate per attention layer), and
+/// the answer is a property of the whole program, not of the candidate:
+/// building it per candidate walked every op of the program once per layer.
 #[cfg(feature = "cached-attention-streaming")]
-pub(super) fn attention_consumers(
-    program: &[Op],
-    dependencies: &BTreeSet<NodeId>,
-) -> BTreeMap<NodeId, BTreeSet<NodeId>> {
-    let mut consumers = BTreeMap::new();
+pub(super) struct ProgramConsumers {
+    by_node: Vec<Vec<NodeId>>,
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+impl ProgramConsumers {
+    pub(super) fn of(&self, node: NodeId) -> &[NodeId] {
+        self.by_node
+            .get(node.0 as usize)
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn program_consumers(program: &[Op]) -> ProgramConsumers {
+    let mut by_node: Vec<Vec<NodeId>> = vec![Vec::new(); program.len()];
     for (position, operation) in program.iter().enumerate() {
         let consumer = NodeId(position as u32);
-        let mut references = Vec::new();
+        let mut record = |node: NodeId| {
+            if let Some(consumers) = by_node.get_mut(node.0 as usize)
+                && consumers.last() != Some(&consumer)
+            {
+                consumers.push(consumer);
+            }
+        };
         match operation {
             Op::Elementwise { operands, .. } => {
-                references.extend(operands.iter().map(|(node, _)| *node));
+                operands.iter().for_each(|(node, _)| record(*node));
             }
-            Op::Reduce(reduce) => references.push(reduce.operand),
+            Op::Reduce(reduce) => record(reduce.operand),
             Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
         }
-        for dependency in references
-            .into_iter()
-            .filter(|node| dependencies.contains(node))
-        {
-            consumers
-                .entry(dependency)
-                .or_insert_with(BTreeSet::new)
-                .insert(consumer);
-        }
     }
-    consumers
+    ProgramConsumers { by_node }
 }
 
 #[cfg(feature = "cached-attention-streaming")]
 pub(super) fn removable_attention_dependencies(
     program: &[Op],
+    consumers: &ProgramConsumers,
     dependencies: &BTreeSet<NodeId>,
     output: NodeId,
 ) -> BTreeSet<NodeId> {
-    let consumers = attention_consumers(program, dependencies);
     let mut retained = dependencies
         .iter()
         .copied()
-        .filter(|node| has_external_attention_consumer(&consumers, dependencies, *node, output))
+        .filter(|node| has_external_attention_consumer(consumers, dependencies, *node, output))
         .collect::<BTreeSet<_>>();
     let mut changed = true;
     while changed {
