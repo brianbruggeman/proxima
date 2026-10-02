@@ -16,12 +16,13 @@
 //! `layer_caches` after the loop is unchanged.
 //!
 //! A full layer's rows live at their absolute position. A sliding layer keeps
-//! its most recent window in a linear buffer of `2 * window + step rows`: the
-//! leaf placement slides forward by one row per token (the program reads
-//! `min(cached_len, window)` rows starting `window` back), and when the read
-//! would run off the end the live rows are moved to the front. That trades the
-//! ring's modular indexing, which the kernel does not do, for an amortised
-//! `window`-row move once every `window + step` tokens.
+//! the rows its host ring would hold (window plus rewind slack, `retain`) in a
+//! linear buffer of `2 * retain + step rows`: the leaf placement slides forward
+//! by one row per token (the program reads `min(cached_len, window)` rows
+//! starting `window` back), and when the read would run off the end the kept
+//! rows are moved to the front. That trades the ring's modular indexing, which
+//! the kernel does not do, for an amortised `retain`-row move once every
+//! `retain + step` tokens.
 
 use super::*;
 
@@ -49,6 +50,10 @@ struct DeviceKvLayer {
     capacity_rows: usize,
     /// `Some` for a sliding layer: its buffer is a moving window.
     window: Option<usize>,
+    /// Rows a sliding layer keeps behind the write head: its host ring's whole
+    /// capacity, so a prefix state or prompt cache rewound after the call
+    /// finds every row the ring would have held.
+    retain: usize,
     /// Absolute position of buffer row 0. Always `0` for a full layer.
     base_position: usize,
 }
@@ -67,9 +72,12 @@ impl DeviceKvLayer {
         max_step_rows: usize,
     ) -> Result<Self, InteropError> {
         let window = cache.ring_geometry().map(|ring| ring.window);
-        let capacity_rows = window.map_or(full_capacity_rows, |window| {
-            (2 * window + max_step_rows).min(full_capacity_rows)
-        });
+        let retain = cache.ring_geometry().map_or(0, |ring| ring.capacity);
+        let capacity_rows = if window.is_some() {
+            (2 * retain + max_step_rows).min(full_capacity_rows)
+        } else {
+            full_capacity_rows
+        };
         let even_odd_row_bytes = even_odd_row * core::mem::size_of::<f32>();
         let v_row_bytes = v_row * core::mem::size_of::<f32>();
         let k_even = allocate_placed_buffer(capacity_rows * even_odd_row_bytes)?;
@@ -89,57 +97,68 @@ impl DeviceKvLayer {
             v_row_bytes,
             capacity_rows,
             window,
+            retain,
             base_position: 0,
         })
     }
 
-    fn seed(&mut self, cache: &LayerCache, cached_len: usize, layer: usize) -> Result<(), InteropError> {
+    /// The oldest position this layer keeps at `cached_len`: every one for a
+    /// full layer, the last `retain` for a sliding one.
+    fn first_kept(&self, cached_len: usize) -> usize {
+        match self.window {
+            Some(_) => cached_len - cached_len.min(self.retain),
+            None => 0,
+        }
+    }
+
+    fn seed(&mut self, cache: &LayerCache, cached_len: usize) {
         let even_odd_row = self.even_odd_row_bytes / core::mem::size_of::<f32>();
         let v_row = self.v_row_bytes / core::mem::size_of::<f32>();
-        let (first, live) = match self.window {
-            Some(window) => (cached_len - cached_len.min(window), cached_len.min(window)),
-            None => (0, cached_len),
-        };
+        let first = self.first_kept(cached_len);
+        let kept = cached_len - first;
         self.base_position = first;
-        if live == 0 {
-            return Ok(());
-        }
-        let (mut even, mut odd, mut value) = (
-            alloc::vec![0.0f32; live * even_odd_row],
-            alloc::vec![0.0f32; live * even_odd_row],
-            alloc::vec![0.0f32; live * v_row],
-        );
-        if cache.ring_geometry().is_some() {
-            cache.unroll_live_rows(cached_len, &mut even, &mut odd, &mut value, layer)?;
-        } else {
-            even.copy_from_slice(&cache.k_even[..live * even_odd_row]);
-            odd.copy_from_slice(&cache.k_odd[..live * even_odd_row]);
-            value.copy_from_slice(&cache.v[..live * v_row]);
+        let mut even = Vec::with_capacity(kept * even_odd_row);
+        let mut odd = Vec::with_capacity(kept * even_odd_row);
+        let mut value = Vec::with_capacity(kept * v_row);
+        for position in first..cached_len {
+            let slot = cache
+                .ring_geometry()
+                .map_or(position, |ring| position % ring.capacity);
+            even.extend_from_slice(&cache.k_even[slot * even_odd_row..(slot + 1) * even_odd_row]);
+            odd.extend_from_slice(&cache.k_odd[slot * even_odd_row..(slot + 1) * even_odd_row]);
+            value.extend_from_slice(&cache.v[slot * v_row..(slot + 1) * v_row]);
         }
         omega::write_placed_buffer_f32(&self.k_even, 0, &even);
         omega::write_placed_buffer_f32(&self.k_odd, 0, &odd);
         omega::write_placed_buffer_f32(&self.v, 0, &value);
-        Ok(())
     }
 
     fn make_room(&mut self, cached_len: usize, new_count: usize, bound_extent: usize) {
         let Some(window) = self.window else {
             return;
         };
-        let live = cached_len.min(window);
-        let first_row = cached_len - live - self.base_position;
-        let reach = (first_row + bound_extent).max(cached_len + new_count - self.base_position);
+        let live_first_row = cached_len - cached_len.min(window) - self.base_position;
+        let reach =
+            (live_first_row + bound_extent).max(cached_len + new_count - self.base_position);
         if reach <= self.capacity_rows {
             return;
         }
+        let kept_first = self.first_kept(cached_len);
+        let kept_rows = cached_len - kept_first;
+        let kept_first_row = kept_first - self.base_position;
         for (buffer, row_bytes) in [
             (&self.k_even, self.even_odd_row_bytes),
             (&self.k_odd, self.even_odd_row_bytes),
             (&self.v, self.v_row_bytes),
         ] {
-            omega::move_placed_buffer_bytes(buffer, first_row * row_bytes, 0, live * row_bytes);
+            omega::move_placed_buffer_bytes(
+                buffer,
+                kept_first_row * row_bytes,
+                0,
+                kept_rows * row_bytes,
+            );
         }
-        self.base_position = cached_len - live;
+        self.base_position = kept_first;
     }
 
     fn input_row(&self, cached_len: usize) -> usize {
@@ -170,7 +189,7 @@ impl DeviceKv {
         let full_capacity_rows =
             kv_extent(positions_needed + max_step_rows, usize::MAX, bucket_tokens) + bucket_tokens;
         let mut layers: Vec<Option<DeviceKvLayer>> = Vec::with_capacity(layer_caches.len());
-        for (layer, (state, widths)) in layer_caches.iter().zip(layer_row_widths).enumerate() {
+        for (state, widths) in layer_caches.iter().zip(layer_row_widths) {
             match (state, widths) {
                 (
                     LayerCacheState::Attention(cache),
@@ -192,7 +211,7 @@ impl DeviceKv {
                         full_capacity_rows,
                         max_step_rows,
                     )?;
-                    device_layer.seed(cache, cached_len, layer)?;
+                    device_layer.seed(cache, cached_len);
                     layers.push(Some(device_layer));
                 }
                 (LayerCacheState::SharedFromLayer, LayerPadRowWidths::SharedFromLayer) => {
@@ -269,8 +288,8 @@ impl DeviceKv {
             let (Some(layer), LayerCacheState::Attention(cache)) = (slot, state) else {
                 continue;
             };
-            let live = layer.window.map_or(cached_len, |window| cached_len.min(window));
-            let first = cached_len - live;
+            let first = layer.first_kept(cached_len);
+            let live = cached_len - first;
             let first_row = first - layer.base_position;
             let even_odd_row = layer.even_odd_row_bytes / core::mem::size_of::<f32>();
             let v_row = layer.v_row_bytes / core::mem::size_of::<f32>();
@@ -416,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sliding_layer_keeps_exactly_its_window_across_every_compaction() {
+    fn a_sliding_layer_keeps_its_whole_ring_across_every_compaction() {
         let window = 8;
         let start = 21;
         let steps = 60;
@@ -453,7 +472,7 @@ mod tests {
             .ring_geometry()
             .copied()
             .expect("sliding layer keeps its ring");
-        for position in final_len - window..final_len {
+        for position in final_len - ring.capacity..final_len {
             let slot = position % ring.capacity;
             assert_eq!(
                 restored.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
@@ -463,6 +482,29 @@ mod tests {
             assert_eq!(
                 restored.v[slot * V_ROW..(slot + 1) * V_ROW],
                 row_values(position, V_ROW, 2)[..]
+            );
+        }
+    }
+
+    #[test]
+    fn a_ring_round_trips_through_the_device_with_its_rewind_slack_rows() {
+        let positions = 21;
+        let before = host_cache(Some(8), positions);
+        let ring = before.ring_geometry().copied().expect("sliding layer has a ring");
+        assert_eq!(ring.capacity, 10, "8 window rows plus 2 slack rows");
+        let (device, mut caches) = adopted(Some(8), positions, 60);
+
+        device.flush(&mut caches, positions, 60);
+
+        let LayerCacheState::Attention(restored) = &caches[0] else {
+            panic!("layer 0 stays an attention cache");
+        };
+        for position in positions - ring.capacity..positions {
+            let slot = position % ring.capacity;
+            assert_eq!(
+                restored.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
+                before.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
+                "position {position}, older than the window but inside the slack, is still there"
             );
         }
     }
