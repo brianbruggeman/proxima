@@ -615,6 +615,30 @@ pub(super) fn build_elementwise_op(
     }
 }
 
+/// The held entries `compose` can reach from `operands`: every held node
+/// transitively named by an operand, and nothing else. `compose` only ever
+/// looks up (and drops, as absorbed) entries on that walk, so a preview that
+/// must not disturb the real held set can compose over this slice of it
+/// instead of a clone of the whole map -- the whole map is every pending
+/// elementwise node of the program, and one preview ran per materialization.
+fn window_below(
+    held: &BTreeMap<NodeId, HeldElementwise>,
+    operands: &[(NodeId, IndexMap)],
+) -> BTreeMap<NodeId, HeldElementwise> {
+    let mut window = BTreeMap::new();
+    let mut pending: Vec<NodeId> = operands.iter().map(|(node, _)| *node).collect();
+    while let Some(node) = pending.pop() {
+        if window.contains_key(&node) {
+            continue;
+        }
+        if let Some(entry) = held.get(&node) {
+            pending.extend(entry.operands.iter().map(|(operand, _)| *operand));
+            window.insert(node, entry.clone());
+        }
+    }
+    window
+}
+
 pub(super) fn preview_elementwise_buffer_count(
     node: NodeId,
     shapes: &Shapes,
@@ -623,15 +647,14 @@ pub(super) fn preview_elementwise_buffer_count(
     values: &[Option<f32>],
     numeric_policy: NumericPolicy,
 ) -> Result<usize, TensorError> {
-    let held = RefCell::new(held.clone());
     let entry = held
-        .borrow()
         .get(&node)
         .cloned()
         .ok_or(TensorError::NotLowerable {
             node,
             reason: "elementwise ABI preview requires a held node",
         })?;
+    let held = RefCell::new(window_below(held, &entry.operands));
     let (_, operands) = compose(
         shapes,
         &held,
