@@ -3561,6 +3561,25 @@ impl<'file> LoadedModel<'file> {
         let mut device_resident_flags: Vec<bool> = Vec::new();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv_attempted = false;
+        // plain greedy ends on the device: the pick is the last ops of the program and the
+        // host reads one index (`greedy_device.rs`); everything that needs the row keeps the host path
+        // a one-token call never repays it: the greedy program is its own plan, and a prefill restore
+        // landing between sampled drafts would evict their cached plan and rebuild it for nothing
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let greedy_on_device = device_kv_eligible
+            && max_tokens > 1
+            && matches!(logits_sink, LogitsSink::Discard)
+            && sample_config.temperature <= 0.0
+            && sample_config.min_p <= 1.0
+            && sample_config.repeat_penalty == 1.0
+            && sample_config.frequency_penalty == 0.0
+            && sample_config.presence_penalty == 0.0
+            && std::env::var_os("PROXIMA_DEBUG_GDN_LOGITS").is_none()
+            && std::env::var_os("PROXIMA_LOGITS_DIAG").is_none();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut greedy_program: Option<(Vec<Op>, NodeId, NodeId, PlacedBuffer)> = None;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut greedy_declined = false;
 
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
@@ -3970,6 +3989,44 @@ impl<'file> LoadedModel<'file> {
                         &mut named_blocks,
                         active_single_position_step,
                     )?;
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if greedy_on_device
+                        && greedy_program.is_none()
+                        && !greedy_declined
+                        && !speculative_step
+                        && step_batch_needs_logits(split_prefill, is_last_step_batch)
+                    {
+                        match with_greedy_argmax(
+                            active_program,
+                            active_logits_root,
+                            vocab_size as u32,
+                            &symbols,
+                        ) {
+                            Some((program, token, finite)) => {
+                                let logits_buffer = allocate_placed_buffer(
+                                    vocab_size * core::mem::size_of::<f32>(),
+                                )?;
+                                greedy_program = Some((program, token, finite, logits_buffer));
+                            }
+                            None => {
+                                greedy_declined = true;
+                                debug!(
+                                    step = _step as u64,
+                                    "greedy_device_declined: the logits root does not take the argmax ops"
+                                );
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let greedy_step = greedy_program.is_some()
+                        && !speculative_step
+                        && step_batch_needs_logits(split_prefill, is_last_step_batch)
+                        && token_override.is_none_or(|forced| forced.get(_step).is_none());
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let active_program: &[Op] = match &greedy_program {
+                        Some((program, ..)) if greedy_step => program,
+                        _ => active_program,
+                    };
                     if active_program.iter().any(|operation| {
                         operation.name().is_some_and(|name| {
                             gdn_prefill_names.iter().any(|candidate| candidate == name)
@@ -4067,6 +4124,11 @@ impl<'file> LoadedModel<'file> {
                         roots.extend(self.duplicate_head_roots.iter().copied());
                     }
                     roots.extend_from_slice(node_values_sink.nodes());
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if let (true, Some((_, token, finite, _))) = (greedy_step, &greedy_program) {
+                        roots.push(*token);
+                        roots.push(*finite);
+                    }
                     if monolithic_prefill_requested {
                         roots.extend(self.router_roots.iter().copied());
                     }
@@ -4401,6 +4463,10 @@ impl<'file> LoadedModel<'file> {
                         );
                         ssm_input_placements.extend(placements.inputs);
                         ssm_output_placements.extend(placements.outputs);
+                    }
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if let (true, Some((_, _, _, logits_buffer))) = (greedy_step, &greedy_program) {
+                        ssm_output_placements.push((active_logits_root, logits_buffer, 0));
                     }
                     // The `StepGuard` (shadowing the lock below) closes this
                     // step on every exit -- normal return and an early `?`
@@ -4777,7 +4843,7 @@ impl<'file> LoadedModel<'file> {
                             &mut before_qwen35moe_gather,
                         )?
                     } else if use_metal_output_placements(
-                        !ssm_input_placements.is_empty(),
+                        !ssm_input_placements.is_empty() || !ssm_output_placements.is_empty(),
                         monolithic_all_low,
                     ) {
                         runtime.evaluate_with_placements(
@@ -5757,6 +5823,34 @@ impl<'file> LoadedModel<'file> {
                         let fetch_started = read_ticks();
                         #[cfg(any(feature = "instrument", feature = "metal"))]
                         let logits_diag_enabled = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        let greedy_device_token: Option<u32> = match (greedy_step, &greedy_program) {
+                            (true, Some((_, token, finite, _))) => {
+                                device_token(&evaluated, *token, *finite, vocab_size)
+                            }
+                            _ => None,
+                        };
+                        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                        let greedy_device_token: Option<u32> = None;
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        let placed_logits: Vec<f32>;
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        let logits: &[f32] = match (greedy_step, &greedy_program, greedy_device_token) {
+                            (true, _, Some(_)) => &[],
+                            (true, Some((_, _, _, logits_buffer)), None) => {
+                                placed_logits = omega::read_placed_buffer_f32(logits_buffer, 0, vocab_size);
+                                &placed_logits
+                            }
+                            _ => {
+                                evaluated
+                                    .get(active_logits_root)
+                                    .ok_or(InteropError::MissingEvaluatedNode {
+                                        node: active_logits_root,
+                                    })?
+                                    .0
+                            }
+                        };
+                        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                         let (logits, _shape) = evaluated.get(active_logits_root).ok_or(
                             InteropError::MissingEvaluatedNode {
                                 node: active_logits_root,
@@ -5784,14 +5878,14 @@ impl<'file> LoadedModel<'file> {
                             first_five = ?&logits[..logits.len().min(5)],
                             "one_evaluation_prefill_batch: logits shape before sampling"
                         );
-                        if logits.len() != vocab_size {
+                        if greedy_device_token.is_none() && logits.len() != vocab_size {
                             return Err(InteropError::LogitsShapeMismatch {
                                 expected_rows: 1,
                                 found_rows: logits.len() / vocab_size,
                                 vocab: vocab_size,
                             });
                         }
-                        let last_position = &logits[..vocab_size];
+                        let last_position = &logits[..vocab_size.min(logits.len())];
                         // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head):
                         // per-step bytes verification for the
                         // `PROXIMA_HEAD_REPEATS` duplicate head dispatches --
@@ -5973,15 +6067,18 @@ impl<'file> LoadedModel<'file> {
 
                         #[cfg(feature = "instrument")]
                         let greedy_pick_started = read_ticks();
-                        token_id = select_decoded_token(
-                            _step,
-                            last_position,
-                            &token_history,
-                            repeat_window,
-                            token_override,
-                            sample_config,
-                            &mut rng,
-                        )?;
+                        token_id = match greedy_device_token {
+                            Some(picked) => picked,
+                            None => select_decoded_token(
+                                _step,
+                                last_position,
+                                &token_history,
+                                repeat_window,
+                                token_override,
+                                sample_config,
+                                &mut rng,
+                            )?,
+                        };
                         token_history.push(token_id);
                         #[cfg(feature = "instrument")]
                         let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
