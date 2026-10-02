@@ -1048,30 +1048,12 @@ pub(super) mod tests {
         );
     }
 
-    /// ROW 392's own class fix, proved directly against the real two-range
-    /// path (not a hand-rolled stand-in): a synthetic one-layer
-    /// mixture-of-experts checkpoint (`architecture.expert_count > 0` forces
-    /// [`LoadedModel::single_range`] to `None`, `build_single_range_program`'s
-    /// own doc, so `gpu_layers: GPU_LAYERS_ALL` here reaches
-    /// [`BackendRuntime::evaluate`] through [`LoadedModel::run_decode_loop`],
-    /// never `run_decode_loop_placed_kv`) drives the SAME 8-step greedy
-    /// decode twice, once with `kv_bucket_tokens: 1` (today's pre-fix
-    /// behavior: `kv_extent`'s own doc, `div_ceil(1)` is the identity) and
-    /// once with `kv_bucket_tokens: 32` (`ServingConfig::default`'s own
-    /// value). Two claims, both comparative rather than a single hard-coded
-    /// constant, so neither depends on `omega`'s own internal per-node
-    /// allocation count: bucketing must produce STRICTLY fewer plan misses
-    /// and STRICTLY fewer [`omega::metal::OUTPUT_BUFFER_ALLOCATIONS`] than
-    /// the unbucketed run (ROW 392's own finding: one miss, and one fresh
-    /// `Plan` with its own device output buffers, per token before this
-    /// fix), and the two runs must land on the IDENTICAL generated token
-    /// ids -- `proxima_tensor::bind::cached_attention_candidates`'s own doc
-    /// on the fused op's runtime bound is the numerics claim this equality
-    /// is standing in for: a bucket's padding is invisible to softmax, so
-    /// rounding `cached_len` up must never change what the model emits.
+    /// The minimal one-layer mixture-of-experts llama checkpoint these
+    /// plan-cache tests drive: `expert_count > 0` keeps
+    /// [`LoadedModel::single_range`] at `None`, so decode takes the two-range
+    /// path through [`BackendRuntime::evaluate`] and its `plans` cache.
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    #[test]
-    fn two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens() {
+    fn one_layer_moe_checkpoint() -> Vec<u8> {
         fn f32_bytes(values: &[f32]) -> Vec<u8> {
             values
                 .iter()
@@ -1217,8 +1199,34 @@ pub(super) mod tests {
             ],
         };
 
-        let file_bytes =
-            write_complete(&model).expect("writes a minimal one-layer MoE gguf fixture");
+        write_complete(&model).expect("writes a minimal one-layer MoE gguf fixture")
+    }
+
+    /// ROW 392's own class fix, proved directly against the real two-range
+    /// path (not a hand-rolled stand-in): a synthetic one-layer
+    /// mixture-of-experts checkpoint (`architecture.expert_count > 0` forces
+    /// [`LoadedModel::single_range`] to `None`, `build_single_range_program`'s
+    /// own doc, so `gpu_layers: GPU_LAYERS_ALL` here reaches
+    /// [`BackendRuntime::evaluate`] through [`LoadedModel::run_decode_loop`],
+    /// never `run_decode_loop_placed_kv`) drives the SAME 8-step greedy
+    /// decode twice, once with `kv_bucket_tokens: 1` (today's pre-fix
+    /// behavior: `kv_extent`'s own doc, `div_ceil(1)` is the identity) and
+    /// once with `kv_bucket_tokens: 32` (`ServingConfig::default`'s own
+    /// value). Two claims, both comparative rather than a single hard-coded
+    /// constant, so neither depends on `omega`'s own internal per-node
+    /// allocation count: bucketing must produce STRICTLY fewer plan misses
+    /// and STRICTLY fewer [`omega::metal::OUTPUT_BUFFER_ALLOCATIONS`] than
+    /// the unbucketed run (ROW 392's own finding: one miss, and one fresh
+    /// `Plan` with its own device output buffers, per token before this
+    /// fix), and the two runs must land on the IDENTICAL generated token
+    /// ids -- `proxima_tensor::bind::cached_attention_candidates`'s own doc
+    /// on the fused op's runtime bound is the numerics claim this equality
+    /// is standing in for: a bucket's padding is invisible to softmax, so
+    /// rounding `cached_len` up must never change what the model emits.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens() {
+        let file_bytes = one_layer_moe_checkpoint();
         let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
             .expect("parses the minimal one-layer MoE gguf fixture");
         let loaded = LoadedModel::load(&parsed, &file_bytes)
