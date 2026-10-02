@@ -239,6 +239,15 @@ fn emit_sizing_consts() {
         "pub const COMMAND_BUFFER_FIRST_CHUNK_OPS: u64 = {first_chunk_ops};\n"
     ));
 
+    let chunk_growth = require_at_least(
+        "command_buffer.chunk_growth",
+        2,
+        resolve_int(&root, "command_buffer", "chunk_growth"),
+    );
+    out.push_str(&format!(
+        "pub const COMMAND_BUFFER_CHUNK_GROWTH: u64 = {chunk_growth};\n"
+    ));
+
     let uniform_cache_entries = require_nonzero(
         "spans.uniform_cache_entries",
         resolve_int(&root, "spans", "uniform_cache_entries"),
