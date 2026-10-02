@@ -1693,6 +1693,7 @@ impl<'file> LoadedModel<'file> {
         kv_pad_scratch: &'call mut [KvPadScratch],
         qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
         step_input_scratch: &'call mut Vec<StepInput>,
+        device_resident: &[bool],
         named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
         single_position_step: bool,
     ) -> Result<Vec<u64>, InteropError> {
@@ -1767,6 +1768,7 @@ impl<'file> LoadedModel<'file> {
             },
             kv_pad_scratch,
             qwen35_dense_pad_scratch,
+            device_resident,
             named_blocks,
         )?;
         Ok(symbols)
@@ -3533,6 +3535,32 @@ impl<'file> LoadedModel<'file> {
         // the two-layer cache checksum walks whole caches every step; only the diag knob pays for it
         #[cfg(feature = "instrument")]
         let cache_checksum_diag = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
+        // gemma4's attention layers keep their KV on the device once decode starts
+        // (`DeviceKv`'s own doc); every other architecture keeps the host path
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let device_kv_eligible = runtime.is_metal()
+            && self.ring_write_offset == 0
+            && layer_caches
+                .iter()
+                .any(|state| matches!(state, LayerCacheState::Attention(_)))
+            && layer_caches.iter().all(|state| {
+                matches!(
+                    state,
+                    LayerCacheState::Attention(_) | LayerCacheState::SharedFromLayer
+                )
+            });
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let device_kv_step_rows = draft_limit + 1;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut device_kv: Option<DeviceKv> = None;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut device_kv_leaves_decode: Option<Vec<Option<KvLeafNodes>>> = None;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut device_kv_leaves_verify: Option<Vec<Option<KvLeafNodes>>> = None;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut device_resident_flags: Vec<bool> = Vec::new();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut device_kv_attempted = false;
 
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
@@ -3874,6 +3902,54 @@ impl<'file> LoadedModel<'file> {
                     // `Architecture::step_inputs`' own leaves, and every KV/SSM
                     // cache leaf -- so a foreign architecture's own leaf names
                     // are fed identically whether decoding or tapping one node.
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if !device_kv_attempted
+                        && device_kv_eligible
+                        && cached_len > 0
+                        && is_last_step_batch
+                        && new_count <= device_kv_step_rows
+                    {
+                        device_kv_attempted = true;
+                        device_kv = DeviceKv::adopt(
+                            &mut layer_caches,
+                            &layer_row_widths,
+                            cached_len,
+                            positions_needed,
+                            serving_config.kv_bucket_tokens,
+                            device_kv_step_rows,
+                        )?;
+                        if let Some(device) = &device_kv {
+                            device_resident_flags = device.resident_layers();
+                            debug!(
+                                step = _step as u64,
+                                cached_len = cached_len as u64,
+                                resident_layers = device_resident_flags
+                                    .iter()
+                                    .filter(|flag| **flag)
+                                    .count() as u64,
+                                "device_kv_adopted: attention layers keep their KV on the device from here"
+                            );
+                        } else {
+                            debug!(
+                                step = _step as u64,
+                                cached_len = cached_len as u64,
+                                "device_kv_declined: a host cache did not hold exactly the cached positions"
+                            );
+                        }
+                    }
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if device_kv
+                        .as_ref()
+                        .is_some_and(|device| new_count > device.max_step_rows())
+                    {
+                        return Err(InteropError::UnsupportedServingConfig(alloc::format!(
+                            "device-resident KV step of {new_count} rows exceeds the {device_kv_step_rows} rows it was sized for"
+                        )));
+                    }
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let device_resident_view: &[bool] = &device_resident_flags;
+                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                    let device_resident_view: &[bool] = &[];
                     let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, cached_len);
                     let symbols = self.push_step_named_blocks(
                         &inputs,
@@ -3890,6 +3966,7 @@ impl<'file> LoadedModel<'file> {
                         &mut kv_pad_scratch,
                         &mut qwen35_dense_pad_scratch,
                         &mut step_input_scratch,
+                        device_resident_view,
                         &mut named_blocks,
                         active_single_position_step,
                     )?;
@@ -4304,6 +4381,27 @@ impl<'file> LoadedModel<'file> {
                         "evaluator_roots"
                     );
 
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if let Some(device) = device_kv.as_mut() {
+                        let leaves = if speculative_step {
+                            &mut device_kv_leaves_verify
+                        } else {
+                            &mut device_kv_leaves_decode
+                        };
+                        let leaves = leaves
+                            .get_or_insert_with(|| kv_leaf_nodes(active_program, &cache_names));
+                        let sliding_bound = sliding_ring_geometry(&layer_caches)
+                            .map_or(0, |ring| ring.bound_extent(kv_bound_extent));
+                        let placements = device.placements(
+                            cached_len,
+                            new_count,
+                            sliding_bound,
+                            leaves,
+                            active_layer_roots,
+                        );
+                        ssm_input_placements.extend(placements.inputs);
+                        ssm_output_placements.extend(placements.outputs);
+                    }
                     // The `StepGuard` (shadowing the lock below) closes this
                     // step on every exit -- normal return and an early `?`
                     // error alike -- so the source-snapshot boundary cannot
@@ -5321,6 +5419,9 @@ impl<'file> LoadedModel<'file> {
                                 Qwen35LayerRoots::Attention((even, odd, value)),
                                 LayerCacheState::Attention(cache),
                             ) => {
+                                if device_resident_view.get(layer).copied().unwrap_or(false) {
+                                    continue;
+                                }
                                 let (even_data, _) = evaluated
                                     .get(*even)
                                     .ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
@@ -6043,6 +6144,11 @@ impl<'file> LoadedModel<'file> {
         }
 
         let (generated_ids, stopped_by_eos) = decode_result?;
+
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        if let Some(device) = device_kv.as_ref() {
+            device.flush(&mut layer_caches, cached_len, positions_needed);
+        }
 
         #[cfg(feature = "qwen35moe-expert-prefetch")]
         if qwen35moe_expert_prefetch_enabled {
@@ -6861,6 +6967,7 @@ impl<'file> LoadedModel<'file> {
             &mut kv_pad_scratch,
             &mut qwen35_dense_pad_scratch,
             &mut step_input_scratch,
+            &[],
             &mut named_blocks,
             self.single_position_step,
         )?;

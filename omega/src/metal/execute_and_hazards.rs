@@ -1113,6 +1113,51 @@ pub fn read_placed_buffer_f32(
     .to_vec()
 }
 
+/// Writes `values` into `buffer` at `byte_offset` -- the host-side store a
+/// caller uses to seed a [`PlacedBuffer`] (a KV cache restored from a host
+/// copy, say) before the device ever writes it. The counterpart of
+/// [`read_placed_buffer_f32`]; both rely on `storageModeShared` and on no
+/// command buffer being in flight, which every `execute_plan_with_placements`
+/// call guarantees by `waitUntilCompleted`-ing before it returns.
+///
+/// # Contract
+/// `byte_offset + size_of_val(values)` must stay inside the buffer's
+/// allocated length, the same trust boundary [`read_placed_buffer_f32`] states.
+#[cfg(feature = "metal-output-placement")]
+pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
+    let pointer = buffer.contents();
+    // SAFETY: `storageModeShared` memory is CPU-writable while no command
+    // buffer is in flight, and the caller keeps `byte_offset + values` inside
+    // the allocation (this function's contract), so the destination is a
+    // valid, non-overlapping region for `values.len()` floats.
+    unsafe {
+        let destination = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
+        core::ptr::copy_nonoverlapping(values.as_ptr(), destination, values.len());
+    }
+}
+
+/// Moves `byte_len` bytes from `from_byte` to `to_byte` inside one
+/// [`PlacedBuffer`], overlap allowed -- how a sliding-window KV buffer
+/// compacts its live rows back to the front without leaving the device's
+/// shared allocation. Same in-flight and bounds contract as
+/// [`write_placed_buffer_f32`].
+#[cfg(feature = "metal-output-placement")]
+pub fn move_placed_buffer_bytes(
+    buffer: &PlacedBuffer,
+    from_byte: usize,
+    to_byte: usize,
+    byte_len: usize,
+) {
+    let pointer = buffer.contents();
+    // SAFETY: both ranges lie inside the allocation (caller contract) and
+    // `ptr::copy` is the overlap-safe move, so a forward compaction whose
+    // source and destination ranges intersect is well-defined.
+    unsafe {
+        let base = pointer.as_ptr().cast::<u8>();
+        core::ptr::copy(base.add(from_byte), base.add(to_byte), byte_len);
+    }
+}
+
 /// [`DispatchType::Concurrent`]'s dataflow-hazard set, generic over the
 /// identity type so this logic is testable without a real Metal device
 /// (`Id = usize`/`&str` in tests, `Id = *const ProtocolObject<dyn MTLBuffer>`
