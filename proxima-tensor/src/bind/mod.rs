@@ -102,11 +102,13 @@ mod cached_attention_epilogue_liveness;
 mod identity_copy_alias;
 #[cfg(feature = "instrument")]
 mod repeat_nodes;
+mod refit_cached_attention;
 mod refresh;
 pub use builder_compose_window::*;
 pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
+pub use refit_cached_attention::refit_cached_attention_rows;
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
 pub use types_layout_boundop::*;
 #[cfg(feature = "identity-copy-alias")]
@@ -121,3 +123,7 @@ mod tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod dead_resolved_tests;
+
+#[cfg(all(test, feature = "cached-attention-streaming"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod refit_tests;

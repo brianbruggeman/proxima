@@ -104,7 +104,7 @@ pub(super) fn native_packed_layout(
 
 /// Every node `computed` physically reads, each once: operands, epilogue
 /// operands, gather index nodes, and a reduce's scatter index node.
-fn read_nodes(computed: &BoundOp) -> BTreeSet<NodeId> {
+pub(super) fn read_nodes(computed: &BoundOp) -> BTreeSet<NodeId> {
     let mut reads = BTreeSet::new();
     for (operand, _layout, lookup) in computed.all_read_sources() {
         reads.insert(*operand);
