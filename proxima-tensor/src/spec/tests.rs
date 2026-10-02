@@ -17594,3 +17594,93 @@ mod gemma4_synthetic_parity {
         }
     }
 }
+
+fn greedy_argmax_over(rows: &[Vec<f32>]) -> (Vec<f32>, Vec<f32>) {
+    let vocab = rows[0].len() as u32;
+    let mut program = Vec::new();
+    let logits = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(vocab)],
+        "logits",
+    );
+    let (token, finite) = greedy_argmax(&mut program, logits, vocab).expect("argmax builds");
+    let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+    let evaluated = crate::cpu::evaluate_quantized(
+        &program,
+        &[rows.len() as u64],
+        &[crate::cpu::QuantizedBlock::Float32(&flat)],
+        &[token, finite],
+    )
+    .expect("argmax evaluates");
+    let picked = evaluated.get(token).expect("token root evaluated").0.to_vec();
+    let counted = evaluated.get(finite).expect("finite root evaluated").0.to_vec();
+    (picked, counted)
+}
+
+#[test]
+fn greedy_argmax_picks_the_peak_of_each_row() {
+    let rows = [
+        alloc::vec![0.5, -3.0, 7.25, 1.0, 7.0, -0.5],
+        alloc::vec![9.5, 9.0, -1.0, 2.0, 3.0, 4.0],
+    ];
+
+    let (tokens, finite) = greedy_argmax_over(&rows);
+
+    assert_eq!(tokens, [2.0, 0.0]);
+    assert_eq!(finite, [6.0, 6.0], "clean rows count every entry");
+}
+
+#[test]
+fn greedy_argmax_breaks_a_tie_toward_the_lowest_index() {
+    let rows = [alloc::vec![1.0, 4.0, 2.0, 4.0, 4.0, 0.0]];
+
+    let (tokens, _) = greedy_argmax_over(&rows);
+
+    assert_eq!(tokens, [1.0]);
+}
+
+#[test]
+fn greedy_argmax_treats_negative_and_positive_zero_as_one_tie() {
+    let rows = [alloc::vec![-5.0, -0.0, 0.0, -1.0]];
+
+    let (tokens, _) = greedy_argmax_over(&rows);
+
+    assert_eq!(
+        tokens,
+        [1.0],
+        "the first of the equal zeros wins, as the host scan does"
+    );
+}
+
+#[test]
+fn greedy_argmax_flags_a_row_holding_nan_or_an_infinity() {
+    let rows = [
+        alloc::vec![1.0, f32::NAN, 3.0, 2.0],
+        alloc::vec![1.0, f32::NEG_INFINITY, 3.0, 2.0],
+        alloc::vec![1.0, f32::INFINITY, 3.0, 2.0],
+    ];
+
+    let (_, finite) = greedy_argmax_over(&rows);
+
+    assert_eq!(finite[0], 3.0, "one NaN is not counted");
+    assert_eq!(finite[1], 3.0, "negative infinity is not counted");
+    assert_eq!(finite[2], 3.0, "positive infinity is not counted either");
+}
+
+#[test]
+fn greedy_argmax_over_a_blocked_vocabulary_keeps_the_lowest_tied_index() {
+    let vocab = 2048;
+    let mut row: Vec<f32> = (0..vocab).map(|index| (index % 97) as f32 * 0.01).collect();
+    row[1700] = 9.5;
+    row[100] = 9.5;
+    let mut later_peak: Vec<f32> = (0..vocab).map(|index| (index % 89) as f32 * 0.01).collect();
+    later_peak[1537] = 12.25;
+    let mut poisoned = later_peak.clone();
+    poisoned[2047] = f32::NAN;
+
+    let (tokens, finite) = greedy_argmax_over(&[row, later_peak, poisoned]);
+
+    assert_eq!(tokens[..2], [100.0, 1537.0], "ties and peaks are found across 4 blocks of 512");
+    assert_eq!(finite, [2048.0, 2048.0, 2047.0], "only the poisoned row is short");
+}

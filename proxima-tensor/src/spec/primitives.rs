@@ -922,6 +922,168 @@ pub fn rmsnorm(
     )
 }
 
+/// The greedy token pick over `logits` (`[s, vocab]`, `s` rows) as ordinary
+/// ops, so a decode step can end on the device and read back one index per
+/// row instead of the whole row. Returns `(token, finite)`: `token` is the
+/// lowest index holding the row maximum, and `finite` counts the entries
+/// that are neither NaN nor infinite -- `vocab` when the row is clean. A caller
+/// that gets any other count owns the row through a host path instead,
+/// because a NaN has no defined argmax and `Equal` (`|a - b| == 0`) never matches an infinity.
+///
+/// Composes [`reduce`] (`Maximum`, then `Minimum`), [`elementwise`]
+/// (`Equal`, `Select`, `Greater`, `Multiply`) and one [`Op::Iota`]; nothing here is new
+/// algebra. Every step is an exact comparison or a min/max, so the result is
+/// independent of reduction order: `max` finds the peak value, `Equal` marks
+/// every entry holding it (`-0.0` and `0.0` compare equal, as the host scan
+/// does), and the minimum over `index-or-vocab` is the first such index --
+/// the same tie rule as `proxima_tokenizer::greedy_pick`. Indices ride in
+/// `f32`, exact below 2^24.
+///
+/// # Errors
+///
+/// [`TensorError`] when a notation or extent fails to build, which only a
+/// malformed `logits` node can cause.
+pub fn greedy_argmax(
+    program: &mut Vec<Op>,
+    logits: NodeId,
+    vocab: u32,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let width = blocked_width(vocab);
+    let blocks = vocab / width;
+    let unit = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(blocks), Extent::Static(width)],
+            value: 1.0,
+        },
+    );
+    let grid = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (logits, &alloc::format!("s,{width}*g+w->sgw")),
+            (unit, "gw->sgw"),
+        ],
+    )?;
+    let peak = reduce_blocked(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, grid)?;
+    let at_peak = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(grid, "sgw->sgw"), (peak, "s->sgw")],
+    )?;
+    let index = block_index(program, blocks, width)?;
+    let past_the_end = scalar_constant(program, vocab as f32);
+    let index_or_end = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (at_peak, "sgw->sgw"),
+            (index, "gw->sgw"),
+            (past_the_end, "->sgw"),
+        ],
+    )?;
+    let token = reduce_blocked(
+        program,
+        ScalarOp::Minimum,
+        ReduceInit::PositiveInfinity,
+        index_or_end,
+    )?;
+    let floor = scalar_constant(program, f32::MIN);
+    let ceiling = scalar_constant(program, f32::MAX);
+    let above_floor = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(grid, "sgw->sgw"), (floor, "->sgw")],
+    )?;
+    let below_ceiling = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(ceiling, "->sgw"), (grid, "sgw->sgw")],
+    )?;
+    let in_range = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(above_floor, "sgw->sgw"), (below_ceiling, "sgw->sgw")],
+    )?;
+    let finite = reduce_blocked(program, ScalarOp::Add, ReduceInit::Zero, in_range)?;
+    Ok((token, finite))
+}
+
+/// The widest divisor of `vocab` up to 512: the row is read as `vocab /
+/// width` blocks of `width`, so each block reduces on its own threadgroup
+/// instead of the whole row folding in one. A vocabulary with no divisor of
+/// 16 or more reads as a single block.
+fn blocked_width(vocab: u32) -> u32 {
+    (16..=512)
+        .rev()
+        .find(|width| vocab.is_multiple_of(*width))
+        .unwrap_or(vocab)
+}
+
+/// Folds `[s, blocks, width]` to `[s]` in two passes, the per-block partials
+/// first: [`greedy_argmax`]'s every reduction, so the cost of one is two
+/// dispatches wide enough to fill the device, not one narrow one.
+fn reduce_blocked(
+    program: &mut Vec<Op>,
+    body: ScalarOp,
+    init: ReduceInit,
+    grid: NodeId,
+) -> Result<NodeId, TensorError> {
+    let partial = reduce(
+        program,
+        DType::Float32,
+        body,
+        init,
+        grid,
+        "sgw->sgw",
+        "sg->sgw",
+    )?;
+    reduce(program, DType::Float32, body, init, partial, "sg->sg", "s->sg")
+}
+
+/// `block * width + lane` for every `[block, lane]` cell, as an `f32` index
+/// tensor -- the vocabulary position each cell of the blocked row holds.
+fn block_index(
+    program: &mut Vec<Op>,
+    blocks: u32,
+    width: u32,
+) -> Result<NodeId, TensorError> {
+    let block = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(blocks),
+        },
+    );
+    let lane = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(width),
+        },
+    );
+    let stride = scalar_constant(program, width as f32);
+    let block_start = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(block, "g->g"), (stride, "->g")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(block_start, "g->gw"), (lane, "w->gw")],
+    )
+}
+
 /// [`rmsnorm`]'s per-head counterpart -- `Lfm2MoeAttention.q_layernorm`/
 /// `.k_layernorm`'s own shape (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:317-318,331-332`):
 /// normalizes over the head-dim axis only, broadcasting per token AND per
