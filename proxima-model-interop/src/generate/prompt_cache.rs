@@ -910,6 +910,11 @@ impl PromptCache {
         self.index.node_count()
     }
 
+    #[cfg(all(test, feature = "metal", target_os = "macos"))]
+    pub(super) fn entry_states(&self) -> impl Iterator<Item = &PrefixState> {
+        self.entries.values().map(|entry| &entry.state)
+    }
+
     /// Re-cuts every entry into `config`'s blocks and re-sizes their filters
     /// and the index when the config asks for other ones than it holds.
     fn reconfigure(&mut self, config: &PromptCacheConfig) {
