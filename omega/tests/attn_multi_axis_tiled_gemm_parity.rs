@@ -154,8 +154,9 @@ fn expected_output(
 
 /// Both tolerances below are `atol + rtol * |reference|`, not a bare
 /// relative bound, for the same reason `metal_parity.rs`'s f16 test and
-/// `wgpu_parity.rs`'s f16 test needed the combined form: at `TOKENS=20,
-/// OUT_ROWS=24` this compares 480 independent dot products, and with
+/// `wgpu_parity.rs`'s f16 test needed the combined form: at
+/// `TOKENS=TILED_GEMM_MIN_TOKENS+4, OUT_ROWS=24` this compares 24 x tokens
+/// independent dot products, and with
 /// `test_support::Lcg::next_unit`'s corrected [-1,1) range (see that
 /// function's doc) some of them land near a zero crossing, where a
 /// pure-relative bound is unsound (tiny denominator, ordinary noise
@@ -169,12 +170,13 @@ fn expected_output(
 /// doc for that same documented lossy step), while the Metal tiled-gemm
 /// path dequantizes the q4_k weight and multiplies against the activation
 /// in float directly -- no second lossy step, hence its much tighter bound.
-/// Measured worst case across all 480 elements, this run:
-/// CPU abs diff `9.90386e-2` at reference magnitude `7.42` (a large-output
-/// element, so still <1.4% relative) and `6.83842e-2` at reference `0.375`
-/// (a block-quantization-scale-outlier case, ~18% relative) -- `CPU_ABSOLUTE`
-/// is set to `0.075`, `CPU_RELATIVE` to `0.012`, together covering both with
-/// ~15-20% headroom. Metal's worst case was `4.676342e-3` absolute at a
+/// Measured worst case across all 3936 elements (164 tokens, the default
+/// `TILED_GEMM_MIN_TOKENS` of 160 plus 4), this run: CPU abs diff `1.24866e-1`
+/// at reference magnitude `0.364` and three more above `7.7e-2` -- the CPU
+/// int8 activation quantization has an outlier tail that grows with the
+/// element count, and the earlier 480-element calibration (`0.075`) sat inside
+/// it. `CPU_ABSOLUTE` is set to `0.15` (~20% headroom), `CPU_RELATIVE` stays
+/// `0.012`. Metal's worst case was `5.4416656e-3` absolute at a
 /// near-zero reference; `METAL_ABSOLUTE` is `0.0055`, `METAL_RELATIVE` stays
 /// the original `5e-3` (the "two-axis feature-group fold defect" this test
 /// exists to catch shows up on the Metal side, so that bound stays as tight
@@ -183,7 +185,7 @@ fn expected_output(
 fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group()
  {
     const CPU_RELATIVE: f32 = 0.012;
-    const CPU_ABSOLUTE: f32 = 0.075;
+    const CPU_ABSOLUTE: f32 = 0.15;
     const METAL_RELATIVE: f32 = 5e-3;
     const METAL_ABSOLUTE: f32 = 0.0055;
 
@@ -195,7 +197,8 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     // dimension (`TILED_GEMM_BLOCK_N`=32, `TILED_GEMM_BLOCK_M`=64) -- a wrong
     // boundary-tile mask on either axis, or a wrong flattened stride for the
     // two-axis feature group, shows up as a real numeric disagreement here.
-    const TOKENS: usize = 20;
+    // 4 past the admission threshold keeps it above the gate and off a tile edge.
+    const TOKENS: usize = omega::sized::TILED_GEMM_MIN_TOKENS as usize + 4;
 
     let rows: Vec<Vec<f32>> = (0..OUT_ROWS)
         .map(|row| random_vec(61 + row as u64, IN_DIM))
