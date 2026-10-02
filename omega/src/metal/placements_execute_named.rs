@@ -159,10 +159,9 @@ fn config_or_default_chunks(plan_chunks: u32) -> (usize, &'static str) {
 }
 
 /// Chunk boundary positions (program-order op indices) splitting
-/// `total_ops` resolved ops into at most `chunk_count` contiguous groups: a
-/// short head of `COMMAND_BUFFER_FIRST_CHUNK_OPS` ops so the GPU starts early,
-/// then boundaries growing by `COMMAND_BUFFER_CHUNK_GROWTH` so the host always
-/// encodes the next chunk before the GPU finishes the last (`omega-runtime.toml`'s
+/// `total_ops` resolved ops into `chunk_count` contiguous groups: a short head
+/// of `COMMAND_BUFFER_FIRST_CHUNK_OPS` ops so the GPU starts early, then the
+/// rest as evenly as an integer split allows (`omega-runtime.toml`'s
 /// `[command_buffer]` doc has the measurements). With no head configured, or
 /// fewer than three chunks, it is the even split: boundary `i` sits at
 /// `floor(i * total_ops / chunk_count)`. Returns the empty vector for
@@ -178,24 +177,19 @@ fn command_buffer_chunk_boundaries(total_ops: usize, chunk_count: usize) -> Vec<
         return Vec::new();
     }
     let head_ops = crate::sized::COMMAND_BUFFER_FIRST_CHUNK_OPS as usize;
-    if head_ops == 0 || head_ops >= total_ops || chunk_count <= 2 {
-        return even_chunk_boundaries(total_ops, chunk_count);
-    }
-    let growth = crate::sized::COMMAND_BUFFER_CHUNK_GROWTH as usize;
+    let headed = head_ops > 0 && head_ops < total_ops && chunk_count > 2;
+    let (first_boundary, tail_ops, tail_chunks) = if headed {
+        (head_ops, total_ops - head_ops, chunk_count - 1)
+    } else {
+        (0, total_ops, chunk_count)
+    };
     let mut boundaries = Vec::with_capacity(chunk_count - 1);
-    let mut boundary = head_ops;
-    while boundary < total_ops && boundaries.len() < chunk_count - 1 {
-        boundaries.push(boundary);
-        boundary = boundary.saturating_mul(growth);
+    if headed {
+        boundaries.push(first_boundary);
     }
-    boundaries
-}
-
-fn even_chunk_boundaries(total_ops: usize, chunk_count: usize) -> Vec<usize> {
-    let mut boundaries = Vec::with_capacity(chunk_count - 1);
-    let mut previous = 0usize;
-    for index in 1..chunk_count {
-        let boundary = (index * total_ops) / chunk_count;
+    let mut previous = first_boundary;
+    for index in 1..tail_chunks {
+        let boundary = first_boundary + (index * tail_ops) / tail_chunks;
         if boundary > previous && boundary < total_ops {
             boundaries.push(boundary);
             previous = boundary;
@@ -2711,22 +2705,28 @@ mod chunk_boundary_tests {
     use super::command_buffer_chunk_boundaries;
 
     #[test]
-    fn gemma4_decode_step_ramps_from_a_short_head() {
+    fn gemma4_decode_step_gets_a_short_head_and_an_even_tail() {
         let boundaries = command_buffer_chunk_boundaries(1150, 8);
+        assert_eq!(boundaries.len(), 7, "8 chunks need 7 boundaries");
         assert_eq!(
-            boundaries,
-            vec![32, 160, 800],
-            "head chunk is the sized first-chunk op count, each boundary the growth factor past the last"
+            boundaries[0], 24,
+            "head chunk is the sized first-chunk op count"
         );
+        let widths: Vec<usize> = boundaries
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        let widest = widths.iter().copied().max().unwrap_or(0);
+        let narrowest = widths.iter().copied().min().unwrap_or(0);
+        assert!(
+            widest - narrowest <= 1,
+            "tail chunks stay within one op of even: {widths:?}"
+        );
+        assert!(boundaries.iter().all(|boundary| *boundary < 1150));
     }
 
     #[test]
-    fn the_chunk_count_caps_how_far_the_ramp_runs() {
-        assert_eq!(command_buffer_chunk_boundaries(1150, 3), vec![32, 160]);
-    }
-
-    #[test]
-    fn two_chunks_keep_the_even_split_because_a_ramp_needs_a_middle() {
+    fn two_chunks_keep_the_even_split_because_a_head_would_leave_one_tail_chunk() {
         assert_eq!(command_buffer_chunk_boundaries(1150, 2), vec![575]);
     }
 
