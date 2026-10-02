@@ -1310,6 +1310,69 @@ pub(super) mod tests {
         );
     }
 
+    /// A decode that crosses `kv_bucket_tokens` boundaries must serve every
+    /// crossing by refitting the cached plan in place, not by building a new
+    /// one: the only thing a crossing changes in a decode plan is the key
+    /// range of its fused attention ops (`proxima_tensor::
+    /// refit_cached_attention_rows`'s own doc), so `plan_misses - plan_refits`
+    /// -- the number of plans actually built -- stays at the one plan the
+    /// first step needed. 70 tokens past a 2-token prompt cross the 32 and 64
+    /// row boundaries; the unbucketed run (a fresh plan per step, 70 builds)
+    /// is the oracle for the emitted ids.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn a_bucket_crossing_refits_the_cached_plan_instead_of_building_another() {
+        let file_bytes = one_layer_moe_checkpoint();
+        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+            .expect("parses the minimal one-layer MoE gguf fixture");
+        let loaded = LoadedModel::load(&parsed, &file_bytes)
+            .expect("loads the minimal one-layer MoE checkpoint through the public path");
+        let base_config = ServingConfig {
+            kv_cache_key_quant: WireType::F32,
+            kv_cache_value_quant: WireType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+        let max_tokens = 70usize;
+        let refitting_config = ServingConfig {
+            kv_bucket_tokens: 32,
+            plan_refit: true,
+            ..base_config
+        };
+        let mut refitting_runtime = BackendRuntime::new(&refitting_config);
+        let refitted = loaded
+            .run_decode_loop("A", max_tokens, &refitting_config, &mut refitting_runtime)
+            .expect("runs the refitting decode loop across two bucket crossings");
+        let rebuilding_config = ServingConfig {
+            plan_refit: false,
+            ..refitting_config
+        };
+        let mut rebuilding_runtime = BackendRuntime::new(&rebuilding_config);
+        let rebuilt = loaded
+            .run_decode_loop("A", max_tokens, &rebuilding_config, &mut rebuilding_runtime)
+            .expect("runs the rebuilding decode loop, a fresh plan at every crossing");
+
+        assert_eq!(
+            refitting_runtime.plan_misses, 3,
+            "one miss for the first plan and one per crossing of the 32 and 64 row boundaries"
+        );
+        assert_eq!(
+            refitting_runtime.plan_refits, 2,
+            "both crossings must be served by refitting, leaving exactly one plan built"
+        );
+        assert_eq!(refitting_runtime.plan_hits, max_tokens - 3, "every other step reuses the cached plan");
+        assert_eq!(rebuilding_runtime.plan_misses, 3, "the rebuilding arm misses at the same steps");
+        assert_eq!(rebuilding_runtime.plan_refits, 0, "plan_refit: false never refits");
+        assert_eq!(
+            refitted.0, rebuilt.0,
+            "refitting across a crossing must emit the ids a freshly built plan emits"
+        );
+    }
+
     /// [`two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens`]'s
     /// counterpart for a qwen35 [`Qwen35LayerRoots::DenseAttention`] layer --
     /// this crate's fake-fixture fallback for that same claim, not the full

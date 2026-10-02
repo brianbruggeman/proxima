@@ -5975,6 +5975,7 @@ impl<'file> LoadedModel<'file> {
                                 runtime.plans_len(),
                                 runtime.plan_hits,
                                 runtime.plan_misses,
+                                runtime.plan_refits,
                                 runtime.arena_allocated_bytes(),
                                 self.mapping_residency_rung,
                             );
@@ -6621,6 +6622,7 @@ impl<'file> LoadedModel<'file> {
                         runtime.placed_plans_len(),
                         runtime.plan_hits,
                         runtime.plan_misses,
+                        runtime.plan_refits,
                         runtime.arena_allocated_bytes(),
                         self.mapping_residency_rung,
                     );

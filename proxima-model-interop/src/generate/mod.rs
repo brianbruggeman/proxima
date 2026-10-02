@@ -116,6 +116,8 @@ use omega::backend::set_math_mode;
 // in its own signature, so it needs the same `metal`+macos gate that type
 // itself lives behind -- same reasoning as `set_math_mode` above.
 #[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::backend::refit_symbols;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::backend::set_dispatch_type;
 // `set_command_buffer_chunks` -- same `metal`+macos gate as `set_dispatch_type`
 // immediately above, same reasoning: its own signature is ungated but it
