@@ -173,13 +173,21 @@ uniform_cache_entries = 4096
 # it encoded (~1.8 us per op, host-side), so an even split across K chunks
 # delays GPU start by encode(total/K). A short head chunk starts the GPU after
 # a fraction of that while the host encodes the remaining chunks behind it.
-# Measured on gemma4-E2B decode (1150 ops, K=8): even split ~18.73 ms/token,
-# 24-op head ~18.3 ms/token (text identical). Cost of raising it: later GPU
-# start; cost of lowering it: one more command-buffer switch (~40 us GPU idle
-# per boundary, measured) once the head is shorter than the encode of the next
-# chunk. 0 restores the even split. Overridable per-build via
+# Cost of raising it: later GPU start. Cost of lowering it: the next chunk's
+# encode outlasts the head's GPU time and the GPU idles between them. 0
+# restores the even split. Overridable per-build via
 # `OMEGA_COMMAND_BUFFER_FIRST_CHUNK_OPS`.
-first_chunk_ops = 24
+first_chunk_ops = 32
+# how many times larger each later chunk boundary is than the one before it
+# (32, 160, 640 at 5). The GPU spends ~10 us per op where the host spends
+# ~2 us encoding it, so a chunk can be ~5x everything already committed before
+# the GPU would run dry waiting for it; a steeper ramp starves the GPU, a
+# shallower one adds command-buffer switches (~40 us GPU idle each, measured).
+# Measured on gemma4-E2B decode (1150 ops, K=8) as GPU idle inside one token's
+# window, under a loaded box: even split p10 0.69 ms, 24-op head then an even
+# split p10 0.43-0.47 ms, 32-op head with this ramp p10 0.30-0.32 ms. Must be
+# at least 2. Overridable per-build via `OMEGA_COMMAND_BUFFER_CHUNK_GROWTH`.
+chunk_growth = 5
 
 [output_pool]
 # per-`(bucket, dtype)` cap on retained buffers in `metal::OUTPUT_BUFFER_POOL`
