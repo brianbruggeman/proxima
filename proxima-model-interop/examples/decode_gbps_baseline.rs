@@ -310,6 +310,7 @@ fn main() {
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
         let tokens_generated = token_ids.len();
         let text_hash = fnv64(&text);
+        eprintln!("decode_gbps_baseline token_ids run_index={run_index} ids={token_ids:?}");
 
         // `(wall - first-step time) / (tokens - 1)`: prefill (step 0, 26
         // prompt tokens here) is included identically in both K=1 and K=8
