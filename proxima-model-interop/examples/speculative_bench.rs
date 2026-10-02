@@ -76,7 +76,13 @@ const GPU_IDLE_BASELINE_DURATION: Duration = Duration::from_secs(5);
 /// incumbent flags at all (SPEC AC23's own command line omits them).
 enum BenchMode {
     Pairs,
-    VerifyWidthSweep { widths: Vec<usize> },
+    VerifyWidthSweep {
+        widths: Vec<usize>,
+    },
+    /// Cold prefill tokens/s -- [`run_prefill_throughput_mode`].
+    PrefillThroughput {
+        char_counts: Vec<usize>,
+    },
     /// Greedy ids against llama.cpp on the same token ids -- [`run_llama_parity_mode`].
     LlamaParity,
 }
@@ -92,6 +98,10 @@ struct BenchArgs {
     llama_server_bin: PathBuf,
     force: bool,
     model_path: String,
+    prefill_text: Option<PathBuf>,
+    ubatch_size: Option<u32>,
+    sweep_full_steps: usize,
+    sweep_runs: usize,
 }
 
 const DEFAULT_LLAMA_SERVER_BIN: &str = "llama-server";
@@ -140,6 +150,11 @@ fn parse_args() -> BenchArgs {
     let mut llama_server_bin = PathBuf::from(DEFAULT_LLAMA_SERVER_BIN);
     let mut force = false;
     let mut llama_parity = false;
+    let mut prefill_char_counts = None;
+    let mut prefill_text = None;
+    let mut ubatch_size = None;
+    let mut sweep_full_steps = SWEEP_FULL_WIDTH_STEPS;
+    let mut sweep_runs = SWEEP_RUNS_PER_WIDTH;
     let mut positionals = Vec::new();
 
     let mut index = 0;
@@ -187,6 +202,34 @@ fn parse_args() -> BenchArgs {
             "--llama-parity" => {
                 llama_parity = true;
             }
+            "--prefill-throughput" => {
+                index += 1;
+                prefill_char_counts = Some(parse_width_list(&raw[index]));
+            }
+            "--prefill-text" => {
+                index += 1;
+                prefill_text = Some(PathBuf::from(&raw[index]));
+            }
+            "--sweep-full-steps" => {
+                index += 1;
+                sweep_full_steps = raw[index]
+                    .parse()
+                    .unwrap_or_else(|err| panic!("--sweep-full-steps {}: {err}", raw[index]));
+            }
+            "--sweep-runs" => {
+                index += 1;
+                sweep_runs = raw[index]
+                    .parse()
+                    .unwrap_or_else(|err| panic!("--sweep-runs {}: {err}", raw[index]));
+            }
+            "--ubatch" => {
+                index += 1;
+                ubatch_size = Some(
+                    raw[index]
+                        .parse()
+                        .unwrap_or_else(|err| panic!("--ubatch {}: {err}", raw[index])),
+                );
+            }
             other => positionals.push(other.to_string()),
         }
         index += 1;
@@ -197,10 +240,11 @@ fn parse_args() -> BenchArgs {
         .next()
         .unwrap_or_else(|| DEFAULT_MODEL_PATH.to_string());
 
-    let mode = match (llama_parity, widths) {
-        (true, _) => BenchMode::LlamaParity,
-        (false, Some(widths)) => BenchMode::VerifyWidthSweep { widths },
-        (false, None) => BenchMode::Pairs,
+    let mode = match (llama_parity, widths, prefill_char_counts) {
+        (true, _, _) => BenchMode::LlamaParity,
+        (false, _, Some(char_counts)) => BenchMode::PrefillThroughput { char_counts },
+        (false, Some(widths), None) => BenchMode::VerifyWidthSweep { widths },
+        (false, None, None) => BenchMode::Pairs,
     };
 
     BenchArgs {
@@ -214,6 +258,10 @@ fn parse_args() -> BenchArgs {
         llama_server_bin,
         force,
         model_path,
+        prefill_text,
+        ubatch_size,
+        sweep_full_steps,
+        sweep_runs,
     }
 }
 
@@ -1205,7 +1253,7 @@ fn load_corpus(path: &Path) -> Vec<String> {
 // one arm / one pair
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct ArmResult {
     ms_per_token: f64,
     ttft_ms: f64,
@@ -1220,6 +1268,8 @@ struct ArmResult {
     tokens_generated: usize,
     decode_wall_ms: f64,
     max_gap_token_index: usize,
+    token_ids: Vec<u32>,
+    token_elapsed_ms: Vec<u64>,
 }
 
 /// Every arm's own cached context -- a [`PrefixState`] a single per-prompt
@@ -1247,6 +1297,7 @@ fn run_one_arm(
     serving_config: ServingConfig,
     sample_gpu: bool,
     forced_draft_width: Option<u16>,
+    stop_after_tokens: Option<usize>,
 ) -> ArmResult {
     let mut prefill_elapsed_ms: u64 = 0;
     let cpu_start = cpu_seconds();
@@ -1265,6 +1316,15 @@ fn run_one_arm(
     let mut elapsed_by_step: Vec<(usize, Phase, u64)> = Vec::new();
     let mut on_token = |event: TokenEvent<'_>| {
         elapsed_by_step.push((event.step, event.phase, event.elapsed_ms));
+        if let Some(limit) = stop_after_tokens {
+            let token_events = elapsed_by_step
+                .iter()
+                .filter(|(_, phase, _)| matches!(phase, Phase::Token))
+                .count();
+            if token_events >= limit {
+                return ControlFlow::Break(());
+            }
+        }
         ControlFlow::Continue(())
     };
     let (token_ids, _text, _stopped_by_eos) = model
@@ -1332,6 +1392,8 @@ fn run_one_arm(
         tokens_generated,
         decode_wall_ms: wall_ms - prefill_elapsed_ms as f64,
         max_gap_token_index,
+        token_ids,
+        token_elapsed_ms,
     }
 }
 
@@ -1369,7 +1431,7 @@ fn run_arm_logged(
     label: &str,
 ) -> (ArmResult, bool) {
     log_ollama_ps(&format!("before_{label}"));
-    let result = run_one_arm(model, source, max_tokens, config, sample_gpu, None);
+    let result = run_one_arm(model, source, max_tokens, config, sample_gpu, None, None);
     let after = log_ollama_ps(&format!("after_{label}"));
     (result, !after.is_empty())
 }
@@ -1857,6 +1919,34 @@ const LLAMA_PARITY_PORT: u16 = 18_082;
 
 const SWEEP_RUNS_PER_WIDTH: usize = 7;
 
+/// Default count of full-width verify steps a sweep run times (`--sweep-full-steps` overrides).
+/// `draft_limit_for_step` shrinks the draft to `max_tokens - step - 1`, so a width-`k+1` forward
+/// only runs while that limit is still `k`; each width's run is sized to `k + 1 + steps` tokens
+/// and stopped after token event `steps`, so every timed step ran at exactly `k+1` rows.
+const SWEEP_FULL_WIDTH_STEPS: usize = 16;
+
+/// Mean ms of the steps that ran at exactly `k+1` rows: steps `1..=full_steps` (step 0 evaluates the
+/// suffix, not a draft), read as the gap between token events 0 and `full_steps`. Only valid while
+/// every step emitted one token (`accepted_total == 0`), which the caller checks against the
+/// drafted-token count.
+fn full_width_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) -> Option<f64> {
+    let first = token_elapsed_ms.first()?;
+    let last = token_elapsed_ms.get(full_steps)?;
+    Some((last - first) as f64 / full_steps as f64)
+}
+
+/// Median of the same steps' individual gaps. A KV-bucket crossing lands one slow step inside any
+/// run that spans a multiple of `kv_bucket_tokens`; the median ignores it where the mean does not.
+fn full_width_median_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) -> Option<f64> {
+    let events = token_elapsed_ms.get(..=full_steps)?;
+    let mut gaps: Vec<f64> = events
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]) as f64)
+        .collect();
+    gaps.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
+    Some(percentile(&gaps, 50.0))
+}
+
 /// One non-streaming greedy `/completion` call that returns llama's own
 /// generated token ids (`return_tokens`), with `cache_prompt` off so every
 /// prompt is prefilled from scratch: the correctness oracle must not lean on
@@ -1995,6 +2085,66 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
     handle.stop();
 }
 
+/// Text cut at the first character boundary at or after `char_count`, so a multi-byte character is
+/// never split.
+fn text_prefix_at_char_count(text: &str, char_count: usize) -> &str {
+    let cut = text
+        .char_indices()
+        .nth(char_count)
+        .map_or(text.len(), |(offset, _)| offset);
+    &text[..cut]
+}
+
+/// Cold prefill throughput: one [`LoadedModel::prefill_prefix`] per run over a prefix cut from
+/// `--prefill-text` at each character count, at the serving config's own `ubatch_size` (`--ubatch`
+/// overrides; the default config chunks a long prompt into `ubatch_size`-row forwards, so this is
+/// the width the tiled-GEMM threshold decides for every chunk). Tokens/s is the prefix length the
+/// returned [`PrefixState`] reports over the wall time of that one call.
+fn run_prefill_throughput_mode(
+    model: &LoadedModel,
+    args: &BenchArgs,
+    char_counts: &[usize],
+    unmeasured_label: &str,
+) {
+    let text_path = args
+        .prefill_text
+        .as_ref()
+        .unwrap_or_else(|| panic!("--prefill-text is required with --prefill-throughput"));
+    let text = std::fs::read_to_string(text_path)
+        .unwrap_or_else(|err| panic!("read --prefill-text {}: {err}", text_path.display()));
+    let mut serving_config = base_serving_config(args.gpu_layers);
+    if let Some(ubatch_size) = args.ubatch_size {
+        serving_config.ubatch_size = ubatch_size;
+    }
+    for &char_count in char_counts {
+        let prompt = text_prefix_at_char_count(&text, char_count);
+        let mut samples_tokens_per_second = Vec::new();
+        for run in 0..args.sweep_runs {
+            let started = Instant::now();
+            let prefix_state = model
+                .prefill_prefix(prompt, &serving_config)
+                .expect("prefill the throughput prompt");
+            let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let tokens_per_second = prefix_state.len() as f64 / (wall_ms / 1000.0);
+            println!(
+                "{unmeasured_label} prefill_run chars={char_count} ubatch={} run={run} prefix_tokens={} \
+                 wall_ms={wall_ms:.3} tokens_per_s={tokens_per_second:.2}",
+                serving_config.ubatch_size,
+                prefix_state.len(),
+            );
+            samples_tokens_per_second.push(tokens_per_second);
+        }
+        samples_tokens_per_second.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
+        println!(
+            "{unmeasured_label} prefill_throughput chars={char_count} ubatch={} \
+             tokens_per_s={:.2} cov={:.4}",
+            serving_config.ubatch_size,
+            percentile(&samples_tokens_per_second, 50.0),
+            coefficient_of_variation(&samples_tokens_per_second),
+        );
+    }
+}
+
 /// Per SPEC's own architecture paragraph -- "ms per verify forward at width
 /// k+1... via the verify program with forced drafts". Genuinely forces an
 /// exact width via `run_one_arm`'s own `forced_draft_width` argument, which
@@ -2054,16 +2204,26 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
     let mut rows: Vec<(usize, f64, f64, f64)> = Vec::new();
 
     for &width in widths {
+        let full_steps = args.sweep_full_steps;
+        let (width_max_tokens, stop_after_tokens) = if width == 0 {
+            (args.max_tokens, None)
+        } else {
+            (width + 1 + full_steps, Some(full_steps + 1))
+        };
+        let expected_drafted = (width * (full_steps + 1)) as u64;
         let mut samples_ms_per_verify = Vec::new();
-        for run in 0..SWEEP_RUNS_PER_WIDTH {
+        let mut samples_full_width = Vec::new();
+        let mut samples_full_width_median = Vec::new();
+        for run in 0..args.sweep_runs {
             let forced_draft_width = if width == 0 { None } else { Some(width as u16) };
             let arm = run_one_arm(
                 model,
                 source,
-                args.max_tokens,
+                width_max_tokens,
                 serving_config,
                 sample_gpu,
                 forced_draft_width,
+                stop_after_tokens,
             );
             println!(
                 "{unmeasured_label} sweep_run k={width} run={run} tokens={} verify_steps={} \
@@ -2078,6 +2238,26 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
                 arm.decode_wall_ms / arm.verify_steps.max(1) as f64,
                 arm.cpu_percent,
             );
+            println!("sweep_ids k={width} run={run} ids={:?}", arm.token_ids);
+            println!(
+                "sweep_token_ms k={width} run={run} elapsed_ms={:?}",
+                arm.token_elapsed_ms
+            );
+            let one_token_per_step =
+                arm.accepted_total == 0 && arm.drafted_total == expected_drafted;
+            let full_width = full_width_ms_per_step(&arm.token_elapsed_ms, full_steps)
+                .filter(|_| width > 0 && one_token_per_step);
+            if let Some(full_width_ms) = full_width {
+                let median_ms = full_width_median_ms_per_step(&arm.token_elapsed_ms, full_steps)
+                    .expect("mean exists so the median does");
+                println!(
+                    "{unmeasured_label} sweep_full_width k={width} run={run} rows={} steps={full_steps} \
+                     ms_per_step={full_width_ms:.4} median_ms_per_step={median_ms:.4}",
+                    width + 1,
+                );
+                samples_full_width.push(full_width_ms);
+                samples_full_width_median.push(median_ms);
+            }
             let steps = arm.verify_steps.max(1);
             let wall_over_decode = arm.ms_per_token * (steps as f64).max(1.0);
             let ms_per_verify = if width == 0 {
@@ -2088,6 +2268,8 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
             samples_ms_per_verify.push(ms_per_verify);
         }
         samples_ms_per_verify.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
+        samples_full_width.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
+        samples_full_width_median.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
         let cov = coefficient_of_variation(&samples_ms_per_verify);
         let median = percentile(&samples_ms_per_verify, 50.0);
         if width == 0 {
@@ -2095,8 +2277,15 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
         }
         println!(
             "{unmeasured_label} verify_width_sweep k={width} width_plus_one={} \
-             ms_per_verify={median:.4} cov={cov:.4}",
+             ms_per_verify={median:.4} cov={cov:.4} full_width_runs={} full_width_steps={full_steps} \
+             full_width_ms_per_verify={:.4} full_width_cov={:.4} \
+             full_width_median_ms_per_verify={:.4} full_width_median_cov={:.4}",
             width + 1,
+            samples_full_width.len(),
+            percentile(&samples_full_width, 50.0),
+            coefficient_of_variation(&samples_full_width),
+            percentile(&samples_full_width_median, 50.0),
+            coefficient_of_variation(&samples_full_width_median),
         );
         rows.push((width, median, cov, 0.0));
     }
@@ -2262,6 +2451,9 @@ fn main() {
         BenchMode::VerifyWidthSweep { widths } => {
             run_verify_width_sweep_mode(&model, &args, widths, unmeasured_label);
         }
+        BenchMode::PrefillThroughput { char_counts } => {
+            run_prefill_throughput_mode(&model, &args, char_counts, unmeasured_label);
+        }
         BenchMode::LlamaParity => run_llama_parity_mode(&model, &vocab, &args),
     }
 }
@@ -2273,11 +2465,53 @@ mod tests {
     use super::{
         ChildGuard, CpuIdleBaseline, GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT,
         LLAMA_REPREFILL_PROMPT_N_BOUND, REAPABLE_PIDS, chat_prompt, compiled_perf_features_summary,
-        cpu_idle_decision, git_commit_at_startup, parse_llama_completion_response,
-        parse_top_cpu_line, split_prompt_at_hard_boundary, summarize_gpu_idle_samples,
+        cpu_idle_decision, full_width_median_ms_per_step, full_width_ms_per_step,
+        git_commit_at_startup, parse_llama_completion_response, parse_top_cpu_line,
+        split_prompt_at_hard_boundary, summarize_gpu_idle_samples, text_prefix_at_char_count,
     };
 
     const REAL_TOP_CPU_LINE: &str = "CPU usage: 8.97% user, 5.40% sys, 85.61% idle ";
+
+    #[test]
+    fn full_width_mean_is_the_gap_between_token_events_zero_and_last_full_step() {
+        let token_elapsed_ms = [310, 400, 489, 580, 671];
+
+        let mean =
+            full_width_ms_per_step(&token_elapsed_ms, 4).expect("five events cover four steps");
+
+        assert!(
+            (mean - 90.25).abs() < 1e-9,
+            "(671 - 310) / 4 = 90.25, got {mean}"
+        );
+    }
+
+    #[test]
+    fn full_width_median_ignores_the_one_slow_bucket_crossing_step() {
+        let token_elapsed_ms = [310, 400, 489, 640, 731, 822];
+
+        let median = full_width_median_ms_per_step(&token_elapsed_ms, 5)
+            .expect("six events cover five steps");
+
+        assert!(
+            (median - 91.0).abs() < 1e-9,
+            "gaps 90 89 151 91 91 -> median 91, got {median}"
+        );
+    }
+
+    #[test]
+    fn full_width_mean_is_absent_when_the_run_stopped_before_the_last_full_step() {
+        let token_elapsed_ms = [310, 400, 489];
+
+        assert_eq!(full_width_ms_per_step(&token_elapsed_ms, 4), None);
+    }
+
+    #[test]
+    fn text_prefix_cuts_on_a_character_boundary_never_inside_a_multibyte_character() {
+        let text = "caf\u{e9} au lait";
+
+        assert_eq!(text_prefix_at_char_count(text, 4), "caf\u{e9}");
+        assert_eq!(text_prefix_at_char_count(text, 99), text);
+    }
 
     #[test]
     fn top_cpu_line_from_this_mac_parses_user_sys_idle() {
