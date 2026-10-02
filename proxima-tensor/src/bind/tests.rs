@@ -4,7 +4,7 @@ use super::*;
 /// `reduce_epilogue_fusion_tests::run_resolved` does — inlined rather
 /// than shared across the module boundary, since this is the only
 /// consumer at this scope.
-fn run_resolved(
+pub(super) fn run_resolved(
     program_len: usize,
     resolved: &[BoundOp],
     inputs: Vec<(NodeId, Vec<f32>)>,
