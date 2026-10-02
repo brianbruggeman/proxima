@@ -173,16 +173,63 @@ fn command_buffer_chunk_boundaries(total_ops: usize, chunk_count: usize) -> Vec<
     if chunk_count <= 1 || total_ops == 0 {
         return Vec::new();
     }
+    let head_ops = crate::sized::COMMAND_BUFFER_FIRST_CHUNK_OPS as usize;
+    let headed = head_ops > 0 && head_ops < total_ops && chunk_count > 2;
+    let (first_boundary, tail_ops, tail_chunks) = if headed {
+        (head_ops, total_ops - head_ops, chunk_count - 1)
+    } else {
+        (0, total_ops, chunk_count)
+    };
     let mut boundaries = Vec::with_capacity(chunk_count - 1);
-    let mut previous = 0usize;
-    for i in 1..chunk_count {
-        let boundary = (i * total_ops) / chunk_count;
+    if headed {
+        boundaries.push(first_boundary);
+    }
+    let mut previous = first_boundary;
+    for index in 1..tail_chunks {
+        let boundary = first_boundary + (index * tail_ops) / tail_chunks;
         if boundary > previous && boundary < total_ops {
             boundaries.push(boundary);
             previous = boundary;
         }
     }
     boundaries
+}
+
+#[cfg(test)]
+mod chunk_boundary_tests {
+    use super::command_buffer_chunk_boundaries;
+
+    #[test]
+    fn gemma4_decode_step_gets_a_short_head_and_an_even_tail() {
+        let boundaries = command_buffer_chunk_boundaries(1150, 8);
+        assert_eq!(boundaries.len(), 7, "8 chunks need 7 boundaries");
+        assert_eq!(boundaries[0], 24, "head chunk is the sized first-chunk op count");
+        let widths: Vec<usize> = boundaries
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        let widest = widths.iter().copied().max().unwrap_or(0);
+        let narrowest = widths.iter().copied().min().unwrap_or(0);
+        assert!(widest - narrowest <= 1, "tail chunks stay within one op of even: {widths:?}");
+        assert!(boundaries.iter().all(|boundary| *boundary < 1150));
+    }
+
+    #[test]
+    fn two_chunks_keep_the_even_split_because_a_head_would_leave_one_tail_chunk() {
+        assert_eq!(command_buffer_chunk_boundaries(1150, 2), vec![575]);
+    }
+
+    #[test]
+    fn a_plan_no_longer_than_the_head_falls_back_to_the_even_split() {
+        let boundaries = command_buffer_chunk_boundaries(20, 4);
+        assert_eq!(boundaries, vec![5, 10, 15]);
+    }
+
+    #[test]
+    fn one_chunk_or_an_empty_plan_has_no_boundaries() {
+        assert!(command_buffer_chunk_boundaries(1150, 1).is_empty());
+        assert!(command_buffer_chunk_boundaries(0, 8).is_empty());
+    }
 }
 
 /// The one place `BufferDiagnostics::first_op_label`/`last_op_label` are
