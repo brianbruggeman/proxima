@@ -3532,6 +3532,7 @@ impl<'file> LoadedModel<'file> {
         // allocation across the whole decode, per each drafter's own doc on
         // the reuse contract.
         let mut speculative_draft: Vec<u32> = Vec::new();
+        let mut validated_programs: BTreeSet<usize> = BTreeSet::new();
         // the two-layer cache checksum walks whole caches every step; only the diag knob pays for it
         #[cfg(feature = "instrument")]
         let cache_checksum_diag = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
@@ -4361,17 +4362,20 @@ impl<'file> LoadedModel<'file> {
                         }
                     }
 
-                    if let Some(name) =
-                        missing_program_input(active_program, &named_blocks).filter(|name| {
-                            !(qwen35moe_pre_gather_enabled(
-                                serving_config.qwen35moe_pre_gather,
-                                self.architecture_impl.is_some_and(|architecture| {
-                                    architecture.ffn_routing()
-                                        == crate::architecture::FfnRouting::Routed
-                                }),
-                            ) && (name.contains("_exps.weight")
-                                || name.starts_with("gdn_prefill.")))
-                        })
+                    // a program's input names and the step's named blocks are the same set
+                    // every step, so one check per program per call proves them all
+                    if validated_programs.insert(active_program.as_ptr() as usize)
+                        && let Some(name) =
+                            missing_program_input(active_program, &named_blocks).filter(|name| {
+                                !(qwen35moe_pre_gather_enabled(
+                                    serving_config.qwen35moe_pre_gather,
+                                    self.architecture_impl.is_some_and(|architecture| {
+                                        architecture.ffn_routing()
+                                            == crate::architecture::FfnRouting::Routed
+                                    }),
+                                ) && (name.contains("_exps.weight")
+                                    || name.starts_with("gdn_prefill.")))
+                            })
                     {
                         return Err(InteropError::MissingStepInput { name });
                     }
