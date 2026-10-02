@@ -608,6 +608,113 @@ pub(super) fn resolve_step(
     })
 }
 
+/// Installs `patches` (position, replacement op) into `plan` and re-derives
+/// the per-position state that is a pure function of the op: its resolved
+/// step (pipeline, bindings, grid) and, under `metal-plan-stable-buffers`,
+/// its plan-owned uniform buffer, and drops the attention scratch when a
+/// multi-row op's key range moved. Everything else the plan holds -- the
+/// output arena, the retirement schedule -- is a function of operand
+/// structure and output extents, which a patch never changes. All fallible work happens before the first write, so an `Err`
+/// leaves `plan` exactly as it was.
+pub(super) fn apply_refit(
+    plan: &mut Plan,
+    patches: Vec<(usize, BoundOp)>,
+    next_shapes: Shapes,
+) -> Result<(), MetalError> {
+    let (device, _queue) = device_and_queue()?;
+    let steps = refit_steps(&device, plan, &patches)?;
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    let uniforms = refit_uniform_buffers(&device, plan, &patches)?;
+    // a multi-row attention op sizes its scratch by its key range, so the
+    // plan's scratch buffers are rebuilt lazily from the patched ops; a
+    // single-row op reserves the compiled split ceiling whatever its range
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    if patches.iter().any(|(_, bound)| {
+        matches!(bound.kind, BoundOpKind::CachedAttention { query_rows, .. } if query_rows > 1)
+    }) {
+        plan.attention_scratch.take();
+    }
+    for (position, bound) in patches {
+        plan.prepared.resolved[position] = bound;
+    }
+    plan.prepared.shapes = next_shapes;
+    #[cfg(feature = "metal-horizontal-merge")]
+    {
+        let _ = steps;
+        plan.resolved_steps.get_mut().take();
+        plan.merged.get_mut().take();
+    }
+    #[cfg(not(feature = "metal-horizontal-merge"))]
+    if let (Some(steps), Some(resolved)) = (steps, plan.resolved_steps.get_mut().as_mut()) {
+        for (position, step) in steps {
+            resolved.steps[position] = step;
+        }
+    }
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    if let (Some(buffers), Some(plan_uniforms)) = (uniforms, plan.uniforms.get_mut()) {
+        for (position, buffer) in buffers {
+            plan_uniforms.buffers[position] = buffer;
+        }
+    }
+    Ok(())
+}
+
+/// The steps to swap in, or `None` when the plan has not resolved its steps
+/// yet (the first execution will resolve them from the patched ops) or
+/// resolved them under another math mode (a rebuild is already due).
+fn refit_steps(
+    device: &ProtocolObject<dyn MTLDevice>,
+    plan: &Plan,
+    patches: &[(usize, BoundOp)],
+) -> Result<Option<Vec<(usize, ResolvedStep)>>, MetalError> {
+    let current = plan.resolved_steps.borrow();
+    if !current
+        .as_ref()
+        .is_some_and(|resolved| resolved.math_mode == plan.math_mode)
+    {
+        return Ok(None);
+    }
+    patches
+        .iter()
+        .map(|(position, bound)| {
+            resolve_step(
+                device,
+                bound,
+                &plan.packed_operands,
+                plan.numeric_policy,
+                plan.math_mode,
+            )
+            .map(|step| (*position, step))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn refit_uniform_buffers(
+    device: &ProtocolObject<dyn MTLDevice>,
+    plan: &Plan,
+    patches: &[(usize, BoundOp)],
+) -> Result<Option<Vec<(usize, MetalBuffer)>>, MetalError> {
+    if plan.uniforms.get().is_none() {
+        return Ok(None);
+    }
+    patches
+        .iter()
+        .map(|(position, bound)| {
+            let bytes = pack_uniforms(bound, plan.numeric_policy)?;
+            let buffer = device
+                .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "device refused to allocate a plan uniform buffer".to_string(),
+                })?;
+            write_plan_uniform_bytes(&buffer, &bytes);
+            Ok((*position, buffer))
+        })
+        .collect::<Result<Vec<_>, MetalError>>()
+        .map(Some)
+}
+
 /// Builds `plan.resolved_steps` on its first call, or when
 /// [`Plan::set_math_mode`] moved the compiled mode since the last build --
 /// every later call for the SAME mode is a no-op. `numeric_policy` cannot

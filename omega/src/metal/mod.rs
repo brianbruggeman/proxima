@@ -224,6 +224,7 @@ use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
     QuantizedBlock, Shapes, TensorError, bind_with_fusion, block_node_ids,
     correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, prune_dead,
+    refit_cached_attention_rows,
     resolve_named_blocks,
 };
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
