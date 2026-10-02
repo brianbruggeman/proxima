@@ -1046,6 +1046,7 @@ pub(super) fn push_kv_named_blocks<'call>(
     step: KvStep,
     kv_pad_scratch: &'call mut [KvPadScratch],
     qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
+    device_resident: &[bool],
     named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
 ) -> Result<(), InteropError> {
     let KvStep {
@@ -1062,6 +1063,9 @@ pub(super) fn push_kv_named_blocks<'call>(
                 },
             ) => {
                 let shape = KvPadShape::for_cache(cache, kv_bound_extent, *even_odd_row, *v_row);
+                if device_resident.get(layer).copied().unwrap_or(false) {
+                    continue;
+                }
                 kv_pad_scratch[layer].fill(cache, &shape, layer, cached_len)?;
             }
             (
@@ -1098,6 +1102,14 @@ pub(super) fn push_kv_named_blocks<'call>(
                 },
             ) => {
                 let shape = KvPadShape::for_cache(cache, kv_bound_extent, *even_odd_row, *v_row);
+                if device_resident.get(layer).copied().unwrap_or(false) {
+                    named_blocks.extend([
+                        (k_even.as_str(), QuantizedBlock::Float32(&[])),
+                        (k_odd.as_str(), QuantizedBlock::Float32(&[])),
+                        (v.as_str(), QuantizedBlock::Float32(&[])),
+                    ]);
+                    continue;
+                }
                 named_blocks.extend(kv_pad_scratch[layer].named_blocks(k_even, k_odd, v, &shape));
             }
             (
