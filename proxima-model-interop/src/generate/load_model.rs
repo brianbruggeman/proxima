@@ -518,6 +518,7 @@ pub(super) fn emit_token_breakdown_metal(
     plan_cache_len: usize,
     plan_hits: usize,
     plan_misses: usize,
+    plan_refits: usize,
     arena_allocated_bytes: (usize, usize, usize),
     mapping_residency_rung: crate::mapping_residency::ResidencyRung,
 ) {
@@ -608,6 +609,7 @@ pub(super) fn emit_token_breakdown_metal(
         plan_cache_len = plan_cache_len as u64,
         plan_hits = plan_hits as u64,
         plan_misses = plan_misses as u64,
+        plan_refits = plan_refits as u64,
         plan_arena_allocated_bytes = arena_allocated_bytes.0 as u64,
         segment_arena_allocated_bytes = arena_allocated_bytes.1 as u64,
         placed_arena_allocated_bytes = arena_allocated_bytes.2 as u64,

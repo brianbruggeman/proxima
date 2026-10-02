@@ -1671,6 +1671,13 @@ pub(crate) struct BackendRuntime {
         alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
+    /// Misses served by refitting the previous plan in place
+    /// ([`Self::take_near_plan`]) instead of building one -- a subset of
+    /// `plan_misses`, so `plan_misses - plan_refits` is the number of plans
+    /// actually built.
+    pub(crate) plan_refits: usize,
+    /// `ServingConfig::plan_refit`, read once at construction.
+    pub(super) plan_refit: bool,
     /// `ServingConfig::exact_activations`, read once at construction --
     /// `Self::evaluate`'s `Engine::Cpu` arm plans through
     /// `omega::backend::plan_named_exact` instead of `plan_named` when
@@ -1714,6 +1721,8 @@ impl BackendRuntime {
             placed_segment_plans: alloc::collections::BTreeMap::new(),
             plan_hits: 0,
             plan_misses: 0,
+            plan_refits: 0,
+            plan_refit: config.plan_refit,
             exact_activations: config.exact_activations,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_time_constants: config.plan_time_constants,
@@ -1788,12 +1797,25 @@ impl BackendRuntime {
         } else {
             None
         };
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let near_plan = if self.plan_refit {
+            Self::take_near_plan(&mut self.plans, &shape)
+        } else {
+            None
+        };
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
             || {
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                if let Some(mut near) = near_plan
+                    && refit_symbols(&mut near, symbols)?
+                {
+                    self.plan_refits += 1;
+                    return Ok(near);
+                }
                 let mut plan = if exact_activations {
                     plan_named_exact(
                         self.engine,
@@ -2242,12 +2264,23 @@ impl BackendRuntime {
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
         };
+        let near_plan = if self.plan_refit {
+            Self::take_near_plan(&mut self.placed_plans, &shape)
+        } else {
+            None
+        };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
             || {
+                if let Some(mut near) = near_plan
+                    && near.refit_symbols(symbols)?
+                {
+                    self.plan_refits += 1;
+                    return Ok(near);
+                }
                 Self::build_placed_plan(
                     program,
                     symbols,
@@ -2601,6 +2634,29 @@ impl BackendRuntime {
             kernel_cache_keys_identical,
             "plan_footprint_diff: bucket-crossing miss against the immediately prior plan"
         );
+    }
+
+    /// The cached plan a miss at `shape` can be refitted from: removed from
+    /// `cache` when its key differs from `shape` only in `kv_bound_extent`
+    /// (same new-token count, outputs and epilogue sources), `None` on a hit
+    /// or when no such plan is cached. [`Self::resolve_cached_plan`]'s
+    /// clear-on-miss policy would drop this plan on the very next line, so
+    /// taking it costs nothing; the build closure then tries
+    /// `refit_symbols` on it before building from scratch, which is what
+    /// makes a bucket crossing cheaper than a plan build when only the
+    /// attention key range moved.
+    pub(super) fn take_near_plan<PlanType>(
+        cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), PlanType>,
+        shape: &(usize, usize, Vec<NodeId>, bool),
+    ) -> Option<PlanType> {
+        if cache.contains_key(shape) {
+            return None;
+        }
+        let near = cache
+            .keys()
+            .find(|key| key.0 == shape.0 && key.2 == shape.2 && key.3 == shape.3)
+            .cloned()?;
+        cache.remove(&near)
     }
 
     #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]

@@ -162,6 +162,8 @@ impl CacheKey {
             moe_topk_fusion,
             // resident vs re-dispatched constants: placement, same values
             plan_time_constants: _,
+            // refit vs rebuild at a bucket crossing: the same ops either way
+            plan_refit: _,
             // how one step's dispatches split across command buffers
             command_buffer_chunks: _,
             max_command_buffers_per_token: _,

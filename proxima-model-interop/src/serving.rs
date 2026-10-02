@@ -1015,6 +1015,14 @@ pub struct ServingConfig<'model> {
     /// plan's cold call, and never rewritten again, so it can never take a
     /// slot from the arena's free list (`build_buffer_arena`'s own doc).
     pub plan_time_constants: bool,
+    /// Not an upstream llama-server flag -- whether a plan-cache miss that
+    /// differs from the cached plan only in `kv_bound_extent` (a
+    /// `kv_bucket_tokens` crossing) refits that plan in place
+    /// (`omega::backend::refit_symbols`) instead of building another. `true`
+    /// (this field's default) is the shipped behavior; `false` rebuilds the
+    /// plan on every miss, which is the A/B arm a harness needs to show that
+    /// a refitted plan emits what a fresh one does.
+    pub plan_refit: bool,
     /// Not an upstream llama-server flag -- how many `MTLCommandBuffer`s
     /// [`omega::metal::Plan`]'s placements executor
     /// (`execute_plan_with_placements_inner`'s own
@@ -1188,6 +1196,7 @@ impl Default for ServingConfig<'static> {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
@@ -1610,6 +1619,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
@@ -1783,6 +1793,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
@@ -1884,6 +1895,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
@@ -1975,6 +1987,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
@@ -2056,6 +2069,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: true,
+            plan_refit: true,
             command_buffer_chunks: 1,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
