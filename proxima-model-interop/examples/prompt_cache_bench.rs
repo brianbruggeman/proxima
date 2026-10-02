@@ -24,6 +24,13 @@
 //! next real user turn is then sent. Reports the hit rate (requests whose lookup extended into a
 //! branch), the tokens each hit saved, and what the drafting cost, against an arm with no branches.
 //!
+//! `--mode shift`: spec S3 AC5 and R5. A transcript whose middle turns are replaced by a summary
+//! (or dropped, llama-server's own case), the system prompt and the last turns byte-identical:
+//! through the prompt cache with chunk reuse on and off, then, with `--llama-server-bin`, through
+//! llama-server with `--cache-reuse` with and without `--swa-full`, comparing the tokens each reuses
+//! (`cache_n`) and the ids each generates; then interleaved pairs of time to first token, shifted
+//! against a full prefill of the same prompt.
+//!
 //! `--mode split`: one cold full-prompt prefill with checkpoint splitting off, at the default
 //! interval, and at swept intervals.
 //!
@@ -71,6 +78,7 @@ enum Mode {
     Split,
     Prewarm,
     FollowUp,
+    Shift,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +97,7 @@ struct Args {
     lengths: Vec<usize>,
     intervals: Vec<u32>,
     transcript: TranscriptKind,
+    variants: usize,
 }
 
 fn parse_list<T: std::str::FromStr>(value: &str) -> Vec<T> {
@@ -112,6 +121,7 @@ fn parse_args() -> Args {
         lengths: vec![2500, 4300, 8300],
         intervals: vec![1024, 512, 256],
         transcript: TranscriptKind::Long,
+        variants: 6,
     };
     let mut iterator = env::args().skip(1);
     while let Some(flag) = iterator.next() {
@@ -126,6 +136,7 @@ fn parse_args() -> Args {
             "--lengths" => args.lengths = parse_list(&value),
             "--intervals" => args.intervals = parse_list(&value),
             "--transcript" => args.transcript = parse_transcript(&value),
+            "--variants" => args.variants = value.parse().expect("--variants is a count"),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -139,7 +150,8 @@ fn parse_mode(value: &str) -> Mode {
         "split" => Mode::Split,
         "prewarm" => Mode::Prewarm,
         "follow_up" => Mode::FollowUp,
-        other => panic!("--mode is oracle, ttft, split, prewarm or follow_up, got {other}"),
+        "shift" => Mode::Shift,
+        other => panic!("--mode is oracle, ttft, split, prewarm, follow_up or shift, got {other}"),
     }
 }
 
@@ -434,10 +446,20 @@ fn timed_request(
     max_tokens: usize,
     config: &ServingConfig<'_>,
 ) -> Timed {
+    timed_request_with_turn_ends(model, ids, &[], max_tokens, config)
+}
+
+fn timed_request_with_turn_ends(
+    model: &LoadedModel<'_>,
+    ids: &[u32],
+    turn_ends: &[usize],
+    max_tokens: usize,
+    config: &ServingConfig<'_>,
+) -> Timed {
     let start = Instant::now();
     let mut first_token = None;
     let (generated, _text, stopped_by_eos) = model
-        .generate_from_ids(ids, max_tokens, config, &mut |_event| {
+        .generate_from_ids_with_turn_ends(ids, turn_ends, max_tokens, config, &mut |_event| {
             first_token.get_or_insert_with(|| start.elapsed());
             ControlFlow::Continue(())
         })
@@ -492,6 +514,7 @@ fn path_label(report: Option<CacheReport>) -> Value {
             "prewarm_hit_tokens": report.prewarm_hit_tokens,
             "prewarm_wait_ms": report.prewarm_wait.as_secs_f64() * 1000.0,
             "follow_up_hit_tokens": report.follow_up_hit_tokens,
+            "shifted_tokens": report.shifted_tokens,
         })
     })
 }
@@ -1436,6 +1459,266 @@ fn run_follow_up(args: &Args, recorder: &mut Recorder) {
     });
 }
 
+const SHIFT_REUSE_MIN: u32 = 256;
+const SHIFT_TURNS: usize = 6;
+const LLAMA_PORT_SHIFT: u16 = 18492;
+const SHIFT_VARIANTS: [(usize, usize); 6] = [(2, 90), (1, 90), (3, 90), (2, 700), (1, 700), (3, 700)];
+
+/// A cached conversation of a system prompt, six completed turns and a last user turn, and the
+/// ids that replace its middle.
+struct Squash {
+    kept_turns: usize,
+    summary_chars: usize,
+    system_end: usize,
+    kept_start: usize,
+    old_prompt: Vec<u32>,
+    turn_ends: Vec<usize>,
+    summary: Vec<u32>,
+    closing: Vec<u32>,
+}
+
+fn chat_turn(user: &str, answer: &str) -> String {
+    format!("<|turn>user\n{user}<turn|>\n<|turn>model\n{answer}<turn|>\n")
+}
+
+fn squash_transcript(vocab: &Vocab, kept_turns: usize, summary_chars: usize) -> Squash {
+    let pool = long_document(38_000);
+    let system = encode_opening(vocab, &format!("<|turn>system\n{}<turn|>\n", excerpt(&pool, 0, 2400)));
+    let mut old_prompt = system.clone();
+    let mut turn_ends = vec![system.len()];
+    let mut kept_start = 0;
+    for index in 0..SHIFT_TURNS {
+        if index == SHIFT_TURNS - kept_turns {
+            kept_start = old_prompt.len();
+        }
+        let from = 2400 + index * 2000;
+        let turn = chat_turn(&excerpt(&pool, from, 1200), &excerpt(&pool, from + 1200, 800));
+        old_prompt.extend(encode_continuation(vocab, &turn));
+        turn_ends.push(old_prompt.len());
+    }
+    old_prompt.extend(encode_continuation(vocab, &opening_turn(&excerpt(&pool, 14_400, 1400))));
+    let summary_text = format!(
+        "Summary of the conversation so far: the user shared several documents and asked about each. {}",
+        excerpt(&pool, 30_000, summary_chars)
+    );
+    Squash {
+        kept_turns,
+        summary_chars,
+        system_end: system.len(),
+        kept_start,
+        old_prompt,
+        turn_ends,
+        summary: encode_continuation(vocab, &chat_turn(&summary_text, "Understood.")),
+        closing: encode_continuation(vocab, &next_turn(&excerpt(&pool, 15_800, 400))),
+    }
+}
+
+impl Squash {
+    /// The squashed prompt: the system prompt, the summary when `with_summary`, the kept turns, the
+    /// last user turn and the answer to it, and a new user turn.
+    fn new_prompt(&self, answer: &[u32], with_summary: bool) -> Vec<u32> {
+        let mut ids = self.old_prompt[..self.system_end].to_vec();
+        if with_summary {
+            ids.extend_from_slice(&self.summary);
+        }
+        ids.extend_from_slice(&self.old_prompt[self.kept_start..]);
+        ids.extend_from_slice(answer);
+        ids.extend_from_slice(&self.closing);
+        ids
+    }
+
+    fn label(&self, with_summary: bool) -> String {
+        let middle = if with_summary { format!("summary{}", self.summary_chars) } else { "dropped".to_string() };
+        format!("kept{}_{middle}", self.kept_turns)
+    }
+}
+
+struct ShiftRun {
+    first_generated: Vec<u32>,
+    new_prompt: Vec<u32>,
+    cached: Timed,
+    fresh: Timed,
+}
+
+struct ShiftCase {
+    label: String,
+    squash: Squash,
+    shifting: ShiftRun,
+    reuse_off: ShiftRun,
+}
+
+fn shift_config(cache_reuse_min: u32) -> ServingConfig<'static> {
+    config_with(PromptCacheConfig {
+        cache_reuse_min,
+        max_checkpoints: 8,
+        ..PromptCacheConfig::standard()
+    })
+}
+
+fn old_prompt_answer(model: &LoadedModel<'_>, vocab: &Vocab, squash: &Squash, config: &ServingConfig<'_>, max_tokens: usize) -> Timed {
+    clear_cache(model, vocab);
+    let first = timed_request_with_turn_ends(model, &squash.old_prompt, &squash.turn_ends, max_tokens, config);
+    model.run_pending_prewarm(config).expect("run the queued end-of-answer prewarm");
+    first
+}
+
+fn proxima_squash(
+    model: &LoadedModel<'_>,
+    vocab: &Vocab,
+    squash: &Squash,
+    with_summary: bool,
+    cache_reuse_min: u32,
+    max_tokens: usize,
+) -> ShiftRun {
+    let config = shift_config(cache_reuse_min);
+    let first = old_prompt_answer(model, vocab, squash, &config, max_tokens);
+    let new_prompt = squash.new_prompt(&first.generated, with_summary);
+    let cached = timed_request(model, &new_prompt, max_tokens, &config);
+    let fresh = timed_request(model, &new_prompt, max_tokens, &uncached());
+    ShiftRun {
+        first_generated: first.generated,
+        new_prompt,
+        cached,
+        fresh,
+    }
+}
+
+fn shift_record(case: &ShiftCase) -> Value {
+    let (shifting, off) = (&case.shifting, &case.reuse_off);
+    json!({
+        "kind": "shift_proxima", "variant": case.label,
+        "old_prompt_tokens": case.squash.old_prompt.len(), "new_prompt_tokens": shifting.new_prompt.len(),
+        "system_end": case.squash.system_end, "kept_start": case.squash.kept_start,
+        "shift": path_label(shifting.cached.report), "reuse_off": path_label(off.cached.report),
+        "shifted_ids": shifting.cached.generated, "fresh_ids": shifting.fresh.generated,
+        "reuse_off_ids": off.cached.generated,
+        "shifted_equals_fresh": shifting.cached.generated == shifting.fresh.generated,
+        "first_divergence": first_divergence(&shifting.cached.generated, &shifting.fresh.generated),
+        "reuse_off_equals_fresh": off.cached.generated == off.fresh.generated,
+    })
+}
+
+fn run_shift_variants(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder: &mut Recorder) -> Vec<ShiftCase> {
+    let mut cases = Vec::new();
+    for &(kept_turns, summary_chars) in SHIFT_VARIANTS.iter().take(args.variants) {
+        let squash = squash_transcript(vocab, kept_turns, summary_chars);
+        for with_summary in [true, false] {
+            let shifting = proxima_squash(model, vocab, &squash, with_summary, SHIFT_REUSE_MIN, args.max_tokens);
+            let reuse_off = proxima_squash(model, vocab, &squash, with_summary, 0, args.max_tokens);
+            let label = squash.label(with_summary);
+            let case = ShiftCase {
+                label,
+                squash: squash_transcript(vocab, kept_turns, summary_chars),
+                shifting,
+                reuse_off,
+            };
+            let record = shift_record(&case);
+            println!("{record}");
+            recorder.write(&record);
+            cases.push(case);
+        }
+    }
+    let total = cases.len();
+    let equal = cases.iter().filter(|case| case.shifting.cached.generated == case.shifting.fresh.generated).count();
+    let off_equal = cases.iter().filter(|case| case.reuse_off.cached.generated == case.reuse_off.fresh.generated).count();
+    println!("shift summary: proxima_shifted_ids_equal_fresh={equal}/{total} proxima_reuse_off_ids_equal_fresh={off_equal}/{total}");
+    cases
+}
+
+fn llama_squash(args: &Args, case: &ShiftCase, swa_full: bool, recorder: &mut Recorder) {
+    let bin = args.llama_bin.as_ref().expect("--llama-server-bin");
+    let shifting = &case.shifting;
+    let context = case.squash.old_prompt.len() + shifting.new_prompt.len() + 2 * args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS;
+    let reuse = SHIFT_REUSE_MIN.to_string();
+    let mut extra = vec!["--cache-reuse", reuse.as_str()];
+    if swa_full {
+        extra.push("--swa-full");
+    }
+    let server = LlamaServer::spawn(bin, &args.model_path, LLAMA_PORT_SHIFT, context, &extra);
+    let first = llama_completion(LLAMA_PORT_SHIFT, &case.squash.old_prompt, args.max_tokens, true);
+    let second = llama_completion(LLAMA_PORT_SHIFT, &shifting.new_prompt, args.max_tokens, true);
+    let fresh = llama_completion(LLAMA_PORT_SHIFT, &shifting.new_prompt, args.max_tokens, false);
+    let report = shifting.cached.report.expect("the cached request report");
+    let record = json!({
+        "kind": "shift_llama", "variant": case.label, "swa_full": swa_full, "pid": server.pid(),
+        "llama_first_ids_equal_proxima_first": first.ids == shifting.first_generated,
+        "llama_cache_n": second.timings["cache_n"], "llama_prompt_n": second.timings["prompt_n"],
+        "llama_prompt_ms": second.timings["prompt_ms"],
+        "proxima_reused_tokens": report.reused_tokens, "proxima_shifted_tokens": report.shifted_tokens,
+        "proxima_prefilled_tokens": report.prefilled_tokens, "proxima_path": report.path.as_str(),
+        "llama_ids": second.ids, "llama_fresh_ids": fresh.ids,
+        "proxima_shifted_ids": shifting.cached.generated, "proxima_fresh_ids": shifting.fresh.generated,
+        "llama_reuse_equals_llama_fresh": second.ids == fresh.ids,
+        "llama_reuse_equals_proxima_shifted": second.ids == shifting.cached.generated,
+        "llama_reuse_equals_proxima_fresh": second.ids == shifting.fresh.generated,
+        "llama_fresh_equals_proxima_fresh": fresh.ids == shifting.fresh.generated,
+    });
+    println!("{record}");
+    recorder.write(&record);
+}
+
+fn run_shift_llama(args: &Args, cases: &[ShiftCase], recorder: &mut Recorder) {
+    for case in cases {
+        for swa_full in [true, false] {
+            llama_squash(args, case, swa_full, recorder);
+        }
+    }
+}
+
+fn run_shift_ttft(model: &LoadedModel<'_>, vocab: &Vocab, args: &Args, recorder: &mut Recorder) {
+    let squash = squash_transcript(vocab, 2, 90);
+    let config = shift_config(SHIFT_REUSE_MIN);
+    let reference = old_prompt_answer(model, vocab, &squash, &config, args.max_tokens);
+    let new_prompt = squash.new_prompt(&reference.generated, true);
+    let (mut shifted_ms, mut full_ms) = (Vec::new(), Vec::new());
+    let mut identical = 0;
+    for pair in 0..=args.pairs {
+        recorder.write(&host_snapshot(&format!("pair_{pair}_start")));
+        let mut measured = [f64::NAN; 2];
+        let mut ids: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+        let order = if pair % 2 == 0 { [0, 1] } else { [1, 0] };
+        for (position, arm) in order.into_iter().enumerate() {
+            let timed = if arm == 0 {
+                old_prompt_answer(model, vocab, &squash, &config, args.max_tokens);
+                timed_request(model, &new_prompt, args.max_tokens, &config)
+            } else {
+                timed_request(model, &new_prompt, args.max_tokens, &uncached())
+            };
+            measured[arm] = timed.ttft_ms;
+            recorder.write(&json!({
+                "kind": "request", "mode": "shift_ttft", "pair": pair, "warmup": pair == 0,
+                "arm": if arm == 0 { "shifted" } else { "full_prefill" }, "order_position": position,
+                "prompt_tokens": new_prompt.len(), "ttft_ms": timed.ttft_ms, "total_ms": timed.total_ms,
+                "cache": path_label(timed.report),
+            }));
+            ids[arm] = timed.generated;
+        }
+        if pair > 0 {
+            shifted_ms.push(measured[0]);
+            full_ms.push(measured[1]);
+            identical += usize::from(ids[0] == ids[1]);
+        }
+        recorder.write(&host_snapshot(&format!("pair_{pair}_end")));
+    }
+    println!("shift ttft ms ({} pairs, warmup pair excluded; prompt_tokens={})", args.pairs, new_prompt.len());
+    println!("  shifted      {}", spread(&shifted_ms).text());
+    println!("  full_prefill {}", spread(&full_ms).text());
+    println!("  median_shifted/median_full={:.3} ids_identical_shifted_vs_full={identical}/{}", median(&shifted_ms) / median(&full_ms), args.pairs);
+}
+
+fn run_shift(args: &Args, recorder: &mut Recorder) {
+    let cases = with_model(&args.model_path, |model, vocab| {
+        let cases = run_shift_variants(model, vocab, args, recorder);
+        if args.pairs > 0 {
+            run_shift_ttft(model, vocab, args, recorder);
+        }
+        cases
+    });
+    if args.llama_bin.is_some() {
+        run_shift_llama(args, &cases, recorder);
+    }
+}
+
 fn main() {
     let args = parse_args();
     let mut recorder = Recorder::create(&args.out);
@@ -1447,6 +1730,7 @@ fn main() {
         Mode::Split => run_split(&args, &mut recorder),
         Mode::Prewarm => run_prewarm(&args, &mut recorder),
         Mode::FollowUp => run_follow_up(&args, &mut recorder),
+        Mode::Shift => run_shift(&args, &mut recorder),
     }
     recorder.write(&host_snapshot("end"));
 }
