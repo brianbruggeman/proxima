@@ -3530,6 +3530,9 @@ impl<'file> LoadedModel<'file> {
         // allocation across the whole decode, per each drafter's own doc on
         // the reuse contract.
         let mut speculative_draft: Vec<u32> = Vec::new();
+        // the two-layer cache checksum walks whole caches every step; only the diag knob pays for it
+        #[cfg(feature = "instrument")]
+        let cache_checksum_diag = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
 
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
@@ -5302,10 +5305,16 @@ impl<'file> LoadedModel<'file> {
                     // to "nothing to report" rather than index out of bounds.
                     #[cfg(feature = "instrument")]
                     let (layer0_before_len, layer0_before_checksum) =
-                        layer_caches.first().map_or((0, 0.0), layer_cache_checksum);
+                        layer_caches
+                            .first()
+                            .filter(|_| cache_checksum_diag)
+                            .map_or((0, 0.0), layer_cache_checksum);
                     #[cfg(feature = "instrument")]
                     let (layer3_before_len, layer3_before_checksum) =
-                        layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
+                        layer_caches
+                            .get(3)
+                            .filter(|_| cache_checksum_diag)
+                            .map_or((0, 0.0), layer_cache_checksum);
                     for (layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         match (roots_for_layer, &mut layer_caches[layer]) {
                             (
@@ -5473,7 +5482,7 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(feature = "instrument")]
                     let checksum_started = read_ticks();
                     #[cfg(feature = "instrument")]
-                    {
+                    if cache_checksum_diag {
                         let (layer0_after_len, layer0_after_checksum) =
                             layer_caches.first().map_or((0, 0.0), layer_cache_checksum);
                         let (layer3_after_len, layer3_after_checksum) =
