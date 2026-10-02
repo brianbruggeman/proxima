@@ -1014,11 +1014,13 @@ pub(super) fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> L
 /// bucketed extent the program's full-attention slot resolves to
 /// ([`crate::symbols::KV_BOUND`]). Both are read together by every layer's
 /// fill: a full layer pads to `bound_extent`, a ring layer unrolls its
-/// `cached_len`-relative window.
+/// `cached_len`-relative window. `device_resident` flags the layers whose rows
+/// live on the device (`DeviceKv`), which fill nothing and name empty blocks.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct KvStep {
+pub(super) struct KvStep<'resident> {
     pub(super) cached_len: usize,
     pub(super) bound_extent: usize,
+    pub(super) device_resident: &'resident [bool],
 }
 
 /// One step's KV-cache `Op::Input` leaves, named and padded off whatever
@@ -1046,12 +1048,12 @@ pub(super) fn push_kv_named_blocks<'call>(
     step: KvStep,
     kv_pad_scratch: &'call mut [KvPadScratch],
     qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
-    device_resident: &[bool],
     named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
 ) -> Result<(), InteropError> {
     let KvStep {
         cached_len,
         bound_extent: kv_bound_extent,
+        device_resident,
     } = step;
     for (layer, cache) in layer_caches.iter().enumerate() {
         match (cache, &layer_row_widths[layer]) {
