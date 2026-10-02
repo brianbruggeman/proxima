@@ -23,9 +23,12 @@
 //! The lock is held only to take an entry out, or put one back, never across
 //! a decode: a request owns its taken state for the whole generation, so a
 //! second request on the same model sees no entry and prefills in full rather
-//! than waiting. [`super::prewarm`] fills the same entries ahead of a request
-//! through the same lookup, and [`super::prewarm_gate`] decides who holds the
-//! device when a request and a prewarm meet.
+//! than waiting. Taking an entry out also copies and rotates the rows of the
+//! chunks a shifting request will move ([`super::chunk_shift`]), host work on
+//! those rows alone, before the entry is rewound. [`super::prewarm`] fills the
+//! same entries ahead of a request through the same lookup, and
+//! [`super::prewarm_gate`] decides who holds the device when a request and a
+//! prewarm meet.
 
 use core::ops::{ControlFlow, Range};
 use std::collections::BTreeMap;
