@@ -2049,6 +2049,40 @@ impl Plan {
         }
     }
 
+    /// Moves this plan to `symbols` in place when the move only changes the
+    /// key range of its fused cached-attention ops -- the one thing a KV
+    /// bucket crossing changes in a decode plan -- and returns `true`;
+    /// returns `false`, leaving the plan untouched, when the move reaches
+    /// anything else, so the caller builds a fresh plan exactly as before.
+    ///
+    /// [`proxima_tensor::refit_cached_attention_rows`] decides locality and
+    /// produces the replacement ops (the same ones a fresh bind at `symbols`
+    /// would); this method re-derives only what is a function of those ops
+    /// (resolved step, plan-owned uniform buffer) and refreshes
+    /// `prepared.shapes` so named blocks sized for the new extent validate;
+    /// a multi-row (verify / prefill) attention op also drops the plan's
+    /// scratch buffers so they re-size from the patched ops. Compose with
+    /// [`plan_named`] the way a plan
+    /// cache does: look up by key, `refit_symbols` on a near miss, build on
+    /// `false`.
+    ///
+    /// # Errors
+    /// Shape inference or kernel resolution failing at `symbols`; the plan is
+    /// unchanged on `Err`.
+    pub fn refit_symbols(&mut self, symbols: &[u64]) -> Result<bool, MetalError> {
+        let next_shapes = infer(&self.program, symbols)?;
+        let Some(patches) = refit_cached_attention_rows(
+            &self.prepared.resolved,
+            &self.program,
+            &self.prepared.shapes,
+            &next_shapes,
+        ) else {
+            return Ok(false);
+        };
+        apply_refit(self, patches, next_shapes)?;
+        Ok(true)
+    }
+
     /// Overrides this plan's [`DispatchType`] from [`DispatchType::default`]
     /// (`Concurrent`). Safe to call any time before an `execute_plan*` call
     /// -- unlike [`Self::set_math_mode`], this never invalidates

@@ -682,6 +682,37 @@ pub fn set_math_mode(plan: &mut Plan, math_mode: metal::MathMode) -> Result<(), 
     }
 }
 
+/// Moves a cached plan to `symbols` in place when only the key range of its
+/// fused cached-attention ops changes -- [`metal::Plan::refit_symbols`]'s own
+/// doc has the contract. `Ok(false)` on every other arm: `Plan::Cpu` keeps
+/// the symbols it was planned at and re-binds per call, and v1's
+/// `wgpu_driver::WgpuPlan`/`CudaPlan` carry no refit, so the caller builds a
+/// fresh plan exactly as before.
+///
+/// # Errors
+/// [`metal::MetalError`] when shape inference or kernel resolution fails at
+/// `symbols`; the plan is unchanged.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn refit_symbols(plan: &mut Plan, symbols: &[u64]) -> Result<bool, metal::MetalError> {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => Ok(false),
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.refit_symbols(symbols),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => Ok(false),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => Ok(false),
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
+        )))]
+        _ => match *plan {},
+    }
+}
+
 /// Sets [`metal::DispatchType`] on [`Plan::Metal`] -- see that type's own
 /// doc for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
 /// 311/312). A no-op on every other arm: `Plan::Cpu`'s interpreter has no
