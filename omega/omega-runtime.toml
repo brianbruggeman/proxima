@@ -167,6 +167,20 @@ group = 8
 # Overridable per-build via `OMEGA_SPANS_UNIFORM_CACHE_ENTRIES`.
 uniform_cache_entries = 4096
 
+[command_buffer]
+# ops in the FIRST command buffer of a chunked decode step. The GPU cannot
+# start until the first buffer is committed, and committing needs every op in
+# it encoded (~1.8 us per op, host-side), so an even split across K chunks
+# delays GPU start by encode(total/K). A short head chunk starts the GPU after
+# a fraction of that while the host encodes the remaining chunks behind it.
+# Measured on gemma4-E2B decode (1150 ops, K=8): even split ~18.73 ms/token,
+# 24-op head ~18.3 ms/token (text identical). Cost of raising it: later GPU
+# start; cost of lowering it: one more command-buffer switch (~40 us GPU idle
+# per boundary, measured) once the head is shorter than the encode of the next
+# chunk. 0 restores the even split. Overridable per-build via
+# `OMEGA_COMMAND_BUFFER_FIRST_CHUNK_OPS`.
+first_chunk_ops = 24
+
 [output_pool]
 # per-`(bucket, dtype)` cap on retained buffers in `metal::OUTPUT_BUFFER_POOL`
 # (`feature = "metal-buffer-pool"`-only) -- see sized::OUTPUT_POOL_MAX_PER_BUCKET
