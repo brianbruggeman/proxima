@@ -850,9 +850,11 @@ pub(super) fn bind_plain(
     let reachable = live::reachable(program, outputs);
     let building = BoundOpBuilder::new(retires, numeric_policy);
     let mut built = Vec::new();
+    let mut ready = ReadyBatch::new();
     for (position, expr) in program.iter().enumerate() {
         if reachable.contains(&NodeId(position as u32)) {
-            built.extend(building.push(expr, shapes)?);
+            building.push_into(expr, shapes, &mut ready)?;
+            built.extend(ready.drain(..));
         } else {
             building.skip();
         }

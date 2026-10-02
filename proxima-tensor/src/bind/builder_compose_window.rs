@@ -73,6 +73,23 @@ impl BoundOpBuilder {
     /// fuse, up to [`ScalarOp::arity`]'s current maximum
     /// (`READY_BATCH_CAPACITY`).
     pub fn push(&self, expr: &Op, shapes: &Shapes) -> Result<ReadyBatch, TensorError> {
+        let mut emitted = ReadyBatch::new();
+        self.push_into(expr, shapes, &mut emitted)?;
+        Ok(emitted)
+    }
+
+    /// [`push`](Self::push) appending to a caller-owned batch. A
+    /// [`ReadyBatch`] is a full-capacity inline array, so returning one by
+    /// value copies every slot whether or not the push readied anything --
+    /// and most pushes ready nothing. A caller walking a whole program
+    /// (`bind_plain`) reuses one batch instead and pays for the ops that
+    /// were actually emitted.
+    pub fn push_into(
+        &self,
+        expr: &Op,
+        shapes: &Shapes,
+        emitted: &mut ReadyBatch,
+    ) -> Result<(), TensorError> {
         let node = NodeId(self.position.get());
         self.position.set(self.position.get() + 1);
         let empty = Vec::new();
@@ -110,14 +127,12 @@ impl BoundOpBuilder {
                 None
             });
 
-        let mut emitted = ReadyBatch::new();
-
         match expr {
             Op::Input { .. } => {}
             Op::Iota { dtype, .. } => {
                 let extents = shapes.of(node).to_vec();
                 push_ready(
-                    &mut emitted,
+                    emitted,
                     node,
                     BoundOp {
                         node,
@@ -130,7 +145,7 @@ impl BoundOpBuilder {
             Op::Constant { dtype, value, .. } => {
                 let extents = shapes.of(node).to_vec();
                 push_ready(
-                    &mut emitted,
+                    emitted,
                     node,
                     BoundOp {
                         node,
@@ -177,9 +192,9 @@ impl BoundOpBuilder {
                         );
                     }
                     if !fuses {
-                        self.materialize_if_held(*operand_node, shapes, &mut emitted)?;
+                        self.materialize_if_held(*operand_node, shapes, emitted)?;
                     }
-                    self.materialize_computed_indices(map, shapes, &mut emitted)?;
+                    self.materialize_computed_indices(map, shapes, emitted)?;
                 }
                 self.held.borrow_mut().insert(
                     node,
@@ -214,10 +229,10 @@ impl BoundOpBuilder {
                     // before this non-identity map ever reads it, or
                     // `compose_operand`'s recursive remap silently
                     // mis-addresses whatever was held beneath it.
-                    self.materialize_if_held(source_node, shapes, &mut emitted)?;
+                    self.materialize_if_held(source_node, shapes, emitted)?;
                     let identity_operand = vec![(source_node, source_map)];
                     push_ready(
-                        &mut emitted,
+                        emitted,
                         node,
                         build_elementwise_op(
                             node,
@@ -233,7 +248,7 @@ impl BoundOpBuilder {
                             },
                         ),
                     )?;
-                    return Ok(emitted);
+                    return Ok(());
                 }
 
                 let still_live = !retires.contains(&reduce.operand);
@@ -264,7 +279,7 @@ impl BoundOpBuilder {
                          packed-weight product so W * a and the reduction stay fused \
                          (docs/discipline.md ROW 431, supersedes ROW 430)"
                     );
-                    self.materialize_if_held(activation_node, shapes, &mut emitted)?;
+                    self.materialize_if_held(activation_node, shapes, emitted)?;
                 }
                 #[cfg(feature = "instrument")]
                 {
@@ -292,7 +307,7 @@ impl BoundOpBuilder {
                         reduce.operand,
                         reduce_extent,
                         shapes,
-                        &mut emitted,
+                        emitted,
                     )?;
                     compose_fused_operands(
                         shapes,
@@ -306,8 +321,8 @@ impl BoundOpBuilder {
                         },
                     )
                 } else {
-                    self.materialize_if_held(reduce.operand, shapes, &mut emitted)?;
-                    self.materialize_computed_indices(&reduce.in_map, shapes, &mut emitted)?;
+                    self.materialize_if_held(reduce.operand, shapes, emitted)?;
+                    self.materialize_computed_indices(&reduce.in_map, shapes, emitted)?;
                     let operand = build_operand(reduce.operand, &reduce.in_map, shapes);
                     (ComposedBody::leaf(ScalarOp::Identity), vec![operand])
                 };
@@ -319,17 +334,17 @@ impl BoundOpBuilder {
                 // this method's own doc for why `materialize_computed_indices`
                 // is unconditional for `in_map`; the same reasoning applies
                 // here, independent of whether the operand fused.
-                self.materialize_computed_indices(&reduce.out_map, shapes, &mut emitted)?;
+                self.materialize_computed_indices(&reduce.out_map, shapes, emitted)?;
 
                 push_ready(
-                    &mut emitted,
+                    emitted,
                     node,
                     build_reduce_op(node, reduce, shapes, element_body, operands)?,
                 )?;
             }
         }
 
-        Ok(emitted)
+        Ok(())
     }
 
     /// `bind_plain`'s reachability skip lane: advances the position
