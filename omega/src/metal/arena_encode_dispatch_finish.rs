@@ -534,6 +534,80 @@ pub(super) fn attention_scratch_buffer(
     Ok(None)
 }
 
+/// One position's `(pipeline, bindings, grid, merge)`: the per-`bound` body
+/// of [`resolve_steps`], extracted so [`Plan::refit_symbols`] re-resolves
+/// only the positions it patched. A pure function of `bound` and the plan's
+/// `(packed_operands, numeric_policy, math_mode)` -- which is why a patched
+/// position's step equals the one a fresh plan would resolve for it.
+pub(super) fn resolve_step(
+    device: &ProtocolObject<dyn MTLDevice>,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    math_mode: MathMode,
+) -> Result<ResolvedStep, MetalError> {
+    let (bindings, grid) =
+        kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+    let mut cache_key =
+        kernel_cache_key_for_grid(bound, packed_operands, numeric_policy, &grid)?;
+    cache_key.push(math_mode.cache_token());
+    #[cfg(feature = "instrument")]
+    if let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+        ..
+    } = &bound.kind
+    {
+        crate::msl::debug_tiled_gemm_classification(
+            bound,
+            &crate::identity::operand_codecs(bound, packed_operands),
+            *reduce_op,
+            *init,
+            output_axes,
+            epilogue_body,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+            &cache_key,
+        );
+    }
+    let pipeline = pipeline_for(
+        device,
+        bound,
+        packed_operands,
+        &cache_key,
+        math_mode,
+        numeric_policy,
+    )?;
+    // Redesign §4c: a `CachedAttention` position under a policy that
+    // admits `ContextSplitMerge` resolves a SECOND pipeline for the
+    // merge dispatch, keyed on the split's own cache key plus `_merge`
+    // so the two never collide in `PIPELINE_CACHE` even though they
+    // share every other structural token.
+    let merge = match crate::msl::emit_cached_attention_merge(bound, numeric_policy)? {
+        Some(merge_kernel) => {
+            let merge_cache_key = merge_pipeline_key(&cache_key, &merge_kernel);
+            let merge_pipeline =
+                pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, math_mode)?;
+            Some(ResolvedMergeStep {
+                pipeline: merge_pipeline,
+                bindings: merge_kernel.bindings,
+                grid: merge_kernel.grid,
+            })
+        }
+        None => None,
+    };
+    Ok(ResolvedStep {
+        pipeline,
+        bindings,
+        grid,
+        merge,
+    })
+}
+
 /// Builds `plan.resolved_steps` on its first call, or when
 /// [`Plan::set_math_mode`] moved the compiled mode since the last build --
 /// every later call for the SAME mode is a no-op. `numeric_policy` cannot
@@ -563,66 +637,13 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
     plan.merged.borrow_mut().take();
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
-        let (bindings, grid) =
-            kernel_dispatch_shape(bound, &plan.packed_operands, plan.numeric_policy)?;
-        let mut cache_key =
-            kernel_cache_key_for_grid(bound, &plan.packed_operands, plan.numeric_policy, &grid)?;
-        cache_key.push(plan.math_mode.cache_token());
-        #[cfg(feature = "instrument")]
-        if let BoundOpKind::Reduce {
-            reduce_op,
-            init,
-            output_axes,
-            epilogue_body,
-            epilogue_operands,
-            epilogue_broadcast_axes,
-            ..
-        } = &bound.kind
-        {
-            crate::msl::debug_tiled_gemm_classification(
-                bound,
-                &crate::identity::operand_codecs(bound, &plan.packed_operands),
-                *reduce_op,
-                *init,
-                output_axes,
-                epilogue_body,
-                epilogue_operands,
-                epilogue_broadcast_axes,
-                &cache_key,
-            );
-        }
-        let pipeline = pipeline_for(
+        steps.push(resolve_step(
             device,
             bound,
             &plan.packed_operands,
-            &cache_key,
-            plan.math_mode,
             plan.numeric_policy,
-        )?;
-        // Redesign §4c: a `CachedAttention` position under a policy that
-        // admits `ContextSplitMerge` resolves a SECOND pipeline for the
-        // merge dispatch, keyed on the split's own cache key plus `_merge`
-        // so the two never collide in `PIPELINE_CACHE` even though they
-        // share every other structural token.
-        let merge = match crate::msl::emit_cached_attention_merge(bound, plan.numeric_policy)? {
-            Some(merge_kernel) => {
-                let merge_cache_key = merge_pipeline_key(&cache_key, &merge_kernel);
-                let merge_pipeline =
-                    pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, plan.math_mode)?;
-                Some(ResolvedMergeStep {
-                    pipeline: merge_pipeline,
-                    bindings: merge_kernel.bindings,
-                    grid: merge_kernel.grid,
-                })
-            }
-            None => None,
-        };
-        steps.push(ResolvedStep {
-            pipeline,
-            bindings,
-            grid,
-            merge,
-        });
+            plan.math_mode,
+        )?);
     }
     #[cfg(feature = "metal-horizontal-merge")]
     let merge_candidates = {
