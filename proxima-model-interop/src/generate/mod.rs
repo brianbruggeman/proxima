@@ -208,6 +208,8 @@ mod chunk_shift;
 mod kv_ring;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod device_kv;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+mod greedy_device;
 mod prompt_cache;
 mod prompt_cache_key;
 #[cfg(test)]
@@ -245,6 +247,8 @@ mod thread_index_census_tests;
 use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use device_kv::{DeviceKv, KvLeafNodes, kv_leaf_nodes};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use greedy_device::{device_token, with_greedy_argmax};
 use kv_ring::{
     KvRing, attention_cache, ring_slack_rows, rings_cover_speculation, sliding_cached_len_scalar,
     sliding_ring_geometry, speculative_draft_limit,
