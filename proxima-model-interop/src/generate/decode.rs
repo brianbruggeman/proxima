@@ -1765,10 +1765,10 @@ impl<'file> LoadedModel<'file> {
             KvStep {
                 cached_len: new_start,
                 bound_extent: kv_bound_extent,
+                device_resident,
             },
             kv_pad_scratch,
             qwen35_dense_pad_scratch,
-            device_resident,
             named_blocks,
         )?;
         Ok(symbols)
