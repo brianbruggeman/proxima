@@ -23,8 +23,9 @@ const F32_EXACT_INTEGER_BOUND: u64 = 1 << 24;
 ///   consistent key/value rows, a non-empty cached range for the two-range
 ///   form, the f32-exact row bound) and whose query rows and output extents
 ///   did not move;
-/// - anything else touched, or any condition failing, returns `None` and the
-///   caller binds from scratch.
+/// - anything else touched, any condition failing, or a partial-rotary op
+///   (whose pass-plane operands this function does not re-check), returns
+///   `None` and the caller binds from scratch.
 ///
 /// Applying the returned patches to `resolved` yields exactly the ops a
 /// fresh bind at `next` returns, which `refit_matches_a_fresh_bind_*` in this
@@ -105,11 +106,16 @@ fn refit_one(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
         query_rows,
         cached_key_rows,
         new_key_rows,
+        head_dim,
+        rotary_dim,
         ..
     } = &bound.kind
     else {
         return None;
     };
+    if rotary_dim != head_dim {
+        return None;
+    }
     let rows = |index: usize| next.of(operands.get(index)?.0).first().copied();
     if next.of(bound.node) != bound.extents.as_slice() || rows(0)? != *query_rows {
         return None;

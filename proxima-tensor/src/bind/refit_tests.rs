@@ -159,3 +159,34 @@ fn refit_declines_when_an_unfused_op_reads_the_moving_symbol() {
         "without fusion the attention chain is plain reduces and elementwise ops, which this refit never recomposes"
     );
 }
+
+#[test]
+fn refit_declines_a_partial_rotary_attention_op() {
+    let fixture = single_range_fixture(2);
+    let (low_shapes, mut low_bound) = bound_at(&fixture, &[1, 33], true);
+    let (high_shapes, _) = bound_at(&fixture, &[1, 65], true);
+    let attention_positions: Vec<usize> = low_bound
+        .iter()
+        .enumerate()
+        .filter(|(_, bound)| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(
+        attention_positions.len(),
+        fixture.layers,
+        "one fused attention op per layer"
+    );
+    for position in attention_positions {
+        if let BoundOpKind::CachedAttention { rotary_dim, .. } = &mut low_bound[position].kind {
+            *rotary_dim /= 2;
+        }
+    }
+
+    let patches =
+        refit_cached_attention_rows(&low_bound, &fixture.program, &low_shapes, &high_shapes);
+
+    assert_eq!(
+        patches, None,
+        "a pass plane carries operands the refit does not re-check"
+    );
+}
