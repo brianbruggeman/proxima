@@ -704,6 +704,7 @@ pub(super) fn cached_attention_candidates(
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
     let consumers = core::cell::OnceCell::new();
+    let first_readers = core::cell::OnceCell::new();
     #[cfg(not(feature = "metal-attn-split-decode"))]
     let _ = numeric_policy;
     // resolved once: every caller supplies this leaf unconditionally
@@ -1134,10 +1135,10 @@ pub(super) fn cached_attention_candidates(
         }
         let mut operands = Vec::with_capacity(source_nodes.len());
         for source in &source_nodes {
-            let Some((_, layout, lookup)) = resolved
-                .iter()
-                .flat_map(|bound| bound.operands().iter())
-                .find(|(node, _, _)| node == source)
+            let Some((_, layout, lookup)) = first_readers
+                .get_or_init(|| first_reader_operands(resolved))
+                .get(source)
+                .copied()
             else {
                 #[cfg(feature = "instrument")]
                 debug!(
@@ -1858,6 +1859,7 @@ pub(super) fn cached_attention_single_range_candidates(
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
     let consumers = core::cell::OnceCell::new();
+    let first_readers = core::cell::OnceCell::new();
     for output_position in (0..program.len()).rev() {
         let output = NodeId(output_position as u32);
         let Some(attended_product) =
@@ -1951,10 +1953,10 @@ pub(super) fn cached_attention_single_range_candidates(
         ];
         let mut operands = Vec::with_capacity(source_nodes.len());
         for source in source_nodes {
-            let Some((_, layout, lookup)) = resolved
-                .iter()
-                .flat_map(|bound| bound.operands().iter())
-                .find(|(node, _, _)| *node == source)
+            let Some((_, layout, lookup)) = first_readers
+                .get_or_init(|| first_reader_operands(resolved))
+                .get(&source)
+                .copied()
             else {
                 operands.clear();
                 break;
@@ -2121,6 +2123,20 @@ pub(super) fn cached_attention_single_range_candidates(
         candidates.push((fused, absorbed));
     }
     candidates
+}
+
+/// For every node some resolved op reads, the first operand entry (in
+/// `resolved` order) that reads it -- what a linear `find` over every op's
+/// operands would return, built once. Each fusion candidate looks up eight
+/// to eleven sources this way, and the scan it replaces walked every operand
+/// of every resolved op per source per candidate.
+#[cfg(feature = "cached-attention-streaming")]
+fn first_reader_operands(resolved: &[BoundOp]) -> BTreeMap<NodeId, &(NodeId, Layout, Option<Lookup>)> {
+    let mut first = BTreeMap::new();
+    for operand in resolved.iter().flat_map(|bound| bound.operands().iter()) {
+        first.entry(operand.0).or_insert(operand);
+    }
+    first
 }
 
 #[cfg(feature = "cached-attention-streaming")]
