@@ -51,6 +51,8 @@ use proxima_model_interop::{
     GPU_LAYERS_ALL, LoadedModel, NgramMapParams, NgramModParams, Phase, PrefixState, ServingConfig,
     SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet, TokenEvent,
 };
+use proxima_telemetry::export::Exporter;
+use proxima_telemetry::recorder::Recorder;
 use proxima_tokenizer::vocab::Vocab;
 
 const DEFAULT_MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
@@ -2397,7 +2399,27 @@ fn print_lever_config_and_refuse_if_unsafe() {
     }
 }
 
+/// `PROXIMA_TELEMETRY_FILE=<path>` points a file-sink [`Exporter`] at the process recorder, so the
+/// library's `debug!` events (raise them with `RUST_LOG`) land in `<path>` next to the bench's own
+/// stdout. Unset, no recorder is installed and every event site stays a no-op.
+fn install_telemetry_file_sink() -> Option<Arc<Recorder>> {
+    let path = env::var("PROXIMA_TELEMETRY_FILE").ok()?;
+    let recorder = Recorder::builder()
+        .ring_capacity(65536)
+        .export(Exporter::file(path))
+        .expect("file exporter composes")
+        .install()
+        .expect("telemetry recorder installs");
+    let pump = Arc::clone(&recorder);
+    std::thread::Builder::new()
+        .name("telemetry-file-drain".to_string())
+        .spawn(move || pump.run_drain_loop())
+        .expect("spawn telemetry drain thread");
+    Some(recorder)
+}
+
 fn main() {
+    let telemetry_recorder = install_telemetry_file_sink();
     install_orphan_reaping_panic_hook();
     print_lever_config_and_refuse_if_unsafe();
     let args = parse_args();
@@ -2455,6 +2477,9 @@ fn main() {
             run_prefill_throughput_mode(&model, &args, char_counts, unmeasured_label);
         }
         BenchMode::LlamaParity => run_llama_parity_mode(&model, &vocab, &args),
+    }
+    if let Some(recorder) = &telemetry_recorder {
+        while recorder.drain() > 0 {}
     }
 }
 
