@@ -589,7 +589,7 @@ impl BoundOp {
     /// into `operands()` itself and silently widening every existing caller's
     /// operand table by one entry it never asked for. A liveness pass that
     /// calls `operands()` alone treats an epilogue-only reader as no reader
-    /// at all: `dead_resolved_nodes`/`consumed_by_resolved_nodes` would mark
+    /// at all: `dead_resolved_nodes` would mark
     /// a reduce whose sole use is another fold's `epilogue_operands` entry as
     /// dead weight to skip, and `node_retirement` would free its buffer at
     /// its OWN position instead of the epilogue's later one — the exact

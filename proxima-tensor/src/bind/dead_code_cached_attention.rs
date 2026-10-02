@@ -102,52 +102,80 @@ pub(super) fn native_packed_layout(
     }
 }
 
-/// Batch driver: computes liveness once, then streams every expression
-/// through a fresh [`BoundOpBuilder`], flushing whatever remains held at the end.
-/// Every node `resolved` physically reads, straight off [`BoundOp::operands()`]
-/// plus each gathered operand's own [`Lookup::indices`] — the same walk
-/// [`crate::cpu`]'s own execution-time dead-node analysis performs, relocated
-/// here so a GPU backend (which has no persistent arena to skip a slot
-/// inside) can reuse it too, via [`prune_dead`] below.
-pub(super) fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
-    let mut consumed = BTreeSet::new();
-    for computed in resolved {
-        for (operand, _layout, lookup) in computed.all_read_sources() {
-            consumed.insert(*operand);
-            if let Some(lookup) = lookup {
-                consumed.insert(lookup.indices);
-            }
-        }
-        if let BoundOpKind::Reduce {
-            out_scatter: Some(lookup),
-            ..
-        } = &computed.kind
-        {
-            consumed.insert(lookup.indices);
+/// Every node `computed` physically reads, each once: operands, epilogue
+/// operands, gather index nodes, and a reduce's scatter index node.
+fn read_nodes(computed: &BoundOp) -> BTreeSet<NodeId> {
+    let mut reads = BTreeSet::new();
+    for (operand, _layout, lookup) in computed.all_read_sources() {
+        reads.insert(*operand);
+        if let Some(lookup) = lookup {
+            reads.insert(lookup.indices);
         }
     }
-    consumed
+    if let BoundOpKind::Reduce {
+        out_scatter: Some(lookup),
+        ..
+    } = &computed.kind
+    {
+        reads.insert(lookup.indices);
+    }
+    reads
 }
 
-/// Every `resolved` node neither consumed by another resolved node's own
-/// operands nor named in `effective_outputs` — dead weight [`bind`]'s own
-/// fusion can leave behind (`eliminate_identity_multiply` dropping a
-/// [`BoundOpKind::Constant`] from a fused body once its last reader absorbed
-/// it is one source; a fused-away [`BoundOpKind::Elementwise`] chain is
-/// another). [`crate::cpu::StaticArena`] computes this same set today purely
-/// to build its own execution-time skip list — see that type's own `dead`
-/// field doc — which hides a real cost from every OTHER backend: a driver
-/// with no persistent arena (every GPU backend today) has no skip list to
-/// consult, so it dispatches a kernel for a node this function would already
-/// tell it nobody reads.
+/// Every `resolved` node nothing live reads and `effective_outputs` does not
+/// name — dead weight [`bind`]'s own fusion can leave behind
+/// (`eliminate_identity_multiply` dropping a [`BoundOpKind::Constant`] from a
+/// fused body once its last reader absorbed it is one source; a fused-away
+/// [`BoundOpKind::Elementwise`] chain is another; the `key_index`/`query_index`
+/// iotas of a `causal_mask_merged` whose mask a fused cached-attention op
+/// absorbed are a third).
+///
+/// The set is transitive: a node whose only readers are themselves dead is
+/// dead too, so one call removes a whole orphaned chain (the absorbed mask's
+/// iota is read only by mask ops that are themselves unread). Computed by
+/// retiring readers, one pass: count each node's distinct readers, seed the
+/// worklist with the unread non-outputs, and each removal decrements the
+/// counts of what that node read.
+///
+/// [`crate::cpu::StaticArena`] computes this same set to build its own
+/// execution-time skip list — see that type's own `dead` field doc — which
+/// hides a real cost from every OTHER backend: a driver with no persistent
+/// arena (every GPU backend today) has no skip list to consult, so it
+/// dispatches a kernel for a node this function would already tell it nobody
+/// reads.
 #[must_use]
 pub fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BTreeSet<NodeId> {
-    let consumed = consumed_by_resolved_nodes(resolved);
-    let dead: BTreeSet<NodeId> = resolved
+    let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
+    let reads: Vec<BTreeSet<NodeId>> = resolved.iter().map(read_nodes).collect();
+    let mut readers: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for node in reads.iter().flatten() {
+        *readers.entry(*node).or_insert(0) += 1;
+    }
+    let mut positions: BTreeMap<NodeId, Vec<usize>> = BTreeMap::new();
+    for (position, computed) in resolved.iter().enumerate() {
+        positions.entry(computed.node).or_default().push(position);
+    }
+    let is_unread = |node: &NodeId, readers: &BTreeMap<NodeId, usize>| {
+        !outputs.contains(node) && readers.get(node).copied().unwrap_or(0) == 0
+    };
+    let mut pending: Vec<usize> = resolved
         .iter()
-        .map(|computed| computed.node)
-        .filter(|node| !consumed.contains(node) && !effective_outputs.contains(node))
+        .enumerate()
+        .filter(|(_, computed)| is_unread(&computed.node, &readers))
+        .map(|(position, _)| position)
         .collect();
+    let mut dead = BTreeSet::new();
+    while let Some(position) = pending.pop() {
+        dead.insert(resolved[position].node);
+        for read in &reads[position] {
+            if let Some(count) = readers.get_mut(read) {
+                *count -= 1;
+            }
+            if is_unread(read, &readers) {
+                pending.extend(positions.get(read).into_iter().flatten().copied());
+            }
+        }
+    }
     #[cfg(feature = "instrument")]
     for node in &dead {
         debug!(

@@ -117,3 +117,7 @@ pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod dead_resolved_tests;
