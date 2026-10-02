@@ -204,43 +204,6 @@ fn even_chunk_boundaries(total_ops: usize, chunk_count: usize) -> Vec<usize> {
     boundaries
 }
 
-#[cfg(test)]
-mod chunk_boundary_tests {
-    use super::command_buffer_chunk_boundaries;
-
-    #[test]
-    fn gemma4_decode_step_ramps_from_a_short_head() {
-        let boundaries = command_buffer_chunk_boundaries(1150, 8);
-        assert_eq!(
-            boundaries,
-            vec![32, 160, 800],
-            "head chunk is the sized first-chunk op count, each boundary the growth factor past the last"
-        );
-    }
-
-    #[test]
-    fn the_chunk_count_caps_how_far_the_ramp_runs() {
-        assert_eq!(command_buffer_chunk_boundaries(1150, 3), vec![32, 160]);
-    }
-
-    #[test]
-    fn two_chunks_keep_the_even_split_because_a_ramp_needs_a_middle() {
-        assert_eq!(command_buffer_chunk_boundaries(1150, 2), vec![575]);
-    }
-
-    #[test]
-    fn a_plan_no_longer_than_the_head_falls_back_to_the_even_split() {
-        let boundaries = command_buffer_chunk_boundaries(20, 4);
-        assert_eq!(boundaries, vec![5, 10, 15]);
-    }
-
-    #[test]
-    fn one_chunk_or_an_empty_plan_has_no_boundaries() {
-        assert!(command_buffer_chunk_boundaries(1150, 1).is_empty());
-        assert!(command_buffer_chunk_boundaries(0, 8).is_empty());
-    }
-}
-
 /// The one place `BufferDiagnostics::first_op_label`/`last_op_label` are
 /// resolved -- a plain index (never a panic) into `resolved`, so a bound
 /// out of range (only reachable if `total_ops == 0`, an empty plan) reports
@@ -2742,3 +2705,40 @@ pub(super) fn q2k_debug_value(blocks: &[u8], index: usize) -> f32 {
     d * f32::from(scale_min & 0x0f) * f32::from(level) - dmin * f32::from(scale_min >> 4)
 }
 
+
+#[cfg(test)]
+mod chunk_boundary_tests {
+    use super::command_buffer_chunk_boundaries;
+
+    #[test]
+    fn gemma4_decode_step_ramps_from_a_short_head() {
+        let boundaries = command_buffer_chunk_boundaries(1150, 8);
+        assert_eq!(
+            boundaries,
+            vec![32, 160, 800],
+            "head chunk is the sized first-chunk op count, each boundary the growth factor past the last"
+        );
+    }
+
+    #[test]
+    fn the_chunk_count_caps_how_far_the_ramp_runs() {
+        assert_eq!(command_buffer_chunk_boundaries(1150, 3), vec![32, 160]);
+    }
+
+    #[test]
+    fn two_chunks_keep_the_even_split_because_a_ramp_needs_a_middle() {
+        assert_eq!(command_buffer_chunk_boundaries(1150, 2), vec![575]);
+    }
+
+    #[test]
+    fn a_plan_no_longer_than_the_head_falls_back_to_the_even_split() {
+        let boundaries = command_buffer_chunk_boundaries(20, 4);
+        assert_eq!(boundaries, vec![5, 10, 15]);
+    }
+
+    #[test]
+    fn one_chunk_or_an_empty_plan_has_no_boundaries() {
+        assert!(command_buffer_chunk_boundaries(1150, 1).is_empty());
+        assert!(command_buffer_chunk_boundaries(0, 8).is_empty());
+    }
+}
