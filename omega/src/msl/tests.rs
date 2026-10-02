@@ -1459,6 +1459,11 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path_single_fetch() {
     );
 }
 
+/// The smallest activation-row count the tiled path admits: every fixture that asserts the tiled
+/// path rather than the row-blocked one reads the build's own threshold instead of a literal.
+#[cfg(feature = "metal-tiled-gemm")]
+const TILED_ADMITTED_TOKENS: u32 = crate::sized::TILED_GEMM_MIN_TOKENS as u32;
+
 /// Same shape as [`matmul_op`] (`lhs=[features,k]` weight,
 /// `rhs=[k,tokens]` activation), but with the out_map listing the TOKEN
 /// axis before the feature axis -- `output_axes = [1, 0]` instead of
@@ -1715,7 +1720,11 @@ fn dense_batched_restage_msl_dump_for_the_real_weather_score_shape() {
 fn dense_batched_gemm_admission_is_switch_gated() {
     use alloc::collections::BTreeMap;
 
-    let shapes: &[(u32, u32, u32, u32)] = &[(510, 512, 8, 128), (16, 32, 8, 128), (64, 96, 4, 256)];
+    let shapes: &[(u32, u32, u32, u32)] = &[
+        (510, 512, 8, 128),
+        (TILED_ADMITTED_TOKENS, 32, 8, 128),
+        (TILED_ADMITTED_TOKENS + 32, 96, 4, 256),
+    ];
 
     let count_admitted = |var_value: Option<&str>| -> usize {
         temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", var_value, || {
@@ -1853,7 +1862,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn push_tiled_gemm_body_rejects_an_empty_token_axis_group() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let block = TiledGemmBlock {
         weight: 0,
         other: 1,
@@ -1889,7 +1898,7 @@ fn push_tiled_gemm_body_rejects_an_empty_token_axis_group() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn push_tiled_gemm_body_rejects_an_axis_not_in_output_axes() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let block = TiledGemmBlock {
         weight: 0,
         other: 1,
@@ -2506,11 +2515,11 @@ fn coord_index32_single_token_shape_is_admitted_with_same_narrowing() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn many_token_matmul_takes_the_tiled_gemm_path() {
-    // 16 tokens clears TILED_GEMM_MIN_TOKENS (8); 4 weight rows is
+    // exactly TILED_GEMM_MIN_TOKENS tokens clears the gate; 4 weight rows is
     // deliberately NOT a multiple of TILE_DIM (8), exercising the
     // boundary-tile mask on the feature axis in the same test that
     // proves the path is taken at all.
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
@@ -2524,14 +2533,14 @@ fn many_token_matmul_takes_the_tiled_gemm_path() {
             &[1, 0]
         )
         .is_some(),
-        "16 tokens must clear TILED_GEMM_MIN_TOKENS"
+        "TILED_GEMM_MIN_TOKENS tokens must clear TILED_GEMM_MIN_TOKENS"
     );
     let source = emit(&bound, &q4k, NumericPolicy::default())
         .expect("emits")
         .source;
     assert!(
         source.contains("simdgroup_multiply_accumulate"),
-        "a 16-token dispatch must take the tiled GEMM path:\n{source}"
+        "a TILED_GEMM_MIN_TOKENS-token dispatch must take the tiled GEMM path:\n{source}"
     );
     assert!(
         source.contains("simdgroup_load"),
@@ -2644,7 +2653,7 @@ fn wide_weight_stage_msl_dump_for_the_real_q4_0_shape() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn staging_switches_default_on_render_unless_explicitly_disabled() {
-    let (bound, weight_node) = real_shaped_tiled_gemm_op(16, 256, 4);
+    let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
 
@@ -2728,7 +2737,7 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
 fn non_q4k_codec_never_takes_the_tiled_gemm_path() {
     // Q5_K/Q6_K are explicitly out of scope (ROW 107) -- unmeasured on
     // this path, and their unpack has no batched form to reuse.
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q6k = BTreeMap::new();
     q6k.insert(weight_node, Codec::Q6K);
@@ -2762,7 +2771,7 @@ fn non_q4k_codec_never_takes_the_tiled_gemm_path() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
@@ -2794,7 +2803,7 @@ fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn wide_weight_stage_emits_ushort_wide_q4_0_decode_when_switch_on() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
@@ -2822,7 +2831,7 @@ fn wide_weight_stage_emits_ushort_wide_q4_0_decode_when_switch_on() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn wide_weight_stage_unset_is_byte_identical_to_switch_disabled_for_tiled_and_packed_row_q4_0() {
-    let tiled_bound = tiled_gemm_op(16, 256, 4);
+    let tiled_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let tiled_weight = tiled_bound.operands()[0].0;
     let mut tiled_q4_0 = BTreeMap::new();
     tiled_q4_0.insert(tiled_weight, Codec::Q4_0);
@@ -2982,7 +2991,7 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn q4_0_never_takes_the_tiled_gemm_path_with_the_switch_explicitly_off() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
@@ -3016,7 +3025,7 @@ fn q4_0_never_takes_the_tiled_gemm_path_with_the_switch_explicitly_off() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn q4_0_takes_the_tiled_gemm_path_when_unset() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
@@ -3063,7 +3072,7 @@ fn q4_0_takes_the_tiled_gemm_path_when_unset() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn q4_0_takes_the_tiled_gemm_path_with_the_switch_on() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
@@ -3118,7 +3127,7 @@ fn q4_0_takes_the_tiled_gemm_path_with_the_switch_on() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn q4_0_broadcast_epilogue_declines_tiled_gemm_admission_without_erroring() {
-    let mut bound = tiled_gemm_op(16, 256, 4);
+    let mut bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
@@ -3201,7 +3210,7 @@ fn tiled_gemm_block_k_chunk_aligned_rejects_a_ragged_combination() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn classify_tiled_gemm_admits_todays_real_sized_block_k_for_both_codecs() {
-    let bound = tiled_gemm_op(16, 256, 4);
+    let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
 
     let mut q4k = BTreeMap::new();

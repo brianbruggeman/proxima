@@ -141,9 +141,9 @@ fn fused_matmul_kernel() -> omega::Kernel {
     .expect("matmul emits")
 }
 
-/// `simdgroup_matrix`-tiled Q4_K GEMM (ROW 107) -- 16 tokens clears
-/// `TILED_GEMM_MIN_TOKENS` (8), 4 weight rows is deliberately not a multiple
-/// of `TILE_DIM` (8) so the boundary-tile mask is present in the emitted
+/// `simdgroup_matrix`-tiled Q4_K GEMM (ROW 107) -- exactly
+/// `TILED_GEMM_MIN_TOKENS` tokens clears the gate, 4 weight rows is deliberately
+/// not a multiple of `TILE_DIM` (8) so the boundary-tile mask is present in the emitted
 /// source this gate hands to the real Metal compiler.
 #[cfg(feature = "metal-tiled-gemm")]
 fn tiled_gemm_q4k_kernel() -> omega::Kernel {
@@ -160,7 +160,10 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
         &mut program,
         Op::Input {
             dtype: DType::Float32,
-            shape: vec![Extent::Static(256), Extent::Static(16)],
+            shape: vec![
+                Extent::Static(256),
+                Extent::Static(omega::sized::TILED_GEMM_MIN_TOKENS as u32),
+            ],
             name: None,
         },
     );

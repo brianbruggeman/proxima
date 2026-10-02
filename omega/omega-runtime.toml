@@ -47,10 +47,18 @@ split_k_max_rows = 4096
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the
 # `simdgroup_matrix`-tiled path (`push_tiled_gemm_body`) — see
 # sized::TILED_GEMM_MIN_TOKENS. `feature = "metal-tiled-gemm"`-only; emitted
-# only when that feature is active. 9 because gemma4-E2B's 8-token verify step
-# measured 149.764 ms on the row-blocked body against 178.214 ms tiled
-# (N=14 each, KV ~1600, speculative_bench --verify-width-sweep).
-min_tokens = 9
+# only when that feature is active. 160 because the row-blocked body re-streams
+# the weights once per 8-row group while the tiled body pays a fixed ~110 ms
+# over it and re-streams once per 32-row tile, so tiled only wins once its
+# cheaper per-row slope has repaid that offset. gemma4-E2B Q4_0, KV ~1150,
+# median ms per forward, row-blocked / tiled (14 runs over 2 interleaved
+# processes, CoV <= 0.4%, speculative_bench --verify-width-sweep): 9 rows
+# 73 / 175, 32 rows 141 / 191, 64 rows 272 / 294, 120 rows 650 / 671, 129 rows
+# 765 / 783, 144 rows 800 / 809, 160 rows 862 / 812, 192 rows 1012 / 937, 512
+# rows 2663 / 2411. 128 rows is a lone tiled win (666 / 636): the tiled cost
+# steps up at every 32-row tile edge, so 129..144 lose again. Ubatch-32
+# prefill: 495 tok/s row-blocked, 364 tiled.
+min_tokens = 160
 
 # per-threadgroup output tile shape (ROW 109 redesign) — ports
 # `ggml-metal.metal:6487` (`BLOCK_SIZE_M`). Must be a multiple of 16 (2
