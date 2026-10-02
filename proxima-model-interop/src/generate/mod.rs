@@ -226,6 +226,8 @@ mod cpu_forward_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prompt_cache_real_model_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod prompt_cache_chunk_shift_real_model_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prewarm_real_model_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod block_index_real_model_tests;

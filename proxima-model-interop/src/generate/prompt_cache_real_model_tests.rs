@@ -487,7 +487,7 @@ fn rewriting_past_the_ring_slack_restores_a_checkpoint_with_speculation_on() {
     rewrite_beyond_slack(SpeculativeConfig::default());
 }
 
-fn long_document(chars: usize) -> String {
+pub(super) fn long_document(chars: usize) -> String {
     ["rag011", "rag016", "rag013", "rag008", "rag012", "rag004"]
         .iter()
         .map(|id| corpus_document(id))
