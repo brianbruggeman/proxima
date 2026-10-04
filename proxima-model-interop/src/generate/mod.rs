@@ -212,6 +212,8 @@ mod device_kv;
 mod greedy_device;
 mod prompt_cache;
 mod prompt_cache_key;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+mod resident_plans;
 #[cfg(test)]
 mod alloc_probe;
 mod arena;
@@ -246,6 +248,8 @@ mod block_index_real_model_tests;
 mod follow_up_conditioning_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod thread_index_census_tests;
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+mod resident_plans_real_model_tests;
 use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use device_kv::{DeviceKv, KvLeafNodes, kv_leaf_nodes};

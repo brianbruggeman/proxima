@@ -2591,6 +2591,8 @@ pub(super) mod memory_fit_gate_tests {
             expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,
             prompt_cache: std::sync::Mutex::new(crate::generate::PromptCache::new()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            plan_life: crate::generate::Arc::new(()),
             prewarm_gate: crate::generate::PrewarmGate::new(),
             prewarm_queue: crate::generate::PrewarmQueue::new(),
         }

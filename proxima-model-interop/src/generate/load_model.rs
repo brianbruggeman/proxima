@@ -1012,6 +1012,13 @@ pub struct LoadedModel<'file> {
     /// type stays `Sync` behind an `Arc`); held only to take an entry out or
     /// put one back, never across a decode.
     pub(super) prompt_cache: std::sync::Mutex<super::PromptCache>,
+    /// This model's identity for [`super::resident_plans`]: every thread's
+    /// resident decode plans hold only a `Weak` to it, so dropping the model,
+    /// or replacing the token because a `&mut self` method changed what a
+    /// plan was built against ([`Self::attach_indexed_expert_sidecar`]),
+    /// orphans them.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) plan_life: Arc<()>,
     /// Who may use the device, a request or an anticipatory prefill
     /// ([`super::prewarm_gate`]'s module doc).
     pub(super) prewarm_gate: super::PrewarmGate,
@@ -1201,6 +1208,14 @@ pub(super) fn fused_segment_experts_are_current_layer(
 #[cfg(feature = "metal")]
 impl Drop for LoadedModel<'_> {
     fn drop(&mut self) {
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        {
+            // orphan, then free, this thread's resident plans before the
+            // checkpoint mapping they were built over goes away; other
+            // threads free theirs on their next access
+            self.plan_life = Arc::new(());
+            super::resident_plans::release_orphans();
+        }
         release_resident_names(self.resident_names().iter().copied());
         unregister_checkpoint_mapping(self.checkpoint_mapping);
     }
