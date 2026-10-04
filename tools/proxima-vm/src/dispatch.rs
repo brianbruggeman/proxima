@@ -114,6 +114,11 @@ impl FfiRecordingDispatcher {
     /// Constructed by this module's own `#[cfg(test)]` tests directly, and
     /// by [`run_dispatch_loop`] as the one dispatcher a real VM-exit run
     /// drives.
+    #[cfg(any(
+        test,
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     pub(crate) fn new(configured_response: ChildResponse) -> Self {
         Self {
             configured_response,
@@ -122,6 +127,11 @@ impl FfiRecordingDispatcher {
     }
 
     /// The requests this dispatcher has been called with, in call order.
+    #[cfg(any(
+        test,
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     pub(crate) fn requests(&self) -> Vec<ChildRequest> {
         self.recorded_requests
             .lock()

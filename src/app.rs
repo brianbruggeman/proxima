@@ -115,7 +115,7 @@ pub struct App {
     all(
         feature = "serve-prime",
         feature = "runtime-prime-reactor",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     )
 ))]
 fn resolve_cores(explicit: Option<usize>) -> Result<usize, ProximaError> {
@@ -197,7 +197,7 @@ fn resolve_default_runtime_selection(
         feature = "serve-prime",
         feature = "runtime-prime-reactor",
         feature = "tokio",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     {
         // tokio-compat: the prime transport (accept/serve/codec) needs no
@@ -217,7 +217,7 @@ fn resolve_default_runtime_selection(
         feature = "serve-prime",
         feature = "runtime-prime-reactor",
         not(feature = "tokio"),
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     {
         let runtime: Arc<dyn Runtime> = Arc::new(crate::runtime::PrimeRuntime::new(
@@ -230,7 +230,7 @@ fn resolve_default_runtime_selection(
         not(all(
             feature = "serve-prime",
             feature = "runtime-prime-reactor",
-            any(target_os = "linux", target_os = "macos")
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
         ))
     ))]
     {
@@ -244,7 +244,7 @@ fn resolve_default_runtime_selection(
         not(all(
             feature = "serve-prime",
             feature = "runtime-prime-reactor",
-            any(target_os = "linux", target_os = "macos")
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
         ))
     ))]
     {
@@ -2146,7 +2146,7 @@ mod tests {
             all(
                 feature = "serve-prime",
                 feature = "runtime-prime-reactor",
-                any(target_os = "linux", target_os = "macos")
+                any(target_os = "linux", target_os = "macos", target_os = "windows")
             )
         )
     ))]

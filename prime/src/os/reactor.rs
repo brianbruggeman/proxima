@@ -1,6 +1,5 @@
-//! per-core I/O readiness reactor. POSIX-only (`kqueue` on macOS,
-//! `epoll` on Linux) via raw `libc::*` syscalls — zero added deps beyond
-//! the optional `libc` crate gated on this feature.
+//! per-core readiness reactor: kqueue on macOS, epoll on Linux, and
+//! polling's IOCP socket backend on Windows.
 //!
 //! design: single-thread-owned (`!Send`). source slab keyed by `SourceKey`
 //! (slab index + generation); each slot stores read/write wakers inline.
@@ -13,11 +12,22 @@
 //! needs them.
 
 use std::io;
+#[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(unix)]
+pub type RawSource = RawFd;
+#[cfg(windows)]
+pub type RawSource = std::os::windows::io::RawSocket;
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool, Ordering};
 use std::task::Waker;
 use std::time::Duration;
+
+use crossbeam_queue::SegQueue;
+#[cfg(unix)]
+pub(crate) type OwnedSource = std::os::fd::OwnedFd;
+#[cfg(windows)]
+pub(crate) type OwnedSource = std::os::windows::io::OwnedSocket;
 
 /// shared wake state. cheap to clone (shares an `Arc`). external threads
 /// `fire()` it to interrupt the owning worker's `Reactor::turn` call.
@@ -37,6 +47,10 @@ pub struct Wakeup {
 
 struct WakeupInner {
     needs_wake: AtomicBool,
+    alive: AtomicBool,
+    cancellations: SegQueue<(SourceKey, OwnedSource)>,
+    #[cfg(windows)]
+    poller: Arc<polling::Poller>,
     #[cfg(target_os = "macos")]
     kq: RawFd,
     #[cfg(target_os = "macos")]
@@ -70,7 +84,9 @@ impl Wakeup {
     /// visible). One side always acts.
     pub fn fire(&self) {
         atomic::fence(Ordering::SeqCst);
-        if !self.inner.needs_wake.load(Ordering::Acquire) {
+        if !self.inner.alive.load(Ordering::Acquire)
+            || !self.inner.needs_wake.load(Ordering::Acquire)
+        {
             return;
         }
         // race: another producer may have already won and cleared the flag.
@@ -79,6 +95,26 @@ impl Wakeup {
         if self.inner.needs_wake.swap(false, Ordering::AcqRel) {
             self.fire_syscall();
         }
+    }
+
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn release_source(&self, key: SourceKey, socket: OwnedSource) {
+        if !self.inner.alive.load(Ordering::Acquire) {
+            return;
+        }
+        self.inner.cancellations.push((key, socket));
+        self.fire();
+        if !self.inner.alive.load(Ordering::Acquire) {
+            while self.inner.cancellations.pop().is_some() {}
+        }
+    }
+
+    #[cfg(windows)]
+    fn fire_syscall(&self) {
+        let _ = self.inner.poller.notify();
     }
 
     #[cfg(target_os = "macos")]
@@ -188,7 +224,7 @@ mod kqueue {
         next_generation: u32,
         events_buf: Vec<libc::kevent>,
         live_sources: usize,
-        wakeup: super::Wakeup,
+        pub(super) wakeup: super::Wakeup,
     }
 
     impl Reactor {
@@ -222,6 +258,8 @@ mod kqueue {
             let wakeup = super::Wakeup {
                 inner: Arc::new(super::WakeupInner {
                     needs_wake: AtomicBool::new(false),
+                    alive: AtomicBool::new(true),
+                    cancellations: SegQueue::new(),
                     kq,
                     ident: WAKE_IDENT,
                 }),
@@ -436,6 +474,7 @@ mod kqueue {
         }
 
         pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+            self.drain_cancellations()?;
             let timespec = timeout.map(|duration| libc::timespec {
                 tv_sec: duration.as_secs() as libc::time_t,
                 tv_nsec: libc::c_long::from(duration.subsec_nanos() as i32),
@@ -471,6 +510,7 @@ mod kqueue {
             if count == 0 {
                 crate::trace::record_reactor_timeout();
             }
+            self.drain_cancellations()?;
             let mut fired = 0;
             for event in &self.events_buf[..count as usize] {
                 if event.filter == libc::EVFILT_USER {
@@ -578,10 +618,16 @@ mod kqueue {
 
     impl Drop for Reactor {
         fn drop(&mut self) {
-            // SAFETY: kq was created by kqueue(); closing once is correct.
-            unsafe {
-                libc::close(self.kq);
+            for index in 0..self.slab.len() {
+                let generation = self.slab[index].generation;
+                if generation != 0 {
+                    let _ = self.deregister(SourceKey {
+                        index: index as u32,
+                        generation,
+                    });
+                }
             }
+            self.retire();
         }
     }
 
@@ -611,7 +657,7 @@ mod epoll {
         next_generation: u32,
         events_buf: Vec<libc::epoll_event>,
         live_sources: usize,
-        wakeup: super::Wakeup,
+        pub(super) wakeup: super::Wakeup,
     }
 
     impl Reactor {
@@ -643,6 +689,8 @@ mod epoll {
             let wakeup = super::Wakeup {
                 inner: Arc::new(super::WakeupInner {
                     needs_wake: AtomicBool::new(false),
+                    alive: AtomicBool::new(true),
+                    cancellations: SegQueue::new(),
                     eventfd,
                 }),
             };
@@ -859,6 +907,7 @@ mod epoll {
         }
 
         pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+            self.drain_cancellations()?;
             let timeout_ms: i32 = match timeout {
                 None => -1,
                 Some(duration) => {
@@ -890,6 +939,7 @@ mod epoll {
             if count == 0 {
                 crate::trace::record_reactor_timeout();
             }
+            self.drain_cancellations()?;
             let mut fired = 0;
             for event in &self.events_buf[..count as usize] {
                 if event.u64 == WAKE_COOKIE {
@@ -963,9 +1013,9 @@ mod epoll {
         fn drop(&mut self) {
             // SAFETY: epfd and eventfd were created by us.
             unsafe {
-                libc::close(self.eventfd);
                 libc::close(self.epfd);
             }
+            self.retire();
         }
     }
 
@@ -990,8 +1040,48 @@ pub use kqueue::Reactor;
 // packed (gen, index) tuple, treated as `u64`.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 unsafe impl Send for Reactor {}
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-compile_error!("runtime-prime-reactor requires macOS (kqueue) or Linux (epoll)");
+#[cfg(windows)]
+#[path = "reactor_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::Reactor;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+compile_error!("runtime-prime-reactor requires macOS, Linux, or Windows");
+
+impl Reactor {
+    pub(crate) fn owns(&self, owner: &Wakeup) -> bool {
+        self.wakeup.same_owner(owner)
+    }
+
+    fn drain_cancellations(&mut self) -> io::Result<()> {
+        while let Some((key, _socket)) = self.wakeup.inner.cancellations.pop() {
+            self.deregister(key)?;
+        }
+        Ok(())
+    }
+
+    fn retire(&self) {
+        self.wakeup.inner.alive.store(false, Ordering::Release);
+        // pairs with fire after queue publication, so shutdown or the producer drains every handle.
+        atomic::fence(Ordering::SeqCst);
+        while self.wakeup.inner.cancellations.pop().is_some() {}
+    }
+}
+
+impl Drop for WakeupInner {
+    fn drop(&mut self) {
+        // wake handles can outlive the reactor, so their syscall resource follows the arc.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            libc::close(self.kq);
+        }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::close(self.eventfd);
+        }
+    }
+}
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

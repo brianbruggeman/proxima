@@ -15,13 +15,14 @@
 use super::port::{self, Port};
 use super::{DpdkError, Eal, Mempool, RawMbuf};
 use crate::stack::{self, Action};
+use crate::tcp_dial::{DialGuard, DialLease};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, TcpStack};
 use core::future::Future;
 use core::pin::pin;
 use futures::io::{AsyncRead, AsyncWrite};
 use proxima_primitives::stream::{
-    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
+    BindAddr, ConnectFuture, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
 };
 use proxima_primitives::sync::{AsyncMutex, AsyncMutexGuard};
 use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
@@ -55,6 +56,7 @@ struct State {
 
 struct Shared {
     inner: AsyncMutex<State>,
+    dial: Option<Arc<DialLease>>,
 }
 
 // SAFETY: the dpdk resources are reached only under `inner`'s lock and the
@@ -69,7 +71,15 @@ impl Shared {
     // waker is queued and re-woken on release instead of parking.
     fn poll_lock(&self, cx: &mut Context<'_>) -> Poll<AsyncMutexGuard<'_, State>> {
         let lock_future = pin!(self.inner.lock());
-        lock_future.poll(cx)
+        match lock_future.poll(cx) {
+            Poll::Ready(mut state) => {
+                if let Some(dial) = &self.dial {
+                    dial.reclaim(&mut state.stack);
+                }
+                Poll::Ready(state)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -115,6 +125,7 @@ impl DpdkStreamListener {
         Ok(Self {
             shared: Arc::new(Shared {
                 inner: AsyncMutex::new(state),
+                dial: None,
             }),
             local_addr: SocketAddr::V4(bind),
         })
@@ -293,6 +304,7 @@ impl StreamListener for DpdkStreamListener {
                 shared: self.shared.clone(),
                 id,
                 peer,
+                dial: None,
             }));
         }
         cx.waker().wake_by_ref();
@@ -310,6 +322,7 @@ pub struct DpdkStreamConnection {
     shared: Arc<Shared>,
     id: ConnId,
     peer: SocketAddr,
+    dial: Option<DialGuard>,
 }
 
 impl StreamConnection for DpdkStreamConnection {
@@ -330,7 +343,10 @@ impl AsyncRead for DpdkStreamConnection {
             Poll::Pending => return Poll::Pending,
         };
         state.pump();
-        let read = state.stack.read(this.id, buf);
+        let read = match &this.dial {
+            Some(dial) => dial.read(&mut state.stack, buf)?,
+            None => state.stack.read(this.id, buf),
+        };
         if read > 0 {
             return Poll::Ready(Ok(read));
         }
@@ -355,15 +371,26 @@ impl AsyncWrite for DpdkStreamConnection {
             Poll::Pending => return Poll::Pending,
         };
         let now = state.now();
-        let outbound = state.stack.write(this.id, buf, now);
+        let outbound = match &this.dial {
+            Some(dial) => dial.write(&mut state.stack, buf, now)?,
+            None => state.stack.write(this.id, buf, now),
+        };
         for (peer, segment) in outbound {
             state.tx_segment(peer, &segment);
         }
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let Some(dial) = &this.dial else {
+            return Poll::Ready(Ok(()));
+        };
+        let state = match this.shared.poll_lock(context) {
+            Poll::Ready(state) => state,
+            Poll::Pending => return Poll::Pending,
+        };
+        Poll::Ready(dial.flush(&state.stack))
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -374,17 +401,15 @@ impl AsyncWrite for DpdkStreamConnection {
             Poll::Ready(guard) => guard,
             Poll::Pending => return Poll::Pending,
         };
-        let outbound = state.stack.close(this.id);
+        let outbound = match &this.dial {
+            Some(dial) => dial.close(&mut state.stack)?,
+            None => state.stack.close(this.id),
+        };
         for (peer, segment) in outbound {
             state.tx_segment(peer, &segment);
         }
         Poll::Ready(Ok(()))
     }
-}
-
-enum ConnectPhase {
-    Resolving,
-    Connecting(ConnId),
 }
 
 /// A dpdk-backed active-open TCP client: ARP-resolves the peer, drives the
@@ -394,7 +419,6 @@ pub struct DpdkStreamUpstream {
     shared: Arc<Shared>,
     peer_ip: [u8; 4],
     peer_port: u16,
-    phase: AsyncMutex<ConnectPhase>,
 }
 
 impl DpdkStreamUpstream {
@@ -438,70 +462,80 @@ impl DpdkStreamUpstream {
         Ok(Self {
             shared: Arc::new(Shared {
                 inner: AsyncMutex::new(state),
+                dial: Some(Arc::new(DialLease::new((peer.ip().octets(), peer.port())))),
             }),
             peer_ip: peer.ip().octets(),
             peer_port: peer.port(),
-            phase: AsyncMutex::new(ConnectPhase::Resolving),
         })
-    }
-
-    fn poll_phase_lock(&self, cx: &mut Context<'_>) -> Poll<AsyncMutexGuard<'_, ConnectPhase>> {
-        let lock_future = pin!(self.phase.lock());
-        lock_future.poll(cx)
     }
 }
 
 impl StreamUpstream for DpdkStreamUpstream {
     type Conn = DpdkStreamConnection;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        let mut state = match self.shared.poll_lock(cx) {
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+        let mut operation = None;
+        Box::pin(core::future::poll_fn(move |context| {
+            self.poll_dial(context, &mut operation)
+        }))
+    }
+}
+
+impl DpdkStreamUpstream {
+    fn poll_dial(
+        &self,
+        context: &mut Context<'_>,
+        operation: &mut Option<DialGuard>,
+    ) -> Poll<io::Result<DpdkStreamConnection>> {
+        let mut state = match self.shared.poll_lock(context) {
             Poll::Ready(guard) => guard,
             Poll::Pending => return Poll::Pending,
+        };
+        let Some(lease) = &self.shared.dial else {
+            return Poll::Ready(Err(io::Error::other("missing upstream tuple lease")));
+        };
+        if operation.is_none() {
+            *operation = Some(lease.claim(&mut state.stack)?);
+        }
+        let Some(dial) = operation.as_mut() else {
+            return Poll::Ready(Err(io::Error::other("missing dial ownership")));
         };
         state.pump();
-        let mut phase = match self.poll_phase_lock(cx) {
-            Poll::Ready(guard) => guard,
-            Poll::Pending => return Poll::Pending,
-        };
-        match *phase {
-            ConnectPhase::Resolving => {
-                if let Some(&mac) = state.arp.get(&self.peer_ip) {
-                    let peer = Endpoint {
-                        mac,
-                        ip: self.peer_ip,
-                        port: self.peer_port,
-                    };
-                    let (id, outbound) = state.stack.connect(peer);
-                    for (target, segment) in outbound {
-                        state.tx_segment(target, &segment);
-                    }
-                    *phase = ConnectPhase::Connecting(id);
-                } else {
-                    state.send_arp_request(self.peer_ip);
-                }
+        if let Some(id) = dial.connection() {
+            if !dial.owns(&state.stack) {
+                return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
             }
-            ConnectPhase::Connecting(id) => {
-                let mut connected = false;
-                while let Some(connected_id) = state.stack.poll_connected() {
-                    if connected_id == id {
-                        connected = true;
-                    }
-                }
-                if connected {
-                    let peer = SocketAddr::V4(SocketAddrV4::new(
-                        Ipv4Addr::from(self.peer_ip),
-                        self.peer_port,
-                    ));
+            while let Some(connected) = state.stack.poll_connected() {
+                if connected == id && dial.connected(&state.stack) {
+                    let Some(dial) = operation.take() else {
+                        return Poll::Ready(Err(io::Error::other("missing dial ownership")));
+                    };
+                    let dial = dial.complete(&state.stack)?;
                     return Poll::Ready(Ok(DpdkStreamConnection {
-                        shared: self.shared.clone(),
+                        shared: Arc::clone(&self.shared),
+                        dial: Some(dial),
                         id,
-                        peer,
+                        peer: SocketAddr::V4(SocketAddrV4::new(
+                            Ipv4Addr::from(self.peer_ip),
+                            self.peer_port,
+                        )),
                     }));
                 }
             }
+        } else if let Some(&mac) = state.arp.get(&self.peer_ip) {
+            let peer = Endpoint {
+                mac,
+                ip: self.peer_ip,
+                port: self.peer_port,
+            };
+            let outbound = dial.start(&mut state.stack, peer)?;
+            for (target, segment) in outbound {
+                state.tx_segment(target, &segment);
+            }
+        } else {
+            state.send_arp_request(self.peer_ip);
         }
-        cx.waker().wake_by_ref();
+        context.waker().wake_by_ref();
         Poll::Pending
     }
 }

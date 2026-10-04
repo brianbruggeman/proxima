@@ -37,7 +37,15 @@ use crate::elf::Segment;
 #[derive(Debug)]
 struct MappedSegment {
     guest_address: u64,
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     host_address: *mut core::ffi::c_void,
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     mapped_size: usize,
 }
 

@@ -309,7 +309,7 @@ mod tests {
     // pure tokio-only build (no prime features at all, newly reachable now
     // that `tcp` no longer smuggles `serve-prime` in — see the umbrella
     // Cargo.toml's `tcp` doc) compiles none of them.
-    #[cfg(feature = "runtime-prime-reactor")]
+    #[cfg(all(unix, feature = "runtime-prime-reactor"))]
     use std::task::Poll;
 
     use super::*;

@@ -3,3 +3,7 @@
 # Scoped to the wasm target so no host build sees this flag.
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
+[env]
+# rust uses the non-debug CRT even when native dependencies retain debug symbols.
+CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = "scripts/cmake/windows-msvc-runtime.cmake", relative = true, force = false }

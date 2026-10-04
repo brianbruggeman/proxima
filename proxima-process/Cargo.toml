@@ -18,14 +18,15 @@ alloc = []
 # pty_pipe, fork_server, fd_pipe, command_settings, spawn, pty) that
 # require std::io / std::path / std::os::unix / std::thread.
 std = ["alloc"]
+getrandom = []
 
 [dependencies]
 bon.workspace = true
 bytes.workspace = true
 conflaguration = { workspace = true, features = ["derive", "toml"] }
 futures = { workspace = true, features = ["executor"] }
+getrandom = { version = "0.4", default-features = false }
 libc.workspace = true
-nix = { version = "0.31.3", features = ["poll", "ioctl", "socket", "net", "term", "process", "signal", "fs", "uio"] }
 postcard = { workspace = true, features = ["alloc"] }
 proxima-primitives = { workspace = true, features = ["std"] }
 proxima-protocols = { workspace = true, features = ["process"] }
@@ -59,3 +60,9 @@ required-features = ["std"]
 [[bench]]
 name = "bench_libc_shim"
 harness = false
+
+[target."cfg(unix)".dependencies]
+nix = { version = "0.31.3", features = ["poll", "ioctl", "socket", "net", "term", "process", "signal", "fs", "uio"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Globalization", "Win32_System_Diagnostics_ToolHelp"] }

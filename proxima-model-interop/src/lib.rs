@@ -58,7 +58,7 @@ pub mod residency;
 // bundle). Keep `cfg(test)` so its unit tests remain available in a bare
 // alloc-tier test build without making a plain `--features std` library carry
 // an unreachable module under `warnings = "deny"`.
-#[cfg(any(test, all(feature = "std", feature = "metal")))]
+#[cfg(any(test, all(feature = "std", feature = "metal", target_os = "macos")))]
 mod memory_fit;
 #[cfg(feature = "std")]
 mod quality;

@@ -59,7 +59,9 @@ use core::future::Future;
 use core::marker::PhantomData;
 use core::ops::Range;
 
-use memmap2::{Advice, Mmap};
+#[cfg(unix)]
+use memmap2::Advice;
+use memmap2::Mmap;
 #[cfg(feature = "mlx-gdn")]
 use omega::mlx;
 use proxima_gguf::GgmlType;
@@ -101,11 +103,12 @@ use omega::backend::execute_plan_named;
 use omega::backend::execute_plan_named_metal_op_timed;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use omega::backend::mark_plan_time_constants_resident;
 #[cfg(feature = "metal")]
 use omega::backend::{
     Engine, Plan, clear_expert_source_cache, execute_plan_named_with_expert_sources, mark_resident,
-    mark_plan_time_constants_resident, plan_named, plan_named_exact, release_resident_names,
-    unregister_checkpoint_mapping,
+    plan_named, plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same

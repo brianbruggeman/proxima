@@ -294,6 +294,10 @@ mod platform {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     use super::GuestMemoryRegion;
 
     #[cfg(any(

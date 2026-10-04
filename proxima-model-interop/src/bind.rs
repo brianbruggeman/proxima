@@ -526,7 +526,7 @@ pub(crate) fn checkpoint_has_qk_norm(parsed: &ParsedGguf) -> bool {
 // `generate.rs`'s `load_inner` is this function's only caller, itself only
 // reachable from the metal-gated load-time memory-fit gate -- a plain
 // `--features std` build with no metal has no call site at all.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 #[must_use]
 pub(crate) fn tensor_bytes_by_class(parsed: &ParsedGguf) -> (u64, u64, u64) {
     let mut dense_bytes = 0u64;
@@ -4564,7 +4564,7 @@ mod moe_memory_shape {
 /// non-sharing justification as `real_mixtral_file::MappedGguf`'s own doc
 /// (private to its module, no shared home for a two-line mmap wrapper three
 /// fixture-specific test modules all happen to want).
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_qwen3moe_file {
     use super::*;
@@ -4898,7 +4898,7 @@ mod real_qwen3moe_file {
 // `#[ignore]`d, and fails loudly naming the missing checkpoint when the
 // host-local model cache is absent -- see
 // `crate::test_support::require_fixture`.
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_openchat_file {
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -6812,7 +6812,7 @@ mod real_openchat_file {
 // decode. `#[ignore]`d, and fails loudly naming the missing checkpoint when
 // the host-local model cache is absent, the same convention every other
 // `real_*` module in this file uses (`crate::test_support::require_fixture`).
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod draft_acceptance {
     use core::future::Future;
@@ -7209,7 +7209,7 @@ mod draft_acceptance {
 // prefix and each of the 8 experts' own `Q4_K` byte range for one layer's
 // `ffn_gate` projection are
 // read via direct `seek`+`read` -- never the whole 25 GB file.
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_mixtral_file {
     use std::io::{Read, Seek, SeekFrom};
@@ -7708,7 +7708,7 @@ mod real_mixtral_file {
 // (a separate, larger `proxima-tensor` gap, out of this change's scope), so
 // this module only proves `architecture_from_metadata`'s own read is
 // correct and non-fatal, never attempts a forward pass.
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_lfm2_hybrid_file {
     use std::io::{Read, Seek, SeekFrom};

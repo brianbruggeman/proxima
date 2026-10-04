@@ -1,19 +1,24 @@
+#[cfg(unix)]
 use std::future::IntoFuture;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use futures::channel::oneshot;
 use proxima::{
-    DynPipelineControlPlane, FsPipelineControlPlane, HttpListenProtocol, ListenProtocol,
-    ListenProtocolFluent, McpListenProtocol, PipelineControlPlanePipe, ProximaError, ServeContext,
-    into_handle, serve_h1_connection,
+    DynPipelineControlPlane, FsPipelineControlPlane, ListenProtocol, McpListenProtocol,
+    PipelineControlPlanePipe, ProximaError, ServeContext, into_handle, serve_h1_connection,
 };
+#[cfg(unix)]
+use proxima::{HttpListenProtocol, ListenProtocolFluent};
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::error;
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -111,6 +116,12 @@ async fn serve(
             "pick exactly one of --unix / --stdio / --mcp-stdio / --mcp-unix".into(),
         ));
     }
+    #[cfg(windows)]
+    if unix.is_some() || mcp_unix.is_some() {
+        return Err(ProximaError::Config(
+            "daemon unix sockets require Unix; use --stdio or --mcp-stdio".into(),
+        ));
+    }
     let state_dir = state_dir.unwrap_or_else(default_state_dir);
     // arm the recording spigot with a tokio-backed runtime (we are under
     // #[tokio::main]); the FS control plane's per-pipeline durables stay inert
@@ -137,6 +148,24 @@ async fn serve(
                 .into(),
         )
     })?;
+    serve_unix(handle, &unix_path).await
+}
+
+#[cfg(not(unix))]
+async fn serve_unix(
+    _handle: proxima::PipeHandle,
+    _path: &std::path::Path,
+) -> Result<(), ProximaError> {
+    Err(ProximaError::Config(
+        "daemon unix sockets require Unix; use --stdio".into(),
+    ))
+}
+
+#[cfg(unix)]
+async fn serve_unix(
+    handle: proxima::PipeHandle,
+    unix_path: &std::path::Path,
+) -> Result<(), ProximaError> {
     let protocol = HttpListenProtocol::default();
     let spec = serde_json::json!({ "path": unix_path.to_string_lossy() });
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -188,6 +217,7 @@ async fn serve(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn probe_uds_until_ready(path: &std::path::Path) -> Result<(), ProximaError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -256,4 +286,38 @@ async fn serve_stdio(handle: proxima::PipeHandle) -> Result<(), ProximaError> {
     // prefix would corrupt the response stream.
     let duplex = tokio::io::join(tokio::io::stdin(), tokio::io::stdout()).compat();
     serve_h1_connection(duplex, handle, None, None).await
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{ProximaError, serve};
+
+    #[proxima::test]
+    async fn windows_cli_server_uds_rejects_before_state_creation() {
+        let directory = tempfile::tempdir().expect("create daemon test directory");
+        let socket = directory.path().join("daemon.sock");
+        let state = directory.path().join("nonexistent-state");
+
+        let http_error = serve(
+            Some(socket.clone()),
+            false,
+            false,
+            None,
+            Some(state.clone()),
+        )
+        .await
+        .expect_err("reject HTTP Unix socket mode on Windows");
+        assert!(
+            matches!(http_error, ProximaError::Config(message) if message.contains("require Unix"))
+        );
+        assert!(!state.exists(), "HTTP refusal must precede state creation");
+
+        let mcp_error = serve(None, false, false, Some(socket), Some(state.clone()))
+            .await
+            .expect_err("reject MCP Unix socket mode on Windows");
+        assert!(
+            matches!(mcp_error, ProximaError::Config(message) if message.contains("require Unix"))
+        );
+        assert!(!state.exists(), "MCP refusal must precede state creation");
+    }
 }

@@ -40,6 +40,7 @@ use serde_json::{Map, Value};
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::alloc_tier;
 
+#[cfg(unix)]
 use super::command_pipe::{CommandPipe, CommandPipeBuilder, Set};
 use super::descriptor::{CommandDescriptor, Stdio};
 use super::env::Env;
@@ -460,6 +461,7 @@ impl CommandConfig {
     /// builder. The chain is type-erased through a
     /// [`alloc_tier::PipeHandle`]; the caller's only remaining step is
     /// `.build()`.
+    #[cfg(unix)]
     pub fn into_pipe_builder(
         self,
     ) -> Result<CommandPipeBuilder<Set<CommandDescriptor>, Set<DispatchChainHandle>>, ProximaError>
@@ -1159,6 +1161,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn into_pipe_builder_returns_fully_set_typestate_builder() {
         let config = CommandConfig::builder()
@@ -1187,13 +1190,16 @@ errno = 13
             config.dispatch,
             DispatchChoice::Deny { errno: 13 }
         ));
-        let pipe = config
-            .into_pipe_builder()
-            .expect("into_pipe_builder")
-            .build();
-        // TARGET 3 — served-Pipe `.name()` is gone; a successful
-        // build() is the behavioral proof.
-        let _ = pipe;
+        #[cfg(unix)]
+        {
+            let pipe = config
+                .into_pipe_builder()
+                .expect("into_pipe_builder")
+                .build();
+            // TARGET 3 — served-Pipe `.name()` is gone; a successful
+            // build() is the behavioral proof.
+            let _ = pipe;
+        }
     }
 
     #[test]

@@ -535,7 +535,7 @@ impl ListenProtocol for AnyListenProtocol {
             // TCP. No TLS/SO_REUSEPORT/TCP_FASTOPEN on UDS (none apply);
             // still gets full ListenerCore/ConnAdmission/drain treatment.
             if let Some(path) = spec_owned.get("path").and_then(Value::as_str) {
-                #[cfg(feature = "uds-listener")]
+                #[cfg(all(unix, feature = "uds-listener"))]
                 {
                     return serve_uds(
                         std::path::PathBuf::from(path),
@@ -554,11 +554,11 @@ impl ListenProtocol for AnyListenProtocol {
                     )
                     .await;
                 }
-                #[cfg(not(feature = "uds-listener"))]
+                #[cfg(not(all(unix, feature = "uds-listener")))]
                 {
                     let _ = path;
                     return Err(ProximaError::Config(
-                        "any listener UDS bind requires the `uds-listener` feature".into(),
+                        "any listener UDS bind requires Unix and the `uds-listener` feature".into(),
                     ));
                 }
             }
@@ -1244,7 +1244,7 @@ async fn drain_requests_only(admission: &ConnAdmission, timeout: std::time::Dura
 /// through the SAME [`ListenerCore`] + [`ConnAdmission`] + drain machinery
 /// as the TCP path, since a control-plane UDS listener deserves the exact
 /// same graceful-shutdown guarantee as a network one.
-#[cfg(feature = "uds-listener")]
+#[cfg(all(unix, feature = "uds-listener"))]
 // the UDS sibling of `serve_via_factory`, so it carries the same
 // listener-scoped state; kept in one signature to stay diffable against it.
 #[allow(clippy::too_many_arguments)]
@@ -1347,10 +1347,10 @@ async fn serve_uds(
 /// no peer address (UDS has none) — the same "collapse onto loopback"
 /// convention [`proxima_listen::peer_ip`] already documents for non-TCP
 /// transports.
-#[cfg(feature = "uds-listener")]
+#[cfg(all(unix, feature = "uds-listener"))]
 struct UdsStream<S>(S);
 
-#[cfg(feature = "uds-listener")]
+#[cfg(all(unix, feature = "uds-listener"))]
 impl<S: AsyncRead + Unpin> AsyncRead for UdsStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -1361,7 +1361,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for UdsStream<S> {
     }
 }
 
-#[cfg(feature = "uds-listener")]
+#[cfg(all(unix, feature = "uds-listener"))]
 impl<S: AsyncWrite + Unpin> AsyncWrite for UdsStream<S> {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -1380,7 +1380,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for UdsStream<S> {
     }
 }
 
-#[cfg(feature = "uds-listener")]
+#[cfg(all(unix, feature = "uds-listener"))]
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> StreamConnection for UdsStream<S> {
     fn peer(&self) -> Option<PeerInfo> {
         Some(PeerInfo::Unix(None))
@@ -2122,7 +2122,7 @@ mod tests {
     // `UnixListener::bind` syscall — never returning the
     // "requires the `uds-listener` feature" config error, and leaving a
     // real socket file on disk — rather than failing immediately.
-    #[cfg(feature = "uds-listener")]
+    #[cfg(all(unix, feature = "uds-listener"))]
     #[proxima::test(runtime = "tokio")]
     async fn any_listener_uds_bind_reaches_the_real_bind_without_http1() {
         let temp_dir = tempfile::tempdir().expect("tempdir");

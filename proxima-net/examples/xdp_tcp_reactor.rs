@@ -160,7 +160,7 @@ fn main() {
                 }
             };
             let outcome = async {
-                let mut conn = poll_fn(|cx| upstream.poll_connect(cx)).await?;
+                let mut conn = upstream.connect_future().await?;
                 let line = b"hello-from-xdp-reactor-connect\n";
                 conn.write_all(line).await?;
                 let mut buf = [0u8; 64];

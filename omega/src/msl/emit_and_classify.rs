@@ -1743,7 +1743,7 @@ pub(super) fn debug_packed_row_block_decline(_node: NodeId, _reason: &PackedRowB
 /// the rejection reason itself already names why) and
 /// [`classify_tiled_gemm`] for the admission/decline verdict, so this can
 /// never drift from the two functions it reports on.
-#[cfg(feature = "instrument")]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 #[allow(
     clippy::too_many_arguments,
     reason = "mirrors the exact field set BoundOpKind::Reduce carries; bundling into a struct would just relocate the count"

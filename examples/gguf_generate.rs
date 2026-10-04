@@ -386,6 +386,7 @@ fn supported_serving_config<'model>(
     // but must not silently switch the model from the full graph to segmented
     // pre-gather because that would make the control arm impossible to run.
     let qwen35moe_pre_gather = settings.qwen35moe_pre_gather;
+    #[cfg(target_os = "macos")]
     let qwen35moe_monolithic_all_low = settings.qwen35moe_monolithic_all_low;
     let kv_bucket_tokens = (settings.kv_bucket_tokens > 0).then_some(settings.kv_bucket_tokens);
     #[cfg(target_os = "macos")]
@@ -397,6 +398,7 @@ fn supported_serving_config<'model>(
     // Full-graph low-codec expert substitution is not yet safe under Metal's
     // concurrent encoder: serial is the correctness-preserving boundary until
     // the missing source-table hazard edge is proven in omega.
+    #[cfg(target_os = "macos")]
     let dispatch_type = if qwen35moe_monolithic_all_low {
         omega::DispatchType::Serial
     } else {
@@ -885,35 +887,38 @@ fn main() {
     // no-copy path (`omega::metal::checkpoint_mapping_offset`) is what
     // replaced `upload_resident_copy`'s per-tensor device copy, not merely
     // a relabeling of the same bytes.
-    println!(
-        "nocopy_buffer_uploads = {}",
-        omega::metal::NOCOPY_BUFFER_UPLOADS.get()
-    );
-    println!(
-        "nocopy_buffer_reuses = {}",
-        omega::metal::NOCOPY_BUFFER_REUSES.get()
-    );
-    println!(
-        "mapping_offset_uploads = {}",
-        omega::metal::MAPPING_OFFSET_UPLOADS.get()
-    );
-    println!(
-        "resident_buffer_uploads = {}",
-        omega::metal::RESIDENT_BUFFER_UPLOADS.get()
-    );
-    println!(
-        "resident_buffer_reuses = {}",
-        omega::metal::RESIDENT_BUFFER_REUSES.get()
-    );
-    println!(
-        "copying_buffer_uploads = {}",
-        omega::metal::COPYING_BUFFER_UPLOADS.get()
-    );
-    println!(
-        "device_current_allocated_size = {:?}",
-        omega::metal::current_allocated_size()
-    );
-    println!("nocopy_cache_len = {}", omega::metal::nocopy_cache_len());
+    #[cfg(target_os = "macos")]
+    {
+        println!(
+            "nocopy_buffer_uploads = {}",
+            omega::metal::NOCOPY_BUFFER_UPLOADS.get()
+        );
+        println!(
+            "nocopy_buffer_reuses = {}",
+            omega::metal::NOCOPY_BUFFER_REUSES.get()
+        );
+        println!(
+            "mapping_offset_uploads = {}",
+            omega::metal::MAPPING_OFFSET_UPLOADS.get()
+        );
+        println!(
+            "resident_buffer_uploads = {}",
+            omega::metal::RESIDENT_BUFFER_UPLOADS.get()
+        );
+        println!(
+            "resident_buffer_reuses = {}",
+            omega::metal::RESIDENT_BUFFER_REUSES.get()
+        );
+        println!(
+            "copying_buffer_uploads = {}",
+            omega::metal::COPYING_BUFFER_UPLOADS.get()
+        );
+        println!(
+            "device_current_allocated_size = {:?}",
+            omega::metal::current_allocated_size()
+        );
+        println!("nocopy_cache_len = {}", omega::metal::nocopy_cache_len());
+    }
     print_peak_rss();
 }
 

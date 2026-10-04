@@ -16,16 +16,44 @@
 //! then hits an unmodeled wall (a real, still-open possibility this task's
 //! own scope names) still needs those bytes reported, not discarded.
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use std::env;
 use std::error::Error;
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use std::fs;
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use std::io::{self, Write};
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use proxima_vm::boot;
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 const MAX_HYPERCALLS: usize = 10_000;
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 const PL011_CAPACITY: usize = 65_536;
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
     let firmware_path = arguments
@@ -61,4 +89,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     io::stdout().write_all(&pl011_emitted)?;
     loop_outcome?;
     Ok(())
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
+fn main() -> Result<(), Box<dyn Error>> {
+    Err(
+        "edk2 boot probing supports linux/x86_64 KVM and macos/aarch64 Hypervisor.framework only"
+            .into(),
+    )
 }

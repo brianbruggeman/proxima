@@ -41,20 +41,26 @@
 //! on a quiet tree (check `uptime` / `ps -eo pcpu,comm` first — no other
 //! cargo/rustc process above ~20% CPU).
 
-#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::hint::black_box;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::execute;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::cpu::evaluate;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
     ScalarOp, append, map,
 };
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
     (0..count).map(|_| lcg.next_unit()).collect()
@@ -65,6 +71,7 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// duplicated here (rather than imported) because that file is a `PRESERVED
 /// COPY` pinned to the `260.24106` checksum and is not a library target this
 /// crate can depend on.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let lhs = append(
@@ -116,6 +123,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
 /// exactly once. This is the "4.00 bytes/mac" shape
 /// (`project_tensor_decode_is_bandwidth_not_compute.md`), unlike the square
 /// GEMM above which reuses each operand `O(n)` times.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn matvec_program(out_dim: u32, in_dim: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let activation = append(
@@ -170,6 +178,7 @@ fn matvec_program(out_dim: u32, in_dim: u32) -> (Vec<Op>, NodeId) {
 /// documents (observed 7.629395e-6 at k=97, float reassociation, not a bug)
 /// — scaled `sqrt(k)` here since none of these `k` values have been run yet
 /// to pin an observed worst case the way that test's comment does.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn assert_checksum_agrees(case: &str, cpu: f32, metal: f32, k: u32) {
     let epsilon = 1e-5 * (k as f32).sqrt();
     let diff = (cpu - metal).abs();
@@ -219,6 +228,7 @@ fn assert_checksum_agrees(case: &str, cpu: f32, metal: f32, k: u32) {
 /// To re-derive: reimplement `Lcg::next_unit` (shift 32, current form)
 /// standalone, generate `random_vec(1, size)` and `random_vec(2, size)`,
 /// and take their dot product in `f64`.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn reference_checksum(size: u32) -> Option<f32> {
     match size {
         512 => Some(7.67010),
@@ -228,6 +238,7 @@ fn reference_checksum(size: u32) -> Option<f32> {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn bench_gemm_square(c: &mut Criterion) {
     let mut group = c.benchmark_group("gemm_square_f32");
     for size in [512u32, 1024, 2048] {
@@ -278,6 +289,7 @@ fn bench_gemm_square(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn bench_matvec_batch1(c: &mut Criterion) {
     let mut group = c.benchmark_group("matvec_batch1_f32");
     // (out_dim, in_dim, label) — the three real weight shapes
@@ -328,5 +340,13 @@ fn bench_matvec_batch1(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_group!(benches, bench_gemm_square, bench_matvec_batch1);
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_main!(benches);
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
+}

@@ -42,7 +42,11 @@ use crate::upstreams::callback::CallbackPipeFactory;
 #[cfg(all(
     feature = "http1",
     any(
-        not(all(unix, feature = "http-prime-deps", feature = "runtime-prime")),
+        not(all(
+            any(unix, windows),
+            feature = "http-prime-deps",
+            feature = "runtime-prime"
+        )),
         feature = "http-hyper"
     )
 ))]
@@ -175,13 +179,13 @@ impl AppBuilder {
         self.pipe_factory_registry
             .register(Arc::new(KvFileFactory))?;
         // `http` upstream backend: PRIME is the default whenever the prime
-        // runtime is active on unix (the prime `TcpStream` only drives on a
+        // runtime is active on a supported OS (the prime `TcpStream` only drives on a
         // CoreShard worker's reactor); hyper is the backend on the tokio
-        // runtime, on non-unix, and under the `http-hyper` opt-out. The
+        // runtime and under the `http-hyper` opt-out. The
         // `Client` requests-style API resolves through this registry, so the
         // swap is backend-only.
         #[cfg(all(
-            unix,
+            any(unix, windows),
             feature = "http-prime-deps",
             feature = "runtime-prime",
             not(feature = "http-hyper")
@@ -191,7 +195,11 @@ impl AppBuilder {
         #[cfg(all(
             feature = "http1",
             any(
-                not(all(unix, feature = "http-prime-deps", feature = "runtime-prime")),
+                not(all(
+                    any(unix, windows),
+                    feature = "http-prime-deps",
+                    feature = "runtime-prime"
+                )),
                 feature = "http-hyper"
             )
         ))]
@@ -630,7 +638,7 @@ mod tests {
         all(
             feature = "serve-prime",
             feature = "runtime-prime-reactor",
-            any(target_os = "linux", target_os = "macos")
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
         )
     ))]
     #[proxima::test]
@@ -664,7 +672,7 @@ mod tests {
     // `PrimeAcceptorFactory` needs `proxima_net::prime`, which is
     // `target_os`-gated (see that module's own `#[cfg]`) — matches the
     // gate on `app_builder_build_installs_runtime` just above.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[proxima::test]
     async fn build_rejects_a_hand_assembled_selection_with_a_mismatched_datagram_factory() {
         use crate::runtime::{RuntimeBackend, RuntimeSelection};

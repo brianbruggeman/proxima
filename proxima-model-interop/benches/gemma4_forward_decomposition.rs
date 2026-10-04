@@ -98,39 +98,56 @@
 //! `ollama stop gemma4:e2b-it-qat` first — a resident ollama copy of the
 //! same checkpoint contends for the same GPU (`project_ollama_loader_is_the_judge_hook.md`).
 
-#![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::fs::File;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::hint::black_box;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::sync::OnceLock;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::time::{Duration, Instant};
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use memmap2::{Mmap, MmapOptions};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::execute;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::metal::metal_stage_totals;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::parse_complete;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::types::GgmlType;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::gemma4::program::gemma4_sliding_rope_table;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::{ContextLength, LoadedModel, ServingConfig, SpeculativeConfig};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::instrument::ticks_to_nanos;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, RopePairing,
     RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
 };
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
     ScalarOp, append, block_node_ids, infer, map,
 };
 
 /// `gemma4:e2b-it-qat`'s real blob (task brief).
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
 /// Verify/prefill widths this slice sweeps — task brief's own set.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const WIDTHS: [usize; 4] = [1, 2, 4, 8];
 
 /// Real gemma4-E2B hparams, read once via `gemma4_dump` against
@@ -143,23 +160,34 @@ const WIDTHS: [usize; 4] = [1, 2, 4, 8];
 /// length; the brief's figure is treated as the checkpoint's real vocab,
 /// consistent with `[new_count, vocab]`'s own doc at
 /// `proxima-model-interop/src/gemma4/bind.rs:1055`).
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const EMBEDDING: u32 = 1536;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const VOCAB_REAL: u32 = 262_144;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const QUERY_HEADS: u32 = 8;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const KV_HEADS: u32 = 1;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const HEAD_DIM_SWA: u32 = 256;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const FEED_FORWARD_SWA: u32 = 6144;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const SLIDING_WINDOW: u32 = 512;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const ROPE_FREQ_BASE_SWA: f32 = 1.0e4;
 /// Real `gemma4.block_count` — the aggregation section's own `* 35`
 /// extrapolation factor.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const REAL_BLOCK_COUNT: u32 = 35;
 /// Tiny — component 3+4's own program still needs SOME vocab/LM-head tail
 /// to be a syntactically complete forward program, but component 2 already
 /// covers the real LM-head cost in isolation, so this stays cheap on
 /// purpose.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const LAYER_PROBE_VOCAB: u32 = 32;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn model_bytes() -> &'static [u8] {
     static BYTES: OnceLock<Mmap> = OnceLock::new();
     BYTES.get_or_init(|| {
@@ -174,6 +202,7 @@ fn model_bytes() -> &'static [u8] {
     })
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn loaded_model() -> &'static LoadedModel<'static> {
     static MODEL: OnceLock<LoadedModel<'static>> = OnceLock::new();
     MODEL.get_or_init(|| {
@@ -191,6 +220,7 @@ fn loaded_model() -> &'static LoadedModel<'static> {
 /// time, unaccounted by `metal_stage_totals`, and bias the width sweep by a
 /// FIXED amount that has nothing to do with the floor this slice is
 /// root-causing.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn serving_config() -> ServingConfig<'static> {
     ServingConfig {
         context_length: ContextLength::Within(64),
@@ -212,6 +242,7 @@ fn serving_config() -> ServingConfig<'static> {
 /// [`LoadedModel::prefill_prefix`]'s own returned `PrefixState::len()` is
 /// the ground truth this bench reports as the width, never this function's
 /// own guess.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn prompt_for_width(target: usize) -> String {
     const WORDS: [&str; 8] = [
         "history", "ocean", "bridge", "copper", "signal", "garden", "matrix", "lantern",
@@ -219,6 +250,7 @@ fn prompt_for_width(target: usize) -> String {
     WORDS[..target.min(WORDS.len()).max(1)].join(" ")
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
     (0..count).map(|_| lcg.next_unit()).collect()
@@ -229,6 +261,7 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// reason that bench file's own doc states: a bench target cannot depend on
 /// another crate's bench target) at the LM head's own real shape
 /// (`m=width`, `k=EMBEDDING`, `n=VOCAB_REAL`) rather than a square GEMM.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let lhs = append(
@@ -279,6 +312,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
 /// `gemma4::bind::gemma4_layer_schedule`'s own values at this checkpoint's
 /// real dims (`ple: false` is this bench's one documented deviation, see
 /// the module doc's Component 3+4 section).
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn sliding_layer_schedule() -> Vec<LayerSchedule> {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
@@ -317,7 +351,12 @@ fn sliding_layer_schedule() -> Vec<LayerSchedule> {
 /// [`gemma4_program_metal_cpu_parity.rs`]'s own `seed_named_inputs`,
 /// adapted to this bench's one-layer sliding schedule (no full-layer RoPE
 /// table needed -- every layer in [`sliding_layer_schedule`] is sliding).
-fn seed_named_inputs(program: &[Op], symbols: &[u64], positions: &[usize]) -> Vec<(String, Vec<f32>)> {
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn seed_named_inputs(
+    program: &[Op],
+    symbols: &[u64],
+    positions: &[usize],
+) -> Vec<(String, Vec<f32>)> {
     let shapes = infer(program, symbols).expect("one-layer gemma4 program infers its own shapes");
     let (cos_swa, sin_swa) = gemma4_sliding_rope_table(positions, ROPE_FREQ_BASE_SWA, HEAD_DIM_SWA);
     block_node_ids(program)
@@ -347,6 +386,7 @@ fn seed_named_inputs(program: &[Op], symbols: &[u64], positions: &[usize]) -> Ve
 /// One raw per-iteration record, printed (never only aggregated -- the
 /// discipline log's own table is built by grepping these lines, guiding
 /// principle 19: results traced to records, not a metric alone).
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn log_stage_sample(component: &str, width: usize, wall_ns: u64) {
     let stage = metal_stage_totals();
     let exec_ns = ticks_to_nanos(stage.gpu_exec_ticks);
@@ -377,6 +417,7 @@ fn log_stage_sample(component: &str, width: usize, wall_ns: u64) {
 
 /// Component 1: FULL FORWARD, real isolation via
 /// [`LoadedModel::prefill_prefix`] -- see the module doc.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn bench_full_forward(c: &mut Criterion) {
     let model = loaded_model();
     let config = serving_config();
@@ -418,6 +459,7 @@ fn bench_full_forward(c: &mut Criterion) {
 
 /// Component 2: LM HEAD, real isolation -- standalone matmul at gemma4-E2B's
 /// real `[width, EMBEDDING] x [VOCAB_REAL, EMBEDDING]^T` shape.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn bench_lm_head(c: &mut Criterion) {
     let _ = metal_stage_totals();
     let mut group = c.benchmark_group("component2_lm_head");
@@ -455,6 +497,7 @@ fn bench_lm_head(c: &mut Criterion) {
 /// Component 3+4: ONE gemma4 sliding layer (cached attention + FFN, fused
 /// -- see the module doc's Component 3+4 section for why these two are not
 /// separable within this slice).
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn bench_one_layer(c: &mut Criterion) {
     let _ = metal_stage_totals();
     let mut group = c.benchmark_group("component3_4_one_layer");
@@ -547,5 +590,13 @@ fn bench_one_layer(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_group!(benches, bench_full_forward, bench_lm_head, bench_one_layer);
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_main!(benches);
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
+}

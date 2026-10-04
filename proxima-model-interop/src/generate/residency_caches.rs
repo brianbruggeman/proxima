@@ -95,7 +95,7 @@ impl LogitsSink<'_> {
         match self {
             Self::Discard => {}
             Self::Collect(buffer) => buffer.push(logits.to_vec()),
-            #[cfg(all(test, feature = "metal"))]
+            #[cfg(all(test, feature = "metal", target_os = "macos"))]
             Self::SumBarriers(total) => **total += _barriers_step,
         }
     }
@@ -1675,8 +1675,10 @@ pub(crate) struct BackendRuntime {
     /// ([`Self::take_near_plan`]) instead of building one -- a subset of
     /// `plan_misses`, so `plan_misses - plan_refits` is the number of plans
     /// actually built.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(crate) plan_refits: usize,
     /// `ServingConfig::plan_refit`, read once at construction.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(super) plan_refit: bool,
     /// `ServingConfig::exact_activations`, read once at construction --
     /// `Self::evaluate`'s `Engine::Cpu` arm plans through
@@ -1721,7 +1723,9 @@ impl BackendRuntime {
             placed_segment_plans: alloc::collections::BTreeMap::new(),
             plan_hits: 0,
             plan_misses: 0,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refits: 0,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refit: config.plan_refit,
             exact_activations: config.exact_activations,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1838,6 +1842,7 @@ impl BackendRuntime {
                     )?
                 };
                 mark_resident(&mut plan, resident_names);
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
                     mark_plan_time_constants_resident(&mut plan);
                 }
@@ -1936,6 +1941,7 @@ impl BackendRuntime {
                     )?
                 };
                 mark_resident(&mut plan, resident_names);
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
                     mark_plan_time_constants_resident(&mut plan);
                 }
@@ -2069,6 +2075,7 @@ impl BackendRuntime {
                     )?
                 };
                 mark_resident(&mut plan, resident_names);
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
                     mark_plan_time_constants_resident(&mut plan);
                 }
@@ -2645,6 +2652,7 @@ impl BackendRuntime {
     /// `refit_symbols` on it before building from scratch, which is what
     /// makes a bucket crossing cheaper than a plan build when only the
     /// attention key range moved.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(super) fn take_near_plan<PlanType>(
         cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), PlanType>,
         shape: &(usize, usize, Vec<NodeId>, bool),
@@ -2733,7 +2741,7 @@ impl BackendRuntime {
     /// `cached_len`, rather than growing 1:1 with the step index as it did
     /// before that policy landed. See `token_breakdown_metal`'s
     /// `plan_cache_len` field.
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     pub(crate) fn plans_len(&self) -> usize {
         self.plans.len()
     }
@@ -2741,7 +2749,7 @@ impl BackendRuntime {
     /// Retained output-slot bytes across the plan caches. Peak liveness is
     /// smaller than this when slots are reused within one plan; this census
     /// answers why a device allocation remains high after a step completes.
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     pub(crate) fn arena_allocated_bytes(&self) -> (usize, usize, usize) {
         let ordinary = self
             .plans
@@ -2825,6 +2833,7 @@ impl BackendRuntime {
                     self.numeric_policy,
                 )?;
                 mark_resident(&mut plan, resident_names);
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
                     mark_plan_time_constants_resident(&mut plan);
                 }
@@ -2894,6 +2903,7 @@ impl BackendRuntime {
                     self.numeric_policy,
                 )?;
                 mark_resident(&mut plan, resident_names);
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if self.plan_time_constants {
                     mark_plan_time_constants_resident(&mut plan);
                 }

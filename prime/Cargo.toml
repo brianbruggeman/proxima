@@ -57,6 +57,11 @@ socket2 = { workspace = true, optional = true, features = ["all"] }
 io-uring = { workspace = true, optional = true }
 tokio-uring = { workspace = true, optional = true }
 
+[target."cfg(windows)".dependencies]
+polling = { version = "3.11", optional = true }
+socket2 = { workspace = true, features = ["all"], optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"], optional = true }
+
 [features]
 default = ["std", "runtime-prime"]
 std = [
@@ -93,7 +98,7 @@ runtime-prime-thread-identity = ["runtime-prime", "std"]
 # benched vs the inbox-alloc incumbent on the single-producer hot path.
 runtime-prime-inbox-dynamic = ["runtime-prime", "std"]
 runtime-prime-timer       = ["runtime-prime", "alloc"]
-runtime-prime-reactor     = ["runtime-prime", "std", "dep:libc", "dep:core_affinity"]
+runtime-prime-reactor     = ["runtime-prime", "std", "dep:libc", "dep:core_affinity", "dep:polling", "dep:windows-sys"]
 runtime-prime-reactor-harvest-io = ["runtime-prime-reactor"]
 runtime-prime-reactor-trace = ["runtime-prime-reactor"]
 runtime-prime-executor    = ["runtime-prime-timer"]

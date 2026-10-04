@@ -19,27 +19,27 @@
 //! - [`FixedClock`] — emits a fixed epoch; impls `Deterministic` +
 //!   `Reproducible`.
 //!
-//! # Stubs vs real I/O
-//!
-//! The current implementations are STUBS — they return placeholder
-//! bytes / canned errors. Real I/O (`std::fs::read`, `getrandom`,
-//! `SystemTime::now`) lands when the architectural proof (C8e)
-//! needs it. The structural shape (types + markers + cap-gating)
-//! is what's load-bearing for G1+G2.
+//! filesystem effects run synchronously at call construction on the blocking
+//! dispatch owner (`dispatched::dispatch_thread_body`). The returned future is
+//! ready; callers outside that owner must supply their own blocking boundary.
 
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec::Vec;
-use core::future::Future;
-use std::path::PathBuf;
+use core::future::{Future, ready};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 
 use super::capabilities::CapFilesystem;
 use super::markers::{
-    AllocFree, Deterministic, IdempotentSideEffectFree, NoStd, Reproducible, WithoutFilesystem,
+    Deterministic, IdempotentSideEffectFree, NoStd, Reproducible, WithoutFilesystem,
     WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime,
 };
 use super::protocol::{ChildRequest, ChildResponse, ReadResponse, WriteResponse};
@@ -79,14 +79,14 @@ impl SendPipe for HostRead {
         &self,
         request: Self::In,
     ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
-        // Stub: real implementation would `std::fs::read(&self.host_path)`.
         let response = match request {
-            ChildRequest::Read { .. } | ChildRequest::Stat { .. } => {
-                ChildResponse::Error { errno: 38 } // ENOSYS
-            }
-            _ => ChildResponse::Error { errno: 30 }, // EROFS for writes
+            ChildRequest::Read {
+                max_bytes, offset, ..
+            } => read_file(&self.host_path, max_bytes, offset).map_err(host_error),
+            ChildRequest::Stat { .. } => file_stat(&self.host_path).map_err(host_error),
+            _ => Ok(ChildResponse::Error { errno: libc::EROFS }),
         };
-        async move { Ok(response) }
+        ready(response)
     }
 }
 
@@ -127,12 +127,14 @@ impl SendPipe for HostWrite {
         request: Self::In,
     ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
         let response = match request {
-            ChildRequest::Write { bytes, .. } => ChildResponse::Write(WriteResponse {
-                bytes_written: bytes.len() as u32,
+            ChildRequest::Write { bytes, .. } => {
+                append_file(&self.host_path, &bytes).map_err(host_error)
+            }
+            _ => Ok(ChildResponse::Error {
+                errno: libc::ENOSYS,
             }),
-            _ => ChildResponse::Error { errno: 38 }, // ENOSYS for non-write
         };
-        async move { Ok(response) }
+        ready(response)
     }
 }
 
@@ -167,12 +169,14 @@ impl SendPipe for OsEntropy {
     ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
         let response = match request {
             ChildRequest::Read { max_bytes, .. } => {
-                let bytes: Vec<u8> = alloc::vec![0u8; max_bytes as usize];
-                ChildResponse::Read(ReadResponse { bytes, eof: false })
+                let mut bytes = alloc::vec![0; max_bytes as usize];
+                getrandom::fill(&mut bytes)
+                    .map(|()| ChildResponse::Read(ReadResponse { bytes, eof: false }))
+                    .map_err(|error| ProximaError::Body(format!("OS entropy failed: {error}")))
             }
-            _ => ChildResponse::Error { errno: 30 },
+            _ => Ok(ChildResponse::Error { errno: libc::EROFS }),
         };
-        async move { Ok(response) }
+        ready(response)
     }
 }
 
@@ -262,13 +266,17 @@ impl SendPipe for RealClock {
         request: Self::In,
     ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
         let response = match request {
-            ChildRequest::Read { .. } => ChildResponse::Read(ReadResponse {
-                bytes: String::from("0").into_bytes(),
-                eof: true,
-            }),
-            _ => ChildResponse::Error { errno: 30 },
+            ChildRequest::Read {
+                max_bytes, offset, ..
+            } => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| read_bytes(format_u64(elapsed.as_secs()), max_bytes, offset))
+                .map_err(|error| {
+                    ProximaError::Body(format!("system clock precedes Unix epoch: {error}"))
+                }),
+            _ => Ok(ChildResponse::Error { errno: libc::EROFS }),
         };
-        async move { Ok(response) }
+        ready(response)
     }
 }
 
@@ -307,10 +315,9 @@ impl SendPipe for FixedClock {
     ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
         let epoch = self.epoch_seconds;
         let response = match request {
-            ChildRequest::Read { .. } => {
-                let bytes = format_u64(epoch);
-                ChildResponse::Read(ReadResponse { bytes, eof: true })
-            }
+            ChildRequest::Read {
+                max_bytes, offset, ..
+            } => read_bytes(format_u64(epoch), max_bytes, offset),
             _ => ChildResponse::Error { errno: 30 },
         };
         async move { Ok(response) }
@@ -318,7 +325,6 @@ impl SendPipe for FixedClock {
 }
 
 impl NoStd for FixedClock {}
-impl AllocFree for FixedClock {}
 impl Deterministic for FixedClock {}
 impl Reproducible for FixedClock {}
 impl IdempotentSideEffectFree for FixedClock {}
@@ -329,7 +335,7 @@ impl WithoutRandom for FixedClock {}
 
 // Helpers
 
-/// Format a u64 as a decimal byte string. Used by FixedClock stub.
+/// decimal Unix seconds for both real and fixed clocks.
 fn format_u64(value: u64) -> Vec<u8> {
     if value == 0 {
         return Vec::from(b"0".as_slice());
@@ -342,4 +348,54 @@ fn format_u64(value: u64) -> Vec<u8> {
     }
     buffer.reverse();
     buffer
+}
+
+fn read_file(path: &Path, max_bytes: u32, offset: u64) -> io::Result<ChildResponse> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(u64::from(max_bytes))
+        .read_to_end(&mut bytes)?;
+    let mut lookahead = [0; 1];
+    let eof = file.read(&mut lookahead)? == 0;
+    Ok(ChildResponse::Read(ReadResponse { bytes, eof }))
+}
+
+fn append_file(path: &Path, bytes: &[u8]) -> io::Result<ChildResponse> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let count = file.write(bytes)?;
+    let bytes_written =
+        u32::try_from(count).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(ChildResponse::Write(WriteResponse { bytes_written }))
+}
+
+#[cfg(unix)]
+fn file_stat(path: &Path) -> io::Result<ChildResponse> {
+    let metadata = path.metadata()?;
+    Ok(ChildResponse::Stat {
+        size: metadata.len(),
+        mode: metadata.mode(),
+        is_directory: metadata.is_dir(),
+    })
+}
+
+#[cfg(not(unix))]
+fn file_stat(_path: &Path) -> io::Result<ChildResponse> {
+    Ok(ChildResponse::Error {
+        errno: libc::ENOSYS,
+    })
+}
+
+fn host_error(error: io::Error) -> ProximaError {
+    ProximaError::Io(error)
+}
+
+fn read_bytes(mut bytes: Vec<u8>, max_bytes: u32, offset: u64) -> ChildResponse {
+    let start = offset.min(bytes.len() as u64) as usize;
+    let count = (bytes.len() - start).min(max_bytes as usize);
+    let eof = start + count == bytes.len();
+    bytes.copy_within(start..start + count, 0);
+    bytes.truncate(count);
+    ChildResponse::Read(ReadResponse { bytes, eof })
 }

@@ -1638,7 +1638,7 @@ impl CachedAttentionForm {
     /// scratch buffer. Only attention ops of different layers do, and each
     /// layer's partial reads the previous layer's output, so no two are in
     /// flight together; the decode split keeps a buffer per position.
-    #[cfg(any(test, all(feature = "metal-plan-stable-buffers", target_os = "macos")))]
+    #[cfg(all(feature = "metal", target_os = "macos", any(test, feature = "metal-plan-stable-buffers")))]
     #[must_use]
     pub(crate) const fn shares_scratch(self) -> bool {
         match self {

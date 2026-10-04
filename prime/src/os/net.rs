@@ -7,40 +7,13 @@
 //! contract below) — the only differences are the `AF_UNIX` domain and a
 //! path-shaped address instead of a `SocketAddr`.
 //!
-//! design:
-//!   - Sockets are constructed via `socket2` and set non-blocking.
-//!   - On first poll, the stream/listener lazily registers with the worker
-//!     thread's Reactor (via the `CURRENT_REACTOR` thread-local published by
-//!     CoreShard) AND caches the reactor's raw pointer in its own slot.
-//!     subsequent polls deref the cached pointer directly — no thread-local
-//!     read, no RefCell borrow check, no closure indirection.
-//!   - The cached waker is compared with `will_wake` to elide the Arc clone
-//!     when the same task re-polls the same source (the common case under
-//!     burst load).
-//!   - `poll_read` / `poll_write` / `poll_accept` follow the standard
-//!     non-blocking-fd dance: try the syscall; on `WouldBlock` register the
-//!     current waker with the Reactor and return `Pending`.
-//!   - On drop, the source is deregistered.
+//! sockets register lazily on the current worker and retain its wake-owner identity.
+//! subsequent polls on another worker return an error. Dropping a registered
+//! socket on another thread queues its owned handle for deletion by the owner,
+//! so descriptor reuse cannot race a delayed deregistration.
 //!
-//! ## Send / thread affinity contract
-//!
-//! `TcpListener` and `TcpStream` are `Send` (auto-derived — every field is
-//! Send) and intentionally `!Sync` (`PhantomData<Cell<()>>` enforces this).
-//! Send is allowed so the types compose with executor APIs that demand
-//! `Send` bounds (e.g. `serve_h2_connection`'s `S: AsyncRead + AsyncWrite
-//! + Send + 'static`).
-//!
-//! Polling these types is **only sound on the proxima worker thread that
-//! registered them** (the one whose `CURRENT_REACTOR` is non-null and
-//! points at the Reactor that issued the cached `SourceKey`). The cached
-//! reactor pointer is invalid on any other thread. Polling off-worker is
-//! undefined behavior — but it cannot happen by accident through the
-//! provided runtime APIs because tasks spawned on a CoreShard never
-//! migrate to another thread (the runtime is per-core, not work-stealing).
-//!
-//! There is no auto-derived `!Send` marker that captures this rule, so we
-//! rely on the runtime topology to enforce it. Manual `std::thread::spawn`
-//! with a `TcpStream` would violate the contract.
+//! socket types are `Send` and intentionally `!Sync`; ordinary movement and
+//! drop remain safe after registration and after the owning worker exits.
 
 // matches os.rs's `pub mod core_shard;` gate exactly — this file imports
 // core_shard::CURRENT_REACTOR, and that module doesn't exist without the
@@ -50,27 +23,44 @@
     feature = "runtime-prime-executor",
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-inbox-alloc",
-    any(target_os = "macos", target_os = "linux"),
+    any(target_os = "macos", target_os = "linux", windows),
 ))]
 
 use std::io;
+#[cfg(windows)]
+use std::io::Read;
 use std::marker::PhantomData;
 #[cfg(target_os = "linux")]
 use std::mem;
+use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(target_os = "linux")]
 use std::ptr;
 use std::task::{Context, Poll};
 
 use std::task::Waker;
 
 use futures::io::{AsyncRead, AsyncWrite};
+#[cfg(windows)]
+use socket2::MaybeUninitSlice;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::{
+    SO_EXCLUSIVEADDRUSE, SOL_SOCKET, WSAEALREADY, WSAEINPROGRESS, WSAEISCONN, WSAGetLastError,
+    setsockopt,
+};
 
-use super::core_shard::{self, CURRENT_REACTOR};
-use super::reactor::{Interest, Reactor, SourceKey};
+use super::core_shard::{self, ReactorBorrow};
+#[cfg(unix)]
+use super::reactor::RawSource;
+use super::reactor::{Interest, Reactor, SourceKey, Wakeup};
 
 /// 1024 is the standard default accept-queue depth (matches `SOMAXCONN` on
 /// most kernels and the historical libc default) — deep enough to absorb
@@ -80,29 +70,13 @@ const DEFAULT_LISTEN_BACKLOG: i32 = 1024;
 /// non-blocking TCP listener bound to the proxima reactor on the worker
 /// thread that constructs it. accept() returns a futures-io TcpStream.
 pub struct TcpListener {
-    socket: Socket,
+    socket: ManuallyDrop<Socket>,
     source: Option<SourceKey>,
-    /// cached raw pointer to the worker's `Reactor`. set on first
-    /// registration; subsequent polls deref directly without going through
-    /// the thread-local. `*mut` is `!Send` so the type's auto-Send
-    /// disappears — see the `unsafe impl Send` block and module docs.
-    reactor_ptr: *mut Reactor,
+    /// unique owner identity for registration and deferred disposal.
+    reactor_owner: Option<Wakeup>,
     /// retained for `!Sync` (which IS enforced by `Cell<()>` here).
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
-
-// SAFETY: every owned field is conceptually Send — Socket is Send, Option
-// <SourceKey> is plain data, Option<Waker> is Send. The cached
-// `*mut Reactor` is the only !Send field, and we restore Send so the type
-// composes with executor APIs that require it.
-//
-// The CONTRACT (see module docs): the cached pointer is only valid on the
-// worker thread that produced it. Polling on a different thread will
-// dereference a pointer that belongs to another worker's Reactor — UB.
-// The proxima runtime never migrates tasks cross-thread (per-core, not
-// work-stealing), so under normal use this cannot happen. Users who hand
-// these types to `std::thread::spawn` violate the contract.
-unsafe impl Send for TcpListener {}
 
 impl TcpListener {
     /// bind a non-blocking listening socket. must be called on a proxima
@@ -120,7 +94,10 @@ impl TcpListener {
         };
         let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
         socket.set_nonblocking(true)?;
+        #[cfg(unix)]
         socket.set_reuse_address(true)?;
+        #[cfg(windows)]
+        set_exclusive_address(&socket)?;
         // SO_REUSEPORT: the per-core serve model binds the SAME (possibly
         // concrete) port once per CoreShard worker; without it, every core
         // after the first hits AddrInUse on a fixed port. SO_REUSEADDR alone is
@@ -132,9 +109,9 @@ impl TcpListener {
         socket.bind(&sock_addr)?;
         socket.listen(backlog)?;
         Ok(Self {
-            socket,
+            socket: ManuallyDrop::new(socket),
             source: None,
-            reactor_ptr: ptr::null_mut(),
+            reactor_owner: None,
             _not_sync: PhantomData,
         })
     }
@@ -154,6 +131,7 @@ impl TcpListener {
         context: &mut Context<'_>,
     ) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         match this.socket.accept() {
             Ok((socket, sock_addr)) => {
                 socket.set_nonblocking(true)?;
@@ -180,9 +158,9 @@ impl TcpListener {
     }
 
     fn register_read_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
-        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+        let mut reactor = ensure_reactor(&mut self.reactor_owner)?;
         if self.source.is_none() {
-            let key = reactor.register(self.socket.as_raw_fd(), Interest::Read)?;
+            let key = register_socket(&mut reactor, &self.socket, Interest::Read)?;
             self.source = Some(key);
         }
         let Some(key) = self.source else {
@@ -190,11 +168,9 @@ impl TcpListener {
                 "TcpListener: missing source key after register",
             ));
         };
-        // `register_read_waker_ref` clones the waker only when the slot's
-        // stored waker does not already `will_wake` the same task — that
-        // check is correct against the live slot state (the reactor's
-        // `turn` takes the waker out when it fires, so a stale local
-        // cache would deadlock; the slot itself is authoritative).
+        // the source slot owns the authoritative waker across readiness notifications.
+        #[cfg(windows)]
+        reactor.rearm(key, Interest::Read)?;
         if !reactor.register_read_waker_ref(key, context.waker()) {
             return Err(io::Error::other("TcpListener: reactor source went stale"));
         }
@@ -204,7 +180,9 @@ impl TcpListener {
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
-        deregister_on_drop(&mut self.source, self.reactor_ptr);
+        // safety: this is the sole owner; drop transfers the socket exactly once.
+        let socket = unsafe { ManuallyDrop::take(&mut self.socket) };
+        release_socket(self.source.take(), self.reactor_owner.take(), socket);
     }
 }
 
@@ -232,13 +210,11 @@ enum ConnectState {
     Pending {
         socket: Socket,
         source: SourceKey,
-        reactor_ptr: *mut Reactor,
+
+        reactor_owner: Option<Wakeup>,
     },
     Done,
 }
-
-// SAFETY: Socket is Send; *mut Reactor follows the same contract as TcpStream.
-unsafe impl Send for ConnectState {}
 
 /// future returned by `TcpStream::connect`. polls until the TCP handshake
 /// completes or fails, then yields a `TcpStream`.
@@ -247,14 +223,18 @@ pub struct Connect {
     state: ConnectState,
 }
 
-// SAFETY: Connect contains ConnectState which is Send per above.
-unsafe impl Send for Connect {}
-
 impl std::future::Future for Connect {
     type Output = io::Result<TcpStream>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if let ConnectState::Pending {
+            reactor_owner: Some(owner),
+            ..
+        } = &this.state
+        {
+            checked_reactor(owner)?;
+        }
         match &mut this.state {
             ConnectState::Init => {
                 let domain = match this.addr {
@@ -278,12 +258,12 @@ impl std::future::Future for Connect {
                     Err(err) if is_connect_in_progress(&err) => {}
                     Err(err) => return Poll::Ready(Err(err)),
                 }
-                let mut reactor_ptr: *mut Reactor = ptr::null_mut();
-                let reactor = match ensure_reactor_ptr(&mut reactor_ptr) {
+                let mut reactor_owner = None;
+                let mut reactor = match ensure_reactor(&mut reactor_owner) {
                     Ok(reactor) => reactor,
                     Err(err) => return Poll::Ready(Err(err)),
                 };
-                let source = match reactor.register(socket.as_raw_fd(), Interest::Write) {
+                let source = match register_socket(&mut reactor, &socket, Interest::Write) {
                     Ok(key) => key,
                     Err(err) => return Poll::Ready(Err(err)),
                 };
@@ -295,7 +275,7 @@ impl std::future::Future for Connect {
                 this.state = ConnectState::Pending {
                     socket,
                     source,
-                    reactor_ptr,
+                    reactor_owner,
                 };
                 core_shard::note_reactor_pending();
                 Poll::Pending
@@ -323,7 +303,8 @@ impl std::future::Future for Connect {
                 // wakeup and does not have this ambiguity.
                 let outcome = match socket.take_error() {
                     Ok(Some(err)) => Outcome::Failed(err),
-                    Ok(None) | Err(_) => {
+                    Err(error) => Outcome::Failed(error),
+                    Ok(None) => {
                         // no SO_ERROR yet: fall back to the reconnect-probe
                         // only to distinguish "still pending" from
                         // "connected", never to detect failure.
@@ -346,7 +327,7 @@ impl std::future::Future for Connect {
                         let ConnectState::Pending {
                             socket: owned_socket,
                             source: owned_source,
-                            reactor_ptr: owned_ptr,
+                            reactor_owner: owned_owner,
                         } = std::mem::replace(&mut this.state, ConnectState::Done)
                         else {
                             unreachable!()
@@ -354,10 +335,9 @@ impl std::future::Future for Connect {
                         // deregister the write-only registration;
                         // TcpStream::ensure_registered will re-register
                         // for the needed interest on first I/O poll.
-                        if !owned_ptr.is_null() {
-                            // SAFETY: same invariant as TcpStream::ensure_registered.
-                            let reactor = unsafe { &mut *owned_ptr };
-                            let _ = reactor.deregister(owned_source);
+                        if let Some(owner) = owned_owner {
+                            let mut current = checked_reactor(&owner)?;
+                            current.deregister(owned_source)?;
                         }
                         Poll::Ready(Ok(TcpStream::from_socket(owned_socket)))
                     }
@@ -367,20 +347,20 @@ impl std::future::Future for Connect {
                         // so the next real writable edge wakes this task.
                         let ConnectState::Pending {
                             source,
-                            reactor_ptr,
+                            reactor_owner,
                             ..
                         } = &this.state
                         else {
                             unreachable!()
                         };
                         let source = *source;
-                        let reactor_ptr = *reactor_ptr;
-                        if !reactor_ptr.is_null() {
-                            // SAFETY: same invariant as ensure_reactor_ptr.
-                            let reactor = unsafe { &mut *reactor_ptr };
+                        if let Some(owner) = reactor_owner {
+                            let mut reactor = checked_reactor(owner)?;
+                            #[cfg(windows)]
+                            reactor.rearm(source, Interest::Write)?;
                             if !reactor.register_write_waker_ref(source, context.waker()) {
                                 return Poll::Ready(Err(io::Error::other(
-                                    "Connect: reactor source went stale",
+                                    "connect source went stale",
                                 )));
                             }
                         }
@@ -389,7 +369,15 @@ impl std::future::Future for Connect {
                     }
 
                     Outcome::Failed(err) => {
-                        this.state = ConnectState::Done;
+                        if let ConnectState::Pending {
+                            socket,
+                            source,
+                            reactor_owner,
+                            ..
+                        } = std::mem::replace(&mut this.state, ConnectState::Done)
+                        {
+                            release_socket(Some(source), reactor_owner, socket);
+                        }
                         Poll::Ready(Err(err))
                     }
                 }
@@ -405,12 +393,13 @@ impl std::future::Future for Connect {
 impl Drop for Connect {
     fn drop(&mut self) {
         if let ConnectState::Pending {
+            socket,
             source,
-            reactor_ptr,
+            reactor_owner,
             ..
-        } = &mut self.state
+        } = std::mem::replace(&mut self.state, ConnectState::Done)
         {
-            deregister_on_drop(&mut Some(*source), *reactor_ptr);
+            release_socket(Some(source), reactor_owner, socket);
         }
     }
 }
@@ -431,6 +420,8 @@ fn is_connect_in_progress(err: &io::Error) -> bool {
     const EINPROGRESS: i32 = 115;
     #[cfg(target_os = "macos")]
     const EINPROGRESS: i32 = 36;
+    #[cfg(windows)]
+    const EINPROGRESS: i32 = WSAEINPROGRESS;
     err.raw_os_error() == Some(EINPROGRESS)
 }
 
@@ -442,6 +433,8 @@ fn is_already_connected(err: &io::Error) -> bool {
     const EISCONN: i32 = 106;
     #[cfg(target_os = "macos")]
     const EISCONN: i32 = 56;
+    #[cfg(windows)]
+    const EISCONN: i32 = WSAEISCONN;
     err.raw_os_error() == Some(EISCONN)
 }
 
@@ -453,17 +446,18 @@ fn is_connect_resuming(err: &io::Error) -> bool {
     const EALREADY: i32 = 114;
     #[cfg(target_os = "macos")]
     const EALREADY: i32 = 37;
+    #[cfg(windows)]
+    const EALREADY: i32 = WSAEALREADY;
     err.raw_os_error() == Some(EALREADY)
 }
 
 /// non-blocking TCP stream bound to the proxima reactor. `futures::io`
 /// compatible — composes directly with `serve_h2_connection` and friends.
 pub struct TcpStream {
-    socket: Socket,
+    socket: ManuallyDrop<Socket>,
     source: Option<SourceKey>,
-    /// cached raw pointer to the worker's `Reactor`. see [TcpListener]'s
-    /// field docs and module-level "Send / thread affinity contract".
-    reactor_ptr: *mut Reactor,
+    /// unique owner identity for registration and deferred disposal.
+    reactor_owner: Option<Wakeup>,
     /// last waker registered for read-readiness. used to skip the reactor
     /// call when the same task re-polls with the same waker (the common
     /// case for steady-state stream reads under one connection task).
@@ -491,18 +485,12 @@ pub struct TcpStream {
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
-// SAFETY: see `TcpListener` above — same reasoning. `*mut Reactor` is
-// the only !Send field; we restore Send to support executor APIs that
-// require it, with the documented contract that polling must remain on
-// the worker thread that registered the stream.
-unsafe impl Send for TcpStream {}
-
 impl TcpStream {
     fn from_socket(socket: Socket) -> Self {
         Self {
-            socket,
+            socket: ManuallyDrop::new(socket),
             source: None,
-            reactor_ptr: ptr::null_mut(),
+            reactor_owner: None,
             last_read_waker: None,
             last_write_waker: None,
             last_read_blocked_epoch: None,
@@ -519,6 +507,16 @@ impl TcpStream {
         }
     }
 
+    /// request the kernel's send-buffer capacity in bytes; the OS may adjust it.
+    pub fn set_send_buffer_size(&self, size: usize) -> io::Result<()> {
+        self.socket.set_send_buffer_size(size)
+    }
+
+    /// return the effective kernel send-buffer capacity in bytes.
+    pub fn send_buffer_size(&self) -> io::Result<usize> {
+        self.socket.send_buffer_size()
+    }
+
     /// Attempt a non-blocking read without registering a reactor waker.
     ///
     /// Returns [`io::ErrorKind::WouldBlock`] when the stream is not currently
@@ -530,19 +528,20 @@ impl TcpStream {
     }
 
     /// lazy register helper. on first call, registers with the reactor
-    /// for the requested interest and caches the reactor pointer + source
+    /// for the requested interest and retains its owner identity + source
     /// key. subsequent calls reregister only when the requested interest
     /// broadens the current source. read polls never narrow an already
     /// read/write-registered source because a write waker may be live.
-    fn ensure_registered(&mut self, interest: Interest) -> io::Result<(&mut Reactor, SourceKey)> {
-        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+    fn ensure_registered(&mut self, interest: Interest) -> io::Result<(ReactorBorrow, SourceKey)> {
+        let mut reactor = ensure_reactor(&mut self.reactor_owner)?;
         if let Some(key) = self.source {
+            #[cfg(not(windows))]
             if interest == Interest::ReadWrite {
                 reactor.reregister(key, Interest::ReadWrite)?;
             }
             return Ok((reactor, key));
         }
-        let key = reactor.register(self.socket.as_raw_fd(), interest)?;
+        let key = register_socket(&mut reactor, &self.socket, interest)?;
         self.source = Some(key);
         Ok((reactor, key))
     }
@@ -557,7 +556,9 @@ impl TcpStream {
             .as_ref()
             .is_some_and(|cached| cached.will_wake(context.waker()));
         let epoch = {
-            let (reactor, key) = self.ensure_registered(Interest::Read)?;
+            let (mut reactor, key) = self.ensure_registered(Interest::Read)?;
+            #[cfg(windows)]
+            reactor.rearm(key, Interest::Read)?;
             if !cached_waker_matches && !reactor.register_read_waker_ref(key, context.waker()) {
                 return Err(io::Error::other("TcpStream: reactor source went stale"));
             }
@@ -573,12 +574,15 @@ impl TcpStream {
     }
 
     fn register_write_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
+        #[cfg(not(windows))]
         if let Some(cached) = &self.last_write_waker
             && cached.will_wake(context.waker())
         {
             return Ok(());
         }
-        let (reactor, key) = self.ensure_registered(Interest::ReadWrite)?;
+        let (mut reactor, key) = self.ensure_registered(Interest::ReadWrite)?;
+        #[cfg(windows)]
+        reactor.rearm(key, Interest::Write)?;
         if !reactor.register_write_waker_ref(key, context.waker()) {
             return Err(io::Error::other("TcpStream: reactor source went stale"));
         }
@@ -587,23 +591,30 @@ impl TcpStream {
     }
 
     #[inline]
+    #[cfg(unix)]
     fn read_into(&self, buf: &mut [u8]) -> io::Result<usize> {
         // SAFETY: this TCP socket is non-blocking and `read(2)` writes at most
         // `len` initialized bytes into the caller-owned buffer, returning the
         // initialized byte count.
         let len = buf.len().min(isize::MAX as usize);
-        let n = unsafe { libc::read(self.socket.as_raw_fd(), buf.as_mut_ptr().cast(), len) };
+        let n = unsafe { libc::read(socket_source(&self.socket), buf.as_mut_ptr().cast(), len) };
         if n >= 0 {
             Ok(n as usize)
         } else {
             Err(io::Error::last_os_error())
         }
     }
+    #[cfg(windows)]
+    fn read_into(&self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.socket).read(buf)
+    }
 }
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        deregister_on_drop(&mut self.source, self.reactor_ptr);
+        // safety: this is the sole owner; drop transfers the socket exactly once.
+        let socket = unsafe { ManuallyDrop::take(&mut self.socket) };
+        release_socket(self.source.take(), self.reactor_owner.take(), socket);
     }
 }
 
@@ -615,6 +626,7 @@ impl AsyncRead for TcpStream {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         if let Some(blocked_epoch) = this.last_read_blocked_epoch {
             match this.register_read_waker(context) {
                 Ok(current_epoch) if current_epoch == blocked_epoch => {
@@ -659,6 +671,7 @@ impl AsyncWrite for TcpStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         match this.socket.send(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -685,27 +698,25 @@ impl AsyncWrite for TcpStream {
         // live read half (proven by `StreamPassthroughUpstream`'s prime-path
         // round trip going empty once `PrimeTcpUpstream` was reachable).
         let this = self.get_mut();
-        let _ = this.socket.shutdown(std::net::Shutdown::Write);
-        Poll::Ready(Ok(()))
+        check_owner(&this.reactor_owner)?;
+        Poll::Ready(this.socket.shutdown(std::net::Shutdown::Write))
     }
 }
 
 /// non-blocking Unix-domain listener bound to the proxima reactor. mirrors
 /// [`TcpListener`] exactly (same lazy registration dance) — accept() returns
 /// a futures-io [`UnixStream`].
+#[cfg(unix)]
 pub struct UnixListener {
-    socket: Socket,
+    socket: ManuallyDrop<Socket>,
     source: Option<SourceKey>,
-    reactor_ptr: *mut Reactor,
+
+    reactor_owner: Option<Wakeup>,
     bind_path: PathBuf,
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
-// SAFETY: same reasoning as `TcpListener` — see the module-level Send
-// contract. Polling is only sound on the worker thread that registered
-// this listener's source.
-unsafe impl Send for UnixListener {}
-
+#[cfg(unix)]
 impl UnixListener {
     /// bind a non-blocking Unix-domain listening socket at `path`. must be
     /// called on a proxima worker thread (CoreShard worker_main has set
@@ -722,9 +733,9 @@ impl UnixListener {
         socket.bind(&sock_addr)?;
         socket.listen(DEFAULT_LISTEN_BACKLOG)?;
         Ok(Self {
-            socket,
+            socket: ManuallyDrop::new(socket),
             source: None,
-            reactor_ptr: ptr::null_mut(),
+            reactor_owner: None,
             bind_path: path,
             _not_sync: PhantomData,
         })
@@ -746,6 +757,7 @@ impl UnixListener {
         context: &mut Context<'_>,
     ) -> Poll<io::Result<(UnixStream, Option<PathBuf>)>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         // `Socket::accept_raw` (not the convenience `Socket::accept`) —
         // on macOS `Socket::accept` additionally applies `SO_NOSIGPIPE` to
         // the freshly-accepted fd, and the kernel rejects that setsockopt
@@ -779,9 +791,9 @@ impl UnixListener {
     }
 
     fn register_read_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
-        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+        let mut reactor = ensure_reactor(&mut self.reactor_owner)?;
         if self.source.is_none() {
-            let key = reactor.register(self.socket.as_raw_fd(), Interest::Read)?;
+            let key = register_socket(&mut reactor, &self.socket, Interest::Read)?;
             self.source = Some(key);
         }
         let Some(key) = self.source else {
@@ -789,6 +801,8 @@ impl UnixListener {
                 "UnixListener: missing source key after register",
             ));
         };
+        #[cfg(windows)]
+        reactor.rearm(key, Interest::Read)?;
         if !reactor.register_read_waker_ref(key, context.waker()) {
             return Err(io::Error::other("UnixListener: reactor source went stale"));
         }
@@ -805,6 +819,7 @@ impl UnixListener {
 /// the connecting peer already disconnected before this process called
 /// `accept(2)` — a normal, common race (fast client write-then-close) —
 /// and succeeds whenever the peer is still connected at accept time.
+#[cfg(unix)]
 fn finish_accepted_unix_socket(socket: Socket) -> io::Result<Socket> {
     socket.set_nonblocking(true)?;
     // `accept_raw` skips the FD_CLOEXEC hygiene `Socket::accept` would have
@@ -827,9 +842,12 @@ fn finish_accepted_unix_socket(socket: Socket) -> io::Result<Socket> {
     Ok(socket)
 }
 
+#[cfg(unix)]
 impl Drop for UnixListener {
     fn drop(&mut self) {
-        deregister_on_drop(&mut self.source, self.reactor_ptr);
+        // safety: this is the sole owner; drop transfers the socket exactly once.
+        let socket = unsafe { ManuallyDrop::take(&mut self.socket) };
+        release_socket(self.source.take(), self.reactor_owner.take(), socket);
         // best-effort: unlinks the bound socket file so a later `bind` at
         // the same path doesn't see a stale entry. Mirrors
         // `TokioUnixListener`'s drop-time cleanup.
@@ -838,10 +856,12 @@ impl Drop for UnixListener {
 }
 
 /// future returned by `UnixListener::accept`. polls `poll_accept`.
+#[cfg(unix)]
 pub struct UnixAccept<'listener> {
     listener: &'listener mut UnixListener,
 }
 
+#[cfg(unix)]
 impl std::future::Future for UnixAccept<'_> {
     type Output = io::Result<(UnixStream, Option<PathBuf>)>;
 
@@ -855,34 +875,41 @@ impl std::future::Future for UnixAccept<'_> {
 /// [`ConnectState`] — AF_UNIX `connect(2)` on a local socket usually
 /// completes immediately, but nothing in POSIX guarantees that, so the
 /// same EINPROGRESS/EALREADY/EISCONN dance applies.
+#[cfg(unix)]
 enum UnixConnectState {
     Init,
     Pending {
         socket: Socket,
         source: SourceKey,
-        reactor_ptr: *mut Reactor,
+
+        reactor_owner: Option<Wakeup>,
     },
     Done,
 }
 
-// SAFETY: Socket is Send; *mut Reactor follows the same contract as TcpStream.
-unsafe impl Send for UnixConnectState {}
+#[cfg(unix)]
 
 /// future returned by `UnixStream::connect`. polls until the connect
 /// completes or fails, then yields a `UnixStream`.
+#[cfg(unix)]
 pub struct UnixConnect {
     path: PathBuf,
     state: UnixConnectState,
 }
 
-// SAFETY: UnixConnect contains UnixConnectState which is Send per above.
-unsafe impl Send for UnixConnect {}
-
+#[cfg(unix)]
 impl std::future::Future for UnixConnect {
     type Output = io::Result<UnixStream>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if let UnixConnectState::Pending {
+            reactor_owner: Some(owner),
+            ..
+        } = &this.state
+        {
+            checked_reactor(owner)?;
+        }
         match &mut this.state {
             UnixConnectState::Init => {
                 let socket = match Socket::new(Domain::UNIX, Type::STREAM, None) {
@@ -904,12 +931,12 @@ impl std::future::Future for UnixConnect {
                     Err(err) if is_connect_in_progress(&err) => {}
                     Err(err) => return Poll::Ready(Err(err)),
                 }
-                let mut reactor_ptr: *mut Reactor = ptr::null_mut();
-                let reactor = match ensure_reactor_ptr(&mut reactor_ptr) {
+                let mut reactor_owner = None;
+                let mut reactor = match ensure_reactor(&mut reactor_owner) {
                     Ok(reactor) => reactor,
                     Err(err) => return Poll::Ready(Err(err)),
                 };
-                let source = match reactor.register(socket.as_raw_fd(), Interest::Write) {
+                let source = match register_socket(&mut reactor, &socket, Interest::Write) {
                     Ok(key) => key,
                     Err(err) => return Poll::Ready(Err(err)),
                 };
@@ -921,7 +948,7 @@ impl std::future::Future for UnixConnect {
                 this.state = UnixConnectState::Pending {
                     socket,
                     source,
-                    reactor_ptr,
+                    reactor_owner,
                 };
                 core_shard::note_reactor_pending();
                 Poll::Pending
@@ -956,15 +983,14 @@ impl std::future::Future for UnixConnect {
                         let UnixConnectState::Pending {
                             socket: owned_socket,
                             source: owned_source,
-                            reactor_ptr: owned_ptr,
+                            reactor_owner: owned_owner,
                         } = std::mem::replace(&mut this.state, UnixConnectState::Done)
                         else {
                             unreachable!()
                         };
-                        if !owned_ptr.is_null() {
-                            // SAFETY: same invariant as TcpStream::ensure_registered.
-                            let reactor = unsafe { &mut *owned_ptr };
-                            let _ = reactor.deregister(owned_source);
+                        if let Some(owner) = owned_owner {
+                            let mut current = checked_reactor(&owner)?;
+                            current.deregister(owned_source)?;
                         }
                         Poll::Ready(Ok(UnixStream::from_socket(owned_socket)))
                     }
@@ -972,20 +998,20 @@ impl std::future::Future for UnixConnect {
                     Outcome::InProgress => {
                         let UnixConnectState::Pending {
                             source,
-                            reactor_ptr,
+                            reactor_owner,
                             ..
                         } = &this.state
                         else {
                             unreachable!()
                         };
                         let source = *source;
-                        let reactor_ptr = *reactor_ptr;
-                        if !reactor_ptr.is_null() {
-                            // SAFETY: same invariant as ensure_reactor_ptr.
-                            let reactor = unsafe { &mut *reactor_ptr };
+                        if let Some(owner) = reactor_owner {
+                            let mut reactor = checked_reactor(owner)?;
+                            #[cfg(windows)]
+                            reactor.rearm(source, Interest::Write)?;
                             if !reactor.register_write_waker_ref(source, context.waker()) {
                                 return Poll::Ready(Err(io::Error::other(
-                                    "UnixConnect: reactor source went stale",
+                                    "connect source went stale",
                                 )));
                             }
                         }
@@ -994,7 +1020,15 @@ impl std::future::Future for UnixConnect {
                     }
 
                     Outcome::Failed(err) => {
-                        this.state = UnixConnectState::Done;
+                        if let UnixConnectState::Pending {
+                            socket,
+                            source,
+                            reactor_owner,
+                            ..
+                        } = std::mem::replace(&mut this.state, UnixConnectState::Done)
+                        {
+                            release_socket(Some(source), reactor_owner, socket);
+                        }
                         Poll::Ready(Err(err))
                     }
                 }
@@ -1007,15 +1041,17 @@ impl std::future::Future for UnixConnect {
     }
 }
 
+#[cfg(unix)]
 impl Drop for UnixConnect {
     fn drop(&mut self) {
         if let UnixConnectState::Pending {
+            socket,
             source,
-            reactor_ptr,
+            reactor_owner,
             ..
-        } = &mut self.state
+        } = std::mem::replace(&mut self.state, UnixConnectState::Done)
         {
-            deregister_on_drop(&mut Some(*source), *reactor_ptr);
+            release_socket(Some(source), reactor_owner, socket);
         }
     }
 }
@@ -1023,25 +1059,25 @@ impl Drop for UnixConnect {
 /// non-blocking Unix-domain stream bound to the proxima reactor.
 /// `futures::io` compatible. Mirrors [`TcpStream`] field-for-field except
 /// there is no `set_nodelay` equivalent (AF_UNIX has no Nagle algorithm).
+#[cfg(unix)]
 pub struct UnixStream {
-    socket: Socket,
+    socket: ManuallyDrop<Socket>,
     source: Option<SourceKey>,
-    reactor_ptr: *mut Reactor,
+
+    reactor_owner: Option<Wakeup>,
     last_read_waker: Option<Waker>,
     last_write_waker: Option<Waker>,
     last_read_blocked_epoch: Option<u32>,
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
-// SAFETY: see `TcpStream` above — same reasoning.
-unsafe impl Send for UnixStream {}
-
+#[cfg(unix)]
 impl UnixStream {
     fn from_socket(socket: Socket) -> Self {
         Self {
-            socket,
+            socket: ManuallyDrop::new(socket),
             source: None,
-            reactor_ptr: ptr::null_mut(),
+            reactor_owner: None,
             last_read_waker: None,
             last_write_waker: None,
             last_read_blocked_epoch: None,
@@ -1065,15 +1101,16 @@ impl UnixStream {
         self.read_into(buf)
     }
 
-    fn ensure_registered(&mut self, interest: Interest) -> io::Result<(&mut Reactor, SourceKey)> {
-        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+    fn ensure_registered(&mut self, interest: Interest) -> io::Result<(ReactorBorrow, SourceKey)> {
+        let mut reactor = ensure_reactor(&mut self.reactor_owner)?;
         if let Some(key) = self.source {
+            #[cfg(not(windows))]
             if interest == Interest::ReadWrite {
                 reactor.reregister(key, Interest::ReadWrite)?;
             }
             return Ok((reactor, key));
         }
-        let key = reactor.register(self.socket.as_raw_fd(), interest)?;
+        let key = register_socket(&mut reactor, &self.socket, interest)?;
         self.source = Some(key);
         Ok((reactor, key))
     }
@@ -1084,7 +1121,9 @@ impl UnixStream {
             .as_ref()
             .is_some_and(|cached| cached.will_wake(context.waker()));
         let epoch = {
-            let (reactor, key) = self.ensure_registered(Interest::Read)?;
+            let (mut reactor, key) = self.ensure_registered(Interest::Read)?;
+            #[cfg(windows)]
+            reactor.rearm(key, Interest::Read)?;
             if !cached_waker_matches && !reactor.register_read_waker_ref(key, context.waker()) {
                 return Err(io::Error::other("UnixStream: reactor source went stale"));
             }
@@ -1099,12 +1138,15 @@ impl UnixStream {
     }
 
     fn register_write_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
+        #[cfg(not(windows))]
         if let Some(cached) = &self.last_write_waker
             && cached.will_wake(context.waker())
         {
             return Ok(());
         }
-        let (reactor, key) = self.ensure_registered(Interest::ReadWrite)?;
+        let (mut reactor, key) = self.ensure_registered(Interest::ReadWrite)?;
+        #[cfg(windows)]
+        reactor.rearm(key, Interest::Write)?;
         if !reactor.register_write_waker_ref(key, context.waker()) {
             return Err(io::Error::other("UnixStream: reactor source went stale"));
         }
@@ -1118,7 +1160,7 @@ impl UnixStream {
         // writes at most `len` initialized bytes into the caller-owned
         // buffer, returning the initialized byte count.
         let len = buf.len().min(isize::MAX as usize);
-        let n = unsafe { libc::read(self.socket.as_raw_fd(), buf.as_mut_ptr().cast(), len) };
+        let n = unsafe { libc::read(socket_source(&self.socket), buf.as_mut_ptr().cast(), len) };
         if n >= 0 {
             Ok(n as usize)
         } else {
@@ -1127,12 +1169,16 @@ impl UnixStream {
     }
 }
 
+#[cfg(unix)]
 impl Drop for UnixStream {
     fn drop(&mut self) {
-        deregister_on_drop(&mut self.source, self.reactor_ptr);
+        // safety: this is the sole owner; drop transfers the socket exactly once.
+        let socket = unsafe { ManuallyDrop::take(&mut self.socket) };
+        release_socket(self.source.take(), self.reactor_owner.take(), socket);
     }
 }
 
+#[cfg(unix)]
 impl AsyncRead for UnixStream {
     #[inline]
     fn poll_read(
@@ -1141,6 +1187,7 @@ impl AsyncRead for UnixStream {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         if let Some(blocked_epoch) = this.last_read_blocked_epoch {
             match this.register_read_waker(context) {
                 Ok(current_epoch) if current_epoch == blocked_epoch => {
@@ -1173,6 +1220,7 @@ impl AsyncRead for UnixStream {
     }
 }
 
+#[cfg(unix)]
 impl AsyncWrite for UnixStream {
     #[inline]
     fn poll_write(
@@ -1181,6 +1229,7 @@ impl AsyncWrite for UnixStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         match this.socket.send(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -1209,61 +1258,55 @@ impl AsyncWrite for UnixStream {
         // crate's `finish_accepted_unix_socket`/EINVAL investigation
         // surfaced it while building a real split+copy+close echo test).
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         let _ = this.socket.shutdown(std::net::Shutdown::Write);
         Poll::Ready(Ok(()))
     }
 }
 
-/// returns a `&mut Reactor` for the calling worker. on first call, reads
-/// `CURRENT_REACTOR` and caches it into `slot`; subsequent calls deref
-/// `slot` directly with no thread-local read.
-///
-/// returns `Err` if called off a proxima worker (`CURRENT_REACTOR` null)
-/// AND no pointer has been cached yet.
-fn ensure_reactor_ptr(slot: &mut *mut Reactor) -> io::Result<&mut Reactor> {
-    if slot.is_null() {
-        let raw = CURRENT_REACTOR.with(std::cell::Cell::get);
-        if raw.is_null() {
-            return Err(io::Error::other(
-                "proxima TcpListener/TcpStream used off worker thread \
-                 (CURRENT_REACTOR is null — construct via spawn_factory_on_core)",
-            ));
-        }
-        *slot = raw;
+fn checked_reactor(owner: &Wakeup) -> io::Result<ReactorBorrow> {
+    let reactor = core_shard::borrow_current_reactor().ok_or_else(|| {
+        io::Error::other(
+            "registered socket used off its owning prime worker or during reactor callback",
+        )
+    })?;
+    if !reactor.owns(owner) {
+        return Err(io::Error::other(
+            "registered socket moved to a different prime worker",
+        ));
     }
-    // SAFETY: CURRENT_REACTOR is set by CoreShard::worker_main to the raw
-    // pointer of its own `UnsafeCell<Reactor>` (alive for the worker
-    // thread's lifetime, cleared on worker exit by CurrentGuards::drop).
-    // The pointer remains valid until the worker thread exits. By the
-    // module-level Send contract, callers must only poll on the worker
-    // thread that produced the cached pointer; the runtime's per-core
-    // (no work-stealing) topology enforces this.
-    //
-    // No aliasing: the worker loop holds no outstanding borrow while
-    // tasks are being polled (it only borrows the reactor when calling
-    // `turn` between executor ticks); the Reactor's own methods don't
-    // re-enter via wakers (wakers push to ready queues, not the reactor).
-    Ok(unsafe { &mut **slot })
+    Ok(reactor)
 }
 
-/// drop-time deregistration. uses the cached reactor pointer if non-null;
-/// otherwise no-op (we never registered or the worker exited first).
-fn deregister_on_drop(source: &mut Option<SourceKey>, reactor_ptr: *mut Reactor) {
-    let Some(key) = source.take() else {
-        return;
-    };
-    if reactor_ptr.is_null() {
-        return;
+fn check_owner(owner: &Option<Wakeup>) -> io::Result<()> {
+    if let Some(owner) = owner {
+        checked_reactor(owner)?;
     }
-    // SAFETY: same invariants as `ensure_reactor_ptr`'s deref — the
-    // pointer is to thread-owned data on the worker that registered the
-    // source. Drop runs on whatever thread holds the type; under the
-    // documented contract that thread is the worker. If the contract was
-    // violated (move-then-drop on another thread), this is UB — but we
-    // can't detect it without a thread-id check on every poll, which is
-    // exactly the overhead this design eliminates.
-    let reactor = unsafe { &mut *reactor_ptr };
-    let _ = reactor.deregister(key);
+    Ok(())
+}
+
+fn ensure_reactor(owner: &mut Option<Wakeup>) -> io::Result<ReactorBorrow> {
+    if let Some(owner) = owner {
+        return checked_reactor(owner);
+    }
+    let reactor = core_shard::borrow_current_reactor()
+        .ok_or_else(|| io::Error::other("socket polling requires an available prime reactor"))?;
+    *owner = Some(reactor.wakeup());
+    Ok(reactor)
+}
+
+fn release_socket(source: Option<SourceKey>, owner: Option<Wakeup>, socket: Socket) {
+    if let (Some(key), Some(owner)) = (source, owner) {
+        match checked_reactor(&owner) {
+            Ok(mut reactor) => {
+                let _ = reactor.deregister(key);
+            }
+            Err(_) => {
+                owner.release_source(key, socket.into());
+                return;
+            }
+        }
+    }
 }
 
 /// Maximum datagrams moved per `recvmmsg`/`sendmmsg` syscall by
@@ -1285,14 +1328,12 @@ const UDP_SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 /// `proxima_protocols::quic::Connection` from any executor (`prime` in
 /// production; tokio via the tokio-compat feature on consumers).
 pub struct UdpSocket {
-    socket: Socket,
+    socket: ManuallyDrop<Socket>,
     source: Option<SourceKey>,
-    reactor_ptr: *mut Reactor,
+
+    reactor_owner: Option<Wakeup>,
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
-
-// SAFETY: same contract as TcpListener / TcpStream — see module docs.
-unsafe impl Send for UdpSocket {}
 
 impl UdpSocket {
     /// Bind a non-blocking UDP socket. Must be called on a proxima
@@ -1308,7 +1349,10 @@ impl UdpSocket {
         };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_nonblocking(true)?;
+        #[cfg(unix)]
         socket.set_reuse_address(true)?;
+        #[cfg(windows)]
+        set_exclusive_address(&socket)?;
         // SO_REUSEPORT: the per-core serve model binds this SAME port once per
         // core (one datagram socket per CoreShard worker). Without it the N
         // sockets share only SO_REUSEADDR and never form a load-balancing
@@ -1332,9 +1376,9 @@ impl UdpSocket {
         let sock_addr = SockAddr::from(addr);
         socket.bind(&sock_addr)?;
         Ok(Self {
-            socket,
+            socket: ManuallyDrop::new(socket),
             source: None,
-            reactor_ptr: ptr::null_mut(),
+            reactor_owner: None,
             _not_sync: PhantomData,
         })
     }
@@ -1357,14 +1401,14 @@ impl UdpSocket {
     ///
     /// # Errors
     ///
-    /// On UB-class errors only (reactor cache went stale; otherwise
-    /// `WouldBlock` is converted to `Pending`).
+    /// reports socket errors, failed registration, or polling away from the owner.
     pub fn poll_recv_from(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         // socket2's recv_from takes &mut [MaybeUninit<u8>]; convert via
         // the raw fd path so callers can use plain &mut [u8].
         // SAFETY: writing `&mut [u8]` as `&mut [MaybeUninit<u8>]` is sound for
@@ -1372,7 +1416,22 @@ impl UdpSocket {
         // MaybeUninit transmute is required by socket2's API surface.
         let buf_ptr = buf.as_mut_ptr().cast::<core::mem::MaybeUninit<u8>>();
         let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf.len()) };
-        match this.socket.recv_from(buf_slice) {
+        #[cfg(not(windows))]
+        let received = this.socket.recv_from(buf_slice);
+        #[cfg(windows)]
+        let received = this
+            .socket
+            .recv_from_vectored(&mut [MaybeUninitSlice::new(buf_slice)])
+            .map(|(count, flags, address)| {
+                // winsock fills the UDP buffer on WSAEMSGSIZE without promising a byte count.
+                let received = if flags.is_truncated() {
+                    buf.len()
+                } else {
+                    count
+                };
+                (received, address)
+            });
+        match received {
             Ok((len, sock_addr)) => {
                 let peer = sock_addr
                     .as_socket()
@@ -1396,7 +1455,7 @@ impl UdpSocket {
     ///
     /// # Errors
     ///
-    /// On UB-class errors only.
+    /// reports socket errors, failed registration, or polling away from the owner.
     pub fn poll_send_to(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
@@ -1404,6 +1463,7 @@ impl UdpSocket {
         peer: SocketAddr,
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         let sock_addr = SockAddr::from(peer);
         match this.socket.send_to(buf, &sock_addr) {
             Ok(written) => Poll::Ready(Ok(written)),
@@ -1451,6 +1511,7 @@ impl UdpSocket {
         out_meta: &mut [(usize, SocketAddr)],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         let want = bufs.len().min(out_meta.len()).min(DATAGRAM_BATCH);
         if want == 0 {
             return Poll::Ready(Ok(0));
@@ -1473,7 +1534,7 @@ impl UdpSocket {
         // `want` entries; null timeout returns immediately (non-blocking).
         let received = unsafe {
             libc::recvmmsg(
-                this.socket.as_raw_fd(),
+                socket_source(&this.socket),
                 headers.as_mut_ptr(),
                 want as u32,
                 0,
@@ -1513,7 +1574,7 @@ impl UdpSocket {
         bufs: &mut [&mut [u8]],
         out_meta: &mut [(usize, SocketAddr)],
     ) -> Poll<io::Result<usize>> {
-        let want = bufs.len().min(out_meta.len());
+        let want = bufs.len().min(out_meta.len()).min(DATAGRAM_BATCH);
         let mut count = 0;
         while count < want {
             match self.as_mut().poll_recv_from(context, bufs[count]) {
@@ -1550,6 +1611,7 @@ impl UdpSocket {
         packets: &[(&[u8], SocketAddr)],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        check_owner(&this.reactor_owner)?;
         let total = packets.len();
         let mut sent = 0;
         while sent < total {
@@ -1583,7 +1645,7 @@ impl UdpSocket {
             // SAFETY: fd is the bound socket; headers valid for `chunk` entries.
             let pushed = unsafe {
                 libc::sendmmsg(
-                    this.socket.as_raw_fd(),
+                    socket_source(&this.socket),
                     headers.as_mut_ptr(),
                     chunk as u32,
                     0,
@@ -1637,14 +1699,16 @@ impl UdpSocket {
     }
 
     fn register_read_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
-        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+        let mut reactor = ensure_reactor(&mut self.reactor_owner)?;
         if self.source.is_none() {
-            let key = reactor.register(self.socket.as_raw_fd(), Interest::ReadWrite)?;
+            let key = register_socket(&mut reactor, &self.socket, Interest::ReadWrite)?;
             self.source = Some(key);
         }
         let Some(key) = self.source else {
             return Err(io::Error::other("UdpSocket: missing source key"));
         };
+        #[cfg(windows)]
+        reactor.rearm(key, Interest::Read)?;
         if !reactor.register_read_waker_ref(key, context.waker()) {
             return Err(io::Error::other("UdpSocket: reactor source went stale"));
         }
@@ -1652,14 +1716,16 @@ impl UdpSocket {
     }
 
     fn register_write_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
-        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+        let mut reactor = ensure_reactor(&mut self.reactor_owner)?;
         if self.source.is_none() {
-            let key = reactor.register(self.socket.as_raw_fd(), Interest::ReadWrite)?;
+            let key = register_socket(&mut reactor, &self.socket, Interest::ReadWrite)?;
             self.source = Some(key);
         }
         let Some(key) = self.source else {
             return Err(io::Error::other("UdpSocket: missing source key"));
         };
+        #[cfg(windows)]
+        reactor.rearm(key, Interest::Write)?;
         if !reactor.register_write_waker_ref(key, context.waker()) {
             return Err(io::Error::other("UdpSocket: reactor source went stale"));
         }
@@ -1669,7 +1735,9 @@ impl UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        deregister_on_drop(&mut self.source, self.reactor_ptr);
+        // safety: this is the sole owner; drop transfers the socket exactly once.
+        let socket = unsafe { ManuallyDrop::take(&mut self.socket) };
+        release_socket(self.source.take(), self.reactor_owner.take(), socket);
     }
 }
 
@@ -2105,6 +2173,7 @@ mod tests {
     /// worked example: bind a `UnixListener` in a tempdir (never a fixed
     /// path — a second concurrent test run must not collide), accept one
     /// connection via `UnixStream::connect`, and echo 4 bytes.
+    #[cfg(unix)]
     #[test]
     fn unix_listener_accept_and_stream_echo() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -2170,6 +2239,7 @@ mod tests {
 
     /// sad path: connecting to a path with no listener must return an
     /// error (`NotFound` — nothing was ever bound there), not hang.
+    #[cfg(unix)]
     #[test]
     fn unix_stream_connect_to_missing_path_returns_error() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -2230,6 +2300,7 @@ mod tests {
     /// invariant instead: after the second bind steals the path, the FIRST
     /// listener's accept never observes a client connecting to the (now
     /// re-pointed) path — i.e. the path, not the listener, is what's live.
+    #[cfg(unix)]
     #[test]
     fn unix_listener_rebind_replaces_the_stale_socket_file() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -2273,5 +2344,48 @@ mod tests {
             "rebinding at the same path must unlink the stale file and succeed, \
              matching tokio's fresh-bind-on-restart behavior"
         );
+    }
+}
+
+#[cfg(unix)]
+fn socket_source(socket: &Socket) -> RawSource {
+    socket.as_raw_fd()
+}
+
+#[cfg(windows)]
+fn register_socket(
+    reactor: &mut Reactor,
+    socket: &Socket,
+    interest: Interest,
+) -> io::Result<SourceKey> {
+    reactor.register(socket, interest)
+}
+
+#[cfg(unix)]
+fn register_socket(
+    reactor: &mut Reactor,
+    socket: &Socket,
+    interest: Interest,
+) -> io::Result<SourceKey> {
+    reactor.register(socket.as_raw_fd(), interest)
+}
+
+#[cfg(windows)]
+fn set_exclusive_address(socket: &Socket) -> io::Result<()> {
+    let enabled = 1_i32;
+    // safety: winsock reads the supplied integer synchronously while the socket is borrowed.
+    let outcome = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&raw const enabled).cast(),
+            4,
+        )
+    };
+    if outcome == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }))
     }
 }

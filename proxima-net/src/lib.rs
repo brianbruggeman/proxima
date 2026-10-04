@@ -27,6 +27,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 pub mod packet;
 pub mod stack;
+#[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+mod tcp_dial;
 #[cfg(feature = "alloc")]
 pub mod tcp_listener;
 #[cfg(feature = "alloc")]
@@ -36,7 +38,7 @@ pub mod tcp_stack;
 pub mod dpdk;
 #[cfg(all(
     feature = "prime",
-    any(target_os = "macos", target_os = "linux"),
+    any(target_os = "macos", target_os = "linux", windows),
     feature = "runtime-prime-inbox-alloc"
 ))]
 pub mod prime;

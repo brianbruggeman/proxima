@@ -48,26 +48,61 @@
 //! future change accidentally adds one of those bounds.
 use bytes::Bytes;
 
+#[cfg(windows)]
+use super::spawn::{Child, native_stdio, process_error};
+#[cfg(windows)]
+use futures::Stream;
+#[cfg(windows)]
+use futures::channel::mpsc;
+#[cfg(windows)]
+use futures::future::{AbortHandle, Abortable};
+#[cfg(windows)]
+use futures::{SinkExt, StreamExt};
 use std::ffi::{OsStr, OsString};
 use std::future::Future;
+#[cfg(windows)]
+use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::pin::Pin;
+#[cfg(windows)]
+use std::process::Command as NativeCommand;
+#[cfg(windows)]
+use std::sync::Arc;
+#[cfg(windows)]
+use std::task::{Context, Poll};
 use std::thread;
+#[cfg(windows)]
+use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::TerminateProcess;
 
 use alloc::ffi::CString;
 use bon::Builder;
+#[cfg(unix)]
 use futures::stream::{self, StreamExt};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::alloc_tier;
 use proxima_primitives::pipe::{ProximaError, Request, Response, ResponseStream};
 
 use super::descriptor::{CommandDescriptor, Stdio};
+#[cfg(unix)]
 use super::dispatched::{DispatchedChild, spawn_and_dispatch_with_options};
 use super::env::Env;
+#[cfg(unix)]
 use super::fd_pipe::FdPairPipe;
+#[cfg(unix)]
 use super::libc_shim;
 use super::protocol::{ChildRequest, ChildResponse};
+#[cfg(unix)]
 use super::spawn::{Child, SpawnOptions, spawn};
 
 /// Drop-in mirror of [`std::process::Command`].
@@ -228,8 +263,13 @@ impl Command {
     {
         let key = key.as_ref().to_os_string();
         let value = value.as_ref().to_os_string();
-        self.removed_envs.retain(|removed| *removed != key);
-        if let Some(slot) = self.envs.iter_mut().find(|(existing, _)| *existing == key) {
+        self.removed_envs
+            .retain(|removed| !env_key_eq(removed, &key));
+        if let Some(slot) = self
+            .envs
+            .iter_mut()
+            .find(|(existing, _)| env_key_eq(existing, &key))
+        {
             slot.1 = value;
         } else {
             self.envs.push((key, value));
@@ -259,8 +299,13 @@ impl Command {
     /// credential the child must not see.
     pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Self {
         let key = key.as_ref().to_os_string();
-        self.envs.retain(|(existing, _)| *existing != key);
-        if !self.removed_envs.contains(&key) {
+        self.envs
+            .retain(|(existing, _)| !env_key_eq(existing, &key));
+        if !self
+            .removed_envs
+            .iter()
+            .any(|removed| env_key_eq(removed, &key))
+        {
             self.removed_envs.push(key);
         }
         self
@@ -468,6 +513,13 @@ impl Command {
             descriptor.current_dir(path_to_cstring(dir)?);
         }
         for (key, value) in &self.envs {
+            #[cfg(windows)]
+            descriptor.env.retain(|entry| {
+                !entry
+                    .key
+                    .to_str()
+                    .is_ok_and(|existing| env_key_eq(OsStr::new(existing), key))
+            });
             descriptor.env(
                 osstr_to_cstring(key, "env key")?,
                 osstr_to_cstring(value, "env value")?,
@@ -475,10 +527,24 @@ impl Command {
         }
         for key in &self.removed_envs {
             descriptor.env_remove(&osstr_to_cstring(key, "env key")?);
+            #[cfg(windows)]
+            descriptor.env.retain(|entry| {
+                !entry
+                    .key
+                    .to_str()
+                    .is_ok_and(|existing| env_key_eq(OsStr::new(existing), key))
+            });
         }
         descriptor.stdin(self.stdin);
         descriptor.stdout(self.stdout);
         descriptor.stderr(self.stderr);
+        #[cfg(windows)]
+        if self.libc_shim {
+            return Err(ProximaError::Body(
+                "libc interposition requires Unix".into(),
+            ));
+        }
+        #[cfg(unix)]
         if self.libc_shim {
             let key = CString::new(libc_shim::PRELOAD_ENV_VAR).map_err(|err| {
                 ProximaError::Body(format!("libc-shim preload env var contains NUL: {err}"))
@@ -496,6 +562,7 @@ impl Command {
     /// `Stdio::Piped` slots — no chain/dispatch wiring here
     /// (use [`Pipe::call`](proxima_primitives::pipe::Pipe::call) for that — it handles the dispatch
     /// thread lifecycle alongside the byte shuttle).
+    #[cfg(unix)]
     pub fn spawn(&mut self) -> Result<Child, ProximaError> {
         let descriptor = self.to_descriptor()?;
         spawn(&descriptor, self.spawn_options(None))
@@ -530,6 +597,7 @@ impl Command {
         wait_child(&mut child)
     }
 
+    #[cfg(unix)]
     fn spawn_and_collect(&mut self) -> Result<Output, ProximaError> {
         let mut child = self.spawn()?;
         let stdout_fd = child
@@ -550,6 +618,7 @@ impl Command {
         })
     }
 
+    #[cfg(unix)]
     fn spawn_options(&self, dispatch_fd: Option<RawFd>) -> SpawnOptions {
         SpawnOptions {
             dispatch_fd,
@@ -575,6 +644,7 @@ pub struct Output {
     pub stderr: Vec<u8>,
 }
 
+#[cfg(unix)]
 fn drain_fd(fd: std::os::fd::OwnedFd) -> Vec<u8> {
     use std::io::Read;
     use std::os::fd::{FromRawFd, IntoRawFd};
@@ -587,6 +657,7 @@ fn drain_fd(fd: std::os::fd::OwnedFd) -> Vec<u8> {
     buffer
 }
 
+#[cfg(unix)]
 fn wait_child(child: &mut Child) -> Result<i32, ProximaError> {
     let pid = child.pid();
     let mut status: libc::c_int = 0;
@@ -653,6 +724,7 @@ fn parse_command_line(input: &str) -> Result<Command, super::descriptor::Command
     Ok(command)
 }
 
+#[cfg(unix)]
 impl SendPipe for Command {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -674,6 +746,7 @@ impl SendPipe for Command {
     }
 }
 
+#[cfg(unix)]
 async fn run_pipe_call(
     descriptor: CommandDescriptor,
     chain: Option<alloc_tier::PipeHandle<ChildRequest, ChildResponse>>,
@@ -722,6 +795,7 @@ async fn run_pipe_call(
     Ok(Response::streamed(wrap_body(inner_response, after, pid)))
 }
 
+#[cfg(unix)]
 fn take_piped(
     slot: &mut Option<std::os::fd::OwnedFd>,
     label: &'static str,
@@ -730,11 +804,13 @@ fn take_piped(
         .ok_or_else(|| ProximaError::Body(format!("spawn returned no Piped {label} fd")))
 }
 
+#[cfg(unix)]
 enum AfterPipe {
     Vanilla,
     Dispatched(DispatchedChild),
 }
 
+#[cfg(unix)]
 fn wrap_body(response: Response<Bytes>, after: AfterPipe, pid: libc::pid_t) -> ResponseStream {
     let stream = response.into_chunk_stream();
     ResponseStream::new(stream::unfold(
@@ -751,6 +827,7 @@ fn wrap_body(response: Response<Bytes>, after: AfterPipe, pid: libc::pid_t) -> R
     ))
 }
 
+#[cfg(unix)]
 fn finish(after: Option<AfterPipe>, pid: libc::pid_t) {
     match after {
         Some(AfterPipe::Vanilla) => {
@@ -768,17 +845,19 @@ fn finish(after: Option<AfterPipe>, pid: libc::pid_t) {
     }
 }
 
+#[cfg(unix)]
 fn osstr_to_cstring(value: &OsStr, field: &'static str) -> Result<CString, ProximaError> {
     CString::new(value.as_bytes())
         .map_err(|err| ProximaError::Body(format!("{field} contains NUL: {err}")))
 }
 
+#[cfg(unix)]
 fn path_to_cstring(value: &Path) -> Result<CString, ProximaError> {
     CString::new(value.as_os_str().as_bytes())
         .map_err(|err| ProximaError::Body(format!("current_dir contains NUL: {err}")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #![allow(
         clippy::unwrap_used,
@@ -1058,5 +1137,302 @@ mod tests {
             }
         });
         assert_eq!(output, b"hello via Command Pipe\n");
+    }
+}
+
+#[cfg(windows)]
+impl Command {
+    fn native_command(&self) -> Result<NativeCommand, ProximaError> {
+        if self.chain.is_some() || self.libc_shim || self.controlling_tty || self.umask.is_some() {
+            return Err(ProximaError::Body(
+                "POSIX dispatch, interposition, terminal and umask options require Unix".into(),
+            ));
+        }
+        let mut command = NativeCommand::new(&self.program);
+        command.args(&self.args);
+        if !self.inherit_parent_env {
+            command.env_clear();
+        }
+        for (key, value) in &self.envs {
+            command.env(key, value);
+        }
+        for key in &self.removed_envs {
+            command.env_remove(key);
+        }
+        if let Some(directory) = &self.current_dir {
+            command.current_dir(directory);
+        }
+        command
+            .stdin(native_stdio(self.stdin)?)
+            .stdout(native_stdio(self.stdout)?)
+            .stderr(native_stdio(self.stderr)?);
+        Ok(command)
+    }
+
+    pub fn spawn(&mut self) -> Result<Child, ProximaError> {
+        Child::from_command(&mut self.native_command()?)
+    }
+
+    fn spawn_and_collect(&mut self) -> Result<Output, ProximaError> {
+        self.spawn()?.collect()
+    }
+}
+
+#[cfg(windows)]
+fn wait_child(child: &mut Child) -> Result<i32, ProximaError> {
+    child.wait()
+}
+
+#[cfg(windows)]
+fn osstr_to_cstring(value: &OsStr, field: &'static str) -> Result<CString, ProximaError> {
+    let text = value.to_str().ok_or_else(|| {
+        ProximaError::Body(format!(
+            "{field} cannot be represented in a UTF-8 descriptor"
+        ))
+    })?;
+    CString::new(text).map_err(|error| ProximaError::Body(format!("{field} contains NUL: {error}")))
+}
+
+#[cfg(windows)]
+fn path_to_cstring(value: &Path) -> Result<CString, ProximaError> {
+    osstr_to_cstring(value.as_os_str(), "current_dir")
+}
+
+#[cfg(not(windows))]
+fn env_key_eq(left: &OsStr, right: &OsStr) -> bool {
+    left == right
+}
+
+#[cfg(windows)]
+fn env_key_eq(left: &OsStr, right: &OsStr) -> bool {
+    if left == right {
+        return true;
+    }
+    let left: Vec<u16> = left.encode_wide().collect();
+    let right: Vec<u16> = right.encode_wide().collect();
+    // keys exceeding the OS string limit cannot spawn; keep them for that error.
+    let (Ok(left_length), Ok(right_length)) =
+        (i32::try_from(left.len()), i32::try_from(right.len()))
+    else {
+        return false;
+    };
+    // both UTF-16 slices remain live for the length-delimited ordinal comparison.
+    unsafe {
+        CompareStringOrdinal(left.as_ptr(), left_length, right.as_ptr(), right_length, 1)
+            == CSTR_EQUAL
+    }
+}
+
+#[cfg(windows)]
+struct PipeProcess {
+    handle: OwnedHandle,
+    input_abort: AbortHandle,
+}
+
+#[cfg(windows)]
+impl PipeProcess {
+    fn cancel(&self) {
+        self.input_abort.abort();
+        // the duplicate keeps this process identity alive even after Child is dropped.
+        // termination is also harmless after the waiter has observed process exit.
+        unsafe {
+            TerminateProcess(self.handle.as_raw_handle(), 1);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct PipeProcessGuard {
+    process: Arc<PipeProcess>,
+    armed: bool,
+}
+
+#[cfg(windows)]
+impl PipeProcessGuard {
+    fn new(process: &Arc<PipeProcess>) -> Self {
+        Self {
+            process: Arc::clone(process),
+            armed: true,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PipeProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.process.cancel();
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ProcessResponseStream {
+    receiver: mpsc::Receiver<Result<Bytes, ProximaError>>,
+    cancellation: PipeProcessGuard,
+}
+
+#[cfg(windows)]
+impl Stream for ProcessResponseStream {
+    type Item = Result<Bytes, ProximaError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let result = Pin::new(&mut self.receiver).poll_next(context);
+        if matches!(result, Poll::Ready(None)) {
+            self.cancellation.finish();
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+impl SendPipe for Command {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        let native = self.native_command();
+        async move {
+            let mut native = native?;
+            native
+                .stdin(native_stdio(Stdio::Piped)?)
+                .stdout(native_stdio(Stdio::Piped)?);
+            let mut child = Child::from_command(&mut native)?;
+            let handle = child.clone_process_handle()?;
+            let (input_abort, input_registration) = AbortHandle::new_pair();
+            let process = Arc::new(PipeProcess {
+                handle,
+                input_abort,
+            });
+            let (mut sender, receiver) = mpsc::channel(1);
+            // until returned, this guard owns cleanup for every partial startup failure.
+            let response = ProcessResponseStream {
+                receiver,
+                cancellation: PipeProcessGuard::new(&process),
+            };
+            let mut input = child
+                .stdin
+                .take()
+                .ok_or_else(|| ProximaError::Body("child stdin missing".into()))?;
+            let mut output = child
+                .stdout
+                .take()
+                .ok_or_else(|| ProximaError::Body("child stdout missing".into()))?;
+
+            // stderr has its own drain so a full pipe cannot stop stdout or child exit.
+            let stderr_reader = match child.stderr.take() {
+                Some(mut stderr) => {
+                    let mut guard = PipeProcessGuard::new(&process);
+                    Some(
+                        thread::Builder::new()
+                            .name("proxima-process-stderr".into())
+                            .spawn(move || {
+                                let result = io::copy(&mut stderr, &mut io::sink())
+                                    .map(|_| ())
+                                    .map_err(process_error);
+                                if result.is_ok() {
+                                    guard.finish();
+                                }
+                                result
+                            })
+                            .map_err(process_error)?,
+                    )
+                }
+                None => None,
+            };
+            let mut input_guard = PipeProcessGuard::new(&process);
+            let writer = thread::Builder::new()
+                .name("proxima-process-input".into())
+                .spawn(move || {
+                    let writing = async move {
+                        let mut chunks = request.into_chunk_stream();
+                        while let Some(chunk) = chunks.next().await {
+                            input.write_all(&chunk?).map_err(process_error)?;
+                        }
+                        Ok(())
+                    };
+                    let result =
+                        futures::executor::block_on(Abortable::new(writing, input_registration))
+                            .unwrap_or(Ok(()));
+                    if result.is_ok() {
+                        input_guard.finish();
+                    }
+                    result
+                })
+                .map_err(process_error)?;
+            let mut output_guard = PipeProcessGuard::new(&process);
+            let mut output_sender = sender.clone();
+            let reader = thread::Builder::new()
+                .name("proxima-process-output".into())
+                .spawn(move || {
+                    let result = (|| {
+                        let mut buffer = [0u8; 8192];
+                        loop {
+                            match output.read(&mut buffer) {
+                                Ok(0) => return Ok(()),
+                                Ok(count) => {
+                                    if futures::executor::block_on(
+                                        output_sender
+                                            .send(Ok(Bytes::copy_from_slice(&buffer[..count]))),
+                                    )
+                                    .is_err()
+                                    {
+                                        output_guard.process.cancel();
+                                        return Ok(());
+                                    }
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                    continue;
+                                }
+                                Err(error) => return Err(process_error(error)),
+                            }
+                        }
+                    })();
+                    if result.is_ok() {
+                        output_guard.finish();
+                    }
+                    result
+                })
+                .map_err(process_error)?;
+            let mut wait_guard = PipeProcessGuard::new(&process);
+            thread::Builder::new()
+                .name("proxima-process-wait".into())
+                .spawn(move || {
+                    // waiting owns Child alone; response cancellation never needs this thread.
+                    let wait_result = child.wait();
+                    process.input_abort.abort();
+                    if wait_result.is_err() {
+                        process.cancel();
+                    }
+                    for (worker, label) in [(writer, "input"), (reader, "output")]
+                        .into_iter()
+                        .chain(stderr_reader.map(|worker| (worker, "stderr")))
+                    {
+                        let result = worker
+                            .join()
+                            .map_err(|_| {
+                                ProximaError::Body(format!("child {label} worker panicked"))
+                            })
+                            .and_then(|result| result);
+                        if let Err(error) = result {
+                            let _ = futures::executor::block_on(sender.send(Err(error)));
+                        }
+                    }
+                    if let Err(error) = wait_result {
+                        let _ = futures::executor::block_on(sender.send(Err(error)));
+                    }
+                    wait_guard.finish();
+                })
+                .map_err(process_error)?;
+            Ok(Response::streamed(ResponseStream::new(response)))
+        }
     }
 }

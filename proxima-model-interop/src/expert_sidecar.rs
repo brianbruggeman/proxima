@@ -186,8 +186,11 @@ impl MappedExpertWindow {
                 reason: String::from("mapped expert windows require unix mmap"),
             });
         }
-        self.capacity = capacity;
-        Ok(())
+        #[cfg(unix)]
+        {
+            self.capacity = capacity;
+            Ok(())
+        }
     }
 
     #[cfg(unix)]
@@ -469,7 +472,7 @@ impl ExpertSidecarReadScratch {
             })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(all(not(unix), test))]
     pub(crate) fn mapped_window_arena(
         &self,
         _projection: ExpertProjection,
@@ -552,6 +555,7 @@ impl MappedExpertSidecar {
         // the returned sidecar for the complete attachment lifetime.
         let mapping = unsafe { memmap2::MmapOptions::new().map(source_file.as_ref()) }
             .map_err(InteropError::SidecarIo)?;
+        #[cfg(unix)]
         mapping.advise(memmap2::Advice::Random)?;
         Self::new_with_source_file(Arc::new(mapping), Some(source_file))
     }
@@ -802,6 +806,7 @@ impl MappedExpertSidecar {
         let mut arena_totals = [0usize; 3];
         let mut mapped_window_totals = [0usize; 3];
         let mut mapped_low_projections = [true; 3];
+        #[cfg(unix)]
         let mut mapped_window_active = false;
         let mut mapped_ranges: [Option<Range<usize>>; 3] = [None, None, None];
         for &expert in experts {
@@ -908,8 +913,7 @@ impl MappedExpertSidecar {
                 let projection_index = projection.index();
                 #[cfg(unix)]
                 let direct_window = scratch.mapped_window_ranges[projection_index].is_some();
-                #[cfg(not(unix))]
-                let direct_window = false;
+                #[cfg(unix)]
                 if direct_window {
                     let range =
                         Self::checked_range(descriptor, offset, length, self.mapping.len(), codec)?;
@@ -1236,7 +1240,7 @@ impl MappedExpertSidecar {
     /// Advises the kernel that one expert's low-codec ranges will be needed
     /// soon. This changes only page-cache scheduling: it does not copy bytes,
     /// change the slab epoch, or promote the expert to the high codec.
-    #[cfg(any(feature = "qwen35moe-expert-prefetch", test))]
+    #[cfg(all(unix, any(feature = "qwen35moe-expert-prefetch", test)))]
     pub(crate) fn advise_expert_low(&self, address: ExpertAddress) -> Result<u64, InteropError> {
         let mut advised_bytes = 0_u64;
         for projection in ExpertProjection::ALL {
@@ -1248,12 +1252,21 @@ impl MappedExpertSidecar {
                 self.mapping.len(),
                 descriptor.target_codec,
             )?;
+            #[cfg(unix)]
             self.mapping
                 .advise_range(memmap2::Advice::WillNeed, range.start, range.len())
                 .map_err(InteropError::SidecarIo)?;
             advised_bytes = advised_bytes.saturating_add(range.len() as u64);
         }
         Ok(advised_bytes)
+    }
+
+    #[cfg(all(not(unix), any(feature = "qwen35moe-expert-prefetch", test)))]
+    pub(crate) fn advise_expert_low(&self, _address: ExpertAddress) -> Result<u64, InteropError> {
+        Err(InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from("qwen35moe"),
+            reason: String::from("expert prefetch requires unix memory advice"),
+        })
     }
 
     #[must_use]
@@ -2226,12 +2239,18 @@ mod tests {
             assert!(scratch.arena(projection).is_some());
             assert_eq!(scratch.bytes(0, projection), Some(expected));
         }
+        #[cfg(unix)]
         assert_eq!(
             sidecar
                 .advise_expert_low(address)
                 .expect("the mapped low ranges accept a will-need advice"),
             3 * 84
         );
+        #[cfg(not(unix))]
+        assert!(matches!(
+            sidecar.advise_expert_low(address),
+            Err(InteropError::PreGatherExecutionUnsupported { .. })
+        ));
 
         sidecar
             .read_selected_with_checkpoint_admitting(

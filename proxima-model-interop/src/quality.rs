@@ -694,7 +694,7 @@ mod tests {
 // comparison (CPU reference vs Metal variant). Same convention:
 // `#[ignore]`d, mmaps the fixture instead of copying it, and skips
 // cleanly when the host-local model cache is absent.
-#[cfg(all(test, feature = "metal"))]
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_openchat_file {
     use core::ffi::c_void;
@@ -1040,7 +1040,7 @@ mod real_openchat_file {
 // (`generate.rs`'s `load_inner` only special-cases `general.architecture
 // == "qwen35"`, never `"qwen3"`), so no qwen3-specific loader exists or is
 // needed here.
-#[cfg(all(test, feature = "metal"))]
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_qwen3_file {
     use core::ffi::c_void;

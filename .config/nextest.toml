@@ -8,6 +8,11 @@
 heavy-runtime = { max-threads = 1 }
 
 [[profile.default.overrides]]
+filter = 'binary(windows_port) or binary(windows_fs) or binary(windows_process) or binary(windows_instrument) or binary(host_grounds) or test(windows_cli_) or test(prime::tests::upstream_) or test(tcp_dial::tests::) or test(prime::connect_tunnel::tests::) or test(connector::tests::) or test(stream_listener::tests::quic_upstream_and_listener_exchange_one_stream)'
+slow-timeout = { period = "10s", terminate-after = 2 }
+retries = 0
+
+[[profile.default.overrides]]
 filter = 'package(proxima) and binary(concurrent_accept)'
 test-group = "heavy-runtime"
 

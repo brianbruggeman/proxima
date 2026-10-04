@@ -65,7 +65,7 @@ pub trait ClientProtocolExt: Sized {
     /// ```
     #[cfg(all(
         feature = "kafka-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     #[must_use]
     fn kafka(self, dsn: impl Into<String>) -> Self;
@@ -78,7 +78,7 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().mqtt("mqtt://localhost:1883").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     #[must_use]
     fn mqtt(self, dsn: impl Into<String>) -> Self;
 
@@ -90,7 +90,7 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().amqp("amqp://localhost:5672").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     #[must_use]
     fn amqp(self, dsn: impl Into<String>) -> Self;
 
@@ -102,7 +102,7 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().dns("dns://1.1.1.1:53").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     #[must_use]
     fn dns(self, dsn: impl Into<String>) -> Self;
 
@@ -116,7 +116,7 @@ pub trait ClientProtocolExt: Sized {
     /// ```
     #[cfg(all(
         feature = "memcached-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     #[must_use]
     fn memcached(self, dsn: impl Into<String>) -> Self;
@@ -131,7 +131,7 @@ pub trait ClientProtocolExt: Sized {
     /// ```
     #[cfg(all(
         feature = "redis-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     #[must_use]
     fn redis(self, dsn: impl Into<String>) -> Self;
@@ -148,7 +148,7 @@ pub trait ClientProtocolExt: Sized {
     /// ```
     #[cfg(all(
         feature = "redis-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     #[must_use]
     fn valkey(self, dsn: impl Into<String>) -> Self;
@@ -163,7 +163,7 @@ pub trait ClientProtocolExt: Sized {
     /// ```
     #[cfg(all(
         feature = "pgwire-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     #[must_use]
     fn pgwire(self, dsn: impl Into<String>) -> Self;
@@ -184,30 +184,30 @@ impl ClientProtocolExt for ClientBuilder {
 
     #[cfg(all(
         feature = "kafka-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     fn kafka(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::kafka::KafkaClientProtocol::dsn(dsn))
     }
 
-    #[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     fn mqtt(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::mqtt::MqttClientProtocol::dsn(dsn))
     }
 
-    #[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     fn amqp(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::amqp::AmqpClientProtocol::dsn(dsn))
     }
 
-    #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     fn dns(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::dns::DnsClientProtocol::dsn(dsn))
     }
 
     #[cfg(all(
         feature = "memcached-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     fn memcached(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::memcached::MemcachedClientProtocol::dsn(
@@ -217,7 +217,7 @@ impl ClientProtocolExt for ClientBuilder {
 
     #[cfg(all(
         feature = "redis-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     fn redis(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::redis::RedisClientProtocol::dsn(dsn))
@@ -225,7 +225,7 @@ impl ClientProtocolExt for ClientBuilder {
 
     #[cfg(all(
         feature = "redis-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     fn valkey(self, dsn: impl Into<String>) -> Self {
         self.redis(dsn)
@@ -233,7 +233,7 @@ impl ClientProtocolExt for ClientBuilder {
 
     #[cfg(all(
         feature = "pgwire-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     fn pgwire(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::pgwire::PgwireClientProtocol::dsn(dsn))

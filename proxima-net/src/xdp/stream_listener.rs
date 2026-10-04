@@ -27,12 +27,13 @@ use super::sys;
 use super::uapi::{self, xdp_desc};
 use super::xsk::{RingSizes, UmemConfig, XskSocket};
 use crate::stack::{self, Action};
+use crate::tcp_dial::{DialGuard, DialLease};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, TcpStack};
 use futures::io::{AsyncRead, AsyncWrite};
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_primitives::stream::{
-    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
+    BindAddr, ConnectFuture, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
 };
 use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
 use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
@@ -68,14 +69,19 @@ struct State {
 
 struct Shared {
     inner: Mutex<State>,
+    dial: Option<Arc<DialLease>>,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
-        match self.inner.lock() {
+        let mut state = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(dial) = &self.dial {
+            dial.reclaim(&mut state.stack);
         }
+        state
     }
 }
 
@@ -154,6 +160,7 @@ impl XdpStreamListener {
         Ok(Self {
             shared: Arc::new(Shared {
                 inner: Mutex::new(state),
+                dial: None,
             }),
             local_addr: SocketAddr::V4(bind),
         })
@@ -407,6 +414,7 @@ impl StreamListener for XdpStreamListener {
                     shared: self.shared.clone(),
                     id,
                     peer,
+                    dial: None,
                 }));
             }
             if progressed {
@@ -436,6 +444,7 @@ pub struct XdpStreamConnection {
     shared: Arc<Shared>,
     id: ConnId,
     peer: SocketAddr,
+    dial: Option<DialGuard>,
 }
 
 impl StreamConnection for XdpStreamConnection {
@@ -454,7 +463,10 @@ impl AsyncRead for XdpStreamConnection {
         let mut state = this.shared.lock();
         loop {
             let progressed = state.pump();
-            let read = state.stack.read(this.id, buf);
+            let read = match &this.dial {
+                Some(dial) => dial.read(&mut state.stack, buf)?,
+                None => state.stack.read(this.id, buf),
+            };
             if read > 0 {
                 if progressed {
                     state.wake_others(cx);
@@ -493,7 +505,10 @@ impl AsyncWrite for XdpStreamConnection {
         let this = self.get_mut();
         let mut state = this.shared.lock();
         let now = state.now();
-        let outbound = state.stack.write(this.id, buf, now);
+        let outbound = match &this.dial {
+            Some(dial) => dial.write(&mut state.stack, buf, now)?,
+            None => state.stack.write(this.id, buf, now),
+        };
         for (peer, segment) in outbound {
             state.tx_segment(peer, &segment);
         }
@@ -501,7 +516,11 @@ impl AsyncWrite for XdpStreamConnection {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+        let this = self.get_mut();
+        let Some(dial) = &this.dial else {
+            return Poll::Ready(Ok(()));
+        };
+        Poll::Ready(dial.flush(&this.shared.lock().stack))
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -509,7 +528,10 @@ impl AsyncWrite for XdpStreamConnection {
         // stack keeps the connection until the peer acks it; we do not block.
         let this = self.get_mut();
         let mut state = this.shared.lock();
-        let outbound = state.stack.close(this.id);
+        let outbound = match &this.dial {
+            Some(dial) => dial.close(&mut state.stack)?,
+            None => state.stack.close(this.id),
+        };
         for (peer, segment) in outbound {
             state.tx_segment(peer, &segment);
         }
@@ -518,18 +540,12 @@ impl AsyncWrite for XdpStreamConnection {
     }
 }
 
-enum ConnectPhase {
-    Resolving,
-    Connecting(ConnId),
-}
-
 /// An AF_XDP-backed active-open TCP client: ARP-resolves the peer, drives the
 /// handshake, and yields a connected [`XdpStreamConnection`].
 pub struct XdpStreamUpstream {
     shared: Arc<Shared>,
     peer_ip: [u8; 4],
     peer_port: u16,
-    phase: Mutex<ConnectPhase>,
 }
 
 impl XdpStreamUpstream {
@@ -565,77 +581,86 @@ impl XdpStreamUpstream {
         Ok(Self {
             shared: Arc::new(Shared {
                 inner: Mutex::new(state),
+                dial: Some(Arc::new(DialLease::new((peer.ip().octets(), peer.port())))),
             }),
             peer_ip: peer.ip().octets(),
             peer_port: peer.port(),
-            phase: Mutex::new(ConnectPhase::Resolving),
         })
-    }
-
-    fn phase(&self) -> MutexGuard<'_, ConnectPhase> {
-        match self.phase.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
     }
 }
 
 impl StreamUpstream for XdpStreamUpstream {
     type Conn = XdpStreamConnection;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+        let mut operation = None;
+        Box::pin(core::future::poll_fn(move |context| {
+            self.poll_dial(context, &mut operation)
+        }))
+    }
+}
+
+impl XdpStreamUpstream {
+    fn poll_dial(
+        &self,
+        context: &mut Context<'_>,
+        operation: &mut Option<DialGuard>,
+    ) -> Poll<io::Result<XdpStreamConnection>> {
         let mut state = self.shared.lock();
+        let Some(lease) = &self.shared.dial else {
+            return Poll::Ready(Err(io::Error::other("missing upstream tuple lease")));
+        };
+        if operation.is_none() {
+            *operation = Some(lease.claim(&mut state.stack)?);
+        }
+        let Some(dial) = operation.as_mut() else {
+            return Poll::Ready(Err(io::Error::other("missing dial ownership")));
+        };
         loop {
             let progressed = state.pump();
-            let mut connected_id = None;
-            {
-                let mut phase = self.phase();
-                match *phase {
-                    ConnectPhase::Resolving => {
-                        if let Some(&mac) = state.arp.get(&self.peer_ip) {
-                            let peer = Endpoint {
-                                mac,
-                                ip: self.peer_ip,
-                                port: self.peer_port,
-                            };
-                            let (id, outbound) = state.stack.connect(peer);
-                            for (target, segment) in outbound {
-                                state.tx_segment(target, &segment);
-                            }
-                            *phase = ConnectPhase::Connecting(id);
-                        } else {
-                            state.send_arp_request(self.peer_ip);
-                        }
-                    }
-                    ConnectPhase::Connecting(id) => {
-                        while let Some(done_id) = state.stack.poll_connected() {
-                            if done_id == id {
-                                connected_id = Some(id);
-                            }
-                        }
+            if let Some(id) = dial.connection() {
+                if !dial.owns(&state.stack) {
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
+                }
+                while let Some(connected) = state.stack.poll_connected() {
+                    if connected == id && dial.connected(&state.stack) {
+                        let Some(dial) = operation.take() else {
+                            return Poll::Ready(Err(io::Error::other("missing dial ownership")));
+                        };
+                        let dial = dial.complete(&state.stack)?;
+                        return Poll::Ready(Ok(XdpStreamConnection {
+                            shared: Arc::clone(&self.shared),
+                            dial: Some(dial),
+                            id,
+                            peer: SocketAddr::V4(SocketAddrV4::new(
+                                Ipv4Addr::from(self.peer_ip),
+                                self.peer_port,
+                            )),
+                        }));
                     }
                 }
-            }
-            if let Some(id) = connected_id {
-                let peer = SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::from(self.peer_ip),
-                    self.peer_port,
-                ));
-                return Poll::Ready(Ok(XdpStreamConnection {
-                    shared: self.shared.clone(),
-                    id,
-                    peer,
-                }));
+            } else if let Some(&mac) = state.arp.get(&self.peer_ip) {
+                let peer = Endpoint {
+                    mac,
+                    ip: self.peer_ip,
+                    port: self.peer_port,
+                };
+                let outbound = dial.start(&mut state.stack, peer)?;
+                for (target, segment) in outbound {
+                    state.tx_segment(target, &segment);
+                }
+            } else {
+                state.send_arp_request(self.peer_ip);
             }
             if progressed {
-                state.wake_others(cx);
+                state.wake_others(context);
                 continue;
             }
-            match state.arm(cx) {
+            match state.arm(context) {
                 Ok(ReadyState::Retry) => continue,
                 Ok(ReadyState::Parked) => return Poll::Pending,
                 Ok(ReadyState::OffWorker) => {
-                    cx.waker().wake_by_ref();
+                    context.waker().wake_by_ref();
                     return Poll::Pending;
                 }
                 Err(error) => return Poll::Ready(Err(error)),

@@ -46,19 +46,24 @@
 //! (`omega/tests/wide_cooperative_reduce_ragged.rs`) already proved correct
 //! -- this arm is about COST, not correctness.
 
-#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::hint::black_box;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::execute;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
     ScalarOp, append, projection,
 };
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
     (0..count).map(|_| lcg.next_unit()).collect()
@@ -70,6 +75,7 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// wide_cooperative_reduce_ragged.rs::single_row_reduce_program`, kept as
 /// its own copy here since bench targets cannot depend on a sibling test
 /// binary).
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn rms_norm_sum_program(cols: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let input = append(
@@ -101,6 +107,7 @@ fn rms_norm_sum_program(cols: u32) -> (Vec<Op>, NodeId) {
 /// sized at 512 (a realistic single-head attention sequence length) so the
 /// bench sweeps a reduction extent between `rms_norm_small` and
 /// `rms_norm_large` rather than only the two endpoints.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn attention_softmax_max_program(cols: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let scores = append(
@@ -127,6 +134,7 @@ fn attention_softmax_max_program(cols: u32) -> (Vec<Op>, NodeId) {
     (program, max)
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn bench_reduce_cooperative(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("reduce_cooperative");
 
@@ -160,5 +168,13 @@ fn bench_reduce_cooperative(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_group!(benches, bench_reduce_cooperative);
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_main!(benches);
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
+}

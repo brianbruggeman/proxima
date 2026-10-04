@@ -15,11 +15,6 @@
 //!
 //! requires-features: runtime-prime-reactor, runtime-tokio.
 
-#![cfg(all(
-    feature = "runtime-prime-reactor",
-    feature = "runtime-tokio",
-    any(target_os = "macos", target_os = "linux")
-))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -30,14 +25,49 @@
     clippy::default_constructed_unit_structs
 )]
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::io::Write;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::os::fd::AsRawFd;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::os::unix::net::UnixStream;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::time::{Duration, Instant};
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 use proxima::runtime::prime::os::reactor::{Interest, Reactor};
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn configure_group<M: criterion::measurement::Measurement>(
     group: &mut criterion::BenchmarkGroup<'_, M>,
 ) {
@@ -46,6 +76,11 @@ fn configure_group<M: criterion::measurement::Measurement>(
     group.measurement_time(Duration::from_secs(3));
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn noop_waker() -> std::task::Waker {
     std::task::Waker::noop().clone()
 }
@@ -54,6 +89,11 @@ fn noop_waker() -> std::task::Waker {
 // canonical async I/O readiness pattern this crate was built for. Proxima's
 // `register + write + turn` is the same operation without the mio/scheduler
 // indirection. The ~2× win here engages tokio's actual machinery.
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_wake_latency(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("reactor_wake_latency");
     configure_group(&mut group);
@@ -115,6 +155,11 @@ fn bench_wake_latency(criterion: &mut Criterion) {
 // design-favors: prime — proxima-only. tokio has no "drain N ready sources in
 // one syscall" API; its readable()/writable() futures fire individually. This
 // arm measures proxima's batched-drain primitive, not a comparison.
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_turn_n_ready(criterion: &mut Criterion) {
     const N: usize = 16;
     let mut group = criterion.benchmark_group(format!("reactor_turn_n_ready_{N}"));
@@ -158,5 +203,25 @@ fn bench_turn_n_ready(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 criterion_group!(benches, bench_wake_latency, bench_turn_n_ready);
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+))]
 criterion_main!(benches);
+
+#[cfg(not(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-tokio",
+    any(target_os = "macos", target_os = "linux")
+)))]
+fn main() {
+    eprintln!("this reactor benchmark requires Unix runtime-prime-reactor and runtime-tokio");
+    std::process::exit(1);
+}

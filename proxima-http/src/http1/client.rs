@@ -64,7 +64,7 @@
 //!
 //! | stage | form | in this file |
 //! |---|---|---|
-//! | get a connection | **source** `() -> Conn` | [`StreamUpstream::poll_connect`] — nothing goes in, a connection comes out |
+//! | get a connection | **source** `() -> Conn` | [`StreamUpstream::connect_future`] — nothing goes in, a connection comes out |
 //! | apply per-request config | **observe** `In -> In` | `apply_config` — a `Request` goes in, the same `Request` comes out, adjusted |
 //! | encode the head | **transform** `In -> Out` | [`encode_request_head`] — request fields in, bytes out |
 //! | parse the head | **transform** `In -> Out` | [`parse_response_head`] — bytes in, a status + headers out |
@@ -313,7 +313,7 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
     /// use futures::io::{AsyncRead, AsyncWrite};
     /// use proxima_http::http1::{H1ClientConfig, H1ClientUpstream};
     /// use proxima_primitives::pipe::{Request, SendPipe};
-    /// use proxima_primitives::stream::{PeerInfo, StreamConnection, StreamUpstream};
+    /// use proxima_primitives::stream::{ConnectFuture, PeerInfo, StreamConnection, StreamUpstream};
     ///
     /// // ── the fake transport ────────────────────────────────────────────
     /// // A `StreamConnection` is just "bytes in, bytes out, and it can name
@@ -366,11 +366,13 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
     ///
     /// impl StreamUpstream for CannedUpstream {
     ///     type Conn = CannedConnection;
-    ///     fn poll_connect(&self, _cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-    ///         Poll::Ready(Ok(CannedConnection {
-    ///             response: b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
-    ///             sent: 0,
-    ///         }))
+    ///     fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+    ///         Box::pin(async {
+    ///             Ok(CannedConnection {
+    ///                 response: b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+    ///                 sent: 0,
+    ///             })
+    ///         })
     ///     }
     /// }
     ///

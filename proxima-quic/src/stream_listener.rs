@@ -18,12 +18,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 
+use futures::lock::Mutex as AsyncMutex;
 use quinn::ClientConfig;
 use quinn::{Endpoint, RecvStream, SendStream, ServerConfig};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use proxima_primitives::stream::{
-    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
+    BindAddr, ConnectFuture, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
 };
 
 pub struct QuicStreamConnection {
@@ -76,19 +77,9 @@ impl StreamConnection for QuicStreamConnection {
     }
 }
 
-// boxed because `poll_connect` takes `&self`, so the asynchronous QUIC
-// connect/open-bi sequence must live across polls in the same way as the
-// listener's accept sequence below.
-type QuicConnectFut = Pin<
-    Box<
-        dyn std::future::Future<Output = io::Result<(QuicStreamConnection, quinn::Connection)>>
-            + Send,
-    >,
->;
-
 /// QUIC client adapter for stream protocols such as DNS-over-QUIC.
 ///
-/// Each `poll_connect` opens one bidirectional application stream, reusing a
+/// Each connection future opens one bidirectional application stream, reusing a
 /// bounded pool of authenticated QUIC connections. The caller supplies a TLS
 /// config whose ALPN is appropriate for its protocol (DoQ uses `doq`). The
 /// returned stream uses the existing bounded protocol framing; this adapter
@@ -97,14 +88,14 @@ pub struct QuicUpstream {
     endpoint: Endpoint,
     server_addr: SocketAddr,
     server_name: String,
-    in_flight: Mutex<Option<QuicConnectFut>>,
-    connections: Mutex<Vec<quinn::Connection>>,
+    connections: AsyncMutex<Vec<quinn::Connection>>,
+    /// maximum connection handles retained for subsequent stream setup.
     max_connections: usize,
 }
 
 impl QuicUpstream {
     /// Build a QUIC client endpoint using the caller's rustls-backed QUIC
-    /// configuration. No network activity occurs until `poll_connect`.
+    /// configuration. No network activity occurs until its connection future is polled.
     pub fn with_client_config(
         server_addr: SocketAddr,
         server_name: impl Into<String>,
@@ -113,9 +104,9 @@ impl QuicUpstream {
         Self::with_client_config_and_limit(server_addr, server_name, tls_config, 1)
     }
 
-    /// Build a client endpoint with a bounded connection pool. A limit of
-    /// zero is rejected so configuration mistakes fail before any network
-    /// activity.
+    /// build a client endpoint retaining at most `max_connections` handles
+    /// for reuse. concurrent dials can create additional live connections.
+    /// zero is rejected before network activity.
     pub fn with_client_config_and_limit(
         server_addr: SocketAddr,
         server_name: impl Into<String>,
@@ -141,8 +132,7 @@ impl QuicUpstream {
             endpoint,
             server_addr,
             server_name: server_name.into(),
-            in_flight: Mutex::new(None),
-            connections: Mutex::new(Vec::with_capacity(max_connections.min(4))),
+            connections: AsyncMutex::new(Vec::with_capacity(max_connections.min(4))),
             max_connections,
         })
     }
@@ -150,75 +140,44 @@ impl QuicUpstream {
     #[cfg(all(test, feature = "tokio-compat"))]
     #[allow(clippy::expect_used)]
     fn pooled_connection_count(&self) -> usize {
-        self.connections.lock().expect("quic pool lock").len()
+        self.connections.try_lock().expect("quic pool lock").len()
     }
 }
 
 impl StreamUpstream for QuicUpstream {
     type Conn = Box<dyn StreamConnection>;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        let Ok(mut slot) = self.in_flight.lock() else {
-            return Poll::Ready(Err(io::Error::other("quic in-flight lock poisoned")));
-        };
-        let endpoint = self.endpoint.clone();
-        let server_addr = self.server_addr;
-        let server_name = self.server_name.clone();
-        let pooled = self
-            .connections
-            .lock()
-            .ok()
-            .and_then(|mut connections| connections.pop());
-        let future = slot.get_or_insert_with(|| {
-            Box::pin(async move {
-                let connect = || async {
-                    let connecting = endpoint
-                        .connect(server_addr, &server_name)
-                        .map_err(|error| io::Error::other(format!("quic connect: {error}")))?;
-                    connecting
-                        .await
-                        .map_err(|error| io::Error::other(format!("quic handshake: {error}")))
-                };
-                let connection = if let Some(connection) = pooled {
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+        Box::pin(async move {
+            let connect = || async {
+                self.endpoint
+                    .connect(self.server_addr, &self.server_name)
+                    .map_err(|error| io::Error::other(format!("quic connect: {error}")))?
+                    .await
+                    .map_err(|error| io::Error::other(format!("quic handshake: {error}")))
+            };
+            let pooled = self.connections.lock().await.pop();
+            let mut connection = match pooled {
+                Some(connection) => connection,
+                None => connect().await?,
+            };
+            let (send, recv) = match connection.open_bi().await {
+                Ok(stream) => stream,
+                Err(_) => {
+                    connection = connect().await?;
                     connection
-                } else {
-                    connect().await?
-                };
-                let peer = connection.remote_address();
-                let (send, recv) = match connection.open_bi().await {
-                    Ok(stream) => stream,
-                    Err(_) => {
-                        let connection = connect().await?;
-                        let peer = connection.remote_address();
-                        let (send, recv) = connection.open_bi().await.map_err(|error| {
-                            io::Error::other(format!("quic open stream: {error}"))
-                        })?;
-                        return Ok((
-                            QuicStreamConnection::new(send, recv, Some(peer)),
-                            connection,
-                        ));
-                    }
-                };
-                Ok((
-                    QuicStreamConnection::new(send, recv, Some(peer)),
-                    connection,
-                ))
-            })
-        });
-        match future.as_mut().poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => {
-                slot.take();
-                Poll::Ready(result.map(|(connection, pooled)| {
-                    if let Ok(mut connections) = self.connections.lock()
-                        && connections.len() < self.max_connections
-                    {
-                        connections.push(pooled);
-                    }
-                    Box::new(connection) as Self::Conn
-                }))
+                        .open_bi()
+                        .await
+                        .map_err(|error| io::Error::other(format!("quic open stream: {error}")))?
+                }
+            };
+            let peer = connection.remote_address();
+            let mut connections = self.connections.lock().await;
+            if connections.len() < self.max_connections {
+                connections.push(connection);
             }
-        }
+            Ok(Box::new(QuicStreamConnection::new(send, recv, Some(peer))) as Self::Conn)
+        })
     }
 }
 
@@ -233,12 +192,7 @@ type QuicAcceptFut =
 pub struct QuicListener {
     endpoint: Endpoint,
     local_addr: Option<SocketAddr>,
-    // WHY Mutex here / WHY NOT removable / WHY right: same pattern
-    // as `TokioTcpUpstream::in_flight` (`src/upstreams/tokio_stream.rs`)
-    // — interior mutability for a poll-resumable future, &self trait
-    // API, future not movable through atomics, RefCell would force
-    // !Send. Per-listener (not per-connection), uncontested between
-    // accept polls.
+    // the listener retains its single accept operation between polls.
     in_flight: Mutex<Option<QuicAcceptFut>>,
 }
 
@@ -297,6 +251,8 @@ impl StreamListener for QuicListener {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use futures::channel::oneshot;
+    use futures::future::poll_fn;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use proxima_primitives::stream::{StreamListener, StreamUpstream};
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -370,25 +326,59 @@ mod tests {
             QuicUpstream::with_client_config(server_addr, "localhost", tls).expect("quic upstream"),
         );
 
+        let (started, both_pending) = oneshot::channel();
         let upstream_for_client = Arc::clone(&upstream);
         let client_task = tokio::spawn(async move {
-            let mut client = std::future::poll_fn(|cx| upstream_for_client.poll_connect(cx))
-                .await
-                .expect("connect stream");
-            client.write_all(b"doq-frame").await.expect("client write");
-            client
+            let mut first = upstream_for_client.connect_future();
+            let mut second = upstream_for_client.connect_future();
+            poll_fn(|context| {
+                assert!(first.as_mut().poll(context).is_pending());
+                assert!(second.as_mut().poll(context).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            started.send(()).expect("announce both pending handshakes");
+            let exchange = async |future: ConnectFuture<'_, Box<dyn StreamConnection>>,
+                                  request: &[u8; 9],
+                                  expected: &[u8; 9]| {
+                let mut client = future.await.expect("connect stream");
+                client.write_all(request).await.expect("client write");
+                let mut response = [0u8; 9];
+                client.read_exact(&mut response).await.expect("client read");
+                assert_eq!(&response, expected);
+            };
+            futures::join!(
+                exchange(first, b"doq-first", b"ack-first"),
+                exchange(second, b"doq-other", b"ack-other")
+            );
         });
-        let mut server = std::future::poll_fn(|cx| listener.poll_accept(cx))
+        both_pending
             .await
-            .expect("accept stream");
-        let mut client = client_task.await.expect("client task");
+            .expect("both calls own a pending handshake");
+        let mut first = poll_fn(|context| listener.poll_accept(context))
+            .await
+            .expect("accept first stream");
+        let mut second = poll_fn(|context| listener.poll_accept(context))
+            .await
+            .expect("accept second stream");
         assert_eq!(upstream.pooled_connection_count(), 1);
-        let mut request = [0u8; 9];
-        server.read_exact(&mut request).await.expect("server read");
-        assert_eq!(&request, b"doq-frame");
-        server.write_all(b"doq-reply").await.expect("server write");
-        let mut response = [0u8; 9];
-        client.read_exact(&mut response).await.expect("client read");
-        assert_eq!(&response, b"doq-reply");
+        let mut requests = Vec::new();
+        for connection in [&mut first, &mut second] {
+            let mut request = [0u8; 9];
+            connection
+                .read_exact(&mut request)
+                .await
+                .expect("server read");
+            let response = match &request {
+                b"doq-first" => b"ack-first",
+                b"doq-other" => b"ack-other",
+                other => panic!("unexpected request: {other:?}"),
+            };
+            connection.write_all(response).await.expect("server write");
+            requests.push(request);
+        }
+        requests.sort();
+        assert_eq!(requests, vec![*b"doq-first", *b"doq-other"]);
+        client_task.await.expect("client task");
     }
 }

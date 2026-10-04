@@ -1,0 +1,59 @@
+name: windows
+
+on:
+  pull_request:
+  push:
+    branches: [main, port/windows-support]
+  workflow_dispatch:
+
+jobs:
+  windows-port:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: 1
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: install assembler
+        run: choco install nasm --yes --no-progress
+      - name: compile every workspace target
+        run: cargo check --workspace --all-targets --message-format short
+      - name: Prime filesystem
+        run: cargo nextest run -p prime --test windows_fs --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config --no-tests=fail --test-threads 1 --retries 0
+      - name: Prime reactor and sockets
+        run: cargo nextest run -p prime --test windows_port --features runtime-prime-full,runtime-prime-virtual-clock,runtime-prime-bgpool,runtime-prime-config --no-tests=fail --test-threads 1 --retries 0
+      - name: proxima-net adapters
+        run: cargo nextest run -p proxima-net --test windows_port --features prime,runtime-prime-inbox-alloc --no-tests=fail --test-threads 1 --retries 0
+      - name: proxima-net upstream ownership
+        run: cargo nextest run -p proxima-net --lib --features prime,runtime-prime-inbox-alloc -E 'test(prime::tests::upstream_)' --no-tests=fail --test-threads 1 --retries 0
+      - name: CONNECT tunnel
+        run: cargo nextest run -p proxima-net --lib --features prime,runtime-prime-inbox-alloc -E 'test(prime::connect_tunnel::tests::)' --no-tests=fail --test-threads 1 --retries 0
+      - name: fixed tuple ownership
+        run: cargo nextest run -p proxima-net --lib --features prime,runtime-prime-inbox-alloc -E 'test(tcp_dial::tests::fixed_tuple_preserves_payload_and_cancels_only_owned_generation)' --no-tests=fail --test-threads 1 --retries 0
+      - name: TLS upstream ownership
+        run: cargo nextest run -p proxima-tls --lib --features futures-io -E 'test(connector::tests::)' --no-tests=fail --test-threads 1 --retries 0
+      - name: QUIC upstream ownership
+        run: cargo nextest run -p proxima-quic --lib --features tokio-compat -E 'test(stream_listener::tests::quic_upstream_and_listener_exchange_one_stream)' --no-tests=fail --test-threads 1 --retries 0
+      - name: root default runtime facades
+        run: cargo nextest run -p proxima --test windows_port --no-tests=fail --test-threads 1 --retries 0
+      - name: root HTTP-enabled runtime facades
+        run: cargo nextest run -p proxima --test windows_port --features http1-native --no-tests=fail --test-threads 1 --retries 0
+      - name: process host grounds
+        run: cargo nextest run -p proxima-process --test host_grounds --no-tests=fail --test-threads 1 --retries 0
+      - name: Windows timing
+        run: cargo nextest run -p proxima-tensor --test windows_instrument --features instrument --no-tests=fail --test-threads 1 --retries 0
+      - name: CLI refusals
+        run: cargo nextest run -p proxima-cli --bin proxima -E 'test(windows_cli_)' --no-tests=fail --test-threads 1 --retries 0
+      - name: daemon refusal
+        run: cargo nextest run -p proxima-cli --bin proximad -E 'test(windows_cli_)' --no-tests=fail --test-threads 1 --retries 0
+      - name: Windows child processes
+        run: cargo nextest run -p proxima-process --test windows_process --no-tests=fail --test-threads 1 --retries 0
+      - name: exercise doctests and example
+        run: cargo test -p proxima --doc
+      - name: run independent Windows network example
+        run: cargo run -p proxima --example windows_port --features http1-native

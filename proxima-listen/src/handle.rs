@@ -195,6 +195,7 @@ impl Listener {
         let is_http = self.protocol_name == "http";
         let use_spread = is_http
             && (cfg!(any(
+                windows,
                 target_os = "macos",
                 target_os = "freebsd",
                 target_os = "openbsd",
@@ -202,7 +203,12 @@ impl Listener {
             )) || tuning.http_handler_spread);
 
         let num_cores = runtime.num_cores().max(1);
-        let num_lanes = if use_spread { 1 } else { num_cores };
+        // windows has no Unix reuseport load-balancing contract; one lane owns the bind.
+        let num_lanes = if cfg!(windows) || use_spread {
+            1
+        } else {
+            num_cores
+        };
 
         let shutdown_notify = Arc::new(proxima_primitives::sync::Notify::new());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -338,7 +344,7 @@ fn attach_reuseport_flag(spec: &mut Value) {
         *spec = Value::Object(serde_json::Map::new());
     }
     if let Value::Object(table) = spec {
-        table.insert(REUSEPORT_SPEC_KEY.to_string(), Value::Bool(true));
+        table.insert(REUSEPORT_SPEC_KEY.to_string(), Value::Bool(!cfg!(windows)));
     }
 }
 
@@ -383,6 +389,7 @@ pub fn build_reuseport_socket(addr: &SocketAddr) -> std::io::Result<socket2::Soc
         Domain::IPV6
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(unix)]
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;

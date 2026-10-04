@@ -18,6 +18,8 @@
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::future::Future;
+use std::io;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr;
 use std::sync::Arc;
@@ -102,7 +104,7 @@ thread_local! {
     /// avoid the runtime borrow-tracking branch on every WouldBlock; the
     /// reactor is single-thread-owned by construction so no dynamic check
     /// is needed.
-    pub(super) static CURRENT_REACTOR: Cell<*mut Reactor> = const {
+    static CURRENT_REACTOR: Cell<*mut Reactor> = const {
         Cell::new(ptr::null_mut())
     };
     /// Set by OS I/O futures when a poll registers a reactor waker and
@@ -212,21 +214,49 @@ pub fn on_worker() -> bool {
 
 /// Borrow the calling worker's [`Reactor`] to register an externally-owned
 /// fd (e.g. an AF_XDP socket) for readiness, returning `None` off a proxima
-/// worker thread so the caller can fall back to busy-poll. This is the same
+/// worker thread or during a nested borrow. This is the same
 /// per-core reactor the built-in `TcpStream`/`UdpSocket` register with; it
 /// exists so an out-of-crate fd source reuses the epoll registration instead
 /// of inventing a new source kind. Same worker-affinity contract as those
 /// types: poll only on the worker that produced the registration.
 pub fn with_current_reactor<Return>(apply: impl FnOnce(&mut Reactor) -> Return) -> Option<Return> {
-    let raw = CURRENT_REACTOR.with(Cell::get);
+    let mut reactor = borrow_current_reactor()?;
+    Some(apply(&mut reactor))
+}
+
+pub(crate) struct ReactorBorrow {
+    raw: *mut Reactor,
+}
+
+pub(crate) fn borrow_current_reactor() -> Option<ReactorBorrow> {
+    let raw = CURRENT_REACTOR.with(|cell| cell.replace(ptr::null_mut()));
     if raw.is_null() {
-        return None;
+        None
+    } else {
+        Some(ReactorBorrow { raw })
     }
-    // SAFETY: CURRENT_REACTOR is the worker's own Reactor pointer, valid for
-    // the worker thread's lifetime and cleared on exit. The worker holds no
-    // reactor borrow while polling tasks, so this &mut does not alias; the
-    // per-core (no work-stealing) topology keeps polling on the owning thread.
-    Some(apply(unsafe { &mut *raw }))
+}
+
+impl Deref for ReactorBorrow {
+    type Target = Reactor;
+
+    fn deref(&self) -> &Reactor {
+        // safety: taking the thread-local pointer excludes recursive borrows until drop.
+        unsafe { &*self.raw }
+    }
+}
+
+impl DerefMut for ReactorBorrow {
+    fn deref_mut(&mut self) -> &mut Reactor {
+        // safety: this guard alone owns access to the worker's reactor.
+        unsafe { &mut *self.raw }
+    }
+}
+
+impl Drop for ReactorBorrow {
+    fn drop(&mut self) {
+        CURRENT_REACTOR.with(|cell| cell.set(self.raw));
+    }
 }
 
 #[inline]
@@ -678,7 +708,7 @@ fn worker_main(
     setup: Option<WorkerSetup>,
     clock: StdClock,
 ) {
-    let _guards = CurrentGuards;
+    let guards = CurrentGuards;
 
     // setup token lives on the worker's stack for the worker's lifetime.
     // P2 compat mode uses this to hold a `tokio::runtime::EnterGuard`
@@ -711,13 +741,7 @@ fn worker_main(
     // `timer`'s wheel clones the SAME `clock` this loop reads below — one
     // source, not two independently-sampled `StdClock`s.
     let timer: RefCell<TimerWheel<StdClock>> = RefCell::new(TimerWheel::new(clock.clone()));
-    // UnsafeCell rather than RefCell: the worker thread is the unique
-    // accessor for the lifetime of this scope (CoreShard is single-threaded
-    // by construction). Skipping runtime borrow checks is worth ~10-30 ns
-    // per WouldBlock on the I/O hot path. callers (TcpListener/TcpStream
-    // poll methods, and the worker loop below) coordinate by being purely
-    // sequential — no future can re-enter the reactor while another borrow
-    // is live because no method on Reactor calls `poll`.
+    // the scoped TLS guard excludes reentrant borrows while keeping the reactor pinned here.
     let reactor: UnsafeCell<Reactor> = UnsafeCell::new(reactor);
 
     // declare this thread as the executor's worker thread. wakers fired on
@@ -729,6 +753,8 @@ fn worker_main(
     CURRENT_EXECUTOR.with(|cell| cell.set(&executor as *const _));
     CURRENT_TIMER.with(|cell| cell.set(&timer as *const _));
     CURRENT_REACTOR.with(|cell| cell.set(reactor.get()));
+    // retire published pointers before owned reactors and their arbitrary wakers drop.
+    let _guards = guards;
 
     // tracks consecutive empty parks where NO inbox activity was observed.
     // the spin gate's only purpose is catching cross-core inbox pushes
@@ -830,13 +856,8 @@ fn worker_main(
         if fired == 0 {
             let mut got_work = false;
             #[cfg(feature = "runtime-prime-reactor-harvest-io")]
-            let has_live_reactor_sources = {
-                // SAFETY: same worker-unique reactor access invariant as
-                // the park section below. This read happens outside task
-                // polling, before any mutable reactor borrow is created.
-                let reactor_ref: &Reactor = unsafe { &*reactor.get() };
-                reactor_ref.live_sources() > 0
-            };
+            let has_live_reactor_sources =
+                with_current_reactor(|reactor| reactor.live_sources() > 0).unwrap_or(false);
             #[cfg(not(feature = "runtime-prime-reactor-harvest-io"))]
             let has_live_reactor_sources = false;
 
@@ -919,17 +940,7 @@ fn worker_main(
                 None => None,
             };
             {
-                // SAFETY: the worker thread is the unique accessor for
-                // `reactor` (UnsafeCell). No outstanding borrow can exist
-                // here because: (a) every TcpStream / TcpListener method
-                // that touches the reactor does so via `with_reactor_mut`
-                // which scopes the borrow to a single non-async function
-                // call; (b) the executor's `tick()` returned before we got
-                // here. The only re-entrancy risk would be a waker callback
-                // calling into the reactor — wakers only push into ready
-                // queues, never the reactor.
-                let reactor_mut: &mut Reactor = unsafe { &mut *reactor.get() };
-                reactor_mut.arm_wakeup();
+                with_current_reactor(|reactor| reactor.arm_wakeup());
                 // Dekker-pattern fence (matches the one in
                 // `Wakeup::fire`). arm_wakeup wrote `needs_wake` with
                 // Release; the recheck below reads the inbox `tail`
@@ -999,7 +1010,7 @@ fn worker_main(
                     }
                 }
                 if inbox_shutdown {
-                    reactor_mut.disarm_wakeup();
+                    with_current_reactor(|reactor| reactor.disarm_wakeup());
                     break;
                 }
                 let recheck_polled = executor.tick();
@@ -1017,7 +1028,7 @@ fn worker_main(
                             recheck_fired,
                         );
                     }
-                    reactor_mut.disarm_wakeup();
+                    with_current_reactor(|reactor| reactor.disarm_wakeup());
                     if inbox_drained > 0 {
                         empty_parks_since_inbox = 0;
                     }
@@ -1025,7 +1036,8 @@ fn worker_main(
                 }
                 #[cfg(feature = "runtime-prime-reactor-trace")]
                 crate::trace::record_turn_enter();
-                let turn_result = reactor_mut.turn(timeout);
+                let turn_result = with_current_reactor(|reactor| reactor.turn(timeout))
+                    .unwrap_or_else(|| Err(io::Error::other("worker reactor unavailable")));
                 #[cfg(feature = "runtime-prime-reactor-trace")]
                 crate::trace::record_turn_exit(turn_result.as_ref().map_or(0, |fired| *fired));
                 if let Err(err) = turn_result
@@ -1033,7 +1045,7 @@ fn worker_main(
                 {
                     warn!(error = %err, "proxima reactor turn failed");
                 }
-                reactor_mut.disarm_wakeup();
+                with_current_reactor(|reactor| reactor.disarm_wakeup());
                 // drain io_uring CQEs immediately after the epoll park so that
                 // completions triggered by the ring-fd EPOLLIN wake are
                 // processed before the next executor tick.
@@ -1045,11 +1057,9 @@ fn worker_main(
         }
     }
 
-    // tear the executor down while the reactor is still alive: each task's
-    // source deregisters on drop, which clears the waker the reactor holds for
-    // it. locals drop in reverse declaration order, so without this the reactor
-    // (UnsafeCell, declared after executor) frees first and the tasks dropping
-    // last deregister into freed reactor memory — a use-after-free.
+    // retire TLS before arbitrary task destructors; retained socket cancellations
+    // remain owned until the reactor tears down after the executor.
+    drop(_guards);
     drop(executor);
 }
 
@@ -1134,7 +1144,7 @@ fn worker_main_inverted(
     consumer: inbox_impl::Consumer<SpawnRequest<InlineTask>>,
     reactor: Reactor,
 ) {
-    let _guards = CurrentGuards;
+    let guards = CurrentGuards;
 
     if let Some(target) = affinity {
         let valid = core_affinity::get_core_ids()
@@ -1200,6 +1210,8 @@ fn worker_main_inverted(
     CURRENT_EXECUTOR.with(|cell| cell.set(&executor as *const _));
     CURRENT_TIMER.with(|cell| cell.set(&timer as *const _));
     CURRENT_REACTOR.with(|cell| cell.set(reactor.get()));
+    // retire published pointers before owned reactors and their arbitrary wakers drop.
+    let _guards = guards;
 
     // sister spawned-task count from the previous idle check. used to tell a
     // draining tokio::spawn burst (count changing → keep driving) apart from
@@ -1295,11 +1307,7 @@ fn worker_main_inverted(
         // bounded reactor.turn. a producer's wakeup.fire interrupts it; the
         // bounded timeout caps how long a missed-wake costs. minimal park;
         // full Dekker-park fidelity tracked in discipline-inverted-compat.md.
-        // SAFETY: the worker thread is the unique accessor for `reactor`
-        // (UnsafeCell); no reactor borrow is outstanding here (tick returned,
-        // no waker re-enters the reactor).
-        let reactor_mut: &mut Reactor = unsafe { &mut *reactor.get() };
-        reactor_mut.arm_wakeup();
+        with_current_reactor(|reactor| reactor.arm_wakeup());
         atomic::fence(Ordering::SeqCst);
         let mut rearmed = false;
         loop {
@@ -1329,17 +1337,18 @@ fn worker_main_inverted(
             }
         }
         if shutdown {
-            reactor_mut.disarm_wakeup();
+            with_current_reactor(|reactor| reactor.disarm_wakeup());
             break;
         }
         if rearmed {
-            reactor_mut.disarm_wakeup();
+            with_current_reactor(|reactor| reactor.disarm_wakeup());
             continue;
         }
         // C2a (non-linux): bounded park on prime's reactor; a producer's
         // wakeup.fire interrupts it, the timeout caps a missed-wake stall.
         #[cfg(not(target_os = "linux"))]
-        if let Err(err) = reactor_mut.turn(Some(INVERTED_PARK_TIMEOUT))
+        if let Some(Err(err)) =
+            with_current_reactor(|reactor| reactor.turn(Some(INVERTED_PARK_TIMEOUT)))
             && err.kind() != std::io::ErrorKind::Interrupted
         {
             warn!(error = %err, "proxima inverted reactor turn failed");
@@ -1365,15 +1374,17 @@ fn worker_main_inverted(
                     guard.clear_ready();
                 }
             });
-            if let Err(err) = reactor_mut.turn(Some(std::time::Duration::ZERO))
+            if let Some(Err(err)) =
+                with_current_reactor(|reactor| reactor.turn(Some(std::time::Duration::ZERO)))
                 && err.kind() != std::io::ErrorKind::Interrupted
             {
                 warn!(error = %err, "proxima inverted reactor drain failed");
             }
         }
-        reactor_mut.disarm_wakeup();
+        with_current_reactor(|reactor| reactor.disarm_wakeup());
     }
 
+    drop(_guards);
     drop(executor);
 }
 

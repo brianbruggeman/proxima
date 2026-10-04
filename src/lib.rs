@@ -172,7 +172,7 @@ pub use proxima_listen::handle as listen_handle;
 pub mod listener;
 #[cfg(all(
     feature = "http-prime-deps",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use proxima_net::prime::PrimeTcpUpstream;
 pub use proxima_primitives::pipe::header_list;
@@ -237,7 +237,7 @@ pub use proxima_telemetry as telemetry;
 #[cfg(all(
     feature = "otlp-http",
     feature = "http-prime",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub mod otlp;
 // mirrors proxima-http's own gate on `pub mod templates`

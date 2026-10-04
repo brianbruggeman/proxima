@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::pin::Pin;
 
@@ -8,12 +9,15 @@ use futures::channel::oneshot;
 use futures::{FutureExt, select};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
 use proxima_protocols::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use proxima_telemetry::{debug, warn};
+use proxima_telemetry::debug;
+#[cfg(unix)]
+use proxima_telemetry::warn;
 
 use crate::error::ProximaError;
 use crate::pipe::PipeHandle;
@@ -65,11 +69,13 @@ impl ListenProtocol for McpListenProtocol {
             .and_then(Value::as_str)
             .unwrap_or("stdio")
             .to_string();
+        #[cfg(unix)]
         let path: Option<PathBuf> = spec.get("path").and_then(Value::as_str).map(PathBuf::from);
         let ready_signal = context.ready_signal.clone();
         Box::pin(async move {
             match transport.as_str() {
                 "stdio" => serve_stdio(dispatch, shutdown, ready_signal).await,
+                #[cfg(unix)]
                 "unix" | "uds" => {
                     let path = path.ok_or_else(|| {
                         ProximaError::Config(
@@ -78,6 +84,10 @@ impl ListenProtocol for McpListenProtocol {
                     })?;
                     serve_unix(path, dispatch, shutdown, ready_signal).await
                 }
+                #[cfg(not(unix))]
+                "unix" | "uds" => Err(ProximaError::Config(
+                    "mcp Unix socket transport is unavailable on this platform".into(),
+                )),
                 other => Err(ProximaError::Config(format!(
                     "unknown mcp transport `{other}` — expected stdio | unix"
                 ))),
@@ -109,6 +119,7 @@ async fn serve_stdio(
     }
 }
 
+#[cfg(unix)]
 async fn serve_unix(
     path: PathBuf,
     dispatch: PipeHandle,
@@ -142,6 +153,7 @@ async fn serve_unix(
     }
 }
 
+#[cfg(unix)]
 fn spawn_mcp_unix_handler(stream: UnixStream, dispatch: PipeHandle) {
     // spawn_local: surrounding listener serve runs on a TokioPerCoreRuntime
     // worker (current-thread runtime + LocalSet). `?Send` per-request futures

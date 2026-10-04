@@ -152,10 +152,8 @@ impl TaskWaker {
     fn do_wake(&self) {
         #[cfg(feature = "std")]
         if CURRENT_EXEC_ID.with(Cell::get) == self.exec_id {
-            // SAFETY: same-thread; pointer valid for the executor's lifetime
-            // (the waker's Arc keeps the TaskWaker alive, which holds the
-            // pointer; the executor itself outlives every waker because
-            // executors are dropped only after all spawned tasks finish).
+            // safety: the matching live executor owns this thread's queue;
+            // drop clears its identity before any queue fields are destroyed.
             unsafe { (*(*self.local_ready).get()).push(self.index) };
             #[cfg(feature = "runtime-prime-reactor-trace")]
             crate::trace::record_ready_push();
@@ -314,8 +312,8 @@ impl LocalExecutor {
 
     /// declare this thread as the executor's owning worker. tasks polled by
     /// `tick`/`block_on` will see `CURRENT_EXEC_ID == self.id` and route
-    /// wakers to the local queue. the caller MUST call `disarm` before the
-    /// executor goes away or the thread switches contexts.
+    /// wakers to the local queue. call `disarm` when switching contexts;
+    /// dropping the executor retires its identity automatically.
     ///
     /// Under alloc-only (no `std`), this is a no-op: all wakes route via
     /// `remote_ready` until C3 (reactor-direct-wake) lands.
@@ -652,6 +650,17 @@ impl LocalExecutor {
         }
         #[cfg(not(feature = "std"))]
         self.remote_ready.is_empty()
+    }
+}
+
+impl Drop for LocalExecutor {
+    fn drop(&mut self) {
+        #[cfg(feature = "std")]
+        CURRENT_EXEC_ID.with(|current| {
+            if current.get() == self.id {
+                current.set(0);
+            }
+        });
     }
 }
 
