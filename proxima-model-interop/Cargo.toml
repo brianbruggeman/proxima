@@ -585,6 +585,11 @@ required-features = ["std", "metal", "instrument", "metal-output-placement"]
 name = "gemma4_decode_kernel_census"
 required-features = ["std", "metal", "instrument"]
 
+# Interleaved A/B replay of kernel-body variants on captured decode dispatches.
+[[example]]
+name = "norm_variant_ab"
+required-features = ["std", "metal", "instrument"]
+
 # SLICE 1 forward decomposition harness (`bench/forward-decomposition`):
 # root-causes the multi-position gpu_exec floor by splitting the gemma4-E2B
 # Metal forward into named components, each on the compile axis
