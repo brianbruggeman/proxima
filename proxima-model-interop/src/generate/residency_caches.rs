@@ -2328,11 +2328,21 @@ impl BackendRuntime {
             fuse_cached_attention: true,
         };
         let decode_shaped = shape.0 == 1;
-        if decode_shaped {
-            // a decode lookup is the signal prefill is over: its plan's arena
-            // scales with the prompt, so it must not outlive that
+        // a decode lookup is the signal prefill is over: its plan's arena
+        // scales with the prompt (402 MB at 970 tokens), so it must not
+        // outlive that. With a decode plan already resident nothing is built
+        // here, so the release waits for the GPU; otherwise it is dropped
+        // before a build allocates beside it.
+        let defer_release =
+            decode_shaped && !self.decode_plans.is_empty() && expert_sources.is_none();
+        if decode_shaped && !defer_release {
             self.placed_plans.clear();
         }
+        let retired_plans = if defer_release {
+            core::mem::take(&mut self.placed_plans)
+        } else {
+            BTreeMap::new()
+        };
         let cache = if decode_shaped {
             &mut self.decode_plans
         } else {
@@ -2375,7 +2385,13 @@ impl BackendRuntime {
                 expert_sources,
             )
         } else {
-            execute_plan_named_with_placements(plan, named, input_placements, output_placements)
+            execute_plan_named_with_placements_overlapping(
+                plan,
+                named,
+                input_placements,
+                output_placements,
+                move || drop(retired_plans),
+            )
         };
         if executed.is_err() {
             // a plan whose execute failed may have work in flight against its

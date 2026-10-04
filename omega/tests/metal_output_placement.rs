@@ -381,3 +381,94 @@ fn a_four_dimensional_state_round_trips_through_placement() {
         "same-offset input/output placement must preserve the recurrent state"
     );
 }
+
+fn named_identity_plan(extent: u32, input: &[f32]) -> (omega::metal::Plan, proxima_tensor::NodeId) {
+    let (mut program, identity_node) = identity_program(extent);
+    if let Some(Op::Input { name, .. }) = program.first_mut() {
+        *name = Some(String::from("source"));
+    }
+    let plan = omega::plan_named_with_placed_inputs(
+        &program,
+        &[],
+        &[("source", QuantizedBlock::Float32(input))],
+        &[identity_node],
+        NumericPolicy::default(),
+        &[],
+        true,
+    )
+    .expect("plans the named identity program");
+    (plan, identity_node)
+}
+
+struct CountsDrop<'counter>(&'counter std::cell::Cell<usize>);
+
+impl Drop for CountsDrop<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn the_overlapping_call_runs_its_closure_once_and_returns_the_plain_calls_output() {
+    const EXTENT: u32 = 4;
+    let input = [1.0f32, 2.0, 3.0, 4.0];
+    let (plan, identity_node) = named_identity_plan(EXTENT, &input);
+    let named = [("source", QuantizedBlock::Float32(&input))];
+    let buffer = omega::allocate_placed_buffer(input.len() * size_of::<f32>())
+        .expect("allocates the caller-owned output buffer");
+    let ran = std::cell::Cell::new(0usize);
+
+    let evaluated = omega::execute_plan_named_with_placements_overlapping(
+        &plan,
+        &named,
+        &[],
+        &[(identity_node, &buffer, 0)],
+        || ran.set(ran.get() + 1),
+    )
+    .expect("executes with work overlapped on the host");
+
+    assert_eq!(ran.get(), 1, "the closure runs exactly once per call");
+    assert_eq!(
+        omega::read_placed_buffer_f32(&buffer, 0, input.len()),
+        input.to_vec(),
+        "overlapped host work does not change what the GPU wrote"
+    );
+    drop(evaluated);
+}
+
+#[test]
+fn a_call_that_fails_before_its_commit_drops_the_closure_unrun() {
+    const EXTENT: u32 = 4;
+    let input = [1.0f32, 2.0, 3.0, 4.0];
+    let (plan, identity_node) = named_identity_plan(EXTENT, &input);
+    let buffer = omega::allocate_placed_buffer(input.len() * size_of::<f32>())
+        .expect("allocates the caller-owned output buffer");
+    let ran = std::cell::Cell::new(0usize);
+    let dropped = std::cell::Cell::new(0usize);
+    let guard = CountsDrop(&dropped);
+    let ran_ref = &ran;
+
+    let error = omega::execute_plan_named_with_placements_overlapping(
+        &plan,
+        &[],
+        &[],
+        &[(identity_node, &buffer, 0)],
+        move || {
+            let _held = &guard;
+            ran_ref.set(ran_ref.get() + 1);
+        },
+    )
+    .expect_err("an unbound named input fails before anything is committed");
+
+    assert!(error.to_string().contains("source"), "{error}");
+    assert_eq!(
+        ran.get(),
+        0,
+        "the closure never runs when nothing was committed"
+    );
+    assert_eq!(
+        dropped.get(),
+        1,
+        "the closure is dropped when the call fails"
+    );
+}

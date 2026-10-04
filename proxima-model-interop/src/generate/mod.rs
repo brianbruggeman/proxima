@@ -165,7 +165,8 @@ use omega::read_placed_buffer_f32;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
-    execute_plan_named_with_placements_and_expert_sources, plan_named_with_placed_inputs,
+    execute_plan_named_with_placements_and_expert_sources,
+    execute_plan_named_with_placements_overlapping, plan_named_with_placed_inputs,
 };
 // this module is only compiled under `feature = "std"` (lib.rs's own
 // `#[cfg(feature = "std")] mod generate;`), and `std` pulls in
