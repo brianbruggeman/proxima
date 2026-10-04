@@ -41,9 +41,17 @@ pub struct NumericPolicy {
     pub approx_functions: bool,
     /// Permits [`NumericRewrite::WidenedReduceEpilogueFusion`]: the
     /// reduce-epilogue pass considers every reduce operand of a consumer
-    /// instead of only the first. Changes the bound op count and dispatch
-    /// shape, never the arithmetic of any single fold, so it is a structural
-    /// permission rather than a float-bit one -- and it is part of the plan
+    /// instead of only the first, which folds the RMSNorm apply into its
+    /// sum-of-squares reduce (170 dispatches per gemma4-E2B decode token).
+    /// It changes the bound op count and dispatch shape. Measured on Metal
+    /// (`omega/tests/rmsnorm_epilogue_bit_identity.rs`), the hidden-width and
+    /// single-head norms keep every bit under [`Self::bit_exact`], the
+    /// multi-head norms do not, and under [`Self::llama_relaxed`] 71 to 1333
+    /// elements per norm differ by at most 2.4e-7. The gemma4-E2B logits then
+    /// differ in about 85% of their bits with row-norm-relative error of at
+    /// most 6.7e-8 and the same argmax at every step. Decode ms per token did
+    /// not improve with it on (15.72 off, 15.93 on, median of 14 runs), which
+    /// is why `ServingConfig::default` leaves it off. It is part of the plan
     /// identity, so a plan cache keys on it.
     #[cfg_attr(feature = "config", serde(default))]
     pub epilogue_sources: bool,
