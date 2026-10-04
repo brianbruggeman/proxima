@@ -1,6 +1,6 @@
 #[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
 use super::phys_footprint_bytes;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
+#[cfg(all(test, unix))]
 use super::LoadedModel;
 #[cfg(all(test, feature = "metal"))]
 use super::{BackendRuntime, InteropError};
