@@ -19,6 +19,14 @@ impl<'file> LoadedModel<'file> {
         self.single_range.is_some()
     }
 
+    /// The `general.architecture` family this load resolved against
+    /// ([`Architecture::name`]), the label every typed error from a
+    /// family-specific path carries. `"unknown"` only on the load fallthrough
+    /// with no resolved [`Architecture`] impl.
+    pub(super) fn family(&self) -> &'static str {
+        self.architecture_impl.map_or("unknown", Architecture::name)
+    }
+
     /// `general.name` off the checkpoint this call loaded, when the
     /// checkpoint declared one -- a live "what's running" indicator's own
     /// label ([`Self::model_name`]'s field doc). `None` on a safetensors
@@ -69,7 +77,7 @@ impl<'file> LoadedModel<'file> {
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
-                    self.architecture_impl.map_or("unknown", Architecture::name),
+                    self.family(),
                 ),
                 reason: String::from("the bound model does not expose qwen35moe router roots"),
             });
@@ -92,7 +100,7 @@ impl<'file> LoadedModel<'file> {
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
-                    self.architecture_impl.map_or("unknown", Architecture::name),
+                    self.family(),
                 ),
                 reason: String::from("the bound model has no qwen35moe layer diagnostics"),
             });
@@ -132,7 +140,7 @@ impl<'file> LoadedModel<'file> {
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
-                    self.architecture_impl.map_or("unknown", Architecture::name),
+                    self.family(),
                 ),
                 reason: String::from("the bound model has no qwen35moe layer diagnostics"),
             });
@@ -171,7 +179,7 @@ impl<'file> LoadedModel<'file> {
     > {
         let diagnostic = self.qwen35moe_layer_diagnostics.get(layer).ok_or_else(|| {
             InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
+                architecture: String::from(self.family()),
                 reason: String::from("requested routed layer is outside the bound diagnostics"),
             }
         })?;
@@ -196,7 +204,7 @@ impl<'file> LoadedModel<'file> {
             .last()
             .map(|diagnostic| diagnostic.block_output)
             .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
+                architecture: String::from(self.family()),
                 reason: String::from("the bound graph has no routed layer boundary"),
             })?;
         let suffix = crate::qwen35moe::execution::split_mapped_layer_segment(
@@ -270,7 +278,7 @@ impl<'file> LoadedModel<'file> {
             layer_parts
                 .first()
                 .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
+                    architecture: String::from(self.family()),
                     reason: String::from("the bound graph has no first router segment"),
                 })?;
         let first_entry_mapping = &first_entry_mapping.0.2;
@@ -348,7 +356,7 @@ impl<'file> LoadedModel<'file> {
             ] {
                 proxima_tensor::shape::infer(program, symbols).map_err(|error| {
                     InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: alloc::format!("layer {layer} {phase} segment is invalid: {error}"),
                     }
                 })?;
@@ -356,7 +364,7 @@ impl<'file> LoadedModel<'file> {
             if let Some(fused) = &segments.gather_next_router {
                 proxima_tensor::shape::infer(&fused.0, symbols).map_err(|error| {
                     InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: alloc::format!(
                             "layer {layer} gather-next-router segment is invalid: {error}"
                         ),
@@ -366,7 +374,7 @@ impl<'file> LoadedModel<'file> {
             if let Some(window) = &segments.layer_window {
                 proxima_tensor::shape::infer(&window.0, symbols).map_err(|error| {
                     InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: alloc::format!(
                             "layer {layer} two-layer window is invalid: {error}"
                         ),
@@ -421,7 +429,7 @@ impl<'file> LoadedModel<'file> {
         let router_cut_placements = if persistent_cuts {
             let shapes = proxima_tensor::shape::infer(&self.program, symbols).map_err(|error| {
                 InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
+                    architecture: String::from(self.family()),
                     reason: alloc::format!("full graph shape inference failed: {error}"),
                 }
             })?;
@@ -496,7 +504,7 @@ impl<'file> LoadedModel<'file> {
                             .and_then(|extent| product.checked_mul(extent))
                     })
                     .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: alloc::format!(
                             "boundary cut {node:?} shape does not fit a placed buffer"
                         ),
@@ -507,7 +515,7 @@ impl<'file> LoadedModel<'file> {
                         element_count
                             .checked_mul(core::mem::size_of::<f32>())
                             .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                                architecture: String::from(self.family()),
                                 reason: alloc::format!(
                                     "boundary cut {node:?} byte size overflowed"
                                 ),
@@ -626,14 +634,14 @@ impl<'file> LoadedModel<'file> {
             {
                 let sidecar =
                     sidecar.ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: String::from(
                             "qwen35moe_layer_window=2 requires an attached exact sidecar",
                         ),
                     })?;
                 if !sidecar.preserves_source_codecs() {
                     return Err(InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: String::from(
                             "qwen35moe_layer_window=2 requires byte-preserving sidecar codecs",
                         ),
@@ -641,7 +649,7 @@ impl<'file> LoadedModel<'file> {
                 }
                 let window = segments.layer_window.as_ref().ok_or_else(|| {
                     InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: alloc::format!(
                             "layer {layer} has no two-layer segment despite window=2"
                         ),
@@ -654,6 +662,7 @@ impl<'file> LoadedModel<'file> {
                     all_low_expert_scratch,
                 )?;
                 let mapped_expert_sources = map_expert_sources_to_segment(
+                    self.family(),
                     layer,
                     &self.program,
                     &window.0,
@@ -679,7 +688,7 @@ impl<'file> LoadedModel<'file> {
                     }
                     let (_, values) = carried.get(node).ok_or_else(|| {
                         InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
+                            architecture: String::from(self.family()),
                             reason: alloc::format!(
                                 "two-layer window missing cut node {node:?} ({name})"
                             ),
@@ -751,6 +760,7 @@ impl<'file> LoadedModel<'file> {
                         shape: first_shape,
                     },
                     RouterExpertCounts {
+                        family: self.family(),
                         expert_count: self.architecture.expert_count as usize,
                         expert_used_count: self.architecture.expert_used_count as usize,
                     },
@@ -771,6 +781,7 @@ impl<'file> LoadedModel<'file> {
                         shape: second_shape,
                     },
                     RouterExpertCounts {
+                        family: self.family(),
                         expert_count: self.architecture.expert_count as usize,
                         expert_used_count: self.architecture.expert_used_count as usize,
                     },
@@ -849,7 +860,7 @@ impl<'file> LoadedModel<'file> {
                 let (program, cuts, mapping, future_cuts, segment_output) = if fused_gather {
                     let fused = segments.gather_next_router.as_ref().ok_or_else(|| {
                         InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
+                            architecture: String::from(self.family()),
                             reason: String::from("fused boundary segment is absent"),
                         }
                     })?;
@@ -916,7 +927,7 @@ impl<'file> LoadedModel<'file> {
                     }
                     let (_, values) = carried.get(node).ok_or_else(|| {
                         InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
+                            architecture: String::from(self.family()),
                             reason: alloc::format!(
                                 "layer {layer} missing cut node {node:?} ({name})"
                             ),
@@ -1146,7 +1157,7 @@ impl<'file> LoadedModel<'file> {
                     ] {
                         let mapped = mapping.get(&node).copied().ok_or_else(|| {
                             InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                                architecture: String::from(self.family()),
                                 reason: alloc::format!(
                                     "layer {layer} dense-attention cache input {node:?} is absent from the router segment"
                                 ),
@@ -1162,7 +1173,7 @@ impl<'file> LoadedModel<'file> {
                     ] {
                         let mapped = mapping.get(&node).copied().ok_or_else(|| {
                             InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                                architecture: String::from(self.family()),
                                 reason: alloc::format!(
                                     "layer {layer} dense-attention cache root {node:?} is absent from the router segment"
                                 ),
@@ -1171,7 +1182,7 @@ impl<'file> LoadedModel<'file> {
                         let byte_offset =
                             position_offset.checked_mul(row_bytes).ok_or_else(|| {
                                 InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
+                                    architecture: String::from(self.family()),
                                     reason: alloc::format!(
                                         "layer {layer} dense-attention cache offset overflowed"
                                     ),
@@ -1529,6 +1540,7 @@ impl<'file> LoadedModel<'file> {
                             BTreeMap::new()
                         } else {
                             map_expert_sources_to_segment(
+                                self.family(),
                                 layer,
                                 &self.program,
                                 program,
@@ -2006,6 +2018,7 @@ impl<'file> LoadedModel<'file> {
                             shape: router_shape,
                         },
                         RouterExpertCounts {
+                            family: self.family(),
                             expert_count: self.architecture.expert_count as usize,
                             expert_used_count: self.architecture.expert_used_count as usize,
                         },
@@ -2106,7 +2119,7 @@ impl<'file> LoadedModel<'file> {
                             "qwen35_nonfinite_gather"
                         );
                         return Err(InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
+                            architecture: String::from(self.family()),
                             reason: alloc::format!(
                                 "layer {layer} node {segment_output:?} expert gather produced a non-finite value first={first_nonfinite:?}"
                             ),
@@ -2170,7 +2183,7 @@ impl<'file> LoadedModel<'file> {
                 };
                 discard(self.checkpoint_mapping).map_err(|error| {
                     InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: error.to_string(),
                     }
                 })?;
@@ -2225,7 +2238,7 @@ impl<'file> LoadedModel<'file> {
                 }
                 let (_, values) = carried.get(node).ok_or_else(|| {
                     InteropError::PreGatherExecutionUnsupported {
-                        architecture: String::from("qwen35moe"),
+                        architecture: String::from(self.family()),
                         reason: alloc::format!("suffix missing cut node {node:?} ({name})"),
                     }
                 })?;

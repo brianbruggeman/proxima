@@ -101,33 +101,17 @@ pub enum ResidencyAction {
     Evict(ExpertAddress),
 }
 
-/// Fixed-capacity actions emitted by one budget reconciliation boundary.
-#[derive(Debug, Clone, Copy)]
-pub struct ResidencyActions<const ACTIONS: usize> {
-    entries: [Option<ResidencyAction>; ACTIONS],
-    len: usize,
+/// Actions emitted by one budget reconciliation boundary, bounded by the
+/// policy matrix (at most one evict or page per expert).
+#[derive(Debug, Clone, Default)]
+pub struct ResidencyActions {
+    entries: Vec<ResidencyAction>,
 }
 
-impl<const ACTIONS: usize> ResidencyActions<ACTIONS> {
-    const fn new() -> Self {
-        Self {
-            entries: [None; ACTIONS],
-            len: 0,
-        }
-    }
-
-    fn push(&mut self, action: ResidencyAction) -> Result<(), ResidencyError> {
-        let Some(entry) = self.entries.get_mut(self.len) else {
-            return Err(ResidencyError::ActionCapacityExceeded { capacity: ACTIONS });
-        };
-        *entry = Some(action);
-        self.len += 1;
-        Ok(())
-    }
-
+impl ResidencyActions {
     #[must_use]
-    pub fn as_slice(&self) -> &[Option<ResidencyAction>] {
-        &self.entries[..self.len]
+    pub fn as_slice(&self) -> &[ResidencyAction] {
+        &self.entries
     }
 }
 
@@ -157,12 +141,10 @@ impl Default for ResidencyConfig {
         }
     }
 }
-
+/// A boundary operation would not fit the caller-declared fixed batch or address.
 /// A boundary operation would not fit the caller-declared fixed action batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ResidencyError {
-    #[error("residency action batch is full at {capacity} actions")]
-    ActionCapacityExceeded { capacity: usize },
     #[error("prefetch candidate batch is full at {capacity} candidates")]
     PrefetchCapacityExceeded { capacity: usize },
     #[error("expert address ({layer}, {expert}) is outside the fixed policy matrix")]
@@ -190,24 +172,43 @@ impl ExpertState {
 
 /// DynaExq's bounded hotness matrix and HOBBIT's low-on-miss serving rule.
 ///
-/// `LAYERS`, `EXPERTS`, and the output action capacity are compile-time
-/// bounds. The policy never allocates while observing routes or selecting a
-/// budget-feasible resident set.
-#[derive(Debug, Clone)]
-pub struct ExpertResidency<const LAYERS: usize, const EXPERTS: usize> {
+/// The `layers x experts` matrix is sized once at construction from the
+/// model's own metadata (GGUF `{arch}.block_count` and `{arch}.expert_count`),
+/// so no model's dimensions are baked into the type. Observing routes and
+/// reconciling, and applying actions never allocate: `new` reserves the state
+/// matrix, the scratch target, and an action buffer of `2 * layers * experts`
+/// once, and `reconcile` refills them in place.
+#[derive(Debug)]
+pub struct ExpertResidency {
     config: ResidencyConfig,
-    states: [[ExpertState; EXPERTS]; LAYERS],
+    layers: usize,
+    experts: usize,
+    states: Vec<ExpertState>,
+    target: Vec<bool>,
+    actions: ResidencyActions,
     last_token: u64,
 }
 
-impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS> {
+impl ExpertResidency {
     #[must_use]
-    pub const fn new(config: ResidencyConfig) -> Self {
+    pub fn new(config: ResidencyConfig, layers: usize, experts: usize) -> Self {
+        let slots = layers.saturating_mul(experts);
         Self {
             config,
-            states: [[ExpertState::COLD; EXPERTS]; LAYERS],
+            layers,
+            experts,
+            states: vec![ExpertState::COLD; slots],
+            target: Vec::with_capacity(slots),
+            actions: ResidencyActions {
+                entries: Vec::with_capacity(slots.saturating_mul(2)),
+            },
             last_token: 0,
         }
+    }
+
+    fn index(&self, address: ExpertAddress) -> Option<usize> {
+        (address.layer < self.layers && address.expert < self.experts)
+            .then(|| address.layer * self.experts + address.expert)
     }
 
     /// Records one decode step's routes and returns the precision available
@@ -281,29 +282,20 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
     }
 
     /// Reconciles the resident set to the EMA-ranked, byte-feasible top-N.
-    /// The returned actions have no effect until [`Self::apply_at_boundary`]
+    /// The staged actions have no effect until [`Self::apply_at_boundary`]
     /// is called after the active decode step has ended.
-    pub fn reconcile<const ACTIONS: usize>(
-        &self,
-    ) -> Result<ResidencyActions<ACTIONS>, ResidencyError> {
+    pub fn reconcile(&mut self) -> &ResidencyActions {
         let capacity = self.capacity();
-        let mut target = [[false; EXPERTS]; LAYERS];
-        let mut resident_count = 0usize;
-
-        for (layer, target_row) in target.iter_mut().enumerate() {
-            for (expert, target_cell) in target_row.iter_mut().enumerate() {
-                if self.states[layer][expert].resident {
-                    *target_cell = true;
-                    resident_count += 1;
-                }
-            }
-        }
+        let mut target = core::mem::take(&mut self.target);
+        target.clear();
+        target.extend(self.states.iter().map(|state| state.resident));
+        let mut resident_count = target.iter().filter(|is_targeted| **is_targeted).count();
 
         while resident_count > capacity {
             let Some(victim) = self.coldest_target(&target) else {
                 break;
             };
-            target[victim.layer][victim.expert] = false;
+            target[victim] = false;
             resident_count -= 1;
         }
 
@@ -311,7 +303,7 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
             let Some(candidate) = self.hottest_not_target(&target) else {
                 break;
             };
-            target[candidate.layer][candidate.expert] = true;
+            target[candidate] = true;
             resident_count += 1;
         }
 
@@ -319,51 +311,54 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
             let Some(victim) = self.coldest_target(&target) else {
                 break;
             };
-            let victim_state = self.states[victim.layer][victim.expert];
-            let dwelled = self.last_token.saturating_sub(victim_state.resident_since)
+            let dwelled = self
+                .last_token
+                .saturating_sub(self.states[victim].resident_since)
                 >= self.config.min_dwell_tokens;
             if !dwelled
                 || self.hotness(candidate) <= self.hotness(victim) + self.config.hysteresis_margin
             {
                 break;
             }
-            target[victim.layer][victim.expert] = false;
-            target[candidate.layer][candidate.expert] = true;
+            target[victim] = false;
+            target[candidate] = true;
         }
 
-        let mut actions = ResidencyActions::new();
-        for (layer, target_row) in target.iter().enumerate() {
-            for (expert, is_targeted) in target_row.iter().enumerate() {
-                let address = ExpertAddress { layer, expert };
-                if self.states[layer][expert].resident && !is_targeted {
-                    actions.push(ResidencyAction::Evict(address))?;
-                }
-            }
-        }
-        for (layer, target_row) in target.iter().enumerate() {
-            for (expert, is_targeted) in target_row.iter().enumerate() {
-                let address = ExpertAddress { layer, expert };
-                if !self.states[layer][expert].resident && *is_targeted {
-                    actions.push(ResidencyAction::Page(address))?;
-                }
-            }
-        }
-        Ok(actions)
+        let mut entries = core::mem::take(&mut self.actions.entries);
+        entries.clear();
+        let evictions = self
+            .states
+            .iter()
+            .zip(&target)
+            .enumerate()
+            .filter(|(_, (state, is_targeted))| state.resident && !**is_targeted)
+            .map(|(slot, _)| ResidencyAction::Evict(self.address(slot)));
+        let pages = self
+            .states
+            .iter()
+            .zip(&target)
+            .enumerate()
+            .filter(|(_, (state, is_targeted))| !state.resident && **is_targeted)
+            .map(|(slot, _)| ResidencyAction::Page(self.address(slot)));
+        entries.extend(evictions.chain(pages));
+        self.actions.entries = entries;
+        self.target = target;
+        &self.actions
     }
 
-    /// Applies actions at a slab boundary. The generic page callback keeps
-    /// storage ownership with the caller; pages are borrowed by the slab and
-    /// no dynamic dispatch or policy allocation is involved.
-    pub fn apply_at_boundary<'file, Page, const ACTIONS: usize>(
+    /// Applies the actions staged by [`Self::reconcile`] at a slab boundary.
+    /// The generic page callback keeps storage ownership with the caller;
+    /// pages are borrowed by the slab and no dynamic dispatch or policy
+    /// allocation is involved.
+    pub fn apply_at_boundary<'file, Page>(
         &mut self,
         slab: &mut ExpertSlab<'file>,
-        actions: &ResidencyActions<ACTIONS>,
         mut page: Page,
     ) -> Result<(), InteropError>
     where
         Page: FnMut(ExpertAddress) -> Result<ExpertPage<'file>, InteropError>,
     {
-        self.apply_actions_at_boundary(slab, actions, |slab, action| match action {
+        self.apply_actions_at_boundary(slab, |slab, action| match action {
             ResidencyAction::Page(address) => {
                 let page = page(address)?;
                 slab.page_expert_borrowed(
@@ -380,44 +375,46 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
         })
     }
 
-    /// Applies an action batch through a caller-defined storage transition.
+    /// Applies the staged action batch through a caller-defined storage transition.
     ///
     /// This is the projection-aware form used by a routed MoE whose one
     /// policy address controls several gathered weight tables. The callback
     /// is monomorphized and receives the slab directly, so an mmap/LSM source
     /// can update every table without a trait object or action-path allocation.
-    pub fn apply_actions_at_boundary<'file, Apply, const ACTIONS: usize>(
+    pub fn apply_actions_at_boundary<'file, Apply>(
         &mut self,
         slab: &mut ExpertSlab<'file>,
-        actions: &ResidencyActions<ACTIONS>,
         mut apply: Apply,
     ) -> Result<(), InteropError>
     where
         Apply: FnMut(&mut ExpertSlab<'file>, ResidencyAction) -> Result<(), InteropError>,
     {
-        for action in actions.as_slice().iter().flatten().copied() {
+        for index in 0..self.actions.entries.len() {
+            let action = self.actions.entries[index];
             apply(slab, action)?;
             let (address, resident) = match action {
                 ResidencyAction::Page(address) => (address, true),
                 ResidencyAction::Evict(address) => (address, false),
             };
-            self.states[address.layer][address.expert].resident = resident;
-            self.states[address.layer][address.expert].resident_since =
-                if resident { self.last_token } else { 0 };
+            let last_token = self.last_token;
+            let state = self.state_mut(address).map_err(|_| {
+                InteropError::ExpertSlabIndexOutOfRange {
+                    layer: address.layer,
+                    expert: address.expert,
+                }
+            })?;            state.resident = resident;
+            state.resident_since = if resident { last_token } else { 0 };
         }
+        self.actions.entries.clear();
         Ok(())
     }
 
     #[must_use]
     pub fn resident(&self, address: ExpertAddress) -> Option<bool> {
-        self.states
-            .get(address.layer)
-            .and_then(|layer| layer.get(address.expert))
-            .map(|state| state.resident)
-    }
+        self.index(address).map(|slot| self.states[slot].resident)    }
 
     fn capacity(&self) -> usize {
-        let all_experts = LAYERS.saturating_mul(EXPERTS);
+        let all_experts = self.states.len();
         self.config
             .budget_bytes
             .checked_div(self.config.high_bytes_per_expert)
@@ -426,67 +423,59 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
             })
     }
 
+    fn address(&self, slot: usize) -> ExpertAddress {
+        ExpertAddress {
+            layer: slot / self.experts,
+            expert: slot % self.experts,
+        }
+    }
+
     fn state_mut(&mut self, address: ExpertAddress) -> Result<&mut ExpertState, ResidencyError> {
-        self.states
-            .get_mut(address.layer)
-            .and_then(|layer| layer.get_mut(address.expert))
-            .ok_or(ResidencyError::AddressOutOfRange {
-                layer: address.layer,
-                expert: address.expert,
-            })
+        let slot = self.index(address).ok_or(ResidencyError::AddressOutOfRange {
+            layer: address.layer,
+            expert: address.expert,
+        })?;
+        Ok(&mut self.states[slot])
     }
 
     fn state(&self, address: ExpertAddress) -> Result<ExpertState, ResidencyError> {
-        self.states
-            .get(address.layer)
-            .and_then(|layer| layer.get(address.expert))
-            .copied()
+        self.index(address)
+            .map(|slot| self.states[slot])
             .ok_or(ResidencyError::AddressOutOfRange {
                 layer: address.layer,
                 expert: address.expert,
             })
     }
 
-    fn hotness(&self, address: ExpertAddress) -> f64 {
-        let state = self.states[address.layer][address.expert];
+    fn hotness(&self, slot: usize) -> f64 {
+        let state = self.states[slot];
         let elapsed = self.last_token.saturating_sub(state.last_observed);
         let decay = (1.0 - self.config.ema_rate).powi(elapsed.min(i32::MAX as u64) as i32);
         state.ema * decay
     }
 
-    fn hottest_not_target(&self, target: &[[bool; EXPERTS]; LAYERS]) -> Option<ExpertAddress> {
-        let mut best = None;
-        for (layer, target_row) in target.iter().enumerate() {
-            for (expert, is_targeted) in target_row.iter().enumerate() {
-                if *is_targeted {
-                    continue;
+    fn hottest_not_target(&self, target: &[bool]) -> Option<usize> {
+        (0..self.states.len())
+            .filter(|slot| !target[*slot] && self.states[*slot].seen)
+            .fold(None, |best: Option<usize>, slot| {
+                if best.is_none_or(|current| self.hotness(slot) > self.hotness(current)) {
+                    Some(slot)
+                } else {
+                    best
                 }
-                if !self.states[layer][expert].seen {
-                    continue;
-                }
-                let candidate = ExpertAddress { layer, expert };
-                if best.is_none_or(|current| self.hotness(candidate) > self.hotness(current)) {
-                    best = Some(candidate);
-                }
-            }
-        }
-        best
+            })
     }
 
-    fn coldest_target(&self, target: &[[bool; EXPERTS]; LAYERS]) -> Option<ExpertAddress> {
-        let mut coldest = None;
-        for (layer, target_row) in target.iter().enumerate() {
-            for (expert, is_targeted) in target_row.iter().enumerate() {
-                if !is_targeted {
-                    continue;
+    fn coldest_target(&self, target: &[bool]) -> Option<usize> {
+        (0..self.states.len())
+            .filter(|slot| target[*slot])
+            .fold(None, |coldest: Option<usize>, slot| {
+                if coldest.is_none_or(|current| self.hotness(slot) < self.hotness(current)) {
+                    Some(slot)
+                } else {
+                    coldest
                 }
-                let candidate = ExpertAddress { layer, expert };
-                if coldest.is_none_or(|current| self.hotness(candidate) < self.hotness(current)) {
-                    coldest = Some(candidate);
-                }
-            }
-        }
-        coldest
+            })
     }
 }
 
@@ -515,13 +504,12 @@ mod tests {
     }
 
     fn apply<'a>(
-        policy: &mut ExpertResidency<1, 4>,
+        policy: &mut ExpertResidency,
         slab: &mut ExpertSlab<'a>,
-        actions: &super::ResidencyActions<4>,
         bytes: &'a [u8],
     ) {
         policy
-            .apply_at_boundary(slab, actions, |address| {
+            .apply_at_boundary(slab, |address| {
                 let start = address.expert * 144;
                 Ok(ExpertPage {
                     codec: Codec::Q4K,
@@ -539,7 +527,7 @@ mod tests {
         let mut slab = ExpertSlab::new();
         slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &bytes, 4, 32, 32)
             .expect("the four-expert stack binds");
-        let mut policy = ExpertResidency::<1, 4>::new(CONFIG);
+        let mut policy = ExpertResidency::new(CONFIG, 1, 4);
 
         for token in 1..=6 {
             let served = policy
@@ -552,8 +540,8 @@ mod tests {
                     }],
                 )
                 .expect("expert 2 is inside the fixed matrix");
-            let actions = policy.reconcile::<4>().expect("one action fits");
-            apply(&mut policy, &mut slab, &actions, &bytes);
+            policy.reconcile();
+            apply(&mut policy, &mut slab, &bytes);
             if token > 1 {
                 assert_eq!(served[0].precision, ServePrecision::High);
             }
@@ -575,7 +563,7 @@ mod tests {
         let mut slab = ExpertSlab::new();
         slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &bytes, 4, 32, 32)
             .expect("the four-expert stack binds");
-        let mut policy = ExpertResidency::<1, 4>::new(CONFIG);
+        let mut policy = ExpertResidency::new(CONFIG, 1, 4);
 
         for token in 1..=3 {
             policy
@@ -588,8 +576,8 @@ mod tests {
                     }],
                 )
                 .expect("expert 0 is inside the fixed matrix");
-            let actions = policy.reconcile::<4>().expect("one action fits");
-            apply(&mut policy, &mut slab, &actions, &bytes);
+            policy.reconcile();
+            apply(&mut policy, &mut slab, &bytes);
         }
         assert_eq!(
             policy.resident(ExpertAddress {
@@ -611,10 +599,9 @@ mod tests {
                     }],
                 )
                 .expect("expert 3 is inside the fixed matrix");
-            let actions = policy.reconcile::<4>().expect("two actions fit");
-            last_actions = Some(actions);
-            apply(&mut policy, &mut slab, &actions, &bytes);
-        }
+            let staged = policy.reconcile().as_slice().to_vec();
+            apply(&mut policy, &mut slab, &bytes);
+            last_actions = Some(staged);        }
 
         assert_eq!(
             policy.resident(ExpertAddress {
@@ -633,9 +620,7 @@ mod tests {
         assert!(
             last_actions
                 .expect("the shifting trace has a final boundary")
-                .as_slice()
                 .iter()
-                .flatten()
                 .all(|action| !matches!(
                     action,
                     ResidencyAction::Page(ExpertAddress { expert: 0, .. })
@@ -646,7 +631,7 @@ mod tests {
 
     #[test]
     fn predictor_candidates_are_advisory_bounded_and_do_not_change_residency() {
-        let mut policy = ExpertResidency::<1, 4>::new(CONFIG);
+        let mut policy = ExpertResidency::new(CONFIG, 1, 4);
         policy
             .observe(
                 1,
@@ -657,12 +642,12 @@ mod tests {
                 }],
             )
             .expect("the observed route is inside the policy matrix");
-        let actions = policy.reconcile::<4>().expect("one action fits");
+        policy.reconcile();
         let mut slab = ExpertSlab::new();
         let bytes = stack();
         slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &bytes, 4, 32, 32)
             .expect("the predictor fixture binds its expert stack");
-        apply(&mut policy, &mut slab, &actions, &bytes);
+        apply(&mut policy, &mut slab, &bytes);
 
         let candidates = policy
             .prefetch_candidates::<2>(
@@ -710,7 +695,7 @@ mod tests {
 
     #[test]
     fn predictor_candidates_reject_an_out_of_range_prediction() {
-        let policy = ExpertResidency::<1, 4>::new(CONFIG);
+        let policy = ExpertResidency::new(CONFIG, 1, 4);
         let error = policy
             .prefetch_candidates::<1>(
                 0,
@@ -732,7 +717,7 @@ mod tests {
 
     #[test]
     fn predictor_candidates_report_fixed_capacity_overflow() {
-        let policy = ExpertResidency::<1, 4>::new(CONFIG);
+        let policy = ExpertResidency::new(CONFIG, 1, 4);
         let error = policy
             .prefetch_candidates::<1>(
                 0,
@@ -753,5 +738,98 @@ mod tests {
             error,
             super::ResidencyError::PrefetchCapacityExceeded { capacity: 1 }
         );
+    }
+
+    #[test]
+    fn matrix_dimensions_come_from_the_constructor_at_qwen35moe_scale() {
+        let mut policy = ExpertResidency::new(CONFIG, 40, 256);
+        let corner = ExpertAddress {
+            layer: 39,
+            expert: 255,
+        };
+
+        policy
+            .observe(
+                1,
+                39,
+                [RoutedExpert {
+                    expert: 255,
+                    importance: 1.0,
+                }],
+            )
+            .expect("the last layer's last expert is inside a 40 x 256 matrix");
+        let staged = policy.reconcile().as_slice().to_vec();
+
+        assert_eq!(policy.resident(corner), Some(false));
+        assert_eq!(staged, [ResidencyAction::Page(corner)]);
+        assert_eq!(
+            policy.resident(ExpertAddress {
+                layer: 40,
+                expert: 0
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn observe_rejects_a_layer_past_the_constructed_matrix() {
+        let mut policy = ExpertResidency::new(CONFIG, 40, 256);
+        let error = policy
+            .observe(
+                1,
+                40,
+                [RoutedExpert {
+                    expert: 0,
+                    importance: 1.0,
+                }],
+            )
+            .expect_err("layer 40 is outside a 40-layer matrix");
+        assert_eq!(
+            error,
+            super::ResidencyError::AddressOutOfRange {
+                layer: 40,
+                expert: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn reconcile_reuses_its_buffers_across_boundaries_at_qwen35moe_scale() {
+        let mut policy = ExpertResidency::new(
+            ResidencyConfig {
+                budget_bytes: 144 * 64,
+                ..CONFIG
+            },
+            40,
+            256,
+        );
+        let target_pointer = policy.target.as_ptr();
+        let target_capacity = policy.target.capacity();
+        let actions_pointer = policy.actions.entries.as_ptr();
+        let actions_capacity = policy.actions.entries.capacity();
+        assert!(actions_capacity >= 2 * 40 * 256);
+
+        let mut staged_total = 0;
+        for token in 1..=24_u64 {
+            for layer in 0..40 {
+                let expert = ((token as usize) * 7 + layer * 13) % 256;
+                policy
+                    .observe(
+                        token,
+                        layer,
+                        [RoutedExpert {
+                            expert,
+                            importance: 1.0,
+                        }],
+                    )
+                    .expect("the routed expert is inside the 40 x 256 matrix");
+            }
+            staged_total += policy.reconcile().as_slice().len();
+            assert_eq!(policy.target.as_ptr(), target_pointer);
+            assert_eq!(policy.target.capacity(), target_capacity);
+            assert_eq!(policy.actions.entries.as_ptr(), actions_pointer);
+            assert_eq!(policy.actions.entries.capacity(), actions_capacity);
+        }
+        assert!(staged_total > 0, "the trace must stage real actions");
     }
 }

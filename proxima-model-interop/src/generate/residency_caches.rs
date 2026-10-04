@@ -3623,11 +3623,12 @@ impl CurrentExpertSources {
 
     pub(super) fn push(
         &mut self,
+        family: &str,
         decision: crate::residency::ServeDecision,
     ) -> Result<(), InteropError> {
         let Some(slot) = self.decisions.get_mut(self.len) else {
             return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
+                architecture: String::from(family),
                 reason: String::from("router decision count exceeded the fixed staging bound"),
             });
         };
@@ -3659,10 +3660,12 @@ pub(super) struct RouterLogits<'values> {
     pub(super) shape: &'values [u64],
 }
 
-/// The router's configured expert count and the top-k it selects per
-/// position, grouped so the functions that consume both keep their
-/// argument count under clippy's threshold.
-pub(super) struct RouterExpertCounts {
+/// The router's family label, configured expert count, and the top-k it
+/// selects per position, grouped so the functions that consume them keep
+/// their argument count under clippy's threshold. `family` is the
+/// `general.architecture` name every typed error from the router carries.
+pub(super) struct RouterExpertCounts<'family> {
+    pub(super) family: &'family str,
     pub(super) expert_count: usize,
     pub(super) expert_used_count: usize,
 }
@@ -3671,7 +3674,7 @@ pub(super) fn visit_qwen35moe_router_selections<BeforeGather>(
     layer: usize,
     position_offset: usize,
     logits: RouterLogits<'_>,
-    counts: RouterExpertCounts,
+    counts: RouterExpertCounts<'_>,
     scratch: &mut Vec<crate::residency::RoutedExpert>,
     before_gather: &mut BeforeGather,
 ) -> Result<(), InteropError>
@@ -3683,12 +3686,13 @@ where
         shape,
     } = logits;
     let RouterExpertCounts {
+        family,
         expert_count,
         expert_used_count,
     } = counts;
     let [positions, shaped_experts] = shape else {
         return Err(InteropError::PreGatherExecutionUnsupported {
-            architecture: String::from("qwen35moe"),
+            architecture: String::from(family),
             reason: alloc::format!(
                 "layer {layer} router logits have shape {shape:?}, expected [positions, experts]"
             ),
@@ -3696,18 +3700,18 @@ where
     };
     let positions =
         usize::try_from(*positions).map_err(|_| InteropError::PreGatherExecutionUnsupported {
-            architecture: String::from("qwen35moe"),
+            architecture: String::from(family),
             reason: alloc::format!("layer {layer} router position extent does not fit usize"),
         })?;
     let shaped_experts = usize::try_from(*shaped_experts).map_err(|_| {
         InteropError::PreGatherExecutionUnsupported {
-            architecture: String::from("qwen35moe"),
+            architecture: String::from(family),
             reason: alloc::format!("layer {layer} router expert extent does not fit usize"),
         }
     })?;
     let expected_values = positions.checked_mul(expert_count).ok_or_else(|| {
         InteropError::PreGatherExecutionUnsupported {
-            architecture: String::from("qwen35moe"),
+            architecture: String::from(family),
             reason: alloc::format!("layer {layer} router shape overflows usize"),
         }
     })?;
@@ -3717,7 +3721,7 @@ where
         || expert_used_count > expert_count
     {
         return Err(InteropError::PreGatherExecutionUnsupported {
-            architecture: String::from("qwen35moe"),
+            architecture: String::from(family),
             reason: alloc::format!(
                 "layer {layer} router has shape {shape:?}, {} values, expert_count {expert_count}, and expert_used_count {expert_used_count}",
                 logits.len()
@@ -3774,7 +3778,7 @@ pub(super) fn visit_qwen35moe_router_boundary<'file, BeforeGather>(
     layer: usize,
     position_offset: usize,
     logits: RouterLogits<'_>,
-    counts: RouterExpertCounts,
+    counts: RouterExpertCounts<'_>,
     scratch: &mut Vec<crate::residency::RoutedExpert>,
     expert_slab: &mut crate::expert_slab::ExpertSlab<'file>,
     before_gather: &mut BeforeGather,

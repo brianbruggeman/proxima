@@ -1970,15 +1970,9 @@ impl<'file> LoadedModel<'file> {
     /// The method deliberately does not apply actions while a step is active:
     /// [`ExpertSlab`] returns its typed boundary error, preventing a policy
     /// update from invalidating the borrowed sources of the current step.
-    pub fn apply_expert_residency<
-        const LAYERS: usize,
-        const EXPERTS: usize,
-        const ACTIONS: usize,
-        Page,
-    >(
+    pub fn apply_expert_residency<Page>(
         &self,
-        policy: &mut crate::residency::ExpertResidency<LAYERS, EXPERTS>,
-        actions: &crate::residency::ResidencyActions<ACTIONS>,
+        policy: &mut crate::residency::ExpertResidency,
         page: Page,
     ) -> Result<(), InteropError>
     where
@@ -1987,44 +1981,34 @@ impl<'file> LoadedModel<'file> {
         ) -> Result<crate::residency::ExpertPage<'file>, InteropError>,
     {
         let mut slab = lock_expert_slab(&self.expert_slab);
-        policy.apply_at_boundary(&mut slab, actions, page)
+        policy.apply_at_boundary(&mut slab, page)
     }
 
-    /// Applies a fixed DynaExq action batch to the attached HOBBIT sidecar.
+    /// Applies the DynaExq actions staged by `reconcile` to the attached HOBBIT sidecar.
     /// A page promotes all three projections from their original checkpoint
     /// ranges; an eviction restores all three low-codec mapped ranges.
-    pub fn apply_attached_expert_residency<
-        const LAYERS: usize,
-        const EXPERTS: usize,
-        const ACTIONS: usize,
-    >(
+    pub fn apply_attached_expert_residency(
         &self,
-        policy: &mut crate::residency::ExpertResidency<LAYERS, EXPERTS>,
-        actions: &crate::residency::ResidencyActions<ACTIONS>,
+        policy: &mut crate::residency::ExpertResidency,
     ) -> Result<(), InteropError> {
         let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
             InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
+                architecture: String::from(self.family()),
                 reason: String::from("no expert sidecar is attached"),
             }
         })?;
         let mut slab = lock_expert_slab(&self.expert_slab);
-        policy.apply_actions_at_boundary(&mut slab, actions, |slab, action| {
+        policy.apply_actions_at_boundary(&mut slab, |slab, action| {
             sidecar.apply_action(slab, self.checkpoint_mapping, action)
         })
     }
 
     pub(super) fn reconcile_attached_qwen35moe_residency(
         &self,
-        policy: &mut crate::residency::ExpertResidency<40, 256>,
+        policy: &mut crate::residency::ExpertResidency,
     ) -> Result<(), InteropError> {
-        let actions = policy.reconcile::<{ 40 * 256 * 2 }>().map_err(|error| {
-            InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: error.to_string(),
-            }
-        })?;
-        self.apply_attached_expert_residency(policy, &actions)
+        policy.reconcile();
+        self.apply_attached_expert_residency(policy)
     }
 
     /// Runs the explicit router -> residency -> gather protocol for a
@@ -3259,18 +3243,21 @@ impl<'file> LoadedModel<'file> {
                     return Ok(None);
                 }
                 let even_odd_byte_length = qwen35_dense_attention_placed_byte_length(
+                    self.family(),
                     dense_attention_positions,
                     *even_odd_row,
                     layer,
                     "rotary key",
                 )?;
                 let pass_byte_length = qwen35_dense_attention_placed_byte_length(
+                    self.family(),
                     dense_attention_positions,
                     *pass_row,
                     layer,
                     "pass-through key",
                 )?;
                 let value_byte_length = qwen35_dense_attention_placed_byte_length(
+                    self.family(),
                     dense_attention_positions,
                     *v_row,
                     layer,
@@ -3319,7 +3306,7 @@ impl<'file> LoadedModel<'file> {
             && self.expert_sidecar.is_some()
             && residency_budget > 0
         {
-            Some(crate::residency::ExpertResidency::<40, 256>::new(
+            Some(crate::residency::ExpertResidency::new(
                 crate::residency::ResidencyConfig {
                     budget_bytes: residency_budget,
                     high_bytes_per_expert: self.expert_sidecar.as_ref().map_or(
@@ -3328,6 +3315,8 @@ impl<'file> LoadedModel<'file> {
                     ),
                     ..crate::residency::ResidencyConfig::default()
                 },
+                self.architecture.block_count as usize,
+                self.architecture.expert_count as usize,
             ))
         } else {
             None
@@ -3511,7 +3500,7 @@ impl<'file> LoadedModel<'file> {
                     )
                     .map_err(|error| {
                         InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
+                            architecture: String::from(self.family()),
                             reason: alloc::format!(
                                 "one-evaluation prefill program at width {width} failed to build: \
                                  {error}"
@@ -4062,7 +4051,7 @@ impl<'file> LoadedModel<'file> {
                         // it can execute.
                         let shapes = proxima_tensor::shape::infer(active_program, &symbols)
                             .map_err(|error| InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                                architecture: String::from(self.family()),
                                 reason: alloc::format!(
                                     "gdn prefill zero input shape inference failed: {error}"
                                 ),
@@ -4085,7 +4074,7 @@ impl<'file> LoadedModel<'file> {
                             })
                             .flatten()
                             .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                                architecture: String::from(self.family()),
                                 reason: String::from("gdn prefill zero input shape is unavailable"),
                             })?;
                         gdn_prefill_zero_scratch.clear();
@@ -4549,7 +4538,7 @@ impl<'file> LoadedModel<'file> {
                     let all_low_expert_sources = if monolithic_all_low {
                         let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
                             InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                                architecture: String::from(self.family()),
                                 reason: String::from(
                                     "monolithic all-low execution requires an expert sidecar",
                                 ),
@@ -4557,7 +4546,7 @@ impl<'file> LoadedModel<'file> {
                         })?;
                         if !sidecar.preserves_source_codecs() {
                             return Err(InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                                architecture: String::from(self.family()),
                                 reason: String::from(
                                     "monolithic all-low execution requires a byte-preserving sidecar",
                                 ),
@@ -4567,7 +4556,7 @@ impl<'file> LoadedModel<'file> {
                             let all_low_bytes = sidecar.all_low_bytes();
                             if all_low_bytes > memory_limit {
                                 return Err(InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
+                                    architecture: String::from(self.family()),
                                     reason: alloc::format!(
                                         "monolithic all-low source table is {all_low_bytes} bytes, above the configured memory limit {memory_limit}"
                                     ),
@@ -4636,7 +4625,7 @@ impl<'file> LoadedModel<'file> {
                             let mut selected_experts = [0_u32; 16];
                             if routes.len() > selected_experts.len() {
                                 return Err(InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
+                                    architecture: String::from(self.family()),
                                     reason: String::from(
                                         "router selected more experts than the fixed staging bound",
                                     ),
@@ -4682,7 +4671,7 @@ impl<'file> LoadedModel<'file> {
                                         )
                                         .map_err(|error| {
                                             InteropError::PreGatherExecutionUnsupported {
-                                                architecture: String::from("qwen35moe"),
+                                                architecture: String::from(self.family()),
                                                 reason: error.to_string(),
                                             }
                                         })?;
@@ -4726,11 +4715,11 @@ impl<'file> LoadedModel<'file> {
                                     let [decision] =
                                         policy.observe(position, layer, [*route]).map_err(
                                             |error| InteropError::PreGatherExecutionUnsupported {
-                                                architecture: String::from("qwen35moe"),
+                                                architecture: String::from(self.family()),
                                                 reason: error.to_string(),
                                             },
                                         )?;
-                                    current_sources.borrow_mut().push(decision)?;
+                                    current_sources.borrow_mut().push(self.family(), decision)?;
                                 }
                             }
                             Ok(())
@@ -4820,7 +4809,7 @@ impl<'file> LoadedModel<'file> {
                         let pre_gather_plan =
                             qwen35moe_pre_gather_plan.as_ref().ok_or_else(|| {
                                 InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
+                                    architecture: String::from(self.family()),
                                     reason: String::from(
                                         "the routed segment plan was not prepared",
                                     ),
@@ -4946,7 +4935,7 @@ impl<'file> LoadedModel<'file> {
                         let pre_gather_plan =
                             qwen35moe_pre_gather_plan.as_ref().ok_or_else(|| {
                                 InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
+                                    architecture: String::from(self.family()),
                                     reason: String::from(
                                         "the routed segment plan was not prepared",
                                     ),
@@ -5266,6 +5255,7 @@ impl<'file> LoadedModel<'file> {
                                     shape,
                                 },
                                 RouterExpertCounts {
+                                    family: self.family(),
                                     expert_count: self.architecture.expert_count as usize,
                                     expert_used_count: self.architecture.expert_used_count as usize,
                                 },
@@ -5276,7 +5266,7 @@ impl<'file> LoadedModel<'file> {
                                             policy.observe(position, layer, [*route]).map_err(
                                                 |error| {
                                                     InteropError::PreGatherExecutionUnsupported {
-                                                        architecture: String::from("qwen35moe"),
+                                                        architecture: String::from(self.family()),
                                                         reason: error.to_string(),
                                                     }
                                                 },
@@ -7289,6 +7279,7 @@ pub(super) fn should_release_monolithic_sources(
 }
 
 pub(super) fn map_expert_sources_to_segment<'source>(
+    family: &str,
     layer: usize,
     source_program: &[Op],
     segment_program: &[Op],
@@ -7300,7 +7291,7 @@ pub(super) fn map_expert_sources_to_segment<'source>(
             .get(source_node.0 as usize)
             .map(Op::name)
             .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
+                architecture: String::from(family),
                 reason: alloc::format!(
                     "layer {layer} expert source node {} is outside the source program",
                     source_node.0
@@ -7315,7 +7306,7 @@ pub(super) fn map_expert_sources_to_segment<'source>(
         }
         if !found {
             return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
+                architecture: String::from(family),
                 reason: alloc::format!(
                     "layer {layer} expert source node {} named {source_name:?} is absent from the gather segment",
                     source_node.0

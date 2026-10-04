@@ -273,11 +273,11 @@ pub(super) mod tests {
     #[test]
     fn qwen35_dense_attention_placed_size_is_checked() {
         assert_eq!(
-            qwen35_dense_attention_placed_byte_length(32, 128, 3, "value")
+            qwen35_dense_attention_placed_byte_length("qwen35", 32, 128, 3, "value")
                 .expect("a normal cache extent fits"),
             16_384
         );
-        assert!(qwen35_dense_attention_placed_byte_length(usize::MAX, 2, 3, "value").is_err());
+        assert!(qwen35_dense_attention_placed_byte_length("qwen35", usize::MAX, 2, 3, "value").is_err());
     }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -302,7 +302,7 @@ pub(super) mod tests {
         }];
         let sources = BTreeMap::from([(NodeId(0), ExpertSource::new(&entries))]);
 
-        let error = map_expert_sources_to_segment(0, &source_program, &segment_program, &sources)
+        let error = map_expert_sources_to_segment("qwen35moe", 0, &source_program, &segment_program, &sources)
             .expect_err("a source absent from the gather program must fail before Metal staging");
         assert!(matches!(
             error,
@@ -505,6 +505,7 @@ pub(super) mod tests {
                 shape: &[2, 4],
             },
             RouterExpertCounts {
+                family: "qwen35moe",
                 expert_count: 4,
                 expert_used_count: 2,
             },
@@ -559,6 +560,7 @@ pub(super) mod tests {
                 shape: &[1, 1],
             },
             RouterExpertCounts {
+                family: "qwen35moe",
                 expert_count: 1,
                 expert_used_count: 1,
             },
@@ -654,6 +656,7 @@ pub(super) mod tests {
                 shape: &[1, 4],
             },
             super::RouterExpertCounts {
+                family: "qwen35moe",
                 expert_count: 4,
                 expert_used_count: 2,
             },
@@ -697,6 +700,7 @@ pub(super) mod tests {
                 shape,
             },
             RouterExpertCounts {
+                family: "qwen35moe",
                 expert_count: 4,
                 expert_used_count: 2,
             },

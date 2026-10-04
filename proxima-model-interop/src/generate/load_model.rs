@@ -1103,6 +1103,7 @@ pub(super) fn qwen35_dense_attention_placement_enabled(
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub(super) fn qwen35_dense_attention_placed_byte_length(
+    family: &str,
     positions: usize,
     row_elements: usize,
     layer: usize,
@@ -1112,7 +1113,7 @@ pub(super) fn qwen35_dense_attention_placed_byte_length(
         .checked_mul(row_elements)
         .and_then(|elements| elements.checked_mul(core::mem::size_of::<f32>()))
         .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-            architecture: String::from("qwen35moe"),
+            architecture: String::from(family),
             reason: alloc::format!(
                 "layer {layer} dense-attention {leaf} placed buffer size overflowed"
             ),
