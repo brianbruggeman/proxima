@@ -95,6 +95,15 @@ Profile values GGUF does not carry are data in the profile file.
 - R7. The op graph at real dims is byte-identical to the incumbent at 9dd9deef wherever a
   slice claims no graph change.
 - R8. Token ids on every real checkpoint equal llama.cpp f1ea20621's greedy ids.
+- R10. Owner, 2026-10-04: "we still need that performance, so we may need to make changes to what
+  we have to keep the performance we've already obtained."
+  - Decode ms/token and prefill time on every measured model stay within run-to-run noise of
+    the baseline captured at main 9f0647da, or improve.
+  - Config cost lands at load time only. The lowered program, kernel choice and dispatch count
+    must be what a hand-specialized path would produce.
+  - Where config-driven lowering would cost speed, the change is to the lowering, never a
+    per-model fast path. A specialization the config enables (a fused kernel, a placed
+    single-range KV path) is admitted by the shape of the op, not by model name.
 - R9. Owner, 2026-10-04: "I need our models to be 100% conflaguration driven. like the full graph,
   etc. before we lower into a hardware backend needs to be 100% programmable through
   conflaguration x fsm x sans-io."
@@ -145,6 +154,7 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC8 | R8 | oracle | `cargo nextest run -p proxima-tokenizer --features gguf -E 'binary(gemma4_llama_oracle)'` | 20 passed, 0 failed | 20 passed |
 | AC9 | R9 | consistency | `cargo nextest run -p proxima-model-interop --features std,conflaguration -j 1 -E 'test(/model_config_roundtrip_/)'` | 7 passed: for each checkpoint, GGUF -> config -> TOML text -> config -> lowered program has the same digest as AC0's | tests absent; at HEAD the descriptor has no serde, so it cannot round-trip |
 | AC10 | R9, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal,conflaguration -j 1 -E 'test(/zero_rust_variant_/)'` | 2 passed: (a) the qwen2 0.5B model loaded from a hand-written TOML (in `tests/fixtures/model-configs/`, not derived from GGUF metadata) over its GGUF weights equals the llama ids in `llama-parity/qwen2`; (b) a TOML variant that changes the layer schedule (gemma4 E2B with every layer set full-attention) lowers and runs with no Rust change, and its op count differs from E2B's | tests absent |
+| AC12 | R10 | oracle (incumbent speed: llama-server f1ea20621 and Ollama in the same interleaved run) plus a consistency baseline | `cargo run --release -p proxima-model-interop --example decode_arms -- --prompt-file <1k-token prompt> --processes 2 --runs 7 --arm base=<decode_gbps_baseline built at 9f0647da> --arm tip=<built at the slice> --llama-server <f1ea20621> --ollama gemma4:e2b-it-qat`, run alone on a quiet box (Ollama idle, no peer GPU or cargo jobs) | tip median ms/token <= base median + max(base MAD, 2%), outliers removed; the same for prefill ms; llama and Ollama arms printed alongside | base vs base: within the same bound (this proves the noise floor) |
 | AC11 | R9 | consistency | `cargo check -p proxima-tensor --no-default-features --features alloc` and `git grep -nE 'std::(fs\|io\|net)\|File::' -- proxima-tensor/src/spec \| wc -l` | exit 0; 0 | exit 0; 0 (measured at edd4163c) |
 
 ## out of scope

@@ -3,9 +3,12 @@
 Each slice is one commit, green at every commit, and lands by `git merge --ff-only` in the
 checkout that holds main. Commands run from that checkout.
 
+Speed rule (R10, AC12): every slice that changes a lowered op graph or touches the decode or prefill loop (5, 6, 7, 8, 9, 10b, 10c) runs AC12 against the 0b baseline before it commits. A slice whose AC0 digests stay byte-identical inherits the baseline: an identical program means identical kernels.
+
 | # | slice | AC | validation | expected | done |
 |---|---|---|---|---|---|
 | 0 | At 9dd9deef, capture the incumbent op-graph digests and bound names/bytes for 7 checkpoints. Vendor into `proxima-model-interop/tests/fixtures/llama-parity/`, from llama.cpp f1ea20621: greedy ids per checkpoint, `gguf_kv.txt` per checkpoint, and `swa_layers.txt` for gemma4 E2B and 26B. Add the `arch_data_digest_` and `llama_parity_` tests, plus `generic_binder_` asserting a non-empty incumbent capture. Run AC8 (20 passed at 9dd9deef, measured by the spec auditor). | AC0, AC3 capture, AC6, AC4 control, AC8 | AC0; AC6; AC3; AC4; AC8 | 7 passed; 7 passed; 7 passed; 1214; 20 passed | [x] 2026-10-04: AC0 7/7, AC3 7/7, AC4 1214, AC8 20/20; AC6 4/7 (gemma4 26b divergence D2, qwen35+qwen35moe no oracle O1) |
+| 0b | speed baseline: build `decode_gbps_baseline` at 9f0647da (release, std+metal), keep the binary in `.long_ctx_backups/arch_data/perf/`, and run AC12 base-vs-base as the noise control (gemma4 E2B, 1k-token prompt) | AC12 | AC12 control | base vs base within the bound; medians and MAD recorded here | [ ] |
 | 1 | SWA RoPE `(base, dim)` from GGUF metadata into the descriptor rope table; delete the literal `1.0e4, 256` | AC1, AC0, AC6 | AC1, then AC0, then AC6 | 2; 7; 7 passed | [x] 2026-10-04: AC1 2/2, AC0 7/7, AC6 subset 4/4, clippy 0, lib 397/397 |
 | 2 | `ExpertResidency` dims from `block_count`/`expert_count`; error labels from the descriptor's family string | AC0, AC6 | AC0, AC6 | 7; 7 passed | [x] 2026-10-04: AC0 7/7, AC6 subset 4/4, clippy 0, lib 400/400; reconcile reuses preallocated buffers (test asserts stable ptr+capacity at 40x256); "qwen35moe" literals 61->22 |
 | 3 | one production descriptor builder; delete test-only `gemma4_descriptor`/`mistral_descriptor` | AC0 | AC0 | 7 passed | [x] 2026-10-04: isolated staged-tree gate: clippy 0, alloc check ok, tensor 703/703, digest+real-dims 9/9, interop lib 400/400 |
