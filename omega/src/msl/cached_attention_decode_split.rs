@@ -3,13 +3,25 @@ use super::*;
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeDecodeSplit`]: one
 /// threadgroup per `(query_row, query_head, split)` with `chunks` simdgroups,
 /// llama.cpp's `kernel_flash_attn_ext_vec` grid (`(iq1, iq2, iwg)` at
-/// `fa.metal:1224-1228`) for `n_q = 1`. Each threadgroup walks its own slice
-/// of the live key band in 32-key blocks, reading the even/odd K planes
-/// straight from device memory (`float4` loads, an 8-lane shuffle reduce per
-/// key), folds an online softmax, and merges its simdgroups in threadgroup
-/// memory. `u.splits == 1` stores the normalized row into `out`; above that
-/// it stores the unnormalized partial plus `(max, sum)` into the interleaved
-/// scratch layout [`super::render_cached_attention_merge`] reads back.
+/// `fa.metal:1224-1228`) for `n_q = 1`. Each simdgroup strides its split's
+/// slice of the live key band and keeps a running `(max, sum, weighted V)` in
+/// registers; the simdgroups merge in threadgroup memory. `u.splits == 1`
+/// stores the normalized row into `out`; above that it stores the unnormalized
+/// partial plus `(max, sum)` into the interleaved scratch layout
+/// [`super::render_cached_attention_merge`] reads back.
+///
+/// The lane layout is llama's `NE`/`NL` split of a simdgroup
+/// (`[attention_decode].keys_in_flight`): `32 / keys_in_flight` lanes span one
+/// key's head dim, so a lane owns `head_dim / 8 / lanes` float4 of each K and
+/// Q plane row and `head_dim / 4 / lanes` float4 of each V row. At the default
+/// of one key in flight the whole simdgroup holds one score, so the online
+/// softmax state is uniform: no per-block `simd_max`/`simd_sum`, no staged
+/// scores, no per-block threadgroup round trip of the V accumulator, and each
+/// K/V load instruction reads one contiguous 512 B line. Q is read from
+/// device memory once per simdgroup into registers; the loads of
+/// `keys_per_batch` keys (K planes and V row) are issued before any of them is
+/// consumed, so a simdgroup pays one memory round trip per batch instead of
+/// one per K-plane loop trip.
 ///
 /// Composes the block-staged body `render_cached_attention`'s single-range
 /// path renders (`TreeReduce`, `NumericRewrite` admitted by the form's
@@ -51,18 +63,15 @@ pub(super) fn render_cached_attention_decode_split(
         ("@KV_HEADS@", kv_heads.to_string()),
         ("@QUERY_GROUPS@", query_groups.to_string()),
         ("@HEAD_DIM@", head_dim.to_string()),
-        ("@V_REGISTERS@", (head_dim / 8 / 4).to_string()),
         ("@SCALE@", msl_literal(*scale)),
         ("@CACHED_LOWER@", cached_lower),
         ("@NEW_UPPER@", format!("{new_upper_inclusive}L")),
         ("@NEW_KEY_ROWS@", new_key_rows.to_string()),
+        ("@CAP@", decode_simdgroup_cap(*head_dim).to_string()),
+        ("@LANES_PER_KEY@", decode_lanes_per_key().to_string()),
         (
-            "@CAP@",
-            effective_context_chunk_cap(1, *head_dim).to_string(),
-        ),
-        (
-            "@BLOCK_WIDTH@",
-            crate::sized::ATTENTION_BLOCK_WIDTH.to_string(),
+            "@KEYS_PER_BATCH@",
+            crate::sized::ATTENTION_DECODE_KEYS_PER_BATCH.to_string(),
         ),
     ];
     let mut source = String::new();
@@ -77,10 +86,15 @@ pub(super) fn render_cached_attention_decode_split(
 
 const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
+#define OMEGA_UNROLL _Pragma("clang loop unroll(full)")
+
 kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @T@* in2 [[buffer(2)]], device const @T@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @T@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     long splits = u.splits;
     if ((long)tgid >= u.total_elements * splits) { return; }
-    constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@; constexpr long new_key_rows = @NEW_KEY_ROWS@; constexpr long cap = @CAP@; constexpr long block_width = @BLOCK_WIDTH@; constexpr long v_registers = @V_REGISTERS@;
+    constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@; constexpr long new_key_rows = @NEW_KEY_ROWS@; constexpr long cap = @CAP@;
+    constexpr short lanes_per_key = @LANES_PER_KEY@; constexpr short keys_in_flight = 32 / lanes_per_key; constexpr short batch = @KEYS_PER_BATCH@;
+    constexpr short plane_vectors = head_dim / 8; constexpr short row_vectors = head_dim / 4;
+    constexpr short plane_slots = (plane_vectors + lanes_per_key - 1) / lanes_per_key; constexpr short row_slots = (row_vectors + lanes_per_key - 1) / lanes_per_key;
     long cached_key_rows = (long)in8[0];
     long chunks = u.context_chunks;
     long chunk = (long)simdgroup_slot;
@@ -90,124 +104,128 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
     long kv_head = query_head / query_groups;
     long query_index = query_row * (kv_heads * query_groups) + query_head;
     long qbase = query_index * (head_dim / 2);
-    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];
-    for (long slot = 0; slot < (head_dim + 31) / 32; slot++) { weighted[slot] = 0.0f; }
     long last_key = cached_key_rows + new_key_rows - 1L;
     long first_key = max(0L, cached_key_rows + cached_lower + query_row);
     long band = last_key + 1L - first_key;
     long slice_len = (band + splits - 1L) / splits;
     long lo = first_key + split * slice_len;
     long hi = min(lo + slice_len, last_key + 1L);
-    threadgroup float shared_m[cap]; threadgroup float shared_l[cap]; threadgroup float shared_o[cap * head_dim]; threadgroup float ss[cap * block_width];
-    short ty = (short)(lane / 8); short tx = (short)(lane % 8);
+    threadgroup float shared_m[cap]; threadgroup float shared_l[cap]; threadgroup float4 shared_o[cap * row_vectors];
+    short ty = (short)(lane / lanes_per_key); short tx = (short)(lane % lanes_per_key);
+    float maximum = -INFINITY; float sum = 0.0f;
+    float4 weighted[row_slots];
+    OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] = float4(0.0f); }
     if (chunk < chunks) {
-    long slice_start = lo + chunk;
-    long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;
-    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {
-        for (long cc = 0L; cc < block_width / 4L; cc++) {
-            long local_index = block_start + 4L * cc + (long)ty;
-            bool valid = local_index < num_local_keys;
-            long key = slice_start + local_index * chunks;
-            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;
-            if (valid) {
-                long relative = (cached ? key - cached_key_rows : new_index) - query_row;
-                if (cached && relative < cached_lower) { valid = false; }
-                if (!cached && relative > new_upper) { valid = false; }
-            }
-            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
-            float partial_score = 0.0f;
-            if (valid) {
-                device const @T@4* qr4 = (device const @T@4*)(in0 + qbase);
-                device const @T@4* qi4 = (device const @T@4*)(in1 + qbase);
+        device const @T@4* qr4 = (device const @T@4*)(in0 + qbase);
+        device const @T@4* qi4 = (device const @T@4*)(in1 + qbase);
+        float4 query_real[plane_slots]; float4 query_imag[plane_slots];
+        OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
+            short index = tx + slot * lanes_per_key;
+            query_real[slot] = float4(0.0f); query_imag[slot] = float4(0.0f);
+            if (index < plane_vectors) { query_real[slot] = float4(qr4[index]); query_imag[slot] = float4(qi4[index]); }
+        }
+        long slice_start = lo + chunk;
+        long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;
+        for (long batch_start = 0L; batch_start < num_local_keys; batch_start += (long)batch * (long)keys_in_flight) {
+            float4 key_real[batch][plane_slots]; float4 key_imag[batch][plane_slots]; float4 value_row[batch][row_slots];
+            bool valid[batch];
+            OMEGA_UNROLL for (short step = 0; step < batch; step++) {
+                long local_index = batch_start + (long)step * (long)keys_in_flight + (long)ty;
+                long key = slice_start + local_index * chunks;
+                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;
+                bool live = local_index < num_local_keys;
+                if (live) {
+                    long relative = (cached ? key - cached_key_rows : new_index) - query_row;
+                    if (cached && relative < cached_lower) { live = false; }
+                    if (!cached && relative > new_upper) { live = false; }
+                }
+                valid[step] = live;
+                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
                 device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
                 device const @T@4* ki4 = (device const @T@4*)((cached ? in3 : in5) + kbase);
-                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {
-                    partial_score += dot(kr4[index], qr4[index]);
-                    partial_score += dot(ki4[index], qi4[index]);
+                device const @T@4* v4 = (device const @T@4*)((cached ? in6 : in7) + kbase * 2);
+                OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
+                    short index = tx + slot * lanes_per_key;
+                    key_real[step][slot] = float4(0.0f); key_imag[step][slot] = float4(0.0f);
+                    if (live && index < plane_vectors) { key_real[step][slot] = float4(kr4[index]); key_imag[step][slot] = float4(ki4[index]); }
+                }
+                OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) {
+                    short index = tx + slot * lanes_per_key;
+                    value_row[step][slot] = float4(0.0f);
+                    if (live && index < row_vectors) { value_row[step][slot] = float4(v4[index]); }
                 }
             }
-            partial_score += simd_shuffle_down(partial_score, 4);
-            partial_score += simd_shuffle_down(partial_score, 2);
-            partial_score += simd_shuffle_down(partial_score, 1);
-            if (tx == 0) { ss[chunk * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        for (long sub = 0L; sub < block_width; sub += 32L) {
-            long lane_index = sub + (long)lane;
-            float raw_score = ss[chunk * block_width + lane_index];
-            float next_max = simd_max(max(maximum, raw_score));
+            float score[batch];
+            OMEGA_UNROLL for (short step = 0; step < batch; step++) {
+                float partial_score = 0.0f;
+                OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
+                    partial_score += dot(key_real[step][slot], query_real[slot]);
+                    partial_score += dot(key_imag[step][slot], query_imag[slot]);
+                }
+                if (16 < lanes_per_key) { partial_score += simd_shuffle_xor(partial_score, (ushort)16); }
+                if (8 < lanes_per_key) { partial_score += simd_shuffle_xor(partial_score, (ushort)8); }
+                if (4 < lanes_per_key) { partial_score += simd_shuffle_xor(partial_score, (ushort)4); }
+                if (2 < lanes_per_key) { partial_score += simd_shuffle_xor(partial_score, (ushort)2); }
+                if (1 < lanes_per_key) { partial_score += simd_shuffle_xor(partial_score, (ushort)1); }
+                score[step] = valid[step] ? partial_score * scale : -INFINITY;
+            }
+            float batch_max = score[0];
+            OMEGA_UNROLL for (short step = 1; step < batch; step++) { batch_max = max(batch_max, score[step]); }
+            if (keys_in_flight > 1) { batch_max = simd_max(batch_max); }
+            float next_max = max(maximum, batch_max);
             float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);
-            float weight = exp(raw_score - next_max);
-            sum = sum * rescale + simd_sum(weight);
-            ss[chunk * block_width + lane_index] = weight;
-            for (long slot = 0L; slot < (head_dim + 31) / 32; slot++) { weighted[slot] *= rescale; }
-            maximum = next_max;
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            {
-                float4 v_acc[v_registers];
-                for (long register_index = 0L; register_index < v_registers; register_index++) { v_acc[register_index] = float4(0.0f); }
-                for (long cc4 = 0L; cc4 < 8L; cc4++) {
-                    long local_index = block_start + sub + 4L * cc4 + (long)ty;
-                    bool valid = local_index < min(block_start + sub + 32L, num_local_keys);
-                    long key = slice_start + local_index * chunks;
-                    bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;
-                    long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
-                    float key_weight = valid ? ss[chunk * block_width + (local_index - block_start)] : 0.0f;
-                    device const @T@4* v4 = (device const @T@4*)((cached ? in6 : in7) + kbase * 2);
-                    for (long register_index = 0L; register_index < v_registers; register_index++) {
-                        v_acc[register_index] += valid ? float4(v4[(long)tx + 8L * register_index]) * key_weight : float4(0.0f);
-                    }
-                }
-                for (long register_index = 0L; register_index < v_registers; register_index++) {
-                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8);
-                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16);
-                }
-                if (ty == 0) {
-                    threadgroup float4* shared_o4 = (threadgroup float4*)(shared_o + chunk * head_dim);
-                    for (long register_index = 0L; register_index < v_registers; register_index++) { shared_o4[(long)tx + 8L * register_index] = v_acc[register_index]; }
-                }
-                simdgroup_barrier(mem_flags::mem_threadgroup);
-                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-                    weighted[dimension / 32L] += shared_o[chunk * head_dim + dimension];
-                }
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+            sum *= rescale;
+            OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] *= rescale; }
+            OMEGA_UNROLL for (short step = 0; step < batch; step++) {
+                float weight = (score[step] == -INFINITY) ? 0.0f : exp(score[step] - next_max);
+                sum += weight;
+                OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] += value_row[step][slot] * weight; }
             }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
+            maximum = next_max;
         }
-    }
+        if (lanes_per_key <= 8) {
+            sum += simd_shuffle_xor(sum, (ushort)8);
+            OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] += simd_shuffle_xor(weighted[slot], (ushort)8); }
+        }
+        if (lanes_per_key <= 16) {
+            sum += simd_shuffle_xor(sum, (ushort)16);
+            OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] += simd_shuffle_xor(weighted[slot], (ushort)16); }
+        }
     }
     if (lane == 0) { shared_m[chunk] = maximum; shared_l[chunk] = sum; }
-    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) { shared_o[chunk * head_dim + dimension] = weighted[dimension / 32L]; }
+    if (ty == 0) {
+        OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) {
+            short index = tx + slot * lanes_per_key;
+            if (index < row_vectors) { shared_o[chunk * row_vectors + index] = weighted[slot]; }
+        }
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (chunk == 0L) {
         float merged_max = -INFINITY;
         for (long c = 0; c < chunks; c++) { merged_max = max(merged_max, shared_m[c]); }
+        float chunk_scale[cap];
         float merged_sum = 0.0f;
-        for (long c = 0; c < chunks; c++) {
-            float partial_max = shared_m[c];
-            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);
-            merged_sum += shared_l[c] * rescale;
+        OMEGA_UNROLL for (long c = 0; c < cap; c++) {
+            bool live_chunk = c < chunks && shared_m[c] != -INFINITY;
+            chunk_scale[c] = live_chunk ? exp(shared_m[c] - merged_max) : 0.0f;
+            merged_sum += live_chunk ? shared_l[c] * chunk_scale[c] : 0.0f;
         }
-        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-            float acc = 0.0f;
-            for (long c = 0; c < chunks; c++) {
-                float partial_max = shared_m[c];
-                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);
-                acc += shared_o[c * head_dim + dimension] * rescale;
-            }
-            weighted[dimension / 32L] = acc;
-        }
-        if (splits == 1L) {
-            for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-                out[query_index * head_dim + dimension] = (@T@)(merged_sum == 0.0f ? 0.0f : weighted[dimension / 32L] / merged_sum);
-            }
-        } else {
-            device float* attn_scratch = (device float*)out;
-            long value_base = query_index * (head_dim / 4L);
-            long stats_index = u.total_elements * head_dim * splits + (query_index * splits + split) * 2L;
-            if (lane == 0) { attn_scratch[stats_index] = merged_max; attn_scratch[stats_index + 1L] = merged_sum; }
-            for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-                attn_scratch[((value_base + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L)] = weighted[dimension / 32L];
+        device float* attn_scratch = (device float*)out;
+        long value_base = query_index * row_vectors;
+        long stats_index = u.total_elements * head_dim * splits + (query_index * splits + split) * 2L;
+        if (splits != 1L && lane == 0) { attn_scratch[stats_index] = merged_max; attn_scratch[stats_index + 1L] = merged_sum; }
+        if (ty == 0) {
+            OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) {
+                short index = tx + slot * lanes_per_key;
+                if (index < row_vectors) {
+                    float4 merged = float4(0.0f);
+                    OMEGA_UNROLL for (long c = 0; c < cap; c++) { merged += (c < chunks) ? shared_o[c * row_vectors + index] * chunk_scale[c] : float4(0.0f); }
+                    if (splits == 1L) {
+                        ((device @T@4*)(out + query_index * head_dim))[index] = @T@4(merged_sum == 0.0f ? float4(0.0f) : merged / merged_sum);
+                    } else {
+                        ((device float4*)attn_scratch)[(value_base + index) * splits + split] = merged;
+                    }
+                }
             }
         }
     }

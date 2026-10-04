@@ -22,7 +22,7 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{Architecture, GEMMA4, KvLayout, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOpKind, prune_dead};
 use proxima_tensor::spec::Qwen35LayerRoots;
-use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer};
+use proxima_tensor::{DType, NodeId, NumericPolicy, bind_with_fusion, infer};
 
 const GEMMA4_E2B_DEFAULT_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
      sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
@@ -32,10 +32,16 @@ const GLOBAL_HEAD_DIM: u64 = 512;
 const SLIDING_WINDOW: usize = 512;
 
 /// `(kv bucket, threadgroups of a global layer, threadgroups of a sliding
-/// layer)`: eight query heads times the split count. The sliding ring caps its
-/// extent at the 512-key window, so its split count stops at 17.
-const EXPECTED_THREADGROUPS: [(usize, u64, u64); 3] =
-    [(32, 16, 16), (512, 136, 136), (2048, 256, 136)];
+/// layer, threads per global threadgroup, threads per sliding threadgroup)`:
+/// eight query heads times the split count, and 32 lanes times the simdgroups
+/// `[attention_decode].keys_per_simdgroup` spreads a split over. The sliding
+/// ring caps its extent at the 512-key window, so its split count stops at 17
+/// and its simdgroup count at the four an 8-keys-per-simdgroup target gives a 31-key split.
+const EXPECTED_LAUNCH: [(usize, u64, u64, u64, u64); 3] = [
+    (32, 16, 16, 96, 96),
+    (512, 136, 136, 128, 128),
+    (2048, 256, 136, 128, 128),
+];
 
 fn gemma4_e2b_gguf_path() -> String {
     std::env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| GEMMA4_E2B_DEFAULT_PATH.to_string())
@@ -75,7 +81,9 @@ async fn gemma4_e2b_decode_binds_35_cached_attention_ops_and_no_softmax_weights_
     let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
     let policy = NumericPolicy::llama_relaxed();
 
-    for (bucket, global_threadgroups, sliding_threadgroups) in EXPECTED_THREADGROUPS {
+    for (bucket, global_threadgroups, sliding_threadgroups, global_width, sliding_width) in
+        EXPECTED_LAUNCH
+    {
         let mut step_symbols = bind_symbols(1, bucket, &[], true).expect(
             "bind_symbols: single_position_step=true with one new token is a legal decode step",
         );
@@ -113,6 +121,12 @@ async fn gemma4_e2b_decode_binds_35_cached_attention_ops_and_no_softmax_weights_
             let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
                 unreachable!("filtered to CachedAttention above");
             };
+            assert_eq!(
+                bound.dtype,
+                DType::Float32,
+                "bucket {bucket} node {}: the K and V planes the kernel streams are f32, which is the byte count the split kernel moves",
+                bound.node.0
+            );
             let kernel = omega::emit(bound, &PackedOperands::new(), policy)
                 .expect("the bound decode attention op emits");
             assert!(
@@ -125,15 +139,20 @@ async fn gemma4_e2b_decode_binds_35_cached_attention_ops_and_no_softmax_weights_
                 .grid
                 .threadgroup_width
                 .expect("the split form fixes its threadgroup width");
-            let expected = if *head_dim == GLOBAL_HEAD_DIM {
-                global_threadgroups
+            let (expected, expected_width) = if *head_dim == GLOBAL_HEAD_DIM {
+                (global_threadgroups, global_width)
             } else {
-                sliding_threadgroups
+                (sliding_threadgroups, sliding_width)
             };
             assert_eq!(
                 kernel.grid.threads / width,
                 expected,
                 "bucket {bucket} node {} head_dim {head_dim}: threadgroups",
+                bound.node.0
+            );
+            assert_eq!(
+                width, expected_width,
+                "bucket {bucket} node {} head_dim {head_dim}: threads per threadgroup",
                 bound.node.0
             );
         }

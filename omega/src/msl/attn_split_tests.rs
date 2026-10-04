@@ -1,12 +1,14 @@
 use super::attn_golden_tests::attention_op;
 use super::*;
 
-/// Byte identity: each kernel text, merge included, equals what `main`
-/// emitted before `metal-attn-split-rows` existed -- the five base cases with
-/// every attention feature off, and with `metal-attn-split-decode` on those
-/// five plus the six K=1 decode-split cases (global and sliding at capacities
-/// 33/513/2049). The goldens come from `attn_golden_tests::record_main_goldens`
-/// run on an unpatched export of `main` under each feature set.
+/// Byte identity: each kernel text, merge included, equals its recorded golden.
+/// With every attention feature off the five base cases are what `main` emitted
+/// before `metal-attn-split-rows` existed. With `metal-attn-split-decode` on,
+/// the six K=1 decode-split cases (global and sliding at capacities 33/513/2049)
+/// and the two relaxed two-range cases it serves are recorded from the
+/// lane-span partial kernel (`[attention_decode]`), the one place those goldens
+/// differ from `main`; the merge text and the preamble are still `main`'s. They
+/// come from `attn_golden_tests::record_main_goldens`.
 mod golden_identity {
     use super::super::attn_golden_tests::{
         GOLDEN_PREFIX, golden_cases, golden_dir, preamble_of, rendered,
@@ -154,12 +156,16 @@ mod decode_split {
         assert_eq!(crate::sized::ATTENTION_SPLIT_MAX, 32);
         assert_eq!(crate::sized::ATTENTION_BLOCK_WIDTH, 32);
         assert_eq!(crate::sized::ATTENTION_CONTEXT_CHUNK_CAP, 4);
+        assert_eq!(crate::sized::ATTENTION_DECODE_KEYS_IN_FLIGHT, 1);
+        assert_eq!(crate::sized::ATTENTION_DECODE_KEYS_PER_BATCH, 1);
+        assert_eq!(crate::sized::ATTENTION_DECODE_KEYS_PER_SIMDGROUP, 8);
+        assert_eq!(crate::sized::ATTENTION_DECODE_SIMDGROUPS_MAX, 4);
     }
 
     #[test]
     fn the_split_and_chunk_counts_follow_the_bucket_capacity() {
         assert_default_sizing();
-        let expected = [(32_u64, 2_u64, 1_u64), (512, 17, 1), (2048, 32, 2)];
+        let expected = [(32_u64, 2_u64, 3_u64), (512, 17, 4), (2048, 32, 4)];
 
         for head_dim in [256_u64, 512] {
             for (cached_key_rows, splits, chunks) in expected {
@@ -181,13 +187,24 @@ mod decode_split {
             crate::sized::ATTENTION_SPLIT_MAX
         );
         assert_eq!(
-            decode_chunks_for(4097, 256),
-            4,
-            "llama's nsg rule steps 1, 2, 4"
+            decode_chunks_for(8, 256),
+            1,
+            "a bucket of one simdgroup's keys keeps one simdgroup"
         );
         assert_eq!(
             decode_chunks_for(1_000_000, 256),
-            crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
+            decode_simdgroup_cap(256),
+            "a long split is capped by the simdgroup ceiling"
+        );
+        assert_eq!(
+            decode_simdgroup_cap(512),
+            crate::sized::ATTENTION_DECODE_SIMDGROUPS_MAX,
+            "the head_dim 512 merge arrays fit the threadgroup budget at the ceiling"
+        );
+        assert_eq!(
+            decode_simdgroup_cap(4096),
+            1,
+            "a head too wide for two simdgroups of merge arrays keeps one"
         );
     }
 
@@ -278,7 +295,7 @@ mod decode_split {
     #[test]
     fn the_partial_dispatches_one_threadgroup_per_head_and_split() {
         assert_default_sizing();
-        let expected = [(32_u64, 16_u64, 32_u64), (512, 136, 32), (2048, 256, 64)];
+        let expected = [(32_u64, 16_u64, 96_u64), (512, 136, 128), (2048, 256, 128)];
 
         for head_dim in [256_u64, 512] {
             for (cached_key_rows, threadgroups, width) in expected {
@@ -316,7 +333,9 @@ mod decode_split {
                         "long hi = min(lo + slice_len, last_key + 1L);",
                         "if (splits == 1L) {",
                         "long stats_index = u.total_elements * head_dim * splits + (query_index * splits + split) * 2L;",
-                        "attn_scratch[((value_base + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L)]",
+                        "((device float4*)attn_scratch)[(value_base + index) * splits + split] = merged;",
+                        "constexpr short lanes_per_key = 32;",
+                        "constexpr short batch = 1;",
                         "long cached_key_rows = (long)in8[0];",
                     ] {
                         assert!(
@@ -331,9 +350,8 @@ mod decode_split {
                         "{label}: the bucket extent must not be a compiled or uniform constant"
                     );
 
-                    let cap = effective_context_chunk_cap(1, head_dim);
-                    let block_width = crate::sized::ATTENTION_BLOCK_WIDTH;
-                    let threadgroup_bytes = 4 * (cap * head_dim + 2 * cap + cap * block_width);
+                    let cap = decode_simdgroup_cap(head_dim);
+                    let threadgroup_bytes = 4 * (cap * head_dim + 2 * cap);
                     assert!(
                         threadgroup_bytes
                             <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
@@ -562,6 +580,61 @@ mod decode_split {
         assert_eq!(
             checked,
             32 * 4096 * 3,
+            "the property must have run over the whole domain"
+        );
+    }
+
+    /// The kernel's own key indexing, mirrored: simdgroup `chunk` strides the
+    /// split's `[lo, hi)` by `chunks`, `keys_in_flight` lane groups (`ty`) take
+    /// adjacent local keys, and each pass of the batch loop issues `batch`
+    /// such steps. Over every layout the sized config admits, each key of the
+    /// split is walked by exactly one `(chunk, ty, step)` of exactly one pass.
+    #[test]
+    fn the_simdgroup_walk_visits_every_key_of_a_split_exactly_once() {
+        let mut checked = 0_u64;
+        for chunks in 1..=8_i64 {
+            for keys_in_flight in [1_i64, 2, 4] {
+                for batch in [1_i64, 2, 4, 8] {
+                    for slice_len in 0..=130_i64 {
+                        let (lo, hi) = (7_i64, 7 + slice_len);
+                        let mut visits = vec![0_u32; slice_len as usize];
+                        for chunk in 0..chunks {
+                            let slice_start = lo + chunk;
+                            let num_local_keys = if slice_start < hi {
+                                (hi - 1 - slice_start) / chunks + 1
+                            } else {
+                                0
+                            };
+                            let mut batch_start = 0;
+                            while batch_start < num_local_keys {
+                                for step in 0..batch {
+                                    for ty in 0..keys_in_flight {
+                                        let local_index = batch_start + step * keys_in_flight + ty;
+                                        if local_index < num_local_keys {
+                                            let key = slice_start + local_index * chunks;
+                                            assert!(
+                                                (lo..hi).contains(&key),
+                                                "chunks {chunks} in_flight {keys_in_flight} batch {batch} slice {slice_len}: key {key} outside [{lo}, {hi})"
+                                            );
+                                            visits[(key - lo) as usize] += 1;
+                                        }
+                                    }
+                                }
+                                batch_start += batch * keys_in_flight;
+                            }
+                        }
+                        assert!(
+                            visits.iter().all(|count| *count == 1),
+                            "chunks {chunks} in_flight {keys_in_flight} batch {batch} slice {slice_len}: {visits:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            checked,
+            8 * 3 * 4 * 131,
             "the property must have run over the whole domain"
         );
     }

@@ -44,7 +44,7 @@ fn the_row_count_the_policy_and_the_head_group_choose_the_form() {
     });
     let decode = Some(CachedAttentionForm::TwoRangeDecodeSplit {
         splits: 17,
-        chunks: 1,
+        chunks: 4,
     });
     let one_dispatch = Some(CachedAttentionForm::TwoRangeCachedBound);
     let mut cells = 0_u32;
