@@ -553,9 +553,9 @@ fn reject_gpu_expert_sources(
 }
 
 /// Classifies every named block bound to one of `resident_names` as data
-/// that never changes across calls, so [`Plan::Metal`]'s driver may cache and
+/// that never changes across calls, so the macOS `Plan::Metal` driver may cache and
 /// reuse its device buffer instead of re-copying it every call — see
-/// [`metal::Plan::mark_resident`]'s own doc for the full mechanism and the
+/// `metal::Plan::mark_resident`'s own doc for the full mechanism and the
 /// soundness argument for why this needs a caller-supplied name set rather
 /// than being inferred from bytes alone. A no-op on [`Plan::Cpu`]: the CPU
 /// evaluator has no device buffer to cache — that no-op is the match arm
