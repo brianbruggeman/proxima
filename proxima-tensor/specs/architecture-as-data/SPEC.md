@@ -80,7 +80,9 @@ Profile values GGUF does not carry are data in the profile file.
   - The model is a conflaguration config: `ModelDescriptor` derives `Settings` and `Validate`.
     Its layers are, in order: family-profile TOML defaults, then GGUF metadata, then env.
   - It has a fluent builder that round-trips with the config.
-  - Serving is the sans-IO `ServingState` FSM in `proxima-model-interop/src/serving_fsm.rs`
+  - Serving is the sans-IO `ServingState` FSM, today in `proxima-model-interop/src/serving_fsm.rs`
+    and moving to `proxima-core/src/serving_state.rs` (generic over its entry) by
+    fsm-techniques slice 1
     (Prefill, Decode, Verify, Accept, Rollback, Finish), driven by that config. It replaces the
     closure in `run_decode_loop_from_ids`.
   - Which states are reachable comes from config fields. For example, Verify is reachable only
