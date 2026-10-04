@@ -127,6 +127,14 @@ pub const SIMD_WIDTH: u64 = 32;
 // per-build without editing the TOML -- the mechanism that same discipline
 // row's bake-off used.
 
+// `COOPERATIVE_REDUCE_UNROLL` comes in through the `include!` above -- how
+// many elements a cooperative fold's lane loads before folding the first of
+// them (`msl::push_cooperative_reduce_body`). Fold order is unchanged, so it
+// moves latency, not bits. `OMEGA_COOPERATIVE_REDUCE_UNROLL=<n>` exercises
+// another value per build; see `omega-runtime.toml`'s `[cooperative_reduce]`.
+// `COOPERATIVE_REDUCE_PREFETCH_REGISTERS` is the per-lane register budget a
+// broadcast epilogue's operand prefetch shares across its operands.
+
 // `GRID_LINEAR_THREAD_LIMIT`/`GRID_MAX_THREADGROUPS_X` come in through the
 // `include!` above -- `msl::grid2d_for`'s two grid-shape facts: the widest 1D
 // grid a `uint gid [[thread_position_in_grid]]` kernel can address (a wider
