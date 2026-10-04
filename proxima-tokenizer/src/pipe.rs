@@ -73,7 +73,7 @@ fn encode_ordinary(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError
         return encode_char_level(text, vocab);
     }
     let mut ids = Vec::new();
-    for span in pretokenize(text) {
+    for span in pretokenize(text, vocab.pre_type()) {
         let piece = &text[span];
         ids.extend(encode_pretoken(piece.as_bytes(), vocab)?);
     }

@@ -5146,6 +5146,7 @@ dependencies = [
  "proptest",
  "proxima-gguf",
  "proxima-primitives",
+ "proxima-telemetry",
  "proxima-test",
  "serde",
  "serde_json",

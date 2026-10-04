@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 use crate::byte_level::{byte_to_char, char_to_byte};
 use crate::error::TokenizerError;
+use crate::pretokenize::PreType;
 
 /// Mirrors llama.cpp's `llama_token_type` (`include/llama.h:131-137`) --
 /// the GGUF `tokenizer.ggml.token_type` array tags every vocab entry with
@@ -113,6 +114,7 @@ pub struct Vocab {
     add_eos_token: Option<bool>,
     space_marker: SpaceMarker,
     char_level_bpe: bool,
+    pre_type: PreType,
 }
 
 impl Vocab {
@@ -348,6 +350,7 @@ impl Vocab {
             add_eos_token: None,
             space_marker,
             char_level_bpe,
+            pre_type: PreType::Llama3,
         })
     }
 
@@ -380,6 +383,25 @@ impl Vocab {
         self.token_types = token_types;
         self.added_token_trie = added_token_trie;
         Ok(self)
+    }
+
+    /// Sets the pre-split rule the byte-level path applies
+    /// ([`crate::pretokenize::pretokenize`]). `gguf::vocab_from_metadata`
+    /// always sets it from `tokenizer.ggml.pre`; a vocab built any other way
+    /// ([`Vocab::new`], HF `tokenizer.json`) keeps [`PreType::Llama3`] until
+    /// its caller says otherwise.
+    #[must_use]
+    pub fn with_pre_type(mut self, pre_type: PreType) -> Self {
+        self.pre_type = pre_type;
+        self
+    }
+
+    /// The pre-split rule [`crate::pipe::encode`] applies to this vocab's
+    /// byte-level path. Not consulted by the char-level (gemma4) or unigram
+    /// paths, which carry their own splitting.
+    #[must_use]
+    pub fn pre_type(&self) -> PreType {
+        self.pre_type
     }
 
     /// Attaches the checkpoint's own BOS/EOS auto-add policy

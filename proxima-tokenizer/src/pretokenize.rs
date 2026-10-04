@@ -1,43 +1,105 @@
-//! The LLAMA3/GPT-2-family pretokenizer: splits raw text into pretoken
-//! spans *before* byte-level BPE runs on each one independently. Mirrors
-//! `LLAMA_VOCAB_PRE_TYPE_LLAMA3`'s regex
-//! (`llama.cpp/src/llama-vocab.cpp:282-291`, confirmed as the variant this
-//! crate's fixture uses via `tokenizer.ggml.pre = "llama-bpe"`):
+//! The GPT-2-family pretokenizers: split raw text into pretoken spans
+//! *before* byte-level BPE runs on each one independently. The rule is
+//! chosen by [`PreType`], which a GGUF carries as `tokenizer.ggml.pre`;
+//! each variant mirrors one `LLAMA_VOCAB_PRE_TYPE_*` of llama.cpp f1ea20621
+//! (`src/llama-vocab.cpp` regexes, `src/unicode.cpp` matchers):
 //!
 //! ```text
-//! (?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])
-//!   | [^\r\n\p{L}\p{N}]?\p{L}+
-//!   | \p{N}{1,3}
-//!   | ' '?[^\s\p{L}\p{N}]+[\r\n]*
-//!   | \s*[\r\n]+
-//!   | \s+(?!\S)
-//!   | \s+
+//! llama3  (?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])
+//!           | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}{1,3}
+//!           | ' '?[^\s\p{L}\p{N}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
+//! qwen2   same, with \p{N} (one digit per pretoken) in place of \p{N}{1,3}
+//! qwen35  qwen2 with [\p{L}\p{M}]+ for \p{L}+ and [^\s\p{L}\p{M}\p{N}]+ for
+//!         [^\s\p{L}\p{N}]+
 //! ```
 //!
 //! No regex engine ships in this no_std+alloc crate, so this is a
-//! hand-rolled scanner implementing the same alternation order using
-//! `char::is_alphabetic`/`is_numeric`/`is_whitespace` (Unicode-aware, and
-//! available in `core` -- no allocation, no lookup table of our own)
-//! in place of `\p{L}`/`\p{N}`/`\s`. The two differ from PCRE's exact
-//! Unicode tables at the margins (grapheme-cluster-aware scripts, some
-//! symbol/format codepoints) but agree on every ASCII and common-script
-//! case exercised by the round-trip tests. Round-trip correctness
-//! (`decode(encode(x)) == x`) never depends on where these boundaries
-//! land -- only how closely a produced token id sequence matches another
-//! implementation's (e.g. llama.cpp's) does.
+//! hand-rolled scanner implementing the same alternation order. `\p{L}`,
+//! `\p{N}`, `\p{M}` and `\s` are answered by [`crate::unicode_tables`], the
+//! tables llama.cpp's own matchers read, so the class boundaries agree with
+//! it codepoint for codepoint.
 
 use alloc::vec::Vec;
 
-fn is_letter(character: char) -> bool {
-    character.is_alphabetic()
+use crate::pretokenize_default::default_spans;
+use crate::unicode_tables::{CLASS_RANGES, LETTER, MARK, NUMBER, PUNCT, WHITESPACE};
+
+/// Which pre-split rule a vocab's `tokenizer.ggml.pre` selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreType {
+    /// `LLAMA_VOCAB_PRE_TYPE_LLAMA3`: digit runs of up to three.
+    Llama3,
+    /// `LLAMA_VOCAB_PRE_TYPE_QWEN2`: one digit per pretoken.
+    Qwen2,
+    /// `LLAMA_VOCAB_PRE_TYPE_QWEN35`: one digit per pretoken, and `\p{M}`
+    /// joins `\p{L}` in words.
+    Qwen35,
+    /// `LLAMA_VOCAB_PRE_TYPE_DEFAULT`: four successive splits, see
+    /// [`crate::pretokenize_default`]. What llama.cpp uses for `tokenizer.ggml.pre =
+    /// "default"` and, with a warning, when the key is missing.
+    Default,
 }
 
-fn is_digit(character: char) -> bool {
-    character.is_numeric()
+impl PreType {
+    /// Maps a `tokenizer.ggml.pre` value exactly as llama.cpp's
+    /// `llama_vocab::impl::load` does (`llama-vocab.cpp:2168-2271`), for the
+    /// pre types whose rule this scanner expresses. `None` for every other
+    /// value, including ones llama.cpp itself accepts.
+    #[must_use]
+    pub fn from_gguf_name(name: &str) -> Option<Self> {
+        match name {
+            "llama3" | "llama-v3" | "llama-bpe" | "falcon3" | "falcon-h1" | "pixtral"
+            | "midm-2.0" | "lfm2" | "jina-v5-nano" => Some(Self::Llama3),
+            "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2" | "megrez" => Some(Self::Qwen2),
+            "qwen35" => Some(Self::Qwen35),
+            "default" => Some(Self::Default),
+            _ => None,
+        }
+    }
+
+    fn digit_run_cap(self) -> usize {
+        match self {
+            Self::Llama3 | Self::Default => 3,
+            Self::Qwen2 | Self::Qwen35 => 1,
+        }
+    }
+
+    fn is_word(self, character: char) -> bool {
+        match self {
+            Self::Llama3 | Self::Qwen2 | Self::Default => is_letter(character),
+            Self::Qwen35 => is_letter(character) || is_mark(character),
+        }
+    }
+
+    fn is_punct(self, character: char) -> bool {
+        !is_whitespace(character) && !is_digit(character) && !self.is_word(character)
+    }
 }
 
-fn is_punct(character: char) -> bool {
-    !character.is_whitespace() && !character.is_alphabetic() && !character.is_numeric()
+pub(crate) fn class_bits(character: char) -> u8 {
+    let codepoint = u32::from(character);
+    let index = CLASS_RANGES.partition_point(|&(start, _)| start <= codepoint);
+    CLASS_RANGES[index - 1].1
+}
+
+pub(crate) fn is_letter(character: char) -> bool {
+    class_bits(character) & LETTER != 0
+}
+
+pub(crate) fn is_digit(character: char) -> bool {
+    class_bits(character) & NUMBER != 0
+}
+
+fn is_mark(character: char) -> bool {
+    class_bits(character) & MARK != 0
+}
+
+pub(crate) fn is_punctuation(character: char) -> bool {
+    class_bits(character) & PUNCT != 0
+}
+
+pub(crate) fn is_whitespace(character: char) -> bool {
+    WHITESPACE.binary_search(&u32::from(character)).is_ok()
 }
 
 fn contraction_len(chars: &[char]) -> Option<usize> {
@@ -56,18 +118,26 @@ fn contraction_len(chars: &[char]) -> Option<usize> {
     }
 }
 
-/// Splits `text` into pretoken spans, returned as byte-offset ranges into
-/// `text` so callers can slice the original string (and, for encode, its
-/// UTF-8 bytes) without an extra allocation per pretoken.
+/// Splits `text` into pretoken spans under `pre_type`, returned as
+/// byte-offset ranges into `text` so callers can slice the original string
+/// (and, for encode, its UTF-8 bytes) without an extra allocation per
+/// pretoken.
 #[must_use]
-pub fn pretokenize(text: &str) -> Vec<core::ops::Range<usize>> {
+pub fn pretokenize(text: &str, pre_type: PreType) -> Vec<core::ops::Range<usize>> {
     let chars: Vec<char> = text.chars().collect();
     let byte_offsets: Vec<usize> = char_byte_offsets(text, chars.len());
+
+    if pre_type == PreType::Default {
+        return default_spans(&chars)
+            .into_iter()
+            .map(|(start, end)| byte_offsets[start]..byte_offsets[end])
+            .collect();
+    }
 
     let mut spans = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
-        let consumed = match_at(&chars, index);
+        let consumed = match_at(&chars, index, pre_type);
         let end = index + consumed.max(1);
         spans.push(byte_offsets[index]..byte_offsets[end]);
         index = end;
@@ -80,7 +150,7 @@ pub fn pretokenize(text: &str) -> Vec<core::ops::Range<usize>> {
 /// characters, as byte-offset ranges into `text`. Nothing else is split --
 /// BPE merges run over the whole line, since gemma4's merges are keyed on raw
 /// characters and no merge may span a `\n`. Contrast [`pretokenize`], the
-/// LLAMA3 word splitter the GPT-2 byte-level path uses.
+/// word splitter the GPT-2 byte-level path uses.
 #[must_use]
 pub fn pretokenize_newline_runs(text: &str) -> Vec<core::ops::Range<usize>> {
     let mut spans = Vec::new();
@@ -111,23 +181,20 @@ fn char_byte_offsets(text: &str, char_count: usize) -> Vec<usize> {
 
 /// How many chars, starting at `index`, the next pretoken consumes.
 /// Returns `0` only when nothing at `index` matches any rule, in which
-/// case the caller must still advance by one char (a single
-/// non-matching char becomes its own one-char pretoken -- this only
-/// happens for codepoints the six alternatives all reject, which does
-/// not occur for well-formed Unicode text but keeps the scanner total).
-fn match_at(chars: &[char], index: usize) -> usize {
+/// case the caller must still advance by one char.
+fn match_at(chars: &[char], index: usize, pre_type: PreType) -> usize {
     let remaining = &chars[index..];
 
     if let Some(length) = contraction_len(remaining) {
         return length;
     }
-    if let Some(length) = match_letters(remaining) {
+    if let Some(length) = match_words(remaining, pre_type) {
         return length;
     }
-    if let Some(length) = match_digits(remaining) {
+    if let Some(length) = match_digits(remaining, pre_type) {
         return length;
     }
-    if let Some(length) = match_punct(remaining) {
+    if let Some(length) = match_punct(remaining, pre_type) {
         return length;
     }
     if let Some(length) = match_whitespace_with_newline(remaining) {
@@ -139,13 +206,13 @@ fn match_at(chars: &[char], index: usize) -> usize {
     0
 }
 
-/// `[^\r\n\p{L}\p{N}]?\p{L}+`
-fn match_letters(chars: &[char]) -> Option<usize> {
+/// `[^\r\n\p{L}\p{N}]?\p{L}+`, or `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+` for qwen35
+fn match_words(chars: &[char], pre_type: PreType) -> Option<usize> {
     let first = *chars.first()?;
-    if is_letter(first) {
+    if pre_type.is_word(first) {
         let run = chars
             .iter()
-            .take_while(|character| is_letter(**character))
+            .take_while(|character| pre_type.is_word(**character))
             .count();
         return Some(run);
     }
@@ -153,19 +220,19 @@ fn match_letters(chars: &[char]) -> Option<usize> {
         && first != '\n'
         && !is_digit(first)
         && let Some(&second) = chars.get(1)
-        && is_letter(second)
+        && pre_type.is_word(second)
     {
         let run = chars[1..]
             .iter()
-            .take_while(|character| is_letter(**character))
+            .take_while(|character| pre_type.is_word(**character))
             .count();
         return Some(1 + run);
     }
     None
 }
 
-/// `\p{N}{1,3}`
-fn match_digits(chars: &[char]) -> Option<usize> {
+/// `\p{N}{1,3}` for llama3, `\p{N}` for qwen2 and qwen35
+fn match_digits(chars: &[char], pre_type: PreType) -> Option<usize> {
     let first = *chars.first()?;
     if !is_digit(first) {
         return None;
@@ -174,22 +241,26 @@ fn match_digits(chars: &[char]) -> Option<usize> {
         .iter()
         .take_while(|character| is_digit(**character))
         .count();
-    Some(run.min(3))
+    Some(run.min(pre_type.digit_run_cap()))
 }
 
-/// `' '?[^\s\p{L}\p{N}]+[\r\n]*`
-fn match_punct(chars: &[char]) -> Option<usize> {
+/// `' '?[^\s\p{L}\p{N}]+[\r\n]*` (with `\p{M}` also excluded for qwen35)
+fn match_punct(chars: &[char], pre_type: PreType) -> Option<usize> {
     let first = *chars.first()?;
-    let lead = if is_punct(first) {
+    let lead = if pre_type.is_punct(first) {
         0
-    } else if first == ' ' && chars.get(1).is_some_and(|character| is_punct(*character)) {
+    } else if first == ' '
+        && chars
+            .get(1)
+            .is_some_and(|character| pre_type.is_punct(*character))
+    {
         1
     } else {
         return None;
     };
     let punct_run = chars[lead..]
         .iter()
-        .take_while(|character| is_punct(**character))
+        .take_while(|character| pre_type.is_punct(**character))
         .count();
     if punct_run == 0 {
         return None;
@@ -204,15 +275,15 @@ fn match_punct(chars: &[char]) -> Option<usize> {
 
 /// `\s*[\r\n]+`, consuming only through the last newline in the leading
 /// whitespace run (matching PCRE's greedy-then-backtrack behavior for
-/// this pattern -- see the module doc's derivation).
+/// this pattern).
 fn match_whitespace_with_newline(chars: &[char]) -> Option<usize> {
     let first = *chars.first()?;
-    if !first.is_whitespace() {
+    if !is_whitespace(first) {
         return None;
     }
     let run = chars
         .iter()
-        .take_while(|character| character.is_whitespace())
+        .take_while(|character| is_whitespace(**character))
         .count();
     let last_newline = chars[..run]
         .iter()
@@ -223,16 +294,16 @@ fn match_whitespace_with_newline(chars: &[char]) -> Option<usize> {
 /// `\s+(?!\S)` falling back to `\s+` -- consumes the whole trailing
 /// whitespace run if it reaches end-of-input, otherwise all but its
 /// last char (left for the next pretoken to pick up via
-/// [`match_letters`]/[`match_punct`]'s optional lead), and always at
+/// [`match_words`]/[`match_punct`]'s optional lead), and always at
 /// least one char.
 fn match_trailing_whitespace(chars: &[char]) -> Option<usize> {
     let first = *chars.first()?;
-    if !first.is_whitespace() {
+    if !is_whitespace(first) {
         return None;
     }
     let run = chars
         .iter()
-        .take_while(|character| character.is_whitespace())
+        .take_while(|character| is_whitespace(**character))
         .count();
     if run == chars.len() {
         Some(run)
@@ -248,10 +319,83 @@ mod tests {
     use super::*;
 
     fn spans(text: &str) -> Vec<&str> {
-        pretokenize(text)
+        spans_under(text, PreType::Llama3)
+    }
+
+    fn spans_under(text: &str, pre_type: PreType) -> Vec<&str> {
+        pretokenize(text, pre_type)
             .into_iter()
             .map(|range| &text[range])
             .collect()
+    }
+
+    #[test]
+    fn qwen_digits_split_one_per_pretoken() {
+        assert_eq!(
+            spans_under("$1,299.99", PreType::Qwen2),
+            ["$", "1", ",", "2", "9", "9", ".", "9", "9"]
+        );
+        assert_eq!(spans_under("3333", PreType::Qwen35), ["3", "3", "3", "3"]);
+    }
+
+    #[test]
+    fn llama3_digits_still_group_in_threes_where_qwen_splits_singly() {
+        assert_eq!(spans_under("v2024", PreType::Llama3), ["v", "202", "4"]);
+        assert_eq!(spans_under("v2024", PreType::Qwen2), ["v", "2", "0", "2", "4"]);
+    }
+
+    #[test]
+    fn qwen35_keeps_combining_marks_inside_the_word() {
+        let text = "cafe\u{301} au";
+        assert_eq!(
+            spans_under(text, PreType::Qwen35),
+            ["cafe\u{301}", " au"]
+        );
+        assert_eq!(
+            spans_under(text, PreType::Qwen2),
+            ["cafe", "\u{301}", " au"]
+        );
+    }
+
+    #[test]
+    fn default_pre_split_cuts_digit_runs_into_ascii_triples_after_punctuation_runs() {
+        assert_eq!(
+            spans_under("x=1234567;", PreType::Default),
+            ["x", "=", "123", "456", "7", ";"]
+        );
+        assert_eq!(
+            spans_under("$12.50", PreType::Default),
+            ["$", "12", ".", "50"]
+        );
+    }
+
+    #[test]
+    fn default_pre_split_isolates_the_apostrophe_before_contractions_can_match() {
+        assert_eq!(spans_under("don't", PreType::Default), ["don", "'", "t"]);
+        assert_eq!(
+            spans_under("Hello, world!", PreType::Default),
+            ["Hello", ",", " world", "!"]
+        );
+    }
+
+    #[test]
+    fn default_pre_split_covers_the_input_contiguously() {
+        let text = "  call +1 (415) 555-0132 \u{2162} 1234567\u{0663}\u{0664}  \n";
+        assert_eq!(spans_under(text, PreType::Default).concat(), text);
+    }
+
+    #[test]
+    fn gguf_pre_names_map_like_llama_cpp() {
+        assert_eq!(PreType::from_gguf_name("llama-bpe"), Some(PreType::Llama3));
+        assert_eq!(PreType::from_gguf_name("lfm2"), Some(PreType::Llama3));
+        assert_eq!(PreType::from_gguf_name("qwen2"), Some(PreType::Qwen2));
+        assert_eq!(PreType::from_gguf_name("deepseek-r1-qwen"), Some(PreType::Qwen2));
+        assert_eq!(PreType::from_gguf_name("megrez"), Some(PreType::Qwen2));
+        assert_eq!(PreType::from_gguf_name("qwen35"), Some(PreType::Qwen35));
+        assert_eq!(PreType::from_gguf_name("deepseek-coder"), None);
+        assert_eq!(PreType::from_gguf_name("default"), Some(PreType::Default));
+        assert_eq!(PreType::from_gguf_name("stablelm2"), None);
+        assert_eq!(PreType::from_gguf_name(""), None);
     }
 
     #[test]

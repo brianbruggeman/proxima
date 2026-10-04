@@ -22,7 +22,7 @@ std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde"]
 # convenience) because the only place this crate exercises the
 # combination end to end is the real-fixture test, which needs a file
 # read.
-gguf = ["std", "dep:proxima-gguf", "proxima-gguf/std"]
+gguf = ["std", "dep:proxima-gguf", "proxima-gguf/std", "dep:proxima-telemetry", "proxima-telemetry/std", "proxima-telemetry/emit"]
 # builds a `Vocab` directly from a real HuggingFace `tokenizer.json` (BPE
 # `model.vocab`/`model.merges`, exactly the shape `Vocab::new` already takes
 # from GGUF's parallel arrays) -- optional for the same reason `gguf` is:
@@ -55,6 +55,7 @@ serde_json = { workspace = true, optional = true }
 # carries for the identical reason (`proxima-gguf/Cargo.toml:23`).
 fastrand = { version = "2.4.1", default-features = false }
 libm = { version = "0.2.16", default-features = false }
+proxima-telemetry = { workspace = true, optional = true }
 
 [lints]
 workspace = true

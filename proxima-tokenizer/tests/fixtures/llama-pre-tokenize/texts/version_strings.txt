@@ -1,0 +1,1 @@
+Upgrade from v1.2.10 to v2.0.0-rc.1: Python 3.12.4, CUDA 12.4.1, glibc 2.39, kernel 6.8.0-45-generic, build 20240917.3.
