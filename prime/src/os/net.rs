@@ -1738,6 +1738,49 @@ impl Drop for UdpSocket {
     }
 }
 
+#[cfg(unix)]
+fn socket_source(socket: &Socket) -> RawSource {
+    socket.as_raw_fd()
+}
+
+#[cfg(windows)]
+fn register_socket(
+    reactor: &mut Reactor,
+    socket: &Socket,
+    interest: Interest,
+) -> io::Result<SourceKey> {
+    reactor.register(socket, interest)
+}
+
+#[cfg(unix)]
+fn register_socket(
+    reactor: &mut Reactor,
+    socket: &Socket,
+    interest: Interest,
+) -> io::Result<SourceKey> {
+    reactor.register(socket.as_raw_fd(), interest)
+}
+
+#[cfg(windows)]
+fn set_exclusive_address(socket: &Socket) -> io::Result<()> {
+    let enabled = 1_i32;
+    // safety: winsock reads the supplied integer synchronously while the socket is borrowed.
+    let outcome = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&raw const enabled).cast(),
+            4,
+        )
+    };
+    if outcome == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -2341,48 +2384,5 @@ mod tests {
             "rebinding at the same path must unlink the stale file and succeed, \
              matching tokio's fresh-bind-on-restart behavior"
         );
-    }
-}
-
-#[cfg(unix)]
-fn socket_source(socket: &Socket) -> RawSource {
-    socket.as_raw_fd()
-}
-
-#[cfg(windows)]
-fn register_socket(
-    reactor: &mut Reactor,
-    socket: &Socket,
-    interest: Interest,
-) -> io::Result<SourceKey> {
-    reactor.register(socket, interest)
-}
-
-#[cfg(unix)]
-fn register_socket(
-    reactor: &mut Reactor,
-    socket: &Socket,
-    interest: Interest,
-) -> io::Result<SourceKey> {
-    reactor.register(socket.as_raw_fd(), interest)
-}
-
-#[cfg(windows)]
-fn set_exclusive_address(socket: &Socket) -> io::Result<()> {
-    let enabled = 1_i32;
-    // safety: winsock reads the supplied integer synchronously while the socket is borrowed.
-    let outcome = unsafe {
-        setsockopt(
-            socket.as_raw_socket() as usize,
-            SOL_SOCKET,
-            SO_EXCLUSIVEADDRUSE,
-            (&raw const enabled).cast(),
-            4,
-        )
-    };
-    if outcome == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }))
     }
 }
