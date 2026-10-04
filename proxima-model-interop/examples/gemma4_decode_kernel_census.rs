@@ -447,8 +447,15 @@ mod harness {
         let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map gemma4-E2B blob");
         let parsed = parse_complete(&bytes).expect("parse gemma4-E2B header");
         let model = LoadedModel::load(&parsed, &bytes).expect("bind gemma4-E2B");
+        let numeric_policy = match std::env::var("PROXIMA_EPILOGUE_SOURCES").as_deref() {
+            Ok("0") => ServingConfig::default().numeric_policy.with_epilogue_sources(false),
+            Ok("1") => ServingConfig::default().numeric_policy.with_epilogue_sources(true),
+            Ok(other) => panic!("PROXIMA_EPILOGUE_SOURCES={other}: expected `0` or `1`"),
+            Err(_) => ServingConfig::default().numeric_policy,
+        };
         let serving_config = ServingConfig {
             gpu_layers: GPU_LAYERS_ALL,
+            numeric_policy,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
