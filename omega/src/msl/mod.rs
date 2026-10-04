@@ -188,4 +188,7 @@ mod attn_rows_tests;
 mod attn_split_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cooperative_fold_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

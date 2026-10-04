@@ -2095,6 +2095,17 @@ pub(super) fn push_cooperative_reduce_body(
             return Ok(());
         }
 
+        if is_broadcast_epilogue {
+            push_broadcast_epilogue_preload(
+                source,
+                rank,
+                reduce_dims,
+                width,
+                epilogue_body,
+                epilogue_operands,
+                element_type,
+            );
+        }
         for (index, gather_slot) in gather_slots.iter().copied().enumerate().take(operand_count) {
             source.push_str(&format!(
                 "    long stride{index} = u.operand_strides[{index}][{reduce_dim}];\n"
@@ -2130,30 +2141,46 @@ pub(super) fn push_cooperative_reduce_body(
                 "    int advance{index} = (int)(stride{index} * {width});\n"
             ));
         }
-        source.push_str(&format!(
-            "    for (int r = (int)lane; r < (int)u.reduction_total; r += {width}) {{\n"
-        ));
-        source.push_str(&format!(
-            "        {element_type} scratch[{}];\n",
-            operand_count.max(1)
-        ));
-        for (index, &codec) in quantized.iter().enumerate() {
+        let unroll = crate::sized::COOPERATIVE_REDUCE_UNROLL;
+        let loads_are_plain =
+            quantized.iter().all(Option::is_none) && gather_slots.iter().all(Option::is_none);
+        if unroll > 1 && loads_are_plain {
+            push_batched_accumulate_loop(
+                source,
+                resolved,
+                reduce_op,
+                width,
+                unroll,
+                element_type,
+                operand_count,
+            );
+        } else {
             source.push_str(&format!(
-                "        scratch[{index}] = {};\n",
-                operand_read(index, &format!("walk{index}"), codec)
+                "    for (int r = (int)lane; r < (int)u.reduction_total; r += {width}) {{\n"
             ));
+            source.push_str(&format!(
+                "        {element_type} scratch[{}];\n",
+                operand_count.max(1)
+            ));
+            for (index, &codec) in quantized.iter().enumerate() {
+                source.push_str(&format!(
+                    "        scratch[{index}] = {};\n",
+                    operand_read(index, &format!("walk{index}"), codec)
+                ));
+            }
+            let value_expr =
+                push_body_steps(source, resolved.element_body(), "        ", element_type);
+            source.push_str(&format!("        {element_type} value = {value_expr};\n"));
+            let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
+            source.push_str(&format!(
+                "        accumulator = seeded ? {combine_expr} : value;\n"
+            ));
+            source.push_str("        seeded = true;\n");
+            for index in 0..operand_count {
+                source.push_str(&format!("        walk{index} += advance{index};\n"));
+            }
+            source.push_str("    }\n");
         }
-        let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
-        source.push_str(&format!("        {element_type} value = {value_expr};\n"));
-        let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
-        source.push_str(&format!(
-            "        accumulator = seeded ? {combine_expr} : value;\n"
-        ));
-        source.push_str("        seeded = true;\n");
-        for index in 0..operand_count {
-            source.push_str(&format!("        walk{index} += advance{index};\n"));
-        }
-        source.push_str("    }\n");
         push_cooperative_reduce_tail(
             source,
             resolved.node,
@@ -2449,21 +2476,21 @@ pub(super) fn push_broadcast_epilogue_write(
         operand_index == epilogue_operand_count
             || epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, operand_index)
     };
+    let prefetch_unroll =
+        broadcast_epilogue_prefetch_unroll(reduce_dims, epilogue_body, epilogue_operands);
     let mut element_body = String::new();
     let epi_value = if is_identity {
         reduced_expr.to_string()
     } else {
-        source.push_str(&format!(
-            "    {element_type} epi_scratch[{}];\n",
-            epilogue_operand_count + 1
-        ));
-        push_epilogue_operand_reads(
-            source,
-            (0..epilogue_operand_count).filter(|&index| is_invariant_operand(index)),
-            rank,
-            "    ",
-            |dim| format!("full_coord[{dim}]"),
-        );
+        if prefetch_unroll.is_none() {
+            push_epilogue_scratch_and_invariant_reads(
+                source,
+                rank,
+                reduce_dims,
+                epilogue_operands,
+                element_type,
+            );
+        }
         source.push_str(&format!(
             "    epi_scratch[{epilogue_operand_count}] = {reduced_expr};\n"
         ));
@@ -2486,10 +2513,30 @@ pub(super) fn push_broadcast_epilogue_write(
         )
     };
 
+    if let Some(unroll) = prefetch_unroll {
+        let variant_operands: Vec<usize> = (0..epilogue_operand_count)
+            .filter(|&index| !is_invariant_operand(index))
+            .collect();
+        push_prefetched_broadcast_write_loop(
+            source,
+            rank,
+            reduce_dims[0],
+            width,
+            unroll,
+            &variant_operands,
+            &element_body,
+            &epi_value,
+            element_type,
+        );
+        return;
+    }
+
     source.push_str(&format!(
         "    for (long r = (long)lane; r < u.reduction_total; r += {width}) {{\n"
     ));
-    if reduce_rank > 0 {
+    if reduce_rank == 1 {
+        source.push_str(&format!("        full_coord[{}] = r;\n", reduce_dims[0]));
+    } else if reduce_rank > 1 {
         source.push_str(&format!(
             "        long reduction_coord[{reduce_rank_len}];\n"
         ));
@@ -2525,6 +2572,281 @@ pub(super) fn push_broadcast_epilogue_write(
         source.push_str(&element_body);
         source.push_str(&format!("        out[out_offset] = {epi_value};\n"));
     }
+    source.push_str("    }\n");
+}
+
+// the slot loops index per-thread arrays, which only stay in registers when
+// every trip is unrolled; the trip count is a literal, so full unroll is legal
+const FULL_UNROLL: &str = "#pragma unroll";
+
+/// The cooperative fold's accumulate loop with its loads issued ahead of its
+/// folds: each trip loads `unroll` strided elements of every operand into
+/// `batch`, then folds slot 0, 1, ... in that order -- the order the
+/// one-element-per-trip loop folds them in, so the sum is bit-identical. The
+/// per-trip loop paid one memory round trip per element (a `[1, 1536]` row
+/// over 256 lanes is six); this pays one per `unroll`. Only for plain loads:
+/// a packed codec decode or a gather fetch carries its own address chain.
+fn push_batched_accumulate_loop(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    width: u64,
+    unroll: u64,
+    element_type: &str,
+    operand_count: usize,
+) {
+    let operand_slots = operand_count.max(1);
+    source.push_str("    int total_r = (int)u.reduction_total;\n");
+    source.push_str(&format!(
+        "    for (int r = (int)lane; r < total_r; r += {}) {{\n",
+        width * unroll
+    ));
+    source.push_str(&format!(
+        "        {element_type} batch[{unroll}][{operand_slots}];\n"
+    ));
+    source.push_str(&format!(
+        "        {FULL_UNROLL}\n        for (int slot = 0; slot < {unroll}; ++slot) {{\n"
+    ));
+    source.push_str(&format!(
+        "            bool in_range = (r + slot * {width}) < total_r;\n"
+    ));
+    for index in 0..operand_count {
+        let read = operand_read(index, &format!("walk{index} + slot * advance{index}"), None);
+        source.push_str(&format!(
+            "            batch[slot][{index}] = in_range ? {read} : ({element_type})0;\n"
+        ));
+    }
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        {FULL_UNROLL}\n        for (int slot = 0; slot < {unroll}; ++slot) {{\n"
+    ));
+    source.push_str(&format!(
+        "            if ((r + slot * {width}) < total_r) {{\n"
+    ));
+    source.push_str(&format!(
+        "                {element_type} scratch[{operand_slots}];\n"
+    ));
+    for index in 0..operand_count {
+        source.push_str(&format!(
+            "                scratch[{index}] = batch[slot][{index}];\n"
+        ));
+    }
+    let value_expr = push_body_steps(
+        source,
+        resolved.element_body(),
+        "                ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "                {element_type} value = {value_expr};\n"
+    ));
+    let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
+    source.push_str(&format!(
+        "                accumulator = seeded ? {combine_expr} : value;\n"
+    ));
+    source.push_str("                seeded = true;\n");
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+    for index in 0..operand_count {
+        source.push_str(&format!("        walk{index} += {unroll} * advance{index};\n"));
+    }
+    source.push_str("    }\n");
+}
+
+/// The slots per lane [`push_broadcast_epilogue_preload`] and
+/// [`push_broadcast_epilogue_write`] both key on, or `None` when the write
+/// keeps its plain per-trip loop: a multi-dim reduce, an identity epilogue
+/// (nothing to read), a gathered epilogue operand (its address hangs on an
+/// index buffer), or [`crate::sized::COOPERATIVE_REDUCE_UNROLL`] of 1. The
+/// slot count is the unroll, cut so every per-element operand's slots fit
+/// [`crate::sized::COOPERATIVE_REDUCE_PREFETCH_REGISTERS`] together: an
+/// epilogue with eight such operands cannot hold eight slots each in
+/// registers. One pure function of the same arguments, so the preload and the
+/// write loop cannot disagree on which shape was emitted.
+pub(super) fn broadcast_epilogue_prefetch_unroll(
+    reduce_dims: &[u16],
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+) -> Option<u64> {
+    let unroll = crate::sized::COOPERATIVE_REDUCE_UNROLL;
+    let applies = unroll > 1
+        && reduce_dims.len() == 1
+        && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+        && epilogue_operands.iter().all(|(_, _, lookup)| lookup.is_none());
+    if !applies {
+        return None;
+    }
+    let variant_count = (0..epilogue_operands.len())
+        .filter(|&index| !epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index))
+        .count() as u64;
+    let budgeted = crate::sized::COOPERATIVE_REDUCE_PREFETCH_REGISTERS / variant_count.max(1);
+    Some(unroll.min(budgeted.max(1)))
+}
+
+fn push_epilogue_scratch_and_invariant_reads(
+    source: &mut String,
+    rank: usize,
+    reduce_dims: &[u16],
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    element_type: &str,
+) {
+    let operand_count = epilogue_operands.len();
+    source.push_str(&format!(
+        "    {element_type} epi_scratch[{}];\n",
+        operand_count + 1
+    ));
+    push_epilogue_operand_reads(
+        source,
+        (0..operand_count)
+            .filter(|&index| epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index)),
+        rank,
+        "    ",
+        |dim| format!("full_coord[{dim}]"),
+    );
+}
+
+// emitter helper threading one kernel's loop geometry; a struct would relocate
+// the arguments, not remove them
+#[allow(clippy::too_many_arguments)]
+fn push_epilogue_prefetch_slots(
+    source: &mut String,
+    indent: &str,
+    rank: usize,
+    reduce_dim: u16,
+    width: u64,
+    unroll: u64,
+    variant_operands: &[usize],
+    first_element: &str,
+    element_type: &str,
+) {
+    for &index in variant_operands {
+        source.push_str(&format!(
+            "{indent}{FULL_UNROLL}\n{indent}for (int slot = 0; slot < {unroll}; ++slot) {{\n"
+        ));
+        source.push_str(&format!(
+            "{indent}    long epi_pre_r = {first_element} + (long)slot * {width};\n"
+        ));
+        source.push_str(&format!(
+            "{indent}    long epi_pre_off{index} = u.epilogue_operand_base[{index}];\n"
+        ));
+        for dim in 0..rank {
+            let coord = if dim == usize::from(reduce_dim) {
+                "epi_pre_r".to_string()
+            } else {
+                format!("full_coord[{dim}]")
+            };
+            source.push_str(&format!(
+                "{indent}    epi_pre_off{index} += {coord} * u.epilogue_operand_strides[{index}][{dim}];\n"
+            ));
+        }
+        source.push_str(&format!(
+            "{indent}    epi_pre{index}[slot] = epi_pre_r < u.reduction_total ? epi{index}[epi_pre_off{index}] : ({element_type})0;\n"
+        ));
+        source.push_str(&format!("{indent}}}\n"));
+    }
+}
+
+/// Issues a broadcast epilogue's operand loads BEFORE the fold: none of them
+/// depends on the folded scalar, so emitted ahead of the accumulate loop they
+/// overlap its memory wait instead of starting a second round trip after the
+/// threadgroup barrier (measured on the `[1, 1536]` rmsnorm: 8.6 us with the
+/// loads after the barrier, 4.6 us with them hoisted and the loops batched).
+/// Each lane keeps its first `unroll` strided elements of every per-element
+/// operand in `epi_pre{index}`; [`push_broadcast_epilogue_write`] consumes
+/// them. A no-op when [`broadcast_epilogue_prefetch_unroll`] is `None`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_broadcast_epilogue_preload(
+    source: &mut String,
+    rank: usize,
+    reduce_dims: &[u16],
+    width: u64,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    element_type: &str,
+) {
+    let Some(unroll) =
+        broadcast_epilogue_prefetch_unroll(reduce_dims, epilogue_body, epilogue_operands)
+    else {
+        return;
+    };
+    push_epilogue_scratch_and_invariant_reads(
+        source,
+        rank,
+        reduce_dims,
+        epilogue_operands,
+        element_type,
+    );
+    let variant_operands: Vec<usize> = (0..epilogue_operands.len())
+        .filter(|&index| !epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index))
+        .collect();
+    for &index in &variant_operands {
+        source.push_str(&format!("    {element_type} epi_pre{index}[{unroll}];\n"));
+    }
+    push_epilogue_prefetch_slots(
+        source,
+        "    ",
+        rank,
+        reduce_dims[0],
+        width,
+        unroll,
+        &variant_operands,
+        "(long)lane",
+        element_type,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_prefetched_broadcast_write_loop(
+    source: &mut String,
+    rank: usize,
+    reduce_dim: u16,
+    width: u64,
+    unroll: u64,
+    variant_operands: &[usize],
+    element_body: &str,
+    epi_value: &str,
+    element_type: &str,
+) {
+    let block = width * unroll;
+    source.push_str(&format!(
+        "    for (long block_start = (long)lane; block_start < u.reduction_total; block_start += {block}) {{\n"
+    ));
+    source.push_str("        if (block_start != (long)lane) {\n");
+    push_epilogue_prefetch_slots(
+        source,
+        "            ",
+        rank,
+        reduce_dim,
+        width,
+        unroll,
+        variant_operands,
+        "block_start",
+        element_type,
+    );
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        {FULL_UNROLL}\n        for (int slot = 0; slot < {unroll}; ++slot) {{\n"
+    ));
+    source.push_str(&format!(
+        "            long r = block_start + (long)slot * {width};\n"
+    ));
+    source.push_str("            if (r < u.reduction_total) {\n");
+    source.push_str(&format!("                full_coord[{reduce_dim}] = r;\n"));
+    source.push_str("                long out_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "                out_offset += full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
+        ));
+    }
+    for &index in variant_operands {
+        source.push_str(&format!(
+            "                epi_scratch[{index}] = epi_pre{index}[slot];\n"
+        ));
+    }
+    source.push_str(element_body);
+    source.push_str(&format!("                out[out_offset] = {epi_value};\n"));
+    source.push_str("            }\n");
+    source.push_str("        }\n");
     source.push_str("    }\n");
 }
 

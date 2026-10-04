@@ -105,6 +105,24 @@ max_width = 256
 # short-reduce thresholds remain excluded because the existing attention
 # evidence shows that routing 64-element score folds serial is slower.
 min_len = 2
+# elements each lane loads back to back before folding any of them, in the
+# cooperative fold's accumulate loop and in a broadcast epilogue's write
+# loop (`msl::push_cooperative_reduce_body`). The loop ran one load, one
+# fold per trip, so a lane's six `[1, 1536]` loads waited on memory six
+# times in a row; issuing `unroll` loads before the first fold pays that
+# latency once. The fold order is unchanged (slot 0, 1, ...), so no bit
+# moves. Raising it costs `unroll * operands` live registers per lane and
+# buys nothing once `unroll * width` covers the reduced extent (gemma4-E2B's
+# widest decode norm is 1536 over 256 lanes, 6 per lane: measured 3.30 us
+# at 6, 3.36 at 8, 3.45 at 4 against 4.83 at 1). 1 reproduces the former
+# loop's schedule. See sized::COOPERATIVE_REDUCE_UNROLL.
+unroll = 8
+# registers per lane a broadcast epilogue's operand prefetch may hold
+# (`msl::broadcast_epilogue_prefetch_unroll`): slots per operand are cut to
+# `prefetch_registers / per-element operands`, never above `unroll`. The
+# gemma4-E2B hidden-width rmsnorm has 2 such operands (gamma, x) and keeps all
+# `unroll` slots; its 15-operand per-layer tail has 8 and gets 4.
+prefetch_registers = 32
 
 [packed_row_split_k]
 # below this many simdgroups (`output_rows / PACKED_ROWS_PER_GROUP`), the

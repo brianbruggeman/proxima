@@ -243,6 +243,22 @@ fn emit_sizing_consts() {
         "pub const COOPERATIVE_REDUCE_MIN_LEN: u64 = {cooperative_reduce_min_len};\n"
     ));
 
+    let cooperative_reduce_unroll = require_nonzero(
+        "cooperative_reduce.unroll",
+        resolve_int(&root, "cooperative_reduce", "unroll"),
+    );
+    out.push_str(&format!(
+        "pub const COOPERATIVE_REDUCE_UNROLL: u64 = {cooperative_reduce_unroll};\n"
+    ));
+
+    let cooperative_reduce_prefetch_registers = require_nonzero(
+        "cooperative_reduce.prefetch_registers",
+        resolve_int(&root, "cooperative_reduce", "prefetch_registers"),
+    );
+    out.push_str(&format!(
+        "pub const COOPERATIVE_REDUCE_PREFETCH_REGISTERS: u64 = {cooperative_reduce_prefetch_registers};\n"
+    ));
+
     let first_chunk_ops = require_nonneg(
         "command_buffer.first_chunk_ops",
         resolve_int(&root, "command_buffer", "first_chunk_ops"),
