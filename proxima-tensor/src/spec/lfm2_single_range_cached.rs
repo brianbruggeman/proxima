@@ -1235,9 +1235,8 @@ struct StoredSharedKv {
 /// [`lfm2_two_range_cached_forward_program_with_experts`]'s own return
 /// shape: the lowered program, its `logits` root, one [`CachedLayerRoots`]
 /// per real cache-owning layer, one [`MoeSite`] per MoE layer, and
-/// `PROXIMA_HEAD_REPEATS`'s own scratch output (`append_head`'s own doc
-/// inside the function body) -- empty outside `instrument` builds or when
-/// the env var is unset/`1`.
+/// the `head_repeats - 1` duplicate head roots
+/// ([`super::ModelDescriptor::head_repeats`]) -- empty when it is `1`.
 pub(super) type TwoRangeForwardProgram = (
     Vec<Op>,
     NodeId,
@@ -1273,6 +1272,48 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     // slot 1, and its mask reads the ring's own live-row count. `false`
     // leaves the program node-for-node what it was before the ring existed.
     sliding_kv_ring: bool,
+) -> Result<TwoRangeForwardProgram, TensorError> {
+    lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
+        vocab,
+        embedding,
+        feed_forward,
+        expert_feed_forward,
+        query_heads,
+        block_count,
+        expert_count,
+        expert_used_count,
+        leading_dense_block_count,
+        schedule,
+        embedding_scale,
+        logit_softcap,
+        last_row_only,
+        ple_dim,
+        sliding_kv_ring,
+        1,
+    )
+}
+
+/// [`lfm2_two_range_cached_forward_program_with_experts`] with the LM-head
+/// repeat count ([`super::ModelDescriptor::head_repeats`]) as an explicit
+/// argument; see [`lfm2_forward_program_with_experts_and_head_repeats`].
+#[allow(clippy::too_many_arguments)]
+pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    expert_feed_forward: u32,
+    query_heads: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    leading_dense_block_count: u32,
+    schedule: &[LayerSchedule],
+    embedding_scale: Option<EmbeddingScale>,
+    logit_softcap: Option<f32>,
+    last_row_only: bool,
+    ple_dim: Option<u32>,
+    sliding_kv_ring: bool,
+    head_repeats: u32,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1698,7 +1739,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
 
     // attn_parity followon (2026-09-22): the same factor-out
     // `lfm2_forward_program_with_experts` carries -- see that function's own
-    // doc on `append_head`/`PROXIMA_HEAD_REPEATS`/`duplicate_head_roots`.
+    // doc on `append_head`/`head_repeats`/`duplicate_head_roots`.
     // This is the builder gemma4's real production decode path actually
     // calls (`CacheStrategy::TwoRange`, `bind_gemma4_with_last_row_only`),
     // so this copy, not the cacheless one, is what the measurement harness
@@ -1743,28 +1784,10 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
 
     let logits = append_head(&mut program)?;
 
-    #[cfg(feature = "instrument")]
-    let duplicate_head_roots: alloc::vec::Vec<NodeId> = {
-        let repeats: u32 = std::env::var("PROXIMA_HEAD_REPEATS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(1)
-            .clamp(1, 3);
-        let mut extra = alloc::vec::Vec::with_capacity((repeats.saturating_sub(1)) as usize);
-        for _ in 1..repeats {
-            extra.push(append_head(&mut program)?);
-        }
-        if std::env::var_os("PROXIMA_HEAD_REPEATS_VERIFY").is_some() {
-            std::eprintln!(
-                "head_repeats_true_roots production={} duplicates={:?}",
-                logits.0,
-                extra.iter().map(|node| node.0).collect::<alloc::vec::Vec<_>>(),
-            );
-        }
-        extra
-    };
-    #[cfg(not(feature = "instrument"))]
-    let duplicate_head_roots: alloc::vec::Vec<NodeId> = alloc::vec::Vec::new();
+    let mut duplicate_head_roots = alloc::vec::Vec::new();
+    for _ in 1..head_repeats.clamp(1, 3) {
+        duplicate_head_roots.push(append_head(&mut program)?);
+    }
 
     Ok((
         program,

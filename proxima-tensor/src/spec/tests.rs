@@ -14910,6 +14910,7 @@ mod gemma4_synthetic_parity {
             qkv_biases: false,
             paired_gate_up_reduce: false,
             fused_qkv_reduce: false,
+            head_repeats: 1,
         };
 
         let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden, _head_repeats) =
@@ -17460,4 +17461,117 @@ fn greedy_argmax_over_a_blocked_vocabulary_keeps_the_lowest_tied_index() {
 
     assert_eq!(tokens[..2], [100.0, 1537.0], "ties and peaks are found across 4 blocks of 512");
     assert_eq!(finite, [2048.0, 2048.0, 2047.0], "only the poisoned row is short");
+}
+
+mod head_repeats {
+    use super::*;
+
+    const CACHELESS_PRE_CHANGE_NODES: usize = 221;
+    const CACHELESS_PRE_CHANGE_DIGEST: u64 = 0x9af27091336a2413;
+    const TWO_RANGE_PRE_CHANGE_NODES: usize = 268;
+    const TWO_RANGE_PRE_CHANGE_DIGEST: u64 = 0x0b9f2bd7af6a7a91;
+
+    fn digest(program: &[Op]) -> u64 {
+        alloc::format!("{program:?}")
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
+
+    fn descriptor(cache_strategy: CacheStrategy, head_repeats: u32) -> ModelDescriptor {
+        let attention = LayerAttentionConfig {
+            head_dim: 4,
+            kv_heads: 1,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            key_source_kind: KeySourceKind::ProjectedK,
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos",
+                sin_name: "rope_sin",
+            },
+            rope_pairing: RopePairing::Interleaved,
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
+            value_norm: false,
+        };
+        let layers = (0..2)
+            .map(|_| LayerSchedule {
+                kind: LayerKind::Attention,
+                attention,
+                ffn: LayerFfnConfig::exclusive(),
+            })
+            .collect();
+        ModelDescriptor {
+            vocab: 16,
+            embedding: 8,
+            feed_forward: 16,
+            expert_feed_forward: 0,
+            query_heads: 2,
+            block_count: 2,
+            expert_count: 0,
+            expert_used_count: 0,
+            leading_dense_block_count: 2,
+            l_cache: 0,
+            embedding_scale: Some(EmbeddingScale::Sqrt),
+            logit_softcap: Some(30.0),
+            layers,
+            cache_strategy,
+            ple_dim: None,
+            sliding_kv_ring: false,
+            qk_norm: false,
+            qkv_biases: false,
+            paired_gate_up_reduce: false,
+            fused_qkv_reduce: false,
+            head_repeats,
+        }
+    }
+
+    fn built(cache_strategy: CacheStrategy, head_repeats: u32) -> (Vec<Op>, Vec<NodeId>) {
+        let (program, _logits, _cache_roots, _moe_sites, _residuals, _hidden, duplicates) =
+            build_forward(&descriptor(cache_strategy, head_repeats), false)
+                .expect("the two-layer dense descriptor lowers");
+        (program, duplicates)
+    }
+
+    #[test]
+    fn cacheless_default_graph_equals_the_pre_change_graph() {
+        let (program, duplicates) = built(CacheStrategy::Cacheless, 1);
+
+        assert_eq!(program.len(), CACHELESS_PRE_CHANGE_NODES);
+        assert_eq!(digest(&program), CACHELESS_PRE_CHANGE_DIGEST);
+        assert!(duplicates.is_empty());
+    }
+
+    #[test]
+    fn two_range_default_graph_equals_the_pre_change_graph() {
+        let (program, duplicates) = built(CacheStrategy::TwoRange, 1);
+
+        assert_eq!(program.len(), TWO_RANGE_PRE_CHANGE_NODES);
+        assert_eq!(digest(&program), TWO_RANGE_PRE_CHANGE_DIGEST);
+        assert!(duplicates.is_empty());
+    }
+
+    #[test]
+    fn extra_repeats_append_duplicate_heads_after_the_unchanged_prefix() {
+        for strategy in [CacheStrategy::Cacheless, CacheStrategy::TwoRange] {
+            let (single, _) = built(strategy, 1);
+            let (triple, duplicates) = built(strategy, 3);
+
+            assert_eq!(duplicates.len(), 2);
+            assert_eq!(&triple[..single.len()], single.as_slice());
+            assert!(triple.len() > single.len());
+            assert!(duplicates[0] != duplicates[1]);
+        }
+    }
+
+    #[test]
+    fn repeat_counts_outside_one_to_three_clamp() {
+        let (_, zero) = built(CacheStrategy::Cacheless, 0);
+        let (clamped, nine) = built(CacheStrategy::Cacheless, 9);
+        let (triple, three) = built(CacheStrategy::Cacheless, 3);
+
+        assert!(zero.is_empty());
+        assert_eq!(nine, three);
+        assert_eq!(clamped, triple);
+    }
 }

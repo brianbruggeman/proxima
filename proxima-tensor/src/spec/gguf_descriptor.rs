@@ -153,6 +153,7 @@ pub fn gemma4_descriptor_from_gguf(
         qkv_biases: false,
         paired_gate_up_reduce: false,
         fused_qkv_reduce: false,
+        head_repeats: 1,
     })
 }
 
