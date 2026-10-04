@@ -47,7 +47,7 @@ wait_for_quiet() {
 }
 
 for round in 1 2 3; do
-  printf '\n=== ROUND %s ===\n' "${round}" | tee -a "${LOG_DIR}/bakeoff-summary.log"
+  printf '\n-- ROUND %s --\n' "${round}" | tee -a "${LOG_DIR}/bakeoff-summary.log"
   wait_for_quiet
   loadout | tee -a "${LOG_DIR}/bakeoff-summary.log"
 
@@ -68,7 +68,7 @@ for round in 1 2 3; do
   done
 done
 
-printf '\n=== PER-OP PROFILE (one run per arm) ===\n' | tee -a "${LOG_DIR}/bakeoff-summary.log"
+printf '\n-- PER-OP PROFILE (one run per arm) --\n' | tee -a "${LOG_DIR}/bakeoff-summary.log"
 for arm in "${ARM_ORDER[@]}"; do
   printf -- '-- arm=%s profile --\n' "${arm}" | tee -a "${LOG_DIR}/bakeoff-summary.log"
   PROXIMA_METAL_OP_PROFILE_STEP=3 "${ARM_BIN[${arm}]}" --exact --nocapture --ignored \
@@ -79,4 +79,4 @@ for arm in "${ARM_ORDER[@]}"; do
     | tee -a "${LOG_DIR}/bakeoff-summary.log"
 done
 
-printf '\n=== DONE ===\n' | tee -a "${LOG_DIR}/bakeoff-summary.log"
+printf '\n-- DONE --\n' | tee -a "${LOG_DIR}/bakeoff-summary.log"
