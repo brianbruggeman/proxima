@@ -870,6 +870,8 @@ fn capture_dispatch(
     bindings: &[Binding],
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     output: (&MetalBuffer, usize),
+    scratch: Option<(&MetalBuffer, usize)>,
+    chunk_index: usize,
     uniforms: &MetalBuffer,
 ) {
     let Some(wanted) = std::env::var("PROXIMA_CAPTURE_NODES").ok() else {
@@ -1025,7 +1027,8 @@ fn capture_dispatch(
                     fault_index = Some(index);
                     continue;
                 }
-                Binding::Scratch | Binding::ExpertPayloads(_) | Binding::ExpertDescriptors(_) => None,
+                Binding::Scratch => scratch.map(|(buffer, offset)| (buffer.clone(), offset)),
+                Binding::ExpertPayloads(_) | Binding::ExpertDescriptors(_) => None,
             };
             match resolved {
                 Some((buffer, offset)) => live_buffers.push((index, buffer, offset)),
@@ -1056,6 +1059,7 @@ fn capture_dispatch(
                 entry: entry.clone(),
                 msl_sha256: msl_sha256.clone(),
                 operands: live_operands,
+                chunk_index,
                 extents: bound.extents.clone(),
                 grid,
                 bindings: bindings.to_vec(),
@@ -1274,6 +1278,8 @@ pub struct CapturedDispatch {
     /// `(operand node, codec)` per bound operand; codec is `unpacked` or a
     /// `Codec` debug name such as `Q4_0`
     pub operands: Vec<(u32, String)>,
+    /// one-based command-buffer chunk in the captured decode step
+    pub chunk_index: usize,
     /// the op's iteration-space extents, e.g. `[1, 1, 512]`
     pub extents: Vec<u64>,
     pub grid: GridSpec,
@@ -1411,6 +1417,90 @@ impl CapturedDispatch {
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
         gpu_span_ns(&command_buffer)
+    }
+
+    /// GPU time of all captured dispatches in their original serial order in
+    /// one command buffer, for comparing the census replay with a live step.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first captured unreplayable reason, or a Metal error when
+    /// buffer allocation or command execution fails.
+    pub fn time_gpu_sequence_ns(dispatches: &[Self]) -> Result<f64, MetalError> {
+        if dispatches.is_empty() {
+            return Ok(0.0);
+        }
+        if let Some(reason) = dispatches
+            .iter()
+            .find_map(|dispatch| dispatch.unreplayable.as_ref())
+        {
+            return Err(MetalError::CompileFailed { log: reason.clone() });
+        }
+        let (device, queue) = device_and_queue()?;
+        let uniforms: Vec<MetalBuffer> = dispatches
+            .iter()
+            .map(|dispatch| shared_buffer_from(&device, &dispatch.uniform_bytes))
+            .collect::<Result<_, _>>()?;
+        let fault = shared_buffer_from(&device, &[0u8; FAULT_REPLAY_BYTES])?;
+        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+            log: "queue refused a sequence replay command buffer".to_string(),
+        })?;
+        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+            MetalError::CompileFailed {
+                log: "command buffer refused a sequence replay encoder".to_string(),
+            }
+        })?;
+        for (dispatch_record, uniforms_buffer) in dispatches.iter().zip(&uniforms) {
+            encoder.setComputePipelineState(&dispatch_record.pipeline);
+            for (index, buffer, offset) in &dispatch_record.buffers {
+                // SAFETY: each captured buffer and offset is the pair `encode_op` bound.
+                unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), *offset, *index) };
+            }
+            if let Some(index) = dispatch_record.uniforms_index {
+                unsafe { encoder.setBuffer_offset_atIndex(Some(uniforms_buffer), 0, index) };
+            }
+            if let Some(index) = dispatch_record.fault_index {
+                unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
+            }
+            dispatch(&encoder, &dispatch_record.pipeline, dispatch_record.grid);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        gpu_span_ns(&command_buffer)
+    }
+
+    /// GPU spans for the captured chunks in order, with one command buffer
+    /// per original chunk boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a captured unreplayable reason or a Metal allocation or
+    /// command-execution error.
+    pub fn time_gpu_chunk_sequences_ns(dispatches: &[Self]) -> Result<Vec<f64>, MetalError> {
+        let mut spans = Vec::new();
+        let mut chunk_start = 0usize;
+        while chunk_start < dispatches.len() {
+            let chunk_index = dispatches[chunk_start].chunk_index;
+            let mut chunk_end = chunk_start + 1;
+            while chunk_end < dispatches.len()
+                && dispatches[chunk_end].chunk_index == chunk_index
+            {
+                chunk_end += 1;
+            }
+            if chunk_end < dispatches.len()
+                && dispatches[chunk_end].chunk_index < chunk_index
+            {
+                return Err(MetalError::CompileFailed {
+                    log: "captured chunk indices are not ordered".to_string(),
+                });
+            }
+            spans.push(Self::time_gpu_sequence_ns(
+                &dispatches[chunk_start..chunk_end],
+            )?);
+            chunk_start = chunk_end;
+        }
+        Ok(spans)
     }
 }
 
@@ -1558,6 +1648,8 @@ pub(super) fn encode_op(
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
     resolved: Option<&ResolvedStep>,
+    #[cfg(feature = "instrument")]
+    capture_chunk_index: usize,
     // Redesign §4c: `Some` when `crate::metal::attention_scratch_buffer`
     // already resolved a PLAN-OWNED scratch buffer for this position
     // (`execute_plan_with_placements`, the one call site with a `Plan` to
@@ -2061,6 +2153,8 @@ pub(super) fn encode_op(
         bindings,
         device_buffers,
         (&output, output_offset),
+        scratch,
+        capture_chunk_index,
         &uniforms,
     );
     dispatch(encoder, &pipeline, grid);
@@ -2119,6 +2213,19 @@ pub(super) fn encode_op(
             None,
             None,
         )?;
+        #[cfg(feature = "instrument")]
+        capture_dispatch(
+            bound,
+            packed_operands,
+            &merge.pipeline,
+            merge.grid,
+            &merge.bindings,
+            device_buffers,
+            (&output, output_offset),
+            scratch,
+            capture_chunk_index,
+            &merge_uniforms,
+        );
         dispatch(encoder, &merge.pipeline, merge.grid);
     }
     #[cfg(feature = "instrument")]

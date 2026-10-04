@@ -354,6 +354,8 @@ pub(super) fn execute_plan_inner(
             plan.math_mode,
             plan.numeric_policy,
             None,
+            #[cfg(feature = "instrument")]
+            1,
             None,
             None,
             expert_buffers,
@@ -1662,4 +1664,3 @@ pub(super) fn register_skipped_output(
     device_buffers.insert(bound.node, (buffer, offset));
     Ok(())
 }
-

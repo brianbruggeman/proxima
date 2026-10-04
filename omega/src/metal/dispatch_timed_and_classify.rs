@@ -105,6 +105,8 @@ pub(super) fn execute_op_timed(
         math_mode,
         numeric_policy,
         None,
+        #[cfg(feature = "instrument")]
+        1,
         None,
         None,
         expert_buffers,
@@ -1122,6 +1124,8 @@ pub fn execute_plan_with_placements_dispatch_timed(
             plan.math_mode,
             plan.numeric_policy,
             None,
+            #[cfg(feature = "instrument")]
+            1,
             None,
             None,
             None,
@@ -2256,4 +2260,3 @@ pub(super) fn diagnose_kind(bound: &BoundOp, packed_operands: &PackedOperands) -
         }
     })
 }
-

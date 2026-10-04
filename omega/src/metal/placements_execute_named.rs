@@ -855,6 +855,8 @@ pub(super) fn execute_plan_with_placements_inner(
     // needs (this function's own doc, "Within-call aliasing"). Silent unless
     // a caller raises `RUST_LOG` to `trace` for this target.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+    #[cfg(feature = "instrument")]
+    let mut capture_chunk_index = 1usize;
     for (position, bound) in prepared.resolved.iter().enumerate() {
         if next_boundary < chunk_boundaries.len() && chunk_boundaries[next_boundary] == position {
             let new_command_buffer =
@@ -940,6 +942,10 @@ pub(super) fn execute_plan_with_placements_inner(
                 post_first_commit_encode_started = Some(std::time::Instant::now());
             }
             next_boundary += 1;
+            #[cfg(feature = "instrument")]
+            {
+                capture_chunk_index += 1;
+            }
         }
         // attribution2 followon: the trace-gate loop below unconditionally
         // walks `bound.operands()` and does an `input_placed`/`output_placed`
@@ -1431,6 +1437,8 @@ pub(super) fn execute_plan_with_placements_inner(
                 plan.math_mode,
                 plan.numeric_policy,
                 resolved_step,
+                #[cfg(feature = "instrument")]
+                capture_chunk_index,
                 attention_scratch,
                 hazard,
                 bound_expert_buffers,
@@ -2033,6 +2041,8 @@ pub fn execute_plan_timed(
             plan.math_mode,
             plan.numeric_policy,
             None,
+            #[cfg(feature = "instrument")]
+            1,
             None,
             None,
             None,
