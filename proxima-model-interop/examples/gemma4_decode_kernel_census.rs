@@ -1333,9 +1333,7 @@ mod real_program_names {
         for label in [
             "RMSNorm sumsq",
             "RMSNorm sumsq + fused epilogue",
-            "attention dot",
-            "attention AV",
-            "Candidate B (cached_softmax_weights)",
+            "cached attention partial",
             "norm apply",
             "RoPE",
             "matvec f32",
