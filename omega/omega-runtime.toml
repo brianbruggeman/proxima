@@ -301,6 +301,40 @@ max = 32
 # OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT_DECODE.
 keys_per_split_decode = 32
 
+[attention_decode]
+# the decode split kernel's (`msl::CachedAttentionForm::TwoRangeDecodeSplit`)
+# lane layout. A simdgroup walks `keys_in_flight` keys at once, each spread
+# over `32 / keys_in_flight` lanes along the head dim, so a lane owns
+# `head_dim / 8 / lanes` float4 of every K plane row and `head_dim / 4 / lanes`
+# float4 of every V row. llama.cpp's `kernel_flash_attn_ext_vec` `NE`
+# (ggml-metal.metal `NE = 4` baseline); 1 spans the whole simdgroup over one
+# key, which makes the online-softmax state uniform across lanes (no per-block
+# `simd_max`/`simd_sum`, no staged scores) and every K/V load a contiguous
+# 512 B line. must be 1, 2 or 4. override via
+# OMEGA_ATTENTION_DECODE_KEYS_IN_FLIGHT.
+keys_in_flight = 1
+# keys per lane group whose K and V loads are issued together before any of
+# them is consumed. raising it lengthens the independent load run a lane has
+# in flight (fewer memory round trips per simdgroup) and costs
+# `batch * (head_dim / 8 / lanes * 2 + head_dim / 4 / lanes)` float4 registers;
+# past the register file it spills or lowers occupancy. override via
+# OMEGA_ATTENTION_DECODE_KEYS_PER_BATCH. 1 is the default because a probe sweep at
+# the gemma4-E2B global shape measured 38.9 us per dispatch at (8 keys per
+# simdgroup, batch 1) against 52.2 us at (16, 2); see occ RESULTS.md.
+keys_per_batch = 1
+# target live keys one simdgroup walks: simdgroups per threadgroup =
+# clamp(ceil(keys_per_split / this), 1, simdgroups_max). lowering it spreads a
+# split over more simdgroups, which shortens each one's serial memory chain at
+# the cost of a wider threadgroup-memory merge. override via
+# OMEGA_ATTENTION_DECODE_KEYS_PER_SIMDGROUP.
+keys_per_simdgroup = 8
+# ceiling on simdgroups per decode threadgroup. the threadgroup-memory merge
+# holds `simdgroups_max * (head_dim * 4 + 8)` bytes, so
+# `msl::decode_simdgroup_cap` also clamps it against
+# `[cached_attention].threadgroup_memory_bytes`. must be a power of two <= 32.
+# override via OMEGA_ATTENTION_DECODE_SIMDGROUPS_MAX.
+simdgroups_max = 4
+
 [attention_rows]
 # row-tiled cached attention (`msl::CachedAttentionForm::TwoRangeRowTiled`, K > 1 query rows):
 # keys per staged block, llama.cpp's OP_FLASH_ATTN_EXT_NCPSG = 64 (ggml-metal-impl.h:114).

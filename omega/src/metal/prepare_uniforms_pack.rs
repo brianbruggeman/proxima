@@ -1291,8 +1291,8 @@ pub(super) mod pack_uniforms_byte_len_tests {
         assert_eq!(packed.len(), pack_uniforms_byte_len(&bound, policy));
         assert_eq!(
             words,
-            vec![8, 1, 17],
-            "eight heads, one simdgroup per threadgroup at 513 keys, 17 splits"
+            vec![8, 4, 17],
+            "eight heads, four simdgroups per threadgroup at 513 keys, 17 splits"
         );
     }
 

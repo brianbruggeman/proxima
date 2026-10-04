@@ -129,6 +129,18 @@ fn require_power_of_two_le_32(name: &str, value: usize) -> usize {
     value
 }
 
+/// `[attention_decode].keys_in_flight` is llama.cpp's `NE`: the keys one
+/// simdgroup walks at once, so `32 / NE` lanes span a key's head dim. Only
+/// the widths the kernel's fixed shuffle ladder covers (8, 16 or 32 lanes
+/// per key) are legal.
+fn require_decode_keys_in_flight(name: &str, value: usize) -> usize {
+    assert!(
+        matches!(value, 1 | 2 | 4),
+        "{name} must be 1, 2 or 4 (32 / lanes-per-key); got {value}"
+    );
+    value
+}
+
 /// [`crate::sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH`] must stay a whole
 /// number of simdgroups: `msl::push_cooperative_reduce_tail`'s two-level
 /// fold divides the chosen width by `SIMD_WIDTH` to size its `threadgroup`
@@ -450,6 +462,41 @@ fn emit_sizing_consts() {
     );
     out.push_str(&format!(
         "pub const ATTENTION_SPLIT_MAX: u64 = {attention_splits_max};\n"
+    ));
+
+    let attention_decode_keys_in_flight = require_decode_keys_in_flight(
+        "attention_decode.keys_in_flight",
+        require_nonzero(
+            "attention_decode.keys_in_flight",
+            resolve_int(&root, "attention_decode", "keys_in_flight"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_DECODE_KEYS_IN_FLIGHT: u64 = {attention_decode_keys_in_flight};\n"
+    ));
+    let attention_decode_keys_per_batch = require_nonzero(
+        "attention_decode.keys_per_batch",
+        resolve_int(&root, "attention_decode", "keys_per_batch"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_DECODE_KEYS_PER_BATCH: u64 = {attention_decode_keys_per_batch};\n"
+    ));
+    let attention_decode_keys_per_simdgroup = require_nonzero(
+        "attention_decode.keys_per_simdgroup",
+        resolve_int(&root, "attention_decode", "keys_per_simdgroup"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_DECODE_KEYS_PER_SIMDGROUP: u64 = {attention_decode_keys_per_simdgroup};\n"
+    ));
+    let attention_decode_simdgroups_max = require_power_of_two_le_32(
+        "attention_decode.simdgroups_max",
+        require_nonzero(
+            "attention_decode.simdgroups_max",
+            resolve_int(&root, "attention_decode", "simdgroups_max"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_DECODE_SIMDGROUPS_MAX: u64 = {attention_decode_simdgroups_max};\n"
     ));
 
     let attention_rows_keys_per_block = require_multiple_of_thirty_two(

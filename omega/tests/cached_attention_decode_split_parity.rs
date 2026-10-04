@@ -6,8 +6,8 @@
 //! is `proxima-model-interop/tests/gemma4_attn_split_decode_oracle.rs`.
 //!
 //! The program is the qwen3 two-range cached decode builder at a gemma-like
-//! GQA shape (8 query heads on one kv head, head_dim 64), swept over cached
-//! lengths that land on every regime: a single split (direct output), two
+//! GQA shape (8 query heads on one kv head) at head_dim 64 and at the two gemma4-E2B
+//! heads (256 sliding, 512 global), swept over cached lengths that land on every regime: a single split (direct output), two
 //! splits, a handful, and the full 32. Each cell asserts the bound op really
 //! takes the split form (entry name `_ds`) before comparing, so a pass cannot
 //! be two copies of the one-dispatch kernel agreeing with each other.
@@ -32,7 +32,9 @@ const EMBEDDING: u32 = 512;
 const FEED_FORWARD: u32 = 128;
 const QUERY_HEADS: u32 = 8;
 const KV_HEADS: u32 = 1;
-const HEAD_DIM: u32 = 64;
+/// The narrow fixture head (a lane owns one float4 of an eight-float4 plane) and the
+/// two gemma4-E2B heads: sliding 256 and global 512.
+const HEAD_DIMS: [u32; 3] = [64, 256, 512];
 const LAYERS: u32 = 2;
 
 /// Cached lengths: capacity 32 (one split, direct output), 34 (two), 200
@@ -51,14 +53,14 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     (0..count).map(|_| lcg.next_unit()).collect()
 }
 
-fn gqa_decode_fixture(cached_len: u64) -> Fixture {
+fn gqa_decode_fixture(cached_len: u64, head_dim: u32) -> Fixture {
     let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
         QUERY_HEADS,
         KV_HEADS,
-        HEAD_DIM,
+        head_dim,
         LAYERS,
     )
     .expect("the gemma-like gqa decode program builds");
@@ -96,9 +98,9 @@ fn gqa_decode_fixture(cached_len: u64) -> Fixture {
     }
 }
 
-fn parity_cell(cached_len: u64) -> f32 {
+fn parity_cell(cached_len: u64, head_dim: u32) -> f32 {
     let policy = production_numeric_policy();
-    let fixture = gqa_decode_fixture(cached_len);
+    let fixture = gqa_decode_fixture(cached_len, head_dim);
     let output_roots = [fixture.roots[0]];
     let named = as_named_blocks(&fixture.named);
 
@@ -111,14 +113,14 @@ fn parity_cell(cached_len: u64) -> f32 {
         .collect();
     assert!(
         !attention.is_empty(),
-        "cached_len {cached_len}: zero CachedAttention ops would compare nothing"
+        "head_dim {head_dim} cached_len {cached_len}: zero CachedAttention ops would compare nothing"
     );
     for bound in &attention {
         let kernel = omega::emit(bound, &omega::PackedOperands::new(), policy)
             .expect("the bound attention op emits");
         assert!(
             kernel.entry.ends_with("_ds"),
-            "cached_len {cached_len}: the op must take the decode split form, got {}",
+            "head_dim {head_dim} cached_len {cached_len}: the op must take the decode split form, got {}",
             kernel.entry
         );
     }
@@ -146,10 +148,10 @@ fn parity_cell(cached_len: u64) -> f32 {
 
     let expected = cpu.root();
     let actual = metal.root();
-    assert_eq!(actual.len(), expected.len(), "cached_len {cached_len}");
+    assert_eq!(actual.len(), expected.len(), "head_dim {head_dim} cached_len {cached_len}");
     assert!(
         !expected.is_empty(),
-        "cached_len {cached_len}: an empty root compares nothing"
+        "head_dim {head_dim} cached_len {cached_len}: an empty root compares nothing"
     );
     let max_magnitude = expected
         .iter()
@@ -162,7 +164,7 @@ fn parity_cell(cached_len: u64) -> f32 {
         .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
     eprintln!(
-        "decode_split parity: cached_len={cached_len} attention_ops={} max_diff={max_diff} relative={relative}",
+        "decode_split parity: head_dim={head_dim} cached_len={cached_len} attention_ops={} max_diff={max_diff} relative={relative}",
         attention.len()
     );
     relative
@@ -170,11 +172,16 @@ fn parity_cell(cached_len: u64) -> f32 {
 
 #[test]
 fn the_decode_split_kernels_hold_parity_with_the_cpu_evaluator_across_split_counts() {
-    for cached_len in CACHED_LENGTHS {
-        let relative = parity_cell(cached_len);
-        assert!(
-            relative < 1e-4,
-            "cached_len {cached_len}: metal disagrees with cpu on the decode split root: relative={relative}"
-        );
+    let mut cells = 0_usize;
+    for head_dim in HEAD_DIMS {
+        for cached_len in CACHED_LENGTHS {
+            let relative = parity_cell(cached_len, head_dim);
+            assert!(
+                relative < 1e-4,
+                "head_dim {head_dim} cached_len {cached_len}: metal disagrees with cpu on the decode split root: relative={relative}"
+            );
+            cells += 1;
+        }
     }
+    assert_eq!(cells, 12, "3 head dims x 4 cached lengths");
 }

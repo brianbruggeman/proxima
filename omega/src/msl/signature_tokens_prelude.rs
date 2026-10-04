@@ -329,19 +329,14 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
             let row_tiled_name = row_tiled_entry_name(&resolved.kind, form, &upper_token);
             #[cfg(not(feature = "metal-attn-split-rows"))]
             let row_tiled_name: Option<String> = None;
+            #[cfg(feature = "metal-attn-split-decode")]
+            let decode_split_name = decode_split_entry_name(&resolved.kind, form, &upper_token);
+            #[cfg(not(feature = "metal-attn-split-decode"))]
+            let decode_split_name: Option<String> = None;
             if let Some(name) = row_tiled_name {
                 name
-            } else if form.is_some_and(CachedAttentionForm::is_split) {
-                // the decode split kernel reads `cached_key_rows`, `splits` and
-                // `chunks` at runtime and sizes its threadgroup arrays from the
-                // shape-bounded cap, so no bucket extent belongs in the name.
-                format!(
-                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_ds",
-                    scale.to_bits(),
-                    signed_name_part(*cached_lower_inclusive),
-                    effective_context_chunk_cap(1, *head_dim),
-                    crate::sized::ATTENTION_BLOCK_WIDTH,
-                )
+            } else if let Some(name) = decode_split_name {
+                name
             } else if single_range_dynamic {
                 // `_b{width}` names the build-time block-staging width
                 // (`block_width_for`) -- a build-time constant, so a build
@@ -1621,19 +1616,6 @@ impl CachedAttentionForm {
         }
     }
 
-    /// Whether the form slices the key range across threadgroups, so its
-    /// partial writes the interleaved scratch layout.
-    #[must_use]
-    pub(crate) const fn is_split(self) -> bool {
-        match self {
-            Self::Static | Self::SingleRangeDynamic { .. } | Self::TwoRangeCachedBound => false,
-            #[cfg(feature = "metal-attn-split-decode")]
-            Self::TwoRangeDecodeSplit { .. } => true,
-            #[cfg(feature = "metal-attn-split-rows")]
-            Self::TwoRangeRowTiled { .. } => true,
-        }
-    }
-
     /// Whether every position of this form in one plan shares a single
     /// scratch buffer. Only attention ops of different layers do, and each
     /// layer's partial reads the previous layer's output, so no two are in
@@ -1661,6 +1643,43 @@ pub(crate) fn softmax_weights_rows_token(query_rows: u64) -> String {
     } else {
         format!("_q{query_rows}")
     }
+}
+
+/// The decode split form's kernel name: it reads `cached_key_rows`, `splits`
+/// and `chunks` at runtime and sizes its threadgroup arrays from the
+/// shape-bounded simdgroup cap, so no bucket extent belongs in the name. `_e`
+/// and `_k` name the build-time lane layout and load batch
+/// (`[attention_decode]`), which change the rendered text. `None` for every
+/// other form.
+#[cfg(feature = "metal-attn-split-decode")]
+fn decode_split_entry_name(
+    kind: &BoundOpKind,
+    form: Option<CachedAttentionForm>,
+    upper_token: &str,
+) -> Option<String> {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        scale,
+        cached_lower_inclusive,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    let Some(CachedAttentionForm::TwoRangeDecodeSplit { .. }) = form else {
+        return None;
+    };
+    Some(format!(
+        "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_e{}_k{}_ds",
+        scale.to_bits(),
+        signed_name_part(*cached_lower_inclusive),
+        decode_simdgroup_cap(*head_dim),
+        crate::sized::ATTENTION_DECODE_KEYS_IN_FLIGHT,
+        crate::sized::ATTENTION_DECODE_KEYS_PER_BATCH,
+    ))
 }
 
 /// The row-tiled form's kernel name, which carries its sizing but neither the
@@ -1794,22 +1813,45 @@ pub(crate) fn decode_splits_for(context_capacity: u64) -> u64 {
         .clamp(1, crate::sized::ATTENTION_SPLIT_MAX)
 }
 
-/// Simdgroups per decode-split threadgroup: llama.cpp's `nsg` doubling rule
-/// (`ggml-metal-ops.cpp:3602-3606`, `nwg` mapped to `[attention_splits].max`,
-/// `C` to `[attention_block].width`), capped by the threadgroup-memory budget
-/// of one query head -- `effective_context_chunk_cap(1, head_dim)` over
-/// `[attention_context_chunks].cap`.
+/// Simdgroups per decode-split threadgroup: the live keys one threadgroup's
+/// split holds at the bucket capacity (`ceil(capacity / splits)`) over
+/// `[attention_decode].keys_per_simdgroup`, capped by
+/// [`decode_simdgroup_cap`]. Each simdgroup strides the split's keys, so more
+/// of them shorten every simdgroup's serial K-then-V memory chain; llama.cpp's
+/// `nsg` doubling rule (`ggml-metal-ops.cpp:3602-3606`) only widens past
+/// `2 * nwg * nsg * C` keys, which at a ~1k context leaves one simdgroup
+/// walking 33 keys alone.
 #[cfg(feature = "metal-attn-split-decode")]
 #[must_use]
 pub(crate) fn decode_chunks_for(context_capacity: u64, head_dim: u64) -> u64 {
-    let keys_per_pass = 2 * crate::sized::ATTENTION_SPLIT_MAX * crate::sized::ATTENTION_BLOCK_WIDTH;
-    let cap = effective_context_chunk_cap(1, head_dim);
-    let mut chunks = 1;
-    while keys_per_pass * chunks < context_capacity && chunks < cap {
-        chunks = (chunks * 2).min(cap);
-    }
-    chunks
+    let splits = decode_splits_for(context_capacity);
+    context_capacity
+        .div_ceil(splits)
+        .div_ceil(crate::sized::ATTENTION_DECODE_KEYS_PER_SIMDGROUP)
+        .clamp(1, decode_simdgroup_cap(head_dim))
 }
+
+/// The most simdgroups one decode-split threadgroup may carry for `head_dim`:
+/// `[attention_decode].simdgroups_max`, clamped so the kernel's merge arrays
+/// (`shared_o`: `head_dim` floats per simdgroup, plus its max and sum) stay
+/// inside `[cached_attention].threadgroup_memory_bytes`. The kernel's
+/// `cap`, the entry name and [`decode_chunks_for`] all read this one value.
+#[cfg(feature = "metal-attn-split-decode")]
+#[must_use]
+pub(crate) fn decode_simdgroup_cap(head_dim: u64) -> u64 {
+    let bytes_per_simdgroup = 4 * (head_dim + 2);
+    let budget_cap = crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES / bytes_per_simdgroup;
+    crate::sized::ATTENTION_DECODE_SIMDGROUPS_MAX.min(budget_cap.max(1))
+}
+
+/// Lanes that span one key's head dim in the decode split kernel:
+/// `SIMD_WIDTH / [attention_decode].keys_in_flight`.
+#[cfg(feature = "metal-attn-split-decode")]
+#[must_use]
+pub(crate) fn decode_lanes_per_key() -> u64 {
+    SIMD_WIDTH / crate::sized::ATTENTION_DECODE_KEYS_IN_FLIGHT
+}
+
 
 /// Whether the decode split serves `query_rows` new rows: the single decode
 /// row always, and with `metal-attn-split-rows` also the rows below
