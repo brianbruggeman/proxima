@@ -152,7 +152,7 @@ pub async fn multiworker_listener_exchange() -> io::Result<()> {
     Ok(())
 }
 
-pub async fn incumbent_exchange(corrupt: bool) -> io::Result<()> {
+pub fn incumbent_exchange(corrupt: bool) -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut sender = TcpStream::connect(listener.local_addr()?)?;
     let (mut receiver, _) = listener.accept()?;

@@ -463,7 +463,7 @@ amq-protocol = { workspace = true }
 # parser-shape advantage. Earlier comment ("0.13 fails to build")
 # was resolved upstream by 0.14; 0.17 builds cleanly.
 kafka-protocol = { workspace = true }
-temp-env = { workspace = true }
+temp-env = { version = "0.3.6", features = ["async_closure"] }
 trybuild = { workspace = true }
 tempfile.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

@@ -3,8 +3,8 @@
 #[path = "../examples/support/windows_port.rs"]
 mod support;
 
-#[test]
-fn windows_port_default_runtime_tcp_payload() {
+#[proxima::test]
+async fn windows_port_default_runtime_tcp_payload() {
     support::incumbent_exchange(false).expect("standard library payload oracle");
     assert!(
         support::incumbent_exchange(true).is_err(),
@@ -12,10 +12,12 @@ fn windows_port_default_runtime_tcp_payload() {
     );
     support::tcp_exchange().expect("default runtime exchanges exact TCP payload");
     #[cfg(feature = "http1-native")]
-    temp_env::with_vars([("PROXIMA_HTTP_HANDLER_SPREAD", Some("0"))], || {
+    temp_env::async_with_vars([("PROXIMA_HTTP_HANDLER_SPREAD", Some("0"))], async {
         support::multiworker_listener_exchange()
+            .await
             .expect("configured HTTP listener uses two-worker runtime");
-    });
+    })
+    .await;
 }
 
 #[test]
