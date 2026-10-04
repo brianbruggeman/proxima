@@ -1376,7 +1376,109 @@ fn shared_buffer_from(
 }
 
 #[cfg(feature = "instrument")]
+const REPLAY_POISON_BYTE: u8 = 0x55;
+
+#[cfg(feature = "instrument")]
 impl CapturedDispatch {
+    /// The same captured buffers and uniform bytes bound to a pipeline
+    /// compiled from `source`'s `entry` under the math mode `numeric_policy`
+    /// maps to, launched over `threads` threads of `threadgroup_width`, so a
+    /// kernel body variant is timed on the exact data the production kernel
+    /// ran on. `source` must keep the captured kernel's buffer and uniform
+    /// layout.
+    ///
+    /// # Errors
+    ///
+    /// [`MetalError::CompileFailed`] when the device or the MSL compiler
+    /// refuses `source`.
+    pub fn with_kernel_variant(
+        &self,
+        source: &str,
+        entry: &str,
+        threads: u64,
+        threadgroup_width: Option<u64>,
+        numeric_policy: NumericPolicy,
+    ) -> Result<Self, MetalError> {
+        let (device, _queue) = device_and_queue()?;
+        let grid = GridSpec {
+            threads,
+            threadgroup_width,
+            ..self.grid
+        };
+        let kernel = Kernel {
+            source: source.to_string(),
+            entry: entry.to_string(),
+            bindings: self.bindings.clone(),
+            grid,
+        };
+        let pipeline = compile_pipeline(
+            &device,
+            &kernel,
+            numeric_policy_as_metal_math_mode(numeric_policy),
+        )?;
+        Ok(Self {
+            step: self.step,
+            node: self.node,
+            kind_name: self.kind_name,
+            entry: entry.to_string(),
+            msl_sha256: String::new(),
+            operands: self.operands.clone(),
+            chunk_index: self.chunk_index,
+            extents: self.extents.clone(),
+            grid,
+            bindings: self.bindings.clone(),
+            unreplayable: self.unreplayable.clone(),
+            uniform_bytes: self.uniform_bytes.clone(),
+            pipeline,
+            buffers: self.buffers.clone(),
+            uniforms_index: self.uniforms_index,
+            fault_index: self.fault_index,
+        })
+    }
+
+    /// Poisons the output region (the op's iteration-space element count in
+    /// f32 bytes, an upper bound on its output), runs this dispatch once, and
+    /// returns that region's bytes, so two kernels bound to the same buffers
+    /// compare element for element on the data the production kernel ran on,
+    /// and a kernel that fails to write an element cannot match one that did.
+    ///
+    /// # Errors
+    ///
+    /// [`MetalError::CompileFailed`] when this dispatch is unreplayable, has
+    /// no output binding, or fails to run.
+    pub fn replay_output(&self) -> Result<Vec<u8>, MetalError> {
+        let output_index = self
+            .bindings
+            .iter()
+            .position(|binding| matches!(binding, Binding::Output(_)))
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "captured dispatch has no output binding".to_string(),
+            })?;
+        let (_, buffer, offset) = self
+            .buffers
+            .iter()
+            .find(|(index, _, _)| *index == output_index)
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "captured dispatch output buffer was not recoverable".to_string(),
+            })?;
+        let available = buffer.length().saturating_sub(*offset);
+        let span = self
+            .extents
+            .iter()
+            .product::<u64>()
+            .saturating_mul(core::mem::size_of::<f32>() as u64)
+            .try_into()
+            .map_or(available, |bytes: usize| bytes.min(available));
+        let region_start = buffer.contents().as_ptr().cast::<u8>();
+        // SAFETY: shared-storage buffer of `length()` bytes, idle between
+        // the synchronous replays; `offset + span <= length()` by `available`.
+        unsafe { core::ptr::write_bytes(region_start.add(*offset), REPLAY_POISON_BYTE, span) };
+        self.time_gpu_ns(1)?;
+        // SAFETY: same buffer and span, read after the replay completed.
+        let region = unsafe { core::slice::from_raw_parts(region_start.add(*offset), span) };
+        Ok(region.to_vec())
+    }
+
     /// GPU time in nanoseconds (`GPUEndTime - GPUStartTime`) of ONE command
     /// buffer holding `batch` back-to-back copies of this dispatch in one
     /// serial encoder over the captured buffers. `batch == 1` is the
