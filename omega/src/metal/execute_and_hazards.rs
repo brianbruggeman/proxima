@@ -1063,13 +1063,25 @@ pub fn allocate_placed_buffer(byte_len: usize) -> Result<PlacedBuffer, MetalErro
 /// call wrote first, since `cached_len` only grows.
 #[cfg(feature = "metal-output-placement")]
 pub fn zero_placed_buffer(buffer: &PlacedBuffer, byte_len: usize) {
+    zero_placed_buffer_range(buffer, 0, byte_len);
+}
+
+/// [`zero_placed_buffer`] for `byte_len` bytes starting at `byte_offset`: a
+/// caller that overwrites the head of a buffer with real rows right after
+/// allocating it zeroes only the tail it will not write. Same in-flight and
+/// bounds contract as [`write_placed_buffer_f32`]: `byte_offset + byte_len`
+/// stays inside the allocation.
+#[cfg(feature = "metal-output-placement")]
+pub fn zero_placed_buffer_range(buffer: &PlacedBuffer, byte_offset: usize, byte_len: usize) {
     let pointer = buffer.contents();
     // SAFETY: `buffer` is `storageModeShared` (`allocate_placed_buffer`'s
-    // own contract) and `byte_len` is the caller's own allocated length
-    // for it (mirrors `read_placed_buffer_f32`'s own SAFETY comment), so
-    // this is a valid, CPU-visible, mutable byte slice for the duration of
-    // this call.
-    let slots = unsafe { core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>(), byte_len) };
+    // own contract) and `byte_offset + byte_len` lies inside the caller's
+    // own allocation for it (mirrors `read_placed_buffer_f32`'s own SAFETY
+    // comment), so this is a valid, CPU-visible, mutable byte slice for the
+    // duration of this call.
+    let slots = unsafe {
+        core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>().add(byte_offset), byte_len)
+    };
     slots.fill(0);
 }
 
