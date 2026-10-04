@@ -445,6 +445,7 @@ pub fn execute_plan_with_placements(
         output_placements,
         recycle,
         &BTreeMap::new(),
+        || {},
     )
 }
 
@@ -456,6 +457,7 @@ pub(super) fn execute_plan_with_placements_inner(
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
     recycle: &mut Vec<Vec<f32>>,
     expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
+    while_gpu_runs: impl FnOnce(),
 ) -> Result<Evaluated, MetalError> {
     // ROW GAP.md A3: the sole host span between this function's own entry
     // and `step_encode_start` (:762 below) -- everything the caller's
@@ -1614,6 +1616,7 @@ pub(super) fn execute_plan_with_placements_inner(
         encode_end_ms: last_chunk_encode_end_ms,
         commit_ms: commit_call_ms,
     });
+    while_gpu_runs();
     #[cfg(feature = "instrument")]
     let wait_started = std::time::Instant::now();
     command_buffer.waitUntilCompleted();
@@ -1886,6 +1889,41 @@ pub fn execute_plan_named_with_placements(
     )
 }
 
+/// [`execute_plan_named_with_placements`] that also runs `while_gpu_runs` once
+/// the plan's last command buffer is committed and before this call waits on
+/// it -- the host's idle span, since the GPU is executing and nothing the host
+/// does next depends on it. A decode loop uses it to release what the step no
+/// longer needs (a prefill plan's arena, hundreds of MB whose `MTLBuffer`
+/// release costs milliseconds) instead of paying that before the next token.
+///
+/// `while_gpu_runs` must not touch `plan`'s buffers or any placed buffer. It
+/// runs exactly once when the call reaches its final commit, and not at all
+/// when the call fails earlier; either way it is dropped by the time this
+/// returns. Compose with [`execute_plan_named_with_placements`], which is the
+/// same call with nothing to run.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+#[cfg(feature = "metal-output-placement")]
+pub fn execute_plan_named_with_placements_overlapping(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    while_gpu_runs: impl FnOnce(),
+) -> Result<Evaluated, MetalError> {
+    let blocks = resolve_named_blocks_with_placed_inputs(plan, named, input_placements)?;
+    execute_plan_with_placements_inner(
+        plan,
+        &blocks,
+        input_placements,
+        output_placements,
+        &mut Vec::new(),
+        &BTreeMap::new(),
+        while_gpu_runs,
+    )
+}
+
 /// Executes a named plan with both caller-owned buffers and per-step expert
 /// substitutions. Routed recurrent models need both capabilities in the same
 /// command buffer: placement keeps recurrent state on the device while the
@@ -1921,6 +1959,7 @@ pub fn execute_plan_named_with_placements_and_expert_sources(
         output_placements,
         &mut Vec::new(),
         &expert_buffers,
+        || {},
     )
 }
 
