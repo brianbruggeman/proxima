@@ -121,6 +121,14 @@ pub struct ModelDescriptor {
     /// [`CacheStrategy::SingleRange`]'s arm -- same inertness and
     /// model-global-not-per-layer reasoning as [`Self::qk_norm`].
     pub fused_qkv_reduce: bool,
+    /// LM-head repeat count for the head-cost measurement harness, consulted
+    /// by [`CacheStrategy::Cacheless`] and [`CacheStrategy::TwoRange`]: `1`
+    /// builds only the production head, `2` and `3` append that many minus one
+    /// byte-identical duplicate head chains and return their roots as
+    /// `duplicate_head_roots`. Values outside `1..=3` clamp. Inert under
+    /// [`CacheStrategy::SingleRange`], same "unused when the arm never reads it"
+    /// precedent as [`Self::qk_norm`].
+    pub head_repeats: u32,
 }
 
 /// The values a family's GGUF header and HF `config.json` do not carry, as
@@ -303,6 +311,7 @@ pub fn mistral_descriptor_from_shape(
         qkv_biases,
         paired_gate_up_reduce,
         fused_qkv_reduce,
+        head_repeats: 1,
     }
 }
 
@@ -382,7 +391,7 @@ pub fn build_forward(
     match descriptor.cache_strategy {
         CacheStrategy::TwoRange => {
             let (program, logits, cache_roots, moe_sites, duplicate_head_roots) =
-                lfm2_two_range_cached_forward_program_with_experts(
+                lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
                     descriptor.vocab,
                     descriptor.embedding,
                     descriptor.feed_forward,
@@ -398,6 +407,7 @@ pub fn build_forward(
                     last_row_only,
                     descriptor.ple_dim,
                     descriptor.sliding_kv_ring,
+                    descriptor.head_repeats,
                 )?;
             Ok((
                 program,
@@ -410,7 +420,7 @@ pub fn build_forward(
             ))
         }
         CacheStrategy::Cacheless => {
-            let (program, logits, moe_sites, duplicate_head_roots) = lfm2_forward_program_with_experts(
+            let (program, logits, moe_sites, duplicate_head_roots) = lfm2_forward_program_with_experts_and_head_repeats(
                 descriptor.vocab,
                 descriptor.embedding,
                 descriptor.feed_forward,
@@ -426,6 +436,7 @@ pub fn build_forward(
                 descriptor.logit_softcap,
                 last_row_only,
                 descriptor.ple_dim,
+                descriptor.head_repeats,
             )?;
             Ok((
                 program,

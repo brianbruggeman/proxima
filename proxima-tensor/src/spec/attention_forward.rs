@@ -1735,6 +1735,50 @@ pub fn lfm2_forward_program_with_experts(
     last_row_only: bool,
     ple_dim: Option<u32>,
 ) -> Result<(Vec<Op>, NodeId, MoeSites, alloc::vec::Vec<NodeId>), TensorError> {
+    lfm2_forward_program_with_experts_and_head_repeats(
+        vocab,
+        embedding,
+        feed_forward,
+        expert_feed_forward,
+        query_heads,
+        block_count,
+        expert_count,
+        expert_used_count,
+        leading_dense_block_count,
+        l_cache,
+        schedule,
+        embedding_scale,
+        logit_softcap,
+        last_row_only,
+        ple_dim,
+        1,
+    )
+}
+
+/// [`lfm2_forward_program_with_experts`] with the LM-head repeat count
+/// ([`super::ModelDescriptor::head_repeats`]) as an explicit argument: `1`
+/// builds the one production head, `2` and `3` append that many minus one
+/// byte-identical duplicate head chains (returned as the last tuple element)
+/// for the head-cost measurement harness. Values outside `1..=3` clamp.
+#[allow(clippy::too_many_arguments)]
+pub fn lfm2_forward_program_with_experts_and_head_repeats(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    expert_feed_forward: u32,
+    query_heads: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    leading_dense_block_count: u32,
+    l_cache: u32,
+    schedule: &[LayerSchedule],
+    embedding_scale: Option<EmbeddingScale>,
+    logit_softcap: Option<f32>,
+    last_row_only: bool,
+    ple_dim: Option<u32>,
+    head_repeats: u32,
+) -> Result<(Vec<Op>, NodeId, MoeSites, alloc::vec::Vec<NodeId>), TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
             expected: block_count,
@@ -2064,8 +2108,7 @@ pub fn lfm2_forward_program_with_experts(
     );
 
     // attn_parity followon (2026-09-22): factored out of the single
-    // production call site below so `PROXIMA_HEAD_REPEATS` (instrument-gated,
-    // read once below) can append N-1 byte-identical duplicate head
+    // production call site below so `head_repeats` can append N-1 byte-identical duplicate head
     // dispatches after it -- same `normed_last`/`lm_head` operands, same
     // binding, same softcap epilogue, each producing its own terminal
     // `NodeId` (`reduce`/`elementwise` always allocate a fresh node, so no
@@ -2111,28 +2154,10 @@ pub fn lfm2_forward_program_with_experts(
 
     let logits = append_head(&mut program)?;
 
-    // attn_parity followon: `PROXIMA_HEAD_REPEATS=1|2|3` (default 1, i.e. no
-    // duplicates) is a measurement-only knob for the Gemma4 head cost
-    // campaign -- see `OWNER_BRIEF_gemma_head.md`. Gated on `instrument` so
-    // the knob and its `std::env` read compile out of every non-instrumented
-    // build; the duplicates themselves are ordinary program nodes any
-    // evaluator can run, but nothing outside this measurement harness asks
-    // for them (no caller reads `duplicate_head_roots` today).
-    #[cfg(feature = "instrument")]
-    let duplicate_head_roots: alloc::vec::Vec<NodeId> = {
-        let repeats: u32 = std::env::var("PROXIMA_HEAD_REPEATS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(1)
-            .clamp(1, 3);
-        let mut extra = alloc::vec::Vec::with_capacity((repeats.saturating_sub(1)) as usize);
-        for _ in 1..repeats {
-            extra.push(append_head(&mut program)?);
-        }
-        extra
-    };
-    #[cfg(not(feature = "instrument"))]
-    let duplicate_head_roots: alloc::vec::Vec<NodeId> = alloc::vec::Vec::new();
+    let mut duplicate_head_roots = alloc::vec::Vec::new();
+    for _ in 1..head_repeats.clamp(1, 3) {
+        duplicate_head_roots.push(append_head(&mut program)?);
+    }
 
     Ok((program, logits, MoeSites(moe_sites), duplicate_head_roots))
 }

@@ -685,6 +685,17 @@ fn rebuild_layer_roots(
     }
 }
 
+/// `PROXIMA_HEAD_REPEATS=1|2|3` (unset or unparsable reads as `1`): the
+/// head-cost measurement knob, layered into [`proxima_tensor::spec::ModelDescriptor::head_repeats`]
+/// here so the op-graph builders stay pure functions of the descriptor.
+#[cfg(feature = "instrument")]
+fn head_repeats_from_env() -> u32 {
+    std::env::var("PROXIMA_HEAD_REPEATS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+}
+
 /// [`Gemma4Arch::bind`]'s body, parameterized on `last_row_only`
 /// (`lfm2_two_range_cached_forward_program_with_experts`'s own trailing
 /// flag -- see its doc: `true` gathers the LM head to the last new
@@ -710,6 +721,11 @@ fn bind_gemma4_with_last_row_only<'file>(
     // the two-range engine, not single-range, because the first step processes the whole
     // prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own module doc)
     let descriptor = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
+    #[cfg(feature = "instrument")]
+    let descriptor = ModelDescriptor {
+        head_repeats: head_repeats_from_env(),
+        ..descriptor
+    };
     let schedule = &descriptor.layers;
     let cache_strategy = descriptor.cache_strategy;
         let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
