@@ -1,0 +1,13 @@
+checkpoint=qwen35
+architecture=qwen35
+registry_entry=qwen35
+kv_layout=SlidingRing
+bind.ops=4389
+bind.ops_sha256=deebe0400274d936f52d530e5fd5f9c980f60b8e653fa8ca2a4b168dd3444d5f
+bind.logits_root=NodeId(4388)
+bind.hidden_root=None
+bind.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+bind.layer_roots=24 sha256=d3d2bb4834ec58434fe3bdacff949ab78c38d4128c144c92585102b52ced6fd7
+bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+bind.single_position_step=true
+verify=absent

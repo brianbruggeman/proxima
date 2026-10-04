@@ -1,0 +1,65 @@
+# oracle tool: llama.cpp gguf-py gguf_dump.py (header only, CPU, no tensors) from /Users/brianbruggeman/repos/others/llama.cpp at commit f1ea206218210afb913ae2f5d2c51faed35915da
+# command: cd /Users/brianbruggeman/repos/others/llama.cpp/gguf-py && PYTHONPATH=. uv run --no-project --with numpy --with pyyaml --with tqdm python gguf/scripts/gguf_dump.py --no-tensors /Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+# checkpoint: qwen35moe
+* File is LITTLE endian, script is running on a LITTLE endian host.
+* Dumping 60 key/value pair(s)
+      1: UINT32     |        1 | GGUF.version = 3
+      2: UINT64     |        1 | GGUF.tensor_count = 1194
+      3: UINT64     |        1 | GGUF.kv_count = 57
+      4: STRING     |        1 | general.architecture = 'qwen35moe'
+      5: UINT32     |        1 | general.file_type = 15
+      6: UINT64     |        1 | general.parameter_count = 35951822704
+      7: UINT32     |        1 | general.quantization_version = 2
+      8: UINT32     |        1 | qwen35moe.attention.head_count = 16
+      9: [UINT32]   |       40 | qwen35moe.attention.head_count_kv = [0, 0, 0, 2, 0, 0, ...]
+     10: UINT32     |        1 | qwen35moe.attention.key_length = 256
+     11: FLOAT32    |        1 | qwen35moe.attention.layer_norm_rms_epsilon = 9.999999974752427e-07
+     12: UINT32     |        1 | qwen35moe.attention.value_length = 256
+     13: UINT32     |        1 | qwen35moe.block_count = 40
+     14: UINT32     |        1 | qwen35moe.context_length = 262144
+     15: UINT32     |        1 | qwen35moe.embedding_length = 2048
+     16: UINT32     |        1 | qwen35moe.expert_count = 256
+     17: UINT32     |        1 | qwen35moe.expert_feed_forward_length = 512
+     18: UINT32     |        1 | qwen35moe.expert_shared_feed_forward_length = 512
+     19: UINT32     |        1 | qwen35moe.expert_used_count = 8
+     20: UINT32     |        1 | qwen35moe.feed_forward_length = 0
+     21: UINT32     |        1 | qwen35moe.full_attention_interval = 4
+     22: UINT32     |        1 | qwen35moe.image_token_id = 248056
+     23: [INT32]    |        3 | qwen35moe.mrope_sections = [11, 11, 10]
+     24: UINT32     |        1 | qwen35moe.rope.dimension_count = 64
+     25: [INT32]    |        3 | qwen35moe.rope.dimension_sections = [11, 11, 10]
+     26: FLOAT32    |        1 | qwen35moe.rope.freq_base = 10000000.0
+     27: BOOL       |        1 | qwen35moe.rope.mrope_interleaved = True
+     28: [INT32]    |        3 | qwen35moe.rope.mrope_section = [11, 11, 10]
+     29: UINT32     |        1 | qwen35moe.ssm.conv_kernel = 4
+     30: UINT32     |        1 | qwen35moe.ssm.group_count = 16
+     31: UINT32     |        1 | qwen35moe.ssm.inner_size = 4096
+     32: UINT32     |        1 | qwen35moe.ssm.state_size = 128
+     33: UINT32     |        1 | qwen35moe.ssm.time_step_rank = 32
+     34: BOOL       |        1 | qwen35moe.ssm.v_head_reordered = True
+     35: UINT32     |        1 | qwen35moe.vision.attention.head_count = 16
+     36: UINT32     |        1 | qwen35moe.vision.block_count = 27
+     37: ARRAY      |        0 | qwen35moe.vision.deepstack_visual_indexes = []
+     38: UINT32     |        1 | qwen35moe.vision.embedding_length = 1152
+     39: [FLOAT32]  |        3 | qwen35moe.vision.image_mean = [0.5, 0.5, 0.5]
+     40: [FLOAT32]  |        3 | qwen35moe.vision.image_std = [0.5, 0.5, 0.5]
+     41: UINT32     |        1 | qwen35moe.vision.longest_edge = 16777216
+     42: UINT32     |        1 | qwen35moe.vision.num_channels = 3
+     43: UINT32     |        1 | qwen35moe.vision.patch_size = 16
+     44: UINT32     |        1 | qwen35moe.vision.shortest_edge = 65536
+     45: UINT32     |        1 | qwen35moe.vision.spatial_merge_size = 2
+     46: UINT32     |        1 | qwen35moe.vision.temporal_patch_size = 2
+     47: UINT32     |        1 | qwen35moe.vision_end_token_id = 248054
+     48: UINT32     |        1 | qwen35moe.vision_start_token_id = 248053
+     49: STRING     |        1 | tokenizer.chat_template = '{%- set image_count = namespace(value=0) %}\n{%- set video...'
+     50: BOOL       |        1 | tokenizer.ggml.add_eos_token = False
+     51: BOOL       |        1 | tokenizer.ggml.add_padding_token = False
+     52: UINT32     |        1 | tokenizer.ggml.eos_token_id = 248046
+     53: [INT32]    |        2 | tokenizer.ggml.eos_token_ids = [248046, 248044]
+     54: [STRING]   |   247587 | tokenizer.ggml.merges = ['Ġ Ġ', 'ĠĠ ĠĠ', 'i n', 'Ġ t', 'ĠĠĠĠ ĠĠĠĠ', 'e r', ...]
+     55: STRING     |        1 | tokenizer.ggml.model = 'gpt2'
+     56: UINT32     |        1 | tokenizer.ggml.padding_token_id = 248044
+     57: STRING     |        1 | tokenizer.ggml.pre = 'qwen35'
+     58: [FLOAT32]  |   248320 | tokenizer.ggml.scores = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, ...]
+     59: [INT32]    |   248320 | tokenizer.ggml.token_type = [1, 1, 1, 1, 1, 1, ...]
+     60: [STRING]   |   248320 | tokenizer.ggml.tokens = ['!', '"', '#', '$', '%', '&', ...]

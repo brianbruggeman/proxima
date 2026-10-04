@@ -1,0 +1,13 @@
+checkpoint=qwen2
+architecture=qwen2
+registry_entry=dense
+kv_layout=SlidingRing
+bind.ops=2453
+bind.ops_sha256=a1ff813f115c1db000a1934542aaff11d3a101384b7e5446fe03d1ac291157bf
+bind.logits_root=NodeId(2452)
+bind.hidden_root=Some(NodeId(2449))
+bind.residual_roots=24 sha256=310f4d854768a435720c47bbcf1744372261d1c51dd7ee4b6fcc6d8bbdc7bf30
+bind.layer_roots=24 sha256=af73beb00891132883029f37a2fa9b34e2ec46f10f63cef90f873d57c0b21540
+bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+bind.single_position_step=false
+verify=absent
