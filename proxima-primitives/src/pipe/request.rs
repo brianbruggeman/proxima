@@ -343,7 +343,6 @@ impl Request<Bytes> {
     /// Uniform chunk-stream view of the request payload: the streamed body
     /// if present, else a one-chunk stream of the buffered bytes. Lets a
     /// listener pump any request body without matching on the shape.
-    #[must_use]
     pub fn into_chunk_stream(self) -> ChunkStream {
         match self.stream {
             Some(stream) => stream.into_chunk_stream(),
@@ -625,7 +624,6 @@ impl Response<Bytes> {
     /// Uniform chunk-stream view of the response payload: the streamed body
     /// if present, else a one-chunk stream of the buffered bytes. Lets a
     /// listener pump any response without matching on the shape.
-    #[must_use]
     pub fn into_chunk_stream(self) -> ChunkStream {
         match self.stream {
             Some(stream) => stream.into_chunk_stream(),

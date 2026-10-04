@@ -124,7 +124,6 @@ where
     /// underlying source's stream unchanged. In [`ReplayMode::TimingIntact`]
     /// each event after the first is preceded by a sleep of the recorded
     /// inter-event delta `ts_ms[i] - ts_ms[i-1]` (saturating).
-    #[must_use]
     pub fn events<'replay>(&'replay self) -> RecordingEventStream<'replay> {
         let inner = self.source.events();
         if !self.mode.honors_timing() {

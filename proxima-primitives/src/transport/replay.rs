@@ -66,7 +66,6 @@ pub enum ReplayEvent<T> {
 
 impl<T: Send + Clone + 'static> Replay<T> {
     /// Item-count–capped constructor: each item weighs 1.
-    #[must_use]
     pub fn wrap<S>(stream: S, cap_items: usize) -> (Self, GenericStream<T>)
     where
         S: Stream<Item = Result<T, ProximaError>> + Send + 'static,
@@ -75,7 +74,6 @@ impl<T: Send + Clone + 'static> Replay<T> {
     }
 
     /// Item-count–capped constructor with an explicit sink-queue size.
-    #[must_use]
     pub fn wrap_with<S>(stream: S, cap_items: usize, sink_queue: usize) -> (Self, GenericStream<T>)
     where
         S: Stream<Item = Result<T, ProximaError>> + Send + 'static,
@@ -84,7 +82,6 @@ impl<T: Send + Clone + 'static> Replay<T> {
     }
 
     /// General constructor: caller supplies the weight function and sink-queue.
-    #[must_use]
     pub fn new_with_weight<S>(
         stream: S,
         cap_weight: usize,
@@ -141,7 +138,6 @@ impl<T: Send + Clone + 'static> Replay<T> {
         )))
     }
 
-    #[must_use]
     pub fn sink(&self) -> GenericStream<T> {
         let queue = Arc::new(ArrayQueue::new(self.inner.sink_queue));
         let consumer_waker = Arc::new(AtomicWaker::new());
@@ -186,7 +182,6 @@ impl Replay<Bytes> {
     /// behavior to the old body-specific `Replay` that lived in
     /// the now-dissolved `proxima-graph/src/tee/body.rs` (cap_bytes → weight cap in bytes,
     /// not item count).
-    #[must_use]
     pub fn wrap_bytes<S>(stream: S, cap_bytes: usize) -> (Self, GenericStream<Bytes>)
     where
         S: Stream<Item = Result<Bytes, ProximaError>> + Send + 'static,
@@ -194,7 +189,6 @@ impl Replay<Bytes> {
         Self::wrap_bytes_with(stream, cap_bytes, DEFAULT_SINK_QUEUE)
     }
 
-    #[must_use]
     pub fn wrap_bytes_with<S>(
         stream: S,
         cap_bytes: usize,
@@ -433,7 +427,6 @@ fn poll_broadcast<T: Send + Clone + 'static>(
 }
 
 /// Tap stream: captures all items and fires a callback on EOF.
-#[must_use]
 pub fn tap_complete<T, F>(
     stream: GenericStream<T>,
     cap_weight: usize,
@@ -446,7 +439,6 @@ where
     tap_complete_with_size(stream, cap_weight, None, on_complete)
 }
 
-#[must_use]
 pub fn tap_complete_with_size<T, F>(
     stream: GenericStream<T>,
     cap_weight: usize,
