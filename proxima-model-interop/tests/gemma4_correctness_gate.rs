@@ -12,12 +12,28 @@
 //! Greedy (`ServingConfig::default()`'s own `temperature: 0.0`) so every
 //! prompt is deterministic modulo Metal's known float-reduction
 //! non-determinism at temp 0 (documented at every `real_*_checkpoint.rs`
-//! sibling in this directory) -- the PRIMARY assertion is the answer-word
-//! substring (case-insensitive), robust to that noise. Each prompt's greedy
-//! token-id stream is ALSO recorded as a locked baseline: a variant that
-//! diverges from it is flagged (`eprintln!`, not a panic) as informational
-//! evidence for a human to look at, never a hard gate on its own -- the
-//! substring check is what decides pass/fail.
+//! sibling in this directory) -- the answer-word substring
+//! (case-insensitive) is the first assertion. Each prompt's greedy
+//! token-id stream is ALSO asserted against a locked baseline that is
+//! llama.cpp's output, never proxima's own (see the oracle block below).
+//!
+//! Oracle: llama-server, llama.cpp commit f1ea20621 (build b2633), run on
+//! this checkpoint on Apple Metal (`-ngl 99 -fa off -ctk f32 -ctv f32`, the
+//! same flash-attention-off / f32-KV shape this gate's `ServingConfig`
+//! uses), recorded 2026-10-04. Each prompt was tokenized with BOS and
+//! special tokens parsed (proxima's tokenizer and llama-server's
+//! `/tokenize` return identical ids for all four), then sent to
+//! `/completion` as a token-id prompt with `n_predict: 48`,
+//! `temperature: 0`, `top_k: 1`, `cache_prompt: false`. llama stops at its
+//! first end-of-generation token (`<turn|>`, id 106, which it returns as
+//! the last id); proxima does not stop on 106 (only on eos id 1), so the
+//! baseline is compared against the leading `locked_token_ids.len()` ids
+//! of proxima's stream: up to and including llama's stop, or the 48-token
+//! limit when llama never stopped. `hippo_vs_building` ends on the limit
+//! and carries a near-tie at index 38 (` single` vs ` very`, llama logprob
+//! margin 0.0015 on Metal, 0.073 on llama's CPU backend, which picks
+//! ` very`): that tail is as sensitive to float reduction order as the
+//! oracle itself is.
 //!
 //! Two of the four (ANT-vs-BRIEFCASE, HIPPO-vs-BUILDING) need the real
 //! gemma4 chat template to elicit a comparison answer at all: this
@@ -72,23 +88,22 @@ fn correctness_checks() -> Vec<CorrectnessCheck> {
             name: "paris",
             prompt: "The capital of France is".to_string(),
             expected_substring: "paris",
-            locked_token_ids: &[9079, 236761, 106, 107],
+            locked_token_ids: &[9079, 236761, 106],
         },
         CorrectnessCheck {
             name: "soliloquy",
             prompt: "In drama, a speech in which a character, alone on stage, speaks their inner thoughts aloud is called a".to_string(),
             expected_substring: "soliloquy",
-            locked_token_ids: &[5213, 6169, 11148, 196544, 84750, 106, 107],
+            locked_token_ids: &[5213, 6169, 11148, 196544, 84750, 106],
         },
         CorrectnessCheck {
             name: "ant_vs_briefcase",
             prompt: chat_prompt("Which is bigger, an ant or a briefcase?"),
             expected_substring: "briefcase",
             locked_token_ids: &[
-                818, 5213, 37767, 4925, 1018, 563, 1623, 12869, 1082, 506, 2314, 236761, 108,
-                8291, 236789, 236751, 3217, 236787, 108, 236829, 5213, 14054, 53121, 562, 1401,
-                1944, 16368, 236761, 107, 236829, 5213, 102397, 4925, 53121, 562, 2455, 9714,
-                5402, 531, 2768, 9413, 532, 1032, 4852, 236761,
+                236776, 5213, 37767, 4925, 1018, 563, 12869, 1082, 614, 2314, 236761, 108, 8409,
+                614, 2314, 563, 496, 4882, 33070, 236764, 496, 151678, 563, 496, 24457, 2495,
+                5402, 531, 577, 2455, 532, 2768, 1551, 2432, 236761, 106,
             ],
         },
         CorrectnessCheck {
@@ -98,10 +113,10 @@ fn correctness_checks() -> Vec<CorrectnessCheck> {
             ),
             expected_substring: "hippopotamus",
             locked_token_ids: &[
-                236776, 5213, 110988, 64981, 55569, 1018, 563, 8792, 7100, 528, 2425, 1082, 496,
-                2455, 4408, 3788, 236761, 108, 8291, 236789, 236751, 3217, 236787, 108, 236829,
-                5213, 206621, 64981, 55569, 53121, 562, 5631, 23369, 563, 496, 1401, 2455, 2601,
-                121921, 236764, 840, 625, 2036, 815, 496, 9150, 1944, 5663,
+                236776, 5213, 20619, 4408, 3788, 1018, 563, 7100, 528, 2425, 1082, 496, 50205,
+                64981, 55569, 236761, 108, 8291, 236789, 236751, 3217, 236787, 108, 236829, 5213,
+                206621, 64981, 55569, 53121, 5978, 2455, 236764, 496, 50205, 64981, 55569, 563,
+                496, 3161, 7626, 236761, 9567, 2425, 563, 8434, 528, 3755, 529,
             ],
         },
     ]
@@ -110,9 +125,7 @@ fn correctness_checks() -> Vec<CorrectnessCheck> {
 #[proxima::test]
 async fn gemma4_e2b_answers_all_four_correctness_checks_greedy() {
     let Ok(file) = File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
-        eprintln!(
-            "skipping: real gemma4-E2B blob not found at {REAL_GEMMA4_E2B_GGUF_PATH}"
-        );
+        eprintln!("skipping: real gemma4-E2B blob not found at {REAL_GEMMA4_E2B_GGUF_PATH}");
         return;
     };
     // SAFETY: the checkpoint file is not written or truncated by any other
@@ -151,13 +164,11 @@ async fn gemma4_e2b_answers_all_four_correctness_checks_greedy() {
             ));
         }
 
-        if token_ids != check.locked_token_ids {
-            eprintln!(
-                "{}: greedy token-id stream drifted from the locked baseline (informational \
-                 only -- known Metal float-reduction noise at temp 0; the substring check above \
-                 is what decides pass/fail).\n  locked = {:?}\n  actual = {token_ids:?}",
+        if token_ids.get(..check.locked_token_ids.len()) != Some(check.locked_token_ids) {
+            failures.push(format!(
+                "{}: greedy token ids differ from llama-server's up to its stop\n  llama  = {:?}\n  proxima = {token_ids:?}",
                 check.name, check.locked_token_ids
-            );
+            ));
         }
     }
 
