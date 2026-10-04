@@ -4,7 +4,7 @@
 //! alternating sliding-window/full-attention schedule instead of Qwen 3.6's
 //! GDN/attention schedule. Layer kind (sliding vs full) lives entirely in
 //! `sliding_window_pattern` -- there is no bespoke `LayerKind` here, since
-//! [`crate::gemma4::bind::Gemma4Arch::bind`] reads that array directly to
+//! [`crate::Architecture::bind`] reads that array directly to
 //! build [`proxima_tensor::spec::LayerAttentionConfig`] per layer for the
 //! generic [`proxima_tensor::spec::lfm2_forward_program_with_experts`]
 //! engine, and every gemma4 layer is
@@ -36,7 +36,7 @@ pub struct Architecture {
     /// has every entry equal to this one.
     pub feed_forward: u32,
     /// `{family}.feed_forward_length`, one entry per block --
-    /// [`metadata_u32_per_layer`] broadcasts a scalar (12B/26B/31B) to
+    /// `metadata_u32_per_layer` broadcasts a scalar (12B/26B/31B) to
     /// `block_count` equal entries, and preserves an array (E2B/E4B, whose
     /// matformer variable-width dense FFN this key stores per layer) as-is.
     pub feed_forward_by_layer: Vec<u32>,
@@ -72,7 +72,7 @@ pub struct Architecture {
     /// gemma4.go's own `HiddenSizePerLayer`). `0` (the default
     /// `metadata_u32_optional` returns when the key is absent, e.g.
     /// 12B/26B/31B) means this checkpoint carries no PLE tensors at all --
-    /// [`crate::gemma4::bind::gemma4_layer_schedule`]'s own `ple_dim > 0`
+    /// `crate::gemma4_descriptor_from_gguf`'s own `ple_dim > 0`
     /// check is what gates both the tensor names and the schedule's
     /// `LayerFfnConfig::ple` flag on it.
     pub ple_dim: u32,

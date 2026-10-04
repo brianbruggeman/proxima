@@ -36,7 +36,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
         .unwrap_or_else(|| panic!("no Op::Input leaf named {name:?} in program"))
 }
 
-/// Reproduces `gemma4_layer_schedule`
+/// Reproduces `gemma4_descriptor_from_gguf`
 /// (`proxima-model-interop/src/gemma4/bind.rs`, private to that crate)
 /// so this diagnostic can call `lfm2_forward_program_with_experts` directly
 /// -- pure graph construction, no weight bytes touched, so it is
@@ -1143,7 +1143,7 @@ fn main() {
     // (`attention_forward.rs:627-632`: `scores_scaled = scores *
     // inv_sqrt_head_dim`, `inv_sqrt_head_dim = 1/sqrt(query_pre_attn_scalar)`,
     // `query_pre_attn_scalar` hard-set 256 for every gemma4 layer in
-    // `gemma4_layer_schedule`, `gemma4/bind.rs:502`.)
+    // `gemma4_descriptor_from_gguf`, `gemma4/bind.rs:502`.)
     let mut factor_samples: Vec<f32> = Vec::new();
     for (&raw, &scaled) in engine_scores_raw5.iter().zip(engine_scores_scaled5.iter()) {
         if raw.abs() > 1e-3 {

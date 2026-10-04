@@ -1,39 +1,24 @@
 //! Weight binding, tensor-name enumeration, and [`crate::architecture::Architecture`]
 //! registration for the `gemma4` checkpoint family. `Gemma4Arch::bind` is a
-//! DESCRIPTOR: it reads [`hparams::Architecture`], builds a per-layer
-//! [`LayerAttentionConfig`]/[`LayerFfnConfig`] schedule, and hands both
-//! straight to the generic
-//! [`proxima_tensor::spec::lfm2_forward_program_with_experts`] engine --
-//! there is no bespoke gemma4 forward-graph builder any more (the deleted
-//! `gemma4_forward_program`/`gemma4_attention`/`gemma4_ffn_block` this
-//! module used to assemble). Every gemma4 layer is
-//! [`proxima_tensor::spec::LayerKind::Attention`]; sliding vs full is
-//! entirely a [`LayerAttentionConfig`] value (`head_dim`, `kv_heads`,
-//! `mask_window`, [`ValueSourceKind`], [`RopeTableSel`]), and the
-//! dense+routed parallel FFN is entirely a [`LayerFfnConfig`] value
-//! ([`FfnCombination::ParallelDenseMoe`] plus its three post-norm flags and
-//! `output_scale`). Teaching pointer: read
-//! `proxima_tensor::spec::attention_forward`'s own doc on
-//! `lfm2_forward_program_with_experts` before touching this file -- every
-//! knob this module sets is documented there, not here.
+//! DESCRIPTOR consumer: it hands the parsed header to
+//! [`proxima_tensor::spec::gemma4_descriptor_from_gguf`], which builds the
+//! whole [`proxima_tensor::spec::ModelDescriptor`] (per-layer
+//! [`proxima_tensor::spec::LayerAttentionConfig`]/
+//! [`proxima_tensor::spec::LayerFfnConfig`] schedule included), and lowers it
+//! through [`proxima_tensor::spec::build_forward`] -- there is no bespoke
+//! gemma4 forward-graph builder and no gemma4 schedule in this crate.
+//! Teaching pointer: read `proxima_tensor::spec::attention_forward`'s own doc
+//! on `lfm2_forward_program_with_experts` before touching this file -- every
+//! knob the descriptor sets is documented there, not here.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-// `gemma4_layer_schedule`'s own per-layer schedule (real E2B/E4B/12B/26B/31B
-// shape, `architecture`-derived) is the SINGLE schedule source for both
-// engines below -- [`CacheStrategy`] is a runtime choice off `architecture`
-// (`Gemma4Arch::bind`'s own doc on `descriptor.cache_strategy`), not a
-// `#[cfg]` fork, so every one of these is compiled in unconditionally.
 use proxima_tensor::spec::{
-    Activation, AttentionScoreScale, CacheStrategy, EmbeddingScale, ExpertGatingFunc,
-    FfnCombination, KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind,
-    LayerSchedule, ModelDescriptor, ParallelDenseMoeConfig, Qwen35LayerRoots, RopePairing,
-    RopeTableSel, ValueSourceKind, build_forward,
+    CacheStrategy, KeySourceKind, Qwen35LayerRoots, build_forward, gemma4_descriptor_from_gguf,
 };
-
 use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext,
 };
@@ -64,7 +49,7 @@ use super::program::gemma4_sliding_rope_table;
 /// `block_count - shared_kv_layers` onward (confirmed against the real
 /// header by an `UnknownTensor` load error on `blk.15.attn_k_norm.weight`)
 /// carries none of `attn_k.weight`, `attn_k_norm.weight`, or
-/// `attn_v.weight` at all -- see `gemma4_layer_schedule`'s own
+/// `attn_v.weight` at all -- see `gemma4_descriptor_from_gguf`'s own
 /// `shared_kv_source_layer` for which own-KV layer supplies them instead.
 /// The eight routed-expert leaves (`ffn_down_exps.{scale,weight}`,
 /// `ffn_gate_inp.{scale,weight}`, `ffn_gate_up_exps.weight`,
@@ -115,7 +100,7 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
             suffixes.push("attn_k.weight");
             suffixes.push("attn_k_norm.weight");
             // Mirrors `bind_gemma4_weights`'s own `attn_v.weight` bind gate
-            // and `gemma4_layer_schedule`'s own `value_source_kind` gate --
+            // and `gemma4_descriptor_from_gguf`'s own `value_source_kind` gate --
             // MoE's full layers alone lack `attn_v.weight` (`is_sliding`);
             // a shared-KV checkpoint's (E2B/E4B) own-KV layers ALL carry it.
             if is_sliding || architecture.shared_kv_layers > 0 {
@@ -208,18 +193,18 @@ fn bind_norm<'file>(
     Ok(())
 }
 
-/// Binds every weight [`lfm2_forward_program_with_experts`]'s `Input` leaves
+/// Binds every weight [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s `Input` leaves
 /// declare for gemma4's own [`Gemma4Arch::bind`] descriptor.
-/// `blk.{layer}.pre_ffw_norm_2.weight` is bound (via [`bind_norm`] with
-/// [`GEMMA4_NORM_SHIFT`]) and consumed by the engine's
-/// `routed_pre_norm` knob (`gemma4_layer_schedule` sets it), which normalizes
+/// `blk.{layer}.pre_ffw_norm_2.weight` is bound (via `bind_norm` with
+/// `GEMMA4_NORM_SHIFT`) and consumed by the engine's
+/// `routed_pre_norm` knob (`gemma4_descriptor_from_gguf` sets it), which normalizes
 /// the routed branch's input separately from the dense branch's shared
 /// `ffn_norm`-normed one -- matching the real Gemma 4 graph.
 ///
 /// The fused `blk.{layer}.ffn_gate_up_exps.weight` splits into the two
 /// separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves the engine's
 /// routed FFN declares WITHOUT a dequant -- see
-/// [`bind_gemma4_fused_gate_up_experts`]'s own doc for the confirmed axis
+/// `bind_gemma4_fused_gate_up_experts`'s own doc for the confirmed axis
 /// (the real checkpoint's `ne[0]`=2816 embedding is the quantization block
 /// axis; `ne[1]`=1408=2*`expert_feed_forward` is the row axis the split
 /// cuts, orthogonal to blocks) and the packed-memcpy implementation.
@@ -227,7 +212,7 @@ fn bind_norm<'file>(
 /// # Errors
 ///
 /// Whatever [`find_tensor`]/[`gguf_tensor_as_f32`]/[`bind_dense`]/
-/// [`bind_matmul_weight`]/[`bind_gemma4_fused_gate_up_experts`]/
+/// [`bind_matmul_weight`]/`bind_gemma4_fused_gate_up_experts`/
 /// [`bind_moe_expert_weights`] can fail with.
 #[cfg(feature = "std")]
 pub fn bind_gemma4_weights<'file>(
@@ -342,7 +327,7 @@ pub fn bind_gemma4_weights<'file>(
         // `attn_k.weight`/`attn_k_norm.weight`/`attn_v.weight` on disk at
         // all (confirmed by an `UnknownTensor` load error on
         // `blk.15.attn_k_norm.weight` against the real checkpoint) --
-        // `gemma4_layer_schedule`'s own `KeySourceKind::SharedFromLayer`/
+        // `gemma4_descriptor_from_gguf`'s own `KeySourceKind::SharedFromLayer`/
         // `ValueSourceKind::SharedFromLayer` never declare `Input` leaves
         // for them, so binding them here would look up a tensor the
         // forward program never asks for.
@@ -373,7 +358,7 @@ pub fn bind_gemma4_weights<'file>(
                 &mut state,
             )?;
         }
-        // Mirrors `gemma4_layer_schedule`'s own `value_source_kind` gate --
+        // Mirrors `gemma4_descriptor_from_gguf`'s own `value_source_kind` gate --
         // MoE keeps `is_sliding` (a full layer has no `attn_v.weight` on
         // disk); E2B/E4B (`shared_kv_layers > 0`) binds every own-KV
         // layer's real `attn_v.weight` unconditionally.
@@ -663,220 +648,6 @@ pub struct Gemma4Arch;
 /// The builtin `gemma4` registration value.
 pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 
-/// Sliding layers always use [`ValueSourceKind::ProjectedV`] (a real
-/// `attn_v.weight`) and the SWA RoPE table; full layers use the full-length
-/// RoPE table and [`ValueSourceKind::ProjectedV`] too UNLESS this is a MoE
-/// checkpoint (`shared_kv_layers == 0`), where a full layer genuinely has
-/// no `attn_v.weight` on disk and [`ValueSourceKind::SharedWithKey`] (the
-/// key projection's own output stands in for `V`) is correct instead. Both
-/// use [`RopePairing::SplitHalf`] (Gemma's own half-split rotation, not
-/// Llama/Mistral's interleaved pairing).
-/// Every gemma4 layer is [`LayerKind::Attention`], runs dense SwiGLU over
-/// the shared `ffn_norm`-normed input and routed MoE over its OWN
-/// `pre_ffw_norm_2`-normed input (`routed_pre_norm: true`), each with its
-/// own post-norm, summed and normalized once more, then scaled by
-/// `layer_output_scale`. The routed branch gates with `Softmax` and carries
-/// no `exp_probs_b` bias, unlike [`FfnCombination::Exclusive`]'s LFM2 shape
-/// -- see [`proxima_tensor::spec::LayerFfnConfig`]'s own doc for what each
-/// field means.
-/// The operative §14 reference for gemma4 (a distinct architecture from
-/// gemma3n -- no AltUp/Laurel, its own forward) is ollama's own gemma4
-/// runner, `mlxrunner/model/gemma4/gemma4.go` (github.com/ollama/ollama
-/// v0.34.2): `TextConfig`'s own KV-sharing-map build (`gemma4.go:590-611`)
-/// walks `firstShared..NumHiddenLayers` and, for each shared layer, finds
-/// "the last non-shared layer of the same type" (`gemma4.go:599-606`) --
-/// the MOST RECENT own-KV layer (index `< firstShared`) whose
-/// `isLayerSliding` result matches. `isLayerSliding`'s own fallback formula
-/// (`gemma4.go:644-651`, used whenever `LayerTypes` metadata is absent) is
-/// `(layerIdx+1) % SlidingWindowPattern != 0`, with `SlidingWindowPattern`
-/// defaulting to `5` (`gemma4.go:529-531`) -- period-5 global attention,
-/// 0-indexed, matching this checkpoint's `sliding_window=512` metadata
-/// (7 full layers over 35 blocks, `35 / 5 == 7`). For the real
-/// `gemma4:e2b-it-qat` checkpoint (`block_count=35`, `shared_kv_layers=20`,
-/// `first_shared_idx=15`) this resolves to exactly two source layers: 13
-/// (last own-KV sliding layer) for every sliding shared layer, 14 (last
-/// own-KV full layer) for every full shared layer -- see this file's own
-/// `shared_kv_reuse_map_tests` module for the full 20-entry table this
-/// function reproduces layer-by-layer, and
-/// `proxima-tensor::spec::tests::gemma4_synthetic_parity::shared_kv_worked_example`
-/// for the synthetic-forward proof that the wiring reuses rather than
-/// re-derives.
-fn shared_kv_source_layer(sliding_window_pattern: &[bool], first_shared_idx: u32, layer: usize) -> u32 {
-    let is_sliding = sliding_window_pattern[layer];
-    (0..first_shared_idx as usize)
-        .rev()
-        .find(|&candidate| sliding_window_pattern[candidate] == is_sliding)
-        .map(|index| index as u32)
-        // Only reachable if layers `0..first_shared_idx` have NO
-        // representative of this attention type at all -- not the real
-        // checkpoint's shape (both types appear among its first 15
-        // blocks). A safe deterministic fallback rather than a panic.
-        .unwrap_or_else(|| first_shared_idx.saturating_sub(1))
-}
-
-fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
-    // E2B/E4B (`expert_count == 0`) carry no routed-expert tensors at all
-    // (`bind_gemma4_weights`'s own `expert_count > 0` split) -- their
-    // per-layer FFN is dense-only SwiGLU/GeGLU, [`FfnCombination::Exclusive`]
-    // with `leading_dense_block_count == block_count` at the
-    // `lfm2_forward_program_with_experts` call site
-    // ([`Gemma4Arch::bind`]) so every layer takes the dense branch and the
-    // routed branch is never built. 12B/26B/31B (`expert_count > 0`) keep
-    // the real parallel dense+MoE shape unchanged.
-    let combination = if architecture.expert_count > 0 {
-        FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
-            dense_post_norm: true,
-            routed_post_norm: true,
-            combined_post_norm: true,
-            routed_pre_norm: true,
-            router_scale: true,
-            expert_output_scale: true,
-        })
-    } else {
-        FfnCombination::Exclusive
-    };
-    let ffn = LayerFfnConfig {
-        post_attention_norm: true,
-        combination,
-        output_scale: true,
-        routed_gating: ExpertGatingFunc::Softmax,
-        routed_expert_bias: false,
-        activation: Activation::GeluTanh,
-        // per-layer below: `feed_forward_by_layer[layer]` (E2B/E4B's own
-        // matformer variable dense-FFN width; a uniform checkpoint's array
-        // is `metadata_u32_per_layer`'s scalar-broadcast, so this override
-        // reproduces the prior single-width behaviour byte-for-byte there).
-        dense_feed_forward: None,
-        // E2B/E4B's dense-only `FfnCombination::Exclusive` path needs its
-        // own `blk.{layer}.post_ffw_norm.weight` sandwich norm
-        // (`gemma4.go`'s `PostFFNorm`) -- unread when `combination` is
-        // `ParallelDenseMoe` (12B/26B/31B), which applies its own
-        // `combined_post_norm` on the SAME tensor name instead.
-        exclusive_dense_post_norm: true,
-        // `architecture.ple_dim > 0` (E2B/E4B) -- every layer of a PLE
-        // checkpoint injects it (`gemma4.go:1349-1361` has no per-layer-type
-        // branch), paired with this call site's own `Some(architecture.ple_dim)`
-        // below at `lfm2_forward_program_with_experts` -- Stage A's preamble
-        // only runs, and this flag is only consulted, when BOTH agree.
-        ple: architecture.ple_dim > 0,
-    };
-    // `attention.shared_kv_layers` (0 for E4B/12B/26B/31B, 20 for E2B):
-    // `first_shared_idx` is the first TRAILING layer with no own
-    // `attn_k.weight`/`attn_v.weight`/`attn_k_norm.weight` at all -- see
-    // `gemma4_tensor_names`'s own doc for the tensor-presence side of this
-    // split.
-    let first_shared_idx = architecture
-        .block_count
-        .saturating_sub(architecture.shared_kv_layers);
-    architecture
-        .sliding_window_pattern
-        .iter()
-        .enumerate()
-        .map(|(layer, &is_sliding)| {
-            let kv_heads = architecture.kv_heads_by_layer[layer];
-            let ffn = LayerFfnConfig {
-                dense_feed_forward: Some(architecture.feed_forward_by_layer[layer]),
-                ..ffn
-            };
-            let attention = if is_sliding {
-                LayerAttentionConfig {
-                    head_dim: architecture.key_length_swa,
-                    kv_heads,
-                    mask_window: Some(architecture.sliding_window),
-                    value_source_kind: ValueSourceKind::ProjectedV,
-                    key_source_kind: KeySourceKind::ProjectedK,
-                    rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa",
-                    },
-                    rope_pairing: RopePairing::SplitHalf {
-                        pairs: architecture.key_length_swa / 2,
-                    },
-                    // `Gemma4TextAttention.forward`: `self.scaling = 1.0` for
-                    // every layer, sliding included -- gemma4 has no
-                    // `query_pre_attn_scalar` at all (that is a gemma2/3
-                    // convention this architecture does not inherit).
-                    score_scale: AttentionScoreScale::Unscaled,
-                    // `Gemma4TextAttention.forward` (`modeling_gemma4.py:1256-1265`):
-                    // `v_norm` applies to EVERY layer's `V`, sliding and full
-                    // alike -- `self.v_norm` has no per-layer-type branch.
-                    value_norm: true,
-                }
-            } else {
-                LayerAttentionConfig {
-                    head_dim: architecture.key_length,
-                    kv_heads,
-                    mask_window: None,
-                    // MoE (12B/26B/31B, `shared_kv_layers == 0`): a full
-                    // layer genuinely has no `attn_v.weight` on disk --
-                    // `SharedWithKey` (unchanged). E2B/E4B
-                    // (`shared_kv_layers > 0`): every own-KV layer, sliding
-                    // OR full, carries its own real `attn_v.weight`
-                    // (confirmed against the real `gemma4:e2b-it-qat`
-                    // header -- `blk.4`/`blk.9`/`blk.14`, the three full
-                    // own-KV layers, each list `attn_v.weight` among their
-                    // 17 tensors) -- `SharedWithKey` here would silently
-                    // substitute the key projection for a real, present `V`
-                    // weight instead of reading it. `shared_kv_layers > 0`
-                    // is this crate's own established E2B-vs-MoE
-                    // discriminator (already gates `is_shared_kv`/PLE
-                    // above); the trailing shared-KV override below
-                    // supersedes this for actually-shared layers regardless
-                    // of what is set here.
-                    value_source_kind: if architecture.shared_kv_layers > 0 {
-                        ValueSourceKind::ProjectedV
-                    } else {
-                        ValueSourceKind::SharedWithKey
-                    },
-                    key_source_kind: KeySourceKind::ProjectedK,
-                    rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin",
-                    },
-                    rope_pairing: RopePairing::SplitHalf {
-                        pairs: architecture.key_length / 2,
-                    },
-                    // same `self.scaling = 1.0` as the sliding branch above --
-                    // HF applies no per-layer-type distinction here.
-                    score_scale: AttentionScoreScale::Unscaled,
-                    value_norm: true,
-                }
-            };
-            // Trailing shared-KV layers (E2B: blk.15..=34) have no
-            // `attn_k.weight`/`attn_v.weight`/`attn_k_norm.weight` on disk
-            // -- `attention_forward.rs`'s `KeySourceKind::SharedFromLayer`/
-            // `ValueSourceKind::SharedFromLayer` skip declaring those three
-            // leaves entirely for this layer, reading the named own-KV
-            // layer's post-rope K / post-norm V instead. `value_norm` is
-            // forced `false` below -- `ValueSource::Shared` already carries
-            // a post-norm `V` (the source layer normalized it once);
-            // `append_attention_mixer`'s own doc notes re-normalizing it
-            // here would double-apply, so gemma4 E2B's shared layers must
-            // NOT also request `value_norm`.
-            let attention = if layer as u32 >= first_shared_idx {
-                let source = shared_kv_source_layer(
-                    &architecture.sliding_window_pattern,
-                    first_shared_idx,
-                    layer,
-                );
-                LayerAttentionConfig {
-                    key_source_kind: KeySourceKind::SharedFromLayer(source),
-                    value_source_kind: ValueSourceKind::SharedFromLayer(source),
-                    value_norm: false,
-                    ..attention
-                }
-            } else {
-                attention
-            };
-            LayerSchedule {
-                kind: LayerKind::Attention,
-                attention,
-                ffn,
-            }
-        })
-        .collect()
-}
-
 /// [`Gemma4Arch::bind`]'s body, parameterized on `last_row_only`
 /// (`lfm2_two_range_cached_forward_program_with_experts`'s own trailing
 /// flag -- see its doc: `true` gathers the LM head to the last new
@@ -898,90 +669,12 @@ fn bind_gemma4_with_last_row_only<'file>(
     let architecture = from_metadata(parsed)?;
     let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
 
-        // RUNTIME choice, not `#[cfg]`: `gemma4_layer_schedule` derives the
-        // SAME real-checkpoint shape (sliding/full split, matformer FFN
-        // widths, PLE, shared-KV) for every gemma4 variant, fed once into
-        // `build_forward` here -- `descriptor.cache_strategy` is the one
-        // thing that varies, decided below from `architecture` itself.
-        // `CacheStrategy::TwoRange` is
-        // `lfm2_two_range_cached_forward_program_with_experts`: a decode
-        // step's cost drops from O(n^2) to O(1) in prior sequence length
-        // once `layer_roots` below is non-empty (proven for the
-        // no-shared-KV shape by `proxima-tensor`'s own
-        // `two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`/
-        // `..._two_step_decode_matches_one_shot_prefill_oracle`/
-        // `build_forward_two_range_matches_direct_builder_call`, and for
-        // gemma4 E2B's `KeySourceKind::SharedFromLayer`/
-        // `ValueSourceKind::SharedFromLayer` shape by
-        // `two_range_cached_gemma4_shared_kv_layer_matches_cacheless_oracle`
-        // -- all against the cacheless engine as oracle, all < 1e-4). The
-        // TWO-range engine, not the single-range one: gemma4's own first
-        // step (`single_position_step == false` below) processes the WHOLE
-        // prompt as one `cached_len=0` call, and a single merged softmax
-        // has no self-consistent way to include that call's own new
-        // positions in `kv_cache.{layer}.*` before they exist
-        // (`lfm2_single_range_cached.rs`'s own module doc) -- proven by
-        // `single_range_cached_gemma4_diverges_on_zero_cache_matches_when_self_range_is_folded`
-        // (zero-cache max-abs-diff 0.39 vs the prefill oracle).
-        //
-        // `CacheStrategy::Cacheless` is the safe fallback: every gemma4
-        // layer is `LayerKind::Attention` (the two-range engine's own
-        // requirement), so the ONLY axis that can make a checkpoint
-        // unsupported today is one this match does not yet know how to
-        // prove correct end-to-end against a real checkpoint -- there is
-        // none such left as of this change, so every gemma4 shape routes
-        // through `TwoRange`; a future architecture variant this schedule
-        // cannot express falls back here rather than building a wrong
-        // program silently.
-        let schedule = gemma4_layer_schedule(&architecture);
-        let logit_softcap = (architecture.final_logit_softcapping > 0.0)
-            .then_some(architecture.final_logit_softcapping);
-        // `leading_dense_block_count`: every layer's own `FfnCombination`
-        // (set by `gemma4_layer_schedule` above) is `ParallelDenseMoe` for a
-        // real MoE checkpoint, which ignores this argument entirely (both
-        // branches always run) -- `0` here reproduces that prior behaviour
-        // byte-for-byte. For a dense checkpoint (`expert_count == 0`) every
-        // layer's combination is `FfnCombination::Exclusive` instead, whose
-        // dense-vs-routed choice is `layer < leading_dense_block_count`
-        // (`append_lfm2_layer_ffn`) -- `block_count` here makes that
-        // condition true for every layer, so the (absent, unbound) routed
-        // branch is never built.
-        let leading_dense_block_count = if architecture.expert_count > 0 {
-            0
-        } else {
-            architecture.block_count
-        };
-        let cache_strategy = if schedule.iter().all(|entry| entry.kind == LayerKind::Attention) {
-            CacheStrategy::TwoRange
-        } else {
-            CacheStrategy::Cacheless
-        };
-        let descriptor = ModelDescriptor {
-            vocab: architecture.vocab,
-            embedding: architecture.embedding,
-            feed_forward: architecture.feed_forward,
-            expert_feed_forward: architecture.expert_feed_forward,
-            query_heads: architecture.head_count,
-            block_count: architecture.block_count,
-            expert_count: architecture.expert_count,
-            expert_used_count: architecture.expert_used_count,
-            leading_dense_block_count,
-            l_cache: 0,
-            embedding_scale: Some(EmbeddingScale::Sqrt),
-            logit_softcap,
-            layers: schedule.clone(),
-            cache_strategy,
-            // `gemma4_layer_schedule`'s own `LayerFfnConfig::ple` flag (set
-            // alongside this same `architecture.ple_dim > 0` check) is what
-            // per-layer INJECTS Stage B; this is the checkpoint-wide toggle
-            // that builds Stage A's preamble at all.
-            ple_dim: (architecture.ple_dim > 0).then_some(architecture.ple_dim),
-            sliding_kv_ring: layout == KvLayout::SlidingRing,
-            qk_norm: false,
-            qkv_biases: false,
-            paired_gate_up_reduce: false,
-            fused_qkv_reduce: false,
-        };
+    // every gemma4 shape routes through `TwoRange` (all layers are `LayerKind::Attention`);
+    // the two-range engine, not single-range, because the first step processes the whole
+    // prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own module doc)
+    let descriptor = gemma4_descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
+    let schedule = &descriptor.layers;
+    let cache_strategy = descriptor.cache_strategy;
         let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
             build_forward(&descriptor, last_row_only)?;
         let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
@@ -1099,7 +792,7 @@ impl ArchitectureTrait for Gemma4Arch {
     /// K=8, bytes identical to K=1 on the six-prompt corpus, uninstrumented
     /// rollout check confirming the same order of magnitude
     /// (-1.98 ms/token). Scoped to gemma4 alone -- every other architecture
-    /// keeps [`Architecture::command_buffer_chunks`]'s own default of `1`;
+    /// keeps [`ArchitectureTrait::command_buffer_chunks`]'s own default of `1`;
     /// this measurement does not establish a universal placements-path
     /// default (the owner's own integration recommendation).
     fn command_buffer_chunks(&self) -> u32 {
@@ -1142,7 +835,7 @@ impl ArchitectureTrait for Gemma4Arch {
     }
 
     /// [`bind_gemma4_all_positions_logits`]'s own trait-level entry point --
-    /// this crate's only [`Architecture::speculative_verify_program`]
+    /// this crate's only [`ArchitectureTrait::speculative_verify_program`]
     /// override (that method's own doc on why a capability method, never a
     /// `name() == "gemma4"` check, is what gates speculative decode's
     /// verify step).
@@ -1167,7 +860,7 @@ impl ArchitectureTrait for Gemma4Arch {
 
     /// Feeds the sliding-window RoPE table the `rope_cos_swa`/`rope_sin_swa`
     /// leaves declare (`LayerAttentionConfig::rope_table`,
-    /// [`gemma4_layer_schedule`]) -- the decode loop's builtin
+    /// `gemma4_descriptor_from_gguf`) -- the decode loop's builtin
     /// `rope_cos`/`rope_sin` blocks always carry the FULL-layer table
     /// (`Gemma4Arch::bind`'s own `ModelArchitecture::head_dim`/
     /// `rope_freq_base` are the full-layer values), so this is the one
@@ -1203,10 +896,10 @@ impl ArchitectureTrait for Gemma4Arch {
     /// `n_rot=head_dim` (matching this checkpoint's `rope.dimension_count`
     /// metadata) but ALSO a per-pair `freq_factors` tensor
     /// (`rope_freqs.weight`, GGUF `ROPE_FREQS`) that ggml divides each
-    /// pair's angle by -- [`bind_rope_freqs`] binds that tensor's own values
+    /// pair's angle by -- `bind_rope_freqs` binds that tensor's own values
     /// verbatim into [`BoundWeights::owned`] at bind time, and this method
     /// hands the same slice straight back to
-    /// [`crate::generate::build_position_inputs`], which does the dividing.
+    /// `crate::generate::build_position_inputs`, which does the dividing.
     /// The real checkpoint's `rope_freqs.weight` holds `[1.0]*64 +
     /// [1e30]*192` (confirmed shape: 256 = `head_dim/2` pair entries):
     /// dividing by `1.0` is a no-op for the first 64 pairs, and dividing by
@@ -1235,85 +928,10 @@ impl ArchitectureTrait for Gemma4Arch {
     }
 }
 
-#[cfg(test)]
-mod shared_kv_reuse_map_tests {
-    use super::shared_kv_source_layer;
-
-    /// ollama's `mlxrunner/model/gemma4/gemma4.go` `isLayerSliding` fallback
-    /// (`gemma4.go:644-651`): `(layerIdx+1) % SlidingWindowPattern != 0`,
-    /// `SlidingWindowPattern` defaulting to `5` (`gemma4.go:529-531`),
-    /// 0-indexed -- the global/local period gemma4 E2B's `sliding_window=512`
-    /// metadata implies (7 full layers over 35 blocks, `35 / 5 == 7`). `true`
-    /// means sliding, matching `Architecture::sliding_window_pattern`'s own
-    /// convention.
-    fn period_five_pattern(block_count: usize) -> Vec<bool> {
-        (0..block_count).map(|i| (i + 1) % 5 != 0).collect()
-    }
-
-    /// The worked example this slice derived by hand from
-    /// `gemma4.go`'s `TextConfig` KV-sharing-map build (`gemma4.go:590-611`,
-    /// see `shared_kv_source_layer`'s own doc above for the full citation --
-    /// derivation notes in this session's scratchpad `sharedkv_derivation.md`):
-    /// for `block_count=35`, `shared_kv_layers=20` (`first_shared_idx=15`),
-    /// the 16 sliding shared layers (15,16,17,18,20,21,22,23,25,26,27,28,30,
-    /// 31,32,33) all reuse own-KV layer 13 (the last sliding layer among
-    /// 0..15), and the 4 full shared layers (19,24,29,34) all reuse own-KV
-    /// layer 14 (the last full layer among 0..15) -- exactly 20 pairs,
-    /// matching the real GGUF header's `attention.shared_kv_layers=20`.
-    #[test]
-    fn gemma4_e2b_shared_kv_reuse_map_matches_hand_derived_table() {
-        let pattern = period_five_pattern(35);
-        let first_shared_idx = 15;
-
-        let expected: [(usize, u32); 20] = [
-            (15, 13),
-            (16, 13),
-            (17, 13),
-            (18, 13),
-            (19, 14),
-            (20, 13),
-            (21, 13),
-            (22, 13),
-            (23, 13),
-            (24, 14),
-            (25, 13),
-            (26, 13),
-            (27, 13),
-            (28, 13),
-            (29, 14),
-            (30, 13),
-            (31, 13),
-            (32, 13),
-            (33, 13),
-            (34, 14),
-        ];
-
-        for (shared_layer, expected_source) in expected {
-            let source = shared_kv_source_layer(&pattern, first_shared_idx, shared_layer);
-            assert_eq!(
-                source, expected_source,
-                "layer {shared_layer} expected to reuse source layer {expected_source}, got {source}"
-            );
-        }
-    }
-
-    /// The formula-derived pattern must itself imply exactly 7 full-attention
-    /// layers over 35 blocks (`35 / 5`) -- a sanity check on
-    /// [`period_five_pattern`] independent of the reuse-map assertion above,
-    /// so a broken pattern generator cannot silently pass the main test by
-    /// accident.
-    #[test]
-    fn period_five_pattern_has_seven_full_attention_layers_over_thirty_five_blocks() {
-        let pattern = period_five_pattern(35);
-        let full_count = pattern.iter().filter(|&&is_sliding| !is_sliding).count();
-        assert_eq!(full_count, 7);
-    }
-}
-
 /// Regression coverage for the bug this crate shipped once: `bind` and the
 /// forward program each independently gate `attn_k.weight`/
 /// `attn_k_norm.weight`/`attn_v.weight` per layer, and nothing forced the
-/// two gates to agree -- `gemma4_layer_schedule` used to gate
+/// two gates to agree -- `gemma4_descriptor_from_gguf` used to gate
 /// `ValueSourceKind::ProjectedV` (and therefore the forward program's own
 /// `attn_v.weight` [`proxima_tensor::op::Op::Input`] leaf) on `is_sliding`
 /// alone, the MoE convention, while E2B/E4B's own-KV FULL layers (`blk.4`,
@@ -1332,50 +950,66 @@ mod shared_kv_reuse_map_tests {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
+    use arrayvec::ArrayVec;
+    use proxima_gguf::types::GgmlType;
+    use proxima_gguf::value::{MetadataArray, MetadataValue};
+    use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};
     use proxima_tensor::op::Op;
-    // This test module exercises `gemma4_layer_schedule`'s own declared-vs-
-    // bound leaf contract directly against the cacheless engine -- an
-    // engine-shape check independent of which `CacheStrategy`
-    // `Gemma4Arch::bind` picks at runtime, so it imports its own builder
-    // rather than the module-level `build_forward`.
-    use proxima_tensor::spec::lfm2_forward_program_with_experts;
 
     /// The real `gemma4:e2b-it-qat` checkpoint's own measured
     /// `sliding_window_pattern`/`shared_kv_layers`/`block_count` (header
-    /// dump, 2026-09-20) -- every other field is a plausible dense-E2B
+    /// dump, 2026-09-20) -- every other key is a plausible dense-E2B
     /// value uninvolved in the attn_k/attn_k_norm/attn_v declare-vs-bind
-    /// gate this test exercises.
-    fn e2b_shaped_architecture() -> Architecture {
-        let sliding_window_pattern: Vec<bool> =
-            (0..35u32).map(|index| (index + 1) % 5 != 0).collect();
-        let mut feed_forward_by_layer = alloc::vec![6144u32; 15];
-        feed_forward_by_layer.extend(alloc::vec![12288u32; 20]);
-        Architecture {
-            vocab: 1,
-            embedding: 1536,
-            block_count: 35,
-            feed_forward: 6144,
-            feed_forward_by_layer,
-            expert_feed_forward: 0,
-            expert_count: 0,
-            expert_used_count: 0,
-            head_count: 8,
-            kv_heads_by_layer: alloc::vec![1; 35],
-            rms_epsilon: 1e-6,
-            key_length: 512,
-            value_length: 512,
-            sliding_window: 512,
-            key_length_swa: 256,
-            value_length_swa: 256,
-            sliding_window_pattern,
-            shared_kv_layers: 20,
-            rope_freq_base: 1_000_000.0,
-            rope_freq_base_swa: 10_000.0,
-            rope_dimension_count: 512,
-            rope_dimension_count_swa: 256,
-            final_logit_softcapping: 30.0,
-            ple_dim: 256,
-        }
+    /// gate this test exercises. Written by the real GGUF encoder and
+    /// parsed back by the real decoder; `token_embd.weight` is a 1-row
+    /// table so vocab resolves.
+    fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, Architecture) {
+        let mut feed_forward = alloc::vec![6144u32; 15];
+        feed_forward.extend(alloc::vec![12288u32; 20]);
+        let u32_array = |values: Vec<u32>| MetadataValue::Array(MetadataArray::U32(values));
+        let metadata = alloc::vec![
+            ("general.architecture", MetadataValue::String("gemma4".into())),
+            ("gemma4.embedding_length", MetadataValue::U32(1536)),
+            ("gemma4.block_count", MetadataValue::U32(35)),
+            ("gemma4.attention.head_count", MetadataValue::U32(8)),
+            ("gemma4.attention.head_count_kv", u32_array(alloc::vec![1; 35])),
+            (
+                "gemma4.attention.sliding_window_pattern",
+                MetadataValue::Array(MetadataArray::Bool((0..35u32).map(|index| (index + 1) % 5 != 0).collect())),
+            ),
+            ("gemma4.attention.shared_kv_layers", MetadataValue::U32(shared_kv_layers)),
+            ("gemma4.attention.key_length", MetadataValue::U32(512)),
+            ("gemma4.attention.value_length", MetadataValue::U32(512)),
+            ("gemma4.attention.key_length_swa", MetadataValue::U32(256)),
+            ("gemma4.attention.value_length_swa", MetadataValue::U32(256)),
+            ("gemma4.attention.sliding_window", MetadataValue::U32(512)),
+            ("gemma4.attention.layer_norm_rms_epsilon", MetadataValue::F32(1e-6)),
+            ("gemma4.feed_forward_length", u32_array(feed_forward)),
+            ("gemma4.rope.freq_base", MetadataValue::F32(1_000_000.0)),
+            ("gemma4.rope.freq_base_swa", MetadataValue::F32(10_000.0)),
+            ("gemma4.rope.dimension_count", MetadataValue::U32(512)),
+            ("gemma4.rope.dimension_count_swa", MetadataValue::U32(256)),
+            ("gemma4.final_logit_softcapping", MetadataValue::F32(30.0)),
+            ("gemma4.embedding_length_per_layer_input", MetadataValue::U32(256)),
+        ];
+        let table = [0u8; 1536 * 4];
+        let model = GgufModel {
+            version: 3,
+            metadata: metadata
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+            tensors: alloc::vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: ArrayVec::from_iter([1536u64, 1]),
+                ggml_type: GgmlType::F32,
+                data: &table,
+            }],
+        };
+        let bytes = write_complete(&model).expect("the e2b-shaped model encodes");
+        let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+        let architecture = from_metadata(&parsed).expect("gemma4 hparams parse from the e2b-shaped header");
+        (parsed, architecture)
     }
 
     /// The name set [`bind_gemma4_weights`]'s own per-layer gates would
@@ -1408,33 +1042,18 @@ mod declared_leaves_match_bound_leaves_tests {
             .collect()
     }
 
-    /// The name set the ACTUAL forward program (`lfm2_forward_program_with_experts`
-    /// over `gemma4_layer_schedule`'s own output, the exact call
-    /// `Gemma4Arch::bind` makes) declares as an `Input` leaf for `suffix`.
+    /// The name set the ACTUAL forward program `Gemma4Arch::bind` lowers --
+    /// `gemma4_descriptor_from_gguf`'s own output, built through the
+    /// cacheless engine so the check is independent of which
+    /// `CacheStrategy` bind picks -- declares as an `Input` leaf for `suffix`.
     fn declared_leaf_names(
-        architecture: &Architecture,
+        parsed: &ParsedGguf,
         suffix: &str,
     ) -> alloc::collections::BTreeSet<String> {
-        let schedule = gemma4_layer_schedule(architecture);
-        let (program, _logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.expert_feed_forward,
-            architecture.head_count,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            architecture.block_count,
-            0,
-            &schedule,
-            Some(EmbeddingScale::Sqrt),
-            (architecture.final_logit_softcapping > 0.0)
-                .then_some(architecture.final_logit_softcapping),
-            true,
-            (architecture.ple_dim > 0).then_some(architecture.ple_dim),
-        )
-        .expect("gemma4 e2b-shaped forward program lowers");
+        let mut descriptor = gemma4_descriptor_from_gguf(parsed, false)
+            .expect("the e2b-shaped header carries every key the descriptor reads");
+        descriptor.cache_strategy = CacheStrategy::Cacheless;
+        let (program, ..) = build_forward(&descriptor, true).expect("gemma4 e2b-shaped forward program lowers");
 
         program
             .iter()
@@ -1450,8 +1069,8 @@ mod declared_leaves_match_bound_leaves_tests {
 
     #[test]
     fn e2b_declared_attn_v_leaves_equal_bound_attn_v_leaves() {
-        let architecture = e2b_shaped_architecture();
-        let declared = declared_leaf_names(&architecture, "attn_v.weight");
+        let (parsed, architecture) = e2b_shaped(20);
+        let declared = declared_leaf_names(&parsed, "attn_v.weight");
         let bound = bound_leaf_names(&architecture, "attn_v.weight");
         assert_eq!(
             declared, bound,
@@ -1472,9 +1091,9 @@ mod declared_leaves_match_bound_leaves_tests {
 
     #[test]
     fn e2b_declared_attn_k_and_attn_k_norm_leaves_equal_bound_leaves() {
-        let architecture = e2b_shaped_architecture();
+        let (parsed, architecture) = e2b_shaped(20);
         for suffix in ["attn_k.weight", "attn_k_norm.weight"] {
-            let declared = declared_leaf_names(&architecture, suffix);
+            let declared = declared_leaf_names(&parsed, suffix);
             let bound = bound_leaf_names(&architecture, suffix);
             assert_eq!(declared, bound, "{suffix} declare/bind set mismatch");
         }
@@ -1485,9 +1104,8 @@ mod declared_leaves_match_bound_leaves_tests {
     /// E2B fix above did not widen MoE's own set.
     #[test]
     fn moe_declared_attn_v_leaves_stay_gated_on_is_sliding_only() {
-        let mut architecture = e2b_shaped_architecture();
-        architecture.shared_kv_layers = 0;
-        let declared = declared_leaf_names(&architecture, "attn_v.weight");
+        let (parsed, architecture) = e2b_shaped(0);
+        let declared = declared_leaf_names(&parsed, "attn_v.weight");
         let bound = bound_leaf_names(&architecture, "attn_v.weight");
         assert_eq!(declared, bound);
         for full_layer in [4, 9, 14] {
@@ -1497,6 +1115,58 @@ mod declared_leaves_match_bound_leaves_tests {
                 "MoE full layer {name} must stay SharedWithKey (no attn_v.weight)"
             );
         }
+    }
+
+    /// Hand-derived from ollama's `mlxrunner/model/gemma4/gemma4.go`
+    /// `TextConfig` KV-sharing-map build (`gemma4.go:590-611`: a shared layer
+    /// reuses "the last non-shared layer of the same type") for
+    /// `block_count=35`, `shared_kv_layers=20` (`first_shared_idx=15`): the 16
+    /// sliding shared layers all reuse own-KV layer 13, the 4 full shared
+    /// layers (19, 24, 29, 34) reuse layer 14 -- exactly 20 pairs, matching
+    /// the real header's `attention.shared_kv_layers=20`. Read off the
+    /// production descriptor, not a private helper.
+    #[test]
+    fn gemma4_e2b_shared_kv_reuse_map_matches_hand_derived_table() {
+        let (parsed, _) = e2b_shaped(20);
+        let descriptor = gemma4_descriptor_from_gguf(&parsed, false)
+            .expect("the e2b-shaped header carries every key the descriptor reads");
+        let shared_sources: [(usize, u32); 20] = [
+            (15, 13), (16, 13), (17, 13), (18, 13), (19, 14),
+            (20, 13), (21, 13), (22, 13), (23, 13), (24, 14),
+            (25, 13), (26, 13), (27, 13), (28, 13), (29, 14),
+            (30, 13), (31, 13), (32, 13), (33, 13), (34, 14),
+        ];
+
+        for (layer, source) in shared_sources {
+            let attention = descriptor.layers[layer].attention;
+            assert_eq!(
+                attention.key_source_kind,
+                KeySourceKind::SharedFromLayer(source),
+                "layer {layer} expected to read the K of layer {source}"
+            );
+        }
+        assert!(
+            descriptor.layers[..15]
+                .iter()
+                .all(|entry| entry.attention.key_source_kind == KeySourceKind::ProjectedK),
+            "own-KV layers 0..15 project their own K"
+        );
+    }
+
+    /// The header's pattern must itself imply exactly 7 full-attention
+    /// layers over 35 blocks (`35 / 5`), independent of the reuse-map
+    /// assertion above, so a broken pattern cannot pass it by accident.
+    #[test]
+    fn gemma4_e2b_header_pattern_has_seven_full_attention_layers_over_thirty_five_blocks() {
+        let (parsed, _) = e2b_shaped(20);
+        let descriptor = gemma4_descriptor_from_gguf(&parsed, false)
+            .expect("the e2b-shaped header carries every key the descriptor reads");
+        let full_layers = descriptor
+            .layers
+            .iter()
+            .filter(|entry| entry.attention.mask_window.is_none())
+            .count();
+        assert_eq!(full_layers, 7);
     }
 }
 

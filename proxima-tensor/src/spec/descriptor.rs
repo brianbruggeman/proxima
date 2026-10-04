@@ -43,7 +43,7 @@ pub enum CacheStrategy {
 /// `logit_softcap`), one [`LayerSchedule`] per block, and which cache engine
 /// to build with. `layers` reuses [`LayerSchedule`] verbatim -- it already
 /// composes [`LayerKind`], [`LayerAttentionConfig`], and [`LayerFfnConfig`]
-/// (`proxima-model-interop::gemma4::bind::gemma4_layer_schedule` builds
+/// (`proxima-model-interop::gemma4_descriptor_from_gguf` builds
 /// exactly this shape today, by hand, at bind time), so this struct does not
 /// re-mint a per-layer type. Genuinely new: no existing type bundles a
 /// model's full hyperparameter set with its per-layer schedule and a
@@ -123,233 +123,21 @@ pub struct ModelDescriptor {
     pub fused_qkv_reduce: bool,
 }
 
-/// Real gemma4 26B-A4B header values, proven by the `#[ignore]`d
-/// `builtin_registry_routes_real_gemma4_header_with_exact_tensor_directory`
-/// (`proxima-model-interop/tests/real_gemma4_registry_probe.rs`), which
-/// asserts each of these against the real checkpoint's own GGUF metadata.
-const GEMMA4_BLOCK_COUNT: u32 = 30;
-const GEMMA4_EXPERT_COUNT: u32 = 128;
-const GEMMA4_EXPERT_USED_COUNT: u32 = 8;
-const GEMMA4_EMBEDDING: u32 = 2816;
-const GEMMA4_LOGIT_SOFTCAP: f32 = 30.0;
-const GEMMA4_FEED_FORWARD: u32 = 2112;
-const GEMMA4_EXPERT_FEED_FORWARD: u32 = 704;
-const GEMMA4_QUERY_HEADS: u32 = 16;
-/// `Gemma4Arch::bind`'s own cacheless `lfm2_forward_program_with_experts`
-/// call site (`proxima-model-interop/src/gemma4/bind.rs`) passes `0` here
-/// too, and its `gemma4-kv-cache` sibling now builds its program from this
-/// same constant via `gemma4_descriptor` -- consulted only by a
-/// `LayerKind::ShortConv` entry, and gemma4 has none.
-const GEMMA4_L_CACHE: u32 = 0;
-/// Full-attention head dim (`architecture.key_length`); sliding layers use
-/// [`GEMMA4_HEAD_DIM_SWA`] instead.
-const GEMMA4_HEAD_DIM_FULL: u32 = 512;
-const GEMMA4_HEAD_DIM_SWA: u32 = 256;
-const GEMMA4_KV_HEADS_FULL: u32 = 2;
-const GEMMA4_KV_HEADS_SWA: u32 = 8;
-const GEMMA4_SLIDING_WINDOW: u32 = 1024;
-/// The real header marks every 6th layer (0-indexed 5, 11, 17, 23, 29) full
-/// attention, every other layer sliding -- `(layer + 1).is_multiple_of(6)`
-/// mirrors the real registry probe's own `expected_sliding_window_pattern`.
-const GEMMA4_FULL_LAYER_PERIOD: u32 = 6;
-/// `Gemma4Arch::bind`'s own two call sites into
-/// `lfm2_forward_program_with_experts`/`lfm2_two_range_cached_forward_program_with_experts`
-/// (`proxima-model-interop/src/gemma4/bind.rs`) both pass `0` here: every
-/// gemma4 layer runs the parallel dense+MoE combination
-/// ([`FfnCombination::ParallelDenseMoe`]), so there is no leading run of
-/// dense-only blocks to select past.
-const GEMMA4_LEADING_DENSE_BLOCK_COUNT: u32 = 0;
-
-/// Builds the real gemma4 26B-A4B [`ModelDescriptor`] -- SWA/full dual-base
-/// RoPE, unscaled attention score, value-norm, shared-KV on full layers,
-/// parallel dense+MoE FFN, final-logit softcap 30. Every field this
-/// function sets mirrors
-/// `proxima-model-interop::gemma4::bind::gemma4_layer_schedule` node-for-node
-/// (same [`LayerAttentionConfig`]/[`LayerFfnConfig`] values, same
-/// sliding-vs-full split), just built here as plain data instead of at GGUF
-/// bind time. `vocab` is a parameter rather than a baked-in constant because
-/// it is genuinely per-checkpoint data (`hparams::Architecture::vocab` reads
-/// it from the `token_embd.weight` tensor's own row count, not from a fixed
-/// architecture metadata field) -- every other value here is architecture,
-/// not tokenizer, and is proven fixed by the real registry probe cited on
-/// each constant above.
-#[must_use]
-pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
-    let ffn = LayerFfnConfig {
-        post_attention_norm: true,
-        combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
-            dense_post_norm: true,
-            routed_post_norm: true,
-            combined_post_norm: true,
-            routed_pre_norm: true,
-            router_scale: true,
-            expert_output_scale: true,
-        }),
-        output_scale: true,
-        routed_gating: ExpertGatingFunc::Softmax,
-        routed_expert_bias: false,
-        dense_feed_forward: None,
-        exclusive_dense_post_norm: false,
-        activation: Activation::GeluTanh,
-        ple: false,
-    };
-
-    let layers: Vec<LayerSchedule> = (0..GEMMA4_BLOCK_COUNT)
-        .map(|layer| {
-            let is_full = (layer + 1).is_multiple_of(GEMMA4_FULL_LAYER_PERIOD);
-            let attention = if is_full {
-                LayerAttentionConfig {
-                    head_dim: GEMMA4_HEAD_DIM_FULL,
-                    kv_heads: GEMMA4_KV_HEADS_FULL,
-                    mask_window: None,
-                    value_source_kind: ValueSourceKind::SharedWithKey,
-                    key_source_kind: KeySourceKind::ProjectedK,
-                    rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin",
-                    },
-                    rope_pairing: RopePairing::SplitHalf {
-                        pairs: GEMMA4_HEAD_DIM_FULL / 2,
-                    },
-                    score_scale: AttentionScoreScale::Unscaled,
-                    value_norm: true,
-                }
-            } else {
-                LayerAttentionConfig {
-                    head_dim: GEMMA4_HEAD_DIM_SWA,
-                    kv_heads: GEMMA4_KV_HEADS_SWA,
-                    mask_window: Some(GEMMA4_SLIDING_WINDOW),
-                    value_source_kind: ValueSourceKind::ProjectedV,
-                    key_source_kind: KeySourceKind::ProjectedK,
-                    rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa",
-                    },
-                    rope_pairing: RopePairing::SplitHalf {
-                        pairs: GEMMA4_HEAD_DIM_SWA / 2,
-                    },
-                    score_scale: AttentionScoreScale::Unscaled,
-                    value_norm: true,
-                }
-            };
-            LayerSchedule {
-                kind: LayerKind::Attention,
-                attention,
-                ffn,
-            }
-        })
-        .collect();
-
-    ModelDescriptor {
-        vocab,
-        embedding: GEMMA4_EMBEDDING,
-        feed_forward: GEMMA4_FEED_FORWARD,
-        expert_feed_forward: GEMMA4_EXPERT_FEED_FORWARD,
-        query_heads: GEMMA4_QUERY_HEADS,
-        block_count: GEMMA4_BLOCK_COUNT,
-        expert_count: GEMMA4_EXPERT_COUNT,
-        expert_used_count: GEMMA4_EXPERT_USED_COUNT,
-        leading_dense_block_count: GEMMA4_LEADING_DENSE_BLOCK_COUNT,
-        l_cache: GEMMA4_L_CACHE,
-        embedding_scale: Some(EmbeddingScale::Sqrt),
-        logit_softcap: Some(GEMMA4_LOGIT_SOFTCAP),
-        layers,
-        cache_strategy: CacheStrategy::Cacheless,
-        // 26B-A4B carries no PLE tensors (`GEMMA4_*` constants' own doc:
-        // this function bakes only the 26B header shape) -- a real E2B/E4B
-        // build routes through `proxima-model-interop`'s own
-        // architecture-derived descriptor instead of this function.
-        ple_dim: None,
-        sliding_kv_ring: false,
-        // inert: neither `Cacheless` nor `TwoRange` ever reads these four
-        // fields (`ModelDescriptor::qk_norm`'s own doc) -- gemma4 has no
-        // concept of any of them.
-        qk_norm: false,
-        qkv_biases: false,
-        paired_gate_up_reduce: false,
-        fused_qkv_reduce: false,
-    }
-}
-
-/// Real openchat-3.5-1210 / Mistral-7B-v0.1 header shape, proven by
-/// `single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape`
-/// (`proxima-tensor/src/bind/tests.rs`), which binds this exact shape
-/// against the real `openchat-3.5-1210.Q4_K_S.gguf` checkpoint.
-const MISTRAL_EMBEDDING: u32 = 4096;
-const MISTRAL_FEED_FORWARD: u32 = 14336;
-const MISTRAL_QUERY_HEADS: u32 = 32;
-const MISTRAL_KV_HEADS: u32 = 8;
-const MISTRAL_HEAD_DIM: u32 = 128;
-const MISTRAL_BLOCK_COUNT: u32 = 32;
-/// `DenseArch::bind`'s own call site
-/// (`proxima-model-interop/src/dense.rs`) reads `expert_count`/
-/// `expert_used_count` straight off the checkpoint's own metadata
-/// (`architecture.expert_count`/`expert_used_count`) -- openchat-3.5-1210
-/// has no `ffn_gate_inp.weight` tensor, so both read `0` there, selecting
-/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s dense
-/// branch.
-const MISTRAL_EXPERT_COUNT: u32 = 0;
-const MISTRAL_EXPERT_USED_COUNT: u32 = 0;
-
-/// Builds the real openchat-3.5-1210 / Mistral-7B-v0.1 dense [`ModelDescriptor`]
-/// -- interleaved RoPE off one shared table, `1/sqrt(head_dim)` attention
-/// score scale, plain projected-V (no value-norm, no shared-KV), exclusive
-/// SwiGLU FFN, no embedding scale, no logit softcap. Every field mirrors
-/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
-/// builder (`proxima-tensor/src/spec/attention_forward.rs`) node-for-node --
-/// see that function's call site in `DenseArch::bind`
-/// (`proxima-model-interop/src/dense.rs`) for the real argument set this
-/// descriptor's constants were read off. `vocab` stays a parameter, not a
-/// baked-in constant, for the same reason [`gemma4_descriptor`]'s own doc
-/// gives: it is per-checkpoint tokenizer data, not architecture.
-///
-/// [`ModelDescriptor::cache_strategy`] is [`CacheStrategy::SingleRange`] --
-/// see that variant's own doc for why its [`build_forward`] arm dispatches
-/// straight to `mistral_cached_forward_program_with_experts_and_layer_taps`
-/// rather than through the schedule-driven
-/// [`lfm2_single_range_cached_forward_program_with_experts`] (that engine's
-/// own unconditional per-head QK-norm and `cached_len`-aware merged mask
-/// are not openchat-3.5-1210's own program, node for node -- see
-/// `build_forward_matches_direct_builder_call_at_real_mistral_dims`'s own
-/// doc, `proxima-tensor/src/spec/tests.rs`, for the byte-identical proof
-/// this field's value makes true).
-///
-/// `expert_feed_forward` reuses `MISTRAL_FEED_FORWARD` rather than a
-/// separate constant: unlike gemma4's split dense/routed widths,
-/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own MoE
-/// branch (`append_mistral_cached_moe_layer`,
-/// `proxima-tensor/src/spec/single_range_moe_cached.rs`) sizes
-/// `ffn_gate_exps.weight`/`ffn_up_exps.weight`/`ffn_down_exps.weight` off
-/// the SAME `feed_forward` parameter the dense branch uses -- one width,
-/// not two. `leading_dense_block_count` is set to the full
-/// `MISTRAL_BLOCK_COUNT` ("every layer is dense") rather than `0`
-/// because openchat-3.5-1210 itself is dense (`expert_count == 0`); this
-/// builder picks dense-vs-MoE for the WHOLE checkpoint, not per layer, so
-/// this field is likewise inert for mistral until a future slice wires it.
-/// `routed_gating`/`routed_expert_bias` on [`LayerFfnConfig`] mirror
-/// `append_mistral_cached_moe_layer`'s own hardcoded router instead
-/// (`ExpertGatingFunc::Softmax`, no bias, `single_range_moe_cached.rs`
-/// lines 1428-1430) -- the SAME builder this dense checkpoint's program
-/// comes from runs that router whenever a Mixtral-family checkpoint's
-/// `expert_count > 0`, so this reflects real (if here unexercised, since
-/// openchat-3.5-1210 itself never takes that branch) behaviour rather than
-/// [`LayerFfnConfig::exclusive`]'s own unrelated LFM2 default
-/// (`ExpertGatingFunc::Sigmoid`, bias `true`).
-/// [`mistral_descriptor`]'s own shape, but every field [`DenseArch::bind`]
-/// already reads off a real checkpoint's own metadata
-/// (`ModelArchitecture`'s `embedding`/`feed_forward`/`query_heads`/
-/// `kv_heads`/`head_dim`/`block_count`/`expert_count`/`expert_used_count`)
-/// stays a parameter here rather than a `MISTRAL_*` constant --
-/// `DenseArch` is the un-registered-by-name fallback for `llama`, `mistral`,
-/// `qwen3`, `mixtral`, and any other architecture this crate has no
-/// dedicated hybrid binder for (`crate::dense`'s own module doc), so a
-/// SINGLE proven checkpoint's dims (openchat-3.5-1210's, `mistral_descriptor`
-/// below) are only ever right for that one checkpoint -- a Mixtral header's
-/// `expert_count > 0`, or any header with a different `head_dim`/
-/// `block_count`, would silently mis-shape the whole program if `DenseArch`
-/// built its descriptor from those constants instead of this function.
-/// [`mistral_descriptor`] itself now delegates here with its own
-/// `MISTRAL_*` constants, so the two never drift against each other.
+/// Builds the single-range dense [`ModelDescriptor`] [`DenseArch::bind`]
+/// (`proxima-model-interop/src/dense.rs`) hands to [`build_forward`]:
+/// interleaved or caller-chosen RoPE off one shared table, `1/sqrt(head_dim)`
+/// attention score scale, plain projected-V (no value-norm, no shared-KV),
+/// exclusive SwiGLU FFN, no embedding scale, no logit softcap.
+/// [`CacheStrategy::SingleRange`] makes [`build_forward`] dispatch straight to
+/// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
+/// (see that variant's own doc). Every dimension is a parameter because
+/// `DenseArch` serves llama, mistral, qwen2, qwen3 and mixtral headers alike;
+/// `expert_feed_forward` is `feed_forward` because that builder sizes the
+/// routed branch off the same width as the dense one, and
+/// `leading_dense_block_count` is `block_count` because the dense-vs-MoE
+/// choice is whole-checkpoint (`expert_count`), not per layer.
+/// `rope_pairing` is caller-supplied because Qwen2 is split-half with no
+/// QK-norm tensors, so `qk_norm` alone cannot pick it.
 ///
 /// [`DenseArch::bind`]: ../../../proxima_model_interop/dense/struct.DenseArch.html
 #[expect(clippy::too_many_arguments, reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's SingleRange arm, which reads every one of these fields straight back off the descriptor it builds")]
@@ -437,33 +225,6 @@ pub fn mistral_descriptor_from_shape(
         paired_gate_up_reduce,
         fused_qkv_reduce,
     }
-}
-
-#[must_use]
-pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
-    mistral_descriptor_from_shape(
-        vocab,
-        MISTRAL_EMBEDDING,
-        MISTRAL_FEED_FORWARD,
-        MISTRAL_QUERY_HEADS,
-        MISTRAL_KV_HEADS,
-        MISTRAL_HEAD_DIM,
-        MISTRAL_BLOCK_COUNT,
-        MISTRAL_EXPERT_COUNT,
-        MISTRAL_EXPERT_USED_COUNT,
-        // openchat-3.5-1210's own real header: no per-head QK-norm weights,
-        // no bias tensors, and `DenseArch::bind`'s own call site
-        // (`proxima-model-interop/src/dense.rs`) always passes `false` for
-        // both reduce-fusion diagnostics -- see slice 1's own real-shape
-        // citation on `MISTRAL_HEAD_DIM` above.
-        false,
-        false,
-        false,
-        false,
-        // no QK-norm means the old `qk_norm`-inferred default -- interleaved,
-        // never Qwen2's split-half.
-        RopePairing::Interleaved,
-    )
 }
 
 /// [`build_forward`]'s own return shape: the lowered program, its `logits`
@@ -662,117 +423,6 @@ pub fn build_forward(
                 Some(roots.hidden),
                 Vec::new(),
             ))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Read from `token_embd.weight`'s own row count at bind time on a real
-    /// checkpoint (`hparams::Architecture::vocab`) -- any value proves this
-    /// shape test, since nothing here reads `vocab` back out.
-    const TEST_VOCAB: u32 = 32;
-
-    #[test]
-    fn gemma4_descriptor_matches_real_checkpoint_shape() {
-        let descriptor = gemma4_descriptor(TEST_VOCAB);
-
-        assert_eq!(descriptor.block_count, 30);
-        assert_eq!(descriptor.layers.len(), 30);
-        assert_eq!(descriptor.expert_count, 128);
-        assert_eq!(descriptor.expert_used_count, 8);
-        assert_eq!(descriptor.embedding, 2816);
-        assert_eq!(descriptor.leading_dense_block_count, 0);
-        assert_eq!(descriptor.logit_softcap, Some(30.0));
-        assert_eq!(descriptor.embedding_scale, Some(EmbeddingScale::Sqrt));
-        assert_eq!(descriptor.cache_strategy, CacheStrategy::Cacheless);
-
-        let full_layers: Vec<u32> = descriptor
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(_, layer)| layer.attention.mask_window.is_none())
-            .map(|(index, _)| index as u32)
-            .collect();
-        assert_eq!(full_layers, alloc::vec![5, 11, 17, 23, 29]);
-
-        for (index, layer) in descriptor.layers.iter().enumerate() {
-            assert_eq!(layer.kind, LayerKind::Attention);
-            match layer.ffn.combination {
-                FfnCombination::ParallelDenseMoe(_) => {}
-                FfnCombination::Exclusive => {
-                    panic!("layer {index} must run parallel dense+MoE FFN")
-                }
-            }
-        }
-
-        let sliding_kv_heads: Vec<u32> = descriptor
-            .layers
-            .iter()
-            .filter(|layer| layer.attention.mask_window.is_some())
-            .map(|layer| layer.attention.kv_heads)
-            .collect();
-        assert!(
-            sliding_kv_heads.iter().all(|&kv_heads| kv_heads == 8),
-            "every sliding layer uses 8 kv-heads: {sliding_kv_heads:?}"
-        );
-
-        let full_kv_heads: Vec<u32> = descriptor
-            .layers
-            .iter()
-            .filter(|layer| layer.attention.mask_window.is_none())
-            .map(|layer| layer.attention.kv_heads)
-            .collect();
-        assert!(
-            full_kv_heads.iter().all(|&kv_heads| kv_heads == 2),
-            "every full layer uses 2 kv-heads: {full_kv_heads:?}"
-        );
-    }
-
-    #[test]
-    fn mistral_descriptor_matches_real_openchat_checkpoint_shape() {
-        let descriptor = mistral_descriptor(TEST_VOCAB);
-
-        assert_eq!(descriptor.block_count, 32);
-        assert_eq!(descriptor.layers.len(), 32);
-        assert_eq!(descriptor.embedding, 4096);
-        assert_eq!(descriptor.feed_forward, 14336);
-        assert_eq!(descriptor.expert_feed_forward, 14336);
-        assert_eq!(descriptor.query_heads, 32);
-        assert_eq!(descriptor.expert_count, 0);
-        assert_eq!(descriptor.expert_used_count, 0);
-        assert_eq!(descriptor.leading_dense_block_count, 32);
-        assert_eq!(descriptor.l_cache, 0);
-        assert_eq!(descriptor.embedding_scale, None);
-        assert_eq!(descriptor.logit_softcap, None);
-        assert_eq!(descriptor.cache_strategy, CacheStrategy::SingleRange);
-        assert!(!descriptor.qk_norm);
-        assert!(!descriptor.qkv_biases);
-        assert!(!descriptor.paired_gate_up_reduce);
-        assert!(!descriptor.fused_qkv_reduce);
-
-        for layer in &descriptor.layers {
-            assert_eq!(layer.kind, LayerKind::Attention);
-            assert_eq!(layer.attention.head_dim, 128);
-            assert_eq!(layer.attention.kv_heads, 8);
-            assert_eq!(layer.attention.mask_window, None);
-            assert_eq!(layer.attention.value_source_kind, ValueSourceKind::ProjectedV);
-            assert_eq!(layer.attention.rope_table.cos_name, "rope_cos");
-            assert_eq!(layer.attention.rope_table.sin_name, "rope_sin");
-            assert_eq!(layer.attention.rope_pairing, RopePairing::Interleaved);
-            assert_eq!(
-                layer.attention.score_scale,
-                AttentionScoreScale::InverseSqrtQueryPreAttnScalar(128)
-            );
-            assert!(!layer.attention.value_norm);
-            assert_eq!(layer.ffn.combination, FfnCombination::Exclusive);
-            assert_eq!(layer.ffn.activation, Activation::Silu);
-            assert!(!layer.ffn.post_attention_norm);
-            assert!(!layer.ffn.output_scale);
-            assert_eq!(layer.ffn.routed_gating, ExpertGatingFunc::Softmax);
-            assert!(!layer.ffn.routed_expert_bias);
         }
     }
 }

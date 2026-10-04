@@ -47,7 +47,7 @@
 //!    the REAL `lfm2_forward_program_with_experts` engine
 //!    (`proxima-tensor/src/spec/attention_forward.rs:1719`, the same
 //!    builder `Gemma4Arch::bind` calls, matching
-//!    `gemma4::bind::gemma4_layer_schedule`'s own per-layer config
+//!    `gemma4_descriptor_from_gguf`'s own per-layer config
 //!    verbatim, real dims), `VOCAB` shrunk to keep the LM-head tail cheap
 //!    (component 2 already covers that cost in isolation) — a SLIDING
 //!    layer (the majority shape: 28 of 35 real E2B layers), `ple: false`
@@ -309,7 +309,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
 }
 
 /// Real per-layer config for a SLIDING gemma4-E2B layer --
-/// `gemma4::bind::gemma4_layer_schedule`'s own values at this checkpoint's
+/// `gemma4_descriptor_from_gguf`'s own values at this checkpoint's
 /// real dims (`ple: false` is this bench's one documented deviation, see
 /// the module doc's Component 3+4 section).
 #[cfg(all(feature = "metal", target_os = "macos"))]
