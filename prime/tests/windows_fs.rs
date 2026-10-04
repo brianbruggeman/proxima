@@ -1,4 +1,6 @@
 #![cfg(all(feature = "std", feature = "runtime-prime-bgpool"))]
+// expect() with a message is the test-edge failure report; production code stays denied
+#![allow(clippy::expect_used)]
 
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
