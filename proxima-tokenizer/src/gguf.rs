@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn unmapped_pre_value_is_an_error_carrying_the_value() {
-        for pre in ["deepseek-coder", "stablelm2", "qwen3-unreleased"] {
+        for pre in ["deepseek-coder", "jina-v1-en", "hunyuan-dense", "qwen3-unreleased"] {
             let error = vocab_from_metadata(&byte_level_metadata(Some(pre)))
                 .expect_err("an unmapped pre value is rejected");
             assert_eq!(

@@ -21,53 +21,87 @@
 
 use alloc::vec::Vec;
 
-use crate::pretokenize_default::default_spans;
+use crate::pretokenize_passes::{
+    DEFAULT_PASSES, DIGIT_ISOLATED_GPT2_PASSES, FALCON_PASSES, GPT2_PASSES, Pass, run_passes,
+};
 use crate::unicode_tables::{CLASS_RANGES, LETTER, MARK, NUMBER, PUNCT, WHITESPACE};
 
 /// Which pre-split rule a vocab's `tokenizer.ggml.pre` selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreType {
-    /// `LLAMA_VOCAB_PRE_TYPE_LLAMA3`: digit runs of up to three.
+    /// `LLAMA_VOCAB_PRE_TYPE_LLAMA3`: digit runs of up to three. The same
+    /// regex string serves dbrx, smaug-bpe and chatglm4.
     Llama3,
-    /// `LLAMA_VOCAB_PRE_TYPE_QWEN2`: one digit per pretoken.
+    /// `LLAMA_VOCAB_PRE_TYPE_QWEN2`: one digit per pretoken. The same regex
+    /// string serves stablelm2, hunyuan, solar-open and grok-2.
     Qwen2,
     /// `LLAMA_VOCAB_PRE_TYPE_QWEN35`: one digit per pretoken, and `\p{M}`
     /// joins `\p{L}` in words.
     Qwen35,
     /// `LLAMA_VOCAB_PRE_TYPE_DEFAULT`: four successive splits, see
-    /// [`crate::pretokenize_default`]. What llama.cpp uses for `tokenizer.ggml.pre =
+    /// [`crate::pretokenize_passes`]. What llama.cpp uses for `tokenizer.ggml.pre =
     /// "default"` and, with a warning, when the key is missing.
     Default,
+    /// `LLAMA_VOCAB_PRE_TYPE_GPT2`: the single gpt2 word regex (gpt-2, mpt,
+    /// olmo, jais, trillion, granite-docling and the other names mapped to it).
+    Gpt2,
+    /// `LLAMA_VOCAB_PRE_TYPE_STARCODER`: `\p{N}` isolated, then the gpt2 word
+    /// regex (starcoder, refact, command-r, smollm, codeshell, exaone,
+    /// minerva-7b, mellum2).
+    DigitIsolatedGpt2,
+    /// `LLAMA_VOCAB_PRE_TYPE_FALCON`: punctuation runs including the backtick,
+    /// the gpt2 word regex, then ASCII digit triples.
+    Falcon,
 }
 
 impl PreType {
     /// Maps a `tokenizer.ggml.pre` value exactly as llama.cpp's
-    /// `llama_vocab::impl::load` does (`llama-vocab.cpp:2168-2271`), for the
+    /// `llama_vocab::impl::load` does (`llama-vocab.cpp:2168-2425`), for the
     /// pre types whose rule this scanner expresses. `None` for every other
-    /// value, including ones llama.cpp itself accepts.
+    /// value, including ones llama.cpp itself accepts. Names whose branch also
+    /// sets an encode-affecting flag this crate does not model (`add_sep` on
+    /// jina-v1-en, jina-v2-code and roberta-bpe) are not mapped.
     #[must_use]
     pub fn from_gguf_name(name: &str) -> Option<Self> {
         match name {
             "llama3" | "llama-v3" | "llama-bpe" | "falcon3" | "falcon-h1" | "pixtral"
-            | "midm-2.0" | "lfm2" | "jina-v5-nano" => Some(Self::Llama3),
-            "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2" | "megrez" => Some(Self::Qwen2),
+            | "midm-2.0" | "lfm2" | "jina-v5-nano" | "dbrx" | "smaug-bpe" | "glm4"
+            | "chatglm-bpe" => Some(Self::Llama3),
+            "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2" | "megrez" | "stablelm2"
+            | "hunyuan" | "solar-open" | "grok-2" => Some(Self::Qwen2),
             "qwen35" => Some(Self::Qwen35),
             "default" => Some(Self::Default),
+            "gpt-2" | "phi-2" | "jina-es" | "jina-de" | "gigachat" | "jina-v2-es"
+            | "jina-v2-de" | "a.x-4.0" | "mellum" | "modern-bert" | "exaone4" | "mpt"
+            | "olmo" | "jais" | "trillion" | "granite-docling" => Some(Self::Gpt2),
+            "starcoder" | "refact" | "command-r" | "smollm" | "codeshell" | "exaone"
+            | "minerva-7b" | "mellum2" => Some(Self::DigitIsolatedGpt2),
+            "falcon" => Some(Self::Falcon),
             _ => None,
+        }
+    }
+
+    fn passes(self) -> Option<&'static [Pass]> {
+        match self {
+            Self::Default => Some(&DEFAULT_PASSES),
+            Self::Gpt2 => Some(&GPT2_PASSES),
+            Self::DigitIsolatedGpt2 => Some(&DIGIT_ISOLATED_GPT2_PASSES),
+            Self::Falcon => Some(&FALCON_PASSES),
+            Self::Llama3 | Self::Qwen2 | Self::Qwen35 => None,
         }
     }
 
     fn digit_run_cap(self) -> usize {
         match self {
-            Self::Llama3 | Self::Default => 3,
             Self::Qwen2 | Self::Qwen35 => 1,
+            _ => 3,
         }
     }
 
     fn is_word(self, character: char) -> bool {
         match self {
-            Self::Llama3 | Self::Qwen2 | Self::Default => is_letter(character),
             Self::Qwen35 => is_letter(character) || is_mark(character),
+            _ => is_letter(character),
         }
     }
 
@@ -127,8 +161,8 @@ pub fn pretokenize(text: &str, pre_type: PreType) -> Vec<core::ops::Range<usize>
     let chars: Vec<char> = text.chars().collect();
     let byte_offsets: Vec<usize> = char_byte_offsets(text, chars.len());
 
-    if pre_type == PreType::Default {
-        return default_spans(&chars)
+    if let Some(passes) = pre_type.passes() {
+        return run_passes(&chars, passes)
             .into_iter()
             .map(|(start, end)| byte_offsets[start]..byte_offsets[end])
             .collect();
@@ -385,6 +419,39 @@ mod tests {
     }
 
     #[test]
+    fn gpt2_family_names_map_to_the_pass_pipelines_like_llama_cpp() {
+        assert_eq!(PreType::from_gguf_name("stablelm2"), Some(PreType::Qwen2));
+        assert_eq!(PreType::from_gguf_name("hunyuan"), Some(PreType::Qwen2));
+        assert_eq!(PreType::from_gguf_name("solar-open"), Some(PreType::Qwen2));
+        assert_eq!(PreType::from_gguf_name("dbrx"), Some(PreType::Llama3));
+        assert_eq!(PreType::from_gguf_name("mpt"), Some(PreType::Gpt2));
+        assert_eq!(PreType::from_gguf_name("gpt-2"), Some(PreType::Gpt2));
+        assert_eq!(PreType::from_gguf_name("starcoder"), Some(PreType::DigitIsolatedGpt2));
+        assert_eq!(PreType::from_gguf_name("falcon"), Some(PreType::Falcon));
+    }
+
+    #[test]
+    fn gpt2_pre_split_keeps_digit_runs_whole_and_attaches_the_space() {
+        assert_eq!(spans_under("don't 12345", PreType::Gpt2), ["don", "'t", " 12345"]);
+    }
+
+    #[test]
+    fn digit_isolated_gpt2_pre_split_cuts_every_digit_out_of_words() {
+        assert_eq!(
+            spans_under("x1 y22", PreType::DigitIsolatedGpt2),
+            ["x", "1", " y", "2", "2"]
+        );
+    }
+
+    #[test]
+    fn falcon_pre_split_isolates_backticks_and_cuts_ascii_digit_triples() {
+        assert_eq!(
+            spans_under("a`b1234", PreType::Falcon),
+            ["a", "`", "b", "123", "4"]
+        );
+    }
+
+    #[test]
     fn gguf_pre_names_map_like_llama_cpp() {
         assert_eq!(PreType::from_gguf_name("llama-bpe"), Some(PreType::Llama3));
         assert_eq!(PreType::from_gguf_name("lfm2"), Some(PreType::Llama3));
@@ -394,7 +461,8 @@ mod tests {
         assert_eq!(PreType::from_gguf_name("qwen35"), Some(PreType::Qwen35));
         assert_eq!(PreType::from_gguf_name("deepseek-coder"), None);
         assert_eq!(PreType::from_gguf_name("default"), Some(PreType::Default));
-        assert_eq!(PreType::from_gguf_name("stablelm2"), None);
+        assert_eq!(PreType::from_gguf_name("jina-v1-en"), None);
+        assert_eq!(PreType::from_gguf_name("hunyuan-dense"), None);
         assert_eq!(PreType::from_gguf_name(""), None);
     }
 

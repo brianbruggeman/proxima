@@ -58,7 +58,7 @@ pub mod pipe;
 pub mod pretokenize;
 pub mod sample;
 pub mod sized;
-mod pretokenize_default;
+mod pretokenize_passes;
 mod unicode_tables;
 pub mod unigram;
 pub mod vocab;
