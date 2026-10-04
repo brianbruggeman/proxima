@@ -3,6 +3,7 @@
 use omega::DispatchType;
 use omega::metal::{PLAN_HANDOFF_REUSES, nocopy_cache_len};
 
+use super::BackendRuntime;
 use super::prefix_resume_long_prompt_tests::greedy_config;
 use super::prompt_cache_real_model_tests::with_model;
 use super::resident_plans;
@@ -32,10 +33,23 @@ fn serving_config() -> ServingConfig<'static> {
 }
 
 fn generate(model: &LoadedModel<'_>, config: &ServingConfig<'_>) -> Generation {
+    run(model, config, ResumeFrom::Resident)
+}
+
+#[derive(Clone, Copy)]
+enum ResumeFrom {
+    Resident,
+    Nothing,
+}
+
+fn run(model: &LoadedModel<'_>, config: &ServingConfig<'_>, resume: ResumeFrom) -> Generation {
     let effective = model
         .effective_serving_config(config)
         .expect("the gemma4 config passes the model-dependent gates");
-    let mut runtime = model.backend_runtime(&effective);
+    let mut runtime = match resume {
+        ResumeFrom::Resident => model.backend_runtime(&effective),
+        ResumeFrom::Nothing => BackendRuntime::new(&effective),
+    };
     let _ = PLAN_HANDOFF_REUSES.snapshot_and_reset();
     let (ids, _text, _stopped) = model
         .run_decode_loop(PROMPT, TOKENS, &effective, &mut runtime)
@@ -81,6 +95,32 @@ fn a_second_generation_on_the_same_model_builds_no_decode_plan() {
             "the decode plan's weight blocks are not walked again: cold {} warm {}",
             cold.weight_blocks_rebound,
             warm.weight_blocks_rebound
+        );
+    });
+}
+
+#[test]
+fn a_runtime_built_with_new_keeps_every_plan_call_local() {
+    with_model(|model| {
+        let config = serving_config();
+
+        let first = run(model, &config, ResumeFrom::Nothing);
+        let second = run(model, &config, ResumeFrom::Nothing);
+
+        assert_eq!(
+            (first.plan_misses, first.plan_refits),
+            (2, 0),
+            "a generation builds a prefill plan and a decode plan"
+        );
+        assert_eq!(
+            (second.plan_misses, second.plan_refits),
+            (2, 0),
+            "the control: with nothing resumed the next generation builds both again"
+        );
+        assert_eq!(
+            resident_plans::resident_len(&model.plan_life),
+            0,
+            "a call-local runtime leaves nothing resident"
         );
     });
 }
