@@ -1728,6 +1728,7 @@ impl<'file> LoadedModel<'file> {
                 all_token_ids: token_history,
                 new_start,
                 new_count,
+                architecture: &self.architecture,
             };
             architecture_impl.step_inputs(&step_context, step_input_scratch);
         }

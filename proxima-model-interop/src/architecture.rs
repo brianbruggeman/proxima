@@ -531,6 +531,9 @@ pub struct StepInputContext<'ids> {
     /// [`Architecture::step_inputs`] override must produce per new
     /// position.
     pub new_count: usize,
+    /// The bound model's own hyperparameters, so an override reads
+    /// per-model values instead of re-parsing metadata each step.
+    pub architecture: &'ids ModelArchitecture,
 }
 
 /// One named leaf [`Architecture::step_inputs`] hands back for this step --
@@ -721,6 +724,7 @@ mod tests {
                     rms_epsilon: 0.0,
                     tied_embeddings: false,
                     force_split_half_rope: false,
+                    sliding_rope: None,
                 },
                 program: Vec::new(),
                 logits_root: NodeId(0),

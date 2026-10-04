@@ -413,6 +413,7 @@ impl LoadedModel<'_> {
                     all_token_ids: &history,
                     new_start: magnitude,
                     new_count: 1,
+                    architecture: &self.architecture,
                 },
                 &mut named,
             );

@@ -93,7 +93,7 @@ pub use bind::{
     metadata_f32_optional, metadata_str, metadata_str_opt, metadata_u32, metadata_u32_optional_or,
     vocab_from_token_embedding,
 };
-pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
+pub use bind::{ModelArchitecture, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
 pub use dense::DenseArch;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};

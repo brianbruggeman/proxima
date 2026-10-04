@@ -767,6 +767,7 @@ mod tests {
             rms_epsilon: 1e-5,
             tied_embeddings: false,
             force_split_half_rope: false,
+            sliding_rope: None,
         }
     }
 
