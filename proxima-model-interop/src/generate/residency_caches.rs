@@ -2849,6 +2849,7 @@ impl BackendRuntime {
         let placed = self
             .placed_plans
             .values()
+            .chain(self.decode_plans.values())
             .chain(self.placed_segment_plans.values())
             .map(|plan| plan.arena_allocated_bytes().unwrap_or_default())
             .sum();
@@ -2857,8 +2858,9 @@ impl BackendRuntime {
         (ordinary, segments, placed)
     }
 
-    /// [`Self::plans_len`]'s placed-KV counterpart -- [`Self::plans`] and
-    /// [`Self::placed_plans`] are two SEPARATE maps
+    /// [`Self::plans_len`]'s placed-KV counterpart, counting
+    /// [`Self::placed_plans`] and [`Self::decode_plans`] together --
+    /// [`Self::plans`] and the placed maps are SEPARATE maps
     /// ([`Self::evaluate_with_placements`] never touches [`Self::plans`] at
     /// all), so a caller on [`LoadedModel::run_decode_loop_placed_kv`]'s
     /// own arm reading [`Self::plans_len`] was always reading a map that
@@ -2870,7 +2872,7 @@ impl BackendRuntime {
         target_os = "macos"
     ))]
     pub(crate) fn placed_plans_len(&self) -> usize {
-        self.placed_plans.len()
+        self.placed_plans.len() + self.decode_plans.len()
     }
 
     /// Diagnostic counterpart of [`Self::evaluate`]: same plan-cache lookup,
