@@ -808,11 +808,22 @@ mod harness {
         }
     }
 
-    fn write_dispatch_manifest(path: &Path, dispatches: &[CapturedDispatch], classes: &[Class]) {
+    fn write_dispatch_manifest(
+        path: &Path,
+        dispatches: &[CapturedDispatch],
+        classes: &[Class],
+        groups: &[Group],
+    ) {
+        let mut group_of = vec![usize::MAX; dispatches.len()];
+        for (group_index, group) in groups.iter().enumerate() {
+            for member in &group.members {
+                group_of[*member] = group_index;
+            }
+        }
         let mut csv = File::create(path).expect("create dispatch manifest");
         writeln!(
             csv,
-            "index,step,chunk_index,node,class,kind,entry,grid_threads,operand_codecs,extents"
+            "index,step,chunk_index,node,class,kind,entry,grid_threads,operand_codecs,extents,group,cold_ns,warm_ns,marginal_ns"
         )
         .expect("write manifest header");
         for (index, (dispatch, class)) in dispatches.iter().zip(classes).enumerate() {
@@ -821,9 +832,10 @@ mod harness {
                 .iter()
                 .map(|(_, codec)| codec.as_str())
                 .collect();
+            let measure = &groups[group_of[index]].measure;
             writeln!(
                 csv,
-                "{index},{},{},{},{},{},{},{},{},{:?}",
+                "{index},{},{},{},{},{},{},{},{},{:?},{},{:.1},{:.1},{:.1}",
                 dispatch.step,
                 dispatch.chunk_index,
                 dispatch.node,
@@ -833,19 +845,59 @@ mod harness {
                 dispatch.grid.threads,
                 codecs.join("|"),
                 dispatch.extents,
+                group_of[index],
+                measure.cold_ns,
+                measure.warm_ns,
+                measure.marginal_ns,
             )
             .expect("write manifest row");
         }
     }
 
-    fn sequence_family(class: &Class) -> &'static str {
+    fn extent_label(extents: &[u64]) -> String {
+        extents
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join("x")
+    }
+
+    fn head_dim_label(entry: &str) -> &str {
+        entry
+            .split('_')
+            .find(|part| {
+                part.len() > 1 && part.starts_with('d') && part[1..].parse::<u32>().is_ok()
+            })
+            .unwrap_or("d?")
+    }
+
+    fn sequence_family(dispatch: &CapturedDispatch, class: &Class) -> String {
+        let shape = extent_label(&dispatch.extents);
         match class {
-            Class::Matvec(codec) if codec == "Q4_0" => "q4_0_matvec",
-            Class::Matvec(_) => "other_matvec",
-            Class::Head => "head",
-            Class::RmsSumsq | Class::RmsSumsqEpilogue | Class::NormApply => "norms",
-            Class::CachedAttentionPartial | Class::CachedAttentionMerge => "attention",
-            _ => "rope_copy_elementwise",
+            Class::Matvec(codec) => format!("{codec}_matvec {shape}"),
+            Class::Head => format!("head {shape}"),
+            Class::RmsSumsq => "norms rms_sumsq".to_string(),
+            Class::RmsSumsqEpilogue => "norms rms_sumsq_epilogue".to_string(),
+            Class::NormApply => "norms norm_apply".to_string(),
+            Class::CachedAttentionPartial => {
+                format!("attention partial {}", head_dim_label(&dispatch.entry))
+            }
+            Class::CachedAttentionMerge => {
+                format!("attention merge {}", head_dim_label(&dispatch.entry))
+            }
+            Class::Rope => "rope".to_string(),
+            Class::IdentityCopy => "identity_copy".to_string(),
+            _ => "elementwise_other".to_string(),
+        }
+    }
+
+    fn weight_bytes(dispatch: &CapturedDispatch, class: &Class) -> u64 {
+        let weight_elements: u64 = dispatch.extents.iter().skip(1).product();
+        match class {
+            Class::Matvec(codec) if codec == "Q4_0" => weight_elements * 18 / 32,
+            Class::Matvec(codec) if codec == "Float16" => weight_elements * 2,
+            Class::Head => weight_elements * 210 / 256,
+            _ => 0,
         }
     }
 
@@ -860,45 +912,47 @@ mod harness {
     }
 
     fn sequence_family_arms(launched: &[CapturedDispatch], classes: &[Class], runs: usize) {
-        let mut by_family: BTreeMap<&'static str, Vec<&CapturedDispatch>> = BTreeMap::new();
+        let mut by_family: BTreeMap<String, (Vec<&CapturedDispatch>, u64)> = BTreeMap::new();
         for (dispatch, class) in launched.iter().zip(classes) {
-            by_family
-                .entry(sequence_family(class))
-                .or_default()
-                .push(dispatch);
+            if dispatch.unreplayable.is_some() {
+                continue;
+            }
+            let entry = by_family
+                .entry(sequence_family(dispatch, class))
+                .or_default();
+            entry.0.push(dispatch);
+            entry.1 += weight_bytes(dispatch, class);
         }
         let excluded: usize = launched
             .iter()
             .filter(|dispatch| dispatch.unreplayable.is_some())
             .count();
-        for members in by_family.values_mut() {
-            members.retain(|dispatch| dispatch.unreplayable.is_none());
-        }
         println!(
             "m0 family sequence replay excludes {excluded} unreplayable dispatches of {}",
             launched.len()
         );
-        let member_total: usize = by_family.values().map(Vec::len).sum();
+        let member_total: usize = by_family.values().map(|(members, _)| members.len()).sum();
         assert_eq!(
             member_total + excluded,
             launched.len(),
             "N: family arms plus the excluded must partition the captured dispatches"
         );
-        let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+        let mut samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         for _ in 0..runs {
-            for (family, members) in &by_family {
+            for (family, (members, _)) in &by_family {
                 let nanos = CapturedDispatch::time_gpu_sequence_ns(members)
                     .expect("family sequence replays");
-                samples.entry(family).or_default().push(nanos / 1e6);
+                samples.entry(family.clone()).or_default().push(nanos / 1e6);
             }
         }
-        for (family, members) in &by_family {
+        for (family, (members, bytes)) in &by_family {
             let spans = &samples[family];
             let (mean, cov) = mean_and_cov_percent(spans);
             let minimum = spans.iter().copied().fold(f64::INFINITY, f64::min);
             println!(
-                "m0 family sequence replay: family={family} dispatches={} runs={runs} gpu_ms_mean={mean:.4} gpu_ms_min={minimum:.4} cov_pct={cov:.2}",
-                members.len()
+                "m0 family sequence replay: family=[{family}] dispatches={} weight_bytes={bytes} runs={runs} gpu_ms_mean={mean:.4} gpu_ms_min={minimum:.4} cov_pct={cov:.2} gbps_mean={:.1}",
+                members.len(),
+                *bytes as f64 / (mean * 1e6)
             );
         }
     }
@@ -1076,6 +1130,7 @@ mod harness {
             &config.out_dir.join("census_dispatches.csv"),
             launched,
             classes,
+            groups,
         );
         let failed: Vec<&Group> = groups
             .iter()
