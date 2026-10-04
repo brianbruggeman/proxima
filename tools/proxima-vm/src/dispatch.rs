@@ -51,7 +51,7 @@ use proxima_process::framing::{FrameDecoder, FrameEncoder};
 use proxima_protocols::process::{ChildRequest, ChildResponse};
 
 /// The lambda guest's linker script (`guests/lambda/link.ld`) reserves the
-/// entire 64 MiB `RAM` region for `__stack_top`; [`run_dispatch_loop`] must
+/// entire 64 MiB `RAM` region for `__stack_top`; `run_dispatch_loop` must
 /// map at least that much guest memory or the guest's own stack pointer
 /// lands outside the mapped region. Module-level (not local to
 /// `run_dispatch_loop`) so [`crate::dtb`]'s own RAM-ceiling test can assert
@@ -88,7 +88,7 @@ pub trait VmDispatchHandler {
 /// [`ChildResponse`] and records call order.
 ///
 /// This is `pub(crate)`, not library API: only this module's own
-/// `#[cfg(test)]` tests and [`run_dispatch_loop`] construct one — the real
+/// `#[cfg(test)]` tests and `run_dispatch_loop` construct one — the real
 /// M1 driver, which passes a live `&FfiRecordingDispatcher` across the FFI
 /// boundary into the C exit loop
 /// (`src/backend_macos.c`'s / `src/backend_linux.c`'s
@@ -112,7 +112,7 @@ pub(crate) struct FfiRecordingDispatcher {
 impl FfiRecordingDispatcher {
     /// Build a dispatcher that answers every request with `configured_response`.
     /// Constructed by this module's own `#[cfg(test)]` tests directly, and
-    /// by [`run_dispatch_loop`] as the one dispatcher a real VM-exit run
+    /// by `run_dispatch_loop` as the one dispatcher a real VM-exit run
     /// drives.
     #[cfg(any(
         test,
@@ -166,7 +166,7 @@ impl SendPipe for FfiRecordingDispatcher {
 /// [`proxima_process::framing::FrameEncoder`] into `response_out`. Shared by
 /// [`proxima_vm_dispatch_hypercall`] (the `extern "C"` trampoline entry,
 /// necessarily monomorphized to [`FfiRecordingDispatcher`] because
-/// `extern "C"` cannot be generic; this crate's own [`run_dispatch_loop`]
+/// `extern "C"` cannot be generic; this crate's own `run_dispatch_loop`
 /// calls it that way too, through the C exit loop).
 ///
 /// The three stages are called in sequence rather than composed as one
@@ -181,7 +181,7 @@ impl SendPipe for FfiRecordingDispatcher {
 ///
 /// This is not hand-rolled the way `proxima_process::ipc::run_dispatch_loop`
 /// (`proxima-process/src/ipc.rs:111`, a different crate and a different
-/// function from this module's own [`run_dispatch_loop`] despite the name
+/// function from this module's own `run_dispatch_loop` despite the name
 /// collision) would require: that helper loops a length-prefixed
 /// `[u32_be length][postcard payload]` byte STREAM to EOF over
 /// `Read`/`Write`. A hypercall is one-shot — its payload length is already
@@ -240,7 +240,7 @@ where
 /// (`src/dispatch_trampoline.h`) calls back into once a real hypercall
 /// exit recovers `verb`/`pointer`/`length` from the vCPU
 /// (`src/backend_macos.c`'s and `src/backend_linux.c`'s
-/// `proxima_vm_run_dispatch_loop`, which [`run_dispatch_loop`] drives).
+/// `proxima_vm_run_dispatch_loop`, which `run_dispatch_loop` drives).
 /// `#[unsafe(no_mangle)]` is load-bearing: without it the C loop's
 /// `proxima_vm_dispatch_hypercall(...)` call sees no matching symbol at
 /// link time, since a bare `extern "C" fn` without it still gets a mangled

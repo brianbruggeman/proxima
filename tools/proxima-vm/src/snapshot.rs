@@ -46,7 +46,7 @@
 //! # Tier
 //!
 //! Std-only (`tools/proxima-vm` is a std-tier host binary), same as
-//! [`crate::named_memory`] and [`crate::dispatch::run_dispatch_loop`].
+//! [`crate::named_memory`] and `crate::dispatch::run_dispatch_loop`.
 
 #![cfg(feature = "std")]
 
