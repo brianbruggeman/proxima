@@ -12,15 +12,15 @@
 //!
 //! # The algorithm, traced to the incumbent
 //!
-//! [`NgramMod::add`] (`common_ngram_mod::add`) takes a window of
+//! `NgramMod::add` (`common_ngram_mod::add`) takes a window of
 //! `n_match + 1` tokens: the leading `n_match` tokens hash to a table slot
 //! (llama's own multiplicative hash, `idx()`, `common/ngram-mod.cpp:15-25`
 //! -- an LCG-style `res = res * 6364136223846793005 + token` folded over
 //! every context token, reduced mod the table size), and the trailing
 //! token overwrites whatever was stored there (last-write-wins, no probing).
-//! [`NgramMod::get`] (`common_ngram_mod::get`) hashes an `n_match`-token
+//! `NgramMod::get` (`common_ngram_mod::get`) hashes an `n_match`-token
 //! window the same way and returns whatever token is currently stored
-//! there, or [`EMPTY`] if that slot was never written.
+//! there, or `EMPTY` if that slot was never written.
 //!
 //! [`ngram_mod_begin`] (`common_speculative_impl_ngram_mod::begin`,
 //! `:1894-1920`) trains the table over the entire prompt in one pass, then

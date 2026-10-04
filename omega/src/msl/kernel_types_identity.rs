@@ -1342,7 +1342,7 @@ static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thr
 
 /// Batched weight-tile decode for `PROXIMA_TILED_GEMM_Q4_0`'s staging loop
 /// (`push_tiled_gemm_body`'s `Codec::Q4_0` arm) -- the same amortization
-/// [`q4k_header_for`]/`q4k_run8` give `Q4_K`'s own tiled-GEMM staging: read
+/// `q4k_header_for`/`q4k_run8` give `Q4_K`'s own tiled-GEMM staging: read
 /// `d` ONCE per 32-element block via `q4_0_block_scale`, then this decodes 8
 /// RAW levels at a time so the block's `d` is not re-derived (two `device`
 /// byte reads plus an `as_type<half>` reinterpret) on every one of the 32
@@ -1379,7 +1379,7 @@ static inline void q4_0_run8(device const uchar *block, uint index, thread float
 /// starts at a `(slot / 32) * 18`-byte offset from a device buffer, `18` is
 /// even, so every block origin is even; `+2` for the header stays even), so
 /// pairing consecutive bytes into one `ushort` read is sound the same way
-/// [`q4k_run8`]'s wider `uint` read is sound for `Q4_K`'s 16-byte-aligned
+/// `q4k_run8`'s wider `uint` read is sound for `Q4_K`'s 16-byte-aligned
 /// blocks -- just one width narrower, since `Q4_0`'s 18-byte block has no
 /// 4-byte alignment guarantee. `push_tiled_gemm_body`'s own module doc names
 /// this as the fix for "the same 16 `qs` bytes read twice" (once per nibble
@@ -2469,4 +2469,3 @@ pub(crate) const fn softmax_runtime_rows_override() -> bool {
 /// free functions in `crate::identity` since `Codec` is foreign here and
 /// cannot carry inherent methods (guiding-principles §20, no blanket impls).
 pub type PackedOperands = BTreeMap<NodeId, Codec>;
-

@@ -3,10 +3,10 @@
 //!
 //! [`RopeScaling`] is plain data the way [`crate::serving::ServingConfig`]
 //! is: it is read from the GGUF's `{arch}.rope.scaling.*` keys
-//! ([`RopeScaling::from_gguf`]) or supplied per call through
+//! (`RopeScaling::from_gguf`) or supplied per call through
 //! `ServingConfig::rope_scaling`, and consumed once per step by
 //! `crate::generate`'s `build_position_inputs`, which composes
-//! [`RopeScaling::inv_frequencies`] and [`RopeScaling::attention_factor`]
+//! `RopeScaling::inv_frequencies` and `RopeScaling::attention_factor`
 //! into the same `rope_cos`/`rope_sin` table every architecture already
 //! binds -- no kernel change, no new program input. The arithmetic follows
 //! `transformers`' `_compute_yarn_parameters`

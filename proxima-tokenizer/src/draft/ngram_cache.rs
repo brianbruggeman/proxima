@@ -20,9 +20,9 @@
 //! [`LLAMA_NGRAM_STATIC`]-token static-lookup key and one context/dynamic
 //! key per size in [`LLAMA_NGRAM_MIN`]..=[`LLAMA_NGRAM_MAX`], and tries, IN
 //! THIS ORDER: the context cache (lax thresholds,
-//! [`DRAFT_MIN_SAMPLE_SIZE_LAX`]/[`DRAFT_MIN_PERCENT_LAX`], LONGEST n-gram
+//! `DRAFT_MIN_SAMPLE_SIZE_LAX`/`DRAFT_MIN_PERCENT_LAX`, LONGEST n-gram
 //! first), the dynamic cache (strict thresholds,
-//! [`DRAFT_MIN_SAMPLE_SIZE_STRICT`]/[`DRAFT_MIN_PERCENT_STRICT`], same
+//! `DRAFT_MIN_SAMPLE_SIZE_STRICT`/`DRAFT_MIN_PERCENT_STRICT`, same
 //! longest-first order), then the static cache alone (lax thresholds,
 //! [`LLAMA_NGRAM_STATIC`]-sized key only). A context/dynamic candidate is
 //! additionally weighted by the static cache's own count for that same
@@ -34,7 +34,7 @@
 //! drafting a gap and continuing past it.
 //!
 //! `common_ngram_cache_draft`'s own `inp`/`draft` combined-sequence
-//! indexing (`get_token`, `:55-57`) is ported here as [`token_at`], reading
+//! indexing (`get_token`, `:55-57`) is ported here as `token_at`, reading
 //! directly from the caller's `history`/`sampled`/`out` slices instead of
 //! materializing `inp` as its own concatenated vector -- zero-copy, this
 //! crate's own caller-owned-buffer discipline
@@ -54,7 +54,7 @@
 //! a PRIOR chunk boundary is never recorded at all, permanently, in either
 //! the incumbent or this port -- this is not a bug this port introduces,
 //! it is the incumbent's own steady-state behavior, faithfully reproduced.
-//! [`ngram_cache_update_delta`] reproduces exactly this call shape without
+//! `ngram_cache_update_delta` reproduces exactly this call shape without
 //! allocating the intermediate `tokens_new` vector the incumbent builds --
 //! it walks `history`'s own trailing slice plus `sampled` through the same
 //! index space [`ngram_cache_update`]'s generic indexer already threads
@@ -71,14 +71,14 @@
 //! and `out` is the caller-owned buffer every drafter in this crate writes
 //! into.
 //!
-//! Cache MAINTENANCE ([`ngram_cache_update`]/[`ngram_cache_update_delta`])
+//! Cache MAINTENANCE (`ngram_cache_update`/`ngram_cache_update_delta`)
 //! is NOT unbounded, despite growing on every genuinely new n-gram observed:
 //! within one generation, `common_ngram_cache_update`'s own body
-//! (`common/ngram-cache.cpp:12-52`, ported here as [`update_via_indexer`])
+//! (`common/ngram-cache.cpp:12-52`, ported here as `update_via_indexer`)
 //! bumps at most one entry per `(position, ngram_size)` pair, `ngram_size`
 //! ranging over [`LLAMA_NGRAM_MIN`]..=[`LLAMA_NGRAM_MAX`] -- and
 //! [`NgramCacheState`]'s own `cache_size` bookkeeping ensures every
-//! [`ngram_cache_update_delta`] call's own range tiles the token stream
+//! `ngram_cache_update_delta` call's own range tiles the token stream
 //! EXACTLY ONCE, never overlapping, across the whole lifetime of one
 //! generation. So the total number of (n-gram, continuation-token) entries
 //! the context cache will EVER hold is bounded by

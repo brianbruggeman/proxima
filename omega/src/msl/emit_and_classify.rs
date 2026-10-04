@@ -2672,10 +2672,10 @@ pub enum TiledGemmRejection {
     /// rather than relied upon as a side effect.
     BroadcastEpilogueNotSupported,
     /// `crate::sized::TILED_GEMM_BLOCK_K` is neither `<=` this codec's own
-    /// staging chunk width ([`tiled_gemm_codec_chunk_width`]) nor a whole
+    /// staging chunk width (`tiled_gemm_codec_chunk_width`) nor a whole
     /// multiple of it -- `push_tiled_gemm_body`'s per-row chunk loop would
     /// write past the row's own K-width in `weight_tile` for the last
-    /// chunk (see [`tiled_gemm_block_k_chunk_aligned`]'s own doc). Every
+    /// chunk (see `tiled_gemm_block_k_chunk_aligned`'s own doc). Every
     /// value `omega/build.rs`'s `require_divides_q4k_block` +
     /// `require_multiple_of_eight` currently admit for `tiled_gemm.
     /// block_k` happens to satisfy this, but that is an EMERGENT property
@@ -3463,7 +3463,7 @@ pub(super) fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: C
     (base * token_groups, split)
 }
 
-/// Public diagnostic seam for [`classify_dense_batched_gemm`] -- same shape
+/// Public diagnostic seam for `classify_dense_batched_gemm` -- same shape
 /// as [`TiledGemmRejection`], one variant per `return` site in that
 /// function's own condition order, so a caller printing `{rejection:?}`
 /// sees exactly which condition gave up instead of an inferred guess.
@@ -3482,7 +3482,7 @@ pub enum DenseBatchedGemmRejection {
     /// `quantized.len() != 2` -- not a two-operand op.
     OperandCountNotTwo,
     /// At least one operand is packed -- the packed-weight paths
-    /// ([`classify_packed_row_block`]/[`classify_tiled_gemm`]) own that
+    /// (`classify_packed_row_block`/`classify_tiled_gemm`) own that
     /// shape; this path is for two DENSE (neither quantized) operands only.
     OperandIsPacked,
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
@@ -3497,7 +3497,7 @@ pub enum DenseBatchedGemmRejection {
     /// reduction axis at all.
     NoReduceDim,
     /// More than one reduce dim, but they do NOT nest contiguously for both
-    /// operands -- see [`axes_fold_contiguously`].
+    /// operands -- see `axes_fold_contiguously`.
     ReduceDimsNotContiguous { reduce_dims: Vec<u16> },
     /// `epilogue_broadcast_axes` is non-empty -- the broadcast-reduce
     /// epilogue has no renderer on this tail; see
@@ -3837,4 +3837,3 @@ pub(super) fn grid_depth_for(resolved: &BoundOp, quantized: &[Option<Codec>]) ->
     }
     dense_batched_gemm_depth(resolved, quantized).unwrap_or(1)
 }
-

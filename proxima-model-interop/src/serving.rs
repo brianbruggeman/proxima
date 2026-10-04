@@ -251,7 +251,7 @@ const PRIORITY_ORDER: [SpeculativeType; 10] = [
 /// (`common/common.h:373`) -- a SET of simultaneously-enabled speculators,
 /// not a single active choice (`common_get_enabled_speculative_configs`,
 /// `common/speculative.cpp:2310-2316`, folds the caller's list into exactly
-/// this bitset before `common_speculative_init` walks [`PRIORITY_ORDER`]
+/// this bitset before `common_speculative_init` walks `PRIORITY_ORDER`
 /// over it). A `u16` bitmask keeps this `Copy` -- [`SpeculativeConfig`], and
 /// therefore [`ServingConfig`], depend on that (this struct's own doc).
 /// llama runs every enabled speculator per step in priority order until one
@@ -306,7 +306,7 @@ impl SpeculativeTypeSet {
     }
 
     /// This set's members in llama's own fixed priority order
-    /// ([`PRIORITY_ORDER`]'s own doc) -- the order `common_speculative_init`
+    /// (`PRIORITY_ORDER`'s own doc) -- the order `common_speculative_init`
     /// registers implementations in and `common_speculative_draft` tries
     /// them in, regardless of the order a caller named them in.
     pub fn iter_priority_order(self) -> impl Iterator<Item = SpeculativeType> {
@@ -375,7 +375,7 @@ impl Default for NgramModParams {
 /// [`apply_serving_config`] rejects only the members not yet wired, naming
 /// each. `ngram_cache_lookup_static`/`_dynamic` are borrowed (`&'model str`)
 /// for the same reason `model_path` is -- the caller keeps the owned path
-/// alive for `'model` ([`crate::SpeculativeSettings::as_speculative_config`],
+/// alive for `'model` (`SpeculativeSettings::as_speculative_config`,
 /// `std`-gated, is the conflaguration-facing owner of that storage).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpeculativeConfig<'model> {
@@ -466,7 +466,7 @@ impl Default for SpeculativeConfig<'static> {
 /// (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R1, R7). Plain `Copy`
 /// numbers for the same reason [`SpeculativeConfig`] is: [`ServingConfig`]
 /// stays `Copy` and this module stays free of `serde`/`bon`/`conflaguration`;
-/// [`crate::PromptCacheSettings`] (`std`-gated) is the env/TOML/builder owner
+/// `PromptCacheSettings` (`std`-gated) is the env/TOML/builder owner
 /// of the same fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptCacheConfig {
@@ -1024,7 +1024,7 @@ pub struct ServingConfig<'model> {
     /// a refitted plan emits what a fresh one does.
     pub plan_refit: bool,
     /// Not an upstream llama-server flag -- how many `MTLCommandBuffer`s
-    /// [`omega::metal::Plan`]'s placements executor
+    /// `omega::metal::Plan`'s placements executor
     /// (`execute_plan_with_placements_inner`'s own
     /// `command_buffer_chunk_count` doc) splits one decode step's dispatch
     /// sequence into, threaded the same way as [`Self::plan_time_constants`]
@@ -1034,7 +1034,7 @@ pub struct ServingConfig<'model> {
     /// `PROXIMA_COMMAND_BUFFER_CHUNKS=K` still overrides this per-process
     /// when set -- the same A/B escape hatch this field now supplies a
     /// config-sourced default for, not a replacement for it. A checkpoint
-    /// whose loaded [`crate::architecture::Architecture`] declares its own
+    /// whose loaded `architecture::Architecture` declares its own
     /// non-default split count (`Architecture::command_buffer_chunks`'s own
     /// doc -- gemma4's is `8`, the Intervention 6 measured decode
     /// configuration) uses that value instead of this field's own default,
@@ -1122,7 +1122,7 @@ impl Default for ServingConfig<'static> {
     /// --reasoning-budget 1024 --min-p 0`) restricted to what
     /// [`apply_serving_config`] admits, with `-c` unset (`Native`: the
     /// checkpoint's own limit, [`resolve_context_length`]): F32 KV (`-ctk`/`-ctv`), `-fa off`,
-    /// `--reasoning-budget 0`, and `-ngl` [`DEFAULT_GPU_LAYERS`]. A default
+    /// `--reasoning-budget 0`, and `-ngl` `DEFAULT_GPU_LAYERS`. A default
     /// the admission check rejects is a defect, so the deviations are the
     /// ones admission forces. `gpu_memory_fit` (`-fit`) also defaults `true`
     /// here, not the invocation's own `off` -- see that field's own doc for
