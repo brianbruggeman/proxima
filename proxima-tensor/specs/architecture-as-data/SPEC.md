@@ -75,7 +75,17 @@ Profile values GGUF does not carry are data in the profile file.
 
 - R1. Every architecture-dependent numeric or enum value in a lowered program comes from the
   descriptor (GGUF metadata over the family profile).
-- R2. One generic `Architecture` implementation serves every registered family.
+- R2. There is no `Architecture` concept: no trait, impl, registry or per-family type. Owner: "fsm makes it composable. architecture means that we've fucked up and we just hide it." A per-family type is a place to hide special logic; composition through the FSM and config leaves nowhere to hide it. Owner, 2026-10-04: "I did not
+  authorize a trait here ... it needs to be fsm based w/ a conflaguration driving it."
+  - The model is a conflaguration config: `ModelDescriptor` derives `Settings` and `Validate`.
+    Its layers are, in order: family-profile TOML defaults, then GGUF metadata, then env.
+  - It has a fluent builder that round-trips with the config.
+  - Serving is the sans-IO `ServingState` FSM in `proxima-model-interop/src/serving_fsm.rs`
+    (Prefill, Decode, Verify, Accept, Rollback, Finish), driven by that config. It replaces the
+    closure in `run_decode_loop_from_ids`.
+  - Which states are reachable comes from config fields. For example, Verify is reachable only
+    when the descriptor's layers can rewind and the speculative config is non-empty. It never
+    comes from a type that implements a trait.
 - R3. A speculative verify program is derived for every family whose layers can rewind.
 - R4. A sliding window and KV ring apply to exactly the layers whose descriptor entry has a
   window.
@@ -107,7 +117,7 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC2 | R3, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/generic_verify_llama_parity_/)'` | 3 passed: gemma4 E2B, openchat and qwen3 with speculation on equal their llama ids | 1 passed, 2 failed (openchat and qwen3 have no verify program) |
 | AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 7 passed: bound names and tensor-byte digest equal the incumbent's | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
 | AC4 | R6 | consistency | `git grep -nIiP '\b(gemma4\|qwen35moe\|qwen35\|qwen2\|lfm2\|mistral\|llama)\b' -- proxima-model-interop/src proxima-tensor/src omega/src proxima-tokenizer/src ':!*tests*' ':!*profiles*' \| wc -l` | 0 | 1214 |
-| AC5 | R2 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(=architecture::tests::registry_holds_one_generic_architecture)'` | 1 passed | test absent; the equivalent count of registry entries at 9dd9deef is 4 |
+| AC5 | R2 | consistency | `git grep -nP '\b(trait\|impl\|struct\|enum)\b[^;{]*Architecture' -- proxima-model-interop/src proxima-tensor/src \| wc -l`, then `cargo nextest run -p proxima-model-interop --features std,conflaguration -E 'test(/descriptor_config_parity_\|serving_fsm_drives_/)'` | 0; then 9 passed: one descriptor config-vs-builder round trip per checkpoint (7), plus 2 FSM tests (a plain decode and a speculative verify-accept-rollback run that the live generate path routes through `ServingState`) | first command prints 17 (trait, registry, 4 family impls, the test fake, and the per-family `Architecture`/`*Architecture` hparams structs); second: tests absent |
 | AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/)'` | 7 passed, one per checkpoint; 8 passed from slice 9 (lfm2 added) | 7 passed (lfm2 unloadable at 9dd9deef) |
 | AC7 | R4 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/window_ring_layers_/)'` | 2 passed: (a) gemma4 E2B ring layers equal `swa_layers.txt`; (b) a synthetic descriptor with a window on one dense layer gets a ring on exactly that layer | 1 passed, 1 failed ((b) fails: dense layers ignore the window) |
 | AC8 | R8 | oracle | `cargo nextest run -p proxima-tokenizer --features gguf -E 'binary(gemma4_llama_oracle)'` | 20 passed, 0 failed | 20 passed |
