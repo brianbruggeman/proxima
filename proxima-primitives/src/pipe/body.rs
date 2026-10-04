@@ -177,7 +177,6 @@ impl ResponseStream {
     }
 
     /// Take the underlying chunk stream (drops trailers metadata).
-    #[must_use]
     pub fn into_chunk_stream(self) -> ChunkStream {
         self.stream
     }
@@ -311,7 +310,6 @@ impl RequestStream {
         self.trailers.as_ref()
     }
 
-    #[must_use]
     pub fn into_chunk_stream(self) -> ChunkStream {
         self.stream
     }
