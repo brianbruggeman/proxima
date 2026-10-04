@@ -75,8 +75,122 @@ fn elementwise_broadcast_decodes_omitted_axes_before_selected_axes() {
     let source = render_elementwise(&bound, "broadcast_test", &[None, None])
         .expect("broadcast elementwise renders");
     let divide_axis_one = "remaining /= (uint)u.extents[1];";
-    let assign_axis_zero = "coord[0] = remaining % (uint)u.extents[0];";
-    assert!(source.find(divide_axis_one) < source.find(assign_axis_zero));
+    let assign_axis_zero = "coord[0] = remaining;";
+    let divide_position = source
+        .find(divide_axis_one)
+        .expect("axis one is divided out before axis zero is read");
+    let assign_position = source
+        .find(assign_axis_zero)
+        .expect("the outermost axis takes the quotient without a modulo");
+    assert!(divide_position < assign_position);
+    assert!(!source.contains("remaining % (uint)u.extents[0]"));
+}
+
+fn broadcast_over_trailing_axes(leading_extent: u32) -> BoundOp {
+    let mut program = Vec::new();
+    let tensor = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(leading_extent),
+                Extent::Static(6),
+                Extent::Static(256),
+            ],
+            name: None,
+        },
+    );
+    let plane = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(6), Extent::Static(256)],
+            name: None,
+        },
+    );
+    let scaled = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (tensor, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (plane, IndexMap::Affine(map::projection(3, &[1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let shapes = infer(&program, &[]).expect("plane scale infers");
+    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("plane scale lowers")
+        .into_iter()
+        .find(|candidate| candidate.node == scaled)
+        .expect("plane scale bound op")
+}
+
+#[test]
+fn elementwise_outermost_modulo_elision_changes_the_kernel_cache_key() {
+    let empty = BTreeMap::new();
+    let unit_leading = broadcast_over_trailing_axes(1);
+    let wide_leading = broadcast_over_trailing_axes(2);
+
+    let unit_source = emit(&unit_leading, &empty, NumericPolicy::default())
+        .expect("unit-leading plane scale emits")
+        .source;
+    let wide_source = emit(&wide_leading, &empty, NumericPolicy::default())
+        .expect("wide-leading plane scale emits")
+        .source;
+
+    assert_ne!(unit_source, wide_source);
+    assert_ne!(
+        kernel_cache_key(&unit_leading, &empty, NumericPolicy::default()).expect("cache key builds"),
+        kernel_cache_key(&wide_leading, &empty, NumericPolicy::default()).expect("cache key builds"),
+        "two sources that differ on whether axis 1 is reduced modulo its extent must not share a pipeline"
+    );
+}
+
+#[test]
+fn elementwise_unit_leading_axis_is_never_decoded() {
+    let mut program = Vec::new();
+    let row = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1), Extent::Static(1536)],
+            name: None,
+        },
+    );
+    let gamma = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1536)],
+            name: None,
+        },
+    );
+    let scaled = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (row, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                (gamma, IndexMap::Affine(map::projection(2, &[1]))),
+            ],
+            name: None,
+        },
+    );
+    let shapes = infer(&program, &[]).expect("hidden-width scale infers");
+    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("hidden-width scale lowers")
+        .into_iter()
+        .find(|candidate| candidate.node == scaled)
+        .expect("hidden-width scale bound op");
+    let source = render_elementwise(&bound, "unit_axis_test", &[None, None])
+        .expect("hidden-width scale renders");
+    assert!(source.contains("coord[1] = remaining;"));
+    assert!(!source.contains("u.extents[0]"));
+    assert!(!source.contains("remaining /="));
 }
 
 fn elementwise_tanh_op(extent: u32) -> BoundOp {

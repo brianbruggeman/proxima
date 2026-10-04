@@ -43,16 +43,7 @@ pub(super) fn render_elementwise(
         source.push_str(&format!(
             "    {coordinate_type} remaining = ({coordinate_type})gid;\n"
         ));
-        for dim in (0..resolved.extents.len()).rev() {
-            if coordinate_dims.contains(&dim) {
-                source.push_str(&format!(
-                    "    coord[{dim}] = remaining % ({coordinate_type})u.extents[{dim}];\n"
-                ));
-            }
-            source.push_str(&format!(
-                "    remaining /= ({coordinate_type})u.extents[{dim}];\n"
-            ));
-        }
+        push_coordinate_decomposition(&mut source, resolved, &coordinate_dims, coordinate_type);
     }
 
     for (index, gather_slot) in gather_slots.iter().enumerate() {
@@ -98,6 +89,44 @@ pub(super) fn render_elementwise(
     Ok(source)
 }
 
+/// True when every dim below `dim` has extent 1, so the quotient left after
+/// dividing out the dims above it is already below `extents[dim]` and its
+/// modulo is the identity. The emitted source differs on this fact, so
+/// [`elementwise_addressing_cache_token`] folds it into the pipeline key.
+fn dimension_is_outermost(resolved: &BoundOp, dim: usize) -> bool {
+    resolved.extents[..dim].iter().all(|&extent| extent == 1)
+}
+
+/// Unflattens `gid` into `coord[dim]` for exactly the dims in
+/// `coordinate_dims`. Apple GPUs have no integer divider (a runtime `%` or `/`
+/// is an emulated multi-instruction sequence, measured 1.3 us for the four a
+/// `[1, 1536]` norm apply paid), so a divide is emitted only where a later
+/// dim still reads `remaining`, and a dim whose lower dims all have extent 1
+/// takes `remaining` as is (it is already below that dim's extent).
+fn push_coordinate_decomposition(
+    source: &mut String,
+    resolved: &BoundOp,
+    coordinate_dims: &[usize],
+    coordinate_type: &str,
+) {
+    let lowest_needed = coordinate_dims.iter().copied().min().unwrap_or(0);
+    for dim in (lowest_needed..resolved.extents.len()).rev() {
+        if coordinate_dims.contains(&dim) {
+            let value = if dimension_is_outermost(resolved, dim) {
+                "remaining".to_string()
+            } else {
+                format!("remaining % ({coordinate_type})u.extents[{dim}]")
+            };
+            source.push_str(&format!("    coord[{dim}] = {value};\n"));
+        }
+        if dim > lowest_needed {
+            source.push_str(&format!(
+                "    remaining /= ({coordinate_type})u.extents[{dim}];\n"
+            ));
+        }
+    }
+}
+
 pub(super) fn elementwise_coordinate_dims(resolved: &BoundOp, gather_count: usize) -> Vec<usize> {
     let rank = resolved.extents.len();
     let mut coordinate_dims: Vec<usize> = if gather_count > 0 {
@@ -114,6 +143,7 @@ pub(super) fn elementwise_coordinate_dims(resolved: &BoundOp, gather_count: usiz
                     .enumerate()
                     .filter_map(|(dimension, stride)| (*stride != 0).then_some(dimension))
             })
+            .filter(|&dimension| resolved.extents.get(dimension) != Some(&1))
             .collect()
     };
     coordinate_dims.sort_unstable();
@@ -150,6 +180,9 @@ pub(super) fn elementwise_addressing_cache_token(resolved: &BoundOp) -> Option<S
     for dimension in coordinate_dims {
         token.push('_');
         token.push_str(&dimension.to_string());
+        if dimension_is_outermost(resolved, dimension) {
+            token.push('o');
+        }
     }
     token.push_str("_d");
     for (_, layout, _) in resolved.operands() {
