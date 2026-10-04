@@ -14,7 +14,7 @@
 //! | key | type | on the real fixture |
 //! |---|---|---|
 //! | `tokenizer.ggml.model` | string | `"gpt2"` (byte-level BPE) on the llama-bpe fixture; `"llama"` (SentencePiece/SPM) on the openchat-3.5-1210 fixture below -- this is the key [`vocab_from_metadata`] dispatches the encoder on |
-//! | `tokenizer.ggml.pre` | string | `"llama-bpe"` (selects `LLAMA_VOCAB_PRE_TYPE_LLAMA3`'s pretokenizer regex in llama.cpp) |
+//! | `tokenizer.ggml.pre` | string | `"llama-bpe"` on the llama-bpe fixture, `"qwen2"` on qwen2.5 and qwen3, `"qwen35"` on qwen3.5; [`vocab_from_metadata`] maps it to a [`PreType`] exactly as llama.cpp does (`llama-vocab.cpp:2168-2271`), and a `"gpt2"` vocab with a missing value uses the default pre-split with a warning, and an unmapped value is an error |
 //! | `tokenizer.ggml.tokens` | array\<string\> | 128256 entries, index == token id |
 //! | `tokenizer.ggml.token_type` | array\<i32\> | 128256 entries, parallel to `tokens` (see [`crate::vocab::TokenType::from_raw`]) |
 //! | `tokenizer.ggml.merges` | array\<string\> | 280147 entries, each `"left right"` space-separated, priority order -- `"gpt2"` vocabs only |
@@ -35,10 +35,13 @@ use alloc::vec::Vec;
 use proxima_gguf::{MetadataArray, MetadataValue, ParsedGguf};
 
 use crate::error::TokenizerError;
+use crate::pretokenize::PreType;
 use crate::vocab::{TokenType, Vocab};
 
 const MODEL_KEY: &str = "tokenizer.ggml.model";
 const TOKENS_KEY: &str = "tokenizer.ggml.tokens";
+const PRE_KEY: &str = "tokenizer.ggml.pre";
+const ARCHITECTURE_KEY: &str = "general.architecture";
 const MERGES_KEY: &str = "tokenizer.ggml.merges";
 const SCORES_KEY: &str = "tokenizer.ggml.scores";
 const TOKEN_TYPE_KEY: &str = "tokenizer.ggml.token_type";
@@ -65,7 +68,7 @@ const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
 /// missing -- a vocab that declares one family but carries neither or both
 /// arrays is exactly this case, named by which key came up empty.
 /// [`TokenizerError::UnsupportedTokenizerModel`] for any other
-/// `tokenizer.ggml.model` value. [`TokenizerError::WrongMetadataType`] if a
+/// `tokenizer.ggml.model` value. [`TokenizerError::UnsupportedPreTokenizer`] for a `"gpt2"` vocab whose `tokenizer.ggml.pre` has no exact mapping ([`PreType::from_gguf_name`]); [`TokenizerError::WrongMetadataType`] if a
 /// present key has the wrong GGUF value type. Anything [`Vocab::new`]/
 /// [`Vocab::new_unigram`] can fail with otherwise (a malformed merge rule,
 /// a missing base byte token, a scores/tokens length mismatch).
@@ -82,13 +85,27 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
     let add_eos_token = bool_scalar(metadata, ADD_EOS_KEY)?;
 
     let vocab = match model.as_str() {
+        "gpt2" => {
+            let merges = string_array(metadata, MERGES_KEY)?
+                .ok_or(TokenizerError::MissingMetadataKey { key: MERGES_KEY })?;
+            let pre_type = pre_type_from_metadata(metadata)?;
+            Vocab::new(
+                tokens,
+                &merges,
+                bos_token_id,
+                eos_token_id,
+                unknown_token_id,
+            )?
+            .with_pre_type(pre_type)
+        }
         // `gemma4` carries a real `tokenizer.ggml.merges` keyed on raw UTF-8
         // characters with `▁` for space (llama.cpp `LLAMA_VOCAB_PRE_TYPE_GEMMA4`,
-        // `byte_encode = false`). It shares the merges arm with `gpt2`;
+        // `byte_encode = false`); llama.cpp pins its pre type from the model
+        // name (`llama-vocab.cpp:2149`), so no `tokenizer.ggml.pre` is read.
         // `Vocab::assemble` probes the token list (merges present, `▁` and
         // `<0x0A>` are tokens) and marks it char-level, which routes encode
         // to `bpe::encode_char_pretoken` and decode to raw UTF-8.
-        "gpt2" | "gemma4" => {
+        "gemma4" => {
             let merges = string_array(metadata, MERGES_KEY)?
                 .ok_or(TokenizerError::MissingMetadataKey { key: MERGES_KEY })?;
             Vocab::new(
@@ -116,6 +133,32 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
         None => vocab,
     };
     Ok(vocab.with_bos_eos_policy(add_bos_token, add_eos_token))
+}
+
+/// Selects the byte-level pre-split from `tokenizer.ggml.pre`, mapped as
+/// llama.cpp maps it ([`PreType::from_gguf_name`]).
+///
+/// A missing or empty value is llama.cpp's `default` pre type with a warning
+/// (`llama-vocab.cpp:2159-2167`), so it is [`PreType::Default`] here with the
+/// same warning, naming the file's `general.architecture`. An unmapped value
+/// is an error carrying that value: llama.cpp throws on a name it does not
+/// know (`llama-vocab.cpp:2423`), and for the names it does know but this
+/// crate has no exact rule for, any stand-in would be silent wrong output.
+///
+/// # Errors
+///
+/// [`TokenizerError::UnsupportedPreTokenizer`] for a value with no exact
+/// mapping; [`TokenizerError::WrongMetadataType`] for a non-string value.
+fn pre_type_from_metadata(metadata: &ParsedGguf) -> Result<PreType, TokenizerError> {
+    let Some(name) = string_scalar(metadata, PRE_KEY)?.filter(|name| !name.is_empty()) else {
+        let architecture = string_scalar(metadata, ARCHITECTURE_KEY)?;
+        proxima_telemetry::warn!(
+            architecture = ?architecture,
+            "missing tokenizer.ggml.pre, using the default pre-tokenizer; generation quality may be degraded, consider regenerating the model"
+        );
+        return Ok(PreType::Default);
+    };
+    PreType::from_gguf_name(&name).ok_or(TokenizerError::UnsupportedPreTokenizer { pre: name })
 }
 
 /// Reads `tokenizer.ggml.token_type` (`array<i32>`, parallel to
@@ -297,6 +340,10 @@ mod tests {
                     String::from(MERGES_KEY),
                     MetadataValue::Array(MetadataArray::String(Vec::new()))
                 ),
+                (
+                    String::from(PRE_KEY),
+                    MetadataValue::String(String::from("llama-bpe"))
+                ),
                 (String::from(ADD_BOS_KEY), MetadataValue::Bool(true)),
                 (String::from(ADD_EOS_KEY), MetadataValue::Bool(false)),
             ],
@@ -307,6 +354,80 @@ mod tests {
         let vocab = vocab_from_metadata(&metadata).expect("well-typed metadata builds a vocab");
         assert_eq!(vocab.add_bos_token(), Some(true));
         assert_eq!(vocab.add_eos_token(), Some(false));
+    }
+
+    fn byte_level_metadata(pre: Option<&str>) -> ParsedGguf {
+        let tokens: Vec<String> = (0..=255u8)
+            .map(|byte| String::from(crate::byte_level::byte_to_char(byte)))
+            .collect();
+        let mut metadata = alloc::vec![
+            (
+                String::from(TOKENS_KEY),
+                MetadataValue::Array(MetadataArray::String(tokens))
+            ),
+            (
+                String::from(MODEL_KEY),
+                MetadataValue::String(String::from("gpt2"))
+            ),
+            (
+                String::from(MERGES_KEY),
+                MetadataValue::Array(MetadataArray::String(Vec::new()))
+            ),
+        ];
+        if let Some(pre) = pre {
+            metadata.push((String::from(PRE_KEY), MetadataValue::String(String::from(pre))));
+        }
+        ParsedGguf {
+            version: 3,
+            tensor_count: 0,
+            kv_count: 0,
+            metadata,
+            tensors: Vec::new(),
+            data_offset: 0,
+            alignment: 32,
+        }
+    }
+
+    #[test]
+    fn pre_value_selects_the_pre_split_the_way_llama_cpp_maps_it() {
+        for (pre, expected) in [
+            ("llama-bpe", PreType::Llama3),
+            ("lfm2", PreType::Llama3),
+            ("qwen2", PreType::Qwen2),
+            ("deepseek-r1-qwen", PreType::Qwen2),
+            ("qwen35", PreType::Qwen35),
+            ("default", PreType::Default),
+        ] {
+            let vocab = vocab_from_metadata(&byte_level_metadata(Some(pre)))
+                .expect("a mapped pre value builds a vocab");
+            assert_eq!(vocab.pre_type(), expected, "pre value {pre:?}");
+        }
+    }
+
+    #[test]
+    fn unmapped_pre_value_is_an_error_carrying_the_value() {
+        for pre in ["deepseek-coder", "stablelm2", "qwen3-unreleased"] {
+            let error = vocab_from_metadata(&byte_level_metadata(Some(pre)))
+                .expect_err("an unmapped pre value is rejected");
+            assert_eq!(
+                error,
+                TokenizerError::UnsupportedPreTokenizer { pre: String::from(pre) }
+            );
+        }
+    }
+
+    #[test]
+    fn missing_pre_key_selects_the_default_pre_split_like_llama_cpp() {
+        let vocab = vocab_from_metadata(&byte_level_metadata(None))
+            .expect("a byte-level vocab with no pre key builds, as in llama.cpp");
+        assert_eq!(vocab.pre_type(), PreType::Default);
+    }
+
+    #[test]
+    fn empty_pre_value_is_treated_as_missing() {
+        let vocab = vocab_from_metadata(&byte_level_metadata(Some("")))
+            .expect("an empty pre value builds, as in llama.cpp");
+        assert_eq!(vocab.pre_type(), PreType::Default);
     }
 
     /// Loads the real llama-bpe vocab fixture and confirms the exact
@@ -433,17 +554,20 @@ mod tests {
             }
             panic!("deepseek-coder gguf metadata region did not fit in 128 MiB");
         };
-        let vocab =
-            vocab_from_metadata(&parsed).expect("builds vocab from real deepseek-coder metadata");
-        assert_eq!(
-            vocab.add_bos_token(),
-            None,
+        assert!(
+            parsed.metadata_value(ADD_BOS_KEY).is_none(),
             "deepseek-coder's real gguf metadata carries no add_bos_token key"
         );
-        assert_eq!(
-            vocab.add_eos_token(),
-            None,
+        assert!(
+            parsed.metadata_value(ADD_EOS_KEY).is_none(),
             "deepseek-coder's real gguf metadata carries no add_eos_token key"
+        );
+        let vocab = vocab_from_metadata(&parsed)
+            .expect("builds vocab from real deepseek-coder metadata");
+        assert_eq!(
+            vocab.pre_type(),
+            PreType::Default,
+            "this deepseek-coder gguf predates tokenizer.ggml.pre"
         );
     }
 
@@ -466,7 +590,7 @@ mod tests {
         // vocab, confirmed via `tokenizer.ggml.scores` present and
         // `tokenizer.ggml.merges` absent): the BOS control token, a
         // plain ASCII subword, and a multi-byte UTF-8 katakana token.
-        let cases: [(u32, &str); 3] = [(1, "<s>"), (450, "de"), (30_000, "ァ")];
+        let cases: [(u32, &str); 3] = [(1, ""), (450, "de"), (30_000, "ァ")];
 
         for (token_id, expected_text) in cases {
             let mut logits = alloc::vec![0.0f32; vocab.len()];

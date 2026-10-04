@@ -24,10 +24,10 @@
 //! # Two encoders, selected by what the vocab declares
 //!
 //! Byte-level BPE over the GPT-2 alphabet ([`byte_level`]), with the
-//! LLAMA3 pretokenizer ([`pretokenize`]) -- the variant `tokenizer.ggml.
-//! model = "gpt2"` / `tokenizer.ggml.pre = "llama-bpe"` identify on the
-//! real fixture this crate was built against
-//! (`~/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf`).
+//! pre-split selected by [`pretokenize::PreType`], which a GGUF names in
+//! `tokenizer.ggml.pre` (`"llama-bpe"` is the LLAMA3 rule, `"qwen2"` and
+//! `"qwen35"` split digits one per pretoken); `tokenizer.ggml.model = "gpt2"`
+//! identifies the byte-level family itself.
 //!
 //! Char-level BPE for `tokenizer.ggml.model = "gemma4"`: merges keyed on raw
 //! UTF-8 characters with `▁` for space, split only on newline runs
@@ -58,6 +58,8 @@ pub mod pipe;
 pub mod pretokenize;
 pub mod sample;
 pub mod sized;
+mod pretokenize_default;
+mod unicode_tables;
 pub mod unigram;
 pub mod vocab;
 

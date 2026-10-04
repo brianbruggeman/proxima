@@ -1,7 +1,7 @@
 //! Crate-level integration tests: round-trip over a larger hand-built
 //! vocab exercising multi-step merges, explicit special-token handling,
-//! sad paths, and (feature-gated, `#[ignore]`d) the real llama-bpe
-//! fixture against llama.cpp's own oracle token ids.
+//! sad paths, and (feature-gated) the real llama-bpe fixture against
+//! llama.cpp's own oracle token ids.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -311,29 +311,21 @@ mod real_fixture {
         ]
     }
 
-    fn load_real_vocab() -> Option<Vocab> {
+    fn load_real_vocab() -> Vocab {
         let candidate = Path::new(
             "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
         );
-        if !candidate.exists() {
-            eprintln!("no real .gguf found at {candidate:?}, skipping");
-            return None;
-        }
-        let (parsed, _bytes) =
-            proxima_gguf::edge::read_file(candidate).expect("parse real gguf file");
-        Some(vocab_from_metadata(&parsed).expect("build vocab from real metadata"))
+        let (parsed, _bytes) = proxima_gguf::edge::read_file(candidate)
+            .unwrap_or_else(|error| panic!("parse real gguf file {candidate:?}: {error:?}"));
+        vocab_from_metadata(&parsed).expect("build vocab from real metadata")
     }
 
-    /// Round-trip is the hard gate: every string must survive
-    /// encode-then-decode against the real 128256-token llama-bpe vocab,
-    /// regardless of whether this crate's pretokenizer matches
-    /// llama.cpp's PCRE-based one byte-for-byte on token *boundaries*.
+    /// Every string must survive encode-then-decode against the real
+    /// 128256-token llama-bpe vocab, including strings outside the oracle
+    /// table.
     #[test]
-    #[ignore = "depends on a real .gguf checkout outside this repo"]
     fn round_trips_against_the_real_vocab() {
-        let Some(vocab) = load_real_vocab() else {
-            return;
-        };
+        let vocab = load_real_vocab();
         let mut count = 0;
         for (text, _) in oracle_cases() {
             let ids = encode(text, &vocab).expect("encodes against real vocab");
@@ -367,32 +359,16 @@ mod real_fixture {
         );
     }
 
-    /// Compares this crate's token ids against llama.cpp's own oracle
-    /// table. Prints per-string match/mismatch rather than failing the
-    /// suite on mismatch: this crate's pretokenizer is a hand-rolled
-    /// approximation of llama.cpp's PCRE regex (documented in
-    /// `pretokenize.rs`), not a byte-for-byte port of it, so exact id
-    /// parity is a bonus this test reports, not a correctness gate --
-    /// [`round_trips_against_the_real_vocab`] is the gate.
+    /// This crate's token ids equal llama.cpp's own oracle table, string for
+    /// string, against the real llama-bpe vocab.
     #[test]
-    #[ignore = "depends on a real .gguf checkout outside this repo"]
-    fn reports_parity_against_llama_cpp_oracle_ids() {
-        let Some(vocab) = load_real_vocab() else {
-            return;
-        };
-        let mut matched = 0;
-        let mut total = 0;
-        for (text, expected) in oracle_cases() {
-            total += 1;
+    fn llama3_token_ids_match_llama_cpp_oracle_table() {
+        let vocab = load_real_vocab();
+        let cases = oracle_cases();
+        assert!(!cases.is_empty(), "the oracle table must not be empty");
+        for (text, expected) in cases {
             let ids = encode(text, &vocab).expect("encodes against real vocab");
-            if ids == expected {
-                matched += 1;
-                println!("MATCH   {text:?}: {ids:?}");
-            } else {
-                println!("DIFFER  {text:?}: ours={ids:?} llama.cpp={expected:?}");
-            }
+            assert_eq!(ids, expected, "llama.cpp mismatch for {text:?}");
         }
-        println!("oracle parity: {matched}/{total} exact matches");
-        assert!(total > 0, "the oracle table must not be empty");
     }
 }
