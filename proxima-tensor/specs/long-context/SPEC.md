@@ -95,7 +95,7 @@ their case counts; `--allow-extrapolation` in AC21 maps to `Extrapolate`.
 ## architecture
 
 Everything here is format parsing, a generic op, a kernel, the existing runtime, or a bug
-fix. All of it lives in proxima (`feedback_model_work_lives_in_ragd_not_proxima`).
+fix. All of it lives in proxima: model execution only, no knowledge of any consumer.
 
 - **R1-R4.**
   - `Architecture::trained_context_length(&self) -> Option<u32>`.
