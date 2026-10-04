@@ -2353,6 +2353,15 @@ impl<'file> LoadedModel<'file> {
         &self.residual_roots
     }
 
+    /// How many nodes the forward program holds. [`Self::node_kind`],
+    /// [`Self::node_name`], [`Self::node_description`] and
+    /// [`Self::node_dependencies`] index the program directly, so this is the
+    /// bound a caller walks the ids to.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.program.len()
+    }
+
     /// Every [`NodeId`] the program needs to evaluate `through`, inclusive.
     /// `self.program` is a flat, topologically-ordered slice (`op::append`'s
     /// own doc: "the last element is the root", by construction backwards-
