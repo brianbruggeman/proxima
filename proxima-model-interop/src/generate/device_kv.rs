@@ -83,12 +83,6 @@ impl DeviceKvLayer {
         let k_even = allocate_placed_buffer(capacity_rows * even_odd_row_bytes)?;
         let k_odd = allocate_placed_buffer(capacity_rows * even_odd_row_bytes)?;
         let v = allocate_placed_buffer(capacity_rows * v_row_bytes)?;
-        // the leaf reads past the live rows up to the bucket; a row never
-        // written must be a finite zero, not undefined memory, because the
-        // masked softmax weight 0.0 still multiplies it
-        omega::metal::zero_placed_buffer(&k_even, capacity_rows * even_odd_row_bytes);
-        omega::metal::zero_placed_buffer(&k_odd, capacity_rows * even_odd_row_bytes);
-        omega::metal::zero_placed_buffer(&v, capacity_rows * v_row_bytes);
         Ok(Self {
             k_even,
             k_odd,
@@ -111,26 +105,59 @@ impl DeviceKvLayer {
         }
     }
 
+    /// Writes the kept host rows to the front of each buffer and zeroes the
+    /// rest. The leaf reads past the live rows up to the bucket; a row never
+    /// written must be a finite zero, not undefined memory, because the masked
+    /// softmax weight 0.0 still multiplies it. Only the tail is zeroed: the
+    /// head is overwritten here, so zeroing it first is a second pass over
+    /// every byte of a long context.
     fn seed(&mut self, cache: &LayerCache, cached_len: usize) {
         let even_odd_row = self.even_odd_row_bytes / core::mem::size_of::<f32>();
         let v_row = self.v_row_bytes / core::mem::size_of::<f32>();
         let first = self.first_kept(cached_len);
         let kept = cached_len - first;
         self.base_position = first;
-        let mut even = Vec::with_capacity(kept * even_odd_row);
-        let mut odd = Vec::with_capacity(kept * even_odd_row);
-        let mut value = Vec::with_capacity(kept * v_row);
-        for position in first..cached_len {
-            let slot = cache
-                .ring_geometry()
-                .map_or(position, |ring| position % ring.capacity);
-            even.extend_from_slice(&cache.k_even[slot * even_odd_row..(slot + 1) * even_odd_row]);
-            odd.extend_from_slice(&cache.k_odd[slot * even_odd_row..(slot + 1) * even_odd_row]);
-            value.extend_from_slice(&cache.v[slot * v_row..(slot + 1) * v_row]);
+        for (slot_start, rows, target_row) in kept_segments(cache, first, kept)
+            .into_iter()
+            .filter(|(_, rows, _)| *rows > 0)
+        {
+            self.write_rows(cache, slot_start, rows, target_row, even_odd_row, v_row);
         }
-        omega::write_placed_buffer_f32(&self.k_even, 0, &even);
-        omega::write_placed_buffer_f32(&self.k_odd, 0, &odd);
-        omega::write_placed_buffer_f32(&self.v, 0, &value);
+        for (buffer, row_bytes) in [
+            (&self.k_even, self.even_odd_row_bytes),
+            (&self.k_odd, self.even_odd_row_bytes),
+            (&self.v, self.v_row_bytes),
+        ] {
+            omega::metal::zero_placed_buffer_range(
+                buffer,
+                kept * row_bytes,
+                (self.capacity_rows - kept) * row_bytes,
+            );
+        }
+    }
+
+    fn write_rows(
+        &self,
+        cache: &LayerCache,
+        slot_start: usize,
+        rows: usize,
+        target_row: usize,
+        even_odd_row: usize,
+        v_row: usize,
+    ) {
+        let even_odd = slot_start * even_odd_row..(slot_start + rows) * even_odd_row;
+        let value = slot_start * v_row..(slot_start + rows) * v_row;
+        omega::write_placed_buffer_f32(
+            &self.k_even,
+            target_row * self.even_odd_row_bytes,
+            &cache.k_even[even_odd.clone()],
+        );
+        omega::write_placed_buffer_f32(
+            &self.k_odd,
+            target_row * self.even_odd_row_bytes,
+            &cache.k_odd[even_odd],
+        );
+        omega::write_placed_buffer_f32(&self.v, target_row * self.v_row_bytes, &cache.v[value]);
     }
 
     fn make_room(&mut self, cached_len: usize, new_count: usize, bound_extent: usize) {
@@ -315,6 +342,19 @@ impl DeviceKv {
             cache.append_at(first, &even, &odd, &value);
         }
     }
+}
+
+/// The host-cache slot runs that hold positions `first..first + kept`, as
+/// `(first slot, rows, device row)`. A full layer stores position `p` in slot
+/// `p`: one run. A ring stores it in slot `p % capacity`, so the run wraps at
+/// most once.
+fn kept_segments(cache: &LayerCache, first: usize, kept: usize) -> [(usize, usize, usize); 2] {
+    let Some(ring) = cache.ring_geometry() else {
+        return [(first, kept, 0), (0, 0, kept)];
+    };
+    let start_slot = first % ring.capacity;
+    let head_rows = kept.min(ring.capacity - start_slot);
+    [(start_slot, head_rows, 0), (0, kept - head_rows, head_rows)]
 }
 
 /// Resolves every layer's `kv_cache.{layer}.*` leaf nodes in one pass over
@@ -507,6 +547,39 @@ mod tests {
                 "position {position}, older than the window but inside the slack, is still there"
             );
         }
+    }
+
+    #[test]
+    fn seeding_zeroes_every_row_past_the_kept_ones_whatever_the_buffer_held() {
+        let positions = 37;
+        let capacity_rows = 48;
+        let cache = host_cache(None, positions);
+        let mut layer = DeviceKvLayer::allocate(&cache, EVEN_ODD_ROW, V_ROW, capacity_rows, 3)
+            .expect("device kv allocates on the real Metal device");
+        let dirty = alloc::vec![f32::NAN; capacity_rows * EVEN_ODD_ROW.max(V_ROW)];
+        omega::write_placed_buffer_f32(&layer.k_even, 0, &dirty[..capacity_rows * EVEN_ODD_ROW]);
+        omega::write_placed_buffer_f32(&layer.k_odd, 0, &dirty[..capacity_rows * EVEN_ODD_ROW]);
+        omega::write_placed_buffer_f32(&layer.v, 0, &dirty[..capacity_rows * V_ROW]);
+
+        layer.seed(&cache, positions);
+
+        let tail_rows = capacity_rows - positions;
+        let tail = |buffer: &PlacedBuffer, row_bytes: usize, row: usize| {
+            omega::read_placed_buffer_f32(buffer, positions * row_bytes, tail_rows * row)
+        };
+        assert!(
+            tail(&layer.k_even, layer.even_odd_row_bytes, EVEN_ODD_ROW)
+                .iter()
+                .chain(&tail(&layer.k_odd, layer.even_odd_row_bytes, EVEN_ODD_ROW))
+                .chain(&tail(&layer.v, layer.v_row_bytes, V_ROW))
+                .all(|value| value.to_bits() == 0),
+            "rows the call never wrote read as +0.0, not the buffer's previous bytes"
+        );
+        assert_eq!(
+            omega::read_placed_buffer_f32(&layer.k_even, 0, positions * EVEN_ODD_ROW),
+            rows(0, positions, EVEN_ODD_ROW, 0),
+            "the kept rows are the host rows, in order"
+        );
     }
 
     #[test]
