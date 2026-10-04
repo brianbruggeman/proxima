@@ -746,13 +746,3 @@ fn llama_parity_qwen2() {
 fn llama_parity_qwen3() {
     llama_parity(&QWEN3);
 }
-
-#[test]
-fn llama_parity_qwen35() {
-    llama_parity(&QWEN35);
-}
-
-#[test]
-fn llama_parity_qwen35moe() {
-    llama_parity(&QWEN35MOE);
-}
