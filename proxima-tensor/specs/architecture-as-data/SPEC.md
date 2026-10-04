@@ -118,7 +118,7 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 7 passed: bound names and tensor-byte digest equal the incumbent's | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
 | AC4 | R6 | consistency | `git grep -nIiP '\b(gemma4\|qwen35moe\|qwen35\|qwen2\|lfm2\|mistral\|llama)\b' -- proxima-model-interop/src proxima-tensor/src omega/src proxima-tokenizer/src ':!*tests*' ':!*profiles*' \| wc -l` | 0 | 1214 |
 | AC5 | R2 | consistency | `git grep -nP '\b(trait\|impl\|struct\|enum)\b[^;{]*Architecture' -- proxima-model-interop/src proxima-tensor/src \| wc -l`, then `cargo nextest run -p proxima-model-interop --features std,conflaguration -E 'test(/descriptor_config_parity_\|serving_fsm_drives_/)'` | 0; then 9 passed: one descriptor config-vs-builder round trip per checkpoint (7), plus 2 FSM tests (a plain decode and a speculative verify-accept-rollback run that the live generate path routes through `ServingState`) | first command prints 17 (trait, registry, 4 family impls, the test fake, and the per-family `Architecture`/`*Architecture` hparams structs); second: tests absent |
-| AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/)'` | 7 passed, one per checkpoint; 8 passed from slice 9 (lfm2 added) | 7 passed (lfm2 unloadable at 9dd9deef) |
+| AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/)'` | 7 passed, one per checkpoint; 8 passed from slice 9 (lfm2 added) | 3 passed, 4 failed at ac4eb2c7 (measured 2026-10-04): D1 gemma4 e2b + 26b do not stop at EOG id 106; D2 gemma4 26b diverges at index 0 on 2 of 3 prompts; O1 qwen35 + qwen35moe have no oracle (llama f1ea20621 rejects the blobs: rope.dimension_sections length 3, expects 4) |
 | AC7 | R4 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/window_ring_layers_/)'` | 2 passed: (a) gemma4 E2B ring layers equal `swa_layers.txt`; (b) a synthetic descriptor with a window on one dense layer gets a ring on exactly that layer | 1 passed, 1 failed ((b) fails: dense layers ignore the window) |
 | AC8 | R8 | oracle | `cargo nextest run -p proxima-tokenizer --features gguf -E 'binary(gemma4_llama_oracle)'` | 20 passed, 0 failed | 20 passed |
 
@@ -133,3 +133,22 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
   never-masked cached block), so R7 cannot hold that way.
 - Taken instead: a descriptor field `cache_mask` selects the existing algebra inside one
   engine, which keeps the graph byte-identical.
+
+## findings from slice 0 (llama.cpp f1ea20621 oracle, ac4eb2c7)
+
+- Tokenizer: proxima reproduces llama's prompt ids on 15 of 15 (checkpoint, prompt) pairs.
+- D1: gemma4 does not stop at id 106. llama stops at the GGUF end-of-generation set; proxima
+  stops only on `eos_token_id` (`decode_until_stop_or_budget`,
+  `proxima-model-interop/src/generate/residency_caches.rs:3433`).
+  - Fix: the stop set comes from GGUF data (llama's EOG set), not from one id. That is
+    generic and keyed on no model.
+- D2: gemma4 26B diverges from llama at generated index 0 ("The capital of France is") and at
+  index 1 (river paragraph).
+  - Both sides produce repetitive output on these raw prompts. The cause is unknown until the
+    step-0 top-k margins of both are compared. It is recorded, not explained.
+- O1: qwen35 and qwen35moe have no oracle.
+  - The Ollama blobs carry `rope.dimension_sections` of length 3, and llama f1ea20621 refuses
+    to load them.
+  - A header-patched copy, or a llama-convertible GGUF from the original HF weights, would
+    restore the oracle. Making that copy needs owner approval: the patch command was denied
+    by the permission check.
