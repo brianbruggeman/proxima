@@ -1,6 +1,8 @@
 use super::*;
 #[cfg(feature = "instrument")]
 use objc2_metal::MTLBlitCommandEncoder;
+#[cfg(feature = "instrument")]
+use std::borrow::Borrow;
 
 /// CARD 6.5: whole-`MetalBuffer` device output arena, hung off the cached
 /// [`Plan`] and built exactly once, in [`plan`], from
@@ -1419,14 +1421,16 @@ impl CapturedDispatch {
         gpu_span_ns(&command_buffer)
     }
 
-    /// GPU time of all captured dispatches in their original serial order in
-    /// one command buffer, for comparing the census replay with a live step.
+    /// GPU time of `items` in the given order in one command buffer, for
+    /// comparing the census replay with a live step; `items` is the whole
+    /// captured step or a subset of it (one kernel family).
     ///
     /// # Errors
     ///
     /// Returns the first captured unreplayable reason, or a Metal error when
     /// buffer allocation or command execution fails.
-    pub fn time_gpu_sequence_ns(dispatches: &[Self]) -> Result<f64, MetalError> {
+    pub fn time_gpu_sequence_ns<Item: Borrow<Self>>(items: &[Item]) -> Result<f64, MetalError> {
+        let dispatches: Vec<&Self> = items.iter().map(Borrow::borrow).collect();
         if dispatches.is_empty() {
             return Ok(0.0);
         }
