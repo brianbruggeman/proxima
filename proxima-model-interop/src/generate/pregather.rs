@@ -3036,6 +3036,7 @@ mod gemma4_single_range_exclusion_tests {
             rms_epsilon: 1e-6,
             tied_embeddings: false,
             force_split_half_rope: false,
+            sliding_rope: None,
         }
     }
 

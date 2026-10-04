@@ -38,9 +38,9 @@ use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext,
 };
 use crate::bind::{
-    BoundWeights, ModelArchitecture, bind_dense, bind_matmul_weight, bind_matmul_weight_as,
-    bind_matmul_weight_transposed_f32, bind_moe_expert_weights, codec_from_ggml_type, find_tensor,
-    gguf_tensor_as_f32,
+    BoundWeights, ModelArchitecture, SlidingRope, bind_dense, bind_matmul_weight,
+    bind_matmul_weight_as, bind_matmul_weight_transposed_f32, bind_moe_expert_weights,
+    codec_from_ggml_type, find_tensor, gguf_tensor_as_f32,
 };
 use crate::error::InteropError;
 
@@ -1041,6 +1041,10 @@ fn bind_gemma4_with_last_row_only<'file>(
             rms_epsilon: architecture.rms_epsilon,
             tied_embeddings,
             force_split_half_rope: false,
+            sliding_rope: Some(SlidingRope {
+                freq_base: architecture.rope_freq_base_swa,
+                dimension_count: architecture.rope_dimension_count_swa,
+            }),
         };
 
         Ok(BoundProgram {
@@ -1177,11 +1181,11 @@ impl ArchitectureTrait for Gemma4Arch {
         let positions: Vec<usize> = (0..context.new_count)
             .map(|offset| context.new_start + offset)
             .collect();
-        // Metadata-derived base/dim would need a second `from_metadata` read
-        // per step; the checkpoint's own SWA base/dim (`1e4`/`256`) is fixed
-        // per architecture, not per file, so this seam hard-codes Gemma 4's
-        // own values rather than re-parsing metadata on every decode step.
-        let (cos, sin) = gemma4_sliding_rope_table(&positions, 1.0e4, 256);
+        let Some(rope) = context.architecture.sliding_rope else {
+            return;
+        };
+        let (cos, sin) =
+            gemma4_sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
         out.push(StepInput {
             name: "rope_cos_swa",
             values: cos,

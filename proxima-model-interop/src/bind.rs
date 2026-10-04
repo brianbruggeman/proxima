@@ -418,6 +418,20 @@ pub struct ModelArchitecture {
     /// already derives from, and carried as data so `crate::dense::DenseArch::bind`
     /// never re-derives it from the name itself.
     pub force_split_half_rope: bool,
+    /// `{architecture}.rope.freq_base_swa` / `rope.dimension_count_swa` for a
+    /// checkpoint whose sliding-window layers rotate with their own table;
+    /// `None` when every layer shares the builtin one.
+    /// [`crate::architecture::Architecture::step_inputs`] reads it per step
+    /// through [`crate::architecture::StepInputContext::architecture`].
+    pub sliding_rope: Option<SlidingRope>,
+}
+
+/// Base and rotary width of a sliding-window RoPE table, read from GGUF
+/// metadata at bind time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlidingRope {
+    pub freq_base: f32,
+    pub dimension_count: u32,
 }
 
 impl ModelArchitecture {
@@ -617,6 +631,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         rms_epsilon,
         tied_embeddings: false,
         force_split_half_rope: architecture == "qwen2",
+        sliding_rope: None,
     })
 }
 
@@ -3264,6 +3279,7 @@ mod tests {
                 rms_epsilon: RMS_EPSILON_DEFAULT,
                 tied_embeddings: false,
                 force_split_half_rope: false,
+                sliding_rope: None,
             },
             "a checkpoint with no expert_count/expert_used_count key is dense: both fields must read as 0, \
              not error; a checkpoint with no rope.freq_base/layer_norm_rms_epsilon key must fall back \

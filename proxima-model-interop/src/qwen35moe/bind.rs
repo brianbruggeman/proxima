@@ -270,6 +270,7 @@ impl ArchitectureTrait for Qwen35MoeArch {
             rms_epsilon: qwen_architecture.rms_epsilon,
             tied_embeddings: false,
             force_split_half_rope: false,
+            sliding_rope: None,
         };
         Ok(BoundProgram {
             weights,
