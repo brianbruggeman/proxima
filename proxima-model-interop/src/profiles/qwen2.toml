@@ -1,0 +1,12 @@
+score_scale_inverse_sqrt_head_dim = true
+value_norm = false
+rope_layout = "split_half"
+
+[ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false

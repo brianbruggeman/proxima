@@ -39,16 +39,13 @@ use crate::error::InteropError;
 /// unknown fields" behavior means this struct is forward-compatible with
 /// them rather than needing to enumerate them).
 ///
-/// `model_type`/`architectures` are read but not stored on
-/// [`ModelArchitecture`] -- see [`architecture_from_hf_config`]'s doc for
-/// why: neither this loader nor the GGUF one keeps its own architecture
-/// family string past parsing, and the one runtime branch that exists
-/// today (dense vs. mixture-of-experts) already reads off `expert_count`,
-/// which this struct derives from the MoE-only fields below.
+/// `model_type` is stored on [`ModelArchitecture::family`], the key of the
+/// family profile the HF path reads (see [`architecture_from_hf_config`]);
+/// `architectures` is read for diagnostics only.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HfConfig {
-    /// e.g. `"qwen3_moe"`, `"llama"`, `"mistral"` -- read for
-    /// completeness/diagnostics, not consumed by [`architecture_from_hf_config`].
+    /// e.g. `"qwen3_moe"`, `"llama"`, `"mistral"` -- the family profile key,
+    /// carried to [`ModelArchitecture::family`] by [`architecture_from_hf_config`].
     #[serde(default)]
     pub model_type: String,
     /// e.g. `["Qwen3MoeForCausalLM"]` -- same status as `model_type`.
@@ -150,23 +147,10 @@ pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
 ///   llama.cpp's own GGUF writer already folds a MoE checkpoint's per-expert
 ///   width into the one `{architecture}.feed_forward_length` key.
 ///
-/// `model_type`/`architectures` are read by [`parse_hf_config`] but not
-/// consulted here, matching [`crate::bind::architecture_from_metadata`]'s own
-/// GGUF read: `general.architecture` is used there only to build
-/// `{architecture}.*` metadata key names and is then dropped, never stored on
-/// [`ModelArchitecture`]. HF's config carries the same fact under
-/// `model_type`/`architectures`, and it goes unused here for the identical
-/// reason -- the one branch this crate's forward-program selection makes
-/// (dense vs. mixture-of-experts, `crate::generate::LoadedModel::load`) is
-/// already `architecture.expert_count == 0`, and `expert_count` is exactly
-/// what `num_experts`/`num_local_experts` derive below. Introducing an
-/// explicit family enum was considered and rejected: writing the call site
-/// both ways (`if architecture.expert_count == 0 { .. } else { .. }` vs. a
-/// hypothetical `match architecture.family { Family::Dense => .., Family::Moe
-/// => .. }`) produces the identical branch under a new name -- no family
-/// this crate's one forward-program template could route on beyond
-/// dense/MoE actually exists in the checkpoints available to test this
-/// against, so the enum would carry a fact nothing reads.
+/// `model_type` becomes [`ModelArchitecture::family`], so the HF path keys the
+/// same family profile the GGUF path keys by `general.architecture`; a family
+/// with no profile is an error at bind time, not a default. `architectures` is
+/// read by [`parse_hf_config`] for diagnostics and not consulted here.
 #[must_use]
 pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
     let kv_heads = config
@@ -203,7 +187,7 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
         rope_freq_base: config.rope_theta,
         rms_epsilon: config.rms_norm_eps,
         tied_embeddings: config.tie_word_embeddings,
-        force_split_half_rope: false,
+        family: config.model_type.clone(),
         sliding_rope: None,
     }
 }
@@ -305,7 +289,7 @@ mod tests {
                 rope_freq_base: 1_000_000.0,
                 rms_epsilon: 1e-6,
                 tied_embeddings: false,
-                force_split_half_rope: false,
+                family: String::from("qwen3_moe"),
                 sliding_rope: None,
             },
             "feed_forward must read moe_intermediate_size (768), not intermediate_size (6144), \
@@ -346,7 +330,7 @@ mod tests {
                 rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
                 rms_epsilon: 1e-5,
                 tied_embeddings: false,
-                force_split_half_rope: false,
+                family: String::from("llama"),
                 sliding_rope: None,
             },
             "kv_heads falls back to query_heads, head_dim to hidden_size/num_attention_heads, \
@@ -434,11 +418,44 @@ mod tests {
                 rope_freq_base: 100_000.0,
                 rms_epsilon: 1e-5,
                 tied_embeddings: true,
-                force_split_half_rope: false,
+                family: String::from("llama"),
                 sliding_rope: None,
             },
             "head_dim must derive as hidden_size/num_attention_heads (576/9=64) since no explicit \
              head_dim key is present, and tied_embeddings must read config's tie_word_embeddings"
+        );
+    }
+
+    /// Qwen2-7B's `config.json` scalars (hidden 3584, 28 heads, 4 kv heads,
+    /// 28 layers, vocab 152064, rope_theta 1e6). The HF path takes its family
+    /// from `model_type`, so it reads the same qwen2 profile the GGUF path
+    /// reads from `general.architecture`: split-half RoPE with no QK-norm
+    /// tensors.
+    #[cfg(feature = "std")]
+    #[test]
+    fn hf_qwen2_config_reads_the_split_half_profile_the_gguf_path_reads() {
+        let json = r#"{
+            "model_type": "qwen2",
+            "hidden_size": 3584,
+            "intermediate_size": 18944,
+            "num_attention_heads": 28,
+            "num_hidden_layers": 28,
+            "num_key_value_heads": 4,
+            "rms_norm_eps": 1e-06,
+            "rope_theta": 1000000.0,
+            "vocab_size": 152064,
+            "tie_word_embeddings": false
+        }"#;
+        let config = parse_hf_config(json.as_bytes()).expect("qwen2-7b config.json parses");
+        let architecture = architecture_from_hf_config(&config);
+
+        let profile = crate::profiles::family_profile(&architecture.family)
+            .expect("qwen2 profile embedded");
+
+        assert_eq!(architecture.family, "qwen2");
+        assert_eq!(
+            profile.rope_pairing(architecture.head_dim),
+            proxima_tensor::spec::RopePairing::SplitHalf { pairs: 64 }
         );
     }
 

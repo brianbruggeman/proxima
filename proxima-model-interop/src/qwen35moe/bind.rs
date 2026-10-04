@@ -16,7 +16,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use crate::architecture::{Architecture as ArchitectureTrait, BoundProgram};
 use crate::bind::{
     BoundWeights, bind_dense, bind_matmul_weight, bind_matmul_weight_transposed_f32,
-    bind_moe_expert_weights, find_tensor,
+    bind_moe_expert_weights, find_tensor, metadata_str,
 };
 use crate::error::InteropError;
 
@@ -269,7 +269,7 @@ impl ArchitectureTrait for Qwen35MoeArch {
             rope_freq_base: qwen_architecture.rope_freq_base,
             rms_epsilon: qwen_architecture.rms_epsilon,
             tied_embeddings: false,
-            force_split_half_rope: false,
+            family: metadata_str(parsed, "general.architecture")?.into(),
             sliding_rope: None,
         };
         Ok(BoundProgram {

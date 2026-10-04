@@ -17,7 +17,8 @@ use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    CacheStrategy, KeySourceKind, Qwen35LayerRoots, build_forward, gemma4_descriptor_from_gguf,
+    CacheStrategy, KeySourceKind, ModelDescriptor, Qwen35LayerRoots, build_forward,
+    gemma4_descriptor_from_gguf,
 };
 use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext,
@@ -25,9 +26,10 @@ use crate::architecture::{
 use crate::bind::{
     BoundWeights, ModelArchitecture, SlidingRope, bind_dense, bind_matmul_weight,
     bind_matmul_weight_as, bind_matmul_weight_transposed_f32, bind_moe_expert_weights,
-    codec_from_ggml_type, find_tensor, gguf_tensor_as_f32,
+    codec_from_ggml_type, find_tensor, gguf_tensor_as_f32, metadata_str,
 };
 use crate::error::InteropError;
+use crate::profiles::family_profile;
 
 use super::hparams::{Architecture, from_metadata};
 use super::program::gemma4_sliding_rope_table;
@@ -648,6 +650,18 @@ pub struct Gemma4Arch;
 /// The builtin `gemma4` registration value.
 pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 
+/// The checkpoint's descriptor: [`gemma4_descriptor_from_gguf`] over the family
+/// profile `general.architecture` names, so the values GGUF does not carry come
+/// from `crate::profiles` and never from this module.
+#[cfg(feature = "std")]
+fn descriptor_from_gguf(
+    parsed: &ParsedGguf,
+    sliding_kv_ring: bool,
+) -> Result<ModelDescriptor, InteropError> {
+    let profile = family_profile(metadata_str(parsed, "general.architecture")?)?;
+    Ok(gemma4_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?)
+}
+
 /// [`Gemma4Arch::bind`]'s body, parameterized on `last_row_only`
 /// (`lfm2_two_range_cached_forward_program_with_experts`'s own trailing
 /// flag -- see its doc: `true` gathers the LM head to the last new
@@ -672,7 +686,7 @@ fn bind_gemma4_with_last_row_only<'file>(
     // every gemma4 shape routes through `TwoRange` (all layers are `LayerKind::Attention`);
     // the two-range engine, not single-range, because the first step processes the whole
     // prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own module doc)
-    let descriptor = gemma4_descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
+    let descriptor = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
     let schedule = &descriptor.layers;
     let cache_strategy = descriptor.cache_strategy;
         let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
@@ -733,7 +747,7 @@ fn bind_gemma4_with_last_row_only<'file>(
             rope_freq_base: architecture.rope_freq_base,
             rms_epsilon: architecture.rms_epsilon,
             tied_embeddings,
-            force_split_half_rope: false,
+            family: metadata_str(parsed, "general.architecture")?.into(),
             sliding_rope: Some(SlidingRope {
                 freq_base: architecture.rope_freq_base_swa,
                 dimension_count: architecture.rope_dimension_count_swa,
@@ -1050,7 +1064,7 @@ mod declared_leaves_match_bound_leaves_tests {
         parsed: &ParsedGguf,
         suffix: &str,
     ) -> alloc::collections::BTreeSet<String> {
-        let mut descriptor = gemma4_descriptor_from_gguf(parsed, false)
+        let mut descriptor = descriptor_from_gguf(parsed, false)
             .expect("the e2b-shaped header carries every key the descriptor reads");
         descriptor.cache_strategy = CacheStrategy::Cacheless;
         let (program, ..) = build_forward(&descriptor, true).expect("gemma4 e2b-shaped forward program lowers");
@@ -1128,7 +1142,7 @@ mod declared_leaves_match_bound_leaves_tests {
     #[test]
     fn gemma4_e2b_shared_kv_reuse_map_matches_hand_derived_table() {
         let (parsed, _) = e2b_shaped(20);
-        let descriptor = gemma4_descriptor_from_gguf(&parsed, false)
+        let descriptor = descriptor_from_gguf(&parsed, false)
             .expect("the e2b-shaped header carries every key the descriptor reads");
         let shared_sources: [(usize, u32); 20] = [
             (15, 13), (16, 13), (17, 13), (18, 13), (19, 14),
@@ -1159,7 +1173,7 @@ mod declared_leaves_match_bound_leaves_tests {
     #[test]
     fn gemma4_e2b_header_pattern_has_seven_full_attention_layers_over_thirty_five_blocks() {
         let (parsed, _) = e2b_shaped(20);
-        let descriptor = gemma4_descriptor_from_gguf(&parsed, false)
+        let descriptor = descriptor_from_gguf(&parsed, false)
             .expect("the e2b-shaped header carries every key the descriptor reads");
         let full_layers = descriptor
             .layers

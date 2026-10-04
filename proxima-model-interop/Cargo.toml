@@ -44,6 +44,7 @@ std = [
     "dep:xxhash-rust",
     "conflaguration",
     "bon",
+    "toml",
     "memmap2",
     "dep:proxima-telemetry",
     "proxima-telemetry/std",
@@ -298,6 +299,7 @@ proxima-storage = ["dep:proxima-storage", "proxima-storage/dax"]
 conflaguration = ["dep:conflaguration"]
 libc = ["dep:libc"]
 bon = ["dep:bon"]
+toml = ["dep:toml"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -332,6 +334,7 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 # `proxima-safetensors`'s identical `serde_json.workspace = true`.
 serde_json.workspace = true
 thiserror.workspace = true
+toml = { workspace = true, optional = true }
 xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 
 [lints]

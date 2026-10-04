@@ -63,6 +63,8 @@ mod memory_fit;
 #[cfg(feature = "std")]
 mod quality;
 #[cfg(feature = "std")]
+pub mod profiles;
+#[cfg(feature = "std")]
 mod qwen35;
 pub mod rope_scaling;
 mod serving;

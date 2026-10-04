@@ -25,6 +25,7 @@
 //! without opening a file.
 
 use alloc::collections::BTreeSet;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -409,15 +410,12 @@ pub struct ModelArchitecture {
     /// `crate::hf_bind::hf_bind_matmul_weight` call with a different
     /// source tensor name.
     pub tied_embeddings: bool,
-    /// `true` only for `general.architecture = "qwen2"` -- the one case
-    /// this crate's dense forward-program bind cannot infer RoPE pairing
-    /// from tensor structure alone (`checkpoint_has_qk_norm` reads `false`
-    /// for qwen2 exactly as it does for any other split-half checkpoint
-    /// with no QK-norm tensors on disk). Read once here, at the same
-    /// `general.architecture` lookup every other field on this struct
-    /// already derives from, and carried as data so `crate::dense::DenseArch::bind`
-    /// never re-derives it from the name itself.
-    pub force_split_half_rope: bool,
+    /// The family string the checkpoint declares: `general.architecture` on the
+    /// GGUF path ([`architecture_from_metadata`]), `model_type` on the HF path
+    /// ([`crate::hf_config::architecture_from_hf_config`]). Carried whole rather
+    /// than as a per-family flag so both paths key the same
+    /// `crate::profiles::family_profile` lookup; nothing else reads it.
+    pub family: String,
     /// `{architecture}.rope.freq_base_swa` / `rope.dimension_count_swa` for a
     /// checkpoint whose sliding-window layers rotate with their own table;
     /// `None` when every layer shares the builtin one.
@@ -630,7 +628,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         rope_freq_base,
         rms_epsilon,
         tied_embeddings: false,
-        force_split_half_rope: architecture == "qwen2",
+        family: architecture.into(),
         sliding_rope: None,
     })
 }
@@ -3278,7 +3276,7 @@ mod tests {
                 rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
                 rms_epsilon: RMS_EPSILON_DEFAULT,
                 tied_embeddings: false,
-                force_split_half_rope: false,
+                family: "llama".to_string(),
                 sliding_rope: None,
             },
             "a checkpoint with no expert_count/expert_used_count key is dense: both fields must read as 0, \

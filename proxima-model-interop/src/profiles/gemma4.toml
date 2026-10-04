@@ -1,0 +1,21 @@
+embedding_scale = "Sqrt"
+score_scale_inverse_sqrt_head_dim = false
+value_norm = true
+rope_layout = "split_half"
+
+[ffn]
+post_attention_norm = true
+combination = "Exclusive"
+output_scale = true
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "GeluTanh"
+exclusive_dense_post_norm = true
+
+[parallel_dense_moe]
+dense_post_norm = true
+routed_post_norm = true
+combined_post_norm = true
+routed_pre_norm = true
+router_scale = true
+expert_output_scale = true
