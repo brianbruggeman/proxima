@@ -2687,6 +2687,8 @@ impl<'file> LoadedModel<'file> {
                 expert_slab: std::sync::Mutex::new(expert_slab),
                 expert_sidecar: None,
             prompt_cache: std::sync::Mutex::new(PromptCache::new()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            plan_life: Arc::new(()),
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
                 weights: bound.weights,
@@ -2815,6 +2817,8 @@ impl<'file> LoadedModel<'file> {
             expert_slab: std::sync::Mutex::new(expert_slab),
             expert_sidecar: None,
             prompt_cache: std::sync::Mutex::new(PromptCache::new()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            plan_life: Arc::new(()),
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights,
@@ -2930,6 +2934,8 @@ impl<'file> LoadedModel<'file> {
             expert_slab: std::sync::Mutex::new(expert_slab),
             expert_sidecar: None,
             prompt_cache: std::sync::Mutex::new(PromptCache::new()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            plan_life: Arc::new(()),
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights,

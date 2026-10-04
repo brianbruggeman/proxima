@@ -1940,6 +1940,12 @@ impl<'file> LoadedModel<'file> {
         }
         self.expert_sidecar = Some(sidecar);
         self.clear_prompt_cache();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        {
+            // resident decode plans were built against the whole-checkpoint
+            // mapping unregistered just above
+            self.plan_life = Arc::new(());
+        }
         Ok(())
     }
 
@@ -2130,8 +2136,23 @@ impl<'file> LoadedModel<'file> {
         };
         #[cfg(feature = "std")]
         apply_fusion_env_switches(&serving_config);
-        let mut runtime = BackendRuntime::new(&serving_config);
+        let mut runtime = self.backend_runtime(&serving_config);
         self.run_decode_loop(prompt, max_tokens, &serving_config, &mut runtime)
+    }
+
+    /// The [`BackendRuntime`] a generation on this model runs with. On Metal
+    /// it resumes the decode plans an earlier generation on this thread left
+    /// resident ([`super::resident_plans`]); anywhere else it is
+    /// [`BackendRuntime::new`]. Build a runtime with [`BackendRuntime::new`]
+    /// instead when the call must start from empty plans.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn backend_runtime(&self, serving_config: &ServingConfig) -> BackendRuntime {
+        BackendRuntime::resuming(&self.plan_life, serving_config)
+    }
+
+    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+    pub(super) fn backend_runtime(&self, serving_config: &ServingConfig) -> BackendRuntime {
+        BackendRuntime::new(serving_config)
     }
 
     /// Runs one forward pass over `prompt`'s own tokens and returns the
@@ -2170,7 +2191,7 @@ impl<'file> LoadedModel<'file> {
             effective_serving_config.prompt_cache = PromptCacheConfig::off();
             effective_serving_config
         };
-        let mut runtime = BackendRuntime::new(&effective_serving_config);
+        let mut runtime = self.backend_runtime(&effective_serving_config);
         let (_generated_ids, _text, _stopped_by_eos, prefix_state) = self
             .run_decode_loop_observed_seeded(
                 prompt,
@@ -2233,7 +2254,7 @@ impl<'file> LoadedModel<'file> {
             self.apply_dispatch_type_override(&mut effective_serving_config)?;
             effective_serving_config
         };
-        let mut runtime = BackendRuntime::new(&effective_serving_config);
+        let mut runtime = self.backend_runtime(&effective_serving_config);
         let seed = PrefixState {
             ids: prefix.ids.clone(),
             layer_caches: prefix.layer_caches.clone(),
@@ -2300,7 +2321,7 @@ impl<'file> LoadedModel<'file> {
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let effective_serving_config = self.effective_serving_config(serving_config)?;
-        let mut runtime = BackendRuntime::new(&effective_serving_config);
+        let mut runtime = self.backend_runtime(&effective_serving_config);
         let (generated_ids, text, stopped_by_eos, _final_state) = self
             .run_decode_loop_through_cache(
                 prompt_ids.to_vec(),
@@ -2355,7 +2376,7 @@ impl<'file> LoadedModel<'file> {
             self.apply_dispatch_type_override(&mut effective_serving_config)?;
             effective_serving_config
         };
-        let mut runtime = BackendRuntime::new(&effective_serving_config);
+        let mut runtime = self.backend_runtime(&effective_serving_config);
         let seed = PrefixState {
             ids: prefix.ids.clone(),
             layer_caches: prefix.layer_caches.clone(),
@@ -2698,7 +2719,7 @@ impl<'file> LoadedModel<'file> {
             self.apply_dispatch_type_override(&mut serving_config)?;
             serving_config
         };
-        let mut runtime = BackendRuntime::new(&serving_config);
+        let mut runtime = self.backend_runtime(&serving_config);
         #[cfg(feature = "metal")]
         if std::env::var_os("PROXIMA_WARMUP_BEFORE_GENERATE").is_some() {
             let mut warmup_callback = |_event: TokenEvent<'_>| ControlFlow::Continue(());
@@ -2783,7 +2804,7 @@ impl<'file> LoadedModel<'file> {
             self.apply_dispatch_type_override(&mut serving_config)?;
             serving_config
         };
-        let mut runtime = BackendRuntime::new(&serving_config);
+        let mut runtime = self.backend_runtime(&serving_config);
         let result = self.run_decode_loop_observed_with_stats(
             prompt,
             max_tokens,

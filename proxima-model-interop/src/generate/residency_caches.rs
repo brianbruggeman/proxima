@@ -1683,6 +1683,19 @@ pub(crate) struct BackendRuntime {
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_segment_plans:
         alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
+    /// Plans for the decode shape (`new_count == 1`) that
+    /// [`Self::evaluate_with_placements`] keeps apart from `placed_plans`, so
+    /// a prompt-shaped prefill miss never evicts them. They come from
+    /// [`resident_plans`] when the runtime was built by
+    /// [`LoadedModel::backend_runtime`] and go back in [`Drop`], which is what
+    /// lets a second generation skip plan build, arena build and plan-time
+    /// constant dispatch.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) decode_plans: resident_plans::DecodePlans,
+    /// The model token and numeric identity [`Self::decode_plans`] return to
+    /// on drop; `None` for a runtime built by [`Self::new`] directly.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    resident_home: Option<(Arc<()>, resident_plans::PlanIdentity)>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
     /// Misses served by refitting the previous plan in place
@@ -1718,6 +1731,15 @@ pub(crate) struct BackendRuntime {
     pub(super) command_buffer_chunks: u32,
 }
 
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+impl Drop for BackendRuntime {
+    fn drop(&mut self) {
+        if let Some((owner, identity)) = self.resident_home.take() {
+            resident_plans::put(&owner, identity, core::mem::take(&mut self.decode_plans));
+        }
+    }
+}
+
 #[cfg(feature = "metal")]
 impl BackendRuntime {
     pub(crate) fn new(config: &ServingConfig) -> Self {
@@ -1735,6 +1757,10 @@ impl BackendRuntime {
             placed_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_segment_plans: alloc::collections::BTreeMap::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            decode_plans: resident_plans::DecodePlans::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            resident_home: None,
             plan_hits: 0,
             plan_misses: 0,
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -1747,6 +1773,22 @@ impl BackendRuntime {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             command_buffer_chunks: config.command_buffer_chunks,
         }
+    }
+
+    /// A runtime that resumes `owner`'s resident decode plans on this thread
+    /// when they were built under the same [`resident_plans::PlanIdentity`]
+    /// as `config`, and returns them on drop. The plain [`Self::new`] keeps
+    /// every plan call-local. Only a Gpu runtime resumes anything: the
+    /// plans are Metal plans.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn resuming(owner: &Arc<()>, config: &ServingConfig) -> Self {
+        let mut runtime = Self::new(config);
+        if runtime.is_metal() {
+            let identity = resident_plans::PlanIdentity::of(config);
+            runtime.decode_plans = resident_plans::take(owner, &identity);
+            runtime.resident_home = Some((Arc::clone(owner), identity));
+        }
+        runtime
     }
 
     /// Whether this call's [`ServingConfig`] selected the Gpu engine --
@@ -2285,13 +2327,24 @@ impl BackendRuntime {
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
         };
+        let decode_shaped = shape.0 == 1;
+        if decode_shaped {
+            // a decode lookup is the signal prefill is over: its plan's arena
+            // scales with the prompt, so it must not outlive that
+            self.placed_plans.clear();
+        }
+        let cache = if decode_shaped {
+            &mut self.decode_plans
+        } else {
+            &mut self.placed_plans
+        };
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(&mut self.placed_plans, &shape)
+            Self::take_near_plan(cache, &shape)
         } else {
             None
         };
         let plan = Self::resolve_cached_plan(
-            &mut self.placed_plans,
+            cache,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
@@ -2313,22 +2366,23 @@ impl BackendRuntime {
                 )
             },
         )?;
-        if let Some(expert_sources) = expert_sources {
-            Ok(execute_plan_named_with_placements_and_expert_sources(
+        let executed = if let Some(expert_sources) = expert_sources {
+            execute_plan_named_with_placements_and_expert_sources(
                 plan,
                 named,
                 input_placements,
                 output_placements,
                 expert_sources,
-            )?)
+            )
         } else {
-            Ok(execute_plan_named_with_placements(
-                plan,
-                named,
-                input_placements,
-                output_placements,
-            )?)
+            execute_plan_named_with_placements(plan, named, input_placements, output_placements)
+        };
+        if executed.is_err() {
+            // a plan whose execute failed may have work in flight against its
+            // arena; it must not be resumed by a later generation
+            self.decode_plans.clear();
         }
+        Ok(executed?)
     }
 
     /// Every [`Self::placed_plans`] build closure's shared body -- the class
