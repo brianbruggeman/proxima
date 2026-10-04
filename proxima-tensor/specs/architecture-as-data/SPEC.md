@@ -193,6 +193,24 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
   - Consequence: the 26B parity case compares noise. It needs chat-templated prompts where the
     model is confident, re-vendored from llama-server. Until then it is excluded from AC6's
     pass count, the same way O1 is.
+  - Measured 2026-10-04 on chat-templated prompts (llama-server f1ea20621, greedy, 32 tokens
+    or first end-of-generation id):
+    - The three parity prompts were rendered as `<|turn>user\n{prompt}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>`,
+      which is what the GGUF's `tokenizer.chat_template` emits with thinking off; the BOS id is
+      added by tokenization.
+    - The model is coherent on all three ("The capital of France is **Paris**." and so on).
+    - proxima matches llama on 2 of 3 prompts: "The capital of France is" (9 ids, ends at id 106)
+      and the river paragraph (32 ids).
+    - proxima diverges on the third, `def fibonacci(n):`, at generated index 5: llama picks
+      " a" (id 496, logprob -1.117), proxima picks " an" (id 614), which is llama's second
+      choice (logprob -1.263). The top-2 margin is 0.146 nats, so this prompt is not a
+      confident one either.
+    - The recording is kept outside the repo, in `.long_ctx_backups/land/`
+      (`d3_26b_chat_llama_ids.json`, with `n_probs` in `d3_26b_chat_raw.json`), and the 26B
+      parity test still reads the raw-prompt ids. No test was changed for this finding.
+    - What would close it: replace the third prompt with one where llama's top-2 margin is
+      large at every index, then re-record; or compare the near-tie by logits instead of by
+      argmax ids.
   - Separate and untraced: proxima's CPU interpreter on 26B is off from llama at layer 0
     (`l_out-0` sum_rel_diff -8.06). slot-0-7c queued it.
 - O1: qwen35 and qwen35moe have no oracle.
@@ -201,3 +219,6 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
   - A header-patched copy, or a llama-convertible GGUF from the original HF weights, would
     restore the oracle. Making that copy needs owner approval: the patch command was denied
     by the permission check.
+  - The two `llama_parity_qwen35` and `llama_parity_qwen35moe` cases were removed at 59cf72e6
+    (owner excluded qwen from testing). The `llama_parity_` set lists 5: gemma4 26b, gemma4 e2b,
+    openchat, qwen2, qwen3. Measured 2026-10-04: 4 pass, gemma4 26b fails (D2 above).
