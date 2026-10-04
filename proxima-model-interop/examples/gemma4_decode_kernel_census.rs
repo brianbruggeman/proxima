@@ -58,6 +58,8 @@ const DEFAULT_PROMPT: &str = "<|turn>user\nWhich of these is smaller in size: a 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const HEAD_MIN_OUTPUT_EXTENT: u64 = 65536;
 #[cfg(all(feature = "metal", target_os = "macos"))]
+const FAMILY_SEQUENCE_RUNS: usize = 7;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const PROJECTION_MIN_REDUCTION: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -828,6 +830,47 @@ mod harness {
         }
     }
 
+    fn sequence_family(class: &Class) -> &'static str {
+        match class {
+            Class::Matvec(codec) if codec == "Q4_0" => "q4_0_matvec",
+            Class::Matvec(_) => "other_matvec",
+            Class::Head => "head",
+            Class::RmsSumsq | Class::RmsSumsqEpilogue | Class::NormApply => "norms",
+            Class::CachedAttentionPartial | Class::CachedAttentionMerge => "attention",
+            _ => "rope_copy_elementwise",
+        }
+    }
+
+    fn mean_and_cov_percent(values: &[f64]) -> (f64, f64) {
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        (mean, 100.0 * variance.sqrt() / mean)
+    }
+
+    fn sequence_family_arms(launched: &[CapturedDispatch], classes: &[Class], runs: usize) {
+        let mut by_family: BTreeMap<&'static str, Vec<&CapturedDispatch>> = BTreeMap::new();
+        for (dispatch, class) in launched.iter().zip(classes) {
+            by_family.entry(sequence_family(class)).or_default().push(dispatch);
+        }
+        let member_total: usize = by_family.values().map(Vec::len).sum();
+        assert_eq!(member_total, launched.len(), "N: family arms must partition the captured dispatches");
+        let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+        for _ in 0..runs {
+            for (family, members) in &by_family {
+                let nanos = CapturedDispatch::time_gpu_sequence_ns(members).expect("family sequence replays");
+                samples.entry(family).or_default().push(nanos / 1e6);
+            }
+        }
+        for (family, members) in &by_family {
+            let spans = &samples[family];
+            let (mean, cov) = mean_and_cov_percent(spans);
+            let minimum = spans.iter().copied().fold(f64::INFINITY, f64::min);
+            println!(
+                "m0 family sequence replay: family={family} dispatches={} runs={runs} gpu_ms_mean={mean:.4} gpu_ms_min={minimum:.4} cov_pct={cov:.2}",
+                members.len()
+            );
+        }
+    }
     fn warm_median(steps: &BTreeMap<usize, StepStats>, pick: fn(&StepStats) -> Option<f64>) -> f64 {
         let values: Vec<f64> = steps
             .iter()
@@ -927,6 +970,7 @@ mod harness {
                 })
                 .collect::<Vec<_>>()
         );
+        sequence_family_arms(&launched, &classes, FAMILY_SEQUENCE_RUNS);
         write_sample_trace_csv(&sample_trace_path, &launched, &groups, config.batch);
         report(&Census {
             config: &config,
