@@ -181,8 +181,20 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
   - The parity test therefore compares ids up to and including llama's first EOG id.
 - D2: gemma4 26B diverges from llama at generated index 0 ("The capital of France is") and at
   index 1 (river paragraph).
-  - Both sides produce repetitive output on these raw prompts. The cause is unknown until the
-    step-0 top-k margins of both are compared. It is recorded, not explained.
+  - Both sides produce repetitive output on these raw prompts.
+  - Root-caused by slot-0-7c (2026-10-04; evidence in
+    `proxima-speculative-decode-evidence/bisect_26b/`): not a regression, and not shown to be a
+    proxima numerics defect.
+    - On raw prompts this Q3_K_M blob emits nonsense in proxima, llama-server and Ollama alike.
+    - proxima's 26B ids are byte-identical at 2150fde9, 27d88bdf and f9fc44aa.
+    - llama's own CPU and Metal backends share no id in their step-0 top-5.
+    - proxima's per-layer drift from llama-Metal is smaller than llama-CPU's at every layer.
+    - The one routing difference is an 8th-expert near-tie (router logits 1.81350 vs 1.80960).
+  - Consequence: the 26B parity case compares noise. It needs chat-templated prompts where the
+    model is confident, re-vendored from llama-server. Until then it is excluded from AC6's
+    pass count, the same way O1 is.
+  - Separate and untraced: proxima's CPU interpreter on 26B is off from llama at layer 0
+    (`l_out-0` sum_rel_diff -8.06). slot-0-7c queued it.
 - O1: qwen35 and qwen35moe have no oracle.
   - The Ollama blobs carry `rope.dimension_sections` of length 3, and llama f1ea20621 refuses
     to load them.
