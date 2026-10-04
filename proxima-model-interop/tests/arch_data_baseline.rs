@@ -22,10 +22,17 @@ use std::path::{Path, PathBuf};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
-    PromptCacheConfig, ServingConfig,
+    PromptCacheConfig, ServingConfig, architecture_from_metadata,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::Op;
+use proxima_tensor::spec::{
+    Activation, AttentionScoreScale, CacheStrategy, EmbeddingScale, ExpertGatingFunc, FfnCombination,
+    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind, build_forward,
+    gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
+    mistral_cached_forward_program_with_experts_and_layer_taps, mistral_descriptor_from_shape,
+};
 use sha2::{Digest, Sha256};
 
 const CAPTURE_ENV: &str = "PROXIMA_ARCH_DATA_CAPTURE";
@@ -414,6 +421,170 @@ fn generic_binder_qwen35() {
 #[test]
 fn generic_binder_qwen35moe() {
     assert_bound(&QWEN35MOE);
+}
+
+fn assert_programs_identical(direct: &[Op], descriptor: &[Op]) {
+    assert_eq!(direct.len(), descriptor.len(), "op count mismatch");
+    let first_divergence = direct
+        .iter()
+        .zip(descriptor)
+        .position(|(direct_op, descriptor_op)| direct_op != descriptor_op);
+    assert!(
+        first_divergence.is_none(),
+        "op graphs diverge at index {first_divergence:?}: direct={:?} descriptor={:?}",
+        first_divergence.map(|index| &direct[index]),
+        first_divergence.map(|index| &descriptor[index]),
+    );
+}
+
+/// The independent arm: layers written out from the real 26B-A4B header's own
+/// values (every 6th layer full attention, 8/2 kv heads, window 1024), not
+/// read from the descriptor under test.
+fn gemma4_26b_hand_written_layers() -> Vec<LayerSchedule> {
+    let ffn = LayerFfnConfig {
+        post_attention_norm: true,
+        combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+            dense_post_norm: true,
+            routed_post_norm: true,
+            combined_post_norm: true,
+            routed_pre_norm: true,
+            router_scale: true,
+            expert_output_scale: true,
+        }),
+        output_scale: true,
+        routed_gating: ExpertGatingFunc::Softmax,
+        routed_expert_bias: false,
+        dense_feed_forward: None,
+        exclusive_dense_post_norm: false,
+        activation: Activation::GeluTanh,
+        ple: false,
+    };
+    (0..30u32)
+        .map(|layer| {
+            let is_full = (layer + 1).is_multiple_of(6);
+            let (head_dim, kv_heads, mask_window, value_source_kind, cos_name, sin_name) = if is_full {
+                (512, 2, None, ValueSourceKind::SharedWithKey, "rope_cos", "rope_sin")
+            } else {
+                (256, 8, Some(1024), ValueSourceKind::ProjectedV, "rope_cos_swa", "rope_sin_swa")
+            };
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim,
+                    kv_heads,
+                    mask_window,
+                    value_source_kind,
+                    key_source_kind: KeySourceKind::ProjectedK,
+                    rope_table: RopeTableSel { cos_name, sin_name },
+                    rope_pairing: RopePairing::SplitHalf { pairs: head_dim / 2 },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
+    let mapping = GEMMA4_26B.open();
+    let parsed = parse_complete(&mapping).expect("the real gemma4 26B header parses");
+
+    let descriptor = gemma4_descriptor_from_gguf(&parsed, false)
+        .expect("the production builder reads the real 26B header");
+
+    assert_eq!(descriptor.block_count, 30);
+    assert_eq!(descriptor.embedding, 2816);
+    assert_eq!(descriptor.feed_forward, 2112);
+    assert_eq!(descriptor.expert_feed_forward, 704);
+    assert_eq!(descriptor.query_heads, 16);
+    assert_eq!((descriptor.expert_count, descriptor.expert_used_count), (128, 8));
+    assert_eq!(descriptor.logit_softcap, Some(30.0));
+    assert_eq!(descriptor.cache_strategy, CacheStrategy::TwoRange);
+    let (direct, direct_logits, direct_roots, direct_moe, _head_repeats) =
+        lfm2_two_range_cached_forward_program_with_experts(
+            descriptor.vocab,
+            2816,
+            2112,
+            704,
+            16,
+            30,
+            128,
+            8,
+            0,
+            &gemma4_26b_hand_written_layers(),
+            Some(EmbeddingScale::Sqrt),
+            Some(30.0),
+            true,
+            None,
+            false,
+        )
+        .expect("direct real-dims build");
+
+    let (program, logits, roots, moe, ..) =
+        build_forward(&descriptor, true).expect("build_forward real-dims build");
+
+    assert_programs_identical(&direct, &program);
+    assert_eq!(direct_logits, logits, "root node id mismatch");
+    assert_eq!(direct_roots, roots, "cache roots mismatch");
+    assert_eq!(direct_moe.0.len(), moe.0.len(), "moe site count mismatch");
+}
+
+#[test]
+fn descriptor_real_dims_openchat_program_equals_direct_builder() {
+    let mapping = OPENCHAT.open();
+    let parsed = parse_complete(&mapping).expect("the real openchat header parses");
+    let shape = architecture_from_metadata(&parsed).expect("the real openchat header reads");
+    assert_eq!(
+        (shape.embedding, shape.feed_forward, shape.query_heads, shape.kv_heads, shape.head_dim, shape.block_count),
+        (4096, 14336, 32, 8, 128, 32),
+    );
+
+    let (direct, direct_roots, direct_cache_roots, direct_residuals, direct_moe) =
+        mistral_cached_forward_program_with_experts_and_layer_taps(
+            shape.vocab,
+            shape.embedding,
+            shape.feed_forward,
+            shape.query_heads,
+            shape.kv_heads,
+            shape.head_dim,
+            shape.block_count,
+            shape.expert_count,
+            shape.expert_used_count,
+            false,
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("direct real-dims build");
+    let descriptor = mistral_descriptor_from_shape(
+        shape.vocab,
+        shape.embedding,
+        shape.feed_forward,
+        shape.query_heads,
+        shape.kv_heads,
+        shape.head_dim,
+        shape.block_count,
+        shape.expert_count,
+        shape.expert_used_count,
+        false,
+        false,
+        false,
+        false,
+        RopePairing::Interleaved,
+    );
+
+    let (program, logits, cache_roots, moe, residuals, hidden, _head_repeats) =
+        build_forward(&descriptor, true).expect("build_forward real-dims build");
+
+    assert_programs_identical(&direct, &program);
+    assert_eq!(direct_roots.logits, logits, "root node id mismatch");
+    assert_eq!(Some(direct_roots.hidden), hidden, "hidden root mismatch");
+    assert_eq!(direct_cache_roots, cache_roots, "cache roots mismatch");
+    assert_eq!(direct_moe.0.len(), moe.0.len(), "moe site count mismatch");
+    assert_eq!(direct_residuals, residuals, "layer-residual roots mismatch");
 }
 
 #[test]

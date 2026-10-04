@@ -417,4 +417,23 @@ pub enum TensorError {
     /// element-count multiplication overflowed `usize`.
     #[error("invalid gdn prefill scan shape: {reason}")]
     InvalidGdnPrefillShape { reason: &'static str },
+
+    /// [`crate::spec::gemma4_descriptor_from_gguf`] needed a metadata key or
+    /// tensor directory entry the header does not carry (or carries with an
+    /// unsupported wire type); `name` is the key or tensor name.
+    #[error("gguf header has no usable entry named {name:?}")]
+    MissingGgufEntry { name: alloc::string::String },
+
+    /// A per-layer metadata array's length is not the declared `block_count`.
+    #[error("gguf metadata key {key:?} has {found} per-layer values, expected block_count {expected}")]
+    GgufPerLayerLengthMismatch {
+        key: alloc::string::String,
+        expected: usize,
+        found: usize,
+    },
+
+    /// `token_embd.weight`'s element count does not divide by `embedding_length`,
+    /// so no vocab size exists.
+    #[error("token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}")]
+    GgufVocabShapeMismatch { elements: u64, embedding: u32 },
 }

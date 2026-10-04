@@ -2650,7 +2650,7 @@ impl<'file> LoadedModel<'file> {
             // `attn_v.weight` `Op::Input` leaf for every layer 0..block_count
             // with no concept of `KeySourceKind::SharedFromLayer`/
             // `ValueSourceKind::SharedFromLayer` (gemma4 E2B's trailing
-            // shared-KV layers, `gemma4::bind::gemma4_layer_schedule`'s own
+            // shared-KV layers, `gemma4_descriptor_from_gguf`'s own
             // doc) -- it would declare `blk.15.attn_k.weight` for the real
             // `gemma4:e2b-it-qat` checkpoint even though that tensor never
             // exists on disk and `bind_gemma4_weights` correctly never binds
@@ -2663,7 +2663,7 @@ impl<'file> LoadedModel<'file> {
             // (`shared_kv_layers > 0`), exactly a shared-KV checkpoint --
             // gemma4's two-range path (`self.program`, built by
             // `lfm2_forward_program_with_experts` over
-            // `gemma4_layer_schedule`) already implements the SharedFromLayer
+            // `gemma4_descriptor_from_gguf`) already implements the SharedFromLayer
             // contract correctly, so excluding gemma4 here falls through to
             // that proven-correct path rather than porting cross-layer KV
             // reuse into the placed-KV single-range cache scheme (a
@@ -2904,7 +2904,7 @@ impl<'file> LoadedModel<'file> {
     /// [`InteropError::HfMoeWeightsUnsupported`] if `architecture.expert_count`
     /// is nonzero; otherwise whatever
     /// `crate::hf_bind::bind_all_weights_from_safetensors` or
-    /// [`mistral_cached_forward_program_with_experts`] can fail with.
+    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`] can fail with.
     pub fn load_from_safetensors(
         manifest: &proxima_safetensors::Manifest,
         file_bytes: &'file [u8],

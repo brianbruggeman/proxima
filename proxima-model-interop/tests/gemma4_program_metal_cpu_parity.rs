@@ -6,7 +6,7 @@
 //! schedule at all. This builds the REAL forward-program builder
 //! (`proxima_tensor::spec::lfm2_forward_program_with_experts`, the exact
 //! function [`crate::gemma4::bind::Gemma4Arch::bind`] hands its own
-//! `gemma4_layer_schedule` to -- never a second hand-rolled copy of its
+//! `gemma4_descriptor_from_gguf` to -- never a second hand-rolled copy of its
 //! graph) over a small SYNTHETIC checkpoint that reproduces gemma4's own
 //! dual-RoPE schedule: `sliding_window_pattern` alternates sliding/global
 //! layers, sliding layers read `rope_cos_swa`/`rope_sin_swa` (freq_base=1e4,
@@ -14,7 +14,7 @@
 //! `rope.dimension_count_swa`) and global layers read `rope_cos`/`rope_sin`
 //! (freq_base=1e6, dimension_count=512 -- the real checkpoint's
 //! `rope.freq_base`/`rope.dimension_count`), matching
-//! `gemma4::bind::gemma4_layer_schedule`'s own per-layer `RopeTableSel`/
+//! `gemma4_descriptor_from_gguf`'s own per-layer `RopeTableSel`/
 //! `RopePairing::SplitHalf` wiring (that function and its caller,
 //! `Gemma4Arch::bind`, are both crate-private/`std`-gated, so this test
 //! replicates the SCHEDULE VALUES inline rather than calling them --
@@ -104,12 +104,12 @@ const ROPE_FREQ_BASE_SWA: f32 = 1.0e4;
 /// [`layer_parity`] for the bisection sweep.
 const SLIDING_PATTERN: [bool; 4] = [true, false, true, false];
 
-/// Replicates `gemma4::bind::gemma4_layer_schedule`'s own per-layer
+/// Replicates `gemma4_descriptor_from_gguf`'s own per-layer
 /// `LayerAttentionConfig`/`LayerFfnConfig` values (that function is
 /// crate-private, reachable only from inside `proxima-model-interop`'s own
 /// `src/`, never from this external `tests/` binary) at the synthetic dims
 /// above, for `sliding_pattern`'s own layers in order -- every field here is
-/// copied verbatim from `gemma4::bind::gemma4_layer_schedule`, not
+/// copied verbatim from `gemma4_descriptor_from_gguf`, not
 /// reinvented.
 fn gemma4_synthetic_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
     let ffn = LayerFfnConfig {
