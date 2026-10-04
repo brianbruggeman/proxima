@@ -112,7 +112,7 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 
 | AC | discharges | kind | command | expected | control at 9dd9deef |
 |---|---|---|---|---|---|
-| AC0 | R7 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/arch_data_digest_/)'` | 7 passed (gemma4 26B 13313 ops, gemma4 E2B, openchat, qwen2, qwen3, qwen35, qwen35moe) | 7 passed |
+| AC0 | R7 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/arch_data_digest_/)'` | 7 passed (gemma4 26B 13314 ops, logits root NodeId(13313), gemma4 E2B, openchat, qwen2, qwen3, qwen35, qwen35moe) | 7 passed |
 | AC1 | R1 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/swa_rope_from_metadata/)'` | 2 passed: E2B and 26B tables equal the `rope.freq_base_swa`/`rope.dimension_count_swa` in `gguf_kv.txt` | 2 passed only if the files hold 1e4/256 (the hard-coded values); slice 0 records which, and a file with other values makes the control FAIL |
 | AC2 | R3, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/generic_verify_llama_parity_/)'` | 3 passed: gemma4 E2B, openchat and qwen3 with speculation on equal their llama ids | 1 passed, 2 failed (openchat and qwen3 have no verify program) |
 | AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 7 passed: bound names and tensor-byte digest equal the incumbent's | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
