@@ -120,7 +120,16 @@ check_ex() { # pattern, why
     while IFS= read -r f; do finding "$f — $why"; done <<< "$hits"
   fi
 }
-check_ex 'unsafe\s*\{' 'unsafe in an example; configure it properly instead'
+# These examples must call unsafe OS mapping APIs: `memmap2` requires the
+# caller to keep the mapped file stable, and gguf_generate also uses libc
+# resource/madvise calls. Each call site documents that contract with SAFETY.
+# The lint still catches new unsafe example files until they are reviewed here.
+EXEMPT_UNSAFE_EXAMPLES='dump_tensors|gguf_generate|inspect_moe_header|openai_serve_gguf|stream_generate|write_qwen35_sidecar'
+while IFS= read -r unsafe_example; do
+  if ! grep -qE "examples/(${EXEMPT_UNSAFE_EXAMPLES})\\.rs:" <<< "$unsafe_example"; then
+    finding "$unsafe_example — unsafe in an example; configure it properly instead"
+  fi
+done < <(grep -rnE 'unsafe[[:space:]]*[{]' --include='*.rs' "$EX" 2>/dev/null)
 check_ex 'futures::executor::block_on' "drives proxima's app with futures' executor; use #[proxima::main] and .await"
 check_ex 'env::set_var' 'sets a global env var to configure proxima; use config or pass it explicitly'
 

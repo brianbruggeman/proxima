@@ -256,6 +256,7 @@ fn print_peak_rss() {
     let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
     if result == 0 {
         // Darwin reports bytes; Linux reports KiB.
+        // SAFETY: a successful `getrusage` call initialized `usage`.
         let bytes = unsafe { usage.assume_init().ru_maxrss as u64 }
             * if cfg!(target_os = "macos") { 1 } else { 1024 };
         println!("peak_rss_bytes = {bytes}");

@@ -102,7 +102,7 @@ fn load_expert_sidecar() -> Result<Option<Arc<memmap2::Mmap>>, Box<dyn Error>> {
         return Ok(None);
     };
     let file = File::open(&path)?;
-    // the server retains the read-only mapping for its whole process lifetime.
+    // SAFETY: the server retains the read-only mapping for its whole process lifetime.
     let mapping = Arc::new(unsafe { MmapOptions::new().map(&file)? });
     MappedExpertSidecar::new(Arc::clone(&mapping))
         .map_err(|error| format!("{} {:?}: {error}", SIDECAR_ENV, path))?;
