@@ -515,6 +515,12 @@ required-features = ["std"]
 name = "decode_gbps_baseline"
 required-features = ["std", "metal"]
 
+# Interleaved decode ms/token driver: proxima builds of `decode_gbps_baseline`
+# plus the llama-server and Ollama reference arms over HTTP.
+[[example]]
+name = "decode_arms"
+required-features = ["std"]
+
 # `metal-fuse-attn-decode` byte-equivalence harness: fused vs. unfused
 # `BoundOpKind::CachedAttention` parity on the real gemma4-E2B checkpoint,
 # read via `PROXIMA_METAL_FUSE_ATTN_PARITY_STEPS` in `decode.rs`.
