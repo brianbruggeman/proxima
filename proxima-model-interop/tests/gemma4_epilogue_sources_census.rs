@@ -37,8 +37,8 @@ const GEMMA4_E2B_DEFAULT_PATH: &str = "/Users/brianbruggeman/.ollama/models/blob
 const NEW_COUNT: usize = 1;
 const KV_BUCKET_EXTENT: usize = 32;
 
-const EXPECTED_OFF: usize = 1661;
-const EXPECTED_ON: usize = 1456;
+const EXPECTED_OFF: usize = 1591;
+const EXPECTED_ON: usize = 1386;
 const EXPECTED_ABSORBED: usize = 205;
 
 const LAYERS: usize = 35;
