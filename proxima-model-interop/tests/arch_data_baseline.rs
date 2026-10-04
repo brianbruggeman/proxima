@@ -14,13 +14,15 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use core::ops::ControlFlow;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
-    Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout,
+    Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
+    PromptCacheConfig, ServingConfig,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::Op;
@@ -430,4 +432,153 @@ fn checkpoints_toml_lists_every_baseline_checkpoint() {
             );
         }
     }
+}
+
+const LLAMA_GENERATED_TOKENS: usize = 32;
+
+struct LlamaCase {
+    prompt: String,
+    prompt_ids: Vec<u32>,
+    generated_ids: Vec<u32>,
+}
+
+fn llama_cases(checkpoint: &Checkpoint) -> Vec<LlamaCase> {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/llama-parity")
+        .join(checkpoint.name)
+        .join("llama_ids.json");
+    let text = std::fs::read_to_string(&fixture).unwrap_or_else(|error| {
+        panic!(
+            "{}: no llama.cpp oracle ids at {}: {error}; llama.cpp f1ea20621 has to load this checkpoint to produce them",
+            checkpoint.name,
+            fixture.display()
+        )
+    });
+    let records: Vec<serde_json::Value> =
+        serde_json::from_str(&text).expect("llama_ids.json is a json array of records");
+    assert!(
+        !records.is_empty(),
+        "{}: llama_ids.json holds zero records",
+        checkpoint.name
+    );
+    records
+        .iter()
+        .map(|record| LlamaCase {
+            prompt: record["prompt"]
+                .as_str()
+                .expect("record has a prompt")
+                .to_owned(),
+            prompt_ids: ids_of(&record["prompt_ids"]),
+            generated_ids: ids_of(&record["generated_ids"]),
+        })
+        .collect()
+}
+
+fn ids_of(value: &serde_json::Value) -> Vec<u32> {
+    value
+        .as_array()
+        .expect("ids are a json array")
+        .iter()
+        .map(|id| {
+            u32::try_from(id.as_u64().expect("an id is an unsigned integer"))
+                .expect("an id fits u32")
+        })
+        .collect()
+}
+
+fn first_divergence(expected: &[u32], actual: &[u32]) -> Option<usize> {
+    let shared = expected.len().min(actual.len());
+    (0..shared)
+        .find(|&index| expected[index] != actual[index])
+        .or_else(|| (expected.len() != actual.len()).then_some(shared))
+}
+
+fn llama_parity(checkpoint: &Checkpoint) {
+    let cases = llama_cases(checkpoint);
+    let mapping = checkpoint.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = LoadedModel::load(&parsed, file_bytes)
+        .unwrap_or_else(|error| panic!("{}: LoadedModel::load failed: {error:?}", checkpoint.name));
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    };
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("builds the vocab from the checkpoint metadata");
+    let wants_bos = vocab
+        .add_bos_token()
+        .unwrap_or_else(|| vocab.bos_token_id().is_some());
+    let wants_eos = vocab.add_eos_token().unwrap_or(false);
+
+    let mut failures = Vec::new();
+    for case in &cases {
+        let own_prompt_ids =
+            proxima_tokenizer::encode_with_bos_eos(&case.prompt, &vocab, wants_bos, wants_eos)
+                .expect("proxima tokenizes the prompt");
+        if let Some(index) = first_divergence(&case.prompt_ids, &own_prompt_ids) {
+            failures.push(format!(
+                "TOKENIZER {} prompt {:?}: first divergent index {index}; llama prompt_ids {:?}, proxima {:?}",
+                checkpoint.name, case.prompt, case.prompt_ids, own_prompt_ids
+            ));
+        }
+        let (generated, _text, _stopped) = model
+            .generate_from_ids(
+                &case.prompt_ids,
+                LLAMA_GENERATED_TOKENS,
+                &config,
+                &mut |_event| ControlFlow::Continue(()),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{}: generate_from_ids failed: {error:?}", checkpoint.name)
+            });
+        if let Some(index) = first_divergence(&case.generated_ids, &generated) {
+            failures.push(format!(
+                "MODEL {} prompt {:?}: first divergent index {index}; llama {:?}, proxima {:?}",
+                checkpoint.name, case.prompt, case.generated_ids, generated
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} divergences from llama.cpp across {} prompts:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn llama_parity_gemma4_26b() {
+    llama_parity(&GEMMA4_26B);
+}
+
+#[test]
+fn llama_parity_gemma4_e2b() {
+    llama_parity(&GEMMA4_E2B);
+}
+
+#[test]
+fn llama_parity_openchat() {
+    llama_parity(&OPENCHAT);
+}
+
+#[test]
+fn llama_parity_qwen2() {
+    llama_parity(&QWEN2);
+}
+
+#[test]
+fn llama_parity_qwen3() {
+    llama_parity(&QWEN3);
+}
+
+#[test]
+fn llama_parity_qwen35() {
+    llama_parity(&QWEN35);
+}
+
+#[test]
+fn llama_parity_qwen35moe() {
+    llama_parity(&QWEN35MOE);
 }

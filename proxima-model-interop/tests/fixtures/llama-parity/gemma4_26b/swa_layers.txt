@@ -1,0 +1,34 @@
+# oracle tool: llama.cpp llama-server, version: 0.5.0-dev (build 2633, commit f1ea20621), run at -lv 5 so LLAMA_LOG_DEBUG prints
+# binary: /Users/brianbruggeman/repos/slot-0/proxima-prefix-cache/scratchpad/bin/llama-f1ea2062/bin/llama-server
+# source: llama.cpp src/llama-model.cpp:1595 (CPU branch :1590): LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d", il, dev, is_swa); is_swa = hparams.is_swa(il) at src/llama-hparams.cpp:290
+# command: llama-server -m <checkpoints.toml path of gemma4_26b> -ngl 99 -c 4096 --port N -lv 5 ; raw log /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/phaseB/llama_server_gemma4_26b.log ; n_layer = 30 (the output pseudo-layer 30 is not listed)
+load_tensors: layer   0 assigned to device MTL0, is_swa = 1
+load_tensors: layer   1 assigned to device MTL0, is_swa = 1
+load_tensors: layer   2 assigned to device MTL0, is_swa = 1
+load_tensors: layer   3 assigned to device MTL0, is_swa = 1
+load_tensors: layer   4 assigned to device MTL0, is_swa = 1
+load_tensors: layer   5 assigned to device MTL0, is_swa = 0
+load_tensors: layer   6 assigned to device MTL0, is_swa = 1
+load_tensors: layer   7 assigned to device MTL0, is_swa = 1
+load_tensors: layer   8 assigned to device MTL0, is_swa = 1
+load_tensors: layer   9 assigned to device MTL0, is_swa = 1
+load_tensors: layer  10 assigned to device MTL0, is_swa = 1
+load_tensors: layer  11 assigned to device MTL0, is_swa = 0
+load_tensors: layer  12 assigned to device MTL0, is_swa = 1
+load_tensors: layer  13 assigned to device MTL0, is_swa = 1
+load_tensors: layer  14 assigned to device MTL0, is_swa = 1
+load_tensors: layer  15 assigned to device MTL0, is_swa = 1
+load_tensors: layer  16 assigned to device MTL0, is_swa = 1
+load_tensors: layer  17 assigned to device MTL0, is_swa = 0
+load_tensors: layer  18 assigned to device MTL0, is_swa = 1
+load_tensors: layer  19 assigned to device MTL0, is_swa = 1
+load_tensors: layer  20 assigned to device MTL0, is_swa = 1
+load_tensors: layer  21 assigned to device MTL0, is_swa = 1
+load_tensors: layer  22 assigned to device MTL0, is_swa = 1
+load_tensors: layer  23 assigned to device MTL0, is_swa = 0
+load_tensors: layer  24 assigned to device MTL0, is_swa = 1
+load_tensors: layer  25 assigned to device MTL0, is_swa = 1
+load_tensors: layer  26 assigned to device MTL0, is_swa = 1
+load_tensors: layer  27 assigned to device MTL0, is_swa = 1
+load_tensors: layer  28 assigned to device MTL0, is_swa = 1
+load_tensors: layer  29 assigned to device MTL0, is_swa = 0
