@@ -213,10 +213,17 @@ fn default_env_emits_node_94_shape_for_diffing_against_the_capture() {
     });
     let _ = &packed;
 
-    assert!(
-        source.contains("q4_0_pair_dot(blk"),
-        "node 94's shape must take the batched Q4_0 pair-dot arm:\n{source}"
-    );
+    if cfg!(feature = "metal-q4_0-native") {
+        assert!(
+            source.contains("sumy * -8.0f") && !source.contains("q4_0_pair_dot(blk"),
+            "node 94's shape must take ggml's inline Q4_0 dot under metal-q4_0-native:\n{source}"
+        );
+    } else {
+        assert!(
+            source.contains("q4_0_pair_dot(blk"),
+            "node 94's shape must take the batched Q4_0 pair-dot arm:\n{source}"
+        );
+    }
     let scratch = tempfile::tempdir().expect("scratch dir creates");
     let out_dir = std::env::var_os("PROXIMA_EMITTED_MSL_OUT")
         .map(std::path::PathBuf::from)

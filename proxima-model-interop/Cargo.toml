@@ -115,6 +115,9 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `metal-q4k-ggml-port` joins per ROW 315 (`omega/Cargo.toml`'s own comment
 # carries the mechanism and the interleaved-bake-off numbers) -- the fixed
 # body is less work with identical output, default-on per the same rule.
+# `metal-q4_0-native` joins per ROW C4.22 (`omega/Cargo.toml`'s own comment
+# carries the numbers) -- ggml's lane geometry for the Q4_0 matvecs, same
+# launch grid, identical token ids, default-on per the same rule.
 # ROW 555: `gated-delta-net-fusion` joins default-on now that the fused
 # `state_out` write actually reaches the caller's placed buffer (`encode_op`'s
 # own `state_out_placement` doc, `omega/src/metal.rs`) -- qwen35moe real-model
@@ -141,6 +144,7 @@ metal = [
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
+    "metal-q4_0-native",
     "gated-delta-net-fusion",
     "moe-topk-fusion",
     "metal-attn-split-decode",

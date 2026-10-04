@@ -202,7 +202,7 @@ pub(super) fn push_packed_row_blocked_body(
             )
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
-        // `metal-q4_0-native` (default-off): ggml's OWN `Q4_0` lane geometry
+        // `metal-q4_0-native` (part of `metal`): ggml's OWN `Q4_0` lane geometry
         // (`push_q4_0_native_body`'s own doc) rather than this preamble's
         // K-quant-shaped `ix = lane/8` split -- `Q4_0` has no `codec_
         // supports_pair_dot` entry (its own doc: only the four K-quants have
@@ -1209,7 +1209,7 @@ pub(super) fn push_q4k_ggml_port_body(
 //
 // Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
 //
-/// `metal-q4_0-native` (default-off): a VERBATIM port of ggml's own `Q4_0`
+/// `metal-q4_0-native` (part of `metal`): a VERBATIM port of ggml's own `Q4_0`
 /// matvec lane geometry -- TWO threads per REAL 32-element block (`ix =
 /// tiisg/2`, 16 distinct block-owning lane-PAIRS per simdgroup; `il =
 /// (tiisg%2)*8`, the two lanes of a pair split one block's 16 packed-nibble
