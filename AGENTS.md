@@ -125,7 +125,7 @@ tier that actually applies; a benchmark goal is not a semantic invariant.
   code, yield via an async gate (waker-based async lock or single-consumer pipe)
   rather than parking a thread, so it works at every tier including bare metal.
   A synchronous blocking mutex is last resort, outside async only (sync FFI
-  boundary, dedicated blocking worker), and must be `proxima_lock::Mutex` — never
+  boundary, dedicated blocking worker), and must be `proxima_primitives::sync::blocking::Mutex` — never
   a bare `parking_lot::Mutex` or `std::sync::Mutex`. Spinlocks are ruled out. A
   std-gated mutex must be an optional, std-gated dependency so no_std builds
   never compile it.
