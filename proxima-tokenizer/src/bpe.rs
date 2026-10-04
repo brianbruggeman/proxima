@@ -87,7 +87,7 @@ fn push_bigram(
 /// merges by rank (lowest first, leftmost on ties) using a min-heap over a
 /// linked list of symbols -- `O(n log n)`, since a pre-token is a whole
 /// line, not a word. A symbol that still is not a vocab token falls back to
-/// its `<0xXX>` byte tokens ([`Vocab::byte_fallback_token`]). An all-newline
+/// its `<0xXX>` byte tokens (`Vocab::byte_fallback_token`). An all-newline
 /// pre-token that is itself a token maps straight to it.
 ///
 /// # Errors

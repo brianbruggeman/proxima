@@ -92,7 +92,7 @@ pub enum RefreshRefusal {
     #[error("position {position}, node {node}: program op does not match this position's BoundOpKind")]
     OpKindMismatch { position: usize, node: NodeId },
 
-    /// The window [`recover_window`] rebuilt from `program` recomposed to a
+    /// The window `recover_window` rebuilt from `program` recomposed to a
     /// DIFFERENT step-op sequence than the retained op's own `element_body`
     /// — the validity check task step 3 requires. Means either this
     /// recovery over- or under-absorbed relative to what the original bind
@@ -111,7 +111,7 @@ pub enum RefreshRefusal {
 
     /// The recomposed operand list names a DIFFERENT set of leaf `NodeId`s
     /// than the retained op's own `operands()` — node identity is
-    /// symbol-independent, so any difference here means [`recover_window`]
+    /// symbol-independent, so any difference here means `recover_window`
     /// absorbed a node the original bind actually kept materialized (most
     /// likely `quarantine_broadcast_operands`'s shape-dependent exception,
     /// which this recovery does not model — a broadcast operand whose

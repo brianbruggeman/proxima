@@ -1,7 +1,7 @@
 //! A faithful port of llama.cpp's `common_ngram_simple_draft`
 //! (`common/ngram-map.cpp:49`, config at `common/ngram-map.h:24`): the one
 //! self-speculative n-gram drafter every llama.cpp speculation type traces
-//! back to, and the drafter [`crate::draft::mod@self`]'s
+//! back to, and the drafter in this module's
 //! now-deleted `draft_ngram_lookup` duplicated with different tie-break and
 //! size semantics (RISC debt this port retires -- proxima's own guiding
 //! principle 1).

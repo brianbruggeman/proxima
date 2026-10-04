@@ -231,7 +231,7 @@ impl Exporter {
     /// reaches every sink.
     ///
     /// # Errors
-    /// Propagates the first sink's own lowering error from [`Self::into_handle`].
+    /// Propagates the first sink's own lowering error from `into_handle`.
     pub fn fan(exporters: alloc::vec::Vec<Exporter>) -> Result<Self, Error> {
         let handles = exporters
             .into_iter()

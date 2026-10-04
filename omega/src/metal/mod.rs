@@ -343,7 +343,7 @@ pub(super) fn new_labeled_command_buffer(
     Some(command_buffer)
 }
 
-/// One per [`check_command_buffer_status`] call, pass or fail -- lets a test
+/// One per `check_command_buffer_status` call, pass or fail -- lets a test
 /// prove a chunked (`PROXIMA_COMMAND_BUFFER_CHUNKS`-shaped, K>1) call
 /// checked EVERY committed command buffer's status, not only the last one
 /// [`execute_plan_with_placements`] waits on directly. Unconditional, same
@@ -478,7 +478,7 @@ fn check_all_command_buffers(
     Ok(())
 }
 
-/// Public wrapper around [`prepare_uniforms_pack::pack_uniforms`] (crate-private) --
+/// Public wrapper around `prepare_uniforms_pack::pack_uniforms` (crate-private) --
 /// the same packer [`execute`] uses per dispatch, exposed so a caller outside
 /// this module (a probe/dump binary) can pack the exact bytes a real
 /// dispatch would upload without duplicating the per-`BoundOpKind` match.

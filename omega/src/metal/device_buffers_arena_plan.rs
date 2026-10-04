@@ -182,8 +182,8 @@ impl BufferDiagnostics {
 
 /// [`MetalError::CommandBufferFailed`]'s root-cause payload, boxed off the
 /// variant itself (see that variant's own doc for why). Built once, only on
-/// the fault branch of [`check_command_buffer_status`], from two sources:
-/// the failing [`BufferDiagnostics`] the encode loop already carried
+/// the fault branch of `check_command_buffer_status`, from two sources:
+/// the failing `BufferDiagnostics` the encode loop already carried
 /// (`chunk_index`/`chunk_count`/`dispatch_count`/the op labels), and the
 /// Metal command buffer object itself (`buffer_label`, `gpu_start_s`,
 /// `gpu_end_s` -- free reads, no bookkeeping needed to produce them).
@@ -2095,7 +2095,7 @@ impl Plan {
     /// Overrides this plan's default `MTLCommandBuffer` split count from
     /// `1`, and marks whether this plan is decode-shaped (`new_count == 1`
     /// at the caller's own plan-cache key). See [`Self::command_buffer_chunks`]/
-    /// [`Self::command_buffer_chunks_decode_shaped`]'s own field docs for
+    /// `command_buffer_chunks_decode_shaped`'s own field docs for
     /// how these reach `execute_plan_with_placements`'s chunk loop, and
     /// `PROXIMA_COMMAND_BUFFER_CHUNKS`'s own precedence over both.
     pub fn set_command_buffer_chunks(&mut self, chunks: u32, decode_shaped: bool) {
@@ -2537,4 +2537,3 @@ pub fn pack_expert_payload_descriptors(
     }
     Ok(bytes)
 }
-

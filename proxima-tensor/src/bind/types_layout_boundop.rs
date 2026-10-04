@@ -486,8 +486,8 @@ pub enum BoundOpKind {
     ///
     /// `cached_weight_sum`/`new_weight_sum`/`new_attended` are this op's own
     /// extra outputs (157/158/164), the same "first output is `node`, extra
-    /// outputs are named fields" shape [`GatedDeltaNet::state_out`] and
-    /// [`MoeTopK::routes`] already establish — ordinary device buffers a
+    /// outputs are named fields" shape `GatedDeltaNet::state_out` and
+    /// `MoeTopK::routes` already establish — ordinary device buffers a
     /// renderer writes alongside `node`'s own, read downstream by the
     /// existing, unmodified 162-fold's epilogue (`cached_attention_epilogue_
     /// liveness.rs`'s own `epilogue_sources` extension).

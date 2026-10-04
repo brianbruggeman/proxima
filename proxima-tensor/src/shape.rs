@@ -839,11 +839,11 @@ fn reduce_output_axis_masks(reduce: &Reduce, iteration_masks: &[u64]) -> Vec<u64
 /// Which symbols each node's shape depends on, per OUTPUT axis, one
 /// `Vec<u64>` per [`NodeId`] in program order — mirrors [`infer`]'s own
 /// per-[`Op`] dispatch exactly (same five arms, same operand walk
-/// [`ShapeTable::infer_elementwise`]/[`ShapeTable::infer_reduce`] use to
+/// `ShapeTable::infer_elementwise`/`ShapeTable::infer_reduce` use to
 /// resolve a shape), but tracks axis-level *provenance* (which symbol, on
 /// which axis) instead of a *resolved value*, which is what
 /// [`ShapeTable`]/[`Shapes`] deliberately do not keep once a symbol is
-/// looked up (see [`resolve_extent`]).
+/// looked up (see `resolve_extent`).
 ///
 /// Axis-level, not whole-node, is the fix over this function's own earlier
 /// shape (a single `u64` per node, unioning every operand's mask
@@ -851,8 +851,8 @@ fn reduce_output_axis_masks(reduce: &Reduce, iteration_masks: &[u64]) -> Vec<u64
 /// fold, because a fold's OUTPUT can drop the very axis a symbol lived on
 /// (a softmax/AV reduce over a symbolic kv axis, say) while the whole-node
 /// union kept propagating the bit to every downstream consumer regardless.
-/// Tracking per output axis and projecting through [`reduce_output_axis_masks`]
-/// the same way [`ShapeTable::infer_reduce`] itself projects a resolved shape
+/// Tracking per output axis and projecting through `reduce_output_axis_masks`
+/// the same way `ShapeTable::infer_reduce` itself projects a resolved shape
 /// is what lets the dropped axis's bit actually disappear from what
 /// downstream ops inherit.
 ///

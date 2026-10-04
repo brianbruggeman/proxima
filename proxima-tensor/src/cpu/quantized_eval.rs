@@ -296,7 +296,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
     )
 }
 
-/// [`evaluate_quantized_with_scratch_impl`] plus an explicit
+/// `evaluate_quantized_with_scratch_impl` plus an explicit
 /// `fuse_cached_attention` bool -- the CPU-side counterpart to
 /// `omega/src/metal/prepare_uniforms_pack.rs`'s own `fuse_cached_attention`
 /// parameter on `prepare`. Exists so a caller comparing the fused and

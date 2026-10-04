@@ -163,7 +163,7 @@ pub struct NgramMap {
 }
 
 impl NgramMap {
-    /// Allocates both `key_map` (the fixed-size [`HASH_MAP_SIZE`]-entry hash
+    /// Allocates both `key_map` (the fixed-size `HASH_MAP_SIZE`-entry hash
     /// index, llama's own `key_map.resize(COMMON_NGRAM_HASH_MAP_SIZE)`) and
     /// `keys` up front, at construction, so [`ngram_map_draft`]'s hot path
     /// allocates nothing -- this crate's zero-per-call-allocation discipline
