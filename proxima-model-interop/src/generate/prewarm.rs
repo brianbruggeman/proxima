@@ -30,7 +30,6 @@
 //! and the prefix is likely.
 
 use core::ops::ControlFlow;
-use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use proxima_telemetry::{debug, warn};
@@ -141,7 +140,6 @@ impl LoadedModel<'_> {
     pub fn set_prewarm_suffix(&self, suffix: &[u32]) {
         self.prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .set_prewarm_suffix(suffix);
     }
 
@@ -207,7 +205,6 @@ impl LoadedModel<'_> {
         let (found, _) = self
             .prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .take_for_prewarm(ids, &key, &widths, config.min_similarity_milli);
         let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
         let held = entry.state.cached_len;
@@ -285,7 +282,6 @@ impl LoadedModel<'_> {
         let suffix = self
             .prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .prewarm_suffix()
             .to_vec();
         if suffix.is_empty() {

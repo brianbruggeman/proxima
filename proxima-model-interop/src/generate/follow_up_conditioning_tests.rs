@@ -77,7 +77,6 @@ fn the_drafter_samples_from_the_distribution_a_full_prefill_of_the_boundary_give
         let (entry, _) = model
             .prompt_cache
             .lock()
-            .expect("the cache lock")
             .take_for_prewarm(&base, &key, &widths, 0);
         let seed = entry.expect("the boundary entry is cached").state;
         assert_eq!(seed.cached_len + 1, base.len());

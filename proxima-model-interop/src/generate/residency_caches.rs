@@ -3642,16 +3642,6 @@ impl CurrentExpertSources {
     }
 }
 
-/// Every `LoadedModel::expert_slab` acquire, in one place -- recovers from
-/// poisoning instead of panicking (see that field's own doc for why) rather
-/// than each call site repeating the same `unwrap_or_else`.
-pub(super) fn lock_expert_slab<'lock, 'file>(
-    slab: &'lock std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
-) -> std::sync::MutexGuard<'lock, crate::expert_slab::ExpertSlab<'file>> {
-    slab.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// A router logits tensor and the `[positions, experts]` shape it was
 /// evaluated with, grouped so the functions that consume both keep their
 /// argument count under clippy's threshold.

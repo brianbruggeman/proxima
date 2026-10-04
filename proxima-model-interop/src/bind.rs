@@ -5770,7 +5770,7 @@ mod real_openchat_file {
         struct RouteCountingObserver {
             calls: std::sync::atomic::AtomicUsize,
             distinct_layer_positions:
-                std::sync::Mutex<alloc::collections::BTreeSet<(usize, usize)>>,
+                proxima_primitives::sync::blocking::Mutex<alloc::collections::BTreeSet<(usize, usize)>>,
         }
 
         #[cfg(feature = "instrument")]
@@ -5780,7 +5780,6 @@ mod real_openchat_file {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.distinct_layer_positions
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert((event.layer as usize, event.position as usize));
             }
         }
@@ -5788,7 +5787,7 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         static ROUTE_OBSERVER: RouteCountingObserver = RouteCountingObserver {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            distinct_layer_positions: std::sync::Mutex::new(alloc::collections::BTreeSet::new()),
+            distinct_layer_positions: proxima_primitives::sync::blocking::Mutex::new(alloc::collections::BTreeSet::new()),
         };
 
         #[cfg(feature = "instrument")]
@@ -5833,7 +5832,6 @@ mod real_openchat_file {
             let distinct_layer_positions = ROUTE_OBSERVER
                 .distinct_layer_positions
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .len();
             std::println!(
                 "expert_observer_summary on_expert_routed_calls={total_calls} \

@@ -1,7 +1,6 @@
 #![allow(clippy::expect_used)]
 
 use core::ops::ControlFlow;
-use std::sync::PoisonError;
 
 use super::chunk_shift::{ChunkRun, extract_run};
 use super::prompt_cache_real_model_tests::{
@@ -431,7 +430,6 @@ fn stored_lengths(model: &LoadedModel<'_>) -> Vec<usize> {
     model
         .prompt_cache
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
         .entry_states()
         .map(|state| state.cached_len)
         .collect()
@@ -686,8 +684,7 @@ fn the_rows_a_shifted_request_stores_match_a_fresh_prefill_where_the_context_is_
         let stored_rows: Vec<(usize, f32, f32)> = {
             let cache = model
                 .prompt_cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+                .lock();
             let state = cache
                 .entry_states()
                 .next()
@@ -750,8 +747,7 @@ fn the_squash_stores_the_lifted_rows_in_every_layer_not_the_fresh_ones() {
         let comparisons: Vec<(usize, bool, f32, f32, f32)> = {
             let cache = model
                 .prompt_cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+                .lock();
             let state = cache
                 .entry_states()
                 .next()

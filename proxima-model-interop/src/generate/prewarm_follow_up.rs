@@ -20,7 +20,6 @@
 //! this when the next user turn is the unknown.
 
 use core::ops::ControlFlow;
-use std::sync::PoisonError;
 
 use proxima_telemetry::{debug, warn};
 
@@ -36,7 +35,6 @@ impl LoadedModel<'_> {
     pub fn set_follow_up_closing(&self, closing: &[u32]) {
         self.prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .set_follow_up_closing(closing);
     }
 
@@ -87,7 +85,6 @@ impl LoadedModel<'_> {
         let closing = self
             .prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .follow_up_closing()
             .to_vec();
         if !config.is_enabled()
@@ -109,7 +106,6 @@ impl LoadedModel<'_> {
         let (found, _) = self
             .prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .take_for_prewarm(base_ids, &key, &widths, config.min_similarity_milli);
         let Some(base) = found else {
             return Ok(Vec::new());

@@ -48,7 +48,7 @@ use std::process::{Child, Command, Stdio};
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,8 @@ use proxima_model_interop::{
     GPU_LAYERS_ALL, LoadedModel, NgramMapParams, NgramModParams, Phase, PrefixState, ServingConfig,
     SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet, TokenEvent,
 };
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+use proxima_primitives::sync::blocking::Mutex;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_telemetry::export::Exporter;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
@@ -632,7 +634,6 @@ impl GpuSampler {
                     if let Some(sample) = gpu_utilization_sample() {
                         thread_samples
                             .lock()
-                            .expect("gpu sampler mutex poisoned")
                             .push(sample);
                     }
                     std::thread::sleep(GPU_SAMPLE_INTERVAL);
@@ -654,7 +655,6 @@ impl GpuSampler {
         Arc::try_unwrap(self.samples)
             .expect("sampler thread joined, sole owner remains")
             .into_inner()
-            .expect("gpu sampler mutex poisoned")
     }
 }
 
@@ -1011,7 +1011,6 @@ impl ChildGuard {
         let pid = child.id();
         REAPABLE_PIDS
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .push(pid);
         Self { child, pid }
     }
@@ -1028,7 +1027,6 @@ impl Drop for ChildGuard {
         let _ = self.child.wait();
         REAPABLE_PIDS
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .retain(|&candidate| candidate != self.pid);
     }
 }
@@ -1055,7 +1053,6 @@ fn install_orphan_reaping_panic_hook() {
 fn reap_orphaned_llama_servers() {
     let pids = REAPABLE_PIDS
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
         .clone();
     for pid in pids {
         eprintln!("speculative_bench: panic hook reaping orphaned llama-server pid={pid}");
@@ -3094,7 +3091,6 @@ mod tests {
             assert!(
                 REAPABLE_PIDS
                     .lock()
-                    .expect("lock REAPABLE_PIDS")
                     .contains(&pid),
                 "ChildGuard::new must register its pid for the panic-hook fallback"
             );
@@ -3103,7 +3099,6 @@ mod tests {
         assert!(
             !REAPABLE_PIDS
                 .lock()
-                .expect("lock REAPABLE_PIDS")
                 .contains(&pid),
             "ChildGuard::drop must deregister its pid once it has reaped the child"
         );

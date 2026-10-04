@@ -11,13 +11,13 @@
 //! one: a prefix whose answer has since been followed by another answer is the
 //! one nobody will send.
 //!
-//! The mutex and condition variables here are the "dedicated blocking worker"
-//! case of principle 21: they park the worker thread the caller handed over,
-//! never a request and never a task. The request side takes the mutex for the
+//! The mutex and condition variables here (`proxima_primitives::sync::blocking`) are the
+//! "dedicated blocking worker" case of principle 21: they park the worker
+//! thread the caller handed over, never a request and never a task. The request side takes the mutex for the
 //! length of a pointer swap. Who may use the device while a job runs is
 //! [`super::prewarm_gate`]'s decision, not this module's.
 
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use proxima_primitives::sync::blocking::{Condvar, Mutex, MutexGuard};
 
 use super::CacheKey;
 
@@ -87,7 +87,7 @@ impl PrewarmQueue {
     }
 
     fn lock(&self) -> MutexGuard<'_, QueueState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock()
     }
 
     /// Queues `job`, returning `true` when it replaced one nobody ran.
@@ -111,11 +111,9 @@ impl PrewarmQueue {
     /// Blocks until a job is queued, `true`, or the worker is told to stop,
     /// `false`. The job is left in the slot for [`Self::run_next`].
     pub(super) fn wait_for_work(&self) -> bool {
-        let state = self.lock();
-        let state = self
-            .work
-            .wait_while(state, |held| held.job.is_none() && !held.stopping)
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.lock();
+        self.work
+            .wait_while(&mut state, |held| held.job.is_none() && !held.stopping);
         state.job.is_some() && !state.stopping
     }
 
@@ -134,14 +132,10 @@ impl PrewarmQueue {
     /// worker. With no worker attached a queued job is left alone: nothing
     /// would ever run it, so waiting for it would never return.
     pub(super) fn wait_idle(&self) {
-        let state = self.lock();
-        drop(
-            self.idle
-                .wait_while(state, |held| {
-                    held.running || (held.job.is_some() && held.worker_attached)
-                })
-                .unwrap_or_else(PoisonError::into_inner),
-        );
+        let mut state = self.lock();
+        self.idle.wait_while(&mut state, |held| {
+            held.running || (held.job.is_some() && held.worker_attached)
+        });
     }
 }
 
