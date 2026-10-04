@@ -887,8 +887,6 @@ enum UnixConnectState {
     Done,
 }
 
-#[cfg(unix)]
-
 /// future returned by `UnixStream::connect`. polls until the connect
 /// completes or fails, then yields a `UnixStream`.
 #[cfg(unix)]
@@ -1303,7 +1301,6 @@ fn release_socket(source: Option<SourceKey>, owner: Option<Wakeup>, socket: Sock
             }
             Err(_) => {
                 owner.release_source(key, socket.into());
-                return;
             }
         }
     }
