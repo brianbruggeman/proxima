@@ -39,7 +39,7 @@ device plane joins that gate, it does not get an exemption.
 Ruled out on the alloc-free path (principle 3 verbatim list applies): `std::io::Error`,
 `RawFd`, `std::process::Command`, `OsStr`, `std::cell::RefCell`, `std::sync::Arc`,
 `std::sync::Mutex`/`parking_lot::Mutex` (principle 21: lock-free first, else
-`proxima_lock::Mutex`, never a spin), `std::time::Instant`, `Box::pin(async move {})`.
+`proxima_primitives::sync::blocking::Mutex`, never a spin), `std::time::Instant`, `Box::pin(async move {})`.
 
 ## Ground truth, measured 2026-08-12
 
