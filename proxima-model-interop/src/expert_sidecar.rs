@@ -2562,12 +2562,15 @@ mod tests {
             layer: 0,
             expert: 0,
         };
-        let mut policy =
-            crate::residency::ExpertResidency::<1, 1>::new(crate::residency::ResidencyConfig {
+        let mut policy = crate::residency::ExpertResidency::new(
+            crate::residency::ResidencyConfig {
                 budget_bytes: sidecar.high_bytes_per_expert(),
                 high_bytes_per_expert: sidecar.high_bytes_per_expert(),
                 ..crate::residency::ResidencyConfig::default()
-            });
+            },
+            1,
+            1,
+        );
         policy
             .observe(
                 1,
@@ -2578,11 +2581,9 @@ mod tests {
                 }],
             )
             .expect("the real routed address enters the fixed policy");
-        let actions = policy
-            .reconcile::<1>()
-            .expect("one promotion fits the fixed action batch");
+        policy.reconcile();
         policy
-            .apply_actions_at_boundary(&mut slab, &actions, |slab, action| {
+            .apply_actions_at_boundary(&mut slab, |slab, action| {
                 sidecar.apply_action(slab, &checkpoint, action)
             })
             .expect("the policy callback promotes all three projections");
