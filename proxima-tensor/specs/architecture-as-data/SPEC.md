@@ -95,6 +95,28 @@ Profile values GGUF does not carry are data in the profile file.
 - R7. The op graph at real dims is byte-identical to the incumbent at 9dd9deef wherever a
   slice claims no graph change.
 - R8. Token ids on every real checkpoint equal llama.cpp f1ea20621's greedy ids.
+- R9. Owner, 2026-10-04: "I need our models to be 100% conflaguration driven. like the full graph,
+  etc. before we lower into a hardware backend needs to be 100% programmable through
+  conflaguration x fsm x sans-io."
+  - Everything that determines the pre-lowering program is fields of one serializable config:
+    - the layer schedule: which mixer per layer (attention, GDN, shortconv), its heads, window,
+      KV sharing and RoPE table;
+    - the FFN (dense, routed, shared expert, activation, gating);
+    - norms and scales;
+    - embedding and head;
+    - the cache layout and its mask;
+    - the verify shape;
+    - the step inputs (the RoPE tables).
+  - The config composes compiled primitives. A new model variant is a config file, with zero new
+    Rust.
+  - GGUF metadata and the family profile only populate that config; they are layers, not code
+    paths.
+  - Lowering is sans-IO and pure: config plus weight directory in, op graph out. No file or
+    device IO.
+  - The config type and lowering compile at proxima-tensor's no_std+alloc tier, with serde.
+    conflaguration `Settings`/`Validate` and the layered loader sit at the std composition
+    boundary, per guiding principle 4's layering caveat.
+  - The `ServingState` FSM drives execution from that config (R2).
 
 ## acceptance criteria
 
@@ -121,6 +143,9 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/)'` | 7 passed, one per checkpoint; 8 passed from slice 9 (lfm2 added) | 3 passed, 4 failed at ac4eb2c7 (measured 2026-10-04); 4 passed (gemma4 e2b, openchat, qwen2, qwen3) once ids are compared through llama's first EOG (owner stop-set policy). Still failing: D2 gemma4 26b diverges at index 0 on 2 of 3 prompts; O1 qwen35 + qwen35moe have no oracle (llama f1ea20621 rejects the blobs: rope.dimension_sections length 3, expects 4) |
 | AC7 | R4 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/window_ring_layers_/)'` | 2 passed: (a) gemma4 E2B ring layers equal `swa_layers.txt`; (b) a synthetic descriptor with a window on one dense layer gets a ring on exactly that layer | 1 passed, 1 failed ((b) fails: dense layers ignore the window) |
 | AC8 | R8 | oracle | `cargo nextest run -p proxima-tokenizer --features gguf -E 'binary(gemma4_llama_oracle)'` | 20 passed, 0 failed | 20 passed |
+| AC9 | R9 | consistency | `cargo nextest run -p proxima-model-interop --features std,conflaguration -j 1 -E 'test(/model_config_roundtrip_/)'` | 7 passed: for each checkpoint, GGUF -> config -> TOML text -> config -> lowered program has the same digest as AC0's | tests absent; at HEAD the descriptor has no serde, so it cannot round-trip |
+| AC10 | R9, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal,conflaguration -j 1 -E 'test(/zero_rust_variant_/)'` | 2 passed: (a) the qwen2 0.5B model loaded from a hand-written TOML (in `tests/fixtures/model-configs/`, not derived from GGUF metadata) over its GGUF weights equals the llama ids in `llama-parity/qwen2`; (b) a TOML variant that changes the layer schedule (gemma4 E2B with every layer set full-attention) lowers and runs with no Rust change, and its op count differs from E2B's | tests absent |
+| AC11 | R9 | consistency | `cargo check -p proxima-tensor --no-default-features --features alloc` and `git grep -nE 'std::(fs\|io\|net)\|File::' -- proxima-tensor/src/spec \| wc -l` | exit 0; 0 | exit 0; 0 (measured at edd4163c) |
 
 ## out of scope
 
