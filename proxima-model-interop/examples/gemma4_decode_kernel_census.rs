@@ -33,7 +33,8 @@
 //!   --features std,metal,instrument,metal-fuse-attn-decode --example gemma4_decode_kernel_census
 //! ```
 //! Knobs: `M0_MAX_TOKENS` (24), `M0_ITERS` (50), `M0_BATCH` (16),
-//! `M0_FLUSH_MIB` (256), `M0_OUT_DIR`, `PROXIMA_PROMPT`.
+//! `M0_FLUSH_MIB` (256), `M0_OUT_DIR`, `PROXIMA_PROMPT`, or
+//! `PROXIMA_PROMPT_FILE`.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -73,6 +74,8 @@ enum Class {
     SoftmaxSum,
     AttentionDot,
     AttentionAv,
+    CachedAttentionPartial,
+    CachedAttentionMerge,
     CandidateB,
     IdentityCopy,
     Elementwise(String),
@@ -96,6 +99,8 @@ impl Class {
             Class::SoftmaxSum => "softmax sum".to_string(),
             Class::AttentionDot => "attention dot".to_string(),
             Class::AttentionAv => "attention AV".to_string(),
+            Class::CachedAttentionPartial => "cached attention partial".to_string(),
+            Class::CachedAttentionMerge => "cached attention merge".to_string(),
             Class::CandidateB => "Candidate B (cached_softmax_weights)".to_string(),
             Class::IdentityCopy => "identity copy".to_string(),
             Class::Elementwise(body) => format!("elementwise {body}"),
@@ -227,6 +232,8 @@ fn classify_elementwise(facts: &Facts<'_>) -> Class {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn classify(facts: &Facts<'_>, producers: &HashMap<u32, Class>) -> Class {
     match facts.kind_name {
+        "cached_attention" if facts.entry.ends_with("_merge") => Class::CachedAttentionMerge,
+        "cached_attention" => Class::CachedAttentionPartial,
         "cached_softmax_weights" => Class::CandidateB,
         "constant" => Class::Constant,
         "iota" => Class::Iota,
@@ -350,7 +357,7 @@ mod harness {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use memmap2::{Mmap, MmapOptions};
     use omega::CapturedDispatch;
@@ -367,6 +374,13 @@ mod harness {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(default)
+    }
+
+    fn unix_time_ns() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the unix epoch")
+            .as_nanos()
     }
 
     struct Config {
@@ -391,11 +405,22 @@ mod harness {
         }
     }
 
+    struct ReplaySample {
+        gpu_span_ns: f64,
+        host_start_offset_ns: u128,
+        host_end_offset_ns: u128,
+    }
+
     struct GroupMeasure {
         cold_ns: f64,
         cold_cov_percent: f64,
         warm_ns: f64,
         marginal_ns: f64,
+        started_unix_ns: u128,
+        completed_unix_ns: u128,
+        cold_samples: Vec<ReplaySample>,
+        warm_samples: Vec<ReplaySample>,
+        batched_samples: Vec<ReplaySample>,
         failure: Option<String>,
     }
 
@@ -465,7 +490,12 @@ mod harness {
             dispatch_type: omega::DispatchType::Serial,
             ..ServingConfig::default()
         };
-        let prompt = std::env::var("PROXIMA_PROMPT").unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
+        let prompt = match std::env::var("PROXIMA_PROMPT_FILE") {
+            Ok(path) => std::fs::read_to_string(path).expect("read PROXIMA_PROMPT_FILE"),
+            Err(_) => {
+                std::env::var("PROXIMA_PROMPT").unwrap_or_else(|_| DEFAULT_PROMPT.to_string())
+            }
+        };
         let mut on_token = |_event: TokenEvent<'_>| ControlFlow::Continue(());
         let (token_ids, text, _stopped_by_eos) = model
             .generate_streaming(&prompt, config.max_tokens, serving_config, &mut on_token)
@@ -513,6 +543,11 @@ mod harness {
                             cold_cov_percent: 0.0,
                             warm_ns: 0.0,
                             marginal_ns: 0.0,
+                            started_unix_ns: 0,
+                            completed_unix_ns: 0,
+                            cold_samples: Vec::new(),
+                            warm_samples: Vec::new(),
+                            batched_samples: Vec::new(),
                             failure: None,
                         },
                     });
@@ -522,44 +557,80 @@ mod harness {
         groups
     }
 
-    fn sample_cold(dispatch: &CapturedDispatch, config: &Config) -> Result<Vec<f64>, String> {
+    fn timed_gpu_sample(
+        dispatch: &CapturedDispatch,
+        batch_dispatches: usize,
+        group_origin: Instant,
+    ) -> Result<ReplaySample, String> {
+        let host_start_offset_ns = group_origin.elapsed().as_nanos();
+        let gpu_span_ns = dispatch
+            .time_gpu_ns(batch_dispatches)
+            .map_err(|error| error.to_string())?;
+        let host_end_offset_ns = group_origin.elapsed().as_nanos();
+        Ok(ReplaySample {
+            gpu_span_ns,
+            host_start_offset_ns,
+            host_end_offset_ns,
+        })
+    }
+
+    fn sample_cold(
+        dispatch: &CapturedDispatch,
+        config: &Config,
+        group_origin: Instant,
+    ) -> Result<Vec<ReplaySample>, String> {
         (0..config.iterations)
             .map(|_| {
                 omega::flush_gpu_caches(config.flush_bytes).map_err(|error| error.to_string())?;
-                dispatch.time_gpu_ns(1).map_err(|error| error.to_string())
+                timed_gpu_sample(dispatch, 1, group_origin)
             })
             .collect()
     }
 
-    fn sample_warm(dispatch: &CapturedDispatch, config: &Config) -> Result<Vec<f64>, String> {
+    fn sample_warm(
+        dispatch: &CapturedDispatch,
+        config: &Config,
+        group_origin: Instant,
+    ) -> Result<Vec<ReplaySample>, String> {
         (0..config.iterations)
-            .map(|_| dispatch.time_gpu_ns(1).map_err(|error| error.to_string()))
+            .map(|_| timed_gpu_sample(dispatch, 1, group_origin))
             .collect()
     }
 
-    fn sample_batched(dispatch: &CapturedDispatch, config: &Config) -> Result<Vec<f64>, String> {
+    fn sample_batched(
+        dispatch: &CapturedDispatch,
+        config: &Config,
+        group_origin: Instant,
+    ) -> Result<Vec<ReplaySample>, String> {
         let rounds = (config.iterations / 5).max(9);
         (0..rounds)
-            .map(|_| {
-                dispatch
-                    .time_gpu_ns(config.batch)
-                    .map_err(|error| error.to_string())
-            })
+            .map(|_| timed_gpu_sample(dispatch, config.batch, group_origin))
             .collect()
     }
 
     fn measure_group(dispatch: &CapturedDispatch, config: &Config) -> GroupMeasure {
+        let started_unix_ns = unix_time_ns();
+        let group_origin = Instant::now();
         let arms = (|| -> Result<GroupMeasure, String> {
-            let cold = sample_cold(dispatch, config)?;
-            let warm = sample_warm(dispatch, config)?;
-            let batched = sample_batched(dispatch, config)?;
-            let warm_ns = median(&warm);
-            let marginal_ns = ((median(&batched) - warm_ns) / (config.batch as f64 - 1.0)).max(0.0);
+            let cold = sample_cold(dispatch, config, group_origin)?;
+            let warm = sample_warm(dispatch, config, group_origin)?;
+            let batched = sample_batched(dispatch, config, group_origin)?;
+            let cold_spans: Vec<f64> = cold.iter().map(|sample| sample.gpu_span_ns).collect();
+            let warm_spans: Vec<f64> = warm.iter().map(|sample| sample.gpu_span_ns).collect();
+            let batched_spans: Vec<f64> = batched.iter().map(|sample| sample.gpu_span_ns).collect();
+            let warm_ns = median(&warm_spans);
+            let marginal_ns =
+                ((median(&batched_spans) - warm_ns) / (config.batch as f64 - 1.0)).max(0.0);
             Ok(GroupMeasure {
-                cold_ns: median(&cold),
-                cold_cov_percent: coefficient_of_variation(&cold),
+                cold_ns: median(&cold_spans),
+                cold_cov_percent: coefficient_of_variation(&cold_spans),
                 warm_ns,
                 marginal_ns,
+                started_unix_ns,
+                completed_unix_ns: unix_time_ns(),
+                cold_samples: cold,
+                warm_samples: warm,
+                batched_samples: batched,
                 failure: None,
             })
         })();
@@ -568,6 +639,11 @@ mod harness {
             cold_cov_percent: 0.0,
             warm_ns: 0.0,
             marginal_ns: 0.0,
+            started_unix_ns: 0,
+            completed_unix_ns: 0,
+            cold_samples: Vec::new(),
+            warm_samples: Vec::new(),
+            batched_samples: Vec::new(),
             failure: Some(reason),
         })
     }
@@ -682,11 +758,51 @@ mod harness {
         }
     }
 
+    fn write_sample_trace_csv(
+        path: &Path,
+        dispatches: &[CapturedDispatch],
+        groups: &[Group],
+        batch_dispatches: usize,
+    ) {
+        let mut csv = File::create(path).expect("create timing sample trace csv");
+        writeln!(
+            csv,
+            "group_index,step,chunk_index,node,class,entry,group_started_unix_ns,group_completed_unix_ns,sample_started_unix_ns,sample_completed_unix_ns,arm,sample_index,batch_dispatches,gpu_span_ns"
+        )
+        .expect("write timing sample trace header");
+        for (group_index, group) in groups.iter().enumerate() {
+            let dispatch = &dispatches[group.representative];
+            for (arm, batch_dispatches, samples) in [
+                ("cold", 1, &group.measure.cold_samples),
+                ("warm", 1, &group.measure.warm_samples),
+                ("batched", batch_dispatches, &group.measure.batched_samples),
+            ] {
+                for (sample_index, sample) in samples.iter().enumerate() {
+                    writeln!(
+                        csv,
+                        "{group_index},{},{},{},{},{},{},{},{},{},{arm},{sample_index},{batch_dispatches},{:.1}",
+                        dispatch.step,
+                        dispatch.chunk_index,
+                        dispatch.node,
+                        group.class.label(),
+                        dispatch.entry,
+                        group.measure.started_unix_ns,
+                        group.measure.completed_unix_ns,
+                        group.measure.started_unix_ns + sample.host_start_offset_ns,
+                        group.measure.started_unix_ns + sample.host_end_offset_ns,
+                        sample.gpu_span_ns,
+                    )
+                    .expect("write timing sample trace row");
+                }
+            }
+        }
+    }
+
     fn write_dispatch_manifest(path: &Path, dispatches: &[CapturedDispatch], classes: &[Class]) {
         let mut csv = File::create(path).expect("create dispatch manifest");
         writeln!(
             csv,
-            "index,step,node,class,kind,entry,grid_threads,operand_codecs,extents"
+            "index,step,chunk_index,node,class,kind,entry,grid_threads,operand_codecs,extents"
         )
         .expect("write manifest header");
         for (index, (dispatch, class)) in dispatches.iter().zip(classes).enumerate() {
@@ -697,8 +813,9 @@ mod harness {
                 .collect();
             writeln!(
                 csv,
-                "{index},{},{},{},{},{},{},{},{:?}",
+                "{index},{},{},{},{},{},{},{},{},{:?}",
                 dispatch.step,
+                dispatch.chunk_index,
                 dispatch.node,
                 class.label(),
                 dispatch.kind_name,
@@ -774,12 +891,43 @@ mod harness {
         let floor_samples = measure_floor(200);
         let floor_ns = median(&floor_samples);
         let group_total = groups.len();
+        let sample_trace_path = config.out_dir.join("census_timing_samples.csv");
         for (position, group) in groups.iter_mut().enumerate() {
             group.measure = measure_group(&launched[group.representative], &config);
             if position % 50 == 0 {
                 println!("m0 replay: group {position}/{group_total}");
             }
         }
+        let sequence_replay_ns: Vec<f64> = (0..3)
+            .map(|_| CapturedDispatch::time_gpu_sequence_ns(&launched))
+            .collect::<Result<_, _>>()
+            .expect("replay the captured dispatch sequence");
+        println!(
+            "m0 sequence replay: one command buffer, dispatches={}, gpu_ms={:?}",
+            launched.len(),
+            sequence_replay_ns
+                .iter()
+                .map(|elapsed_ns| elapsed_ns / 1e6)
+                .collect::<Vec<_>>()
+        );
+        let chunk_sequence_replay_ns: Vec<Vec<f64>> = (0..3)
+            .map(|_| CapturedDispatch::time_gpu_chunk_sequences_ns(&launched))
+            .collect::<Result<_, _>>()
+            .expect("replay the captured command-buffer chunks");
+        println!(
+            "m0 chunk sequence replay: chunks={}, gpu_ms={:?}",
+            chunk_sequence_replay_ns.first().map_or(0, Vec::len),
+            chunk_sequence_replay_ns
+                .iter()
+                .map(|chunks| {
+                    chunks
+                        .iter()
+                        .map(|elapsed_ns| elapsed_ns / 1e6)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        );
+        write_sample_trace_csv(&sample_trace_path, &launched, &groups, config.batch);
         report(&Census {
             config: &config,
             launched: &launched,
