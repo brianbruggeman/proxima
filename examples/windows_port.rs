@@ -12,7 +12,7 @@ mod support;
 #[proxima::main]
 async fn main() -> Result<(), ProximaError> {
     let corrupt = std::env::args().any(|argument| argument == "--corrupt-payload");
-    support::incumbent_exchange(corrupt).await?;
+    support::incumbent_exchange(corrupt)?;
     println!("incumbent_payload_matches=2");
     support::tcp_exchange()?;
     println!("tcp_payload_matches=1");
