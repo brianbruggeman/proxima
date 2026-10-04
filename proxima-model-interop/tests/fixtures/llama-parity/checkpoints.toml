@@ -1,0 +1,72 @@
+# the seven real checkpoints the architecture-as-data slices are held to.
+# sha256 is the full-content digest (openssl dgst -sha256) taken 2026-10-04.
+
+[[checkpoint]]
+name = "gemma4_26b"
+path = "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129"
+env = "PROXIMA_ARCH_GEMMA4_26B_GGUF"
+architecture = "gemma4"
+sha256 = "ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129"
+size_bytes = 13286728576
+size_note = "batiai/gemma4-26b:latest, 26B-A4B MoE (expert_count 128), 13.3 GB"
+present = true
+
+[[checkpoint]]
+name = "gemma4_e2b"
+path = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd"
+env = "PROXIMA_ARCH_GEMMA4_E2B_GGUF"
+architecture = "gemma4"
+sha256 = "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd"
+size_bytes = 3349514112
+size_note = "library/gemma4:e2b-it-qat, dense matformer E2B, 35 layers, 3.3 GB"
+present = true
+
+[[checkpoint]]
+name = "openchat"
+path = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
+env = "PROXIMA_ARCH_OPENCHAT_GGUF"
+architecture = "llama"
+sha256 = "817d93618c6edd0b3a0aaf5bf07e851036d4fcfccb956e34d6bc97e107f81e3d"
+size_bytes = 4140385376
+size_note = "openchat-3.5-1210 Q4_K_S, mistral-shaped dense, 4.1 GB; serving.rs DEFAULT_MODEL_PATH"
+present = true
+
+[[checkpoint]]
+name = "qwen2"
+path = "/Users/brianbruggeman/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515"
+env = "PROXIMA_ARCH_QWEN2_GGUF"
+architecture = "qwen2"
+sha256 = "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515"
+size_bytes = 397807936
+size_note = "library/qwen2.5:0.5b, 398 MB"
+present = true
+
+[[checkpoint]]
+name = "qwen3"
+path = "/Users/brianbruggeman/.ollama/models/blobs/sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f"
+env = "PROXIMA_ARCH_QWEN3_GGUF"
+architecture = "qwen3"
+sha256 = "a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f"
+size_bytes = 5225374496
+size_note = "library/qwen3:8b, 5.2 GB; long-context env.sh QWEN3_8B"
+present = true
+
+[[checkpoint]]
+name = "qwen35"
+path = "/Users/brianbruggeman/.ollama/models/blobs/sha256-afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5"
+env = "PROXIMA_ARCH_QWEN35_GGUF"
+architecture = "qwen35"
+sha256 = "afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5"
+size_bytes = 1036034688
+size_note = "library/qwen3.5:0.8b, 1.0 GB"
+present = true
+
+[[checkpoint]]
+name = "qwen35moe"
+path = "/Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d"
+env = "PROXIMA_ARCH_QWEN35MOE_GGUF"
+architecture = "qwen35moe"
+sha256 = "f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d"
+size_bytes = 23938321664
+size_note = "library/qwen3.6:35b-a3b, MoE + vision, 23.9 GB; long-context env.sh QWEN36"
+present = true

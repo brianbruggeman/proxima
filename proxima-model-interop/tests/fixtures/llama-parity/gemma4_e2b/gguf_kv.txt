@@ -1,0 +1,51 @@
+# oracle tool: llama.cpp gguf-py gguf_dump.py (header only, CPU, no tensors) from /Users/brianbruggeman/repos/others/llama.cpp at commit f1ea206218210afb913ae2f5d2c51faed35915da
+# command: cd /Users/brianbruggeman/repos/others/llama.cpp/gguf-py && PYTHONPATH=. uv run --no-project --with numpy --with pyyaml --with tqdm python gguf/scripts/gguf_dump.py --no-tensors /Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd
+# checkpoint: gemma4_e2b
+* File is LITTLE endian, script is running on a LITTLE endian host.
+* Dumping 46 key/value pair(s)
+      1: UINT32     |        1 | GGUF.version = 3
+      2: UINT64     |        1 | GGUF.tensor_count = 541
+      3: UINT64     |        1 | GGUF.kv_count = 43
+      4: STRING     |        1 | general.architecture = 'gemma4'
+      5: STRING     |        1 | general.type = 'model'
+      6: INT32      |        1 | general.sampling.top_k = 64
+      7: FLOAT32    |        1 | general.sampling.top_p = 0.949999988079071
+      8: FLOAT32    |        1 | general.sampling.temp = 1.0
+      9: STRING     |        1 | general.name = '2B_dequant_qat_it_hf'
+     10: STRING     |        1 | general.finetune = '2B_dequant_qat_it_hf'
+     11: STRING     |        1 | general.size_label = '4.6B'
+     12: UINT32     |        1 | gemma4.block_count = 35
+     13: UINT32     |        1 | gemma4.context_length = 131072
+     14: UINT32     |        1 | gemma4.embedding_length = 1536
+     15: [INT32]    |       35 | gemma4.feed_forward_length = [6144, 6144, 6144, 6144, 6144, 6144, ...]
+     16: UINT32     |        1 | gemma4.attention.head_count = 8
+     17: UINT32     |        1 | gemma4.attention.head_count_kv = 1
+     18: FLOAT32    |        1 | gemma4.rope.freq_base = 1000000.0
+     19: FLOAT32    |        1 | gemma4.rope.freq_base_swa = 10000.0
+     20: FLOAT32    |        1 | gemma4.attention.layer_norm_rms_epsilon = 9.999999974752427e-07
+     21: UINT32     |        1 | gemma4.attention.key_length = 512
+     22: UINT32     |        1 | gemma4.attention.value_length = 512
+     23: FLOAT32    |        1 | gemma4.final_logit_softcapping = 30.0
+     24: UINT32     |        1 | gemma4.attention.sliding_window = 512
+     25: UINT32     |        1 | gemma4.attention.shared_kv_layers = 20
+     26: UINT32     |        1 | gemma4.embedding_length_per_layer_input = 256
+     27: [BOOL]     |       35 | gemma4.attention.sliding_window_pattern = [True, True, True, True, False, True, ...]
+     28: UINT32     |        1 | gemma4.attention.key_length_swa = 256
+     29: UINT32     |        1 | gemma4.attention.value_length_swa = 256
+     30: UINT32     |        1 | gemma4.rope.dimension_count = 512
+     31: UINT32     |        1 | gemma4.rope.dimension_count_swa = 256
+     32: STRING     |        1 | tokenizer.ggml.model = 'gemma4'
+     33: [STRING]   |   262144 | tokenizer.ggml.tokens = ['<pad>', '<eos>', '<bos>', '<unk>', '<mask>', '[multimodal]', ...]
+     34: [FLOAT32]  |   262144 | tokenizer.ggml.scores = [-1000.0, -1000.0, -1000.0, -1000.0, -1000.0, -1000.0, ...]
+     35: [INT32]    |   262144 | tokenizer.ggml.token_type = [3, 3, 3, 3, 3, 1, ...]
+     36: [STRING]   |   514906 | tokenizer.ggml.merges = ['\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n \n', '▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁', '\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t \t', '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n \n\n', '▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁', '\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t \t\t', ...]
+     37: UINT32     |        1 | tokenizer.ggml.bos_token_id = 2
+     38: UINT32     |        1 | tokenizer.ggml.eos_token_id = 1
+     39: UINT32     |        1 | tokenizer.ggml.unknown_token_id = 3
+     40: UINT32     |        1 | tokenizer.ggml.padding_token_id = 0
+     41: UINT32     |        1 | tokenizer.ggml.mask_token_id = 4
+     42: STRING     |        1 | tokenizer.chat_template = '{%- macro format_parameters(properties, required, filter_...'
+     43: BOOL       |        1 | tokenizer.ggml.add_space_prefix = False
+     44: BOOL       |        1 | tokenizer.ggml.add_bos_token = True
+     45: UINT32     |        1 | general.quantization_version = 2
+     46: UINT32     |        1 | general.file_type = 2
