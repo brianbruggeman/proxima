@@ -8,13 +8,14 @@
 //! partial entry in the prompt cache and let go, and the request's ordinary
 //! lookup finds it. Nothing spins and no thread is parked inside async code:
 //! the request entry points are synchronous, and the slot is the same
-//! `std::sync::Mutex` tier-3 case [`super::LoadedModel`] documents for its
-//! `expert_slab` (held across one chunk, never across an `.await`; no
-//! `proxima-lock` crate exists in this workspace to resolve it through).
+//! `proxima_primitives::sync::blocking::Mutex` tier-3 case
+//! [`super::LoadedModel`] documents for its `expert_slab` (held across one
+//! chunk, never across an `.await`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
+
+use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
 
 /// The device slot a prewarm holds while it runs and the pending-request
 /// count it yields to.
@@ -56,7 +57,7 @@ impl PrewarmGate {
     pub(super) fn enter_request(&self) -> PendingRequest<'_> {
         self.pending.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
-        drop(self.slot.lock().unwrap_or_else(PoisonError::into_inner));
+        drop(self.slot.lock());
         PendingRequest {
             gate: self,
             waited: started.elapsed(),
@@ -66,11 +67,7 @@ impl PrewarmGate {
     /// The slot for a prewarm to run under, `None` while another prewarm
     /// holds it.
     pub(super) fn try_begin(&self) -> Option<MutexGuard<'_, ()>> {
-        match self.slot.try_lock() {
-            Ok(guard) => Some(guard),
-            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-            Err(TryLockError::WouldBlock) => None,
-        }
+        self.slot.try_lock()
     }
 
     /// Whether any request is pending, which a running prewarm yields to.

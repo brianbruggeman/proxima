@@ -9,8 +9,9 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::{GgmlType, GgufModel, TensorPayload, write_complete};
 use proxima_tensor::test_support::Lcg;
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
+use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::set_default_recorder;
 use proxima_telemetry::pipes::InMemoryPipe;
@@ -247,7 +248,7 @@ struct EvaluationCapture {
 
 impl EvaluationCapture {
     fn install() -> Self {
-        let serialized = AMBIENT_TELEMETRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let serialized = AMBIENT_TELEMETRY.lock();
         global::install(EnvFilter::parse(&format!("{EVALUATION_TARGET}=trace")));
         let pipe = InMemoryPipe::new();
         let recorder = Arc::new(

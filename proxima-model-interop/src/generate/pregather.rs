@@ -2697,9 +2697,9 @@ impl<'file> LoadedModel<'file> {
             let rope_scaling = RopeScaling::from_gguf(parsed)?;
             let kv_layers = kv_layers_for_layout(kv_layout, resolved.kv_layers(parsed)?);
             return Self {
-                expert_slab: std::sync::Mutex::new(expert_slab),
+                expert_slab: Mutex::new(expert_slab),
                 expert_sidecar: None,
-            prompt_cache: std::sync::Mutex::new(PromptCache::new()),
+            prompt_cache: Mutex::new(PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
             prewarm_gate: PrewarmGate::new(),
@@ -2828,9 +2828,9 @@ impl<'file> LoadedModel<'file> {
         let rope_scaling = RopeScaling::from_gguf(parsed)?;
         let kv_layers = crate::bind::kv_layers_from_metadata(parsed)?;
         Self {
-            expert_slab: std::sync::Mutex::new(expert_slab),
+            expert_slab: Mutex::new(expert_slab),
             expert_sidecar: None,
-            prompt_cache: std::sync::Mutex::new(PromptCache::new()),
+            prompt_cache: Mutex::new(PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
             prewarm_gate: PrewarmGate::new(),
@@ -2946,9 +2946,9 @@ impl<'file> LoadedModel<'file> {
             architecture.block_count as usize
         ];
         Self {
-            expert_slab: std::sync::Mutex::new(expert_slab),
+            expert_slab: Mutex::new(expert_slab),
             expert_sidecar: None,
-            prompt_cache: std::sync::Mutex::new(PromptCache::new()),
+            prompt_cache: Mutex::new(PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
             prewarm_gate: PrewarmGate::new(),

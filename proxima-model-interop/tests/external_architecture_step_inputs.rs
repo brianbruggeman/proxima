@@ -15,7 +15,6 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrayvec::ArrayVec;
@@ -30,6 +29,7 @@ use proxima_model_interop::{
     LoadedModel, StepInput, StepInputContext, architecture_from_metadata, bind_dense, symbols,
 };
 use proxima_primitives::pipe::Pipe;
+use proxima_primitives::sync::blocking::Mutex;
 use proxima_tensor::spec::{Qwen35LayerRoots, elementwise, embedding_lookup, input_leaf, reduce};
 use proxima_tensor::{DType, Extent, Op, ReduceInit, ScalarOp};
 use proxima_tokenizer::byte_level::byte_to_char;
@@ -242,7 +242,6 @@ fn reset_observations() {
     CALL_COUNT.store(0, Ordering::SeqCst);
     OBSERVED_NEW_COUNTS
         .lock()
-        .expect("test-only mutex, never poisoned")
         .clear();
 }
 
@@ -285,7 +284,6 @@ impl Architecture for StepInputArch {
         CALL_COUNT.fetch_add(1, Ordering::SeqCst);
         OBSERVED_NEW_COUNTS
             .lock()
-            .expect("test-only mutex, never poisoned")
             .push(context.new_count);
 
         // `logits_root` (`DenseArch::bind`, which this architecture wraps)
@@ -374,7 +372,6 @@ async fn a_foreign_architecture_feeds_a_token_derived_leaf_each_step() {
 
     let observed = OBSERVED_NEW_COUNTS
         .lock()
-        .expect("test-only mutex, never poisoned")
         .clone();
     assert_eq!(
         observed.len(),
@@ -447,7 +444,6 @@ async fn a_forward_tap_feeds_step_inputs_the_same_way_the_decode_loop_does() {
 
     let observed = OBSERVED_NEW_COUNTS
         .lock()
-        .expect("test-only mutex, never poisoned")
         .clone();
     assert_eq!(
         observed.len(),

@@ -1798,7 +1798,7 @@ impl<'file> LoadedModel<'file> {
         out_dim: u32,
         in_dim: u32,
     ) -> Result<u64, InteropError> {
-        lock_expert_slab(&self.expert_slab)
+        self.expert_slab.lock()
             .page_expert(layer, expert, codec, bytes, out_dim, in_dim)
     }
 
@@ -1827,7 +1827,7 @@ impl<'file> LoadedModel<'file> {
         range: Range<usize>,
         dims: crate::expert_slab::WeightDims,
     ) -> Result<u64, InteropError> {
-        lock_expert_slab(&self.expert_slab)
+        self.expert_slab.lock()
             .page_expert_mapped(layer, expert, codec, mapping, range, dims)
     }
 
@@ -1893,7 +1893,7 @@ impl<'file> LoadedModel<'file> {
             });
         }
         sidecar.install_low_copies(
-            &mut lock_expert_slab(&self.expert_slab),
+            &mut self.expert_slab.lock(),
             self.architecture.block_count as usize,
             self.architecture.expert_count as usize,
         )?;
@@ -1916,7 +1916,7 @@ impl<'file> LoadedModel<'file> {
                 .iter()
                 .map(|(_, bytes, _)| bytes.len())
                 .sum::<usize>();
-            let slab_memory = lock_expert_slab(&self.expert_slab).memory();
+            let slab_memory = self.expert_slab.lock().memory();
             debug!(
                 checkpoint_bytes = self.checkpoint_bytes,
                 owned_bytes = owned_bytes as u64,
@@ -1980,7 +1980,7 @@ impl<'file> LoadedModel<'file> {
             crate::residency::ExpertAddress,
         ) -> Result<crate::residency::ExpertPage<'file>, InteropError>,
     {
-        let mut slab = lock_expert_slab(&self.expert_slab);
+        let mut slab = self.expert_slab.lock();
         policy.apply_at_boundary(&mut slab, page)
     }
 
@@ -1997,7 +1997,7 @@ impl<'file> LoadedModel<'file> {
                 reason: String::from("no expert sidecar is attached"),
             }
         })?;
-        let mut slab = lock_expert_slab(&self.expert_slab);
+        let mut slab = self.expert_slab.lock();
         policy.apply_actions_at_boundary(&mut slab, |slab, action| {
             sidecar.apply_action(slab, self.checkpoint_mapping, action)
         })
@@ -2065,7 +2065,7 @@ impl<'file> LoadedModel<'file> {
     /// RSS claim.
     #[must_use]
     pub fn expert_slab_memory(&self) -> crate::expert_slab::ExpertSlabMemory {
-        lock_expert_slab(&self.expert_slab).memory()
+        self.expert_slab.lock().memory()
     }
 
     /// Removes expert `expert` of layer `layer`'s currently-bound bytes --
@@ -2076,7 +2076,7 @@ impl<'file> LoadedModel<'file> {
     /// # Errors
     /// Same as [`Self::page_expert`].
     pub fn evict_expert(&self, layer: usize, expert: usize) -> Result<(), InteropError> {
-        lock_expert_slab(&self.expert_slab).evict_expert(layer, expert)
+        self.expert_slab.lock().evict_expert(layer, expert)
     }
 
     /// `expert`'s current epoch for `layer`, or `None` if either index is
@@ -2084,7 +2084,7 @@ impl<'file> LoadedModel<'file> {
     /// [`crate::expert_slab::ExpertSlab::expert_epoch`].
     #[must_use]
     pub fn expert_epoch(&self, layer: usize, expert: usize) -> Option<u64> {
-        lock_expert_slab(&self.expert_slab).expert_epoch(layer, expert)
+        self.expert_slab.lock().expert_epoch(layer, expert)
     }
 
     /// The greedy decode loop itself: `max_tokens` steps, each one call
@@ -4487,7 +4487,7 @@ impl<'file> LoadedModel<'file> {
                     // step on every exit -- normal return and an early `?`
                     // error alike -- so the source-snapshot boundary cannot
                     // remain open after a failed evaluation.
-                    let mut expert_slab_guard = lock_expert_slab(&self.expert_slab);
+                    let mut expert_slab_guard = self.expert_slab.lock();
                     let mut expert_slab_guard = expert_slab_guard.begin_step();
 
                     // the routed segment plan `qwen35moe_pre_gather_plan` builds

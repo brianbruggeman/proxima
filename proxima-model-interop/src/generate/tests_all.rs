@@ -16,7 +16,7 @@ use core::ops::ControlFlow;
 use super::{
     DecodeMetrics, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache, TokenEvent,
     build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
-    first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
+    first_nonfinite_node_value, kv_extent, qwen35moe_admit_low_copy,
     qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
     should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
     visit_qwen35moe_router_selections,
@@ -44,11 +44,12 @@ use super::PlanNumerics;
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod tests {
+    use proxima_primitives::sync::blocking::Mutex;
     #[cfg(feature = "qwen35moe-expert-prefetch")]
     use super::super::qwen35moe_expert_prefetch_requested;
     use super::{
         RouterExpertCounts, RouterLogits, SsmLayerCache, collect_future_gather_cuts,
-        first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
+        first_nonfinite_node_value, kv_extent, qwen35moe_admit_low_copy,
         qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
         should_release_monolithic_sources, step_batch_needs_logits,
         visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
@@ -444,8 +445,8 @@ pub(super) mod tests {
     fn residency_mutation_closes_only_for_the_expert_gather_phase() {
         let checkpoint_expert = [0_u8; 144];
         let routed_expert = [7_u8; 144];
-        let slab = std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new());
-        lock_expert_slab(&slab)
+        let slab = Mutex::new(crate::expert_slab::ExpertSlab::new());
+        slab.lock()
             .bind_layer_stack(
                 0,
                 proxima_tensor::op::NodeId(1),
@@ -457,11 +458,11 @@ pub(super) mod tests {
             )
             .expect("the routed layer binds before evaluation");
 
-        lock_expert_slab(&slab)
+        slab.lock()
             .page_expert(0, 0, crate::bind::Codec::Q4K, &routed_expert, 32, 32)
             .expect("the current route may change residency before gather");
 
-        let mut locked = lock_expert_slab(&slab);
+        let mut locked = slab.lock();
         let mut gather_phase = locked.begin_step();
         // `StepGuard` forwards no paging method itself -- `as_slab_mut` is
         // the one crate-private escape this test uses to prove the
@@ -486,7 +487,7 @@ pub(super) mod tests {
 
         drop(gather_phase);
         drop(locked);
-        lock_expert_slab(&slab)
+        slab.lock()
             .page_expert(0, 0, crate::bind::Codec::Q4K, &checkpoint_expert, 32, 32)
             .expect("paging succeeds again once the gather phase's StepGuard drops");
     }
@@ -2513,6 +2514,7 @@ pub(super) mod memory_fit_gate_tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    use proxima_primitives::sync::blocking::Mutex;
     use proxima_tokenizer::Vocab;
 
     use crate::bind::{BoundWeights, ModelArchitecture};
@@ -2593,9 +2595,9 @@ pub(super) mod memory_fit_gate_tests {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
             speculative_verify_program: None,
-            expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
+            expert_slab: Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,
-            prompt_cache: std::sync::Mutex::new(crate::generate::PromptCache::new()),
+            prompt_cache: Mutex::new(crate::generate::PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: crate::generate::Arc::new(()),
             prewarm_gate: crate::generate::PrewarmGate::new(),

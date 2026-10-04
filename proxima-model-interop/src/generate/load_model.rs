@@ -985,33 +985,27 @@ pub struct LoadedModel<'file> {
     /// [`crate::expert_slab::ExpertSlab`]'s own module doc for the
     /// ownership contract. [`crate::bind::build_expert_slab`] builds it once
     /// at bind time from `weights`/`program`'s own `_exps.weight` nodes;
-    /// empty for a dense checkpoint. Behind a [`std::sync::Mutex`], not a
+    /// empty for a dense checkpoint. Behind a [`proxima_primitives::sync::blocking::Mutex`], not a
     /// bare [`core::cell::RefCell`]: `examples/openai_serve_gguf.rs` holds a
     /// `LoadedModel` inside an `Arc` and serves it from a multi-threaded
     /// `SendPipe` (`proxima-primitives/src/pipe/primitives.rs`'s own
     /// `Send + Sync + 'static` bound), so this type must stay `Sync` --
     /// `RefCell` is not, `Mutex` is (`cargo check --workspace --all-targets`
     /// is what caught the `RefCell` attempt failing that example's own
-    /// build). `proxima_lock::Mutex` (this workspace's canonical
-    /// tier-resolved mutex, principle 21) does not exist as a crate in this
-    /// repo -- grepped for it before falling back to `std::sync::Mutex`
-    /// here, which is legitimate per that principle's own tier-3 case: a
-    /// synchronous lock guarding a step boundary no code ever holds across
-    /// an `.await`. Every acquire recovers from poisoning
-    /// (`unwrap_or_else(PoisonError::into_inner)`) rather than panicking --
-    /// this crate's own no-panic rule -- since a poisoned lock here would
-    /// mean an earlier panic mid-decode already violated that rule
-    /// somewhere else; recovering is strictly better than a second panic.
-    pub(super) expert_slab: std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
+    /// build). The canonical tier-resolved mutex (principle 21, tier-3
+    /// case): a synchronous lock guarding a step boundary no code ever holds
+    /// across an `.await`. It does not poison, so a panic mid-decode never
+    /// turns the next acquire into a second panic.
+    pub(super) expert_slab: Mutex<crate::expert_slab::ExpertSlab<'file>>,
     /// HOBBIT's optional low-codec store and its mmap owner. Attachment
     /// installs the low copies once; router boundaries subsequently switch
     /// only the selected expert's three projection entries.
     pub(super) expert_sidecar: Option<crate::expert_sidecar::MappedExpertSidecar>,
     /// The per-model prompt cache ([`super::prompt_cache`]'s module doc).
-    /// `std::sync::Mutex` for the same reason as `expert_slab` above (this
+    /// The same mutex as `expert_slab`, for the same reason above (this
     /// type stays `Sync` behind an `Arc`); held only to take an entry out or
     /// put one back, never across a decode.
-    pub(super) prompt_cache: std::sync::Mutex<super::PromptCache>,
+    pub(super) prompt_cache: Mutex<super::PromptCache>,
     /// This model's identity for [`super::resident_plans`]: every thread's
     /// resident decode plans hold only a `Weak` to it, so dropping the model,
     /// or replacing the token because a `&mut self` method changed what a

@@ -28,7 +28,6 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrayvec::ArrayVec;
@@ -42,6 +41,7 @@ use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, DenseArch, InteropError, LoadedModel,
     ServingConfig, StepInput, StepInputContext,
 };
+use proxima_primitives::sync::blocking::Mutex;
 use proxima_tokenizer::byte_level::byte_to_char;
 
 #[path = "support/mod.rs"]
@@ -243,7 +243,6 @@ fn reset_observations() {
     CALL_COUNT.store(0, Ordering::SeqCst);
     OBSERVED_NEW_COUNTS
         .lock()
-        .expect("test-only mutex, never poisoned")
         .clear();
 }
 
@@ -276,7 +275,6 @@ impl Architecture for SinglePositionArch {
         CALL_COUNT.fetch_add(1, Ordering::SeqCst);
         OBSERVED_NEW_COUNTS
             .lock()
-            .expect("test-only mutex, never poisoned")
             .push(context.new_count);
     }
 }
@@ -337,7 +335,6 @@ async fn single_position_step_splits_prefill_into_one_evaluation_per_position() 
 
     let observed = OBSERVED_NEW_COUNTS
         .lock()
-        .expect("test-only mutex, never poisoned")
         .clone();
     assert!(
         observed.len() >= prompt.len() + 2,

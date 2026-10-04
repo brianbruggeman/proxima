@@ -36,6 +36,7 @@ qwen35moe-expert-prefetch = ["std"]
 # from a sibling feature.
 std = [
     "proxima-gguf/std",
+    "proxima-primitives/std",
     "proxima-tensor/std",
     "proxima-tensor/config",
     "interop-bgpool",

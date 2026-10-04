@@ -21,8 +21,10 @@
 //! ASYNC mutex, `futures::lock::Mutex`-backed, which yields the task
 //! instead of parking a thread) so the two never collide under one name.
 
+// `Condvar` rides with the std backend only: the futex tier has no wait-queue to
+// hang one on, so a no_std blocking worker waits on an async gate instead.
 #[cfg(feature = "std")]
-pub use parking_lot::{Mutex, MutexGuard};
+pub use parking_lot::{Condvar, Mutex, MutexGuard};
 
 #[cfg(all(not(feature = "std"), feature = "blocking"))]
 mod futex;

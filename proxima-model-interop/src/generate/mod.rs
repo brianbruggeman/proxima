@@ -67,6 +67,7 @@ use omega::mlx;
 use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
+use proxima_primitives::sync::blocking::Mutex;
 #[cfg(any(
     not(feature = "metal"),
     all(feature = "instrument", target_os = "macos")

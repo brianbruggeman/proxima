@@ -32,7 +32,6 @@
 
 use core::ops::{ControlFlow, Range};
 use std::collections::BTreeMap;
-use std::sync::PoisonError;
 use std::time::Duration;
 
 use proxima_telemetry::{debug, error};
@@ -1000,7 +999,6 @@ impl LoadedModel<'_> {
     pub(super) fn clear_prompt_cache(&mut self) {
         self.prompt_cache
             .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
             .clear();
     }
 
@@ -1009,7 +1007,6 @@ impl LoadedModel<'_> {
     pub fn prompt_cache_bytes(&self) -> usize {
         self.prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .stored_bytes()
     }
 
@@ -1020,7 +1017,6 @@ impl LoadedModel<'_> {
     pub fn last_prompt_cache_report(&self) -> Option<CacheReport> {
         self.prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .last_report()
     }
 
@@ -1059,8 +1055,7 @@ impl LoadedModel<'_> {
         let shifting = config.cache_reuse_min > 0 && config.ring_rewind_slack > 0;
         let mut cache = self
             .prompt_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+            .lock();
         let (mut entry, mut report) = cache.take_best_shifting(
             prompt_ids,
             key,
@@ -1100,7 +1095,6 @@ impl LoadedModel<'_> {
         let entries = self
             .prompt_cache
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .store(entry, config);
         debug!(
             cache_stored_tokens = cached_tokens as u64,
