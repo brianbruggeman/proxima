@@ -123,6 +123,97 @@ pub struct ModelDescriptor {
     pub fused_qkv_reduce: bool,
 }
 
+/// The values a family's GGUF header and HF `config.json` do not carry, as
+/// DATA: the one record both [`gemma4_descriptor_from_gguf`] and
+/// [`mistral_descriptor_from_shape`] read, so neither holds a per-family
+/// literal. `proxima-model-interop` parses one TOML file per family into this
+/// (`serde`, via the [`Deserialize`] derives on [`LayerFfnConfig`],
+/// [`ParallelDenseMoeConfig`], [`EmbeddingScale`], [`Activation`] and
+/// [`ExpertGatingFunc`]), keyed by the checkpoint's own family string.
+///
+/// Parsing lives in the consumer because this crate's alloc tier carries no
+/// TOML parser; a descriptor builder stays a pure data-in, data-out function
+/// that takes the already-parsed profile.
+///
+/// Everything per-checkpoint (head dims, widths, per-layer windows, PLE
+/// width) stays in the GGUF/HF reader: [`LayerFfnConfig::dense_feed_forward`]
+/// and [`LayerFfnConfig::ple`] are left at their defaults here and overridden
+/// per layer by the builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FamilyProfile {
+    /// Multiplier on the embedding lookup (`Some(Sqrt)` for a family that
+    /// scales it by `sqrt(embedding)`, `None` otherwise).
+    #[serde(default)]
+    pub embedding_scale: Option<EmbeddingScale>,
+    /// Every layer's FFN knobs for a dense (`expert_count == 0`) checkpoint.
+    pub ffn: LayerFfnConfig,
+    /// When present and the checkpoint has experts, each layer runs its dense
+    /// and routed FFNs in parallel with these sub-norm knobs instead of
+    /// [`Self::ffn`]'s own [`LayerFfnConfig::combination`].
+    #[serde(default)]
+    pub parallel_dense_moe: Option<ParallelDenseMoeConfig>,
+    /// `true` scales attention scores by `1/sqrt(head_dim)`
+    /// ([`AttentionScoreScale::InverseSqrtQueryPreAttnScalar`]); `false` leaves
+    /// them unscaled ([`AttentionScoreScale::Unscaled`]).
+    pub score_scale_inverse_sqrt_head_dim: bool,
+    /// Per-kv-head value RMSNorm without a learned scale
+    /// ([`LayerAttentionConfig::value_norm`]) on layers that own their `V`.
+    pub value_norm: bool,
+    /// How this family pairs RoPE channels, per llama.cpp's
+    /// `llama_model_rope_type` (`src/llama-model.cpp`): NEOX/MROPE/IMROPE
+    /// families are [`RopeLayout::SplitHalf`], NORM families are
+    /// [`RopeLayout::Adjacent`]. Never inferred from tensor presence.
+    pub rope_layout: RopeLayout,
+}
+
+/// Which channels RoPE rotates together: `(i, i + rotary_dim / 2)` or
+/// `(2i, 2i + 1)`. The count of rotating dims is not here; it is the
+/// checkpoint's own `<arch>.rope.dimension_count`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RopeLayout {
+    SplitHalf,
+    Adjacent,
+}
+
+impl FamilyProfile {
+    /// One layer's [`LayerFfnConfig`]: [`Self::ffn`], with the combination
+    /// taken from [`Self::parallel_dense_moe`] when the checkpoint has experts.
+    #[must_use]
+    pub fn layer_ffn(&self, expert_count: u32) -> LayerFfnConfig {
+        let combination = match self.parallel_dense_moe {
+            Some(parallel) if expert_count > 0 => FfnCombination::ParallelDenseMoe(parallel),
+            _ => self.ffn.combination,
+        };
+        LayerFfnConfig {
+            combination,
+            ..self.ffn
+        }
+    }
+
+    /// The attention score scale for a layer of width `head_dim`.
+    #[must_use]
+    pub const fn score_scale(&self, head_dim: u32) -> AttentionScoreScale {
+        if self.score_scale_inverse_sqrt_head_dim {
+            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim)
+        } else {
+            AttentionScoreScale::Unscaled
+        }
+    }
+
+    /// RoPE pairing for a head whose rotating width is `rotary_dim`
+    /// (`<arch>.rope.dimension_count`, or the head width when the header has
+    /// no such key).
+    #[must_use]
+    pub const fn rope_pairing(&self, rotary_dim: u32) -> RopePairing {
+        match self.rope_layout {
+            RopeLayout::SplitHalf => RopePairing::SplitHalf { pairs: rotary_dim / 2 },
+            RopeLayout::Adjacent => RopePairing::Interleaved,
+        }
+    }
+}
+
 /// Builds the single-range dense [`ModelDescriptor`] [`DenseArch::bind`]
 /// (`proxima-model-interop/src/dense.rs`) hands to [`build_forward`]:
 /// interleaved or caller-chosen RoPE off one shared table, `1/sqrt(head_dim)`
@@ -136,8 +227,11 @@ pub struct ModelDescriptor {
 /// routed branch off the same width as the dense one, and
 /// `leading_dense_block_count` is `block_count` because the dense-vs-MoE
 /// choice is whole-checkpoint (`expert_count`), not per layer.
-/// `rope_pairing` is caller-supplied because Qwen2 is split-half with no
-/// QK-norm tensors, so `qk_norm` alone cannot pick it.
+/// `profile` carries every value the checkpoint header does not: the FFN
+/// activation and norm knobs, the score-scale rule, value-norm, the embedding
+/// scale, and whether RoPE is split-half regardless of QK-norm tensors (a
+/// split-half family with no QK-norm tensors cannot be told from `qk_norm`
+/// alone).
 ///
 /// [`DenseArch::bind`]: ../../../proxima_model_interop/dense/struct.DenseArch.html
 #[expect(clippy::too_many_arguments, reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's SingleRange arm, which reads every one of these fields straight back off the descriptor it builds")]
@@ -156,24 +250,9 @@ pub fn mistral_descriptor_from_shape(
     qkv_biases: bool,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
-    // caller-supplied rather than inferred from `qk_norm` -- Qwen2 is
-    // split-half RoPE with no QK-norm tensors at all, so `qk_norm` alone
-    // cannot pick the pairing (`mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`'s
-    // own doc on the Qwen2 case this parameter now carries as data instead
-    // of a dedicated builder).
-    rope_pairing: RopePairing,
+    profile: &FamilyProfile,
 ) -> ModelDescriptor {
-    let ffn = LayerFfnConfig {
-        post_attention_norm: false,
-        combination: FfnCombination::Exclusive,
-        output_scale: false,
-        routed_gating: ExpertGatingFunc::Softmax,
-        routed_expert_bias: false,
-        dense_feed_forward: None,
-        exclusive_dense_post_norm: false,
-        activation: Activation::Silu,
-        ple: false,
-    };
+    let ffn = profile.layer_ffn(expert_count);
 
     let attention = LayerAttentionConfig {
         head_dim,
@@ -185,9 +264,9 @@ pub fn mistral_descriptor_from_shape(
             cos_name: "rope_cos",
             sin_name: "rope_sin",
         },
-        rope_pairing,
-        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
-        value_norm: false,
+        rope_pairing: profile.rope_pairing(head_dim),
+        score_scale: profile.score_scale(head_dim),
+        value_norm: profile.value_norm,
     };
 
     let layers: Vec<LayerSchedule> = (0..block_count)
@@ -212,7 +291,7 @@ pub fn mistral_descriptor_from_shape(
         // schedule, and that arm's own builder never reads `l_cache` --
         // same inertness as `Self::l_cache`'s own doc.
         l_cache: 0,
-        embedding_scale: None,
+        embedding_scale: profile.embedding_scale,
         logit_softcap: None,
         layers,
         cache_strategy: CacheStrategy::SingleRange,

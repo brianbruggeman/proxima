@@ -41,7 +41,11 @@ use proxima_tokenizer::byte_level::byte_to_char;
 #[allow(dead_code)]
 mod support;
 
-const FOREIGN_ARCHITECTURE_NAME: &str = "acme-dense";
+// DenseArch::bind loads a family profile by general.architecture and errors on a name with none,
+// so a dense variant under a new name must carry a profiled family string
+const PROFILED_DENSE_FAMILY: &str = "mixtral";
+
+const FOREIGN_ARCHITECTURE_NAME: &str = PROFILED_DENSE_FAMILY;
 
 /// The same real GPT-2 byte-level BPE vocab `support::tokenizer_metadata`
 /// (private to that module) builds, inlined here rather than widening that

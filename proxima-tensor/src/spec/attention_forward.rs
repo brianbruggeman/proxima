@@ -108,7 +108,7 @@ pub struct RopeTableSel {
 /// [`lfm2_forward_program_with_experts`] served before this knob existed.
 /// `None` (every caller in this crate today) reproduces the prior
 /// unscaled embedding node-for-node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum EmbeddingScale {
     /// Multiply by `sqrt(embedding)`.
     Sqrt,
@@ -121,7 +121,7 @@ pub enum EmbeddingScale {
 /// needed a different nonlinearity on the same graph shape. `Silu` (every
 /// caller in this crate today, [`LayerFfnConfig::exclusive`]'s default)
 /// reproduces the prior hardcoded chain node-for-node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Activation {
     /// `silu(x) = x * sigmoid(x)`.
     Silu,
@@ -240,7 +240,7 @@ pub(super) fn append_activation(
 /// layer runs BOTH FFNs in parallel; hoisted out of [`LayerFfnConfig`] and
 /// onto this variant's payload so a schedule cannot name them under
 /// [`FfnCombination::Exclusive`], where dense and routed never coexist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ParallelDenseMoeConfig {
     /// Sub-norm placement -- Gemma names these `blk.{layer}.post_ffw_norm_1.weight`
     /// (dense branch), `blk.{layer}.post_ffw_norm_2.weight` (routed branch),
@@ -279,7 +279,7 @@ pub struct ParallelDenseMoeConfig {
 /// (optionally) normalized on its own before the sum, and the sum
 /// (optionally) normalized again -- see [`ParallelDenseMoeConfig`]'s own
 /// fields for which sub-norms apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum FfnCombination {
     Exclusive,
     ParallelDenseMoe(ParallelDenseMoeConfig),
@@ -301,7 +301,7 @@ pub enum FfnCombination {
 /// [`FfnCombination::ParallelDenseMoe`]'s routed half); a field legal under
 /// only one variant lives on that variant's own payload instead --
 /// [`ParallelDenseMoeConfig`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct LayerFfnConfig {
     /// `true` builds and applies `blk.{layer}.post_attention_norm.weight`
     /// to the attention sub-block's output before its residual add
@@ -337,6 +337,7 @@ pub struct LayerFfnConfig {
     /// (`gemma4::hparams::Architecture::feed_forward_by_layer`). `None`
     /// (every caller in this crate before Gemma 4 E2B) reproduces the
     /// prior uniform-width behaviour unchanged.
+    #[serde(default)]
     pub dense_feed_forward: Option<u32>,
     /// `true` builds `blk.{layer}.post_ffw_norm.weight` and applies it (a
     /// plain [`rmsnorm`]) to [`FfnCombination::Exclusive`]'s dense-branch
@@ -357,6 +358,7 @@ pub struct LayerFfnConfig {
     /// only runs when BOTH `ple_dim` is `Some` and this layer's own `ple`
     /// is `true`. `false` (every caller today) reproduces the prior
     /// unmodified residual.
+    #[serde(default)]
     pub ple: bool,
 }
 

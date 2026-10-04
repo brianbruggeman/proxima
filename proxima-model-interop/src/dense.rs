@@ -17,18 +17,12 @@
 //! separate MoE arm (`crate::architecture::Architecture`'s own doc on
 //! `DenseArch` being the un-registered-by-name fallback, not a name match).
 //!
-//! Qwen2's split-half (NEOX) RoPE with no QK-norm tensors at all is a
-//! combination `checkpoint_has_qk_norm` cannot express
-//! (`proxima_tensor::spec::mistral_descriptor_from_shape`'s own
-//! `rope_pairing` parameter doc). This binder never compares
-//! `general.architecture` against `"qwen2"` itself: `general.architecture`
-//! is read once, at [`crate::bind::architecture_from_metadata`], which sets
-//! [`crate::bind::ModelArchitecture::force_split_half_rope`] from the name
-//! and carries the result as data -- this binder only reads that field to
-//! select `RopePairing::SplitHalf` as a config VALUE fed into the one
-//! generic [`build_forward`] call every other architecture already takes,
-//! not a second program-construction call. Every other field this binder
-//! passes is identical between the two cases.
+//! RoPE pairing is profile data (`rope_layout`), never inferred from QK-norm
+//! tensors. This binder compares no family name:
+//! [`crate::bind::ModelArchitecture::family`] keys
+//! [`crate::profiles::family_profile`], and the profile's `rope_layout` rides
+//! into the one generic [`build_forward`] call every family takes. A family with
+//! no profile is an error, never a default.
 //!
 //! Does not carry `load_with_paired_gate_up_reduce`/`load_with_fused_qkv_reduce`'s
 //! diagnostic reduce flags -- those are per-call A/B knobs
@@ -39,15 +33,15 @@
 //! for a diagnostic every other architecture would have to ignore.
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::{
-    Qwen35LayerRoots, RopePairing, build_forward, mistral_descriptor_from_shape,
-};
+use proxima_tensor::spec::{Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape};
 
 use crate::architecture::{Architecture, BoundProgram};
 use crate::bind::{
-    architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm, checkpoint_qkv_biases,
+    ModelArchitecture, architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm,
+    checkpoint_qkv_biases, metadata_u32_optional,
 };
 use crate::error::InteropError;
+use crate::profiles::family_profile;
 use crate::task::{ModelTask, classify_task};
 
 /// The registered fallback architecture -- see [`Architecture::name`]'s own
@@ -69,6 +63,8 @@ impl Architecture for DenseArch {
         file_bytes: &'file [u8],
     ) -> Result<BoundProgram<'file>, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
+        let profile = family_profile(&architecture.family)?;
+        require_full_rotary(parsed, &architecture)?;
         // This builder has one KV cache shape for every layer. Preserve a
         // checkpoint's per-layer configuration in `ModelArchitecture`, but
         // do not silently select a representative value for this uniform
@@ -93,27 +89,10 @@ impl Architecture for DenseArch {
         // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
         // own doc on that flag and `proxima-tensor/docs/discipline.md`
         // ROW 418/421 for the measured cost of computing every row instead.
-        // Qwen2 has no QK-norm tensors at all (`qk_norm` above is `false`
-        // for it either way) but still needs split-half RoPE -- a
-        // combination `checkpoint_has_qk_norm` cannot express, so its
-        // pairing is selected from the architecture name instead
-        // (`proxima_tensor::spec::mistral_descriptor_from_shape`'s own
-        // `rope_pairing` parameter doc). Every other checkpoint keeps the
-        // qk_norm-inferred pairing `mistral_descriptor_from_shape` has
-        // always applied. Both cases now route through the identical
-        // `mistral_descriptor_from_shape` + `build_forward` call below --
-        // proven byte-identical to the prior direct-builder calls at the
-        // real openchat-3.5-1210 (mistral) and qwen2 dims by
-        // `build_forward_matches_direct_builder_call_at_real_mistral_dims`
-        // and `build_forward_matches_direct_builder_call_at_real_qwen2_dims`
-        // (`proxima-tensor/src/spec/tests.rs`).
-        let rope_pairing = if architecture.force_split_half_rope || qk_norm {
-            RopePairing::SplitHalf {
-                pairs: architecture.head_dim / 2,
-            }
-        } else {
-            RopePairing::Interleaved
-        };
+        // Every family's values the header does not carry (RoPE pairing
+        // included) come from its profile; `build_forward_matches_direct_builder_call_at_real_mistral_dims`
+        // and `..._at_real_qwen2_dims` (`proxima-tensor/src/spec/tests.rs`)
+        // prove the descriptor route byte-identical to the direct builder.
         let descriptor = mistral_descriptor_from_shape(
             architecture.vocab,
             architecture.embedding,
@@ -124,18 +103,11 @@ impl Architecture for DenseArch {
             architecture.block_count,
             architecture.expert_count,
             architecture.expert_used_count,
-            // Qwen2's own dedicated builder always hardcoded `false` here
-            // regardless of `qk_norm` above -- reproduce that unconditionally
-            // rather than trusting a real checkpoint's own metadata to agree.
-            if architecture.force_split_half_rope {
-                false
-            } else {
-                qk_norm
-            },
+            qk_norm,
             checkpoint_qkv_biases(parsed, &architecture)?,
             false,
             false,
-            rope_pairing,
+            &profile,
         );
         let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
             build_forward(&descriptor, last_row_only)?;
@@ -156,5 +128,21 @@ impl Architecture for DenseArch {
             duplicate_head_roots: Vec::new(),
             single_position_step: false,
         })
+    }
+}
+
+/// The single-range builder rotates `head_dim` channels. A header whose
+/// `<arch>.rope.dimension_count` says otherwise is partial rotary, which this
+/// program cannot lower; refuse it rather than rotate the wrong width.
+fn require_full_rotary(parsed: &ParsedGguf, architecture: &ModelArchitecture) -> Result<(), InteropError> {
+    let key = format!("{}.rope.dimension_count", architecture.family);
+    match metadata_u32_optional(parsed, &key) {
+        0 => Ok(()),
+        rope_dimension_count if rope_dimension_count == architecture.head_dim => Ok(()),
+        rope_dimension_count => Err(InteropError::PartialRotaryUnsupported {
+            family: architecture.family.clone(),
+            rope_dimension_count,
+            head_dim: architecture.head_dim,
+        }),
     }
 }

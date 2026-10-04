@@ -2768,24 +2768,25 @@ impl<'file> LoadedModel<'file> {
         // always compiled for a checkpoint that carries no
         // `attn_q_norm.weight` tensor.
         let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
-        let (program, forward_roots, cache_roots, layer_residuals, moe_sites) =
-            mistral_cached_forward_program_with_experts_and_layer_taps(
-                architecture.vocab,
-                architecture.embedding,
-                architecture.feed_forward,
-                architecture.query_heads,
-                architecture.kv_heads,
-                architecture.head_dim,
-                architecture.block_count,
-                architecture.expert_count,
-                architecture.expert_used_count,
-                qk_norm,
-                false,
-                paired_gate_up_reduce,
-                fused_qkv_reduce,
-                true,
-            )?;
-        let logits_root = forward_roots.logits;
+        let profile = family_profile(&architecture.family)?;
+        let descriptor = mistral_descriptor_from_shape(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.query_heads,
+            architecture.kv_heads,
+            architecture.head_dim,
+            architecture.block_count,
+            architecture.expert_count,
+            architecture.expert_used_count,
+            qk_norm,
+            false,
+            paired_gate_up_reduce,
+            fused_qkv_reduce,
+            &profile,
+        );
+        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
+            build_forward(&descriptor, true)?;
         // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`/
         // `wq`/`wk`/`wv` leaves (`build_single_range_program`) do not know
         // about `paired_gate_up_reduce`/`fused_qkv_reduce` yet --
@@ -2853,7 +2854,7 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
-            hidden_root: Some(forward_roots.hidden),
+            hidden_root,
             layer_roots: cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
@@ -2918,24 +2919,25 @@ impl<'file> LoadedModel<'file> {
         // `attn_q_norm.weight`, and no HF/safetensors checkpoint this crate
         // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
         // the GGUF path that does.
-        let (program, forward_roots, cache_roots, layer_residuals, moe_sites) =
-            mistral_cached_forward_program_with_experts_and_layer_taps(
-                architecture.vocab,
-                architecture.embedding,
-                architecture.feed_forward,
-                architecture.query_heads,
-                architecture.kv_heads,
-                architecture.head_dim,
-                architecture.block_count,
-                architecture.expert_count,
-                architecture.expert_used_count,
-                false,
-                false,
-                false,
-                false,
-                true,
-            )?;
-        let logits_root = forward_roots.logits;
+        let profile = family_profile(&architecture.family)?;
+        let descriptor = mistral_descriptor_from_shape(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.query_heads,
+            architecture.kv_heads,
+            architecture.head_dim,
+            architecture.block_count,
+            architecture.expert_count,
+            architecture.expert_used_count,
+            false,
+            false,
+            false,
+            false,
+            &profile,
+        );
+        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
+            build_forward(&descriptor, true)?;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
@@ -2984,7 +2986,7 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
-            hidden_root: Some(forward_roots.hidden),
+            hidden_root,
             layer_roots: cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
@@ -3048,7 +3050,7 @@ mod gemma4_single_range_exclusion_tests {
             rope_freq_base: 1_000_000.0,
             rms_epsilon: 1e-6,
             tied_embeddings: false,
-            force_split_half_rope: false,
+            family: String::from("gemma4"),
             sliding_rope: None,
         }
     }

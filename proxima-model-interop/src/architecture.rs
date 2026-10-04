@@ -723,7 +723,7 @@ mod tests {
                     rope_freq_base: 0.0,
                     rms_epsilon: 0.0,
                     tied_embeddings: false,
-                    force_split_half_rope: false,
+                    family: String::new(),
                     sliding_rope: None,
                 },
                 program: Vec::new(),

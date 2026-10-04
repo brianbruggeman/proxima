@@ -9,9 +9,10 @@ use super::*;
 /// per-layer sliding/full split, matformer dense-FFN widths, PLE, shared-KV
 /// and the dense-vs-MoE FFN shape all come from the checkpoint's own
 /// `{general.architecture}.*` keys and the `token_embd.weight` directory
-/// entry (vocab). The per-family constants (unscaled attention score,
-/// value-norm, GeLU-tanh, sqrt embedding scale, split-half RoPE, table
-/// names) are literals here until they move to a family profile.
+/// entry (vocab). The per-family values GGUF does not carry (score scale,
+/// value-norm, activation, embedding scale, RoPE pairing, norm placement)
+/// come from the [`FamilyProfile`] the caller loaded for
+/// `general.architecture`; only the table names stay structural.
 ///
 /// This is the one place a gemma4 descriptor is built; the bind in
 /// `proxima-model-interop` and the tests in `proxima-tensor` both feed it a
@@ -29,6 +30,7 @@ use super::*;
 pub fn gemma4_descriptor_from_gguf(
     parsed: &ParsedGguf,
     sliding_kv_ring: bool,
+    profile: &FamilyProfile,
 ) -> Result<ModelDescriptor, TensorError> {
     let family = metadata_str(parsed, "general.architecture")?;
     let key = |name: &str| format!("{family}.{name}");
@@ -48,8 +50,16 @@ pub fn gemma4_descriptor_from_gguf(
     let key_length_swa = metadata_u32(parsed, &key("attention.key_length_swa"))?;
     let sliding_window = metadata_u32(parsed, &key("attention.sliding_window"))?;
     let softcap = metadata_f32_optional(parsed, &key("final_logit_softcapping"), 0.0);
+    let rotary_dim = rotary_or_head_dim(metadata_u32_optional(parsed, &key("rope.dimension_count")), key_length);
+    let rotary_dim_swa = rotary_or_head_dim(
+        metadata_u32_optional(parsed, &key("rope.dimension_count_swa")),
+        key_length_swa,
+    );
 
-    let ffn = gemma4_ffn(expert_count, ple_dim);
+    let ffn = LayerFfnConfig {
+        ple: ple_dim > 0,
+        ..profile.layer_ffn(expert_count)
+    };
     let sliding = LayerAttentionConfig {
         head_dim: key_length_swa,
         kv_heads: 0,
@@ -60,11 +70,9 @@ pub fn gemma4_descriptor_from_gguf(
             cos_name: "rope_cos_swa",
             sin_name: "rope_sin_swa",
         },
-        rope_pairing: RopePairing::SplitHalf {
-            pairs: key_length_swa / 2,
-        },
-        score_scale: AttentionScoreScale::Unscaled,
-        value_norm: true,
+        rope_pairing: profile.rope_pairing(rotary_dim_swa),
+        score_scale: profile.score_scale(key_length_swa),
+        value_norm: profile.value_norm,
     };
     let full = LayerAttentionConfig {
         head_dim: key_length,
@@ -79,9 +87,8 @@ pub fn gemma4_descriptor_from_gguf(
             cos_name: "rope_cos",
             sin_name: "rope_sin",
         },
-        rope_pairing: RopePairing::SplitHalf {
-            pairs: key_length / 2,
-        },
+        rope_pairing: profile.rope_pairing(rotary_dim),
+        score_scale: profile.score_scale(key_length),
         ..sliding
     };
 
@@ -136,7 +143,7 @@ pub fn gemma4_descriptor_from_gguf(
         // block_count keeps the unbound routed branch from ever being built
         leading_dense_block_count: if expert_count > 0 { 0 } else { block_count },
         l_cache: 0,
-        embedding_scale: Some(EmbeddingScale::Sqrt),
+        embedding_scale: profile.embedding_scale,
         logit_softcap: (softcap > 0.0).then_some(softcap),
         layers,
         cache_strategy,
@@ -147,32 +154,6 @@ pub fn gemma4_descriptor_from_gguf(
         paired_gate_up_reduce: false,
         fused_qkv_reduce: false,
     })
-}
-
-fn gemma4_ffn(expert_count: u32, ple_dim: u32) -> LayerFfnConfig {
-    let combination = if expert_count > 0 {
-        FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
-            dense_post_norm: true,
-            routed_post_norm: true,
-            combined_post_norm: true,
-            routed_pre_norm: true,
-            router_scale: true,
-            expert_output_scale: true,
-        })
-    } else {
-        FfnCombination::Exclusive
-    };
-    LayerFfnConfig {
-        post_attention_norm: true,
-        combination,
-        output_scale: true,
-        routed_gating: ExpertGatingFunc::Softmax,
-        routed_expert_bias: false,
-        activation: Activation::GeluTanh,
-        dense_feed_forward: None,
-        exclusive_dense_post_norm: true,
-        ple: ple_dim > 0,
-    }
 }
 
 /// The own-KV layer a trailing shared layer reads: the last layer before
@@ -210,6 +191,14 @@ fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
         .metadata_value(key)
         .and_then(MetadataValue::as_u32)
         .unwrap_or(0)
+}
+
+const fn rotary_or_head_dim(rope_dimension_count: u32, head_dim: u32) -> u32 {
+    if rope_dimension_count == 0 {
+        head_dim
+    } else {
+        rope_dimension_count
+    }
 }
 
 fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32) -> f32 {

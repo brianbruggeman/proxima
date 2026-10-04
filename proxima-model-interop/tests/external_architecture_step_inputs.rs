@@ -38,7 +38,11 @@ use proxima_tokenizer::byte_level::byte_to_char;
 #[allow(dead_code)]
 mod support;
 
-const STEP_INPUT_ARCHITECTURE_NAME: &str = "acme-step-input";
+// DenseArch::bind loads a family profile by general.architecture and errors on a name with none,
+// so a dense variant under a new name must carry a profiled family string
+const PROFILED_DENSE_FAMILY: &str = "mixtral";
+
+const STEP_INPUT_ARCHITECTURE_NAME: &str = PROFILED_DENSE_FAMILY;
 const TABLE_ROWS: u32 = 8;
 
 fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
@@ -466,7 +470,7 @@ struct NoStepInputArch;
 
 impl Architecture for NoStepInputArch {
     fn name(&self) -> &'static str {
-        "acme-missing-step-input"
+        PROFILED_DENSE_FAMILY
     }
 
     fn bind<'file>(
@@ -515,7 +519,7 @@ struct ReservedSlotArch;
 
 impl Architecture for ReservedSlotArch {
     fn name(&self) -> &'static str {
-        "acme-reserved-slot"
+        PROFILED_DENSE_FAMILY
     }
 
     fn bind<'file>(
@@ -548,7 +552,7 @@ static RESERVED_SLOT: ReservedSlotArch = ReservedSlotArch;
 
 #[proxima::test]
 async fn a_step_input_naming_a_reserved_symbol_slot_is_rejected() {
-    let name = "acme-reserved-slot";
+    let name = PROFILED_DENSE_FAMILY;
     let file_bytes = checkpoint_bytes(name);
     let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let mut registry = ArchitectureRegistry::with_builtin();
@@ -572,7 +576,7 @@ async fn a_step_input_naming_a_reserved_symbol_slot_is_rejected() {
 
 #[proxima::test]
 async fn a_program_leaf_with_no_step_inputs_override_reports_missing_step_input() {
-    let name = "acme-missing-step-input";
+    let name = PROFILED_DENSE_FAMILY;
     let file_bytes = checkpoint_bytes(name);
     let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let mut registry = ArchitectureRegistry::with_builtin();
@@ -609,7 +613,7 @@ struct SsmClaimNoLeavesArch;
 
 impl Architecture for SsmClaimNoLeavesArch {
     fn name(&self) -> &'static str {
-        "acme-ssm-claim-no-leaves"
+        PROFILED_DENSE_FAMILY
     }
 
     fn bind<'file>(
@@ -643,7 +647,7 @@ static SSM_CLAIM_NO_LEAVES: SsmClaimNoLeavesArch = SsmClaimNoLeavesArch;
 
 #[proxima::test]
 async fn a_layer_bound_ssm_with_no_declared_cache_leaves_fails_at_load() {
-    let name = "acme-ssm-claim-no-leaves";
+    let name = PROFILED_DENSE_FAMILY;
     let file_bytes = checkpoint_bytes(name);
     let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let mut registry = ArchitectureRegistry::with_builtin();
@@ -685,7 +689,7 @@ struct MultiRowLogitsArch;
 
 impl Architecture for MultiRowLogitsArch {
     fn name(&self) -> &'static str {
-        "acme-multi-row-logits"
+        PROFILED_DENSE_FAMILY
     }
 
     fn bind<'file>(
@@ -778,7 +782,7 @@ static MULTI_ROW_LOGITS: MultiRowLogitsArch = MultiRowLogitsArch;
 /// [`InteropError::LogitsShapeMismatch`] naming the exact row count found.
 #[proxima::test]
 async fn a_multi_row_logits_root_is_rejected_instead_of_silently_sampling_row_zero() {
-    let name = "acme-multi-row-logits";
+    let name = PROFILED_DENSE_FAMILY;
     let file_bytes = checkpoint_bytes(name);
     let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let mut registry = ArchitectureRegistry::with_builtin();
@@ -823,7 +827,7 @@ struct OneRowLogitsArch;
 
 impl Architecture for OneRowLogitsArch {
     fn name(&self) -> &'static str {
-        "acme-one-row-logits"
+        PROFILED_DENSE_FAMILY
     }
 
     fn bind<'file>(
@@ -839,7 +843,7 @@ static ONE_ROW_LOGITS: OneRowLogitsArch = OneRowLogitsArch;
 
 #[proxima::test]
 async fn a_one_row_logits_root_still_decodes_through_the_same_shape_check() {
-    let name = "acme-one-row-logits";
+    let name = PROFILED_DENSE_FAMILY;
     let file_bytes = checkpoint_bytes(name);
     let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let mut registry = ArchitectureRegistry::with_builtin();
@@ -869,7 +873,7 @@ struct EmptyLayerRootsArch;
 
 impl Architecture for EmptyLayerRootsArch {
     fn name(&self) -> &'static str {
-        "acme-empty-layer-roots"
+        PROFILED_DENSE_FAMILY
     }
 
     fn bind<'file>(
@@ -969,7 +973,7 @@ static EMPTY_LAYER_ROOTS: EmptyLayerRootsArch = EmptyLayerRootsArch;
 /// and reports nothing rather than indexing past the end.
 #[proxima::test]
 async fn a_stateless_architecture_with_no_layer_roots_decodes_without_panicking() {
-    let name = "acme-empty-layer-roots";
+    let name = PROFILED_DENSE_FAMILY;
     let file_bytes = checkpoint_bytes(name);
     let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let mut registry = ArchitectureRegistry::with_builtin();

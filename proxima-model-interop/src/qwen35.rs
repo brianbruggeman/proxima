@@ -682,7 +682,7 @@ impl crate::architecture::Architecture for Qwen35Arch {
             rope_freq_base: qwen_architecture.rope_freq_base,
             rms_epsilon: qwen_architecture.rms_epsilon,
             tied_embeddings: false,
-            force_split_half_rope: false,
+            family: metadata_str(parsed, "general.architecture")?.into(),
             sliding_rope: None,
         };
         Ok(crate::architecture::BoundProgram {

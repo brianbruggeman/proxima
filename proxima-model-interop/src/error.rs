@@ -113,6 +113,22 @@ pub enum InteropError {
     #[error("no registered architecture matches general.architecture = {name:?}")]
     UnknownArchitecture { name: String },
 
+    /// [`crate::profiles::family_profile`]: no embedded profile file exists for
+    /// this family string. Never defaulted: a family whose profile is absent
+    /// would lower with another family's activation, scales and norm shifts.
+    #[error("no family profile for general.architecture or model_type = {family:?}")]
+    MissingFamilyProfile { family: String },
+
+    /// [`crate::profiles::family_profile`]: the embedded profile file for this
+    /// family did not parse into a [`proxima_tensor::spec::FamilyProfile`].
+    #[error("family profile for {family:?} does not parse: {message}")]
+    InvalidFamilyProfile { family: String, message: String },
+
+    /// [`crate::dense::DenseArch`]: the header's `<arch>.rope.dimension_count`
+    /// differs from the head width, so RoPE rotates only part of each head.
+    #[error("{family:?} rotates {rope_dimension_count} of {head_dim} head dims; the single-range dense program rotates the full head")]
+    PartialRotaryUnsupported { family: String, rope_dimension_count: u32, head_dim: u32 },
+
     /// [`crate::bind::architecture_from_metadata`]'s vocab derivation: the
     /// `token_embd.weight` tensor's element count did not divide evenly by
     /// `embedding_length`.

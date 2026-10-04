@@ -48,6 +48,10 @@ use proxima_tokenizer::byte_level::byte_to_char;
 #[allow(dead_code)]
 mod support;
 
+// DenseArch::bind loads a family profile by general.architecture and errors on a name with none,
+// so a dense variant under a new name must carry a profiled family string
+const PROFILED_DENSE_FAMILY: &str = "mixtral";
+
 fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
     let mut tokens: Vec<String> = (0..=255u8)
         .map(|byte| String::from(byte_to_char(byte)))
@@ -278,12 +282,12 @@ impl Architecture for SinglePositionArch {
 }
 
 static SINGLE_POSITION_ON: SinglePositionArch = SinglePositionArch {
-    name: "acme-single-position-prefill-on",
+    name: PROFILED_DENSE_FAMILY,
     single_position_step: true,
 };
 
 static SINGLE_POSITION_OFF: SinglePositionArch = SinglePositionArch {
-    name: "acme-single-position-prefill-off",
+    name: PROFILED_DENSE_FAMILY,
     single_position_step: false,
 };
 

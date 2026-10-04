@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
-    PromptCacheConfig, ServingConfig, architecture_from_metadata,
+    PromptCacheConfig, ServingConfig, architecture_from_metadata, profiles::family_profile,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::Op;
@@ -491,7 +491,8 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
     let mapping = GEMMA4_26B.open();
     let parsed = parse_complete(&mapping).expect("the real gemma4 26B header parses");
 
-    let descriptor = gemma4_descriptor_from_gguf(&parsed, false)
+    let profile = family_profile(GEMMA4_26B.architecture).expect("the gemma4 profile is embedded");
+    let descriptor = gemma4_descriptor_from_gguf(&parsed, false, &profile)
         .expect("the production builder reads the real 26B header");
 
     assert_eq!(descriptor.block_count, 30);
@@ -573,7 +574,7 @@ fn descriptor_real_dims_openchat_program_equals_direct_builder() {
         false,
         false,
         false,
-        RopePairing::Interleaved,
+        &family_profile(OPENCHAT.architecture).expect("the openchat family profile is embedded"),
     );
 
     let (program, logits, cache_roots, moe, residuals, hidden, _head_repeats) =

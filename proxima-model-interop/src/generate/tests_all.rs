@@ -2548,7 +2548,7 @@ pub(super) mod memory_fit_gate_tests {
             rope_freq_base: 10_000.0,
             rms_epsilon: 1e-5,
             tied_embeddings: false,
-            force_split_half_rope: false,
+            family: String::new(),
             sliding_rope: None,
         }
     }

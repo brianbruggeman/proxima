@@ -15058,7 +15058,7 @@ mod gemma4_synthetic_parity {
     }
 
     /// Proves [`mistral_descriptor_from_shape`]'s
-    /// `rope_pairing` parameter plus [`CacheStrategy::SingleRange`]'s
+    /// split-half [`FamilyProfile`] plus [`CacheStrategy::SingleRange`]'s
     /// [`build_forward`] arm reproduce the deleted
     /// `qwen2_cached_forward_program_with_experts_and_layer_taps` byte-for-byte
     /// at real Qwen2-7B dims: `qk_norm=false` (Qwen2 carries no per-head
@@ -15077,6 +15077,13 @@ mod gemma4_synthetic_parity {
         let rope_pairing = RopePairing::SplitHalf {
             pairs: REAL_HEAD_DIM / 2,
         };
+        let profile: FamilyProfile = toml::from_str(
+            "score_scale_inverse_sqrt_head_dim = true\nvalue_norm = false\nrope_layout = \"split_half\"\n\n\
+             [ffn]\npost_attention_norm = false\ncombination = \"Exclusive\"\noutput_scale = false\n\
+             routed_gating = \"Softmax\"\nrouted_expert_bias = false\nactivation = \"Silu\"\n\
+             exclusive_dense_post_norm = false\n",
+        )
+        .expect("the split-half dense profile parses");
 
         let (program_a, roots_a, cache_roots_a, layer_residuals_a, moe_a) =
             mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
@@ -15112,7 +15119,7 @@ mod gemma4_synthetic_parity {
             true,
             false,
             false,
-            rope_pairing,
+            &profile,
         );
         assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
 
