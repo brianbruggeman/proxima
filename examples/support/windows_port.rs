@@ -106,7 +106,7 @@ pub fn udp_exchange() -> io::Result<()> {
 }
 
 #[cfg(feature = "http1-native")]
-pub fn multiworker_listener_exchange() -> io::Result<()> {
+pub async fn multiworker_listener_exchange() -> io::Result<()> {
     let mut app = App::builder()
         .runtime(RuntimeSelection::prime(2).map_err(io::Error::other)?)
         .with_defaults()
@@ -118,10 +118,11 @@ pub fn multiworker_listener_exchange() -> io::Result<()> {
             "configured runtime must expose two workers",
         ));
     }
-    let listeners = futures::executor::block_on(app.load_full(Spec::Inline(json!({
+    let listeners = app.load_full(Spec::Inline(json!({
         "pipe": [{"name": "windows-probe", "synth": {"status": 200, "body": "proxima windows two workers"}}],
         "listen": [{"type": "http", "bind": "127.0.0.1:0", "pipe": "windows-probe"}]
-    }))))
+    })))
+    .await
     .map_err(io::Error::other)?;
     let address = listeners
         .first()
@@ -151,7 +152,7 @@ pub fn multiworker_listener_exchange() -> io::Result<()> {
     Ok(())
 }
 
-pub fn incumbent_exchange(corrupt: bool) -> io::Result<()> {
+pub async fn incumbent_exchange(corrupt: bool) -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut sender = TcpStream::connect(listener.local_addr()?)?;
     let (mut receiver, _) = listener.accept()?;
