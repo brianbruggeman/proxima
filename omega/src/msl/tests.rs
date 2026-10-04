@@ -1294,7 +1294,7 @@ fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
     let source = emit(&bound, &q4_0, NumericPolicy::default())
         .expect("emits")
         .source;
-    // `metal-q4_0-native` (default-off) takes priority over the batched
+    // `metal-q4_0-native` (part of `metal`) takes priority over the batched
     // `q4_0_pair_dot` arm for a plain-product reduce -- see
     // `push_q4_0_native_body`'s own doc. Under that feature this same
     // matmul renders ggml's own inline dot (`sumy * -8.0f`), not a call to

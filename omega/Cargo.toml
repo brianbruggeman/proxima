@@ -158,6 +158,12 @@ metal-core = ["alloc"]
 # not by this change).
 # `metal-attn-split-decode` and `metal-attn-split-rows` join per `docs/model-interop/discipline.md` ROW C4.21 (split-KV decode attention and
 # row-tiled K > 1 verify attention; evidence on the feature definitions below).
+# `metal-q4_0-native` joins per `docs/model-interop/discipline.md` ROW C4.22
+# (ggml's lane geometry for the 275 Q4_0 matvecs of a gemma4-E2B decode token,
+# same launch grid, 640 instead of 512 `maxTotalThreadsPerThreadgroup`: the
+# Q4_0 family replayed in plan order 7.33-7.54 -> 5.26-5.50 ms, decode 16.61-
+# 17.45 -> 14.86-15.63 ms/token, token ids identical to the f32 body and to
+# llama-server on three prompts).
 # `metal-tiled-gemm` joins per `docs/model-interop/discipline.md` ROW C4.6
 # (Q4_0 admitted onto the `simdgroup_matrix`-tiled path: isolated 44.8-45.8x
 # per projection, real p5 prefill 7760 -> 5835 ms, byte-exact vs the f32 CPU
@@ -198,6 +204,7 @@ metal = [
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
+    "metal-q4_0-native",
     "metal-tiled-gemm",
     "metal-attn-split-decode",
     "metal-attn-split-rows",
@@ -443,10 +450,9 @@ metal-q4k-ggml-port = ["metal"]
 # geometry to ggml's own `nsg=2`/`nr0=4` (`N_SG_Q4_0`/`N_R0_Q4_0`,
 # `tiled_gemm_threadgroup_width`), reusing the SAME `packed_row_nsg_factor`
 # mechanism `metal-q4k-ggml-port` already proved correctness-neutral
-# (`docs/discipline.md`'s q4k-ggml-port row). Default-off per the same
-# discipline as `metal-q4k-ggml-port` above: earns the production default
-# only after a quiet-box decode-step seal, not on the "verbatim port"
-# argument alone.
+# (`docs/discipline.md`'s q4k-ggml-port row). Part of `metal` (ROW C4.22 in
+# `docs/model-interop/discipline.md` carries the quiet-box decode-step seal
+# that earned the default).
 metal-q4_0-native = ["metal"]
 # Bakes a packed-row-blocked op's flattened reduction length
 # (`reduction_len`, the same product `pack_reduce_uniforms` writes into
