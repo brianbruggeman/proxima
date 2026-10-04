@@ -17,7 +17,8 @@ use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    CacheStrategy, KeySourceKind, ModelDescriptor, Qwen35LayerRoots, build_forward,
+    CacheStrategy, CachedLayerRoots, KeySourceKind, ModelDescriptor, Qwen35LayerRoots,
+    build_forward,
     gemma4_descriptor_from_gguf,
 };
 use crate::architecture::{
@@ -662,6 +663,28 @@ fn descriptor_from_gguf(
     Ok(gemma4_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?)
 }
 
+fn rebuild_layer_roots(
+    key_sources: impl Iterator<Item = KeySourceKind> + Clone,
+    cache_roots: Vec<CachedLayerRoots>,
+) -> Result<Vec<Qwen35LayerRoots>, InteropError> {
+    let expected = key_sources.clone().filter(|kind| *kind == KeySourceKind::ProjectedK).count();
+    let produced = cache_roots.len();
+    let count_mismatch = || InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced, expected };
+    let mut cache_roots = cache_roots.into_iter();
+    let layer_roots = key_sources
+        .map(|kind| match kind {
+            KeySourceKind::ProjectedK => {
+                cache_roots.next().map(Qwen35LayerRoots::Attention).ok_or_else(count_mismatch)
+            }
+            KeySourceKind::SharedFromLayer(source) => Ok(Qwen35LayerRoots::SharedFromLayer(source)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match cache_roots.next() {
+        Some(_) => Err(count_mismatch()),
+        None => Ok(layer_roots),
+    }
+}
+
 /// [`Gemma4Arch::bind`]'s body, parameterized on `last_row_only`
 /// (`lfm2_two_range_cached_forward_program_with_experts`'s own trailing
 /// flag -- see its doc: `true` gathers the LM head to the last new
@@ -702,31 +725,10 @@ fn bind_gemma4_with_last_row_only<'file>(
                 // `Qwen35LayerRoots` vec `LoadedModel::declared_layer_cache_names_and_widths`
                 // needs (one entry per layer index, `SharedFromLayer`
                 // included).
-                let expected_cache_owning_layers = schedule
-                    .iter()
-                    .filter(|entry| entry.attention.key_source_kind == KeySourceKind::ProjectedK)
-                    .count();
-                if cache_roots.len() != expected_cache_owning_layers {
-                    return Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch {
-                        produced: cache_roots.len(),
-                        expected: expected_cache_owning_layers,
-                    });
-                }
-                let mut cache_roots = cache_roots.into_iter();
-                schedule
-                    .iter()
-                    .map(|entry| match entry.attention.key_source_kind {
-                        KeySourceKind::ProjectedK => Qwen35LayerRoots::Attention(
-                            // count checked equal, just above.
-                            cache_roots.next().unwrap_or_else(|| {
-                                unreachable!("cache_roots length already checked above")
-                            }),
-                        ),
-                        KeySourceKind::SharedFromLayer(source) => {
-                            Qwen35LayerRoots::SharedFromLayer(source)
-                        }
-                    })
-                    .collect()
+                rebuild_layer_roots(
+                    schedule.iter().map(|entry| entry.attention.key_source_kind),
+                    cache_roots,
+                )?
             }
             CacheStrategy::Cacheless | CacheStrategy::SingleRange => Vec::new(),
         };
@@ -939,6 +941,58 @@ impl ArchitectureTrait for Gemma4Arch {
             .iter()
             .find(|(name, _)| name == "rope_freqs.weight")
             .map(|(_, values)| values.as_slice())
+    }
+}
+
+#[cfg(test)]
+mod rebuild_layer_roots_tests {
+    use super::*;
+    use proxima_tensor::op::NodeId;
+
+    fn roots(seed: u32) -> CachedLayerRoots {
+        (NodeId(seed), NodeId(seed + 1), NodeId(seed + 2))
+    }
+
+    #[test]
+    fn interleaves_shared_layers_between_owning_layers_in_schedule_order() -> Result<(), InteropError> {
+        let kinds = [
+            KeySourceKind::ProjectedK,
+            KeySourceKind::ProjectedK,
+            KeySourceKind::SharedFromLayer(1),
+            KeySourceKind::SharedFromLayer(1),
+        ];
+
+        let rebuilt = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10), roots(20)])?;
+
+        assert!(matches!(rebuilt[0], Qwen35LayerRoots::Attention((NodeId(10), _, _))));
+        assert!(matches!(rebuilt[1], Qwen35LayerRoots::Attention((NodeId(20), _, _))));
+        assert!(matches!(rebuilt[2], Qwen35LayerRoots::SharedFromLayer(1)));
+        assert_eq!(rebuilt.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn fewer_cache_roots_than_owning_layers_reports_both_counts() {
+        let kinds = [KeySourceKind::ProjectedK, KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)];
+
+        let outcome = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10)]);
+
+        assert!(matches!(
+            outcome,
+            Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced: 1, expected: 2 })
+        ));
+    }
+
+    #[test]
+    fn more_cache_roots_than_owning_layers_reports_both_counts() {
+        let kinds = [KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)];
+
+        let outcome = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10), roots(20)]);
+
+        assert!(matches!(
+            outcome,
+            Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced: 2, expected: 1 })
+        ));
     }
 }
 
