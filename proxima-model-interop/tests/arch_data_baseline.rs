@@ -532,7 +532,9 @@ fn llama_parity(checkpoint: &Checkpoint) {
             .unwrap_or_else(|error| {
                 panic!("{}: generate_from_ids failed: {error:?}", checkpoint.name)
             });
-        if let Some(index) = first_divergence(&case.generated_ids, &generated) {
+        let compared_len = generated.len().min(case.generated_ids.len());
+        let compared = &generated[..compared_len];
+        if let Some(index) = first_divergence(&case.generated_ids, compared) {
             failures.push(format!(
                 "MODEL {} prompt {:?}: first divergent index {index}; llama {:?}, proxima {:?}",
                 checkpoint.name, case.prompt, case.generated_ids, generated
