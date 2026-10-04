@@ -231,6 +231,8 @@ mod speculative_default_on_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prefix_resume_long_prompt_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod epilogue_sources_real_model_tests;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod cpu_forward_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prompt_cache_real_model_tests;
