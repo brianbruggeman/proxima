@@ -134,3 +134,71 @@ fn deepseek_coder_without_a_pre_key_uses_the_default_split_like_llama() {
     let vocab = load_vocab(&path);
     assert_family_matches_llama(&vocab, PreType::Default, &family_cases!("deepseek_coder_33b_no_pre"));
 }
+
+fn host_local_vector_vocab(name: &str) -> PathBuf {
+    let dir = std::env::var("LLAMA_CPP_MODELS_DIR")
+        .unwrap_or_else(|_| panic!("set LLAMA_CPP_MODELS_DIR to llama.cpp's models/ directory holding ggml-vocab-{name}.gguf"));
+    let path = PathBuf::from(dir).join(format!("ggml-vocab-{name}.gguf"));
+    assert!(path.exists(), "{path:?} is absent; LLAMA_CPP_MODELS_DIR must name llama.cpp's models/ directory");
+    path
+}
+
+#[test]
+#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-starcoder.gguf is not vendored"]
+fn digit_isolated_gpt2_splits_every_digit_like_llama_starcoder() {
+    let vocab = load_vocab(&host_local_vector_vocab("starcoder"));
+    assert_family_matches_llama(&vocab, PreType::DigitIsolatedGpt2, &family_cases!("starcoder"));
+}
+
+#[test]
+#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-refact.gguf is not vendored"]
+fn digit_isolated_gpt2_splits_every_digit_like_llama_refact() {
+    let vocab = load_vocab(&host_local_vector_vocab("refact"));
+    assert_family_matches_llama(&vocab, PreType::DigitIsolatedGpt2, &family_cases!("refact"));
+}
+
+macro_rules! non_ascii_digit_cases {
+    ($family:literal) => {
+        [
+            non_ascii_digit_case!($family, "arabic_indic_digit_runs"),
+            non_ascii_digit_case!($family, "ascii_beside_non_ascii_digits"),
+            non_ascii_digit_case!($family, "devanagari_digit_runs"),
+            non_ascii_digit_case!($family, "fullwidth_digit_runs"),
+            non_ascii_digit_case!($family, "superscript_fraction_runs"),
+        ]
+    };
+}
+
+macro_rules! non_ascii_digit_case {
+    ($family:literal, $name:literal) => {
+        (
+            $name,
+            include_str!(concat!("fixtures/llama-pre-tokenize/texts_non_ascii_digits/", $name, ".txt")),
+            include_str!(concat!("fixtures/llama-pre-tokenize/", $family, "/", $name, ".ids")),
+        )
+    };
+}
+
+fn assert_non_ascii_digit_runs_match_llama(vocab: &Vocab, cases: &[(&str, &str, &str)]) {
+    assert_eq!(cases.len(), 5, "every non-ASCII digit text is exercised");
+    let mismatched: Vec<&str> = cases
+        .iter()
+        .filter(|(_, text, expected_ids)| encode(text, vocab).expect("encodes") != parse_ids(expected_ids))
+        .map(|(name, _, _)| *name)
+        .collect();
+    assert!(mismatched.is_empty(), "ids differ from llama.cpp on {mismatched:?}");
+}
+
+#[test]
+#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-starcoder.gguf is not vendored"]
+fn digit_isolated_gpt2_splits_non_ascii_digit_runs_like_llama_starcoder() {
+    let vocab = load_vocab(&host_local_vector_vocab("starcoder"));
+    assert_non_ascii_digit_runs_match_llama(&vocab, &non_ascii_digit_cases!("starcoder"));
+}
+
+#[test]
+#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-refact.gguf is not vendored"]
+fn digit_isolated_gpt2_splits_non_ascii_digit_runs_like_llama_refact() {
+    let vocab = load_vocab(&host_local_vector_vocab("refact"));
+    assert_non_ascii_digit_runs_match_llama(&vocab, &non_ascii_digit_cases!("refact"));
+}

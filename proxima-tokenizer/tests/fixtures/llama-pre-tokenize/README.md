@@ -27,3 +27,10 @@ files; llama.cpp is not a runtime dependency.
 
 `src/unicode_tables.rs` is not hand-written: `cargo run -p proxima-tokenizer --example gen_unicode_tables -- <llama.cpp>/src/unicode-data.cpp f1ea206218210afb913ae2f5d2c51faed35915da proxima-tokenizer/src/unicode_tables.rs`
 regenerates it from llama.cpp's `unicode-data.cpp` at the same commit.
+
+`starcoder/` and `refact/` use the vocab-only GGUFs from llama.cpp's `models/` (read via `LLAMA_CPP_MODELS_DIR`, not vendored: `ggml-vocab-starcoder.gguf`, `ggml-vocab-refact.gguf`,
+`tokenizer.ggml.pre` = `starcoder` / `refact`, llama.cpp pre type STARCODER / REFACT), same command and the same 13 texts.
+
+`texts_non_ascii_digits/` (Arabic-Indic and Persian digits, Devanagari digits, fullwidth digits, superscripts, fractions, circled digits, ASCII beside non-ASCII digits)
+are run the same way against the starcoder and refact vocabs only: those vocabs have no multi-digit-only and no space+digit tokens, so ASCII digit grouping
+is invisible in their ids and only non-ASCII digit runs distinguish `\p{N}` isolation from the other gpt2-family splits.
