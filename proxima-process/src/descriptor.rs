@@ -105,7 +105,7 @@ impl From<c_int> for Stdio {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 impl From<std::os::fd::OwnedFd> for Stdio {
     /// Mirrors `std::process::Stdio`'s `From<OwnedFd>` impl. Ownership
     /// of the fd transfers in — we extract the raw fd via
@@ -118,7 +118,7 @@ impl From<std::os::fd::OwnedFd> for Stdio {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 impl From<std::fs::File> for Stdio {
     /// Mirrors `std::process::Stdio`'s `From<File>` impl. The file's
     /// underlying fd becomes the child's stdio. Ownership

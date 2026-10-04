@@ -10,26 +10,40 @@
 //! `prune_dead`, matching `prepare.rs`'s own driver-facing plan exactly.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::collections::BTreeMap;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::fs::{self, File};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::io::Write;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use memmap2::Mmap;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::PackedOperands;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::parse_complete;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::{Architecture, GEMMA4, bind_symbols};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::bind::BoundOp;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::spec::Qwen35LayerRoots;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn default_output_dir() -> String {
     let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
     format!("{target_dir}/attn_node_dump/nodes")
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const NEW_COUNT: usize = 1;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const KV_BUCKET_EXTENT: usize = 32;
 
 /// 14 absorbed nodes' ids minus the layer's own attended node id --
@@ -37,9 +51,12 @@ const KV_BUCKET_EXTENT: usize = 32;
 /// 10 checked directly) show every gemma4 layer shares this exact relative
 /// layout, so `PROXIMA_ATTN_LAYER`'s attended node alone regenerates the
 /// full 15-node target list for any layer.
-const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] =
-    [-32, -31, -27, -20, -24, -17, -15, -14, -12, -9, -10, -8, -4, -2];
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] = [
+    -32, -31, -27, -20, -24, -17, -15, -14, -12, -9, -10, -8, -4, -2,
+];
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]) -> Vec<NodeId> {
     let mut outputs = Vec::with_capacity(1 + layer_roots.len() * 3);
     outputs.push(logits_root);
@@ -59,6 +76,7 @@ fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]
     outputs
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn hex_encode(bytes: &[u8]) -> String {
     let mut rendered = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -67,14 +85,21 @@ fn hex_encode(bytes: &[u8]) -> String {
     rendered
 }
 
-fn dump_node(bound: &BoundOp, numeric_policy: NumericPolicy, output_dir: &str, manifest: &mut File) {
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn dump_node(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+    output_dir: &str,
+    manifest: &mut File,
+) {
     let node_id = bound.node.0;
     let packed_operands = PackedOperands::new();
     let kernel = omega::emit(bound, &packed_operands, numeric_policy)
         .unwrap_or_else(|error| panic!("emit node={node_id} failed: {error}"));
 
     let metal_path = format!("{output_dir}/{node_id}.metal");
-    fs::write(&metal_path, &kernel.source).unwrap_or_else(|error| panic!("write {metal_path}: {error}"));
+    fs::write(&metal_path, &kernel.source)
+        .unwrap_or_else(|error| panic!("write {metal_path}: {error}"));
 
     let grid_path = format!("{output_dir}/{node_id}.grid.txt");
     let mut grid_file =
@@ -106,8 +131,10 @@ fn dump_node(bound: &BoundOp, numeric_policy: NumericPolicy, output_dir: &str, m
     writeln!(manifest, "{manifest_line}").expect("write manifest line");
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn main() {
-    let output_dir = std::env::var("PROXIMA_ATTN_NODES_DIR").unwrap_or_else(|_| default_output_dir());
+    let output_dir =
+        std::env::var("PROXIMA_ATTN_NODES_DIR").unwrap_or_else(|_| default_output_dir());
     let layer_index: usize = std::env::var("PROXIMA_ATTN_LAYER")
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -136,8 +163,13 @@ fn main() {
         .ok()
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(KV_BUCKET_EXTENT);
-    let symbols = bind_symbols(NEW_COUNT, kv_bucket_extent, &[], bound_program.single_position_step)
-        .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
+    let symbols = bind_symbols(
+        NEW_COUNT,
+        kv_bucket_extent,
+        &[],
+        bound_program.single_position_step,
+    )
+    .expect("bind_symbols: gemma4 declares no extra symbolic step_inputs");
     let shapes =
         infer(&bound_program.program, &symbols).expect("shape inference over the real program");
 
@@ -146,12 +178,24 @@ fn main() {
     // PRODUCTION shape: `fuse_cached_attention: false`, then `prune_dead`
     // over the SAME requested outputs -- the exact plan `prepare.rs`'s own
     // driver builds (`prepare_uniforms_pack.rs:132-167`).
-    let bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, false, numeric_policy)
-        .expect("bind_with_fusion (production, unfused)");
+    let bound_ops = bind_with_fusion(
+        &bound_program.program,
+        &shapes,
+        &outputs,
+        false,
+        numeric_policy,
+    )
+    .expect("bind_with_fusion (production, unfused)");
     let bound_ops = prune_dead(bound_ops, &outputs);
-    println!("attn_node_dump: production_bound_op_count={}", bound_ops.len());
+    println!(
+        "attn_node_dump: production_bound_op_count={}",
+        bound_ops.len()
+    );
 
-    let by_node: BTreeMap<u32, &BoundOp> = bound_ops.iter().map(|bound| (bound.node.0, bound)).collect();
+    let by_node: BTreeMap<u32, &BoundOp> = bound_ops
+        .iter()
+        .map(|bound| (bound.node.0, bound))
+        .collect();
 
     // `bound_ops` above is the UNFUSED bind (production shape) -- a
     // `CachedAttention` op never appears as that `BoundOpKind` there, it is
@@ -160,11 +204,22 @@ fn main() {
     // only inspected) names the per-layer `CachedAttention` node ids in
     // program order, the same discovery `run_attn_fuse_parity_probe`
     // (`decode.rs`) uses for its own `candidates`.
-    let fused_bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, true, numeric_policy)
-        .expect("bind_with_fusion (fused, for CachedAttention node-id discovery only)");
+    let fused_bound_ops = bind_with_fusion(
+        &bound_program.program,
+        &shapes,
+        &outputs,
+        true,
+        numeric_policy,
+    )
+    .expect("bind_with_fusion (fused, for CachedAttention node-id discovery only)");
     let candidates: Vec<u32> = fused_bound_ops
         .iter()
-        .filter(|bound| matches!(bound.kind, proxima_tensor::BoundOpKind::CachedAttention { .. }))
+        .filter(|bound| {
+            matches!(
+                bound.kind,
+                proxima_tensor::BoundOpKind::CachedAttention { .. }
+            )
+        })
         .map(|bound| bound.node.0)
         .collect();
     let extra_node_ids: Vec<u32> = std::env::var("PROXIMA_ATTN_EXTRA_NODES")
@@ -187,19 +242,25 @@ fn main() {
             .chain(extra_node_ids.clone())
             .collect(),
         None if !extra_node_ids.is_empty() => extra_node_ids.clone(),
-        None => panic!("layer {layer_index} out of range: only {} CachedAttention candidates", candidates.len()),
+        None => panic!(
+            "layer {layer_index} out of range: only {} CachedAttention candidates",
+            candidates.len()
+        ),
     };
-    println!("attn_node_dump: layer={layer_index} candidates={candidates:?} output_dir={output_dir}");
+    println!(
+        "attn_node_dump: layer={layer_index} candidates={candidates:?} output_dir={output_dir}"
+    );
 
     let manifest_path = format!("{output_dir}/manifest.txt");
-    let mut manifest =
-        File::create(&manifest_path).unwrap_or_else(|error| panic!("create {manifest_path}: {error}"));
+    let mut manifest = File::create(&manifest_path)
+        .unwrap_or_else(|error| panic!("create {manifest_path}: {error}"));
 
     for node_id in target_node_ids {
         match by_node.get(&node_id) {
             Some(bound) => dump_node(bound, numeric_policy, &output_dir, &mut manifest),
             None => {
-                let missing_line = format!("node={node_id} kind=MISSING entry= grid= uniforms_bytes=0");
+                let missing_line =
+                    format!("node={node_id} kind=MISSING entry= grid= uniforms_bytes=0");
                 println!("{missing_line}");
                 writeln!(manifest, "{missing_line}").expect("write manifest missing line");
             }
@@ -217,7 +278,12 @@ fn main() {
                     .all_read_sources()
                     .filter(|(node, _, _)| node.0 == *extra_node)
                     .map(move |(_, layout, lookup)| {
-                        (bound.node.0, bound.kind.name(), layout.clone(), lookup.as_ref().map(|_| ()))
+                        (
+                            bound.node.0,
+                            bound.kind.name(),
+                            layout.clone(),
+                            lookup.as_ref().map(|_| ()),
+                        )
                     })
             })
             .collect();
@@ -226,4 +292,10 @@ fn main() {
             consumers.len()
         );
     }
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
 }

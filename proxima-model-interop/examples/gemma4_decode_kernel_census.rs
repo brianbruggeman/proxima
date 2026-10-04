@@ -36,20 +36,31 @@
 //! `M0_FLUSH_MIB` (256), `M0_OUT_DIR`, `PROXIMA_PROMPT`.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::collections::{BTreeMap, HashMap};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::fmt::Write as _;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::fs::File;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::io::Write as _;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::path::{Path, PathBuf};
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const DEFAULT_OUT_DIR: &str = "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/m0";
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const DEFAULT_PROMPT: &str = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const HEAD_MIN_OUTPUT_EXTENT: u64 = 65536;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 const PROJECTION_MIN_REDUCTION: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 enum Class {
     Matvec(String),
     Head,
@@ -70,6 +81,7 @@ enum Class {
     Unclassified(String),
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 impl Class {
     fn label(&self) -> String {
         match self {
@@ -94,6 +106,7 @@ impl Class {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 struct Facts<'a> {
     entry: &'a str,
     kind_name: &'a str,
@@ -101,11 +114,13 @@ struct Facts<'a> {
     extents: &'a [u64],
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn elementwise_body(entry: &str) -> Option<&str> {
     let rest = entry.strip_prefix("omega_elementwise_")?;
     rest.splitn(3, '_').nth(2)
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn reduce_parts(entry: &str) -> Option<(&str, &str)> {
     let rest = entry.strip_prefix("omega_reduce_")?.splitn(4, '_').nth(3)?;
     if let Some(index) = rest.find("_maximum_") {
@@ -114,6 +129,7 @@ fn reduce_parts(entry: &str) -> Option<(&str, &str)> {
     rest.find("_add_zero").map(|index| (&rest[..index], "add"))
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn codec_label(codec: &str) -> String {
     let lowered = codec.to_ascii_lowercase();
     match lowered.as_str() {
@@ -124,6 +140,7 @@ fn codec_label(codec: &str) -> String {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn packed_codec(operands: &[(u32, String)]) -> Option<String> {
     operands
         .iter()
@@ -131,6 +148,7 @@ fn packed_codec(operands: &[(u32, String)]) -> Option<String> {
         .map(|(_, codec)| codec_label(codec))
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn produced_by(facts: &Facts<'_>, producers: &HashMap<u32, Class>, wanted: &[Class]) -> bool {
     facts.operands.iter().any(|(node, _)| {
         producers
@@ -139,6 +157,7 @@ fn produced_by(facts: &Facts<'_>, producers: &HashMap<u32, Class>, wanted: &[Cla
     })
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn classify_reduce(facts: &Facts<'_>, producers: &HashMap<u32, Class>) -> Class {
     let Some((body, reduce_op)) = reduce_parts(facts.entry) else {
         return Class::Unclassified(facts.entry.to_string());
@@ -182,6 +201,7 @@ fn classify_reduce(facts: &Facts<'_>, producers: &HashMap<u32, Class>) -> Class 
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn classify_elementwise(facts: &Facts<'_>) -> Class {
     let Some(body) = elementwise_body(facts.entry) else {
         return Class::Unclassified(facts.entry.to_string());
@@ -204,6 +224,7 @@ fn classify_elementwise(facts: &Facts<'_>) -> Class {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn classify(facts: &Facts<'_>, producers: &HashMap<u32, Class>) -> Class {
     match facts.kind_name {
         "cached_softmax_weights" => Class::CandidateB,
@@ -215,6 +236,7 @@ fn classify(facts: &Facts<'_>, producers: &HashMap<u32, Class>) -> Class {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|left, right| left.partial_cmp(right).expect("timings are finite"));
@@ -225,6 +247,7 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn coefficient_of_variation(values: &[f64]) -> f64 {
     let count = values.len() as f64;
     let mean = values.iter().sum::<f64>() / count.max(1.0);
@@ -239,12 +262,14 @@ fn coefficient_of_variation(values: &[f64]) -> f64 {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn fnv64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn field_after<'line>(line: &'line str, key: &str) -> Option<&'line str> {
     let marker = format!(" {key}=");
     let start = line.find(&marker)? + marker.len();
@@ -253,6 +278,7 @@ fn field_after<'line>(line: &'line str, key: &str) -> Option<&'line str> {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 struct StepStats {
     gpu_exec_ms: Option<f64>,
     physical_dispatch_calls: Option<u64>,
@@ -268,6 +294,7 @@ struct StepStats {
 /// `token_breakdown_gpu` line; the k-th gpu line belongs to the k-th
 /// evaluated step. An evaluation with no `speculative_verify` line is a plain
 /// one-row, one-token step.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn parse_step_stats(log: &str) -> BTreeMap<usize, StepStats> {
     let mut steps: BTreeMap<usize, StepStats> = BTreeMap::new();
     let mut gpu_lines: Vec<f64> = Vec::new();
@@ -309,6 +336,7 @@ fn parse_step_stats(log: &str) -> BTreeMap<usize, StepStats> {
 
 /// Every decode step from 1 up: step 0 is the prompt prefill, and which later
 /// steps run an evaluation is only known after the run.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn capture_steps_arg(max_tokens: usize) -> String {
     (1..max_tokens)
         .map(|step| step.to_string())
@@ -879,6 +907,7 @@ mod harness {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn main() {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     harness::run();
@@ -1338,4 +1367,10 @@ mod real_program_names {
             "unclassified entries: {unclassified:?}"
         );
     }
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
 }

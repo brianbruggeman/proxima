@@ -182,7 +182,7 @@ impl Validate for RuntimeSelection {
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-bgpool",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 impl RuntimeSelection {
     /// Bundle an already-built prime-backed runtime with its matched
@@ -201,7 +201,10 @@ impl RuntimeSelection {
             runtime,
             acceptor_factory: Arc::new(proxima_net::prime::PrimeAcceptorFactory),
             datagram_factory: Some(Arc::new(proxima_net::prime::PrimeDatagramFactory)),
+            #[cfg(unix)]
             unix_upstream_factory: Some(Arc::new(proxima_net::prime::PrimeUnixUpstreamFactory)),
+            #[cfg(not(unix))]
+            unix_upstream_factory: None,
             packet_listener_factory: Some(Arc::new(proxima_net::prime::PrimePacketListenerFactory)),
         }
     }
@@ -231,7 +234,10 @@ impl RuntimeSelection {
             runtime,
             acceptor_factory: Arc::new(proxima_net::tokio::TokioAcceptorFactory),
             datagram_factory: Some(Arc::new(proxima_net::tokio::TokioDatagramFactory)),
+            #[cfg(unix)]
             unix_upstream_factory: Some(Arc::new(proxima_net::tokio::TokioUnixUpstreamFactory)),
+            #[cfg(not(unix))]
+            unix_upstream_factory: None,
             packet_listener_factory: Some(Arc::new(proxima_net::tokio::TokioPacketListenerFactory)),
         }
     }
@@ -700,7 +706,7 @@ impl Runtime for AdoptedRuntime {
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-bgpool",
     feature = "serve-prime",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 fn install_prime_ambient(inner: &Arc<PrimeRuntime>, visible_cores: usize) {
     let runtime: Arc<dyn Runtime> = Arc::new(AdoptedRuntime {
@@ -715,7 +721,7 @@ fn install_prime_ambient(inner: &Arc<PrimeRuntime>, visible_cores: usize) {
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-bgpool",
-    not(all(feature = "serve-prime", any(target_os = "linux", target_os = "macos")))
+    not(all(feature = "serve-prime", any(target_os = "linux", target_os = "macos", target_os = "windows")))
 ))]
 fn install_prime_ambient(_inner: &Arc<PrimeRuntime>, _visible_cores: usize) {}
 
@@ -1005,7 +1011,7 @@ mod tests {
     feature = "runtime-prime-bgpool",
     feature = "runtime-tokio",
     feature = "tokio",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod selection_by_value_tests {

@@ -368,7 +368,9 @@ mod tests {
     use futures::io::{AsyncRead, AsyncWrite, Cursor};
     use proxima_primitives::pipe::handler::into_handle;
     use proxima_primitives::pipe::request::{Request, Response};
-    use proxima_primitives::stream::{DatagramSocket, PeerInfo, StreamConnection, StreamUpstream};
+    use proxima_primitives::stream::{
+        ConnectFuture, DatagramSocket, PeerInfo, StreamConnection, StreamUpstream,
+    };
     use proxima_protocols::dns::codec_trait::parse_message;
     use proxima_protocols::dns::encode;
 
@@ -587,11 +589,13 @@ mod tests {
     impl StreamUpstream for FakeTcpUpstream {
         type Conn = Box<dyn StreamConnection>;
 
-        fn poll_connect(&self, _cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-            Poll::Ready(Ok(Box::new(FakeTcpConnection {
-                response: Cursor::new(self.response.clone()),
-                writes: Arc::clone(&self.writes),
-            })))
+        fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+            Box::pin(async move {
+                Ok(Box::new(FakeTcpConnection {
+                    response: Cursor::new(self.response.clone()),
+                    writes: Arc::clone(&self.writes),
+                }) as Self::Conn)
+            })
         }
     }
 

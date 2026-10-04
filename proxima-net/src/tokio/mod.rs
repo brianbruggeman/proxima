@@ -15,10 +15,12 @@ pub mod tokio_stream_upstream;
 pub use tokio_acceptor::{TokioAcceptor, TokioAcceptorFactory};
 pub use tokio_datagram::{TokioDatagram, TokioDatagramFactory};
 pub use tokio_packet::{TokioPacketListenerFactory, TokioUdpListener};
-pub use tokio_stream_listener::{
-    TokioTcpConnection, TokioTcpListener, TokioUnixConnection, TokioUnixListener,
-};
-pub use tokio_stream_upstream::{TokioTcpUpstream, TokioUnixUpstream, TokioUnixUpstreamFactory};
+pub use tokio_stream_listener::{TokioTcpConnection, TokioTcpListener};
+#[cfg(unix)]
+pub use tokio_stream_listener::{TokioUnixConnection, TokioUnixListener};
+pub use tokio_stream_upstream::TokioTcpUpstream;
+#[cfg(unix)]
+pub use tokio_stream_upstream::{TokioUnixUpstream, TokioUnixUpstreamFactory};
 
 pub(crate) fn domain_for(addr: SocketAddr) -> Domain {
     if addr.is_ipv4() {

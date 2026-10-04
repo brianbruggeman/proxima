@@ -55,24 +55,38 @@
 //! `ollama stop gemma4:e2b-it-qat` first (same GPU-contention reason the
 //! sibling bench's module doc gives).
 
-#![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::fs::File;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::hint::black_box;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::sync::OnceLock;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::time::{Duration, Instant};
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use memmap2::{Mmap, MmapOptions};
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use omega::execute;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use omega::metal::metal_stage_totals;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::parse_complete;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::pipe::ParsedGguf;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::types::GgmlType;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_primitives::Codec;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::instrument::ticks_to_nanos;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
     ScalarOp, append, map,
@@ -81,28 +95,36 @@ use proxima_tensor::{
 /// `gemma4:e2b-it-qat`'s real blob — same checkpoint the sibling
 /// decomposition bench and `omega/tests/q4_0_real_checkpoint_parity.rs`
 /// both read.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
 /// The task brief's own sweep set.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const NEW_COUNTS: [usize; 5] = [1, 2, 4, 8, 16];
 
 /// The attention-score kernel's secondary axis — `cached_len` at
 /// `new_count=1` fixed, so a `key_count`-only slope is separable from a
 /// `new_count`-only one. Spans up to `SLIDING_WINDOW` (512), the real cap
 /// a sliding layer's own key set never exceeds.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const KEY_COUNTS: [usize; 4] = [64, 128, 256, 512];
 
 /// Real gemma4-E2B hparams — same values `gemma4_forward_decomposition.rs`
 /// dumped from this checkpoint (2026-09-20; `gemma4.embedding_length`,
 /// `gemma4.attention.head_count_kv`, `gemma4.attention.key_length_swa`).
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const EMBEDDING: u32 = 1536;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const VOCAB_REAL: u32 = 262_144;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const HEAD_DIM_SWA: u32 = 256;
 /// The attention-score kernel's default fixed `key_count` for the
 /// `new_count` sweep — mid-range within [`KEY_COUNTS`].
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const ATTENTION_SCORE_DEFAULT_KEYS: u32 = 256;
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn model_bytes() -> &'static [u8] {
     static BYTES: OnceLock<Mmap> = OnceLock::new();
     BYTES.get_or_init(|| {
@@ -114,6 +136,7 @@ fn model_bytes() -> &'static [u8] {
     })
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn parsed_gguf() -> &'static ParsedGguf {
     static PARSED: OnceLock<ParsedGguf> = OnceLock::new();
     PARSED.get_or_init(|| parse_complete(model_bytes()).expect("parse gemma4-E2B header"))
@@ -128,6 +151,7 @@ fn parsed_gguf() -> &'static ParsedGguf {
 /// require every bench cell to tolerate a missing arm, which the 90-minute
 /// ceiling on this slice does not afford; the checkpoint path is the same
 /// one the sibling bench already hard-requires.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn real_q4_0_tensor_bytes(name: &str) -> (&'static [u8], u32, u32) {
     let parsed = parsed_gguf();
     let bytes = model_bytes();
@@ -153,6 +177,7 @@ fn real_q4_0_tensor_bytes(name: &str) -> (&'static [u8], u32, u32) {
     )
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
     (0..count).map(|_| lcg.next_unit()).collect()
@@ -161,6 +186,7 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// One raw per-iteration record -- printed, never only aggregated
 /// (principle 19: results traced to records). Same field set as the
 /// sibling bench's own `log_stage_sample`.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn log_kernel_sample(kernel: &str, axis: &str, new_count: usize, other: usize, wall_ns: u64) {
     let stage = metal_stage_totals();
     println!(
@@ -181,6 +207,7 @@ fn log_kernel_sample(kernel: &str, axis: &str, new_count: usize, other: usize, w
 /// Used for both the attention-score reduce (`m=new_count`, `k=head_dim`,
 /// `n=key_count`) and the LM-head unembed (`m=new_count`, `k=EMBEDDING`,
 /// `n=VOCAB_REAL`) -- same op shape, different real dims.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32, name: &str) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let lhs = append(
@@ -232,6 +259,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32, name: &str) -> (Vec<Op>
 /// new_count]` -- `q4_0_real_checkpoint_parity.rs`'s own `matmul_program`
 /// shape, generalized from that test's fixed `[k,1]` activation to sweep
 /// `new_count`.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn packed_row_q4_0_program(rows: u32, k: u32, new_count: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
@@ -287,6 +315,7 @@ fn packed_row_q4_0_program(rows: u32, k: u32, new_count: u32) -> (Vec<Op>, NodeI
 /// own doc, precondition (b): the pre-fusion sum reduce has no other
 /// consumer AND is not itself a requested output) -- the exact
 /// broadcast-reduce epilogue shape `emit_and_classify.rs:988-1001` names.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
     let mut program: Vec<Op> = Vec::new();
     let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
@@ -391,6 +420,7 @@ fn rmsnorm_broadcast_epilogue_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId) {
 /// Component A: `reduce-cooperative` at the ATTENTION-SCORE shape --
 /// `[new_count, head_dim] x [key_count, head_dim]^T -> [new_count,
 /// key_count]`, reduced over `head_dim`. Two sub-sweeps, see module doc.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn bench_attention_score_reduce(c: &mut Criterion) {
     let _ = metal_stage_totals();
     let mut group = c.benchmark_group("kernel_attention_score_reduce");
@@ -486,6 +516,7 @@ fn bench_attention_score_reduce(c: &mut Criterion) {
 /// sibling bench's Component 3+4 uses) -- see module doc for why this is
 /// the exact case that unconfounds the sibling harness's `width=1`
 /// `EpilogueNotSupported` finding.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn bench_rmsnorm_broadcast_epilogue(c: &mut Criterion) {
     let _ = metal_stage_totals();
     let mut group = c.benchmark_group("kernel_rmsnorm_broadcast_epilogue");
@@ -540,12 +571,15 @@ fn bench_rmsnorm_broadcast_epilogue(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const INV_DIM: f32 = 1.0 / EMBEDDING as f32;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const EPS: f32 = 1e-6;
 
 /// Component C: packed-row Q4_0 matvec (a projection) -- REAL
 /// `blk.0.attn_k.weight` packed bytes, `[1536, 256]`, activation `[1536,
 /// new_count]`.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn bench_packed_row_q4_0_matvec(c: &mut Criterion) {
     let _ = metal_stage_totals();
     let (weight_bytes, in_dim, out_dim) = real_q4_0_tensor_bytes("blk.0.attn_k.weight");
@@ -596,6 +630,7 @@ fn bench_packed_row_q4_0_matvec(c: &mut Criterion) {
 /// Component D: LM-head unembed -- same shape as
 /// `gemma4_forward_decomposition.rs`'s Component 2, extended to
 /// `new_count=16`.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn bench_lm_head_unembed(c: &mut Criterion) {
     let _ = metal_stage_totals();
     let mut group = c.benchmark_group("kernel_lm_head_unembed");
@@ -644,6 +679,7 @@ fn bench_lm_head_unembed(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 criterion_group!(
     benches,
     bench_attention_score_reduce,
@@ -651,4 +687,11 @@ criterion_group!(
     bench_packed_row_q4_0_matvec,
     bench_lm_head_unembed
 );
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 criterion_main!(benches);
+
+#[cfg(not(all(feature = "metal", feature = "instrument", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
+}

@@ -1,16 +1,20 @@
 #[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
 use super::phys_footprint_bytes;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+use super::LoadedModel;
 #[cfg(all(test, feature = "metal"))]
+use super::{BackendRuntime, InteropError};
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 use super::{
-    BackendRuntime, InteropError, LogitsSink, NodeValuesSink, PrefixState,
-    ServingConfig, map_expert_sources_to_segment, supported_serving_config, wants_bos,
+    LogitsSink, NodeValuesSink, PrefixState, ServingConfig, map_expert_sources_to_segment,
+    supported_serving_config, wants_bos,
 };
 #[cfg(test)]
 use core::ops::ControlFlow;
 
 #[cfg(test)]
 use super::{
-    DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache, TokenEvent,
+    DecodeMetrics, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache, TokenEvent,
     build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
     first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
     qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
@@ -852,6 +856,7 @@ pub(super) mod tests {
     /// a synthetic float32-only program does not engage the same matmul
     /// batching this needs): every `NodeId` in a wide window must come back
     /// with the identical value it has when requested alone.
+    #[cfg(unix)]
     mod real_openchat_file {
         use core::ffi::c_void;
         use std::os::fd::AsFd;

@@ -33,40 +33,64 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 #![allow(clippy::too_many_lines)]
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::env;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::fs::File;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::io::{BufRead, Read, Write};
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::net::TcpStream;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::path::{Path, PathBuf};
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::process::{Child, Command, Stdio};
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use std::time::{Duration, Instant};
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use core::ops::ControlFlow;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use memmap2::{Mmap, MmapOptions};
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_gguf::parse_complete;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_gguf::types::GgmlType;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_model_interop::{
     GPU_LAYERS_ALL, LoadedModel, NgramMapParams, NgramModParams, Phase, PrefixState, ServingConfig,
     SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet, TokenEvent,
 };
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_telemetry::export::Exporter;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_telemetry::recorder::Recorder;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_tokenizer::vocab::Vocab;
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const DEFAULT_MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const DEFAULT_MAX_TOKENS: usize = 48;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const DEFAULT_PAIRS: usize = 5;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT: f64 = 5.0;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const CPU_IDLE_MINIMUM_PERCENT: f64 = 70.0;
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const GPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 /// The owner's recorded protocol for the precheck's idle-GPU baseline: ~5s
 /// at [`GPU_SAMPLE_INTERVAL`] (~10 Hz), decided on the median -- a single
 /// `ollama ps` wake-the-Electron-app spike inside a 0.5s/5-sample window
 /// produced a false "GPU busy" refusal three times running even though 50
 /// direct `ioreg` samples taken seconds later all read 0.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const GPU_IDLE_BASELINE_DURATION: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------
@@ -76,6 +100,7 @@ const GPU_IDLE_BASELINE_DURATION: Duration = Duration::from_secs(5);
 /// `--verify-width-sweep` is a distinct mode from the interleaved-pair bench
 /// -- both read a `--gpu-layers`, but the sweep needs no corpus/drafter/
 /// incumbent flags at all (SPEC AC23's own command line omits them).
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 enum BenchMode {
     Pairs,
     VerifyWidthSweep {
@@ -89,6 +114,7 @@ enum BenchMode {
     LlamaParity,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct BenchArgs {
     mode: BenchMode,
     drafter: Option<SpeculativeType>,
@@ -106,8 +132,10 @@ struct BenchArgs {
     sweep_runs: usize,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const DEFAULT_LLAMA_SERVER_BIN: &str = "llama-server";
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn parse_gpu_layers(value: &str) -> i32 {
     if value.eq_ignore_ascii_case("all") {
         GPU_LAYERS_ALL
@@ -118,6 +146,7 @@ fn parse_gpu_layers(value: &str) -> i32 {
     }
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn parse_drafter(value: &str) -> SpeculativeType {
     SpeculativeType::from_llama_name(value).unwrap_or_else(|| {
         panic!(
@@ -128,6 +157,7 @@ fn parse_drafter(value: &str) -> SpeculativeType {
     })
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn parse_width_list(value: &str) -> Vec<usize> {
     value
         .split(',')
@@ -140,6 +170,7 @@ fn parse_width_list(value: &str) -> Vec<usize> {
         .collect()
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn parse_args() -> BenchArgs {
     let raw: Vec<String> = env::args().skip(1).collect();
     let mut drafter = None;
@@ -271,6 +302,7 @@ fn parse_args() -> BenchArgs {
 // quiet-box precheck (SPEC "measurement protocol" paragraph)
 // ---------------------------------------------------------------------
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct PrecheckReport {
     busy_reasons: Vec<String>,
     gpu_idle_baseline: Option<GpuIdleBaseline>,
@@ -278,6 +310,7 @@ struct PrecheckReport {
     load_average_line: Option<String>,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 impl PrecheckReport {
     fn is_quiet(&self) -> bool {
         self.busy_reasons.is_empty()
@@ -287,6 +320,7 @@ impl PrecheckReport {
 /// `ollama ps` model names currently loaded. Absence of the `ollama` binary,
 /// or the command failing, is treated as "no models loaded", not an error --
 /// a dev box without Ollama installed at all is trivially unloaded.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn ollama_loaded_models() -> Vec<String> {
     let Ok(output) = Command::new("ollama").arg("ps").output() else {
         return Vec::new();
@@ -309,6 +343,7 @@ fn ollama_loaded_models() -> Vec<String> {
 /// `ollama` CLI is invoked, so the process cannot be kept dead -- its mere
 /// presence is not contamination. `ollama stop` each loaded model and
 /// re-check; fail the precheck only if a model survives the stop.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn ollama_busy() -> Option<String> {
     let loaded = ollama_loaded_models();
     if loaded.is_empty() {
@@ -332,12 +367,14 @@ fn ollama_busy() -> Option<String> {
 /// Host CPU split from one `top` sample. macOS load average counts blocked
 /// threads, so contention is decided on sampled idle time instead.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct CpuIdleBaseline {
     user: f64,
     sys: f64,
     idle: f64,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn format_cpu_idle_baseline(baseline: &CpuIdleBaseline) -> String {
     format!(
         "cpu_idle_baseline user={:.2}% sys={:.2}% idle={:.2}%",
@@ -345,6 +382,7 @@ fn format_cpu_idle_baseline(baseline: &CpuIdleBaseline) -> String {
     )
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn parse_top_cpu_field(line: &str, label: &str) -> Option<f64> {
     let before_label = line.split(label).next()?;
     before_label
@@ -356,6 +394,7 @@ fn parse_top_cpu_field(line: &str, label: &str) -> Option<f64> {
         .ok()
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn parse_top_cpu_line(line: &str) -> Option<CpuIdleBaseline> {
     let usage = line.trim().strip_prefix("CPU usage:")?;
     Some(CpuIdleBaseline {
@@ -367,6 +406,7 @@ fn parse_top_cpu_line(line: &str) -> Option<CpuIdleBaseline> {
 
 /// `top -l 2 -s 1` prints a since-boot sample first and a 1s-delta sample
 /// second; only the last `CPU usage:` line is a current reading.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn sample_cpu_idle() -> Option<CpuIdleBaseline> {
     let output = Command::new("top")
         .args(["-l", "2", "-n", "0", "-s", "1"])
@@ -382,6 +422,7 @@ fn sample_cpu_idle() -> Option<CpuIdleBaseline> {
         .and_then(parse_top_cpu_line)
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn cpu_idle_decision(baseline: &CpuIdleBaseline) -> Option<String> {
     (baseline.idle < CPU_IDLE_MINIMUM_PERCENT).then(|| {
         format!(
@@ -392,6 +433,7 @@ fn cpu_idle_decision(baseline: &CpuIdleBaseline) -> Option<String> {
     })
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn cpu_idle_busy() -> (Option<String>, Option<CpuIdleBaseline>) {
     let Some(baseline) = sample_cpu_idle() else {
         return (None, None);
@@ -399,6 +441,7 @@ fn cpu_idle_busy() -> (Option<String>, Option<CpuIdleBaseline>) {
     (cpu_idle_decision(&baseline), Some(baseline))
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn load_average_line() -> Option<String> {
     let mut averages = [0.0_f64; 3];
     // SAFETY: `getloadavg` writes at most `averages.len()` doubles into a
@@ -417,6 +460,7 @@ fn load_average_line() -> Option<String> {
 /// self-exclusion is needed. `ollama`/`Ollama` are handled separately by
 /// [`ollama_busy`], which stops a loaded model rather than failing on the
 /// app process merely being present.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn other_processes_busy() -> Option<String> {
     let output = Command::new("ps").args(["-Ao", "comm"]).output().ok()?;
     if !output.status.success() {
@@ -445,6 +489,7 @@ fn other_processes_busy() -> Option<String> {
 /// a handful of samples), the rest travel along so every refusal message
 /// and every `gpu_idle_baseline` line can show its whole shape.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct GpuIdleBaseline {
     median: f64,
     mean: f64,
@@ -453,12 +498,16 @@ struct GpuIdleBaseline {
     sample_count: usize,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn summarize_gpu_idle_samples(samples: &[f64]) -> Option<GpuIdleBaseline> {
     if samples.is_empty() {
         return None;
     }
     let mut sorted = samples.to_vec();
-    sorted.sort_by(|left, right| left.partial_cmp(right).expect("gpu idle samples are finite"));
+    sorted.sort_by(|left, right| {
+        left.partial_cmp(right)
+            .expect("gpu idle samples are finite")
+    });
     Some(GpuIdleBaseline {
         median: percentile(&sorted, 50.0),
         mean: mean(&sorted),
@@ -468,6 +517,7 @@ fn summarize_gpu_idle_samples(samples: &[f64]) -> Option<GpuIdleBaseline> {
     })
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn format_gpu_idle_baseline(label: &str, baseline: &GpuIdleBaseline) -> String {
     format!(
         "{label} median={:.1}% mean={:.1}% p90={:.1}% max={:.1}% n={}",
@@ -479,6 +529,7 @@ fn format_gpu_idle_baseline(label: &str, baseline: &GpuIdleBaseline) -> String {
 /// rather than a fixed sample count, so the same helper serves both the
 /// precheck's 5s baseline and the per-pair contamination window's shorter
 /// sample.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn sample_gpu_idle_window(duration: Duration, interval: Duration) -> Vec<f64> {
     let deadline = Instant::now() + duration;
     let mut samples = Vec::new();
@@ -495,6 +546,7 @@ fn sample_gpu_idle_window(duration: Duration, interval: Duration) -> Vec<f64> {
 /// shell-out (which wakes the Ollama Electron app and briefly moves the
 /// GPU) -- sampling the idle baseline after that wake produced three false
 /// "GPU busy" refusals even though the box was otherwise idle.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn gpu_idle_busy() -> (Option<String>, Option<GpuIdleBaseline>) {
     if !cfg!(target_os = "macos") {
         return (None, None);
@@ -513,6 +565,7 @@ fn gpu_idle_busy() -> (Option<String>, Option<GpuIdleBaseline>) {
     (reason, Some(baseline))
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn quiet_box_precheck() -> PrecheckReport {
     let (gpu_idle_reason, gpu_idle_baseline) = gpu_idle_busy();
     let mut busy_reasons = Vec::new();
@@ -536,6 +589,7 @@ fn quiet_box_precheck() -> PrecheckReport {
 /// One `ioreg -r -d 1 -c "IOAccelerator"` call, parsed for the first
 /// `"Device Utilization %"=<value>` field. Returns `None` off macOS or when
 /// `ioreg` cannot be run (no accelerator entry, sandboxed environment).
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn gpu_utilization_sample() -> Option<f64> {
     if !cfg!(target_os = "macos") {
         return None;
@@ -551,16 +605,20 @@ fn gpu_utilization_sample() -> Option<f64> {
     let needle = "\"Device Utilization %\"=";
     let start = stdout.find(needle)? + needle.len();
     let rest = &stdout[start..];
-    let end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse::<f64>().ok()
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct GpuSampler {
     running: Arc<AtomicBool>,
     samples: Arc<Mutex<Vec<f64>>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 impl GpuSampler {
     fn start() -> Self {
         let running = Arc::new(AtomicBool::new(true));
@@ -601,6 +659,7 @@ impl GpuSampler {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct GpuUtilizationSummary {
     mean: f64,
     median: f64,
@@ -609,6 +668,7 @@ struct GpuUtilizationSummary {
     sample_count: usize,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn summarize_gpu_samples(mut samples: Vec<f64>) -> Option<GpuUtilizationSummary> {
     if samples.is_empty() {
         return None;
@@ -631,6 +691,7 @@ fn summarize_gpu_samples(mut samples: Vec<f64>) -> Option<GpuUtilizationSummary>
 
 /// Darwin reports `ru_maxrss` in bytes; Linux reports KiB
 // (`examples/gguf_generate.rs::print_peak_rss` -- same convention).
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn peak_rss_bytes() -> u64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: `getrusage` initializes the caller-owned structure on success.
@@ -647,6 +708,7 @@ fn peak_rss_bytes() -> u64 {
 /// User + system CPU seconds consumed by this process so far
 /// (`getrusage`'s own `ru_utime`/`ru_stime`), for a before/after delta a
 /// caller divides by wall-clock seconds to get CPU%.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn cpu_seconds() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: same contract as `peak_rss_bytes`.
@@ -666,6 +728,7 @@ fn cpu_seconds() -> f64 {
 // ---------------------------------------------------------------------
 
 /// Nearest-rank percentile over an already-sorted ascending slice.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn percentile(sorted: &[f64], percent: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -674,6 +737,7 @@ fn percentile(sorted: &[f64], percent: f64) -> f64 {
     sorted[rank.min(sorted.len() - 1)]
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn mean(values: &[f64]) -> f64 {
     if values.is_empty() {
         0.0
@@ -685,6 +749,7 @@ fn mean(values: &[f64]) -> f64 {
 /// Coefficient of variation: standard deviation / mean, as a fraction
 /// (0.05 == 5%) -- `disciplined-component`'s own "never a point estimate
 /// above 5% CoV" rule reads this directly.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn coefficient_of_variation(values: &[f64]) -> f64 {
     if values.len() < 2 {
         return 0.0;
@@ -693,7 +758,10 @@ fn coefficient_of_variation(values: &[f64]) -> f64 {
     if average == 0.0 {
         return 0.0;
     }
-    let variance = values.iter().map(|value| (value - average).powi(2)).sum::<f64>()
+    let variance = values
+        .iter()
+        .map(|value| (value - average).powi(2))
+        .sum::<f64>()
         / (values.len() - 1) as f64;
     variance.sqrt() / average
 }
@@ -707,6 +775,7 @@ fn coefficient_of_variation(values: &[f64]) -> f64 {
 /// which is crate-private and unreachable from an example binary --
 /// `examples/attn_prompt_tokens.rs` already carries the identical copy for
 /// the identical reason.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn wants_bos(vocab: &Vocab) -> bool {
     vocab
         .add_bos_token()
@@ -728,6 +797,7 @@ fn wants_bos(vocab: &Vocab) -> bool {
 /// status) -- the caller decides whether that is a readiness-poll retry
 /// ([`LlamaServerHandle::wait_until_healthy`]) or a hard failure
 /// ([`http_get_json`]/[`http_post_json`]).
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn try_http_request_json(
     port: u16,
     method: &str,
@@ -750,7 +820,9 @@ fn try_http_request_json(
             .write_all(payload)
             .map_err(|err| format!("write request body: {err}"))?;
     }
-    stream.flush().map_err(|err| format!("flush request: {err}"))?;
+    stream
+        .flush()
+        .map_err(|err| format!("flush request: {err}"))?;
     let mut response = Vec::new();
     stream
         .read_to_end(&mut response)
@@ -769,19 +841,31 @@ fn try_http_request_json(
         return Err(format!("{method} {path} returned {status_text}"));
     }
     let response_body = &response[split_at + separator.len()..];
-    serde_json::from_slice(response_body)
-        .map_err(|err| format!("parse response json: {err} (body: {})", String::from_utf8_lossy(response_body)))
+    serde_json::from_slice(response_body).map_err(|err| {
+        format!(
+            "parse response json: {err} (body: {})",
+            String::from_utf8_lossy(response_body)
+        )
+    })
 }
 
-fn http_request_json(port: u16, method: &str, path: &str, body: Option<&serde_json::Value>) -> serde_json::Value {
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn http_request_json(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> serde_json::Value {
     try_http_request_json(port, method, path, body)
         .unwrap_or_else(|err| panic!("llama-server {method} {path}: {err}"))
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn http_post_json(port: u16, path: &str, body: &serde_json::Value) -> serde_json::Value {
     http_request_json(port, "POST", path, Some(body))
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn llama_gpu_layers_value(gpu_layers: i32) -> String {
     if gpu_layers == GPU_LAYERS_ALL {
         "all".to_string()
@@ -822,6 +906,7 @@ fn llama_gpu_layers_value(gpu_layers: i32) -> String {
 /// corpus (see `run_pairs_mode`'s own comment) so the incumbent is not
 /// forced to allocate KV cache for a multi-hundred-thousand-token context
 /// it never uses.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn base_llama_server_args(config: &ServingConfig, llama_context_length: u32) -> Vec<String> {
     vec![
         "-c".to_string(),
@@ -861,6 +946,7 @@ fn base_llama_server_args(config: &ServingConfig, llama_context_length: u32) -> 
 /// concern, not wired here); the empty-args branch runs it at llama's own
 /// in-memory-dynamic-cache default, same as omitting both cache flags on
 /// llama's own CLI.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn ngram_type_args(spec_type: SpeculativeType, speculative: &SpeculativeConfig) -> Vec<String> {
     fn map_params_args(flag_prefix: &str, params: NgramMapParams) -> Vec<String> {
         vec![
@@ -904,6 +990,7 @@ fn ngram_type_args(spec_type: SpeculativeType, speculative: &SpeculativeConfig) 
 /// PIDs, not `Child` handles: the hook needs to reach these from a context
 /// that does not (and must not) own the `Child` itself -- the normal drop
 /// path already owns and reaps it directly.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 static REAPABLE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// Kills and waits the wrapped child on drop. `std::process::Child`'s own
@@ -912,15 +999,20 @@ static REAPABLE_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// llama-server on any early return, and leaked it on every panic in this
 /// file's own real-run history (two orphaned llama-server processes after a
 /// mid-run panic, neither killed nor waited).
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct ChildGuard {
     child: Child,
     pid: u32,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 impl ChildGuard {
     fn new(child: Child) -> Self {
         let pid = child.id();
-        REAPABLE_PIDS.lock().unwrap_or_else(PoisonError::into_inner).push(pid);
+        REAPABLE_PIDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(pid);
         Self { child, pid }
     }
 
@@ -929,6 +1021,7 @@ impl ChildGuard {
     }
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -949,6 +1042,7 @@ impl Drop for ChildGuard {
 /// than replacing it, so the default panic message (thread name, location,
 /// the `RUST_BACKTRACE` hint) still prints exactly as before. Installed
 /// once, at the top of `main`.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn install_orphan_reaping_panic_hook() {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -957,8 +1051,12 @@ fn install_orphan_reaping_panic_hook() {
     }));
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn reap_orphaned_llama_servers() {
-    let pids = REAPABLE_PIDS.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let pids = REAPABLE_PIDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     for pid in pids {
         eprintln!("speculative_bench: panic hook reaping orphaned llama-server pid={pid}");
         let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
@@ -969,12 +1067,14 @@ fn reap_orphaned_llama_servers() {
 /// [`Self::stop`] (and on drop regardless -- see [`ChildGuard`]). `label` is
 /// `"off"`/`"on"`, printed alongside the pid so a caller reading stderr can
 /// match this run's own process-management instructions to a concrete pid.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct LlamaServerHandle {
     child: ChildGuard,
     port: u16,
     label: String,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 impl LlamaServerHandle {
     fn spawn(bin: &Path, model_path: &str, port: u16, label: &str, extra_args: &[String]) -> Self {
         let mut command = Command::new(bin);
@@ -1006,9 +1106,9 @@ impl LlamaServerHandle {
             .args(extra_args)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let child = command
-            .spawn()
-            .unwrap_or_else(|err| panic!("spawn llama-server ({label}) from {}: {err}", bin.display()));
+        let child = command.spawn().unwrap_or_else(|err| {
+            panic!("spawn llama-server ({label}) from {}: {err}", bin.display())
+        });
         let child = ChildGuard::new(child);
         let pid = child.pid();
         eprintln!("speculative_bench: started llama-server ({label}) pid={pid} port={port}");
@@ -1054,9 +1154,11 @@ impl LlamaServerHandle {
 /// [`warm_llama_prompt_cache`] exists to keep off the timed pairs. A cache
 /// hit still costs a handful of tokens (the freshly generated ones from the
 /// prior pair plus any per-call rounding), never the whole prompt.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const LLAMA_REPREFILL_PROMPT_N_BOUND: u64 = 8;
 
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct LlamaArmResult {
     ms_per_token: f64,
     ttft_ms: f64,
@@ -1073,12 +1175,23 @@ struct LlamaArmResult {
 /// `draft_n`, `draft_n_accepted`) straight off `timings`
 /// (`server-common.cpp:84-105`'s `server_slot_stats::to_json`) -- never
 /// wall-clock around the HTTP call (invariant 3).
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn parse_llama_completion_response(response: &serde_json::Value) -> LlamaArmResult {
-    let timings = response
-        .get("timings")
-        .unwrap_or_else(|| panic!("llama-server /completion response missing \"timings\": {response}"));
-    let get_f64 = |key: &str| timings.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-    let get_u64 = |key: &str| timings.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let timings = response.get("timings").unwrap_or_else(|| {
+        panic!("llama-server /completion response missing \"timings\": {response}")
+    });
+    let get_f64 = |key: &str| {
+        timings
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0)
+    };
+    let get_u64 = |key: &str| {
+        timings
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
     let prompt_n = get_u64("prompt_n");
     LlamaArmResult {
         ms_per_token: get_f64("predicted_per_token_ms"),
@@ -1099,6 +1212,7 @@ fn parse_llama_completion_response(response: &serde_json::Value) -> LlamaArmResu
 /// so llama-server must resume from its own per-slot KV cache too rather
 /// than re-prefilling on every pair -- [`warm_llama_prompt_cache`] primes
 /// that cache once per prompt, discarded, before the timed pairs begin.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_llama_completion(port: u16, token_ids: &[u32], max_tokens: usize) -> LlamaArmResult {
     let body = serde_json::json!({
         "prompt": token_ids,
@@ -1115,15 +1229,18 @@ fn run_llama_completion(port: u16, token_ids: &[u32], max_tokens: usize) -> Llam
 /// prefix so the first TIMED pair does not eat the one-time prefill cost --
 /// the same cost proxima's own [`prefill_prompt_once`] pays exactly once
 /// and excludes from the pair loop.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn warm_llama_prompt_cache(handle: &LlamaServerHandle, token_ids: &[u32]) {
     let _ = run_llama_completion(handle.port, token_ids, 1);
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct LlamaPairResult {
     off: LlamaArmResult,
     on: LlamaArmResult,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_llama_pair(
     off_handle: &LlamaServerHandle,
     on_handle: &LlamaServerHandle,
@@ -1143,6 +1260,7 @@ fn run_llama_pair(
     LlamaPairResult { off, on }
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn format_llama_arm(label: &str, arm: &LlamaArmResult) -> String {
     format!(
         "{label}_llama_ms_per_token={:.3} {label}_llama_ttft_ms={:.3} {label}_llama_predicted_n={} \
@@ -1163,7 +1281,13 @@ fn format_llama_arm(label: &str, arm: &LlamaArmResult) -> String {
 /// exact convention [`run_one_arm`]'s decode call uses) vs llama-server's
 /// `/tokenize` on the same raw text. Prints the result either way --
 /// divergence is reported, not treated as fatal, per the task brief.
-fn check_token_parity(off_handle: &LlamaServerHandle, prompt: &str, proxima_ids: &[u32], add_bos: bool) {
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn check_token_parity(
+    off_handle: &LlamaServerHandle,
+    prompt: &str,
+    proxima_ids: &[u32],
+    add_bos: bool,
+) {
     let body = serde_json::json!({
         "content": prompt,
         "add_special": add_bos,
@@ -1173,9 +1297,15 @@ fn check_token_parity(off_handle: &LlamaServerHandle, prompt: &str, proxima_ids:
     let llama_ids: Vec<u64> = response
         .get("tokens")
         .and_then(serde_json::Value::as_array)
-        .unwrap_or_else(|| panic!("llama-server /tokenize response missing \"tokens\" array: {response}"))
+        .unwrap_or_else(|| {
+            panic!("llama-server /tokenize response missing \"tokens\" array: {response}")
+        })
         .iter()
-        .map(|value| value.as_u64().unwrap_or_else(|| panic!("non-integer token id in {value}")))
+        .map(|value| {
+            value
+                .as_u64()
+                .unwrap_or_else(|| panic!("non-integer token id in {value}"))
+        })
         .collect();
     let proxima_ids_u64: Vec<u64> = proxima_ids.iter().map(|&id| u64::from(id)).collect();
     let identical = llama_ids == proxima_ids_u64;
@@ -1200,6 +1330,7 @@ fn check_token_parity(off_handle: &LlamaServerHandle, prompt: &str, proxima_ids:
 /// on purpose (sampling, seed, `-ngl`) or is llama-server's own real
 /// per-hardware default (KV cache dtype, KV offload, Flash Attention; see
 /// that function's own doc for the `common.h`/`arg.cpp` citations).
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn spawn_incumbent_servers(
     llama_server_bin: &Path,
     model_path: &str,
@@ -1217,7 +1348,8 @@ fn spawn_incumbent_servers(
     on_args.push("--spec-type".to_string());
     on_args.push(drafter.llama_name().to_string());
     on_args.extend(ngram_type_args(drafter, &on_config.speculative));
-    let off_handle = LlamaServerHandle::spawn(llama_server_bin, model_path, OFF_PORT, "off", &off_args);
+    let off_handle =
+        LlamaServerHandle::spawn(llama_server_bin, model_path, OFF_PORT, "off", &off_args);
     let on_handle = LlamaServerHandle::spawn(llama_server_bin, model_path, ON_PORT, "on", &on_args);
     (off_handle, on_handle)
 }
@@ -1230,9 +1362,10 @@ fn spawn_incumbent_servers(
 /// corpus contract. A malformed or prompt-less line is skipped, not fatal:
 /// a corpus assembled by a separate slice (18) may carry other fields this
 /// harness does not need.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn load_corpus(path: &Path) -> Vec<String> {
-    let file = File::open(path)
-        .unwrap_or_else(|err| panic!("open corpus {}: {err}", path.display()));
+    let file =
+        File::open(path).unwrap_or_else(|err| panic!("open corpus {}: {err}", path.display()));
     let reader = std::io::BufReader::new(file);
     let mut prompts = Vec::new();
     for line in reader.lines() {
@@ -1256,6 +1389,7 @@ fn load_corpus(path: &Path) -> Vec<String> {
 // ---------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct ArmResult {
     ms_per_token: f64,
     ttft_ms: f64,
@@ -1282,6 +1416,7 @@ struct ArmResult {
 /// is prefilled exactly once per bench run). Plain references, so this is
 /// `Copy` -- cheap to pass by value into every arm call.
 #[derive(Clone, Copy)]
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct DecodeSource<'source> {
     prefix: &'source PrefixState,
     suffix: &'source str,
@@ -1292,6 +1427,7 @@ struct DecodeSource<'source> {
 /// argument of the same name, never `serving_config` -- see that method's
 /// doc for why the knob stays off the config surface. `None` for every
 /// caller except [`run_verify_width_sweep_mode`].
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_one_arm(
     model: &LoadedModel,
     source: DecodeSource<'_>,
@@ -1378,7 +1514,9 @@ fn run_one_arm(
         0.0
     };
 
-    let gpu = sampler.map(|sampler| sampler.stop()).and_then(summarize_gpu_samples);
+    let gpu = sampler
+        .map(|sampler| sampler.stop())
+        .and_then(summarize_gpu_samples);
 
     ArmResult {
         ms_per_token,
@@ -1399,6 +1537,7 @@ fn run_one_arm(
     }
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct PairResult {
     off: ArmResult,
     on: ArmResult,
@@ -1407,6 +1546,7 @@ struct PairResult {
 
 /// Prints `ollama ps`'s loaded-model set under `label` so a model that
 /// loaded mid-arm is visible in the run's log, not just in the precheck.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn log_ollama_ps(label: &str) -> Vec<String> {
     let loaded = ollama_loaded_models();
     println!(
@@ -1424,6 +1564,7 @@ fn log_ollama_ps(label: &str) -> Vec<String> {
 /// Runs one arm bracketed by `ollama ps` snapshots; the arm is flagged
 /// loaded-contaminated if a model shows up loaded once the arm has finished,
 /// even though none was loaded going in.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_arm_logged(
     model: &LoadedModel,
     source: DecodeSource<'_>,
@@ -1438,6 +1579,7 @@ fn run_arm_logged(
     (result, !after.is_empty())
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_pair(
     model: &LoadedModel,
     source: DecodeSource<'_>,
@@ -1460,18 +1602,25 @@ fn run_pair(
     };
     let idle_baseline = summarize_gpu_idle_samples(&idle_samples);
     if let Some(baseline) = &idle_baseline {
-        println!("{}", format_gpu_idle_baseline("pair_gpu_idle_baseline", baseline));
+        println!(
+            "{}",
+            format_gpu_idle_baseline("pair_gpu_idle_baseline", baseline)
+        );
     }
     let gpu_idle_contaminated = idle_baseline
         .is_some_and(|baseline| baseline.median > GPU_IDLE_CONTAMINATION_THRESHOLD_PERCENT);
 
     let (off, on, ollama_contaminated) = if swap_order {
-        let (on, on_loaded) = run_arm_logged(model, source, max_tokens, on_config, sample_gpu, "on");
-        let (off, off_loaded) = run_arm_logged(model, source, max_tokens, off_config, sample_gpu, "off");
+        let (on, on_loaded) =
+            run_arm_logged(model, source, max_tokens, on_config, sample_gpu, "on");
+        let (off, off_loaded) =
+            run_arm_logged(model, source, max_tokens, off_config, sample_gpu, "off");
         (off, on, on_loaded || off_loaded)
     } else {
-        let (off, off_loaded) = run_arm_logged(model, source, max_tokens, off_config, sample_gpu, "off");
-        let (on, on_loaded) = run_arm_logged(model, source, max_tokens, on_config, sample_gpu, "on");
+        let (off, off_loaded) =
+            run_arm_logged(model, source, max_tokens, off_config, sample_gpu, "off");
+        let (on, on_loaded) =
+            run_arm_logged(model, source, max_tokens, on_config, sample_gpu, "on");
         (off, on, off_loaded || on_loaded)
     };
 
@@ -1499,6 +1648,7 @@ fn run_pair(
 /// template applied). The model's own BOS is prepended by the tokenizer
 /// (`tokenizer.ggml.add_bos_token`), so this template never spells `<bos>`
 /// itself.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn chat_prompt(user_turn: &str) -> String {
     format!("<|turn>user\n{user_turn}<turn|>\n<|turn>model\n")
 }
@@ -1528,6 +1678,7 @@ fn chat_prompt(user_turn: &str) -> String {
 /// [`run_verify_width_sweep_mode`]'s own multi-paragraph prompt (no
 /// template, several embedded newlines with real text after the last one)
 /// splits the same way and keeps working.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn split_prompt_at_hard_boundary(prompt: &str) -> (&str, &str) {
     let newline_index = prompt.rfind('\n').unwrap_or_else(|| {
         panic!(
@@ -1543,12 +1694,14 @@ fn split_prompt_at_hard_boundary(prompt: &str) -> (&str, &str) {
 /// pair a caller runs against it -- the performance-harness invariant that
 /// re-prefilling per arm would otherwise violate. `suffix` is a borrow of
 /// `prompt` itself (from [`split_prompt_at_hard_boundary`]), never a copy.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct CachedPrompt<'prompt> {
     prefix_state: PrefixState,
     suffix: &'prompt str,
     prefill_ttft_ms: f64,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn prefill_prompt_once<'prompt>(
     model: &LoadedModel,
     prompt: &'prompt str,
@@ -1571,6 +1724,7 @@ fn prefill_prompt_once<'prompt>(
 /// decode off [`prefill_prompt_once`]'s cached prefix must sample the
 /// IDENTICAL first 32 greedy token ids. Run once per bench (prompt index
 /// 0), never per pair -- this is a correctness gate, not a measurement.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn verify_prefix_resume_matches_full_decode(
     model: &LoadedModel,
     full_prompt: &str,
@@ -1617,6 +1771,7 @@ fn verify_prefix_resume_matches_full_decode(
 // main
 // ---------------------------------------------------------------------
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn base_serving_config(gpu_layers: i32) -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers,
@@ -1638,6 +1793,7 @@ fn base_serving_config(gpu_layers: i32) -> ServingConfig<'static> {
 /// Every field of one arm (invariants 2/3): ms/token, TTFT, p50/p99
 /// per-token latency, verify/accept/draft counts, RSS, CPU%, and GPU
 /// utilization summary when sampled -- none blank.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn format_arm(label: &str, arm: &ArmResult) -> String {
     let gpu = arm.gpu.map_or_else(
         || {
@@ -1672,6 +1828,7 @@ fn format_arm(label: &str, arm: &ArmResult) -> String {
     )
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasured_label: &str) {
     let drafter = args.drafter.unwrap_or(SpeculativeType::NgramSimple);
 
@@ -1717,8 +1874,9 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     let token_ids_per_prompt: Vec<Vec<u32>> = prompts
         .iter()
         .map(|prompt| {
-            proxima_tokenizer::encode_with_bos_eos(prompt, vocab, add_bos, add_eos)
-                .expect("tokenize prompt under the cached_len convention run_one_arm's decode call uses")
+            proxima_tokenizer::encode_with_bos_eos(prompt, vocab, add_bos, add_eos).expect(
+                "tokenize prompt under the cached_len convention run_one_arm's decode call uses",
+            )
         })
         .collect();
     let longest_prompt_tokens = token_ids_per_prompt
@@ -1732,8 +1890,9 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     // oversizing `-c` costs KV-cache memory, undersizing it truncates or
     // forces a mid-run reprocess -- the wrong failure mode for a
     // correctness-sensitive comparison run.
-    let llama_context_length = u32::try_from(longest_prompt_tokens + args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS)
-        .expect("corpus's longest prompt + max_tokens + headroom fits in a u32 context size");
+    let llama_context_length =
+        u32::try_from(longest_prompt_tokens + args.max_tokens + LLAMA_CONTEXT_HEADROOM_TOKENS)
+            .expect("corpus's longest prompt + max_tokens + headroom fits in a u32 context size");
 
     let incumbent_handles = args.incumbent.as_deref().map(|_| {
         spawn_incumbent_servers(
@@ -1814,7 +1973,13 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
             let is_warmup = pair_index == 0;
 
             let llama_pair = incumbent_handles.as_ref().map(|(off_handle, on_handle)| {
-                run_llama_pair(off_handle, on_handle, token_ids, args.max_tokens, swap_order)
+                run_llama_pair(
+                    off_handle,
+                    on_handle,
+                    token_ids,
+                    args.max_tokens,
+                    swap_order,
+                )
             });
             let llama_ratio = llama_pair.as_ref().map(|llama_pair| {
                 if llama_pair.on.ms_per_token > 0.0 {
@@ -1908,29 +2073,33 @@ fn run_pairs_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs, unmeasur
     );
 }
 
-
 // ---------------------------------------------------------------------
 // llama-parity mode: greedy token ids against the llama.cpp oracle
 // ---------------------------------------------------------------------
 
 /// Extra context llama-server is sized for past the longest prompt and
 /// `--max-tokens`; shared by every mode that spawns it.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const LLAMA_CONTEXT_HEADROOM_TOKENS: usize = 256;
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const LLAMA_PARITY_PORT: u16 = 18_082;
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const SWEEP_RUNS_PER_WIDTH: usize = 7;
 
 /// Default count of full-width verify steps a sweep run times (`--sweep-full-steps` overrides).
 /// `draft_limit_for_step` shrinks the draft to `max_tokens - step - 1`, so a width-`k+1` forward
 /// only runs while that limit is still `k`; each width's run is sized to `k + 1 + steps` tokens
 /// and stopped after token event `steps`, so every timed step ran at exactly `k+1` rows.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 const SWEEP_FULL_WIDTH_STEPS: usize = 16;
 
 /// Mean ms of the steps that ran at exactly `k+1` rows: steps `1..=full_steps` (step 0 evaluates the
 /// suffix, not a draft), read as the gap between token events 0 and `full_steps`. Only valid while
 /// every step emitted one token (`accepted_total == 0`), which the caller checks against the
 /// drafted-token count.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn full_width_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) -> Option<f64> {
     let first = token_elapsed_ms.first()?;
     let last = token_elapsed_ms.get(full_steps)?;
@@ -1939,6 +2108,7 @@ fn full_width_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) -> Option
 
 /// Median of the same steps' individual gaps. A KV-bucket crossing lands one slow step inside any
 /// run that spans a multiple of `kv_bucket_tokens`; the median ignores it where the mean does not.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn full_width_median_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) -> Option<f64> {
     let events = token_elapsed_ms.get(..=full_steps)?;
     let mut gaps: Vec<f64> = events
@@ -1953,6 +2123,7 @@ fn full_width_median_ms_per_step(token_elapsed_ms: &[u64], full_steps: usize) ->
 /// generated token ids (`return_tokens`), with `cache_prompt` off so every
 /// prompt is prefilled from scratch: the correctness oracle must not lean on
 /// a slot's cached prefix.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_llama_greedy_ids(port: u16, token_ids: &[u32], max_tokens: usize) -> Vec<u64> {
     let body = serde_json::json!({
         "prompt": token_ids,
@@ -1966,15 +2137,22 @@ fn run_llama_greedy_ids(port: u16, token_ids: &[u32], max_tokens: usize) -> Vec<
     response
         .get("tokens")
         .and_then(serde_json::Value::as_array)
-        .unwrap_or_else(|| panic!("llama-server /completion response missing \"tokens\": {response}"))
+        .unwrap_or_else(|| {
+            panic!("llama-server /completion response missing \"tokens\": {response}")
+        })
         .iter()
-        .map(|value| value.as_u64().unwrap_or_else(|| panic!("non-integer token id in {value}")))
+        .map(|value| {
+            value
+                .as_u64()
+                .unwrap_or_else(|| panic!("non-integer token id in {value}"))
+        })
         .collect()
 }
 
 /// The exact decode call the timed arms use (`run_one_arm`): resumed from the
 /// per-prompt cached prefix, with the speculative stats read off its return
 /// path so an ON arm that never drafted is visible as `drafted_total == 0`.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn greedy_ids_from_prefix(
     model: &LoadedModel,
     cached: &CachedPrompt<'_>,
@@ -1996,6 +2174,7 @@ fn greedy_ids_from_prefix(
     (ids.iter().map(|&id| u64::from(id)).collect(), stats)
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn first_divergence(proxima: &[u64], llama: &[u64]) -> Option<usize> {
     let shared = proxima.len().min(llama.len());
     (0..shared)
@@ -2010,6 +2189,7 @@ fn first_divergence(proxima: &[u64], llama: &[u64]) -> Option<usize> {
 /// one of proxima's dispatches is wrong in a way no proxima-vs-proxima
 /// comparison can see: the incumbent is the oracle, never proxima's own
 /// output.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
     let corpus_path = args
         .corpus_path
@@ -2038,7 +2218,9 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
 
     let config = base_serving_config(args.gpu_layers);
     let on_config = config.with_speculative(SpeculativeConfig {
-        speculative_types: SpeculativeTypeSet::single(args.drafter.unwrap_or(SpeculativeType::NgramSimple)),
+        speculative_types: SpeculativeTypeSet::single(
+            args.drafter.unwrap_or(SpeculativeType::NgramSimple),
+        ),
         ..SpeculativeConfig::none()
     });
     let mut server_args = base_llama_server_args(&config, llama_context_length);
@@ -2057,8 +2239,14 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
         let token_ids = &token_ids_per_prompt[prompt_index];
         check_token_parity(&handle, prompt, token_ids, add_bos);
         let (proxima_ids, ..) = model
-            .generate_with_serving_config(prompt, args.max_tokens, base_serving_config(args.gpu_layers))
-            .unwrap_or_else(|err| panic!("proxima greedy decode of prompt {prompt_index}: {err:?}"));
+            .generate_with_serving_config(
+                prompt,
+                args.max_tokens,
+                base_serving_config(args.gpu_layers),
+            )
+            .unwrap_or_else(|err| {
+                panic!("proxima greedy decode of prompt {prompt_index}: {err:?}")
+            });
         let proxima_ids: Vec<u64> = proxima_ids.iter().map(|&id| u64::from(id)).collect();
         let llama_ids = run_llama_greedy_ids(handle.port, token_ids, args.max_tokens);
         let divergence = first_divergence(&proxima_ids, &llama_ids);
@@ -2071,8 +2259,10 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
         );
 
         let cached = prefill_prompt_once(model, prompt, &on_config);
-        let (off_resumed_ids, off_stats) = greedy_ids_from_prefix(model, &cached, args.max_tokens, config);
-        let (on_resumed_ids, on_stats) = greedy_ids_from_prefix(model, &cached, args.max_tokens, on_config);
+        let (off_resumed_ids, off_stats) =
+            greedy_ids_from_prefix(model, &cached, args.max_tokens, config);
+        let (on_resumed_ids, on_stats) =
+            greedy_ids_from_prefix(model, &cached, args.max_tokens, on_config);
         let off_vs_llama = first_divergence(&off_resumed_ids, &llama_ids);
         let on_vs_off = first_divergence(&on_resumed_ids, &off_resumed_ids);
         let on_vs_llama = first_divergence(&on_resumed_ids, &llama_ids);
@@ -2080,7 +2270,10 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
             "llama_parity_spec prompt={prompt_index} off_vs_llama={off_vs_llama:?} on_vs_off={on_vs_off:?} \
              on_vs_llama={on_vs_llama:?} off_verify_steps={} on_verify_steps={} on_drafted={} \
              on_accepted={} off_ids={off_resumed_ids:?} on_ids={on_resumed_ids:?}",
-            off_stats.verify_steps, on_stats.verify_steps, on_stats.drafted_total, on_stats.accepted_total,
+            off_stats.verify_steps,
+            on_stats.verify_steps,
+            on_stats.drafted_total,
+            on_stats.accepted_total,
         );
     }
     println!("llama_parity prompts={} diverged={diverged}", prompts.len());
@@ -2089,6 +2282,7 @@ fn run_llama_parity_mode(model: &LoadedModel, vocab: &Vocab, args: &BenchArgs) {
 
 /// Text cut at the first character boundary at or after `char_count`, so a multi-byte character is
 /// never split.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn text_prefix_at_char_count(text: &str, char_count: usize) -> &str {
     let cut = text
         .char_indices()
@@ -2102,6 +2296,7 @@ fn text_prefix_at_char_count(text: &str, char_count: usize) -> &str {
 /// overrides; the default config chunks a long prompt into `ubatch_size`-row forwards, so this is
 /// the width the tiled-GEMM threshold decides for every chunk). Tokens/s is the prefix length the
 /// returned [`PrefixState`] reports over the wall time of that one call.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn run_prefill_throughput_mode(
     model: &LoadedModel,
     args: &BenchArgs,
@@ -2158,7 +2353,13 @@ fn run_prefill_throughput_mode(
 /// uses -- no forward-pass code is duplicated here. `k=0` degrades to plain
 /// non-speculative decode (speculation off), matching every other width-0
 /// arm in this harness.
-fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[usize], unmeasured_label: &str) {
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn run_verify_width_sweep_mode(
+    model: &LoadedModel,
+    args: &BenchArgs,
+    widths: &[usize],
+    unmeasured_label: &str,
+) {
     const REPEATED_PARAGRAPH: &str = "The quick brown fox jumps over the lazy dog while a curious cat \
          watches quietly from the garden wall. Pack my box with five dozen liquor jugs before \
          the delivery truck arrives at noon.";
@@ -2308,11 +2509,13 @@ fn run_verify_width_sweep_mode(model: &LoadedModel, args: &BenchArgs, widths: &[
 /// reads (`omega/src/msl/kernel_types_identity.rs`'s own A/B switches) --
 /// `value` is `None` when the caller left the var unset, matching every
 /// switch's own "unset default" posture.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 struct LeverVar {
     name: &'static str,
     value: Option<String>,
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 impl LeverVar {
     fn read(name: &'static str) -> Self {
         LeverVar {
@@ -2335,6 +2538,7 @@ impl LeverVar {
 /// `key=true/false` via `cfg!` so the printed line reflects THIS binary's
 /// own compilation, never an assumption about what the caller meant to
 /// build with.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn compiled_perf_features_summary() -> String {
     format!(
         "metal_feature={} metal_fuse_attn_decode_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={}",
@@ -2348,6 +2552,7 @@ fn compiled_perf_features_summary() -> String {
 /// The short commit this binary was built from, read at startup rather
 /// than baked in by a build script (no build.rs exists in this crate) --
 /// `unknown` when `git` is unavailable or this tree is not a git checkout.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn git_commit_at_startup() -> String {
     Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -2366,6 +2571,7 @@ fn git_commit_at_startup() -> String {
 /// dispatch shape yet, so admitting a dense op onto the tiled-GEMM path
 /// over-dispatches by roughly 4080x and a 510-token prefill hangs past
 /// 180s -- the fix for that gap is not on this branch.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn print_lever_config_and_refuse_if_unsafe() {
     let levers = [
         LeverVar::read("PROXIMA_MULTI_ROW_UNROLL"),
@@ -2402,6 +2608,7 @@ fn print_lever_config_and_refuse_if_unsafe() {
 /// `PROXIMA_TELEMETRY_FILE=<path>` points a file-sink [`Exporter`] at the process recorder, so the
 /// library's `debug!` events (raise them with `RUST_LOG`) land in `<path>` next to the bench's own
 /// stdout. Unset, no recorder is installed and every event site stays a no-op.
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn install_telemetry_file_sink() -> Option<Arc<Recorder>> {
     let path = env::var("PROXIMA_TELEMETRY_FILE").ok()?;
     let recorder = Recorder::builder()
@@ -2418,6 +2625,7 @@ fn install_telemetry_file_sink() -> Option<Arc<Recorder>> {
     Some(recorder)
 }
 
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn main() {
     let telemetry_recorder = install_telemetry_file_sink();
     install_orphan_reaping_panic_hook();
@@ -2445,7 +2653,9 @@ fn main() {
         std::process::exit(3);
     }
     if !precheck.is_quiet() {
-        eprintln!("speculative_bench: --force set; every printed line below is `unmeasured` (host busy):");
+        eprintln!(
+            "speculative_bench: --force set; every printed line below is `unmeasured` (host busy):"
+        );
         for reason in &precheck.busy_reasons {
             eprintln!("  - {reason}");
         }
@@ -2568,7 +2778,10 @@ mod tests {
 
         assert_eq!(cpu_idle_decision(&quiet), None);
         let reason = cpu_idle_decision(&contended).expect("40% idle must refuse");
-        assert!(reason.contains("idle=40.00%"), "reason carries the sample: {reason}");
+        assert!(
+            reason.contains("idle=40.00%"),
+            "reason carries the sample: {reason}"
+        );
     }
 
     /// A single `ollama ps` wake-the-Electron-app spike inside an otherwise
@@ -2743,7 +2956,10 @@ mod tests {
             "ttft_ms should come straight off timings.prompt_ms, got {}",
             arm.ttft_ms
         );
-        assert_eq!(arm.predicted_n, 6, "predicted_n should come off timings.predicted_n");
+        assert_eq!(
+            arm.predicted_n, 6,
+            "predicted_n should come off timings.predicted_n"
+        );
         assert_eq!(arm.draft_n, 24, "draft_n should come off timings.draft_n");
         assert_eq!(
             arm.draft_n_accepted, 18,
@@ -2782,8 +2998,14 @@ mod tests {
         // ("off") arm's response omits them entirely.
         let arm = parse_llama_completion_response(&cache_miss_response_body());
 
-        assert_eq!(arm.draft_n, 0, "missing draft_n must default to 0, not panic");
-        assert_eq!(arm.draft_n_accepted, 0, "missing draft_n_accepted must default to 0, not panic");
+        assert_eq!(
+            arm.draft_n, 0,
+            "missing draft_n must default to 0, not panic"
+        );
+        assert_eq!(
+            arm.draft_n_accepted, 0,
+            "missing draft_n_accepted must default to 0, not panic"
+        );
     }
 
     #[test]
@@ -2815,7 +3037,10 @@ mod tests {
             prefix.ends_with("<|turn>model"),
             "prefix must end exactly at the model-turn opener, got {prefix:?}"
         );
-        assert_eq!(suffix, "\n", "suffix must be the template's own trailing newline only");
+        assert_eq!(
+            suffix, "\n",
+            "suffix must be the template's own trailing newline only"
+        );
         assert_eq!(
             format!("{prefix}{suffix}"),
             templated,
@@ -2839,7 +3064,10 @@ mod tests {
             prefix.ends_with("<|turn>model"),
             "prefix must end exactly at the model-turn opener, got {prefix:?}"
         );
-        assert_eq!(suffix, "\n", "suffix must be the template's own trailing newline only");
+        assert_eq!(
+            suffix, "\n",
+            "suffix must be the template's own trailing newline only"
+        );
         assert_eq!(
             format!("{prefix}{suffix}"),
             templated,
@@ -2864,13 +3092,19 @@ mod tests {
             let guard = ChildGuard::new(child);
             assert_eq!(guard.pid(), pid);
             assert!(
-                REAPABLE_PIDS.lock().expect("lock REAPABLE_PIDS").contains(&pid),
+                REAPABLE_PIDS
+                    .lock()
+                    .expect("lock REAPABLE_PIDS")
+                    .contains(&pid),
                 "ChildGuard::new must register its pid for the panic-hook fallback"
             );
         } // `guard` drops here -- kills and waits `sleep 60`.
 
         assert!(
-            !REAPABLE_PIDS.lock().expect("lock REAPABLE_PIDS").contains(&pid),
+            !REAPABLE_PIDS
+                .lock()
+                .expect("lock REAPABLE_PIDS")
+                .contains(&pid),
             "ChildGuard::drop must deregister its pid once it has reaped the child"
         );
         // `wait()` inside `Drop::drop` already reaped the process, so a
@@ -2904,7 +3138,9 @@ mod tests {
             );
         }
         assert!(
-            summary.split(' ').all(|field| field.ends_with("=true") || field.ends_with("=false")),
+            summary
+                .split(' ')
+                .all(|field| field.ends_with("=true") || field.ends_with("=false")),
             "every feature field must render a bool, got: {summary}"
         );
     }
@@ -2922,4 +3158,10 @@ mod tests {
             "git_commit_at_startup must trim to a bare token, got: {commit:?}"
         );
     }
+}
+
+#[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
 }

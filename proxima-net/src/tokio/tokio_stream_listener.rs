@@ -3,8 +3,6 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use tokio::net::TcpListener as TokioTcpListenerInner;
@@ -12,6 +10,10 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use proxima_primitives::stream::{BindAddr, PeerInfo, StreamConnection, StreamListener};
 
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::Mutex;
 #[cfg(unix)]
 use tokio::net::UnixListener as TokioUnixListenerInner;
 

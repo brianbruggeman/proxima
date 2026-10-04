@@ -17,8 +17,11 @@ use proxima::{
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::error;
 use serde_json::Value;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
 #[global_allocator]
@@ -490,6 +493,7 @@ struct DaemonResponse {
 /// 1. control plane responses are tiny + always Content-Length,
 /// 2. zero need for the full hyper client surface here,
 /// 3. CLI startup cost matters.
+#[cfg(unix)]
 async fn http_call_over_uds(
     socket: &std::path::Path,
     method: &str,
@@ -530,6 +534,7 @@ async fn http_call_over_uds(
     parse_http_response(&response_bytes)
 }
 
+#[cfg(any(unix, test))]
 fn parse_http_response(bytes: &[u8]) -> Result<DaemonResponse, ProximaError> {
     let header_end = find_double_crlf(bytes)
         .ok_or_else(|| ProximaError::Decode("response missing header terminator".into()))?;
@@ -574,6 +579,7 @@ fn parse_http_response(bytes: &[u8]) -> Result<DaemonResponse, ProximaError> {
     Ok(DaemonResponse { status, body })
 }
 
+#[cfg(any(unix, test))]
 fn decode_chunked(bytes: &[u8]) -> Result<Vec<u8>, ProximaError> {
     let mut output = Vec::new();
     let mut cursor = 0usize;
@@ -604,6 +610,7 @@ fn decode_chunked(bytes: &[u8]) -> Result<Vec<u8>, ProximaError> {
     Ok(output)
 }
 
+#[cfg(any(unix, test))]
 fn find_double_crlf(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -882,15 +889,7 @@ async fn run_serve_single(
         .flush()
         .map_err(|err| ProximaError::Io(std::io::Error::other(format!("flush stdout: {err}"))))?;
 
-    let mut sigterm = signal(SignalKind::terminate()).map_err(|err| {
-        ProximaError::Io(std::io::Error::other(format!("install sigterm: {err}")))
-    })?;
-    let mut sigint = signal(SignalKind::interrupt())
-        .map_err(|err| ProximaError::Io(std::io::Error::other(format!("install sigint: {err}"))))?;
-    tokio::select! {
-        _ = sigterm.recv() => {}
-        _ = sigint.recv() => {}
-    }
+    wait_for_shutdown().await?;
     shutdown.stop();
     Ok(())
 }
@@ -934,15 +933,7 @@ async fn run_serve_full(spec: Spec) -> Result<(), ProximaError> {
         .flush()
         .map_err(|err| ProximaError::Io(std::io::Error::other(format!("flush stdout: {err}"))))?;
 
-    let mut sigterm = signal(SignalKind::terminate()).map_err(|err| {
-        ProximaError::Io(std::io::Error::other(format!("install sigterm: {err}")))
-    })?;
-    let mut sigint = signal(SignalKind::interrupt())
-        .map_err(|err| ProximaError::Io(std::io::Error::other(format!("install sigint: {err}"))))?;
-    tokio::select! {
-        _ = sigterm.recv() => {}
-        _ = sigint.recv() => {}
-    }
+    wait_for_shutdown().await?;
     for handle in handles {
         handle.shutdown();
     }
@@ -1524,4 +1515,54 @@ fn emit_json_report(
     let text = serde_json::to_string(&envelope)?;
     println!("{text}");
     Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown() -> Result<(), ProximaError> {
+    let mut sigterm = signal(SignalKind::terminate()).map_err(|err| {
+        ProximaError::Io(std::io::Error::other(format!("install sigterm: {err}")))
+    })?;
+    let mut sigint = signal(SignalKind::interrupt())
+        .map_err(|err| ProximaError::Io(std::io::Error::other(format!("install sigint: {err}"))))?;
+    tokio::select! {
+        _ = sigterm.recv() => {}
+        _ = sigint.recv() => {}
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown() -> Result<(), ProximaError> {
+    tokio::signal::ctrl_c().await.map_err(ProximaError::Io)
+}
+
+#[cfg(not(unix))]
+async fn http_call_over_uds(
+    _socket: &Path,
+    _method: &str,
+    _path_with_query: &str,
+    _body: Vec<u8>,
+) -> Result<DaemonResponse, ProximaError> {
+    Err(ProximaError::Config(
+        "daemon unix sockets require Unix".into(),
+    ))
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{ProximaError, http_call_over_uds, parse_http_response};
+    use std::path::Path;
+
+    #[proxima::test]
+    async fn windows_cli_daemon_uds_reports_unsupported() {
+        let result =
+            http_call_over_uds(Path::new("proxima.sock"), "GET", "/pipes", Vec::new()).await;
+        assert!(
+            matches!(result, Err(ProximaError::Config(message)) if message.contains("require Unix"))
+        );
+        let response = parse_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]")
+            .expect("parse portable daemon response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"[]");
+    }
 }

@@ -2,8 +2,10 @@
 //! Calls `uname(2)` via libc and prints the five utsname fields
 //! pipe-separated so the test can parse them deterministically.
 
+#[cfg(unix)]
 use std::ffi::CStr;
 
+#[cfg(unix)]
 fn read_field(field: &[i8]) -> String {
     // SAFETY: utsname fields are NUL-terminated C strings within
     // their fixed-size char arrays.
@@ -13,6 +15,7 @@ fn read_field(field: &[i8]) -> String {
     cstr.to_str().unwrap_or("non-utf8").to_string()
 }
 
+#[cfg(unix)]
 fn main() {
     // SAFETY: uts is a stack-allocated POD struct; uname writes
     // into it via the pointer. Initialize to zeros so any field
@@ -32,4 +35,9 @@ fn main() {
         read_field(&uts.version),
         read_field(&uts.machine),
     );
+}
+
+#[cfg(not(unix))]
+fn main() -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "POSIX interposition probe requires Unix"))
 }

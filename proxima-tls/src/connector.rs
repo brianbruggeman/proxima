@@ -15,7 +15,6 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use bon::Builder;
@@ -24,7 +23,9 @@ use futures::io::{AsyncRead, AsyncWrite};
 use futures_rustls::TlsConnector;
 use futures_rustls::client::TlsStream;
 use proxima_core::ProximaError;
-use proxima_primitives::stream::{PeerInfo, StreamConnection, StreamUpstream, StreamUpstreamExt};
+use proxima_primitives::stream::{
+    ConnectFuture, PeerInfo, StreamConnection, StreamUpstream, StreamUpstreamExt,
+};
 use rustls::ClientConfig;
 use rustls::RootCertStore;
 use rustls::pki_types::ServerName;
@@ -47,10 +48,6 @@ fn build_client_config(
     config.alpn_protocols = alpn_protocols;
     Ok(config)
 }
-
-// boxed because `poll_connect(&self, ..)` must stash this future in a struct
-// field between polls, and an RPITIT future has no nameable type to store.
-type ConnectFuture<C> = Pin<Box<dyn std::future::Future<Output = io::Result<TlsConn<C>>> + Send>>;
 
 /// Client-side TLS connection: a `futures_rustls::client::TlsStream`
 /// over the inner backend's connection. The inner `peer()` shows
@@ -106,12 +103,6 @@ pub struct TlsStreamUpstream<U: StreamUpstream> {
     // connect-time io error rather than a panic or a silent sentinel.
     server_name: Result<ServerName<'static>, String>,
     config: Arc<ClientConfig>,
-    // WHY Mutex here: `poll_connect(&self, ...)` takes `&self`, so the
-    // in-flight TCP-connect + TLS-handshake future needs interior
-    // mutability to survive across polls. Same structural constraint
-    // and per-connection (not per-request) contention profile as
-    // `TokioTcpUpstream::in_flight` / `PrimeTcpUpstream::in_flight`.
-    in_flight: Mutex<Option<ConnectFuture<U::Conn>>>,
 }
 
 impl<U: StreamUpstream> TlsStreamUpstream<U> {
@@ -128,7 +119,6 @@ impl<U: StreamUpstream> TlsStreamUpstream<U> {
             inner: Arc::new(inner),
             server_name,
             config,
-            in_flight: Mutex::new(None),
         }
     }
 
@@ -232,31 +222,15 @@ impl Validate for TlsClientConfig {
 impl<U: StreamUpstream> StreamUpstream for TlsStreamUpstream<U> {
     type Conn = TlsConn<U::Conn>;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        let Ok(mut slot) = self.in_flight.lock() else {
-            return Poll::Ready(Err(io::Error::other("TlsStreamUpstream: lock poisoned")));
-        };
-        let server_name = match &self.server_name {
-            Ok(name) => name.clone(),
-            Err(message) => return Poll::Ready(Err(io::Error::other(message.clone()))),
-        };
-        let future = slot.get_or_insert_with(|| {
-            let inner = self.inner.clone();
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+        Box::pin(async move {
+            let server_name = self.server_name.clone().map_err(io::Error::other)?;
+            let connection = self.inner.connect().await?;
+            let peer = connection.peer();
             let connector = TlsConnector::from(self.config.clone());
-            Box::pin(async move {
-                let conn = inner.connect().await?;
-                let peer = conn.peer();
-                let tls = connector.connect(server_name, conn).await?;
-                Ok(TlsConn { inner: tls, peer })
-            })
-        });
-        match future.as_mut().poll(cx) {
-            Poll::Ready(result) => {
-                *slot = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
-        }
+            let inner = connector.connect(server_name, connection).await?;
+            Ok(TlsConn { inner, peer })
+        })
     }
 }
 
@@ -306,12 +280,22 @@ mod tests {
         };
 
         let server = tokio::spawn(async move {
-            let conn = listener.accept().await.expect("accept");
-            let mut tls = acceptor.accept(conn).await.expect("server handshake");
-            let mut buf = [0_u8; 5];
-            tls.read_exact(&mut buf).await.expect("server read");
-            tls.write_all(&buf).await.expect("server echo");
-            tls.flush().await.expect("server flush");
+            let first = listener.accept().await.expect("first accept");
+            let second = listener.accept().await.expect("second accept");
+            let exchange = async |connection| {
+                let mut tls = acceptor.accept(connection).await.expect("server handshake");
+                let mut payload = [0_u8; 5];
+                tls.read_exact(&mut payload).await.expect("server read");
+                tls.write_all(&payload).await.expect("server echo");
+                tls.flush().await.expect("server flush");
+                payload
+            };
+            let (first, second) = futures::join!(exchange(first), exchange(second));
+            assert!(
+                (first == *b"hello" && second == *b"world")
+                    || (first == *b"world" && second == *b"hello"),
+                "both independent TLS requests must arrive"
+            );
         });
 
         let mut roots = RootCertStore::empty();
@@ -325,13 +309,18 @@ mod tests {
             "localhost",
             Arc::new(client_config),
         );
-        let mut conn = upstream.connect().await.expect("client tls connect");
-        conn.write_all(b"hello").await.expect("client write");
-        conn.flush().await.expect("client flush");
-        let mut reply = [0_u8; 5];
-        conn.read_exact(&mut reply).await.expect("client read");
-        assert_eq!(&reply, b"hello");
-
+        let exchange = async |payload: &[u8; 5]| {
+            let mut connection = upstream.connect().await.expect("client tls connect");
+            connection.write_all(payload).await.expect("client write");
+            connection.flush().await.expect("client flush");
+            let mut reply = [0_u8; 5];
+            connection
+                .read_exact(&mut reply)
+                .await
+                .expect("client read");
+            assert_eq!(&reply, payload);
+        };
+        futures::join!(exchange(b"hello"), exchange(b"world"));
         server.await.expect("join server");
     }
 

@@ -3087,6 +3087,6 @@ pub(crate) enum LogitsSink<'sink> {
     /// own sink: that test is `#[cfg(feature = "metal")]`, so this variant
     /// carries the same gate (plus `test`) rather than sitting dead in a
     /// `std`-only test build.
-    #[cfg(all(test, feature = "metal"))]
+    #[cfg(all(test, feature = "metal", target_os = "macos"))]
     SumBarriers(&'sink mut u64),
 }

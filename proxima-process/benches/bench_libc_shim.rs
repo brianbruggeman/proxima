@@ -70,7 +70,10 @@
 //! number. Use `--save-baseline` to pin a known-quiet result
 //! and compare against it for tweaks.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(unix)]
+mod unix {
+
+use criterion::{Criterion, criterion_group};
 use std::ffi::CStr;
 use std::hint::black_box;
 
@@ -252,4 +255,14 @@ criterion_group!(
     bench_gethostname_shim_stub,
     bench_gethostname_shim_dispatch,
 );
-criterion_main!(benches);
+pub fn run() { benches(); }
+
+}
+
+#[cfg(unix)]
+fn main() { unix::run(); }
+
+#[cfg(not(unix))]
+fn main() -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "POSIX interposition benchmark requires Unix"))
+}

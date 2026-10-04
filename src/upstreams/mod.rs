@@ -1,36 +1,36 @@
-#[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub mod amqp;
 pub mod callback;
 pub mod callback_registry;
-#[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub mod dns;
 pub mod fs;
 #[cfg(all(
     feature = "http-prime",
     feature = "http2",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub mod grpc_h2;
 #[cfg(all(
     feature = "kafka-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub mod kafka;
 #[cfg(all(
     feature = "memcached-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub mod memcached;
-#[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub mod mqtt;
 #[cfg(all(
     feature = "pgwire-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub mod pgwire;
 #[cfg(all(
     feature = "redis-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub mod redis;
 #[cfg(feature = "http1")]
@@ -60,7 +60,7 @@ pub mod vm;
 pub use proxima_recording::replay;
 #[cfg(all(
     feature = "h3-native-upstream",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub mod h3_native;
 #[cfg(any(feature = "tcp", feature = "unix"))]
@@ -77,31 +77,31 @@ pub use proxima_http::websocket::upstream as websocket;
 #[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
 pub use proxima_net::tokio::tokio_stream_upstream as tokio_stream;
 
-#[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use amqp::{AmqpClientProtocol, AmqpPipeFactory};
 pub use callback::{CallbackPipeFactory, CallbackUpstream};
 pub use callback_registry::{CallbackFn, CallbackFuture, CallbackRegistry, DynCallbackFn};
-#[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use dns::{DnsClientProtocol, DnsPipeFactory};
 pub use fs::{FsPipeFactory, FsUpstream};
 #[cfg(all(
     feature = "http-prime",
     feature = "http2",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use grpc_h2::GrpcH2PipeFactory;
 #[cfg(feature = "h3-upstream")]
 pub use h3::Http3Upstream;
 #[cfg(all(
     feature = "h3-native-upstream",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use h3_native::H3NativeUpstreamFactory;
 #[cfg(feature = "http1")]
 pub use http::{HttpPipeFactory, HttpUpstream};
 #[cfg(all(
     feature = "kafka-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use kafka::{KafkaClientProtocol, KafkaPipeFactory};
 pub use kv_cache::{KvCache, KvCacheFactory};
@@ -109,14 +109,14 @@ pub use kv_file::{KvFile, KvFileFactory};
 pub use kv_upstream::KvUpstream;
 #[cfg(all(
     feature = "memcached-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use memcached::{MemcachedClientProtocol, MemcachedPipeFactory};
-#[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use mqtt::{MqttClientProtocol, MqttPipeFactory};
 #[cfg(all(
     feature = "pgwire-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use pgwire::{PgwireClientProtocol, PgwirePipeFactory};
 #[cfg(feature = "tokio")]
@@ -129,7 +129,7 @@ pub use process_rpc::{ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream}
 pub use record::{RecordPipeFactory, RecordUpstream};
 #[cfg(all(
     feature = "redis-client",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use redis::{RedisClientProtocol, RedisPipeFactory};
 #[cfg(feature = "recording")]

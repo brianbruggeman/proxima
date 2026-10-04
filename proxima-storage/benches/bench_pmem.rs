@@ -16,13 +16,20 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use proxima_storage::pmem::cow::CowRoot;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use proxima_storage::pmem::persist;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::fs::OpenOptions;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::hint::black_box;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::os::unix::fs::FileExt;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn bench(criterion: &mut Criterion) {
     let layout = CowRoot::new(8).unwrap();
     let old = [0xAAu8; 8];
@@ -99,5 +106,10 @@ fn bench(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 criterion_group!(benches, bench);
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 criterion_main!(benches);
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn main() {}

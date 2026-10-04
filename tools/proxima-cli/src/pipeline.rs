@@ -10,6 +10,7 @@ use std::process::Stdio;
 use clap::{Args, Subcommand};
 use proxima::ProximaError;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::process::{ChildStdin, ChildStdout, Command};
 
@@ -148,6 +149,12 @@ impl PipelineTransport {
     /// connection so the SSH process gets reaped on drop).
     pub async fn connect(&self) -> Result<Connection, ProximaError> {
         match self {
+            #[cfg(not(unix))]
+            PipelineTransport::LocalUds(path) => Err(ProximaError::Config(format!(
+                "local unix sockets require Unix: {}; use --host for SSH transport",
+                path.display()
+            ))),
+            #[cfg(unix)]
             PipelineTransport::LocalUds(path) => {
                 let stream = UnixStream::connect(path).await.map_err(|err| {
                     ProximaError::Io(std::io::Error::other(format!(
@@ -188,6 +195,7 @@ impl PipelineTransport {
 }
 
 pub enum Connection {
+    #[cfg(unix)]
     Uds(UnixStream),
     Ssh {
         child: tokio::process::Child,
@@ -207,6 +215,7 @@ impl Connection {
         body: Option<(&str, Vec<u8>)>,
     ) -> Result<HttpResponse, ProximaError> {
         match &mut self {
+            #[cfg(unix)]
             Connection::Uds(stream) => http_call_io(stream, method, path, body).await,
             Connection::Ssh {
                 stdin,
@@ -237,6 +246,7 @@ impl Connection {
         path: &str,
     ) -> Result<NdjsonStream, ProximaError> {
         match self {
+            #[cfg(unix)]
             Connection::Uds(mut stream) => {
                 write_request(&mut stream, method, path, None).await?;
                 let head = read_response_head(&mut stream).await?;
@@ -375,6 +385,7 @@ pub struct NdjsonStream {
 }
 
 enum NdjsonTransport {
+    #[cfg(unix)]
     Uds(UnixStream),
     Ssh {
         stdout: ChildStdout,
@@ -383,6 +394,7 @@ enum NdjsonTransport {
 }
 
 impl NdjsonStream {
+    #[cfg(unix)]
     fn new_uds(stream: UnixStream, leftover: Vec<u8>, framing: Framing) -> Self {
         let terminated = matches!(framing, Framing::Sized(0));
         Self {
@@ -426,6 +438,7 @@ impl NdjsonStream {
             // pull more bytes from transport
             let mut chunk = [0_u8; 4096];
             let read = match &mut self.transport {
+                #[cfg(unix)]
                 NdjsonTransport::Uds(stream) => stream.read(&mut chunk).await,
                 NdjsonTransport::Ssh { stdout, .. } => stdout.read(&mut chunk).await,
             }
@@ -530,6 +543,7 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+#[cfg(unix)]
 async fn http_call_io<S>(
     stream: &mut S,
     method: &str,
@@ -1002,4 +1016,20 @@ fn urlencode(input: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{PipelineTransport, ProximaError};
+    use std::path::PathBuf;
+
+    #[proxima::test]
+    async fn windows_cli_local_uds_reports_unsupported() {
+        let result = PipelineTransport::LocalUds(PathBuf::from("proximad.sock"))
+            .connect()
+            .await;
+        assert!(
+            matches!(result, Err(ProximaError::Config(message)) if message.contains("require Unix"))
+        );
+    }
 }

@@ -19,6 +19,8 @@ use std::io;
 #[cfg(feature = "std")]
 use core::future::Future;
 #[cfg(feature = "std")]
+use core::marker::PhantomData;
+#[cfg(feature = "std")]
 use core::net::SocketAddr;
 #[cfg(feature = "std")]
 use core::pin::Pin;
@@ -68,10 +70,15 @@ pub trait StreamListener: Send + Sync + 'static {
 }
 
 #[cfg(feature = "std")]
+// an open set of transports crosses this object-safe boundary.
+pub type ConnectFuture<'lifetime, Connection> =
+    Pin<Box<dyn Future<Output = io::Result<Connection>> + Send + 'lifetime>>;
+
+#[cfg(feature = "std")]
 pub trait StreamUpstream: Send + Sync + 'static {
     type Conn: StreamConnection;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>>;
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn>;
 }
 
 #[cfg(feature = "std")]
@@ -87,7 +94,10 @@ impl<T: StreamListener + ?Sized> StreamListenerExt for T {}
 #[cfg(feature = "std")]
 pub trait StreamUpstreamExt: StreamUpstream {
     fn connect(&self) -> Connect<'_, Self> {
-        Connect { upstream: self }
+        Connect {
+            future: self.connect_future(),
+            upstream: PhantomData,
+        }
     }
 }
 
@@ -108,7 +118,7 @@ impl<T: StreamUpstream + ?Sized> StreamUpstreamExt for T {}
 ///
 /// `connect` is cheap and synchronous, mirroring `StreamUpstream` itself:
 /// building the upstream value never touches the network — the actual dial
-/// happens lazily on the returned value's `poll_connect`/`.connect().await`.
+/// happens lazily when the returned value's connection future is polled.
 #[cfg(feature = "std")]
 pub trait UnixUpstreamFactory: Send + Sync + 'static {
     fn connect(
@@ -133,15 +143,16 @@ impl<L: StreamListener + ?Sized> Future for Accept<'_, L> {
 
 #[cfg(feature = "std")]
 pub struct Connect<'lifetime, U: StreamUpstream + ?Sized> {
-    upstream: &'lifetime U,
+    future: ConnectFuture<'lifetime, U::Conn>,
+    upstream: PhantomData<&'lifetime U>,
 }
 
 #[cfg(feature = "std")]
 impl<U: StreamUpstream + ?Sized> Future for Connect<'_, U> {
     type Output = io::Result<U::Conn>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.upstream.poll_connect(cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.future.as_mut().poll(cx)
     }
 }
 
@@ -170,10 +181,10 @@ impl Default for TcpBindOptions {
 
 /// A bound TCP acceptor pinned to the worker that created it. `Send` (so
 /// it can be held across awaits in a `Send` bootstrap future) but NOT
-/// `Sync`: prime's reactor-backed listener caches a per-worker reactor
-/// pointer that is UB to poll off its origin worker. This is the bound
-/// that `StreamListener: Send + Sync` could not satisfy, so the runtime
-/// accept surface drops `Sync`.
+/// `Sync`: prime's reactor-backed listener retains its registration's
+/// worker identity and rejects polling on a different worker. Cross-thread
+/// disposal queues deregistration with the owner before closing the socket.
+/// The accept surface therefore requires exclusive access for polling.
 #[cfg(feature = "std")]
 pub trait TcpAcceptor: Send {
     /// Accept the next connection, yielding a boxed `StreamConnection`.

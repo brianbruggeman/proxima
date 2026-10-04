@@ -1835,6 +1835,7 @@ impl<'file> LoadedModel<'file> {
     /// offsets retained by the sidecar become the high-codec promotion source.
     /// No expert payload is copied or heap-allocated by this operation.
     pub fn attach_expert_sidecar(&mut self, mapping: Arc<Mmap>) -> Result<(), InteropError> {
+        #[cfg(unix)]
         mapping.advise(Advice::Random)?;
         let sidecar = crate::expert_sidecar::MappedExpertSidecar::new(mapping)?;
         self.attach_indexed_expert_sidecar(sidecar)
@@ -1847,6 +1848,7 @@ impl<'file> LoadedModel<'file> {
         mapping: Arc<Mmap>,
         checkpoint_file: File,
     ) -> Result<(), InteropError> {
+        #[cfg(unix)]
         mapping.advise(Advice::Random)?;
         let sidecar = crate::expert_sidecar::MappedExpertSidecar::new(mapping)?
             .with_checkpoint_file(checkpoint_file);
@@ -1929,7 +1931,7 @@ impl<'file> LoadedModel<'file> {
         // sidecar owns the expert bytes, drop that device-wide mapping so the
         // remaining tensors bind independently and the residency budget is
         // reflected by actual device buffers.
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             sidecar.discard_checkpoint_expert_pages(self.checkpoint_mapping)?;
             omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
@@ -7039,7 +7041,7 @@ pub(super) fn qwen35moe_monolithic_all_low_enabled(
     pre_gather && uses_gpu && requested
 }
 
-#[cfg(any(test, feature = "metal"))]
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(super) fn should_release_monolithic_sources(
     monolithic_all_low: bool,
     retain_for_warmup: bool,

@@ -16,30 +16,33 @@ pub mod taint;
 
 #[cfg(feature = "std")]
 pub mod command_config;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod command_pipe;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod dispatched;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod fd_pipe;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod fork_server;
 #[cfg(feature = "std")]
 pub mod host_grounds;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod ipc;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod libc_shim;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod pty;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod pty_config;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub mod pty_pipe;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
+pub mod spawn;
+#[cfg(all(feature = "std", windows))]
+#[path = "spawn_windows.rs"]
 pub mod spawn;
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", unix))]
 mod tests;
 
 pub use descriptor::{CommandDescriptor, Stdio};
@@ -50,13 +53,13 @@ pub mod command;
 
 #[cfg(feature = "std")]
 pub use command::{Command, Output};
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub use command_pipe::CommandPipe;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub use pty::{PtySize, current_terminal_size};
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub use pty_config::{PtyConfig, PtySizeConfig};
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 pub use pty_pipe::PtyCommandPipe;
 #[cfg(feature = "std")]
 pub use spawn::{Child, SpawnOptions};

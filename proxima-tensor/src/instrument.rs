@@ -10,6 +10,8 @@
 use core::future::Future;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeMap, HashSet};
+#[cfg(windows)]
+use std::io;
 use std::sync::OnceLock;
 use std::sync::{Mutex, PoisonError};
 use std::thread::ThreadId;
@@ -18,6 +20,12 @@ use proxima_clock::ticks::Ticks;
 use proxima_primitives::pipe::Pipe;
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::FILETIME;
+#[cfg(windows)]
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
 
 use crate::op::NodeId;
 
@@ -51,11 +59,11 @@ fn raw_tick() -> u64 {
     unsafe { libc::mach_absolute_time() }
 }
 
-// Non-Darwin: `clock_gettime(CLOCK_MONOTONIC)` is already ticksecond-native
+// non-Darwin Unix: `clock_gettime(CLOCK_MONOTONIC)` is already nanosecond-native
 // (the kernel/vDSO does its own scaling once, not duplicated per caller), so
 // there is no separate timebase conversion to defer — [`ticks_to_nanos`] is
 // the identity function on this path.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn raw_tick() -> u64 {
     let mut now = libc::timespec {
         tv_sec: 0,
@@ -65,6 +73,20 @@ fn raw_tick() -> u64 {
     // on every target this crate builds for.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
     (now.tv_sec as u64) * 1_000_000_000 + (now.tv_nsec as u64)
+}
+
+#[cfg(windows)]
+fn raw_tick() -> u64 {
+    let mut counter = 0_i64;
+    // safety: valid output pointer; Windows guarantees QPC availability since XP.
+    let success = unsafe { QueryPerformanceCounter(&mut counter) };
+    assert_ne!(
+        success,
+        0,
+        "QueryPerformanceCounter: {}",
+        io::Error::last_os_error()
+    );
+    counter as u64
 }
 
 /// One hardware-clock reading, hot-path shape: a plain function returning
@@ -98,18 +120,40 @@ fn timebase() -> (u64, u64) {
     })
 }
 
+#[cfg(windows)]
+fn timebase() -> (u64, u64) {
+    static FREQUENCY: OnceLock<u64> = OnceLock::new();
+    let frequency = *FREQUENCY.get_or_init(|| {
+        let mut frequency = 0_i64;
+        // safety: valid output pointer; the frequency is fixed at boot across processors.
+        let success = unsafe { QueryPerformanceFrequency(&mut frequency) };
+        assert_ne!(
+            success,
+            0,
+            "QueryPerformanceFrequency: {}",
+            io::Error::last_os_error()
+        );
+        assert!(
+            frequency > 0,
+            "QueryPerformanceFrequency returned a nonpositive frequency"
+        );
+        frequency as u64
+    });
+    (1_000_000_000, frequency)
+}
+
 /// The one-time-per-export conversion [`Ticks`]'s own doc names as the only
 /// place this multiply/divide belongs. Identity on platforms whose raw tick
-/// unit is already nanoseconds (everywhere `raw_tick` is not
-/// `mach_absolute_time`).
+/// unit is already nanoseconds. Windows QPC and Darwin hardware ticks use
+/// their cached platform frequency/timebase.
 #[must_use]
 pub fn ticks_to_nanos(ticks: u64) -> u64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         let (numer, denom) = timebase();
         u64::try_from(u128::from(ticks) * u128::from(numer) / u128::from(denom)).unwrap_or(u64::MAX)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         ticks
     }
@@ -666,6 +710,7 @@ static WORKER_CPU_NANOS: Mutex<Vec<(ThreadId, CpuWorkload, u64)>> = Mutex::new(V
 /// This thread's consumed CPU time. Unlike an [`Instant`](std::time::Instant)
 /// delta, this does not advance while the thread is off-core.
 #[must_use]
+#[cfg(unix)]
 pub fn thread_cpu_nanos() -> u64 {
     let mut now = libc::timespec {
         tv_sec: 0,
@@ -675,6 +720,32 @@ pub fn thread_cpu_nanos() -> u64 {
         return 0;
     }
     (now.tv_sec as u64) * 1_000_000_000 + (now.tv_nsec as u64)
+}
+
+/// this thread's kernel + user CPU time, converted from Windows 100 ns units.
+#[must_use]
+#[cfg(windows)]
+pub fn thread_cpu_nanos() -> u64 {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // safety: the pseudo-handle names this thread; all four output pointers are valid.
+    let success = unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    assert_ne!(success, 0, "GetThreadTimes: {}", io::Error::last_os_error());
+    let units =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    units(kernel)
+        .saturating_add(units(user))
+        .saturating_mul(100)
 }
 
 /// Adds `nanos` of consumed CPU time to the current thread's running total
@@ -735,7 +806,9 @@ pub fn reset_worker_cpu() {
 /// Used to test whether a measured wall-time change is first-touch page-in
 /// (mmap demand paging) rather than compute: a forward pass that walks a
 /// weight mapping for the first time pays one minor fault per page touched.
+/// Unix-only: Windows reports total page faults, which is a different metric.
 #[must_use]
+#[cfg(unix)]
 pub fn ru_minflt() -> u64 {
     let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {

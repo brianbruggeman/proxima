@@ -62,7 +62,7 @@ pub use proxima_http::websocket;
 #[cfg(all(
     feature = "udp",
     feature = "runtime-prime-inbox-alloc",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use proxima_net::prime::{PrimePacketListenerFactory, PrimeUdpListener};
 #[cfg(all(feature = "udp", feature = "tokio"))]

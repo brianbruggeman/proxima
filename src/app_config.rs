@@ -111,7 +111,7 @@ impl RuntimeBackendSelection {
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-bgpool",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 fn resolve_prime_selection(cores: usize) -> Result<RuntimeSelection, ProximaError> {
     RuntimeSelection::prime(cores)
@@ -122,7 +122,7 @@ fn resolve_prime_selection(cores: usize) -> Result<RuntimeSelection, ProximaErro
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-bgpool",
-    any(target_os = "linux", target_os = "macos")
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
 )))]
 fn resolve_prime_selection(_cores: usize) -> Result<RuntimeSelection, ProximaError> {
     Err(ProximaError::Config(

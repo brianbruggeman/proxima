@@ -33,7 +33,7 @@ pub trait ClientTransportExt: Sized {
     ///
     /// // `.dns()` needs the `dns-client` feature (default build has it off);
     /// // gated here so this example still compiles without it.
-    /// # #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos")))]
+    /// # #[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     /// let client = Client::builder().dns("dns://1.1.1.1:53").udp().build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```

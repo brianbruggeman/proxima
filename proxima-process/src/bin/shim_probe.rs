@@ -3,8 +3,10 @@
 //! test spawns this binary with and without the interpose shim
 //! attached to verify that loading the shim flips the answer.
 
+#[cfg(unix)]
 use std::ffi::CStr;
 
+#[cfg(unix)]
 fn main() {
     let mut buffer = [0u8; 256];
     // SAFETY: buffer is a fixed-size stack array; we hand libc its
@@ -21,4 +23,9 @@ fn main() {
     let cstr = CStr::from_bytes_until_nul(&buffer).unwrap_or(c"");
     let text = cstr.to_str().unwrap_or("non-utf8");
     println!("{text}");
+}
+
+#[cfg(not(unix))]
+fn main() -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "POSIX interposition probe requires Unix"))
 }

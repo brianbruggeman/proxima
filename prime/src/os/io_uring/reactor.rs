@@ -28,7 +28,6 @@
     feature = "runtime-prime-reactor"
 ))]
 
-use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
 use std::task::Waker;
@@ -36,7 +35,7 @@ use std::task::Waker;
 use io_uring::{IoUring, opcode};
 use proxima_telemetry::debug;
 
-use super::super::core_shard::CURRENT_REACTOR;
+use super::super::core_shard::with_current_reactor;
 use super::super::reactor::Interest;
 
 /// per-direction read/write buffer size for `TcpStream`; owned here (rather
@@ -385,15 +384,10 @@ where
 // no `Context` exists — the ring fd is registered for interest only, never
 // parked on.
 fn register_ring_fd_with_epoll(ring_fd: std::os::fd::RawFd) -> io::Result<()> {
-    let reactor_ptr = CURRENT_REACTOR.with(Cell::get);
-    if reactor_ptr.is_null() {
-        return Ok(());
-    }
-    // SAFETY: pointer is set by core_shard::worker_main; valid for the
-    // worker's lifetime. we're on the worker thread (same thread that set it).
-    let reactor = unsafe { &mut *reactor_ptr };
-    // ignore error if fd is already registered (idempotent on re-init).
-    let _ = reactor.register(ring_fd, Interest::Read);
+    with_current_reactor(|reactor| {
+        // ignore error if fd is already registered (idempotent on re-init).
+        let _ = reactor.register(ring_fd, Interest::Read);
+    });
     Ok(())
 }
 

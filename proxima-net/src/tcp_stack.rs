@@ -54,6 +54,8 @@ enum Lifecycle {
 
 struct Conn {
     peer: Endpoint,
+    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    active_open: bool,
     path: Path,
     iss_plus_one: u32,
     sent: u32,
@@ -158,6 +160,40 @@ impl TcpStack {
     /// Pop the next actively-opened connection whose handshake completed.
     pub fn poll_connected(&mut self) -> Option<ConnId> {
         self.connected.pop_front()
+    }
+
+    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    pub(crate) fn active_connect_sequence(&self, id: ConnId) -> Option<u32> {
+        match self.conns.get(&id) {
+            Some(Entry::SynSent { isn, .. }) => Some(*isn),
+            _ => self.active_connection_sequence(id),
+        }
+    }
+
+    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    pub(crate) fn active_connection_sequence(&self, id: ConnId) -> Option<u32> {
+        match self.conns.get(&id) {
+            Some(Entry::Open(connection)) if connection.active_open => {
+                Some(connection.iss_plus_one.wrapping_sub(1))
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    pub(crate) fn cancel_connect(&mut self, id: ConnId, sequence: u32) {
+        let owned = match self.conns.get(&id) {
+            Some(Entry::SynSent { isn, .. }) => *isn == sequence,
+            Some(Entry::Open(connection)) => {
+                connection.active_open && connection.iss_plus_one == sequence.wrapping_add(1)
+            }
+            Some(Entry::Handshake { .. }) => false,
+            None => true,
+        };
+        if owned {
+            self.conns.remove(&id);
+            self.connected.retain(|connected| *connected != id);
+        }
     }
 
     #[must_use]
@@ -350,7 +386,11 @@ fn advance(entry: &mut Entry, inbound: &Inbound, now: Instant) -> (Vec<OutSegmen
             if !(inbound.flags.syn && inbound.flags.ack) {
                 return (Vec::new(), Lifecycle::None);
             }
-            let conn = Conn::new(*peer, *isn, inbound.seq, inbound.window);
+            let conn = Conn {
+                #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+                active_open: true,
+                ..Conn::new(*peer, *isn, inbound.seq, inbound.window)
+            };
             let ack = conn.bare_ack();
             *entry = Entry::Open(conn);
             (vec![ack], Lifecycle::Connected)
@@ -387,6 +427,8 @@ impl Conn {
         );
         Self {
             peer,
+            #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+            active_open: false,
             path,
             iss_plus_one,
             sent: 0,

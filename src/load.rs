@@ -266,20 +266,27 @@ fn default_pipe_factory_registry(
     registry.register(Arc::new(KvCacheFactory))?;
     registry.register(Arc::new(KvFileFactory))?;
     // `http` upstream backend: PRIME is the default whenever the prime
-    // runtime is active on unix — the prime `TcpStream` registers with the
+    // runtime is active on a supported OS — the prime `TcpStream` registers with the
     // per-worker reactor (`CURRENT_REACTOR`), so it can only be driven on a
     // prime CoreShard worker, not a plain tokio runtime. Hyper is the
-    // backend otherwise: on the tokio runtime, on non-unix (proxima-net-prime
-    // is macOS/Linux only), and whenever the `http-hyper` opt-out is on.
+    // backend otherwise: on the tokio runtime or an explicit `http-hyper` wire.
     // The `Client` requests-style API resolves its pipe through this
     // registry, so the backend swaps without touching the client surface.
     // prime is the default `"http"` backend whenever it is available.
-    #[cfg(all(unix, feature = "http-prime-deps", feature = "runtime-prime"))]
+    #[cfg(all(
+        any(unix, windows),
+        feature = "http-prime-deps",
+        feature = "runtime-prime"
+    ))]
     registry.register(Arc::new(proxima_http::http1::PrimeHttpPipeFactory::new()))?;
     // hyper backs `"http"` directly only when prime is unavailable.
     #[cfg(all(
         feature = "http-hyper",
-        not(all(unix, feature = "http-prime-deps", feature = "runtime-prime"))
+        not(all(
+            any(unix, windows),
+            feature = "http-prime-deps",
+            feature = "runtime-prime"
+        ))
     ))]
     registry.register(Arc::new(HttpPipeFactory::with_shared_client(
         http_client.clone(),
@@ -288,7 +295,7 @@ fn default_pipe_factory_registry(
     // `"http-tokio"`, chosen per-upstream via `"wire":"tokio"` — default stays prime.
     #[cfg(all(
         feature = "http-hyper",
-        unix,
+        any(unix, windows),
         feature = "http-prime-deps",
         feature = "runtime-prime"
     ))]
@@ -302,14 +309,14 @@ fn default_pipe_factory_registry(
     #[cfg(all(
         feature = "http-prime",
         feature = "http2",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     registry.register(Arc::new(crate::upstreams::grpc_h2::GrpcH2PipeFactory::new()))?;
     // `pgwire` protocol terminal: reached via `{"type":"pgwire", ...}` or the
     // `.pgwire(dsn)` builder sugar — the PostgreSQL client over prime TCP.
     #[cfg(all(
         feature = "pgwire-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     registry.register(Arc::new(crate::upstreams::pgwire::PgwirePipeFactory::new()))?;
     // `redis` protocol terminal: reached via `{"type":"redis", ...}` or the
@@ -317,7 +324,7 @@ fn default_pipe_factory_registry(
     // over prime TCP.
     #[cfg(all(
         feature = "redis-client",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     registry.register(Arc::new(crate::upstreams::redis::RedisPipeFactory::new()))?;
     // `h3-native` protocol terminal: reached via `{"type":"h3-native", ...}`
@@ -326,7 +333,7 @@ fn default_pipe_factory_registry(
     // `Http3Upstream` (P7).
     #[cfg(all(
         feature = "h3-native-upstream",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     registry.register(Arc::new(
         crate::upstreams::h3_native::H3NativeUpstreamFactory::new(),
@@ -973,7 +980,7 @@ mod tests {
     // spec compiles.
     #[cfg(all(
         feature = "h3-native-upstream",
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
     #[proxima::test]
     async fn quic_transport_dispatches_through_h3_native_not_the_ordinary_http_factory() {
@@ -1057,7 +1064,11 @@ mod tests {
     // matches default_pipe_factory_registry's "http" factory availability:
     // prime on unix, or hyper as the fallback wire.
     #[cfg(any(
-        all(unix, feature = "http-prime-deps", feature = "runtime-prime"),
+        all(
+            any(unix, windows),
+            feature = "http-prime-deps",
+            feature = "runtime-prime"
+        ),
         feature = "http-hyper"
     ))]
     #[proxima::test]
@@ -1074,7 +1085,11 @@ mod tests {
     }
 
     #[cfg(any(
-        all(unix, feature = "http-prime-deps", feature = "runtime-prime"),
+        all(
+            any(unix, windows),
+            feature = "http-prime-deps",
+            feature = "runtime-prime"
+        ),
         feature = "http-hyper"
     ))]
     #[proxima::test]
@@ -1095,7 +1110,11 @@ mod tests {
     }
 
     #[cfg(any(
-        all(unix, feature = "http-prime-deps", feature = "runtime-prime"),
+        all(
+            any(unix, windows),
+            feature = "http-prime-deps",
+            feature = "runtime-prime"
+        ),
         feature = "http-hyper"
     ))]
     #[proxima::test]
@@ -1110,7 +1129,11 @@ mod tests {
     }
 
     #[cfg(any(
-        all(unix, feature = "http-prime-deps", feature = "runtime-prime"),
+        all(
+            any(unix, windows),
+            feature = "http-prime-deps",
+            feature = "runtime-prime"
+        ),
         feature = "http-hyper"
     ))]
     #[proxima::test]
@@ -1238,7 +1261,11 @@ mod tests {
     }
 
     #[cfg(any(
-        all(unix, feature = "http-prime-deps", feature = "runtime-prime"),
+        all(
+            any(unix, windows),
+            feature = "http-prime-deps",
+            feature = "runtime-prime"
+        ),
         feature = "http-hyper"
     ))]
     #[proxima::test]

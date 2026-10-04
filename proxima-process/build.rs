@@ -20,6 +20,10 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", source.display());
 
+    if target_os == "windows" {
+        return;
+    }
+
     let (artifact_name, link_flag) = match target_os.as_str() {
         "macos" => ("libproxima_process_shim.dylib", "-dynamiclib"),
         "linux" => ("libproxima_process_shim.so", "-shared"),

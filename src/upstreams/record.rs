@@ -1745,7 +1745,7 @@ mod tests {
         #[cfg(feature = "http-prime-deps")]
         mod multi_connection {
             use super::*;
-            use proxima_primitives::stream::{PeerInfo, StreamConnection, StreamUpstream};
+            use proxima_primitives::stream::{ConnectFuture, PeerInfo, StreamConnection, StreamUpstream};
 
             const MULTI_CONN_RUNS: usize = 300;
 
@@ -1774,20 +1774,16 @@ mod tests {
             impl StreamUpstream for SingleConnUpstream {
                 type Conn = DuplexHalf;
 
-                fn poll_connect(
-                    &self,
-                    _ctx: &mut Context<'_>,
-                ) -> Poll<std::io::Result<Self::Conn>> {
-                    let mut guard = self
-                        .conn
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match guard.take() {
-                        Some(conn) => Poll::Ready(Ok(conn)),
-                        None => Poll::Ready(Err(std::io::Error::other(
+                fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+                    Box::pin(async move {
+                        let mut guard = self
+                            .conn
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        guard.take().ok_or_else(|| std::io::Error::other(
                             "single-connection upstream already connected once",
-                        ))),
-                    }
+                        ))
+                    })
                 }
             }
 

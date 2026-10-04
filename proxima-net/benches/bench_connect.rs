@@ -25,18 +25,25 @@
 //! side. the connecting socket also sets SO_LINGER=0 before drop. together
 //! these prevent ephemeral port exhaustion during criterion's warm-up burst.
 
-#![cfg(any(target_os = "macos", target_os = "linux"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::net::SocketAddr;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::mpsc;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use prime::os::core_shard;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use proxima_runtime::CoreId;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use socket2::{Domain, Protocol, Socket, Type};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn configure_group<M: criterion::measurement::Measurement>(
     group: &mut criterion::BenchmarkGroup<'_, M>,
 ) {
@@ -45,6 +52,7 @@ fn configure_group<M: criterion::measurement::Measurement>(
     group.measurement_time(Duration::from_secs(8));
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn make_listener() -> SocketAddr {
     let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("socket");
     sock.set_reuse_address(true).expect("SO_REUSEADDR");
@@ -67,6 +75,7 @@ fn make_listener() -> SocketAddr {
     addr
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn bench_tcp_connect(criterion: &mut Criterion) {
     let tokio_addr = make_listener();
     let prime_addr = make_listener();
@@ -140,5 +149,10 @@ fn bench_tcp_connect(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 criterion_group!(benches, bench_tcp_connect);
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 criterion_main!(benches);
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn main() {}

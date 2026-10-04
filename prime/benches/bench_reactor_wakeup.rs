@@ -30,40 +30,166 @@
 //! all four endpoints set TCP_NODELAY — a tiny ping-pong is otherwise
 //! destroyed by Nagle + delayed-ACK.
 
-#![cfg(all(
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+#[cfg(all(
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
-    any(target_os = "macos", target_os = "linux"),
+    any(target_os = "macos", target_os = "linux")
 ))]
-#![allow(clippy::expect_used, clippy::unwrap_used)]
-
 use std::future::Future;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::hint::black_box;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::io::{Read, Write};
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::net::{SocketAddr, TcpListener};
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::os::fd::AsRawFd;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::pin::Pin;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::sync::{Arc, Mutex};
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::task::{Context, Poll, Waker};
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use std::time::{Duration, Instant};
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use futures::future::poll_fn;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use futures::io::AsyncRead as FuturesAsyncRead;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use prime::os::core_shard;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use proxima_runtime::CoreId;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 use tokio::io::{AsyncRead as TokioAsyncRead, ReadBuf};
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 const PAYLOAD_SIZES: [usize; 4] = [1, 64, 4096, 16_384];
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 const RTT_TRACE_PAYLOAD_SIZES: [usize; 3] = [1, 64, 4096];
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 const RTT_TRACE_DIAGNOSTIC_ITERS: u64 = 10_000;
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 static COUNTED_READ_REPORTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 static RTT_TRACE_REPORTS: AtomicU64 = AtomicU64::new(0);
 
 /// spawn a blocking std echo peer: accept connections sequentially, echo every
 /// read bytes back until the client closes, then accept the next. one per arm.
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn spawn_echo_peer() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind echo");
     let addr = listener.local_addr().expect("local_addr");
@@ -93,12 +219,24 @@ fn spawn_echo_peer() -> SocketAddr {
 }
 
 #[derive(Default)]
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct EchoCounters {
     read_wait_ns: AtomicU64,
     write_ns: AtomicU64,
     total_ns: AtomicU64,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl EchoCounters {
     fn reset(&self) {
         self.read_wait_ns.store(0, Ordering::Release);
@@ -134,12 +272,24 @@ impl EchoCounters {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 /// spawn a blocking std echo peer and accumulate peer-side timing:
 /// waiting for the client bytes to become readable, then writing the echo.
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn spawn_measured_echo_peer(counters: Arc<EchoCounters>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind measured echo");
     let addr = listener.local_addr().expect("local_addr");
@@ -174,6 +324,12 @@ fn spawn_measured_echo_peer(counters: Arc<EchoCounters>) -> SocketAddr {
     addr
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn configure_group<M: criterion::measurement::Measurement>(
     group: &mut criterion::BenchmarkGroup<'_, M>,
 ) {
@@ -182,6 +338,12 @@ fn configure_group<M: criterion::measurement::Measurement>(
     group.measurement_time(Duration::from_secs(8));
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn configure_attribution_group<M: criterion::measurement::Measurement>(
     group: &mut criterion::BenchmarkGroup<'_, M>,
 ) {
@@ -190,12 +352,24 @@ fn configure_attribution_group<M: criterion::measurement::Measurement>(
     group.measurement_time(Duration::from_secs(3));
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bind_loopback_listener() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
     let addr = listener.local_addr().expect("listener local_addr");
     (listener, addr)
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn connected_std_pair() -> (std::net::TcpStream, std::net::TcpStream) {
     let (listener, addr) = bind_loopback_listener();
     let stream = std::net::TcpStream::connect(addr).expect("connect std client");
@@ -206,6 +380,12 @@ fn connected_std_pair() -> (std::net::TcpStream, std::net::TcpStream) {
     (stream, peer)
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn wait_for_duration(slot: &Arc<Mutex<Option<Duration>>>, label: &str) -> Duration {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -217,6 +397,12 @@ fn wait_for_duration(slot: &Arc<Mutex<Option<Duration>>>, label: &str) -> Durati
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn wait_for_counted_read_result(
     slot: &Arc<Mutex<Option<(Duration, ReadPollCounts)>>>,
     label: &str,
@@ -231,6 +417,12 @@ fn wait_for_counted_read_result(
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn wait_for_rtt_trace_result(
     slot: &Arc<Mutex<Option<(RttTraceTotals, ReadPollCounts)>>>,
     label: &str,
@@ -245,6 +437,12 @@ fn wait_for_rtt_trace_result(
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn report_counted_read(label: &str, payload_len: usize, iters: u64, counts: ReadPollCounts) {
     let Some(payload_index) = PAYLOAD_SIZES
         .iter()
@@ -271,16 +469,34 @@ fn report_counted_read(label: &str, payload_len: usize, iters: u64, counts: Read
 }
 
 #[derive(Clone, Copy, Default)]
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct RttTraceTotals {
     client_total: Duration,
     client_write: Duration,
     client_read_after_write: Duration,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn duration_avg_ns(duration: Duration, iters: u64) -> f64 {
     duration.as_nanos() as f64 / iters as f64
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn report_rtt_trace(
     label: &str,
     payload_len: usize,
@@ -304,6 +520,12 @@ fn report_rtt_trace(
 }
 
 #[cfg(feature = "runtime-prime-reactor-trace")]
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn trace_avg_ns(total: u64, cycles: u64) -> f64 {
     if cycles == 0 {
         0.0
@@ -313,6 +535,12 @@ fn trace_avg_ns(total: u64, cycles: u64) -> f64 {
 }
 
 #[cfg(feature = "runtime-prime-reactor-trace")]
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn report_prime_internal_trace(payload_len: usize, snapshot: prime::trace::Snapshot) {
     eprintln!(
         "diagnostic prime_internal_trace/{payload_len}: cycles={} missed={} \
@@ -394,6 +622,12 @@ fn report_prime_internal_trace(payload_len: usize, snapshot: prime::trace::Snaps
     );
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn should_report_rtt_trace(label: &str, payload_len: usize) -> bool {
     let Some(payload_index) = RTT_TRACE_PAYLOAD_SIZES
         .iter()
@@ -411,6 +645,12 @@ fn should_report_rtt_trace(label: &str, payload_len: usize) -> bool {
     RTT_TRACE_REPORTS.fetch_or(bit, Ordering::AcqRel) & bit == 0
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn std_read_ready_once(stream: &mut std::net::TcpStream, buf: &mut [u8; 1]) -> Duration {
     loop {
         let start = Instant::now();
@@ -425,6 +665,12 @@ fn std_read_ready_once(stream: &mut std::net::TcpStream, buf: &mut [u8; 1]) -> D
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn socket2_recv_ready_once(socket: &socket2::Socket, buf: &mut [u8; 1]) -> Duration {
     loop {
         let uninit_buf =
@@ -441,6 +687,12 @@ fn socket2_recv_ready_once(socket: &socket2::Socket, buf: &mut [u8; 1]) -> Durat
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn socket2_recv_wouldblock_once(socket: &socket2::Socket, buf: &mut [u8; 1]) -> Duration {
     let uninit_buf = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len()) };
     let start = Instant::now();
@@ -451,6 +703,12 @@ fn socket2_recv_wouldblock_once(socket: &socket2::Socket, buf: &mut [u8; 1]) -> 
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn libc_recv_ready_once(stream: &std::net::TcpStream, buf: &mut [u8; 1]) -> Duration {
     loop {
         let start = Instant::now();
@@ -473,6 +731,12 @@ fn libc_recv_ready_once(stream: &std::net::TcpStream, buf: &mut [u8; 1]) -> Dura
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn libc_read_ready_once(stream: &std::net::TcpStream, buf: &mut [u8; 1]) -> Duration {
     loop {
         let start = Instant::now();
@@ -495,6 +759,12 @@ fn libc_read_ready_once(stream: &std::net::TcpStream, buf: &mut [u8; 1]) -> Dura
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn libc_read_wouldblock_once(stream: &std::net::TcpStream, buf: &mut [u8; 1]) -> Duration {
     let start = Instant::now();
     let n = unsafe { libc::read(stream.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
@@ -509,6 +779,12 @@ fn libc_read_wouldblock_once(stream: &std::net::TcpStream, buf: &mut [u8; 1]) ->
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn prime_poll_read_ready_once(
     stream: &mut prime::os::net::TcpStream,
     buf: &mut [u8],
@@ -529,6 +805,12 @@ async fn prime_poll_read_ready_once(
     .await
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn prime_try_read_ready_once(
     stream: &mut prime::os::net::TcpStream,
     buf: &mut [u8],
@@ -550,6 +832,12 @@ fn prime_try_read_ready_once(
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn prime_poll_read_pending_once(
     stream: &mut prime::os::net::TcpStream,
     buf: &mut [u8],
@@ -565,6 +853,12 @@ async fn prime_poll_read_pending_once(
     .await
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn tokio_try_read_ready_once(
     stream: &tokio::net::TcpStream,
     buf: &mut [u8],
@@ -585,6 +879,12 @@ async fn tokio_try_read_ready_once(
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn tokio_poll_read_pending_once(
     stream: &mut tokio::net::TcpStream,
     buf: &mut [u8],
@@ -606,6 +906,12 @@ async fn tokio_poll_read_pending_once(
     .await
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct WakeState {
     armed_seq: AtomicU64,
     wake_seq: AtomicU64,
@@ -613,6 +919,12 @@ struct WakeState {
     waker: Mutex<Option<Waker>>,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl WakeState {
     fn new() -> Self {
         Self {
@@ -624,11 +936,23 @@ impl WakeState {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct ExternalWake {
     state: Arc<WakeState>,
     seq: u64,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl std::future::Future for ExternalWake {
     type Output = ();
 
@@ -648,16 +972,34 @@ impl std::future::Future for ExternalWake {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct AlwaysReadyRead {
     byte: u8,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl AlwaysReadyRead {
     fn new() -> Self {
         Self { byte: 0x51 }
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl FuturesAsyncRead for AlwaysReadyRead {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -676,6 +1018,12 @@ impl FuturesAsyncRead for AlwaysReadyRead {
 }
 
 #[derive(Clone, Copy, Default)]
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct ReadPollCounts {
     polls: u64,
     pending: u64,
@@ -683,6 +1031,12 @@ struct ReadPollCounts {
     bytes: u64,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl ReadPollCounts {
     fn describe(self, iters: u64) -> String {
         format!(
@@ -695,11 +1049,23 @@ impl ReadPollCounts {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct CountingPrimeRead<'stream, 'counts> {
     stream: &'stream mut prime::os::net::TcpStream,
     counts: &'counts mut ReadPollCounts,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl FuturesAsyncRead for CountingPrimeRead<'_, '_> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -723,11 +1089,23 @@ impl FuturesAsyncRead for CountingPrimeRead<'_, '_> {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct CountingTokioRead<'stream, 'counts> {
     stream: &'stream mut tokio::net::TcpStream,
     counts: &'counts mut ReadPollCounts,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl TokioAsyncRead for CountingTokioRead<'_, '_> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -753,6 +1131,12 @@ impl TokioAsyncRead for CountingTokioRead<'_, '_> {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn prime_read_exact_counted(
     stream: &mut prime::os::net::TcpStream,
     buf: &mut [u8],
@@ -764,6 +1148,12 @@ async fn prime_read_exact_counted(
         .expect("prime counted read_exact");
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn tokio_read_exact_counted(
     stream: &mut tokio::net::TcpStream,
     buf: &mut [u8],
@@ -775,6 +1165,12 @@ async fn tokio_read_exact_counted(
         .expect("tokio counted read_exact");
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn run_prime_rtt_trace(
     addr: SocketAddr,
     counters: Arc<EchoCounters>,
@@ -813,6 +1209,12 @@ async fn run_prime_rtt_trace(
     (totals, counts)
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 async fn run_tokio_rtt_trace(
     addr: SocketAddr,
     counters: Arc<EchoCounters>,
@@ -850,6 +1252,12 @@ async fn run_tokio_rtt_trace(
     (totals, counts)
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn run_tokio_rtt_trace_on_thread(
     addr: SocketAddr,
     counters: Arc<EchoCounters>,
@@ -870,11 +1278,23 @@ fn run_tokio_rtt_trace_on_thread(
         .expect("tokio rtt trace thread")
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct ReadWakeState {
     armed_seq: AtomicU64,
     done_seq: AtomicU64,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl ReadWakeState {
     fn new() -> Self {
         Self {
@@ -884,11 +1304,23 @@ impl ReadWakeState {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 enum ReadWakePhase {
     Arm,
     AwaitRead,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct PrimeReadWake<'stream> {
     stream: &'stream mut prime::os::net::TcpStream,
     state: Arc<ReadWakeState>,
@@ -897,6 +1329,12 @@ struct PrimeReadWake<'stream> {
     buf: [u8; 1],
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl std::future::Future for PrimeReadWake<'_> {
     type Output = ();
 
@@ -919,6 +1357,12 @@ impl std::future::Future for PrimeReadWake<'_> {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct TokioReadWake<'stream> {
     stream: &'stream mut tokio::net::TcpStream,
     state: Arc<ReadWakeState>,
@@ -927,6 +1371,12 @@ struct TokioReadWake<'stream> {
     buf: [u8; 1],
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl std::future::Future for TokioReadWake<'_> {
     type Output = ();
 
@@ -954,11 +1404,23 @@ impl std::future::Future for TokioReadWake<'_> {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 enum ReadWakeTiming {
     WriteToDone,
     PostWriteToDone,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn wake_one_iteration(state: &WakeState, seq: u64) -> Duration {
     while state.armed_seq.load(Ordering::Acquire) < seq {
         std::thread::yield_now();
@@ -975,6 +1437,12 @@ fn wake_one_iteration(state: &WakeState, seq: u64) -> Duration {
     start.elapsed()
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn wait_for_seq(counter: &AtomicU64, seq: u64, label: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while counter.load(Ordering::Acquire) < seq {
@@ -986,6 +1454,12 @@ fn wait_for_seq(counter: &AtomicU64, seq: u64, label: &str) {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn read_wake_one_iteration(
     peer: &mut std::net::TcpStream,
     state: &ReadWakeState,
@@ -1006,6 +1480,12 @@ fn read_wake_one_iteration(
 }
 
 #[derive(Clone, Copy)]
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 enum RttBreakdownMetric {
     ClientTotal,
     ClientWrite,
@@ -1015,6 +1495,12 @@ enum RttBreakdownMetric {
     PeerTotal,
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 impl RttBreakdownMetric {
     const ALL: [Self; 6] = [
         Self::ClientTotal,
@@ -1054,6 +1540,12 @@ impl RttBreakdownMetric {
     }
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_reactor_wakeup(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("reactor_wakeup");
     configure_group(&mut group);
@@ -1151,6 +1643,12 @@ fn bench_reactor_wakeup(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_reactor_rtt_breakdown(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("reactor_rtt_breakdown");
     configure_attribution_group(&mut group);
@@ -1278,6 +1776,12 @@ fn bench_reactor_rtt_breakdown(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_reactor_rtt_trace(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("reactor_rtt_trace");
     configure_attribution_group(&mut group);
@@ -1423,6 +1927,12 @@ fn bench_reactor_rtt_trace(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_stream_ready_io(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("stream_ready_io");
     configure_attribution_group(&mut group);
@@ -1606,6 +2116,12 @@ fn bench_stream_ready_io(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_read_exact_poll_count_probe(criterion: &mut Criterion) {
     const DIAGNOSTIC_ITERS: u64 = 10_000;
 
@@ -1782,6 +2298,12 @@ fn bench_read_exact_poll_count_probe(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_read_exact_arrival_slack_probe(criterion: &mut Criterion) {
     const DIAGNOSTIC_ITERS: u64 = 10_000;
 
@@ -1966,6 +2488,12 @@ fn bench_read_exact_arrival_slack_probe(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_read_exact_combinator_probe(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("read_exact_combinator_probe");
     configure_attribution_group(&mut group);
@@ -2068,6 +2596,12 @@ fn bench_read_exact_combinator_probe(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_read_syscall_probe(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("read_syscall_probe");
     configure_attribution_group(&mut group);
@@ -2176,6 +2710,12 @@ fn bench_read_syscall_probe(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_read_poll_probe(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("read_poll_probe");
     configure_attribution_group(&mut group);
@@ -2412,6 +2952,12 @@ fn bench_read_poll_probe(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_parked_read_wake_probe(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("parked_read_wake_probe");
     configure_attribution_group(&mut group);
@@ -2630,6 +3176,12 @@ fn bench_parked_read_wake_probe(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn bench_task_wake_repoll(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("task_wake_repoll");
     configure_attribution_group(&mut group);
@@ -2711,6 +3263,12 @@ fn bench_task_wake_repoll(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 criterion_group!(
     benches,
     bench_reactor_wakeup,
@@ -2725,4 +3283,18 @@ criterion_group!(
     bench_parked_read_wake_probe,
     bench_task_wake_repoll
 );
+#[cfg(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 criterion_main!(benches);
+
+#[cfg(not(all(
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "macos", target_os = "linux")
+)))]
+fn main() {}

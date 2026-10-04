@@ -22,7 +22,7 @@
 //! ONLY — the industry-standard, std-tier trait `prime::os::net::TcpStream`
 //! itself implements (`prime/src/os/net.rs:64,594,638`) and the one
 //! `proxima_primitives::stream::StreamConnection` requires. This type is
-//! std-only by construction (it wraps a std `Mutex` and prime's std-gated
+//! std-only by construction (it wraps prime's std-gated
 //! `net` module), so it never needs `proxima_core::io`'s no_std/no-alloc
 //! floor form — that form exists ONLY for types that must also compile
 //! without std (see `proxima_core::io`'s own module doc). A prior revision
@@ -37,29 +37,30 @@
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 use futures::io::{AsyncRead, AsyncWrite};
+use prime::os::background::ProximaBackgroundPool;
 use prime::os::net::{TcpListener, TcpStream, UdpSocket};
+use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::stream::{
-    AcceptorFactory, DatagramFactory, DatagramSocket, PeerInfo, StreamConnection, StreamUpstream,
-    TcpAcceptor, TcpBindOptions,
+    AcceptorFactory, ConnectFuture, DatagramFactory, DatagramSocket, PeerInfo, StreamConnection,
+    StreamUpstream, TcpAcceptor, TcpBindOptions,
 };
 
 mod connect_tunnel;
-pub use connect_tunnel::ConnectTunneledUpstream;
+pub use connect_tunnel::{ConnectTunnelConnection, ConnectTunneledUpstream};
 
+#[cfg(unix)]
 mod unix;
+#[cfg(unix)]
 pub use unix::{
     PrimeUnixConnection, PrimeUnixListener, PrimeUnixUpstream, PrimeUnixUpstreamFactory,
 };
 
 mod packet;
 pub use packet::{PrimePacketListenerFactory, PrimeUdpListener};
-
-type ConnectFuture =
-    Pin<Box<dyn std::future::Future<Output = io::Result<PrimeTcpConnection>> + Send>>;
 
 /// prime-backed TCP connection. wraps `prime::os::net::TcpStream` and
 /// carries the peer address so `StreamConnection::peer()` is satisfied.
@@ -227,41 +228,45 @@ enum Target {
     Host { host: String, port: u16 },
 }
 
-/// prime-backed TCP upstream. dials the target via the prime reactor on
-/// each `connect()` call. the in-flight future is cached across polls so a
-/// pending connect can resume.
-///
-/// WHY Mutex on `in_flight`: same rationale as `TokioTcpUpstream` —
-/// `poll_connect` takes `&self` (trait surface cannot allow `&mut self`)
-/// so interior mutability is required to stash the future between polls.
+/// each call owns its resolver completion and reactor connection state.
 pub struct PrimeTcpUpstream {
     target: Target,
-    in_flight: Mutex<Option<ConnectFuture>>,
 }
 
 impl PrimeTcpUpstream {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             target: Target::Addr(addr),
-            in_flight: Mutex::new(None),
         }
     }
 
-    /// Build from a host + port, deferring DNS resolution to connect
-    /// time. `build()` of an upstream spec must not touch the network or
-    /// the resolver — only an actual `connect()` may.
+    /// construction performs no DNS or socket operations.
     pub fn with_host(host: impl Into<String>, port: u16) -> Self {
         Self {
             target: Target::Host {
                 host: host.into(),
                 port,
             },
-            in_flight: Mutex::new(None),
         }
     }
 
-    /// Type-erased TCP dialer for consumers whose transport boundary uses
-    /// the shared `Box<dyn StreamConnection>` shape.
+    pub async fn connect(&self) -> io::Result<PrimeTcpConnection> {
+        match &self.target {
+            Target::Addr(address) => connect_addresses(core::iter::once(*address)).await,
+            Target::Host { host, port } => {
+                let host = host.clone();
+                let port = *port;
+                let addresses = resolve_on_pool(move || {
+                    (host.as_str(), port)
+                        .to_socket_addrs()
+                        .map(Iterator::collect)
+                })
+                .await?;
+                connect_addresses(addresses).await
+            }
+        }
+    }
+
     pub fn boxed(
         addr: SocketAddr,
     ) -> std::sync::Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>> {
@@ -274,56 +279,54 @@ struct BoxedPrimeTcpUpstream(PrimeTcpUpstream);
 impl StreamUpstream for BoxedPrimeTcpUpstream {
     type Conn = Box<dyn StreamConnection>;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        match self.0.poll_connect(cx) {
-            Poll::Ready(Ok(conn)) => Poll::Ready(Ok(Box::new(conn))),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+        Box::pin(async move { Ok(Box::new(self.0.connect().await?) as Box<dyn StreamConnection>) })
     }
 }
 
-/// Resolve host + port to the first `SocketAddr` via the system resolver.
-fn resolve(host: &str, port: u16) -> io::Result<SocketAddr> {
-    (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::other(format!("no address for {host}:{port}")))
+// pool ownership outlives cancelled calls so dropping a future cannot join getaddrinfo.
+static RESOLVER_POOL: OnceLock<Result<ProximaBackgroundPool, String>> = OnceLock::new();
+
+async fn resolve_on_pool(
+    work: impl FnOnce() -> io::Result<Vec<SocketAddr>> + Send + 'static,
+) -> io::Result<Vec<SocketAddr>> {
+    let pool = RESOLVER_POOL
+        .get_or_init(|| ProximaBackgroundPool::new().map_err(|error| error.to_string()));
+    let pool = pool
+        .as_ref()
+        .map_err(|message| io::Error::other(message.clone()))?;
+    pool.spawn(move || work().map_err(ProximaError::Io))
+        .await
+        .map_err(|error| match error {
+            ProximaError::Io(error) => error,
+            other => io::Error::other(other),
+        })
+}
+
+async fn connect_addresses(
+    addresses: impl IntoIterator<Item = SocketAddr>,
+) -> io::Result<PrimeTcpConnection> {
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(PrimeTcpConnection::new(stream, address)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(match last_error {
+        Some(error) => error,
+        None => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "resolver returned no addresses",
+        ),
+    })
 }
 
 impl StreamUpstream for PrimeTcpUpstream {
     type Conn = PrimeTcpConnection;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        let Ok(mut slot) = self.in_flight.lock() else {
-            return Poll::Ready(Err(io::Error::other("PrimeTcpUpstream: lock poisoned")));
-        };
-        let pre_resolved = match &self.target {
-            Target::Addr(addr) => Some(*addr),
-            Target::Host { .. } => None,
-        };
-        let host_port = match &self.target {
-            Target::Addr(_) => None,
-            Target::Host { host, port } => Some((host.clone(), *port)),
-        };
-        let future = slot.get_or_insert_with(|| {
-            Box::pin(async move {
-                let addr = match (pre_resolved, host_port) {
-                    (Some(addr), _) => addr,
-                    (None, Some((host, port))) => resolve(&host, port)?,
-                    (None, None) => return Err(io::Error::other("no dial target")),
-                };
-                let stream = TcpStream::connect(addr).await?;
-                Ok(PrimeTcpConnection::new(stream, addr))
-            })
-        });
-        match future.as_mut().poll(cx) {
-            Poll::Ready(result) => {
-                *slot = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
-        }
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+        Box::pin(self.connect())
     }
 }
 
@@ -333,14 +336,189 @@ mod tests {
     use super::*;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use prime::os::core_shard;
-    use proxima_primitives::stream::StreamUpstreamExt;
     use proxima_runtime::CoreId;
+    use std::future::{Future, poll_fn};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
+    use std::pin::pin;
     use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
     // hang guard only: the worker signals completion on the channel, so the
     // test blocks on the event itself rather than polling a flag. no sleep.
     const RESULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn upstream_address_fallback_preserves_payload_and_errors() {
+        let refused: SocketAddr = "127.0.0.1:0".parse().expect("parse refused address");
+        let oracle = StdTcpStream::connect(refused).expect_err("port zero cannot listen");
+        let expected_error = (oracle.kind(), oracle.raw_os_error());
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind fallback peer");
+        let live = listener.local_addr().expect("fallback address");
+        let worker =
+            core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch fallback worker");
+        let (completed, result) = mpsc::channel();
+        worker
+            .dispatch_send_inline(async move {
+                let mut connection = connect_addresses([refused, live])
+                    .await
+                    .expect("try live address after refused address");
+                assert!(
+                    matches!(connection.peer(), Some(PeerInfo::Tcp(address)) if address == live)
+                );
+                connection
+                    .write_all(b"fallback-request")
+                    .await
+                    .expect("write fallback request");
+                let mut response = [0; 17];
+                connection
+                    .read_exact(&mut response)
+                    .await
+                    .expect("read fallback response");
+                assert_eq!(&response, b"fallback-response");
+                let error = connect_addresses([refused, refused])
+                    .await
+                    .err()
+                    .expect("all addresses fail");
+                assert_eq!((error.kind(), error.raw_os_error()), expected_error);
+                let empty = connect_addresses([])
+                    .await
+                    .err()
+                    .expect("empty address set fails");
+                assert_eq!(empty.kind(), io::ErrorKind::InvalidInput);
+                completed.send(()).expect("report fallback result");
+            })
+            .expect("dispatch fallback dial");
+        let (mut peer, _) = listener.accept().expect("accept fallback dial");
+        peer.set_read_timeout(Some(RESULT_TIMEOUT))
+            .expect("set peer read guard");
+        peer.set_write_timeout(Some(RESULT_TIMEOUT))
+            .expect("set peer write guard");
+        let mut request = [0; 16];
+        peer.read_exact(&mut request)
+            .expect("read fallback request");
+        assert_eq!(&request, b"fallback-request");
+        peer.write_all(b"fallback-response")
+            .expect("send fallback response");
+        result
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("fallback assertions complete");
+        worker.shutdown_and_join().expect("join fallback worker");
+    }
+
+    #[test]
+    fn upstream_resolver_yields_and_cancels_without_waiting_for_work() {
+        for cancel in [false, true] {
+            let worker = core_shard::launch_with_lanes(CoreId(0), None, 2, 16)
+                .expect("launch resolver worker");
+            let (entered, entry) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let (progressed, progress) = mpsc::channel();
+            let (completed, result) = mpsc::channel();
+            let (finished, finish) = mpsc::channel();
+            worker
+                .dispatch_send_inline(async move {
+                    let worker_thread = thread::current().id();
+                    let mut operation = pin!(resolve_on_pool(move || {
+                        entered
+                            .send(thread::current().id())
+                            .expect("report resolver thread");
+                        released.recv().expect("hold controlled resolver work");
+                        finished
+                            .send(())
+                            .expect("report resolver closure completed");
+                        Ok(vec![
+                            "127.0.0.1:12345".parse().expect("parse resolved address"),
+                        ])
+                    }));
+                    let initial =
+                        poll_fn(|context| Poll::Ready(operation.as_mut().poll(context))).await;
+                    assert!(initial.is_pending(), "resolver remains held by caller");
+                    progressed
+                        .send(worker_thread)
+                        .expect("report reactor progress while resolver held");
+                    if cancel {
+                        completed
+                            .send(None)
+                            .expect("report cancelled resolver call");
+                    } else {
+                        let addresses = operation.await.expect("resume resolver receiver");
+                        completed
+                            .send(Some(addresses))
+                            .expect("report resolved address payload");
+                    }
+                })
+                .expect("dispatch controlled resolver");
+            let resolver_thread = entry
+                .recv_timeout(RESULT_TIMEOUT)
+                .expect("resolver entered");
+            let worker_thread = progress
+                .recv_timeout(RESULT_TIMEOUT)
+                .expect("reactor yields while resolver held");
+            assert_ne!(worker_thread, resolver_thread);
+            let (other_completed, other_result) = mpsc::channel();
+            worker
+                .dispatch_send_inline(async move {
+                    other_completed
+                        .send(thread::current().id())
+                        .expect("report unrelated task progress");
+                })
+                .expect("dispatch unrelated task");
+            assert_eq!(
+                other_result
+                    .recv_timeout(RESULT_TIMEOUT)
+                    .expect("unrelated task runs before resolver release"),
+                worker_thread
+            );
+            if cancel {
+                assert_eq!(
+                    result
+                        .recv_timeout(RESULT_TIMEOUT)
+                        .expect("cancel without releasing resolver"),
+                    None
+                );
+                // joining the worker proves the receiver's destructor cannot wait for DNS.
+                worker
+                    .shutdown_and_join()
+                    .expect("join worker while resolver still held");
+                release.send(()).expect("release cancelled resolver work");
+            } else {
+                release.send(()).expect("release resolver work");
+                assert_eq!(
+                    result
+                        .recv_timeout(RESULT_TIMEOUT)
+                        .expect("resolved payload delivered"),
+                    Some(vec!["127.0.0.1:12345".parse().expect("expected address")])
+                );
+                worker.shutdown_and_join().expect("join resolver worker");
+            }
+            finish
+                .recv_timeout(RESULT_TIMEOUT)
+                .expect("resolver closure released");
+        }
+        let directory = tempfile::tempdir().expect("resolver error oracle directory");
+        let missing = directory.path().join("missing");
+        let oracle = std::fs::read(&missing).expect_err("missing file gives independent OS error");
+        let expected = (oracle.kind(), oracle.raw_os_error());
+        let actual = futures::executor::block_on(resolve_on_pool(move || {
+            std::fs::read(missing).map(|_| Vec::new())
+        }))
+        .expect_err("resolver preserves work error");
+        assert_eq!((actual.kind(), actual.raw_os_error()), expected);
+        let invalid_host = "invalid\0hostname";
+        let oracle = (invalid_host, 80)
+            .to_socket_addrs()
+            .expect_err("embedded NUL rejects DNS input");
+        let upstream = PrimeTcpUpstream::with_host(invalid_host, 80);
+        let actual = futures::executor::block_on(upstream.connect())
+            .err()
+            .expect("upstream retains resolver error before socket creation");
+        assert_eq!(
+            (actual.kind(), actual.raw_os_error()),
+            (oracle.kind(), oracle.raw_os_error())
+        );
+    }
 
     /// full round-trip: prime listener (server) + PrimeTcpUpstream (client),
     /// both on the same prime worker. client sends 4 bytes, server echoes,

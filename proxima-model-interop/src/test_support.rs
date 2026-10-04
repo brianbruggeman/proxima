@@ -63,6 +63,7 @@ pub(crate) fn gemma4_e2b_gguf_path() -> String {
     })
 }
 
+#[cfg(unix)]
 pub(crate) fn openchat_gguf_path() -> String {
     std::env::var("PROXIMA_OPENCHAT_GGUF").unwrap_or_else(|_| {
         crate::serving::ServingConfig::default()
@@ -78,7 +79,7 @@ pub(crate) fn openchat_gguf_path() -> String {
 /// `RopePairing::SplitHalf` -- `proxima-tensor/src/spec.rs:660`). No
 /// `ServingConfig` default exists for a second model family the way
 /// openchat has one, so this constant path is the closest analog.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn qwen3_gguf_path() -> String {
     std::env::var("PROXIMA_QWEN3_GGUF").unwrap_or_else(|_| {
         "/Users/brianbruggeman/.ollama/models/blobs/\
@@ -94,6 +95,7 @@ pub(crate) fn qwen3_gguf_path() -> String {
 /// first root-caused against (`qwen3moe.feed_forward_length=6144` vs.
 /// `qwen3moe.expert_feed_forward_length=768`; `blk.0.ffn_gate_exps.weight`
 /// GGUF `dims=[2048, 768, 128]`).
+#[cfg(unix)]
 pub(crate) fn qwen3moe_30b_gguf_path() -> String {
     std::env::var("PROXIMA_QWEN3MOE_GGUF").unwrap_or_else(|_| {
         "/Users/brianbruggeman/.ollama/models/blobs/\

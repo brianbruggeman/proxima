@@ -20,11 +20,9 @@ use std::task::{Context, Poll};
 use futures::io::{AsyncRead, AsyncWrite};
 use prime::os::net::{UnixListener as PrimeUnixListenerInner, UnixStream};
 use proxima_primitives::stream::{
-    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream, UnixUpstreamFactory,
+    BindAddr, ConnectFuture, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
+    UnixUpstreamFactory,
 };
-
-type ConnectFuture =
-    Pin<Box<dyn std::future::Future<Output = io::Result<PrimeUnixConnection>> + Send>>;
 
 /// prime-backed Unix-domain connection. wraps `prime::os::net::UnixStream`
 /// and carries the peer path (usually `None` — the common case is an
@@ -84,8 +82,7 @@ impl StreamConnection for PrimeUnixConnection {
 /// `TokioUnixListener::bind`.
 ///
 /// WHY the `Mutex`: `StreamListener::poll_accept` takes `&self` (the trait
-/// surface cannot allow `&mut self`, same constraint documented on
-/// `PrimeTcpUpstream::in_flight`), but the prime OS-layer
+/// surface cannot allow `&mut self`), but the prime OS-layer
 /// `UnixListener::poll_accept` takes `Pin<&mut Self>` — interior mutability
 /// is required to get there. One accept loop per listener means the lock
 /// is uncontested in practice; cost is a single futex-free fast-path lock
@@ -128,51 +125,26 @@ impl StreamListener for PrimeUnixListener {
     }
 }
 
-/// prime-backed Unix-domain `StreamUpstream`. dials the target path via the
-/// prime reactor on each `connect()` call; the in-flight future is cached
-/// across polls so a pending connect can resume — same pattern as
-/// `PrimeTcpUpstream`/`TokioUnixUpstream`.
+/// prime Unix upstream with an independent connection future per call.
 pub struct PrimeUnixUpstream {
     path: PathBuf,
-    in_flight: Mutex<Option<ConnectFuture>>,
 }
 
 impl PrimeUnixUpstream {
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            in_flight: Mutex::new(None),
-        }
+        Self { path }
     }
 }
 
 impl StreamUpstream for PrimeUnixUpstream {
     type Conn = PrimeUnixConnection;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
         let path = self.path.clone();
-        let Ok(mut slot) = self.in_flight.lock() else {
-            return Poll::Ready(Err(io::Error::other("PrimeUnixUpstream: lock poisoned")));
-        };
-        let future = slot.get_or_insert_with(|| {
-            Box::pin(async move {
-                let stream = UnixStream::connect(&path).await?;
-                // On the CLIENT side, `getpeername(2)` on a connected
-                // AF_UNIX stream returns the address it dialed (the
-                // server's bound path) — unlike the accept side, where the
-                // peer is usually an anonymous, unbound client socket.
-                // Mirrors `TokioUnixConnection::new`'s `stream.peer_addr()`
-                // read on the upstream side, which observes the same path.
-                Ok(PrimeUnixConnection::new(stream, Some(path)))
-            })
-        });
-        match future.as_mut().poll(cx) {
-            Poll::Ready(result) => {
-                *slot = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        Box::pin(async move {
+            let stream = UnixStream::connect(&path).await?;
+            Ok(PrimeUnixConnection::new(stream, Some(path)))
+        })
     }
 }
 
@@ -186,12 +158,10 @@ struct BoxedPrimeUnixUpstream(PrimeUnixUpstream);
 impl StreamUpstream for BoxedPrimeUnixUpstream {
     type Conn = Box<dyn StreamConnection>;
 
-    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        match self.0.poll_connect(cx) {
-            Poll::Ready(Ok(conn)) => Poll::Ready(Ok(Box::new(conn))),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
+    fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
+        Box::pin(async move {
+            Ok(Box::new(self.0.connect_future().await?) as Box<dyn StreamConnection>)
+        })
     }
 }
 

@@ -68,38 +68,56 @@
 //!     --release --features "metal instrument" --example q4_0_dram_streaming_bench
 //! ```
 
-#![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::collections::BTreeMap;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::fs::File;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::sync::OnceLock;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use std::time::Instant;
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use memmap2::{Mmap, MmapOptions};
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use omega::metal::metal_stage_totals;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use omega::{execute_plan_named, plan_named};
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::parse_complete;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::pipe::ParsedGguf;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::types::GgmlType;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_primitives::Codec;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::instrument::ticks_to_nanos;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::{
     BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
     ReduceInit, ScalarOp, append, bind, infer, map,
 };
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
 /// Full forward-order passes encoded into ONE command buffer -- amortizes
 /// the per-command-buffer floor below 1% (task brief's own target).
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const REPEATS_PER_PASS: usize = 5;
 /// Interleaved measurement repeats per arm.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const MEASURE_RUNS: usize = 5;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const Q4_0_BLOCK_ELEMENTS: u32 = 32;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const Q4_0_BLOCK_BYTES: usize = 18;
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn model_bytes() -> &'static [u8] {
     static BYTES: OnceLock<Mmap> = OnceLock::new();
     &BYTES.get_or_init(|| {
@@ -110,11 +128,13 @@ fn model_bytes() -> &'static [u8] {
     })[..]
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn parsed_gguf() -> &'static ParsedGguf {
     static PARSED: OnceLock<ParsedGguf> = OnceLock::new();
     PARSED.get_or_init(|| parse_complete(model_bytes()).expect("parse gemma4-E2B header"))
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 struct RealTensor {
     name: String,
     bytes: &'static [u8],
@@ -126,6 +146,7 @@ struct RealTensor {
 /// (layer ascending, tensor name ascending within a layer for a
 /// deterministic tie-break). Ground truth from the parsed directory, not
 /// an assumed 7-tensors/layer convention -- see module doc.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn forward_order_q4_0_tensors() -> Vec<RealTensor> {
     let parsed = parsed_gguf();
     let bytes = model_bytes();
@@ -174,6 +195,7 @@ fn forward_order_q4_0_tensors() -> Vec<RealTensor> {
 /// nibbles), drops every other block. Row layout is `blocks_per_row`
 /// contiguous 18-byte blocks per row, row-major
 /// (`q4_0_real_checkpoint_parity.rs:201-207`'s own `row_bytes` convention).
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn truncate_to_one_block_per_row(bytes: &[u8], rows: u32, k: u32) -> Vec<u8> {
     let blocks_per_row = (k / Q4_0_BLOCK_ELEMENTS) as usize;
     let row_bytes = blocks_per_row * Q4_0_BLOCK_BYTES;
@@ -185,6 +207,7 @@ fn truncate_to_one_block_per_row(bytes: &[u8], rows: u32, k: u32) -> Vec<u8> {
     out
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn deterministic_f32(seed: u64, count: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
     (0..count)
@@ -197,7 +220,13 @@ fn deterministic_f32(seed: u64, count: usize) -> Vec<f32> {
         .collect()
 }
 
-fn append_packed_row_matvec(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, label: String) -> NodeId {
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+fn append_packed_row_matvec(
+    program: &mut Vec<Op>,
+    weight: NodeId,
+    activation: NodeId,
+    label: String,
+) -> NodeId {
     let product = append(
         program,
         Op::Elementwise {
@@ -227,7 +256,13 @@ fn append_packed_row_matvec(program: &mut Vec<Op>, weight: NodeId, activation: N
 
 /// `x + zero` -- forces a genuine elementwise read+write dispatch (never
 /// aliasable the way a bare `ScalarOp::Identity` pass-through might be).
-fn append_copy_dispatch(program: &mut Vec<Op>, data: NodeId, zero: NodeId, label: String) -> NodeId {
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+fn append_copy_dispatch(
+    program: &mut Vec<Op>,
+    data: NodeId,
+    zero: NodeId,
+    label: String,
+) -> NodeId {
     append(
         program,
         Op::Elementwise {
@@ -242,6 +277,7 @@ fn append_copy_dispatch(program: &mut Vec<Op>, data: NodeId, zero: NodeId, label
     )
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 struct ArmBuild<'a> {
     program: Vec<Op>,
     roots: Vec<NodeId>,
@@ -255,6 +291,7 @@ struct ArmBuild<'a> {
 /// self-referential struct while keeping every buffer alive exactly as
 /// long as `main`'s own scope, where every `execute_plan_named` call
 /// also lives.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn build_matvec_arm<'a>(
     tensors: &'a [RealTensor],
     truncate: bool,
@@ -263,11 +300,19 @@ fn build_matvec_arm<'a>(
 ) -> ArmBuild<'a> {
     if truncate {
         for tensor in tensors {
-            truncated_storage.push(truncate_to_one_block_per_row(tensor.bytes, tensor.rows, tensor.k));
+            truncated_storage.push(truncate_to_one_block_per_row(
+                tensor.bytes,
+                tensor.rows,
+                tensor.k,
+            ));
         }
     }
     for (index, tensor) in tensors.iter().enumerate() {
-        let k_used = if truncate { Q4_0_BLOCK_ELEMENTS } else { tensor.k };
+        let k_used = if truncate {
+            Q4_0_BLOCK_ELEMENTS
+        } else {
+            tensor.k
+        };
         activation_storage.push(deterministic_f32(index as u64 + 1, k_used as usize));
     }
 
@@ -278,7 +323,11 @@ fn build_matvec_arm<'a>(
     let mut total_bytes_per_pass: u64 = 0;
 
     for (index, tensor) in tensors.iter().enumerate() {
-        let k_used = if truncate { Q4_0_BLOCK_ELEMENTS } else { tensor.k };
+        let k_used = if truncate {
+            Q4_0_BLOCK_ELEMENTS
+        } else {
+            tensor.k
+        };
         let weight_bytes: &'a [u8] = if truncate {
             &truncated_storage[index]
         } else {
@@ -313,15 +362,27 @@ fn build_matvec_arm<'a>(
                 name: Some(activation_name.clone()),
             },
         );
-        named.push((activation_name, QuantizedBlock::Float32(&activation_storage[index])));
+        named.push((
+            activation_name,
+            QuantizedBlock::Float32(&activation_storage[index]),
+        ));
         activation_nodes.push(activation_node);
     }
 
     let mut roots = Vec::with_capacity(tensors.len() * REPEATS_PER_PASS);
     for repeat in 0..REPEATS_PER_PASS {
         for index in 0..tensors.len() {
-            let label = format!("{}_{}_r{repeat}", tensors[index].name, if truncate { "floor" } else { "matvec" });
-            let root = append_packed_row_matvec(&mut program, weight_nodes[index], activation_nodes[index], label);
+            let label = format!(
+                "{}_{}_r{repeat}",
+                tensors[index].name,
+                if truncate { "floor" } else { "matvec" }
+            );
+            let root = append_packed_row_matvec(
+                &mut program,
+                weight_nodes[index],
+                activation_nodes[index],
+                label,
+            );
             roots.push(root);
         }
     }
@@ -334,7 +395,11 @@ fn build_matvec_arm<'a>(
     }
 }
 
-fn build_copy_arm<'a>(tensors: &'a [RealTensor], data_storage: &'a mut Vec<Vec<f32>>) -> ArmBuild<'a> {
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+fn build_copy_arm<'a>(
+    tensors: &'a [RealTensor],
+    data_storage: &'a mut Vec<Vec<f32>>,
+) -> ArmBuild<'a> {
     for (index, tensor) in tensors.iter().enumerate() {
         let byte_count = tensor.bytes.len();
         let elems = byte_count / 4;
@@ -396,6 +461,7 @@ fn build_copy_arm<'a>(tensors: &'a [RealTensor], data_storage: &'a mut Vec<Vec<f
     }
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 struct Stats {
     mean_ms: f64,
     min_ms: f64,
@@ -403,10 +469,15 @@ struct Stats {
     cov_pct: f64,
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn stats(samples_ms: &[f64]) -> Stats {
     let len = samples_ms.len();
     let mean = samples_ms.iter().sum::<f64>() / len as f64;
-    let variance = samples_ms.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / len as f64;
+    let variance = samples_ms
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / len as f64;
     let cov_pct = if mean.abs() > f64::MIN_POSITIVE {
         100.0 * variance.sqrt() / mean
     } else {
@@ -423,10 +494,18 @@ fn stats(samples_ms: &[f64]) -> Stats {
 /// CPU-side, no GPU dispatch: proves the plan this arm is about to run
 /// really does encode `expected` dispatches of `kind`, not fewer (silent
 /// fusion/dedup across shared input nodes) or more.
-fn assert_dispatch_count(program: &[Op], roots: &[NodeId], expected: usize, arm: &str, reduce_kind: bool) {
-    let shapes = infer(program, &[]).unwrap_or_else(|error| panic!("{arm}: program infers: {error:?}"));
-    let resolved =
-        bind(program, &shapes, roots, NumericPolicy::llama_relaxed()).unwrap_or_else(|error| panic!("{arm}: program binds: {error:?}"));
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+fn assert_dispatch_count(
+    program: &[Op],
+    roots: &[NodeId],
+    expected: usize,
+    arm: &str,
+    reduce_kind: bool,
+) {
+    let shapes =
+        infer(program, &[]).unwrap_or_else(|error| panic!("{arm}: program infers: {error:?}"));
+    let resolved = bind(program, &shapes, roots, NumericPolicy::llama_relaxed())
+        .unwrap_or_else(|error| panic!("{arm}: program binds: {error:?}"));
     let actual = resolved
         .iter()
         .filter(|bound| {
@@ -438,7 +517,8 @@ fn assert_dispatch_count(program: &[Op], roots: &[NodeId], expected: usize, arm:
         })
         .count();
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "{arm}: dispatch count RED -- expected {expected}, bind() resolved {actual} \
          (own construction also expected roots.len()={})",
         roots.len()
@@ -451,6 +531,7 @@ fn assert_dispatch_count(program: &[Op], roots: &[NodeId], expected: usize, arm:
     println!("q4_0_dram_streaming_bench arm={arm} dispatch_count_asserted N={actual}");
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 struct PreparedArm<'a> {
     arm: &'static str,
     plan: omega::Plan,
@@ -461,9 +542,13 @@ struct PreparedArm<'a> {
     gpu_ms: Vec<f64>,
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn prepare_arm<'a>(build: &'a ArmBuild<'a>, arm: &'static str) -> PreparedArm<'a> {
-    let named_refs: Vec<(&'a str, QuantizedBlock<'a>)> =
-        build.named.iter().map(|(name, block)| (name.as_str(), *block)).collect();
+    let named_refs: Vec<(&'a str, QuantizedBlock<'a>)> = build
+        .named
+        .iter()
+        .map(|(name, block)| (name.as_str(), *block))
+        .collect();
     let plan = plan_named(
         &build.program,
         &[],
@@ -491,6 +576,7 @@ fn prepare_arm<'a>(build: &'a ArmBuild<'a>, arm: &'static str) -> PreparedArm<'a
 /// Printed immediately, per-run, so every cell in the summary table is
 /// grep-able from this run's own stdout (principle 19: results traced to
 /// records, not only a summary line).
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn step_arm(prepared: &mut PreparedArm<'_>, run: usize) {
     let started = Instant::now();
     execute_plan_named(&prepared.plan, &prepared.named_refs)
@@ -510,6 +596,7 @@ fn step_arm(prepared: &mut PreparedArm<'_>, run: usize) {
     );
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn summarize_arm(prepared: &PreparedArm<'_>) {
     let wall_stats = stats(&prepared.wall_ms);
     let gpu_stats = stats(&prepared.gpu_ms);
@@ -534,8 +621,11 @@ fn summarize_arm(prepared: &PreparedArm<'_>) {
     );
 }
 
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn main() {
-    println!("q4_0_dram_streaming_bench host_loadout recorded via `uptime` in the caller's run log, not in-process");
+    println!(
+        "q4_0_dram_streaming_bench host_loadout recorded via `uptime` in the caller's run log, not in-process"
+    );
 
     let tensors = forward_order_q4_0_tensors();
     let total_real_bytes: u64 = tensors.iter().map(|tensor| tensor.bytes.len() as u64).sum();
@@ -551,7 +641,12 @@ fn main() {
     // ---- matvec arm ----
     let mut matvec_truncated: Vec<Vec<u8>> = Vec::new();
     let mut matvec_activation: Vec<Vec<f32>> = Vec::new();
-    let matvec_build = build_matvec_arm(&tensors, false, &mut matvec_truncated, &mut matvec_activation);
+    let matvec_build = build_matvec_arm(
+        &tensors,
+        false,
+        &mut matvec_truncated,
+        &mut matvec_activation,
+    );
     assert_dispatch_count(
         &matvec_build.program,
         &matvec_build.roots,
@@ -585,7 +680,9 @@ fn main() {
 
     println!(
         "q4_0_dram_streaming_bench PLAN_SUMMARY matvec_bytes_per_pass={} floor_bytes_per_pass={} copy_bytes_per_pass={}",
-        matvec_build.total_bytes_per_pass, floor_build.total_bytes_per_pass, copy_build.total_bytes_per_pass
+        matvec_build.total_bytes_per_pass,
+        floor_build.total_bytes_per_pass,
+        copy_build.total_bytes_per_pass
     );
 
     // All three plans built and warmed up BEFORE any timed sample is
@@ -608,7 +705,9 @@ fn main() {
 
     let matvec_gbps = {
         let stats = stats(&matvec_prepared.gpu_ms);
-        (matvec_prepared.total_bytes_per_pass * REPEATS_PER_PASS as u64) as f64 / (stats.mean_ms / 1e3) / 1e9
+        (matvec_prepared.total_bytes_per_pass * REPEATS_PER_PASS as u64) as f64
+            / (stats.mean_ms / 1e3)
+            / 1e9
     };
     let floor_us_per_dispatch = {
         let stats = stats(&floor_prepared.gpu_ms);
@@ -616,7 +715,9 @@ fn main() {
     };
     let copy_gbps_read_only = {
         let stats = stats(&copy_prepared.gpu_ms);
-        (copy_prepared.total_bytes_per_pass * REPEATS_PER_PASS as u64) as f64 / (stats.mean_ms / 1e3) / 1e9
+        (copy_prepared.total_bytes_per_pass * REPEATS_PER_PASS as u64) as f64
+            / (stats.mean_ms / 1e3)
+            / 1e9
     };
     let copy_gbps_read_write = copy_gbps_read_only * 2.0;
     let branch = if matvec_gbps <= 110.0 {
@@ -632,4 +733,10 @@ fn main() {
          copy_ceiling_gbps_read_only={copy_gbps_read_only:.3} \
          copy_ceiling_gbps_read_plus_write={copy_gbps_read_write:.3} branch={branch:?}"
     );
+}
+
+#[cfg(not(all(feature = "metal", feature = "instrument", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
 }

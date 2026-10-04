@@ -21,22 +21,54 @@
 //! ran (the outer `Result`, no bytes possible) or an empty byte count
 //! becomes this process's nonzero exit.
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use std::env;
 use std::error::Error;
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use std::fs;
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use std::io::{self, Write};
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use proxima_vm::boot;
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 const MAX_HYPERCALLS: usize = 10_000;
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 const PL011_CAPACITY: usize = 65_536;
 // `nosmp`/`nr_cpus=1` (routes around `ICC_SGI1R_EL1`'s own investigation:
 // with no secondary CPU to bring up, `smp_init`'s IPI machinery never fires
 // at all, the cheapest possible answer to the SMP-IPI wall this probe's own
 // bootargs line names) precede the always-present earlycon/console/panic
 // trio the M5/M5b investigations already anchored.
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 const BOOTARGS: &str = "nosmp nr_cpus=1 earlycon=pl011,mmio32,0x9000000 console=ttyAMA0 panic=-1";
 
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
     let image_path = arguments
@@ -82,4 +114,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     io::stdout().write_all(&pl011_emitted)?;
     loop_outcome?;
     Ok(())
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
+fn main() -> Result<(), Box<dyn Error>> {
+    Err(
+        "kernel boot probing supports linux/x86_64 KVM and macos/aarch64 Hypervisor.framework only"
+            .into(),
+    )
 }

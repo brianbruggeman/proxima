@@ -64,13 +64,13 @@ pub mod runtime;
 #[cfg(feature = "prime-tokio-compat")]
 pub mod tokio_compat;
 
-// matches net.rs's own #![cfg(...)] exactly — it imports core_shard::CURRENT_REACTOR,
+// matches net.rs's own #![cfg(...)] exactly — it uses core_shard reactor access,
 // which needs executor + reactor + inbox-alloc, not reactor alone.
 #[cfg(all(
     feature = "runtime-prime-executor",
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-inbox-alloc",
-    any(target_os = "macos", target_os = "linux"),
+    any(target_os = "macos", target_os = "linux", windows),
 ))]
 pub mod net;
 

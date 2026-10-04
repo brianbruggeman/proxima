@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Smoke test: spawn `proximad serve --unix <path>` as a child process,
 //! wait for its READY line, hit `GET /pipelines` over UDS, expect a
 //! 200 with `[]`, then send SIGTERM and assert clean exit.

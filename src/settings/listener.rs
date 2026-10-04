@@ -13,6 +13,7 @@
 //!   control plane and any local-only pipe surface.
 
 use std::net::SocketAddr;
+#[cfg(any(unix, feature = "tls"))]
 use std::path::PathBuf;
 
 use bon::Builder;
