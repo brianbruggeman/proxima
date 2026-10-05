@@ -229,6 +229,8 @@ mod serving_backend;
 mod tests_all;
 #[cfg(test)]
 mod chunked_prefill_tests;
+#[cfg(test)]
+mod kv_seal_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod speculative_default_on_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]

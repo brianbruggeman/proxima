@@ -92,7 +92,7 @@ fn key(name: &str, value: MetadataValue) -> (String, MetadataValue) {
     (name.to_string(), value)
 }
 
-fn gemma4_checkpoint() -> Vec<u8> {
+pub(super) fn gemma4_checkpoint() -> Vec<u8> {
     let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
     let mut specs = alloc::vec![
         spec("token_embd.weight", &[EMBEDDING, VOCAB], 1.0, 0.0, &mut rng),
@@ -184,7 +184,7 @@ fn dense_checkpoint() -> Vec<u8> {
     encode(metadata, &specs)
 }
 
-fn config(ubatch_size: u32) -> ServingConfig<'static> {
+pub(super) fn config(ubatch_size: u32) -> ServingConfig<'static> {
     ServingConfig {
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
@@ -197,22 +197,25 @@ fn config(ubatch_size: u32) -> ServingConfig<'static> {
     }
 }
 
-struct Prefilled {
+pub(super) struct Prefilled {
     logits: Vec<f32>,
-    state: PrefixState,
+    pub(super) state: PrefixState,
     evaluation_rows: Vec<usize>,
 }
 
 fn prefill(model: &LoadedModel<'_>, prompt: &str, ubatch_size: u32) -> Prefilled {
-    let serving_config = config(ubatch_size);
+    prefill_with(model, prompt, &config(ubatch_size))
+}
+
+pub(super) fn prefill_with(model: &LoadedModel<'_>, prompt: &str, serving_config: &ServingConfig<'_>) -> Prefilled {
     let evaluation_capture = EvaluationCapture::install();
-    let mut runtime = BackendRuntime::new(&serving_config);
+    let mut runtime = BackendRuntime::new(serving_config);
     let mut collected: Vec<Vec<f32>> = Vec::new();
     let (_ids, _text, _eos, state) = model
         .run_decode_loop_observed_seeded(
             prompt,
             1,
-            &serving_config,
+            serving_config,
             &mut runtime,
             None,
             &mut LogitsSink::Collect(&mut collected),
@@ -313,7 +316,7 @@ fn worst_relative_error(reference: &[f32], candidate: &[f32]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn prompt_of(length: usize, last_digit: char) -> String {
+pub(super) fn prompt_of(length: usize, last_digit: char) -> String {
     let mut digits: String = (0..length - 1)
         .map(|index| char::from_digit((index % 10) as u32, 10).expect("a base-10 digit"))
         .collect();
