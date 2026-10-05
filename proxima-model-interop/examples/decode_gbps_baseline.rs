@@ -62,6 +62,25 @@ fn fnv64(text: &str) -> u64 {
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
+/// `PROXIMA_DECODE_MODEL_GGUF` names the checkpoint to decode; unset keeps the
+/// gemma4 E2B blob every earlier baseline binary measured.
+fn model_path() -> String {
+    std::env::var("PROXIMA_DECODE_MODEL_GGUF").unwrap_or_else(|_| MODEL_PATH.to_string())
+}
+
+/// Bytes Metal has allocated on the system device right now; zero where there
+/// is no Metal device. Sampled at every token, the maximum is the run's peak.
+fn gpu_allocated_bytes() -> u64 {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    {
+        omega::metal::current_allocated_size().unwrap_or(0)
+    }
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    {
+        0
+    }
+}
+
 const DEFAULT_MAX_TOKENS: usize = 48;
 
 // proxima-telemetry is only a dependency under `instrument`, so events
@@ -157,7 +176,8 @@ fn main() {
     // `install_console_telemetry`'s `EnvFilter::parse("debug")`) is what
     // controls visibility.
 
-    let file = File::open(MODEL_PATH).expect("open gemma4-E2B blob");
+    let model_file = model_path();
+    let file = File::open(&model_file).unwrap_or_else(|error| panic!("open {model_file}: {error}"));
     // SAFETY: `file` is dropped at the end of this scope, but the mapping
     // stays valid past that -- POSIX `mmap`/`munmap` semantics, same
     // pattern every real-checkpoint example in this crate already uses.
@@ -276,6 +296,7 @@ fn main() {
     // arrive back to back, so those later steps read ~0 ms.
     let step_times = std::env::var_os("PROXIMA_STEP_TIMES").is_some();
 
+    let mut gpu_peak_bytes: u64 = 0;
     for run_index in 0..runs {
         // `generate_streaming`'s own `TokenEvent::elapsed_ms` is Instant-based
         // and compiled on every build that reaches this call, never gated
@@ -286,6 +307,7 @@ fn main() {
             if matches!(event.phase, Phase::Prefill { .. }) {
                 prefill_elapsed_ms = event.elapsed_ms;
             }
+            gpu_peak_bytes = gpu_peak_bytes.max(gpu_allocated_bytes());
             if step_times {
                 let phase = if matches!(event.phase, Phase::Prefill { .. }) {
                     "prefill"
@@ -315,6 +337,7 @@ fn main() {
             .generate_streaming(prompt, max_tokens, serving_config, &mut on_token)
             .expect("greedy decode on the real gemma4-E2B checkpoint");
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+        gpu_peak_bytes = gpu_peak_bytes.max(gpu_allocated_bytes());
         let tokens_generated = token_ids.len();
         let text_hash = fnv64(&text);
         eprintln!("decode_gbps_baseline token_ids run_index={run_index} ids={token_ids:?}");
@@ -337,6 +360,8 @@ fn main() {
                 text_hash = %format!("{text_hash:016x}"),
                 stopped_by_eos,
                 decode_ms_per_token,
+                ttft_ms = prefill_elapsed_ms,
+                gpu_peak_bytes,
                 text = %text,
                 "decode_gbps_baseline"
             );
@@ -345,7 +370,8 @@ fn main() {
                 "decode_gbps_baseline run=done run_index={run_index} wall_ms={wall_ms:.3} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} \
-                 decode_ms_per_token={decode_ms_per_token:.3} text={text:?}"
+                 decode_ms_per_token={decode_ms_per_token:.3} ttft_ms={prefill_elapsed_ms} \
+                 gpu_peak_bytes={gpu_peak_bytes} text={text:?}"
             );
         } else {
             #[cfg(feature = "instrument")]
@@ -357,6 +383,8 @@ fn main() {
                 prompt_token_count = prompt_token_count as u64,
                 text_hash = %format!("{text_hash:016x}"),
                 stopped_by_eos,
+                ttft_ms = prefill_elapsed_ms,
+                gpu_peak_bytes,
                 text = %text,
                 "decode_gbps_baseline"
             );
@@ -364,7 +392,8 @@ fn main() {
             eprintln!(
                 "decode_gbps_baseline run=done run_index={run_index} wall_ms={wall_ms:.3} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
-                 text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} text={text:?}"
+                 text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} ttft_ms={prefill_elapsed_ms} \
+                 gpu_peak_bytes={gpu_peak_bytes} text={text:?}"
             );
         }
         // synchronous flush point: the background pump thread above only
