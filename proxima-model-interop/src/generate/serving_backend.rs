@@ -16,10 +16,9 @@
 //! with no line between "logical state a `ServingState` transition may
 //! carry" and "device resource a backend must own privately". This module
 //! draws that line, as real, compiling, tested types -- not wired into
-//! `decode.rs` (a separate, later step: the live loop's `Op::Input`
-//! derivation, chunked prefill, expert residency, and instrumentation all
-//! still belong to `LoadedModel::run_decode_loop_observed_seeded` and are
-//! out of scope here).
+//! `decode.rs` (the live loop's `Op::Input` derivation, chunked prefill,
+//! expert residency, and instrumentation all still belong to
+//! `LoadedModel::run_decode_loop_observed_seeded` and are out of scope here).
 //!
 //! # The two halves
 //!
@@ -48,12 +47,10 @@
 //! locals threaded by layer index through one closure. It is deliberately
 //! inert: no allocation, no `omega::metal` call, no `ServingBackend` impl --
 //! wiring a real Metal backend means proving `evaluate` against the real
-//! `qwen35moe` program, which is exactly the live-loop migration this step
+//! `qwen35moe` program, which is exactly the live-loop migration this module
 //! does not attempt.
 
-// not yet wired into `decode.rs`'s live loop (a later, separate step); this
-// module's own tests below are its only caller until then, the same reason
-// `serving_fsm.rs` (`ServingState<Cache>` itself) carries this allow.
+// not yet called from decode.rs's live loop; this module's own tests below are its only caller.
 #![allow(dead_code)]
 
 use alloc::vec::Vec;
@@ -106,8 +103,7 @@ pub(super) trait ServingBackend {
 /// Deliberately unconstructed: no `allocate_placed_buffer`, no
 /// `omega::metal` call, no `ServingBackend` impl. Wiring this in means
 /// proving a real Metal `evaluate` against the `qwen35moe` program, out of
-/// scope for this step (`serving_fsm.rs`'s own doc on why that oracle is
-/// separately blocked).
+/// scope for this module.
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub(super) struct MetalPlacementResources {
     pub(super) dense_attention: Vec<Option<Qwen35DenseAttentionBuffers>>,
@@ -118,7 +114,7 @@ pub(super) struct MetalPlacementResources {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::serving_fsm::ServingState;
+    use proxima_core::serving_state::ServingState;
 
     /// A CPU backend proving [`ServingBackend`]'s contract is satisfiable by
     /// the real per-layer cache mutators (`LayerCache::append`,
