@@ -17471,7 +17471,7 @@ mod head_repeats {
     const TWO_RANGE_PRE_CHANGE_NODES: usize = 268;
     const TWO_RANGE_PRE_CHANGE_DIGEST: u64 = 0x0b9f2bd7af6a7a91;
 
-    fn digest(program: &[Op]) -> u64 {
+    pub(super) fn digest(program: &[Op]) -> u64 {
         alloc::format!("{program:?}")
             .bytes()
             .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
@@ -17573,5 +17573,64 @@ mod head_repeats {
         assert!(zero.is_empty());
         assert_eq!(nine, three);
         assert_eq!(clamped, triple);
+    }
+}
+
+mod forward_scales {
+    use super::head_repeats::digest;
+    use super::*;
+
+    const DENSE_PRE_CHANGE_NODES: usize = 219;
+    const DENSE_PRE_CHANGE_DIGEST: u64 = 17540776033648518689;
+    const MOE_PRE_CHANGE_NODES: usize = 291;
+    const MOE_PRE_CHANGE_DIGEST: u64 = 15757248836318508347;
+
+    fn profile_text(rope_layout: &str) -> String {
+        format!(
+            "score_scale_inverse_sqrt_head_dim = true\nvalue_norm = false\nrope_layout = \"{rope_layout}\"\n\n[ffn]\npost_attention_norm = false\ncombination = \"Exclusive\"\noutput_scale = false\nrouted_gating = \"Softmax\"\nrouted_expert_bias = false\nactivation = \"Silu\"\nexclusive_dense_post_norm = false\n"
+        )
+    }
+
+    fn descriptor(expert_count: u32, expert_used_count: u32) -> ModelDescriptor {
+        let profile = toml::from_str::<FamilyProfile>(&profile_text("adjacent"))
+            .expect("the dense profile parses");
+        mistral_descriptor_from_shape(
+            16,
+            8,
+            16,
+            2,
+            1,
+            4,
+            2,
+            expert_count,
+            expert_used_count,
+            false,
+            false,
+            false,
+            false,
+            &profile,
+        )
+    }
+
+    fn built(descriptor: &ModelDescriptor) -> (Vec<Op>, NodeId) {
+        let (program, logits, ..) =
+            build_forward(descriptor, true).expect("the single-range descriptor lowers");
+        (program, logits)
+    }
+
+    #[test]
+    fn dense_default_graph_equals_the_pre_change_graph() {
+        let (program, _logits) = built(&descriptor(0, 0));
+
+        assert_eq!(program.len(), DENSE_PRE_CHANGE_NODES);
+        assert_eq!(digest(&program), DENSE_PRE_CHANGE_DIGEST);
+    }
+
+    #[test]
+    fn moe_default_graph_equals_the_pre_change_graph() {
+        let (program, _logits) = built(&descriptor(4, 2));
+
+        assert_eq!(program.len(), MOE_PRE_CHANGE_NODES);
+        assert_eq!(digest(&program), MOE_PRE_CHANGE_DIGEST);
     }
 }
