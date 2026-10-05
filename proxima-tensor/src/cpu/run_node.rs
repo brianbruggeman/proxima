@@ -183,10 +183,7 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
             run_gated_delta_net(resolved, buffers, output, gdn_state_sink)
         }
         BoundOpKind::MoeTopK { .. } => run_moe_topk(resolved, buffers, output, moe_topk_extra_sink),
-        BoundOpKind::TopFractionSelect { .. } => Err(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "top-fraction select has no cpu runner",
-        }),
+        BoundOpKind::TopFractionSelect { .. } => run_top_fraction_select(resolved, buffers, output),
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
@@ -2130,4 +2127,122 @@ pub(super) fn materialize_quantized_weight_output(
     dequantize_row(node, block, 0, dequantized.len(), &mut dequantized)?;
     buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
     Ok(())
+}
+
+pub(super) fn run_top_fraction_select<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let BoundOpKind::TopFractionSelect {
+        operands,
+        rows,
+        has_keep_rows,
+    } = &resolved.kind
+    else {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "top-fraction select runner received another bound operation",
+        });
+    };
+    let mut sources = operands.iter().map(|(node, _, _)| buffer_of(buffers, *node));
+    let scores = sources.next().ok_or(TensorError::Empty)??;
+    let keep_count = sources.next().ok_or(TensorError::Empty)??;
+    let keep_rows = if *has_keep_rows {
+        Some(sources.next().ok_or(TensorError::Empty)??)
+    } else {
+        None
+    };
+    if scores.len() != *rows as usize || output.len() != scores.len() {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "top-fraction select operand length differs from its row count",
+        });
+    }
+    let count = keep_count.first().copied().unwrap_or(0.0) as usize;
+    rank_select_mask(scores, count, keep_rows, output);
+    Ok(())
+}
+
+fn rank_select_mask(
+    scores: &[f32],
+    keep_count: usize,
+    keep_rows: Option<&[f32]>,
+    output: &mut [f32],
+) {
+    let canonical = |value: f32| if value == 0.0 { 0.0 } else { value };
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by(|left, right| {
+        canonical(scores[*right])
+            .total_cmp(&canonical(scores[*left]))
+            .then(left.cmp(right))
+    });
+    output.fill(0.0);
+    for index in order.into_iter().take(keep_count.min(scores.len())) {
+        output[index] = 1.0;
+    }
+    if let Some(keep) = keep_rows {
+        for (slot, flag) in output.iter_mut().zip(keep) {
+            *slot = slot.max(*flag);
+        }
+    }
+}
+
+#[cfg(test)]
+mod rank_select_tests {
+    use crate::Layout;
+    use smallvec::SmallVec;
+
+    use super::*;
+
+    const TWELVE_SCORES: [f32; 12] = [0.5, 3.0, 1.5, 3.0, 0.1, 2.5, 0.9, 4.0, 1.1, 2.0, 0.3, 5.0];
+
+    fn selected(scores: &[f32], keep_count: usize, keep_rows: Option<&[f32]>) -> Vec<usize> {
+        let mut output = vec![0.0_f32; scores.len()];
+        rank_select_mask(scores, keep_count, keep_rows, &mut output);
+        output
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| **value == 1.0)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn rank_select_reference_twelve_scores() {
+        let mut keep_first = [0.0_f32; 12];
+        keep_first[0] = 1.0;
+        assert_eq!(selected(&TWELVE_SCORES[..11], 3, None), vec![1, 3, 7]);
+        assert_eq!(selected(&TWELVE_SCORES, 3, None), vec![1, 7, 11]);
+        assert_eq!(selected(&TWELVE_SCORES, 3, Some(&keep_first)), vec![0, 1, 7, 11]);
+        assert_eq!(selected(&TWELVE_SCORES, 0, None), Vec::<usize>::new());
+        assert_eq!(selected(&TWELVE_SCORES, 99, None), (0..12).collect::<Vec<_>>());
+        assert_eq!(selected(&[1.0, -0.0, 0.0, -1.0], 2, None), vec![0, 1]);
+    }
+
+    #[test]
+    fn rank_select_runner_reads_scores_then_keep_count() {
+        let select = BoundOp {
+            node: NodeId(9),
+            dtype: DType::Float32,
+            extents: vec![12],
+            kind: BoundOpKind::TopFractionSelect {
+                operands: vec![
+                    (NodeId(0), Layout { base: 0, strides: SmallVec::from_slice(&[1]) }, None),
+                    (NodeId(1), Layout { base: 0, strides: SmallVec::new() }, None),
+                ],
+                rows: 12,
+                has_keep_rows: false,
+            },
+        };
+        let mut buffers: Vec<Option<Vec<f32>>> = vec![None; 10];
+        buffers[0] = Some(TWELVE_SCORES.to_vec());
+        buffers[1] = Some(vec![3.0]);
+        let Ok(mask) = run_node(&select, &buffers) else {
+            panic!("the top-fraction select runs");
+        };
+        assert_eq!(mask.len(), 12, "a vacuous mask proves nothing");
+        let chosen: Vec<usize> = (0..12).filter(|row| mask[*row] == 1.0).collect();
+        assert_eq!(chosen, vec![1, 7, 11]);
+    }
 }
