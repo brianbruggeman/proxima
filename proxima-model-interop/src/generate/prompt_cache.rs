@@ -403,6 +403,11 @@ pub trait ColdTier: Send + Sync {
     /// The entry left the cache; the tier frees its copy.
     fn discard(&self, stamp: u64) -> Result<(), InteropError>;
 
+    /// Rebuilds the entry the tier holds for `stamp`, given the ids and
+    /// cached length the cache kept for it; `Err` means the tier cannot.
+    /// The cache calls this without holding its lock.
+    fn promote(&self, stamp: u64, ids: &[u32], cached_len: usize) -> Result<PrefixState, InteropError>;
+
     /// Makes `model`'s prompt cache hand its evicted entries to this tier.
     /// `max_entries` bounds the cold entries the cache keeps; past it the
     /// oldest cold entry is discarded. `byte_budget` bounds the sum of the
@@ -461,6 +466,22 @@ impl Drop for ColdHold {
                 "cold prompt cache entry could not be removed from its tier"
             );
         }
+    }
+}
+
+/// What the cache lock must not be held across: the tier read of one cold
+/// entry. The cache hands this out under its lock, the read runs without it,
+/// and [`PromptCache::thaw`] takes the outcome back under the lock.
+pub(super) struct ColdRead {
+    pub(super) stamp: u64,
+    ids: Vec<u32>,
+    cached_len: usize,
+    tier: Arc<dyn ColdTier>,
+}
+
+impl ColdRead {
+    fn read(&self) -> Result<PrefixState, InteropError> {
+        self.tier.promote(self.stamp, &self.ids, self.cached_len)
     }
 }
 
@@ -792,7 +813,7 @@ impl PromptCache {
         min_similarity_milli: u32,
         lift: Option<Lift<'_>>,
     ) -> (Option<CacheEntry>, CacheReport) {
-        let best = self.best_candidate(prompt_ids, key, min_similarity_milli);
+        let best = self.best_candidate(prompt_ids, key, min_similarity_milli, false);
         let resume = best.map(|(stamp, lcp)| (stamp, lcp.min(prompt_ids.len().saturating_sub(1))));
         let outcome = match resume {
             None => Err(self.miss_reason(prompt_ids, key)),
@@ -841,6 +862,7 @@ impl PromptCache {
         prompt_ids: &[u32],
         key: &CacheKey,
         min_similarity_milli: u32,
+        cold: bool,
     ) -> Option<(u64, usize)> {
         let block = self.index.block_tokens();
         let overlap_below_a_block_can_clear_the_floor =
@@ -858,13 +880,57 @@ impl PromptCache {
                 let entry = self
                     .entries
                     .get(&stamp)
-                    .filter(|entry| entry.key == *key && !entry.is_cold())?;
+                    .filter(|entry| entry.key == *key && entry.is_cold() == cold)?;
                 let ids = &entry.state.ids;
                 let lcp = from + longest_common_prefix(ids.get(from..)?, prompt_ids.get(from..)?);
                 entry_is_reusable(lcp, ids.len(), prompt_ids.len(), min_similarity_milli)
                     .then_some(lcp)
             },
         )
+    }
+
+    /// A ticket to read back the cold entry that shares a strictly longer
+    /// prefix with `prompt_ids` than any in-memory entry does; `None` without
+    /// a tier or without such an entry.
+    pub(super) fn cold_read(
+        &self,
+        prompt_ids: &[u32],
+        key: &CacheKey,
+        min_similarity_milli: u32,
+    ) -> Option<ColdRead> {
+        let slot = self.cold.as_ref()?;
+        let (stamp, cold_lcp) = self.best_candidate(prompt_ids, key, min_similarity_milli, true)?;
+        let hot_lcp = self
+            .best_candidate(prompt_ids, key, min_similarity_milli, false)
+            .map_or(0, |(_, lcp)| lcp);
+        if cold_lcp <= hot_lcp {
+            return None;
+        }
+        let entry = self.entries.get(&stamp)?;
+        Some(ColdRead {
+            stamp,
+            ids: entry.state.ids.clone(),
+            cached_len: entry.state.cached_len,
+            tier: Arc::clone(&slot.tier),
+        })
+    }
+
+    /// Replaces the cold entry `stamp` with what the tier read back. The cold
+    /// entry and the tier's copy leave the cache whatever the read returned;
+    /// `Ok(false)` says another request already took the entry.
+    pub(super) fn thaw(
+        &mut self,
+        stamp: u64,
+        restored: Result<PrefixState, InteropError>,
+        key: &CacheKey,
+        config: &PromptCacheConfig,
+    ) -> Result<bool, InteropError> {
+        if self.drop_entry(stamp).is_none() {
+            return Ok(false);
+        }
+        let state = restored?;
+        self.store(CacheEntry::new(state, *key), config);
+        Ok(true)
     }
 
     fn miss_reason(&self, prompt_ids: &[u32], key: &CacheKey) -> MissReason {
@@ -1209,6 +1275,32 @@ pub(super) fn log_entry_dropped(error: &InteropError) {
     );
 }
 
+/// Brings back the cold entry a prompt reaches, reading the tier outside the
+/// cache lock so a slow tier never stalls other requests; `Ok(false)` when no
+/// cold entry reaches further than the in-memory ones.
+pub(super) fn thaw_best_cold(
+    cache: &Mutex<PromptCache>,
+    prompt_ids: &[u32],
+    key: &CacheKey,
+    config: &PromptCacheConfig,
+) -> Result<bool, InteropError> {
+    let ticket = cache
+        .lock()
+        .cold_read(prompt_ids, key, config.min_similarity_milli);
+    let Some(ticket) = ticket else {
+        return Ok(false);
+    };
+    let restored = ticket.read();
+    if let Err(error) = &restored {
+        error!(
+            cache_stamp = ticket.stamp,
+            tier_error = %error,
+            "prompt cache tier entry could not be read back, dropped"
+        );
+    }
+    cache.lock().thaw(ticket.stamp, restored, key, config)
+}
+
 impl LoadedModel<'_> {
     /// Drops every entry. A model-level input the key does not carry (the
     /// expert sidecar, [`Self::attach_expert_sidecar`]) just changed, so every
@@ -1288,6 +1380,7 @@ impl LoadedModel<'_> {
             self.lift_chunks(entry, prompt_ids, from, widths, serving_config)
         };
         let shifting = config.cache_reuse_min > 0 && config.ring_rewind_slack > 0;
+        let _restored = thaw_best_cold(&self.prompt_cache, prompt_ids, key, &config);
         let mut cache = self
             .prompt_cache
             .lock();
@@ -1959,17 +2052,19 @@ mod tests {
         );
     }
 
-    const TRACE_A: [u32; 2] = [1, 1];
-    const TRACE_B: [u32; 2] = [2, 2];
-    const TRACE_C: [u32; 2] = [3, 3];
-    const TRACE_D: [u32; 2] = [4, 4];
-    const TRACE_E: [u32; 2] = [5, 5];
+    const TRACE_A: [u32; 4] = [818, 5279, 529, 7001];
+    const TRACE_B: [u32; 4] = [2063, 10779, 78113, 236769];
+    const TRACE_C: [u32; 4] = [194618, 6081, 86460, 699];
+    const TRACE_D: [u32; 4] = [3459, 1883, 7733, 1156];
+    const TRACE_E: [u32; 4] = [5001, 5002, 5003, 5004];
 
     struct RecordingTier {
         demoted: Mutex<Vec<u64>>,
         discarded: Mutex<Vec<u64>>,
         refuses: bool,
         bytes_per_entry: u64,
+        fail_promote: bool,
+        held: Mutex<BTreeMap<u64, PrefixState>>,
     }
 
     impl RecordingTier {
@@ -1979,6 +2074,19 @@ mod tests {
                 discarded: Mutex::new(Vec::new()),
                 refuses,
                 bytes_per_entry,
+                fail_promote: false,
+                held: Mutex::new(BTreeMap::new()),
+            })
+        }
+
+        fn failing_promote() -> Arc<Self> {
+            Arc::new(Self {
+                demoted: Mutex::new(Vec::new()),
+                discarded: Mutex::new(Vec::new()),
+                refuses: false,
+                bytes_per_entry: 0,
+                fail_promote: true,
+                held: Mutex::new(BTreeMap::new()),
             })
         }
     }
@@ -1988,7 +2096,7 @@ mod tests {
             &self,
             stamp: u64,
             _ids: &[u32],
-            _state: &PrefixState,
+            state: &PrefixState,
         ) -> Result<u64, InteropError> {
             if self.refuses {
                 return Err(InteropError::UnsupportedServingConfig(
@@ -1996,12 +2104,33 @@ mod tests {
                 ));
             }
             self.demoted.lock().push(stamp);
+            self.held.lock().insert(stamp, state.branch());
             Ok(self.bytes_per_entry)
         }
 
         fn discard(&self, stamp: u64) -> Result<(), InteropError> {
             self.discarded.lock().push(stamp);
             Ok(())
+        }
+
+        fn promote(
+            &self,
+            stamp: u64,
+            _ids: &[u32],
+            _cached_len: usize,
+        ) -> Result<PrefixState, InteropError> {
+            if self.fail_promote {
+                return Err(InteropError::UnsupportedServingConfig(
+                    "recording tier cannot read".into(),
+                ));
+            }
+            self.held
+                .lock()
+                .get(&stamp)
+                .map(PrefixState::branch)
+                .ok_or_else(|| {
+                    InteropError::UnsupportedServingConfig("recording tier holds no such entry".into())
+                })
         }
     }
 
@@ -2126,6 +2255,119 @@ mod tests {
         assert_eq!(cache.held(), vec![(2, true), (3, false), (4, false)]);
         assert_eq!(*tier.demoted.lock(), vec![0, 1, 2]);
         assert_eq!(*tier.discarded.lock(), vec![0, 1]);
+    }
+
+    fn restore_config() -> PromptCacheConfig {
+        PromptCacheConfig {
+            max_entries: 2,
+            ..enabled_config()
+        }
+    }
+
+    fn prompt_after(trace: &[u32]) -> Vec<u32> {
+        let mut prompt = trace.to_vec();
+        prompt.push(9);
+        prompt
+    }
+
+    #[test]
+    fn tier_restore_cold_entry_is_served_after_reading_outside_the_lock() {
+        let tier = RecordingTier::new(false, 0);
+        let mut cache = cache_with_tier(&tier, 2, 1 << 30);
+        store_trace(&mut cache);
+        let shared = Mutex::new(cache);
+        let prompt = prompt_after(&TRACE_A);
+
+        let restored = thaw_best_cold(&shared, &prompt, &base_key(), &restore_config());
+
+        assert!(restored.expect("the tier read succeeds"));
+        assert_eq!(*tier.discarded.lock(), vec![0]);
+        assert_eq!(*tier.demoted.lock(), vec![0, 1]);
+        let mut cache = shared.lock();
+        assert_eq!(cache.held(), vec![(1, true), (2, false), (3, false)]);
+        let (entry, report) = cache.take_best(&prompt, &base_key(), &shared_widths(), ANY_OVERLAP);
+        assert_eq!(entry.expect("the restored entry serves").state.ids, TRACE_A);
+        assert_eq!(report.path, CachePath::Extend);
+        assert_eq!(report.reused_tokens, 4);
+        assert_eq!(cache.held(), vec![(1, true), (2, false)]);
+    }
+
+    #[test]
+    fn tier_restore_answers_false_when_no_cold_entry_matches() {
+        let tier = RecordingTier::new(false, 0);
+        let mut cache = cache_with_tier(&tier, 2, 1 << 30);
+        store_trace(&mut cache);
+        let shared = Mutex::new(cache);
+
+        let restored = thaw_best_cold(&shared, &[1, 2, 3], &base_key(), &restore_config());
+
+        assert!(!restored.expect("nothing to read is not an error"));
+        assert!(tier.discarded.lock().is_empty());
+    }
+
+    #[test]
+    fn tier_restore_drops_a_cold_entry_whose_tier_read_fails() {
+        let tier = RecordingTier::failing_promote();
+        let mut cache = cache_with_tier(&tier, 2, 1 << 30);
+        store_trace(&mut cache);
+        let shared = Mutex::new(cache);
+
+        let restored = thaw_best_cold(&shared, &prompt_after(&TRACE_A), &base_key(), &restore_config());
+
+        assert!(matches!(
+            restored,
+            Err(InteropError::UnsupportedServingConfig(_))
+        ));
+        assert!(!shared.lock().held().iter().any(|(stamp, _)| *stamp == 0));
+        assert_eq!(*tier.discarded.lock(), vec![0]);
+    }
+
+    #[test]
+    fn tier_restore_keeps_nothing_when_another_request_restored_the_entry_first() {
+        let tier = RecordingTier::new(false, 0);
+        let mut cache = cache_with_tier(&tier, 2, 1 << 30);
+        store_trace(&mut cache);
+        let ticket = cache
+            .cold_read(&prompt_after(&TRACE_A), &base_key(), ANY_OVERLAP)
+            .expect("entry 0 is cold and shares four ids");
+        cache.drop_entry(0);
+        let held_before = cache.held();
+
+        let restored = cache.thaw(
+            ticket.stamp,
+            Ok(state_with_ids(&TRACE_A).state),
+            &base_key(),
+            &restore_config(),
+        );
+
+        assert!(!restored.expect("a taken entry is not an error"));
+        assert_eq!(cache.held(), held_before);
+    }
+
+    #[test]
+    fn tier_restore_prefers_the_longer_prefix_between_cold_and_hot() {
+        let prompt = prompt_after(&TRACE_A);
+        let tier = RecordingTier::new(false, 0);
+        let mut cache = cache_with_tier(&tier, 4, 1 << 30);
+        store_trace(&mut cache);
+        cache.store(state_with_ids(&[818, 5279, 99, 99]), &restore_config());
+        let shared = Mutex::new(cache);
+
+        let shorter_hot = thaw_best_cold(&shared, &prompt, &base_key(), &restore_config());
+
+        assert!(shorter_hot.expect("the cold prefix is longer"));
+        let longer_tier = RecordingTier::new(false, 0);
+        let mut longer = cache_with_tier(&longer_tier, 4, 1 << 30);
+        store_trace(&mut longer);
+        longer.store(
+            state_with_ids(&[818, 5279, 529, 7001, 9, 8]),
+            &restore_config(),
+        );
+        let longer_shared = Mutex::new(longer);
+
+        let longer_hot = thaw_best_cold(&longer_shared, &prompt, &base_key(), &restore_config());
+
+        assert!(!longer_hot.expect("the hot prefix is longer"));
     }
 
     #[test]
@@ -3261,7 +3503,7 @@ mod tests {
             };
             let lookup = |prompt: &[u32]| {
                 batched(&|| {
-                    std::hint::black_box(cache.best_candidate(prompt, &key, 100));
+                    std::hint::black_box(cache.best_candidate(prompt, &key, 100, false));
                 })
             };
             let scan = |prompt: &[u32]| {
