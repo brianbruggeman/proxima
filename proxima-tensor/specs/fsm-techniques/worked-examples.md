@@ -262,3 +262,17 @@ The two sets differ, so the count formula is distinguishable at the two sizes.
 Equal scores: M = 6, fraction 0.5, min_rows 1, no kept rows, scores `[0.5, 0.9, 0.5, 0.5, 0.1, 0.9]`: count = max(1, ceil(3.0) = 3) = 3. With the tie rule: idx 1 (0.9) greater 0, equal-lower 0, rank 0; idx 5 (0.9) rank 0 + 1 = 1; idx 0 (0.5) greater 2, rank 2; idx 2 (0.5) rank 2 + 1 = 3; idx 3 (0.5) rank 2 + 2 = 4; idx 4 (0.1) greater 5, rank 5; selected (rank < 3) = {0,1,5}, 3 rows. With strictly-greater rank alone, idx 0, 2 and 3 all have rank 2, so {0,1,2,3,5} would be selected, 5 rows.
 
 RESULT top-fraction selection: fraction=0.25 min_rows=2 keep={5} M=12 -> {1,5,7,11}; M=11 -> {1,3,5,7}; ties M=6 fraction=0.5 min_rows=1 scores=[0.5,0.9,0.5,0.5,0.1,0.9] -> {0,1,5} (3 selected; strictly-greater rank alone selects 5)
+
+## block read selection
+
+The selection rule: the top blocks are chosen among the sealed blocks that are not local blocks; `nonlocal` is the count of those blocks and `n = min(nonlocal, max(min_blocks, ceil(keep_ratio * nonlocal)))`. The read set is the union of the selected blocks, the local blocks and the unsealed tail. Inputs: block size b = 16, 4 sealed blocks (rows 0 to 63) plus an unsealed tail of 5 rows (rows 64 to 68, 69 rows total), keep_ratio 0.5, min_blocks 1, local_blocks 1, block scores `[6, 9, 4, 1]` (block 3, the most recent sealed block, has the lowest score).
+
+- local = block 3 (always, despite score 1), so the non-local blocks are 0, 1, 2 with scores 6, 9, 4 and nonlocal = 3
+- n = min(3, max(1, ceil(0.5 * 3) = 2)) = 2
+- top 2 of the non-local scores: block 1 (9), block 0 (6); block 2 (4) is not selected
+- the tail rows 64 to 68 are all attended
+- attended blocks {0,1,3} = 3 * 16 = 48 rows, plus 5 tail rows = 53 rows of 69; the 16 rows of block 2 are not attended
+
+Counting n over all four blocks (`ceil(0.5 * 4) = 2`) also gives 2 here, so this selection does not distinguish the two forms; the non-local form is the stated rule.
+
+RESULT block read selection: b=16 sealed=4 tail=5 n=2 top={0,1} local={3} attended_blocks={0,1,3} attended_rows=53
