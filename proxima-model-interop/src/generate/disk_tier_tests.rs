@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::prompt_cache::{CacheEntry, PromptCache};
+use super::prompt_cache::{CacheEntry, PromptCache, thaw_best_cold};
 use super::*;
 use crate::block_file::MappedBlockFile;
 use crate::{ColdTier, InteropError, PrefixState};
@@ -178,4 +178,89 @@ fn tier_disk_drops_an_entry_whose_layers_have_no_row_planes() {
 
     assert!(!cache.held().iter().any(|(stamp, _)| *stamp == 0));
     assert!(spilled_names(directory.path()).is_empty());
+}
+
+fn prompt_after(trace: &[u32; 4]) -> Vec<u32> {
+    let mut prompt = trace.to_vec();
+    prompt.push(9);
+    prompt
+}
+
+fn encoded(state: &PrefixState) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    state
+        .to_block_file([0x22; 16], 7, &mut bytes)
+        .expect("the state encodes");
+    bytes
+}
+
+#[test]
+fn tier_round_trip_entry_survives_host_to_disk_to_host() {
+    let directory = tempfile::tempdir().expect("a temporary spill directory");
+    let original = entry_with_rows(&TRACE_A).state.branch();
+    let config = two_entry_config();
+    let shared = Mutex::new(disk_cache(directory.path(), 2));
+    let first = "0000000000000000.pxkv".to_owned();
+    let second = "0000000000000001.pxkv".to_owned();
+    let third = "0000000000000002.pxkv".to_owned();
+    let fourth = "0000000000000003.pxkv".to_owned();
+
+    shared.lock().store(entry_with_rows(&TRACE_A), &config);
+    assert_eq!(shared.lock().held(), vec![(0, false)]);
+    assert!(spilled_names(directory.path()).is_empty());
+
+    shared.lock().store(entry_with_rows(&TRACE_B), &config);
+    assert_eq!(shared.lock().held(), vec![(0, false), (1, false)]);
+    assert!(spilled_names(directory.path()).is_empty());
+
+    shared.lock().store(entry_with_rows(&TRACE_C), &config);
+    assert_eq!(shared.lock().held(), vec![(0, true), (1, false), (2, false)]);
+    assert_eq!(spilled_names(directory.path()), vec![first.clone()]);
+
+    let restored = thaw_best_cold(&shared, &prompt_after(&TRACE_A), &base_key(), &config);
+    assert!(restored.expect("the disk read succeeds"));
+    assert_eq!(shared.lock().held(), vec![(1, true), (2, false), (3, false)]);
+    assert_eq!(spilled_names(directory.path()), vec![second.clone()]);
+    let hot_bytes = encoded(&shared.lock().entry(3).expect("the restored entry is hot").state);
+    assert_eq!(hot_bytes, encoded(&original));
+
+    shared.lock().store(entry_with_rows(&TRACE_D), &config);
+    assert_eq!(shared.lock().held(), vec![(1, true), (2, true), (3, false), (4, false)]);
+    assert_eq!(spilled_names(directory.path()), vec![second, third.clone()]);
+
+    shared.lock().store(entry_with_rows(&TRACE_E), &config);
+    assert_eq!(shared.lock().held(), vec![(2, true), (3, true), (4, false), (5, false)]);
+    assert_eq!(spilled_names(directory.path()), vec![third, fourth]);
+
+    let prompt = prompt_after(&TRACE_B);
+    let (_, report) = shared.lock().take_best(&prompt, &base_key(), &widths(), 0);
+    assert_eq!(report.path, CachePath::Miss);
+    let thawed = thaw_best_cold(&shared, &prompt, &base_key(), &config);
+    assert!(!thawed.expect("no cold entry reaches the prompt"));
+}
+
+#[test]
+fn tier_policy_oldest_rule_list_moves_a_different_entry_to_disk() {
+    let config = two_entry_config();
+    let branch_ids = [818, 5279, 529, 7001, 9, 9];
+    let fill = |cache: &mut PromptCache| {
+        cache.store(entry_with_rows(&TRACE_A), &config);
+        let mut branch = entry_with_rows(&branch_ids);
+        branch.branch_base = Some(4);
+        cache.store(branch, &config);
+        cache.store(entry_with_rows(&TRACE_C), &config);
+    };
+    let default_directory = tempfile::tempdir().expect("a temporary spill directory");
+    let mut default_cache = disk_cache(default_directory.path(), 2);
+    let oldest_directory = tempfile::tempdir().expect("a temporary spill directory");
+    let mut oldest_cache = disk_cache(oldest_directory.path(), 2);
+    oldest_cache
+        .set_eviction_rules(&[EvictionRule::Oldest])
+        .expect("a list ending in oldest is accepted");
+
+    fill(&mut default_cache);
+    fill(&mut oldest_cache);
+
+    assert_eq!(default_cache.held(), vec![(0, false), (1, true), (2, false)]);
+    assert_eq!(oldest_cache.held(), vec![(0, true), (1, false), (2, false)]);
 }
