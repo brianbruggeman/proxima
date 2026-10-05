@@ -116,6 +116,9 @@ pub(super) struct LayerCache {
     /// `Some` for a sliding-window layer whose rows live in a ring
     /// ([`LayerCache::ring`]); `None` for a layer that stores every position.
     pub(super) ring: Option<KvRing>,
+    /// Rows below this are sealed; a ring layer never seals, and it stays
+    /// `0` until a seal call raises it.
+    pub(super) sealed_end: usize,
 }
 
 impl LayerCache {
@@ -125,6 +128,7 @@ impl LayerCache {
             k_odd: Vec::new(),
             v: Vec::new(),
             ring: None,
+            sealed_end: 0,
         }
     }
 
@@ -152,6 +156,10 @@ impl LayerCache {
     /// `[current, draft...]` appends `new_count` positions' worth of K/V,
     /// and this rewinds every layer back to the `verified.accepted + 1`
     /// that survived.
+    ///
+    /// The whole-state rewinds (prompt cache lookup, ring checkpoint restore,
+    /// chunk shift) discard rows they rebuild, so they lower the sealed end
+    /// with the rows.
     pub(super) fn truncate(&mut self, keep_positions: usize, even_odd_row: usize, v_row: usize) {
         if self.ring.is_some() {
             return;
@@ -159,6 +167,7 @@ impl LayerCache {
         self.k_even.truncate(keep_positions * even_odd_row);
         self.k_odd.truncate(keep_positions * even_odd_row);
         self.v.truncate(keep_positions * v_row);
+        self.sealed_end = self.sealed_end.min(keep_positions);
     }
 }
 
@@ -228,6 +237,42 @@ mod layer_cache_truncate_tests {
         assert!(cache.k_even.is_empty());
         assert!(cache.k_odd.is_empty());
         assert!(cache.v.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layer_cache_sealing_tests {
+    use super::LayerCache;
+
+    fn row_at(position: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let at = position as f32;
+        (vec![at, at + 0.5], vec![-at, -at - 0.5], vec![10.0 * at])
+    }
+
+    fn cache_with_rows(rows: usize) -> LayerCache {
+        let mut cache = LayerCache::new();
+        for position in 0..rows {
+            let (even, odd, value) = row_at(position);
+            cache.append(&even, &odd, &value);
+        }
+        cache
+    }
+
+    #[test]
+    fn a_whole_state_rewind_lowers_the_sealed_end_with_the_rows() {
+        let mut cache = cache_with_rows(6);
+        cache.sealed_end = 4;
+
+        cache.truncate(2, 2, 1);
+
+        assert_eq!(cache.k_even.len(), 4);
+        assert_eq!(cache.sealed_end, 2);
+
+        cache.truncate(5, 2, 1);
+
+        assert_eq!(cache.k_even.len(), 4);
+        assert_eq!(cache.sealed_end, 2);
     }
 }
 
