@@ -113,6 +113,13 @@ pub enum InteropError {
     #[error("no registered architecture matches general.architecture = {name:?}")]
     UnknownArchitecture { name: String },
 
+    /// an in-flight rewind reached rows a seal made immutable
+    #[error("cannot rewind to {keep_positions} rows: rows below {sealed_end} are sealed")]
+    RewindIntoSealed {
+        keep_positions: usize,
+        sealed_end: usize,
+    },
+
     /// [`crate::profiles::family_profile`]: no embedded profile file exists for
     /// this family string. Never defaulted: a family whose profile is absent
     /// would lower with another family's activation, scales and norm shifts.
