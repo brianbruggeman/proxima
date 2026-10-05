@@ -17,12 +17,11 @@ use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    CacheStrategy, CachedLayerRoots, KeySourceKind, ModelDescriptor, Qwen35LayerRoots,
-    build_forward,
+    CacheStrategy, ModelDescriptor, Qwen35LayerRoots, build_forward,
     gemma4_descriptor_from_gguf,
 };
 use crate::architecture::{
-    Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext,
+    Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext, rebuild_layer_roots,
 };
 use crate::bind::{
     BoundWeights, ModelArchitecture, SlidingRope, bind_dense, bind_matmul_weight,
@@ -663,28 +662,6 @@ pub fn descriptor_from_gguf(
     Ok(gemma4_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?)
 }
 
-fn rebuild_layer_roots(
-    key_sources: impl Iterator<Item = KeySourceKind> + Clone,
-    cache_roots: Vec<CachedLayerRoots>,
-) -> Result<Vec<Qwen35LayerRoots>, InteropError> {
-    let expected = key_sources.clone().filter(|kind| *kind == KeySourceKind::ProjectedK).count();
-    let produced = cache_roots.len();
-    let count_mismatch = || InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced, expected };
-    let mut cache_roots = cache_roots.into_iter();
-    let layer_roots = key_sources
-        .map(|kind| match kind {
-            KeySourceKind::ProjectedK => {
-                cache_roots.next().map(Qwen35LayerRoots::Attention).ok_or_else(count_mismatch)
-            }
-            KeySourceKind::SharedFromLayer(source) => Ok(Qwen35LayerRoots::SharedFromLayer(source)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    match cache_roots.next() {
-        Some(_) => Err(count_mismatch()),
-        None => Ok(layer_roots),
-    }
-}
-
 /// `PROXIMA_HEAD_REPEATS=1|2|3` (unset or unparsable reads as `1`): the
 /// head-cost measurement knob, layered into [`proxima_tensor::spec::ModelDescriptor::head_repeats`]
 /// here so the op-graph builders stay pure functions of the descriptor.
@@ -963,58 +940,6 @@ impl ArchitectureTrait for Gemma4Arch {
     }
 }
 
-#[cfg(test)]
-mod rebuild_layer_roots_tests {
-    use super::*;
-    use proxima_tensor::op::NodeId;
-
-    fn roots(seed: u32) -> CachedLayerRoots {
-        (NodeId(seed), NodeId(seed + 1), NodeId(seed + 2))
-    }
-
-    #[test]
-    fn interleaves_shared_layers_between_owning_layers_in_schedule_order() -> Result<(), InteropError> {
-        let kinds = [
-            KeySourceKind::ProjectedK,
-            KeySourceKind::ProjectedK,
-            KeySourceKind::SharedFromLayer(1),
-            KeySourceKind::SharedFromLayer(1),
-        ];
-
-        let rebuilt = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10), roots(20)])?;
-
-        assert!(matches!(rebuilt[0], Qwen35LayerRoots::Attention((NodeId(10), _, _))));
-        assert!(matches!(rebuilt[1], Qwen35LayerRoots::Attention((NodeId(20), _, _))));
-        assert!(matches!(rebuilt[2], Qwen35LayerRoots::SharedFromLayer(1)));
-        assert_eq!(rebuilt.len(), 4);
-        Ok(())
-    }
-
-    #[test]
-    fn fewer_cache_roots_than_owning_layers_reports_both_counts() {
-        let kinds = [KeySourceKind::ProjectedK, KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)];
-
-        let outcome = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10)]);
-
-        assert!(matches!(
-            outcome,
-            Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced: 1, expected: 2 })
-        ));
-    }
-
-    #[test]
-    fn more_cache_roots_than_owning_layers_reports_both_counts() {
-        let kinds = [KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)];
-
-        let outcome = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10), roots(20)]);
-
-        assert!(matches!(
-            outcome,
-            Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced: 2, expected: 1 })
-        ));
-    }
-}
-
 /// Regression coverage for the bug this crate shipped once: `bind` and the
 /// forward program each independently gate `attn_k.weight`/
 /// `attn_k_norm.weight`/`attn_v.weight` per layer, and nothing forced the
@@ -1038,6 +963,7 @@ mod rebuild_layer_roots_tests {
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
     use arrayvec::ArrayVec;
+    use proxima_tensor::spec::KeySourceKind;
     use proxima_gguf::types::GgmlType;
     use proxima_gguf::value::{MetadataArray, MetadataValue};
     use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};

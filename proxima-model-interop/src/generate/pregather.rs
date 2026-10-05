@@ -2337,6 +2337,13 @@ impl<'file> LoadedModel<'file> {
         self.architecture.block_count
     }
 
+    /// How many ops the forward program this load lowered holds; a config
+    /// edit that changes the schedule changes this count.
+    #[must_use]
+    pub fn op_count(&self) -> usize {
+        self.program.len()
+    }
+
     /// The checkpoint file's own byte length at load time (`file_bytes.len()`
     /// passed to [`Self::load`]/[`Self::load_from_safetensors`]) -- the
     /// on-disk size a live indicator reports, not this call's resident
@@ -2445,6 +2452,7 @@ impl<'file> LoadedModel<'file> {
             false,
             registry,
             KvLayout::SlidingRing,
+            None,
         )
     }
 
@@ -2474,6 +2482,7 @@ impl<'file> LoadedModel<'file> {
             false,
             &crate::architecture::ArchitectureRegistry::with_builtin(),
             layout,
+            None,
         )
     }
 
@@ -2534,6 +2543,7 @@ impl<'file> LoadedModel<'file> {
             false,
             &crate::architecture::ArchitectureRegistry::with_builtin(),
             KvLayout::SlidingRing,
+            None,
         )
     }
 
@@ -2566,6 +2576,44 @@ impl<'file> LoadedModel<'file> {
             fused_qkv_reduce,
             &crate::architecture::ArchitectureRegistry::with_builtin(),
             KvLayout::SlidingRing,
+            None,
+        )
+    }
+
+    /// [`Self::load`] with the forward program lowered from `descriptor`
+    /// instead of the one the checkpoint's own header derives: the weights
+    /// still bind from the GGUF tensor directory, the op graph, the verify
+    /// program and the placed single-range program follow the config. The KV
+    /// layout is the config's too ([`ModelDescriptor::sliding_kv_ring`]).
+    ///
+    /// Teaching pointer: build the descriptor with
+    /// `conflaguration::builder().value(base).env().file(path).validate()`
+    /// over a header-derived base (`dense_descriptor_from_gguf`,
+    /// `gemma4::descriptor_from_gguf`), or load a whole hand-written TOML with
+    /// `conflaguration::from_file`; a variant model is a config edit.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::load`] can fail with, plus
+    /// [`proxima_tensor::spec::build_forward`] refusing the config.
+    pub fn load_with_descriptor(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        descriptor: &ModelDescriptor,
+    ) -> Result<Self, InteropError> {
+        let kv_layout = if descriptor.sliding_kv_ring {
+            KvLayout::SlidingRing
+        } else {
+            KvLayout::Full
+        };
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            false,
+            false,
+            &crate::architecture::ArchitectureRegistry::with_builtin(),
+            kv_layout,
+            Some(descriptor),
         )
     }
 
@@ -2576,6 +2624,7 @@ impl<'file> LoadedModel<'file> {
         fused_qkv_reduce: bool,
         registry: &crate::architecture::ArchitectureRegistry,
         kv_layout: KvLayout,
+        descriptor: Option<&ModelDescriptor>,
     ) -> Result<Self, InteropError> {
         // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
         // non-resident page behind the no-copy `MTLBuffer`
@@ -2651,6 +2700,10 @@ impl<'file> LoadedModel<'file> {
         if !resolved.diagnostic_reduce_flags_apply() || (!paired_gate_up_reduce && !fused_qkv_reduce)
         {
             let bound = resolved.bind_with_kv_layout(parsed, file_bytes, kv_layout)?;
+            let bound = match descriptor {
+                Some(config) => bound.lowered_from(config)?,
+                None => bound,
+            };
             #[cfg(all(feature = "metal", target_os = "macos"))]
             let step_state = resolved.step_state(parsed)?;
             let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
@@ -2690,7 +2743,8 @@ impl<'file> LoadedModel<'file> {
             {
                 None
             } else {
-                let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
+                let qk_norm = descriptor
+                    .map_or_else(|| crate::bind::checkpoint_has_qk_norm(parsed), |config| config.qk_norm);
                 build_single_range_program(&bound.architecture, qk_norm)?
             };
             // Capability-derived, never a name comparison -- see
@@ -2700,6 +2754,14 @@ impl<'file> LoadedModel<'file> {
             // keeps this field `None`.
             let speculative_verify_program = resolved
                 .speculative_verify_program_with_kv_layout(parsed, file_bytes, kv_layout)?
+                .map(|verify_bound| match descriptor {
+                    Some(config) => verify_bound.lowered_from(&ModelDescriptor {
+                        last_row_only: false,
+                        ..config.clone()
+                    }),
+                    None => Ok(verify_bound),
+                })
+                .transpose()?
                 .map(|verify_bound| {
                     (
                         verify_bound.program,

@@ -46,6 +46,7 @@ use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 #[cfg(feature = "std")]
 use proxima_tensor::op::Op;
+use proxima_tensor::spec::ModelDescriptor;
 
 use crate::error::InteropError;
 #[cfg(feature = "std")]
@@ -441,6 +442,32 @@ impl ModelArchitecture {
             "attention.head_count_kv",
             self.kv_heads_by_layer.iter().copied(),
         )
+    }
+
+    /// This architecture with the shape fields `descriptor` carries read off
+    /// the config instead of the header. The per-head width and KV-head count
+    /// follow the config only when every layer agrees; a non-uniform schedule
+    /// keeps the header's values, since one number cannot stand for it.
+    #[must_use]
+    pub fn reshaped_by(&self, descriptor: &ModelDescriptor) -> Self {
+        let uniform = descriptor.layers.first().map(|first| &first.attention).filter(|first| {
+            descriptor
+                .layers
+                .iter()
+                .all(|layer| layer.attention.kv_heads == first.kv_heads && layer.attention.head_dim == first.head_dim)
+        });
+        Self {
+            vocab: descriptor.vocab,
+            embedding: descriptor.embedding,
+            feed_forward: descriptor.feed_forward,
+            query_heads: descriptor.query_heads,
+            kv_heads: uniform.map_or(self.kv_heads, |attention| attention.kv_heads),
+            head_dim: uniform.map_or(self.head_dim, |attention| attention.head_dim),
+            block_count: descriptor.block_count,
+            expert_count: descriptor.expert_count,
+            expert_used_count: descriptor.expert_used_count,
+            ..self.clone()
+        }
     }
 }
 

@@ -250,6 +250,57 @@ mod tests {
         )
     }
 
+    fn llama_architecture() -> ModelArchitecture {
+        ModelArchitecture {
+            vocab: 32000,
+            embedding: 4096,
+            feed_forward: 14336,
+            query_heads: 32,
+            kv_heads: 8,
+            kv_heads_by_layer: vec![8; 32],
+            head_dim: 128,
+            block_count: 32,
+            expert_count: 0,
+            expert_used_count: 0,
+            rope_freq_base: 10_000.0,
+            rms_epsilon: 1e-5,
+            tied_embeddings: false,
+            family: "llama".to_string(),
+            sliding_rope: None,
+        }
+    }
+
+    #[test]
+    fn an_architecture_reshaped_by_its_own_descriptor_is_unchanged() {
+        let architecture = llama_architecture();
+
+        assert_eq!(architecture.reshaped_by(&llama_input()), architecture);
+    }
+
+    #[test]
+    fn a_config_that_changes_the_layer_count_and_head_width_reshapes_the_architecture() {
+        let mut descriptor = llama_input();
+        descriptor.block_count = 2;
+        descriptor.layers.truncate(2);
+        for layer in &mut descriptor.layers {
+            layer.attention.head_dim = 64;
+        }
+
+        let reshaped = llama_architecture().reshaped_by(&descriptor);
+
+        assert_eq!((reshaped.block_count, reshaped.head_dim, reshaped.kv_heads), (2, 64, 8));
+    }
+
+    #[test]
+    fn a_non_uniform_schedule_keeps_the_header_head_width() {
+        let mut descriptor = llama_input();
+        descriptor.layers[0].attention.head_dim = 64;
+
+        let reshaped = llama_architecture().reshaped_by(&descriptor);
+
+        assert_eq!(reshaped.head_dim, 128);
+    }
+
     #[test]
     fn header_scales_reach_the_descriptor_of_a_granite_shaped_header() {
         let bytes = header_bytes(
