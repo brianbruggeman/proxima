@@ -88,7 +88,7 @@ pub use factory::Named;
 #[cfg(feature = "config")]
 pub use factory::{Composition, Factory, FactorySpec};
 #[cfg(feature = "alloc")]
-pub use serving_state::ServingFsmError;
+pub use serving_state::{ServingFsmError, ServingState};
 
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
