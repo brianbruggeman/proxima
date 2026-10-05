@@ -811,6 +811,11 @@ fn llama_parity_gemma4_e2b() {
 }
 
 #[test]
+fn llama_parity_granite_moe() {
+    llama_parity(&GRANITE_MOE);
+}
+
+#[test]
 fn llama_parity_openchat() {
     llama_parity(&OPENCHAT);
 }
