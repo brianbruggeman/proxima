@@ -167,3 +167,22 @@ Inputs (headers under `proxima-model-interop/tests/fixtures/llama-parity/<model>
 Assumption: a kernel that reduces sequentially instead of as a tree would exceed these bounds; if a measured gap exceeds tau the test fails and tau is not widened. The earlier gemma4 E2B value (5.424e-05) used n = 6144, missing the 20 shared-cache layers' 12288, and omitted the attention width.
 
 RESULT row tolerance: gemma4_e2b=5.841e-05 gemma4_26b=4.649e-05 granite_moe=2.861e-05
+
+## readout tolerance
+
+The readout of a settle decision is a log probability: `logprob = logit - logsumexp(logits)`.
+
+Model: the logits carry relative error tau (the row tolerance above) and an assumed bound `|logit| <= 40`. The error of one logit is at most `40 * tau`. A log probability moves by the chosen logit's error plus the logsumexp's error, so `tol_logprob = 2 * tau * 40 = 80 * tau`.
+
+For the top-1 minus top-2 probability margin, `|dp| <= p * |dlogp|` and `p1 + p2 <= 1`, so `tol_margin = tol_logprob`.
+
+The bound on the logit:
+- gemma4_e2b and gemma4_26b: both headers declare `gemma4.final_logit_softcapping = 30.0`, so `|logit| <= 30 < 40` holds by construction.
+- granite_moe: the header declares no soft cap. Its logits are divided by `granitemoe.logit_scale = 6.0` after the head, and `|logit| <= 40` on the scaled value is an assumption, unmeasured.
+
+Results:
+- gemma4_e2b: 80 * 5.841e-05 = 4.673e-03
+- gemma4_26b: 80 * 4.649e-05 = 3.719e-03
+- granite_moe: 80 * 2.861e-05 = 2.289e-03 (rests on the unmeasured bound)
+
+RESULT readout tolerance: tol_logprob gemma4_e2b=4.673e-03 gemma4_26b=3.719e-03 granite_moe=2.289e-03 tol_margin=tol_logprob
