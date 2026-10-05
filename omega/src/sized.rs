@@ -83,6 +83,7 @@
 //!   split target (`crate::msl::rows_per_threadgroup`, `row_tiled_simdgroups`,
 //!   `row_tiled_splits`), read only under `metal-attn-split-rows`; see
 //!   `omega-runtime.toml`'s `[attention_rows]`.
+//! - `SELECTION_TOP_FRACTION_MIN_ROWS` (always compiled) -- the row count at which the rank-count top-fraction expression lowers to one selection kernel; see `omega-runtime.toml`'s `[selection]`.
 //! - `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES` (always compiled) —
 //!   Metal's per-threadgroup `threadgroup` memory ceiling; `crate::msl::
 //!   effective_context_chunk_cap` clamps `ATTENTION_CONTEXT_CHUNK_CAP`
@@ -180,3 +181,13 @@ pub const SIMD_WIDTH: u64 = 32;
 // source of truth for a byte constant the fit gate compares against those
 // facts -- not a parallel default the interop crate would otherwise have to
 // keep in sync by hand.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_min_rows_is_the_toml_value() {
+        assert_eq!(SELECTION_TOP_FRACTION_MIN_ROWS, 256);
+    }
+}
