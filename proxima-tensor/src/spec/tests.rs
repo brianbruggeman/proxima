@@ -17603,13 +17603,13 @@ mod forward_scales {
     const MOE_PRE_CHANGE_NODES: usize = 291;
     const MOE_PRE_CHANGE_DIGEST: u64 = 15757248836318508347;
 
-    fn profile_text(rope_layout: &str) -> String {
+    pub(super) fn profile_text(rope_layout: &str) -> String {
         format!(
             "score_scale_inverse_sqrt_head_dim = true\nvalue_norm = false\nrope_layout = \"{rope_layout}\"\n\n[ffn]\npost_attention_norm = false\ncombination = \"Exclusive\"\noutput_scale = false\nrouted_gating = \"Softmax\"\nrouted_expert_bias = false\nactivation = \"Silu\"\nexclusive_dense_post_norm = false\n"
         )
     }
 
-    fn descriptor(expert_count: u32, expert_used_count: u32) -> ModelDescriptor {
+    pub(super) fn descriptor(expert_count: u32, expert_used_count: u32) -> ModelDescriptor {
         let profile = toml::from_str::<FamilyProfile>(&profile_text("adjacent"))
             .expect("the dense profile parses");
         mistral_descriptor_from_shape(
@@ -17906,4 +17906,73 @@ fn rank_select_cpu_keep_rows_union() {
 
     assert_eq!(mask.len(), 12);
     assert_eq!(selected_rows(&mask), vec![0, 1, 7, 11]);
+}
+
+mod descriptor_config {
+    use super::*;
+
+    fn descriptors() -> Vec<(&'static str, ModelDescriptor)> {
+        let mut mixture = forward_scales::descriptor(4, 2);
+        mixture.residual_scale = Some(0.22);
+        mixture.embedding_scale = Some(EmbeddingScale::Factor(12.0));
+        vec![
+            ("cacheless", head_repeats::descriptor(CacheStrategy::Cacheless, 1)),
+            ("two_range", head_repeats::descriptor(CacheStrategy::TwoRange, 1)),
+            ("single_range_dense", forward_scales::descriptor(0, 0)),
+            ("single_range_moe", mixture),
+        ]
+    }
+
+    #[test]
+    fn a_descriptor_round_trips_through_toml_and_lowers_the_same_program() {
+        for (label, descriptor) in descriptors() {
+            let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+            let restored: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+
+            assert_eq!(restored, descriptor, "{label}: round trip changed the config:\n{text}");
+            let original = build_forward(&descriptor).expect("the descriptor lowers");
+            let lowered = build_forward(&restored).expect("the restored descriptor lowers");
+            assert!(!original.0.is_empty(), "{label}: lowered zero ops");
+            assert_eq!(original.0, lowered.0, "{label}: restored config lowers to a different program");
+            assert_eq!(original.1, lowered.1, "{label}: logits root differs");
+        }
+    }
+
+    #[test]
+    fn rope_table_names_are_data_in_the_toml() {
+        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::TwoRange, 1))
+            .expect("a descriptor serializes to toml");
+
+        assert!(text.contains("cos_name = \"rope_cos\""), "got:\n{text}");
+        assert!(text.contains("sin_name = \"rope_sin\""), "got:\n{text}");
+    }
+
+    #[test]
+    fn flipping_last_row_only_in_the_toml_changes_the_lowered_program() {
+        for (label, descriptor) in descriptors() {
+            let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+            let flipped_text = if descriptor.last_row_only {
+                text.replace("last_row_only = true", "last_row_only = false")
+            } else {
+                text.replace("last_row_only = false", "last_row_only = true")
+            };
+            let flipped: ModelDescriptor = toml::from_str(&flipped_text).expect("the edited toml parses");
+
+            assert_ne!(flipped.last_row_only, descriptor.last_row_only, "{label}: the edit did not flip the field");
+            let original = build_forward(&descriptor).expect("the descriptor lowers");
+            let lowered = build_forward(&flipped).expect("the flipped descriptor lowers");
+            assert_ne!(original.0, lowered.0, "{label}: the verify shape must change the program");
+        }
+    }
+
+    #[test]
+    fn an_unknown_field_is_an_error_not_a_silent_default() {
+        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::TwoRange, 1))
+            .expect("a descriptor serializes to toml");
+
+        let error = toml::from_str::<ModelDescriptor>(&format!("block_cuont = 2\n{text}"))
+            .expect_err("a misspelled key must be rejected");
+
+        assert!(error.to_string().contains("unknown field"), "got: {error}");
+    }
 }
