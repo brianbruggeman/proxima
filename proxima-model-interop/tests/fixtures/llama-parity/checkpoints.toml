@@ -1,4 +1,4 @@
-# the seven real checkpoints the architecture-as-data slices are held to.
+# the eight real checkpoints the architecture-as-data slices are held to.
 # sha256 is the full-content digest (openssl dgst -sha256) taken 2026-10-04.
 
 [[checkpoint]]
@@ -69,4 +69,14 @@ architecture = "qwen35moe"
 sha256 = "f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d"
 size_bytes = 23938321664
 size_note = "library/qwen3.6:35b-a3b, MoE + vision, 23.9 GB; long-context env.sh QWEN36"
+present = true
+
+[[checkpoint]]
+name = "granite_moe"
+path = "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80"
+env = "PROXIMA_ARCH_GRANITE_MOE_GGUF"
+architecture = "granitemoe"
+sha256 = "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80"
+size_bytes = 1422239776
+size_note = "library/granite3.1-moe:1b, 1B-a400M MoE (expert_count 32, 8 used), Q8_0, 1.4 GB"
 present = true

@@ -1,0 +1,50 @@
+# oracle tool: llama.cpp gguf-py gguf_dump.py (header only, CPU, no tensors) from /Users/brianbruggeman/repos/others/llama.cpp at commit f1ea206218210afb913ae2f5d2c51faed35915da
+# command: cd /Users/brianbruggeman/repos/others/llama.cpp/gguf-py && PYTHONPATH=. uv run --no-project --with numpy --with pyyaml --with tqdm python gguf/scripts/gguf_dump.py --no-tensors /Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80
+# checkpoint: granite_moe
+* File is LITTLE endian, script is running on a LITTLE endian host.
+* Dumping 45 key/value pair(s)
+      1: UINT32     |        1 | GGUF.version = 3
+      2: UINT64     |        1 | GGUF.tensor_count = 242
+      3: UINT64     |        1 | GGUF.kv_count = 42
+      4: STRING     |        1 | general.architecture = 'granitemoe'
+      5: STRING     |        1 | general.type = 'model'
+      6: STRING     |        1 | general.name = 'Granite 3.1 1b A400M Instruct'
+      7: STRING     |        1 | general.finetune = 'instruct'
+      8: STRING     |        1 | general.basename = 'granite-3.1'
+      9: STRING     |        1 | general.size_label = '1B-a400M'
+     10: STRING     |        1 | general.license = 'apache-2.0'
+     11: UINT32     |        1 | general.base_model.count = 1
+     12: STRING     |        1 | general.base_model.0.name = 'Granite 3.1 1b A400M Base'
+     13: STRING     |        1 | general.base_model.0.organization = 'Ibm Granite'
+     14: STRING     |        1 | general.base_model.0.repo_url = 'https://huggingface.co/ibm-granite/granite-3.1-1b-a400m-base'
+     15: [STRING]   |        3 | general.tags = ['language', 'granite-3.1', 'text-generation']
+     16: UINT32     |        1 | granitemoe.block_count = 24
+     17: UINT32     |        1 | granitemoe.context_length = 131072
+     18: UINT32     |        1 | granitemoe.embedding_length = 1024
+     19: UINT32     |        1 | granitemoe.feed_forward_length = 512
+     20: UINT32     |        1 | granitemoe.attention.head_count = 16
+     21: UINT32     |        1 | granitemoe.attention.head_count_kv = 8
+     22: FLOAT32    |        1 | granitemoe.rope.freq_base = 1500000.0
+     23: FLOAT32    |        1 | granitemoe.attention.layer_norm_rms_epsilon = 9.999999974752427e-07
+     24: UINT32     |        1 | granitemoe.expert_count = 32
+     25: UINT32     |        1 | granitemoe.expert_used_count = 8
+     26: UINT32     |        1 | general.file_type = 7
+     27: UINT32     |        1 | granitemoe.vocab_size = 49155
+     28: UINT32     |        1 | granitemoe.rope.dimension_count = 64
+     29: FLOAT32    |        1 | granitemoe.attention.scale = 0.015625
+     30: FLOAT32    |        1 | granitemoe.embedding_scale = 12.0
+     31: FLOAT32    |        1 | granitemoe.residual_scale = 0.2199999988079071
+     32: FLOAT32    |        1 | granitemoe.logit_scale = 6.0
+     33: STRING     |        1 | tokenizer.ggml.model = 'gpt2'
+     34: STRING     |        1 | tokenizer.ggml.pre = 'refact'
+     35: [STRING]   |    49155 | tokenizer.ggml.tokens = ['<|end_of_text|>', '<fim_prefix>', '<fim_middle>', '<fim_suffix>', '<fim_pad>', '<filename>', ...]
+     36: [INT32]    |    49155 | tokenizer.ggml.token_type = [3, 3, 3, 3, 3, 3, ...]
+     37: [STRING]   |    48891 | tokenizer.ggml.merges = ['Ġ Ġ', 'ĠĠ ĠĠ', 'ĠĠĠĠ ĠĠĠĠ', 'ĠĠ Ġ', 'e r', 'i n', ...]
+     38: UINT32     |        1 | tokenizer.ggml.bos_token_id = 0
+     39: UINT32     |        1 | tokenizer.ggml.eos_token_id = 0
+     40: UINT32     |        1 | tokenizer.ggml.unknown_token_id = 0
+     41: UINT32     |        1 | tokenizer.ggml.padding_token_id = 0
+     42: BOOL       |        1 | tokenizer.ggml.add_bos_token = False
+     43: STRING     |        1 | tokenizer.chat_template = "{%- if messages[0]['role'] == 'system' %}\n    {%- set sys..."
+     44: BOOL       |        1 | tokenizer.ggml.add_space_prefix = False
+     45: UINT32     |        1 | general.quantization_version = 2
