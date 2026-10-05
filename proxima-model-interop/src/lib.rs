@@ -145,7 +145,7 @@ pub use residency::{
     ServeDecision, ServePrecision,
 };
 pub use rope_scaling::RopeScaling;
-pub use serving_grammar::ReadSpec;
+pub use serving_grammar::{AssembleStep, ReadSpec};
 #[cfg(feature = "std")]
 pub use serving::GdnPrefillBackend;
 pub use serving::{
