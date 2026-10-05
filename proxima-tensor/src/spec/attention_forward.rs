@@ -414,7 +414,7 @@ impl LayerFfnConfig {
 /// How a [`LayerAttentionConfig`] layer scales its raw attention scores
 /// before the causal mask -- see [`LayerAttentionConfig::score_scale`]'s own
 /// doc for which architecture uses which variant and why.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttentionScoreScale {
     /// `1/sqrt(query_pre_attn_scalar)`, the Gemma 2/3 convention. LFM2 and
     /// every other pre-existing caller passes its own `head_dim` here,
@@ -423,6 +423,19 @@ pub enum AttentionScoreScale {
     /// No score scaling (`self.scaling = 1.0`): Gemma 4's `Gemma4TextAttention`,
     /// sliding and full layers alike.
     Unscaled,
+    /// Multiply scores by a literal the checkpoint declares (`<family>.attention.scale`, 0.015625 for granite), replacing `1/sqrt(head_dim)`.
+    Factor(f32),
+}
+
+impl AttentionScoreScale {
+    #[must_use]
+    pub fn multiplier(self) -> f32 {
+        match self {
+            Self::InverseSqrtQueryPreAttnScalar(scalar) => 1.0 / (scalar as f32).sqrt(),
+            Self::Unscaled => 1.0,
+            Self::Factor(factor) => factor,
+        }
+    }
 }
 
 /// Technique: grouped-query attention (Ainslie et al. 2023, GQA -- `kv_heads`) -- see `docs/design/technique-taxonomy.md#attention`.
@@ -436,7 +449,7 @@ pub enum AttentionScoreScale {
 /// knobs [`append_attention_mixer`] already generalized in the slice before
 /// this one -- `query_heads` stays a top-level uniform parameter because
 /// every caller in this crate still needs it uniform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerAttentionConfig {
     pub head_dim: u32,
     pub kv_heads: u32,
@@ -480,7 +493,7 @@ pub struct LayerAttentionConfig {
 /// [`LayerKind::Attention`] (every [`LayerKind::ShortConv`] block still
 /// carries one, simply unread, so every schedule entry stays the same
 /// shape regardless of that block's own kind).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerSchedule {
     pub kind: LayerKind,
     pub attention: LayerAttentionConfig,
@@ -1473,13 +1486,7 @@ where
         let group = query_heads / config.kv_heads;
 
         let inv_sqrt_head_dim = find_or_insert(&mut score_scale_cache, config.score_scale, || {
-            let multiplier = match config.score_scale {
-                AttentionScoreScale::InverseSqrtQueryPreAttnScalar(scalar) => {
-                    1.0 / (scalar as f32).sqrt()
-                }
-                AttentionScoreScale::Unscaled => 1.0,
-            };
-            scalar_constant(program, multiplier)
+            scalar_constant(program, config.score_scale.multiplier())
         });
         let inv_head_dim = find_or_insert(&mut inv_head_dim_cache, config.head_dim, || {
             scalar_constant(program, 1.0 / config.head_dim as f32)
@@ -2401,6 +2408,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         rope_pairing,
         None,
         None,
+        AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
     )
 }
 
@@ -2430,6 +2438,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     rope_pairing: RopePairing,
     embedding_scale: Option<EmbeddingScale>,
     logit_scale: Option<f32>,
+    score_scale: AttentionScoreScale,
 ) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -2456,7 +2465,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
-    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    let inv_sqrt_head_dim = scalar_constant(&mut program, score_scale.multiplier());
     // only materialized when a layer actually consumes it (`qk_norm`), so a
     // dense checkpoint with no QK-norm keeps the identical node count this
     // function has always emitted.
