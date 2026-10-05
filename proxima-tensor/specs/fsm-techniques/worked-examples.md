@@ -116,3 +116,25 @@ Selection: the most recent sealed block is local (`local_blocks = 1`, B3) and ne
 An earlier form counted n over all four blocks and let the local block compete, which listed `{0,2,3}` at 0.75; the stated rule counts non-local blocks only, so the attended count is a function of lengths and not of the scores.
 
 RESULT block scoring: scores=[2,1,7,3] keep0.25:n=1,attended={2,3} keep0.75:n=3,attended={0,1,2,3}
+
+## block read rows
+
+A block read attends to the top-n sealed non-local blocks plus the local blocks, and the unsealed tail. The top-n are chosen among the sealed non-local blocks and local blocks are always added, so the number of rows read is a pure function of lengths and never of the scores.
+
+Only the full-attention layers apply the block read; a windowed layer reads `min(len, window)` rows either way. gemma4 E2B has 35 layers (`gemma4.block_count = 35`) with a sliding window of 512 (`gemma4.attention.sliding_window = 512`). Layers 4, 9, 14, 19, 24, 29 and 34 report `is_swa = 0`, so `layers = 7`. Each of those 7, including any that shares another layer's cache, evaluates its own attention over the rows. Counting 35 layers (every layer of the model) would be wrong for this checkpoint: 28 of its layers are windowed.
+
+Per layer, per decode step s from 0 to T-1:
+
+- `len_s = P + s + 1` (rows visible, including the new row);
+- `sealed_end_s = floor(max(0, len_s - H) / b) * b` and `M_s = sealed_end_s / b`;
+- `L' = min(L, M_s)` and `n_s = min(M_s - L', max(n_min, ceil(keep_ratio * (M_s - L'))))`;
+- `rows_s = (n_s + L') * b + (len_s - sealed_end_s)`;
+- `kv_rows_read = layers * sum_s rows_s`.
+
+Instance: block size b = 64, hot tail H = 64, n_min = 16, local blocks L = 1, layers = 7, prompt P = 4096, decode steps T = 2.
+
+- len = 4097 and 4098; sealed_end = 4032 for both (floor(4033/64) = 63 and floor(4034/64) = 63); M = 63, L' = 1, non-local blocks 62;
+- keep_ratio 0.1: n = min(62, max(16, ceil(6.2) = 7)) = 16; rows = 17*64 + 65 = 1153 and 17*64 + 66 = 1154; per layer 2307; total 7 * 2307 = 16149;
+- keep_ratio 0.9: n = min(62, max(16, ceil(55.8) = 56)) = 56; rows = 57*64 + 65 = 3713 and 57*64 + 66 = 3714; per layer 7427; total 7 * 7427 = 51989.
+
+RESULT block read rows: P=4096 T=2 layers=7 b=64 H=64 n_min=16 L=1 keep=0.1 -> 16149; keep=0.9 -> 51989
