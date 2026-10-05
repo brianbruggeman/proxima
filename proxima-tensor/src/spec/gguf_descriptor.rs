@@ -146,6 +146,7 @@ pub fn gemma4_descriptor_from_gguf(
         embedding_scale: profile.embedding_scale,
         logit_softcap: (softcap > 0.0).then_some(softcap),
         logit_scale: None,
+        residual_scale: None,
         layers,
         cache_strategy,
         ple_dim: (ple_dim > 0).then_some(ple_dim),

@@ -14904,6 +14904,7 @@ mod gemma4_synthetic_parity {
             embedding_scale: Some(EmbeddingScale::Sqrt),
             logit_softcap: Some(SOFTCAP),
             logit_scale: None,
+            residual_scale: None,
             layers,
             cache_strategy: CacheStrategy::TwoRange,
             // no PLE entry in the fixture schedule above.
@@ -17522,6 +17523,7 @@ mod head_repeats {
             embedding_scale: Some(EmbeddingScale::Sqrt),
             logit_softcap: Some(30.0),
             logit_scale: None,
+            residual_scale: None,
             layers,
             cache_strategy,
             ple_dim: None,
@@ -17709,6 +17711,53 @@ mod forward_scales {
     #[test]
     fn new_descriptors_default_to_no_logit_scale() {
         assert_eq!(descriptor(0, 0).logit_scale, None);
+    }
+
+    #[test]
+    fn two_range_and_cacheless_refuse_a_residual_scale() {
+        for strategy in [CacheStrategy::TwoRange, CacheStrategy::Cacheless] {
+            let mut descriptor = head_repeats::descriptor(strategy, 1);
+            descriptor.residual_scale = Some(0.22);
+
+            let outcome = build_forward(&descriptor, false);
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(TensorError::UnsupportedInBuilder {
+                        feature: "a residual scale",
+                        ..
+                    })
+                ),
+                "{strategy:?} must refuse a residual scale"
+            );
+        }
+    }
+
+    #[test]
+    fn single_range_refuses_a_residual_scale_until_it_lowers_one() {
+        for (expert_count, expert_used_count) in [(0, 0), (4, 2)] {
+            let mut descriptor = descriptor(expert_count, expert_used_count);
+            descriptor.residual_scale = Some(0.22);
+
+            let outcome = build_forward(&descriptor, true);
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(TensorError::UnsupportedInBuilder {
+                        builder: "build_forward(CacheStrategy::SingleRange)",
+                        feature: "a residual scale",
+                    })
+                ),
+                "experts {expert_count} must refuse a residual scale"
+            );
+        }
+    }
+
+    #[test]
+    fn new_descriptors_default_to_no_residual_scale() {
+        assert_eq!(descriptor(0, 0).residual_scale, None);
     }
 
     #[test]
