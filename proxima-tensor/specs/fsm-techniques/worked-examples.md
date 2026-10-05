@@ -239,3 +239,13 @@ An isotonic judge is a pure function of the per-token margins of the answer. The
 - margins [0.25, 0.0, 0.125]: sum 0.375, mean 0.125, u = 0.875, g(0.875) = 1, 1 > 0.5, escalate
 
 RESULT isotonic judge: u=0.25 g=0 -> settle; u=0.5 g=0.5 -> settle; u=0.875 g=1 -> escalate
+
+## always judge
+
+The always judge is the default: an absent cascade is one tier with judge `always` and one call, and the last tier of any cascade always settles. It is a pure function of nothing: it settles for every request regardless of readouts. In vote terms `samples = 1`, votes `[1]`, disagreement `1 - 1 = 0`, which is inside every bound (`0 <= max_disagree` for any non-negative `max_disagree`).
+
+- logprob -0.2 (a confident token): settle
+- logprob -3.0 (an unconfident token): settle
+- readout missing: settle, because the judge reads no readout
+
+RESULT always judge: any readout -> settle (3 of 3 requests)
