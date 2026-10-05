@@ -69,8 +69,6 @@ mod qwen35;
 pub mod rope_scaling;
 mod serving;
 #[cfg(feature = "std")]
-mod serving_fsm;
-#[cfg(feature = "std")]
 mod prompt_cache_settings;
 #[cfg(feature = "std")]
 mod speculative_settings;
@@ -151,6 +149,8 @@ pub use serving::{
     PromptCacheConfig, REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
     SpeculativeTypeSet, WeightPrecisionRule, apply_serving_config, resolve_context_length,
 };
+#[cfg(feature = "std")]
+pub use proxima_core::ServingState;
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;
 #[cfg(feature = "std")]
