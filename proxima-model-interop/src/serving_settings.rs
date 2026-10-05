@@ -260,6 +260,46 @@ pub struct ServingSettings {
     #[setting(default = false)]
     #[builder(default = false)]
     pub gpu_correctness_fallback: bool,
+    /// `ServingConfig::prefill_one_evaluation`: evaluate the whole prefill chunk in one call.
+    #[setting(default = false)]
+    #[builder(default = false)]
+    pub prefill_one_evaluation: bool,
+    /// `ServingConfig::prefill_chunk_positions`: positions per prefill chunk when one-call prefill is on; `0` keeps the unsplit behaviour.
+    #[setting(default = 0)]
+    #[builder(default = 0)]
+    pub prefill_chunk_positions: usize,
+    /// `ServingConfig::cached_attention_fusion`: fuse the cached attention step.
+    #[setting(default = true)]
+    #[builder(default = true)]
+    pub cached_attention_fusion: bool,
+    /// `ServingConfig::gated_delta_net_fusion`: fuse the gated delta net step.
+    #[setting(default = true)]
+    #[builder(default = true)]
+    pub gated_delta_net_fusion: bool,
+    /// `ServingConfig::moe_topk_fusion`: fuse the expert top-k selection.
+    #[setting(default = true)]
+    #[builder(default = true)]
+    pub moe_topk_fusion: bool,
+    /// `ServingConfig::plan_time_constants`: keep plan-time constants resident.
+    #[setting(default = true)]
+    #[builder(default = true)]
+    pub plan_time_constants: bool,
+    /// `ServingConfig::plan_refit`: refit a compiled plan to a new extent instead of recompiling.
+    #[setting(default = true)]
+    #[builder(default = true)]
+    pub plan_refit: bool,
+    /// `ServingConfig::command_buffer_chunks`: command buffers one token's dispatches are split into; at least `1`.
+    #[setting(default = 1)]
+    #[builder(default = 1)]
+    pub command_buffer_chunks: u32,
+    /// `ServingConfig::max_command_buffers_per_token`: cap on command buffers per token; `0` is no cap.
+    #[setting(default = 0)]
+    #[builder(default = 0)]
+    pub max_command_buffers_per_token: usize,
+    /// `ServingConfig::overlap_transfer_compute`: overlap weight transfer with compute.
+    #[setting(default = false)]
+    #[builder(default = false)]
+    pub overlap_transfer_compute: bool,
 }
 
 impl Default for ServingSettings {
@@ -330,6 +370,16 @@ impl ServingSettings {
             weight_precision,
             gdn_prefill_backend: self.gdn_prefill_backend,
             gpu_correctness_fallback: self.gpu_correctness_fallback,
+            prefill_one_evaluation: self.prefill_one_evaluation,
+            prefill_chunk_positions: self.prefill_chunk_positions,
+            cached_attention_fusion: self.cached_attention_fusion,
+            gated_delta_net_fusion: self.gated_delta_net_fusion,
+            moe_topk_fusion: self.moe_topk_fusion,
+            plan_time_constants: self.plan_time_constants,
+            plan_refit: self.plan_refit,
+            command_buffer_chunks: self.command_buffer_chunks,
+            max_command_buffers_per_token: self.max_command_buffers_per_token,
+            overlap_transfer_compute: self.overlap_transfer_compute,
             ..ServingConfig::default()
         }
     }
@@ -705,5 +755,80 @@ target = "q8_0"
             "[[weight_precision]]\npattern_kind = \"exact\"\ntarget = \"q4_0\"",
         );
         assert!(missing_pattern.is_err(), "an exact rule without a pattern is refused");
+    }
+
+    #[test]
+    fn serving_scalars_runtime_switches_lower_and_round_trip() {
+        const SWITCHES_TOML: &str = r#"
+prefill_one_evaluation = true
+prefill_chunk_positions = 256
+cached_attention_fusion = false
+gated_delta_net_fusion = false
+moe_topk_fusion = false
+plan_time_constants = false
+plan_refit = false
+command_buffer_chunks = 8
+max_command_buffers_per_token = 12
+overlap_transfer_compute = true
+"#;
+
+        let from_toml: ServingSettings =
+            conflaguration::from_toml_str(SWITCHES_TOML).expect("the switches toml parses");
+        let built = ServingSettings::builder()
+            .prefill_one_evaluation(true)
+            .prefill_chunk_positions(256)
+            .cached_attention_fusion(false)
+            .gated_delta_net_fusion(false)
+            .moe_topk_fusion(false)
+            .plan_time_constants(false)
+            .plan_refit(false)
+            .command_buffer_chunks(8)
+            .max_command_buffers_per_token(12)
+            .overlap_transfer_compute(true)
+            .build();
+        let from_env = temp_env::with_vars(
+            [
+                ("PROXIMA_SERVING_PREFILL_ONE_EVALUATION", Some("true")),
+                ("PROXIMA_SERVING_PREFILL_CHUNK_POSITIONS", Some("256")),
+                ("PROXIMA_SERVING_CACHED_ATTENTION_FUSION", Some("false")),
+                ("PROXIMA_SERVING_GATED_DELTA_NET_FUSION", Some("false")),
+                ("PROXIMA_SERVING_MOE_TOPK_FUSION", Some("false")),
+                ("PROXIMA_SERVING_PLAN_TIME_CONSTANTS", Some("false")),
+                ("PROXIMA_SERVING_PLAN_REFIT", Some("false")),
+                ("PROXIMA_SERVING_COMMAND_BUFFER_CHUNKS", Some("8")),
+                ("PROXIMA_SERVING_MAX_COMMAND_BUFFERS_PER_TOKEN", Some("12")),
+                ("PROXIMA_SERVING_OVERLAP_TRANSFER_COMPUTE", Some("true")),
+            ],
+            || ServingSettings::from_env().expect("the switches env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+
+        let config = built.as_serving_config(&[]);
+        assert!(config.prefill_one_evaluation);
+        assert_eq!(config.prefill_chunk_positions, 256);
+        assert!(!config.cached_attention_fusion);
+        assert!(!config.gated_delta_net_fusion);
+        assert!(!config.moe_topk_fusion);
+        assert!(!config.plan_time_constants);
+        assert!(!config.plan_refit);
+        assert_eq!(config.command_buffer_chunks, 8);
+        assert_eq!(config.max_command_buffers_per_token, 12);
+        assert!(config.overlap_transfer_compute);
+
+        let defaults = ServingSettings::default();
+        let lowered = defaults.as_serving_config(&[]);
+        let today = ServingConfig::default();
+        assert_eq!(lowered.prefill_one_evaluation, today.prefill_one_evaluation);
+        assert_eq!(lowered.prefill_chunk_positions, today.prefill_chunk_positions);
+        assert_eq!(lowered.cached_attention_fusion, today.cached_attention_fusion);
+        assert_eq!(lowered.gated_delta_net_fusion, today.gated_delta_net_fusion);
+        assert_eq!(lowered.moe_topk_fusion, today.moe_topk_fusion);
+        assert_eq!(lowered.plan_time_constants, today.plan_time_constants);
+        assert_eq!(lowered.plan_refit, today.plan_refit);
+        assert_eq!(lowered.command_buffer_chunks, today.command_buffer_chunks);
+        assert_eq!(lowered.max_command_buffers_per_token, today.max_command_buffers_per_token);
+        assert_eq!(lowered.overlap_transfer_compute, today.overlap_transfer_compute);
     }
 }
