@@ -176,6 +176,30 @@ impl BlockFileView<'_> {
             false => Err(InteropError::BlockFileDigestMismatch { expected, found: self.header.descriptor_digest }),
         }
     }
+
+    fn plane(&self, layer: usize, plane: usize) -> Option<&[u8]> {
+        let record = self.header.layers.get(layer)?;
+        let sizes = [record.k_even_row_bytes, record.k_odd_row_bytes, record.v_row_bytes]
+            .map(|row_bytes| (record.rows as usize) * (row_bytes as usize));
+        let before: usize = self.header.layers[..layer].iter().map(plane_bytes).sum();
+        let within: usize = sizes.get(..plane)?.iter().sum();
+        let start = before + within;
+        self.payload.get(start..start + *sizes.get(plane)?)
+    }
+
+    /// Replaces `out` with the floats of `plane` (0 `k_even`, 1 `k_odd`, 2 `v`) of `layer`.
+    ///
+    /// `None` when `layer` or `plane` is out of range or the plane is not whole floats.
+    pub fn plane_f32(&self, layer: usize, plane: usize, out: &mut Vec<f32>) -> Option<()> {
+        let bytes = self.plane(layer, plane)?;
+        let (words, rest) = bytes.as_chunks::<4>();
+        if !rest.is_empty() {
+            return None;
+        }
+        out.clear();
+        out.extend(words.iter().map(|word| f32::from_le_bytes(*word)));
+        Some(())
+    }
 }
 
 fn malformed(reason: &'static str) -> InteropError {
@@ -418,5 +442,60 @@ mod tests {
                 if expected == [0x22; 16] && found == [0x11; 16]
         ));
         assert!(matches!(view.require_digest([0x11; 16]), Ok(())));
+    }
+
+    fn read_plane(view: &BlockFileView<'_>, layer: usize, plane: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        view.plane_f32(layer, plane, &mut out).expect("read a plane of the fixture");
+        out
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    #[test]
+    fn blockfile_plane_round_trip_bytes_identical() {
+        let bytes = encode_fixture();
+        let view = decode_block(&bytes).expect("decode the encoded fixture");
+        let fixture = fixture_planes();
+
+        let read: Vec<Vec<f32>> = (0..3)
+            .flat_map(|layer| (0..3).map(move |plane| (layer, plane)))
+            .map(|(layer, plane)| read_plane(&view, layer, plane))
+            .collect();
+
+        assert_eq!(read.len(), fixture.len());
+        for (got, want) in read.iter().zip(&fixture) {
+            assert_eq!(bits(got), bits(want));
+        }
+        assert_eq!(view.plane(0, 0).map(<[u8]>::len), Some(32));
+        assert_eq!(view.plane(2, 0), Some(&[][..]));
+        assert_eq!(view.plane(3, 0), None);
+        assert_eq!(view.plane(0, 3), None);
+        let views: Vec<&[f32]> = read.iter().map(Vec::as_slice).collect();
+        let mut again = Vec::new();
+        encode_block(&view.header, &views, &mut again).expect("re-encode the planes read back");
+        assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn blockfile_plane_f32_refuses_a_plane_that_is_not_whole_floats() {
+        let header = BlockFileHeader {
+            descriptor_digest: [0x11; 16],
+            content_key: 1,
+            base_position: 0,
+            layers: vec![BlockFileLayer { rows: 1, k_even_row_bytes: 4, k_odd_row_bytes: 4, v_row_bytes: 4, ring_window: 0, ring_capacity: 0 }],
+        };
+        let planes = [ramp(1, 0.0), ramp(1, 1.0), ramp(1, 2.0)];
+        let views: Vec<&[f32]> = planes.iter().map(Vec::as_slice).collect();
+        let mut bytes = Vec::new();
+        encode_block(&header, &views, &mut bytes).expect("encode the one layer block");
+        bytes[52..56].copy_from_slice(&6u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        let view = decode_block(&bytes).expect("decode the patched block");
+        let mut out = Vec::new();
+
+        assert_eq!(view.plane_f32(0, 0, &mut out), None);
     }
 }
