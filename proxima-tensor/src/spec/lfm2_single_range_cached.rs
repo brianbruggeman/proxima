@@ -325,7 +325,7 @@ pub fn append_lfm2_single_range_cached_attention(
 /// composes the identical too-old distance check
 /// [`causal_mask_merged_windowed`] uses, OR-ed onto `is_padding` by the
 /// same [`ScalarOp::Maximum`] convention.
-fn causal_mask_cached_windowed(
+pub(super) fn causal_mask_cached_windowed(
     program: &mut Vec<Op>,
     cached_len: NodeId,
     key_extent: Extent,

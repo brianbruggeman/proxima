@@ -504,6 +504,7 @@ pub fn append_mistral_cached_layer(
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
     rope_pairing: RopePairing,
+    cached_window_mask: Option<(NodeId, NodeId)>,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
     let kv_heads = query_heads / group;
@@ -800,6 +801,19 @@ pub fn append_mistral_cached_layer(
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
+    let score_cached_scaled = match cached_window_mask {
+        Some((is_masked, neg_infinity_cached)) => elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Select,
+            &[
+                (is_masked, "st->stug"),
+                (neg_infinity_cached, "->stug"),
+                (score_cached_scaled, "stug->stug"),
+            ],
+        )?,
+        None => score_cached_scaled,
+    };
     // new block: query `s` against this call's own freshly rotated key `w`
     // (symbol 0's extent, same range as `s`) -- causal within the block,
     // reusing `is_future` unchanged since it is already `[s, w]`-shaped.

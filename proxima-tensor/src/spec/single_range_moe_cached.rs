@@ -1036,6 +1036,7 @@ pub fn append_mistral_cached_moe_layer(
     v_cache: NodeId,
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
     residual_scale: Option<NodeId>,
+    cached_window_mask: Option<(NodeId, NodeId)>,
 ) -> Result<(NodeId, CachedLayerRoots, MoeSite), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -1216,6 +1217,19 @@ pub fn append_mistral_cached_moe_layer(
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
+    let score_cached_scaled = match cached_window_mask {
+        Some((is_masked, neg_infinity_cached)) => elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Select,
+            &[
+                (is_masked, "st->stug"),
+                (neg_infinity_cached, "->stug"),
+                (score_cached_scaled, "stug->stug"),
+            ],
+        )?,
+        None => score_cached_scaled,
+    };
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_even_product = elementwise(
         program,

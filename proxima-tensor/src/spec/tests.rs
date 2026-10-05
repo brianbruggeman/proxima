@@ -743,6 +743,8 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             None,
             AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
             None,
+            &[],
+            false,
         )
         .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
@@ -15118,6 +15120,8 @@ mod gemma4_synthetic_parity {
                 None,
                 AttentionScoreScale::InverseSqrtQueryPreAttnScalar(REAL_HEAD_DIM),
                 None,
+                &[],
+                false,
             )
             .expect("direct real qwen2-dims build");
 
@@ -18063,5 +18067,284 @@ mod descriptor_config {
         for (label, descriptor) in descriptors() {
             descriptor.validate().unwrap_or_else(|error| panic!("{label}: {error}"));
         }
+    }
+}
+
+mod dense_windows {
+    use super::forward_scales::profile_text;
+    use super::*;
+
+    const VOCAB: usize = 5;
+    const EMBEDDING: usize = 4;
+    const FEED_FORWARD: usize = 4;
+    const QUERY_HEADS: usize = 2;
+    const HEAD_DIM: usize = 2;
+    const PAIRS: usize = HEAD_DIM / 2;
+    const WINDOW: u32 = 3;
+    const TOLERANCE: f32 = 1e-5;
+
+    fn dense_descriptor(block_count: u32, windows: &[Option<u32>], ring: bool) -> ModelDescriptor {
+        let profile = toml::from_str::<FamilyProfile>(&profile_text("adjacent"))
+            .expect("the dense profile parses");
+        let mut descriptor = mistral_descriptor_from_shape(
+            VOCAB as u32,
+            EMBEDDING as u32,
+            FEED_FORWARD as u32,
+            QUERY_HEADS as u32,
+            1,
+            HEAD_DIM as u32,
+            block_count,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            &profile,
+        );
+        for (layer, window) in descriptor.layers.iter_mut().zip(windows) {
+            layer.attention.mask_window = *window;
+        }
+        descriptor.sliding_kv_ring = ring;
+        descriptor
+    }
+
+    fn leading_extent(program: &[Op], name: &str) -> Option<Extent> {
+        program.iter().find_map(|operation| match operation {
+            Op::Input { name: Some(leaf), shape, .. } if leaf == name => shape.first().copied(),
+            _ => None,
+        })
+    }
+
+    fn has_input(program: &[Op], name: &str) -> bool {
+        program
+            .iter()
+            .any(|operation| matches!(operation, Op::Input { name: Some(leaf), .. } if leaf == name))
+    }
+
+    fn window_ceiling_constants(program: &[Op], window: u32) -> usize {
+        let ceiling = (window as f32 - 1.0).to_bits();
+        program
+            .iter()
+            .filter(|operation| matches!(operation, Op::Constant { value, .. } if value.to_bits() == ceiling))
+            .count()
+    }
+
+    #[test]
+    fn a_ring_binds_only_the_windowed_dense_layer_to_the_sliding_slot() {
+        let descriptor = dense_descriptor(3, &[None, Some(WINDOW), None], true);
+
+        let (program, ..) = build_forward(&descriptor).expect("a dense schedule with one window lowers");
+
+        for (layer, expected) in [(0, Extent::Symbolic(1)), (1, Extent::Symbolic(SLIDING_KV_SYMBOL)), (2, Extent::Symbolic(1))] {
+            for leaf in ["k_even", "k_odd", "v"] {
+                assert_eq!(
+                    leading_extent(&program, &format!("kv_cache.{layer}.{leaf}")),
+                    Some(expected),
+                    "layer {layer} {leaf}"
+                );
+            }
+        }
+        assert!(has_input(&program, SLIDING_CACHED_LEN_INPUT));
+    }
+
+    #[test]
+    fn a_dense_window_without_a_ring_keeps_every_layer_on_the_full_cache() {
+        let descriptor = dense_descriptor(3, &[None, Some(WINDOW), None], false);
+
+        let (program, ..) = build_forward(&descriptor).expect("a dense schedule with one window lowers");
+
+        for layer in 0..3 {
+            assert_eq!(leading_extent(&program, &format!("kv_cache.{layer}.k_even")), Some(Extent::Symbolic(1)));
+        }
+        assert!(!has_input(&program, SLIDING_CACHED_LEN_INPUT));
+        assert_eq!(window_ceiling_constants(&program, WINDOW), 2, "the new-block and cached-block masks of the one windowed layer");
+    }
+
+    #[test]
+    fn a_dense_schedule_with_no_window_lowers_the_program_it_always_did() {
+        let plain = dense_descriptor(2, &[], true);
+        let windowed_nowhere = dense_descriptor(2, &[None, None], true);
+
+        let (plain_program, ..) = build_forward(&plain).expect("lowers");
+        let (nowhere_program, ..) = build_forward(&windowed_nowhere).expect("lowers");
+
+        assert_eq!(plain_program, nowhere_program);
+        assert!(!has_input(&plain_program, SLIDING_CACHED_LEN_INPUT), "no window, no ring input");
+    }
+
+    #[test]
+    fn a_ring_refuses_dense_windows_of_different_widths() {
+        let descriptor = dense_descriptor(2, &[Some(3), Some(5)], true);
+
+        let outcome = build_forward(&descriptor);
+
+        assert!(
+            matches!(outcome, Err(TensorError::UnsupportedInBuilder { feature, .. }) if feature.contains("differing window widths")),
+            "got {outcome:?}"
+        );
+    }
+
+    struct OneLayerRun {
+        descriptor: ModelDescriptor,
+        weights: Vec<(alloc::string::String, Vec<f32>)>,
+    }
+
+    fn weights() -> Vec<(alloc::string::String, Vec<f32>)> {
+        let group = QUERY_HEADS;
+        let sized: [(&str, usize); 12] = [
+            ("token_embd.weight", VOCAB * EMBEDDING),
+            ("blk.0.attn_norm.weight", EMBEDDING),
+            ("blk.0.ffn_norm.weight", EMBEDDING),
+            ("blk.0.attn_q.weight", EMBEDDING * QUERY_HEADS * HEAD_DIM),
+            ("blk.0.attn_k.weight", EMBEDDING * HEAD_DIM),
+            ("blk.0.attn_v.weight", EMBEDDING * HEAD_DIM),
+            ("blk.0.attn_output.weight", group * HEAD_DIM * EMBEDDING),
+            ("blk.0.ffn_gate.weight", EMBEDDING * FEED_FORWARD),
+            ("blk.0.ffn_up.weight", EMBEDDING * FEED_FORWARD),
+            ("blk.0.ffn_down.weight", FEED_FORWARD * EMBEDDING),
+            ("output_norm.weight", EMBEDDING),
+            ("output.weight", EMBEDDING * VOCAB),
+        ];
+        sized
+            .iter()
+            .enumerate()
+            .map(|(index, (name, count))| {
+                let values = if name.ends_with("norm.weight") {
+                    alloc::vec![1.0f32; *count]
+                } else {
+                    random_vec(300 + index as u64, *count)
+                };
+                ((*name).into(), values)
+            })
+            .collect()
+    }
+
+    impl OneLayerRun {
+        fn new(window: Option<u32>, last_row_only: bool) -> Self {
+            let mut descriptor = dense_descriptor(1, &[window], false);
+            descriptor.last_row_only = last_row_only;
+            Self { descriptor, weights: weights() }
+        }
+
+        fn evaluate(&self, ids: &[f32], first_position: usize, cache: &CacheRows) -> (Vec<f32>, CacheRows) {
+            let new_count = ids.len();
+            let eps = alloc::vec![1e-5f32; new_count];
+            let (cos, sin) = rope_angles(first_position, new_count, PAIRS, HEAD_DIM);
+            let cached_len = [cache.rows as f32];
+            let (program, logits, cache_roots, ..) = build_forward(&self.descriptor).expect("the one-layer dense program lowers");
+            let mut named: Vec<(&str, &[f32])> =
+                self.weights.iter().map(|(name, values)| (name.as_str(), values.as_slice())).collect();
+            named.push(("ids", ids));
+            named.push(("eps", eps.as_slice()));
+            named.push(("rope_cos", cos.as_slice()));
+            named.push(("rope_sin", sin.as_slice()));
+            named.push(("cached_len", cached_len.as_slice()));
+            let last_row = [(new_count - 1) as f32];
+            if self.descriptor.last_row_only {
+                named.push(("lm_head_row", last_row.as_slice()));
+            }
+            named.push(("kv_cache.0.k_even", cache.k_even.as_slice()));
+            named.push(("kv_cache.0.k_odd", cache.k_odd.as_slice()));
+            named.push(("kv_cache.0.v", cache.v.as_slice()));
+            let (even, odd, value) = cache_roots[0];
+            let evaluated = crate::cpu::evaluate_named(
+                &program,
+                &[new_count as u64, cache.rows as u64],
+                &named,
+                &[logits, even, odd, value],
+            )
+            .expect("the dense decode call evaluates");
+            let rows = CacheRows {
+                rows: new_count,
+                k_even: evaluated.get(even).expect("k_even").0.to_vec(),
+                k_odd: evaluated.get(odd).expect("k_odd").0.to_vec(),
+                v: evaluated.get(value).expect("v").0.to_vec(),
+            };
+            (evaluated.get(logits).expect("logits").0.to_vec(), rows)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CacheRows {
+        rows: usize,
+        k_even: Vec<f32>,
+        k_odd: Vec<f32>,
+        v: Vec<f32>,
+    }
+
+    impl CacheRows {
+        fn slice(&self, from: usize, to: usize) -> Self {
+            Self {
+                rows: to - from,
+                k_even: self.k_even[from * PAIRS..to * PAIRS].to_vec(),
+                k_odd: self.k_odd[from * PAIRS..to * PAIRS].to_vec(),
+                v: self.v[from * HEAD_DIM..to * HEAD_DIM].to_vec(),
+            }
+        }
+    }
+
+    fn max_difference(left: &[f32], right: &[f32]) -> f32 {
+        assert_eq!(left.len(), right.len());
+        left.iter().zip(right).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max)
+    }
+
+    const IDS: [f32; 7] = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0];
+
+    #[test]
+    fn a_windowed_dense_decode_step_reads_exactly_the_last_window_rows() {
+        let full = OneLayerRun::new(None, true);
+        let windowed = OneLayerRun::new(Some(WINDOW), true);
+        let (_, history) = full.evaluate(&IDS[..6], 0, &CacheRows::default());
+
+        let (windowed_logits, _) = windowed.evaluate(&IDS[6..], 6, &history);
+
+        let kept_rows = WINDOW as usize - 1;
+        let (oracle_logits, _) = full.evaluate(&IDS[6..], 6, &history.slice(6 - kept_rows, 6));
+        let (unwindowed_logits, _) = full.evaluate(&IDS[6..], 6, &history);
+        assert!(max_difference(&windowed_logits, &oracle_logits) < TOLERANCE, "window {WINDOW} keeps the last {kept_rows} cached rows and the new one");
+        assert!(
+            max_difference(&windowed_logits, &unwindowed_logits) > TOLERANCE * 10.0,
+            "the control must fail: dropping the older rows has to change the logits"
+        );
+    }
+
+    #[test]
+    fn a_window_wider_than_the_context_changes_nothing() {
+        let full = OneLayerRun::new(None, true);
+        let wide = OneLayerRun::new(Some(100), true);
+        let (_, history) = full.evaluate(&IDS[..6], 0, &CacheRows::default());
+
+        let (wide_logits, _) = wide.evaluate(&IDS[6..], 6, &history);
+        let (full_logits, _) = full.evaluate(&IDS[6..], 6, &history);
+
+        assert!(max_difference(&wide_logits, &full_logits) < TOLERANCE);
+    }
+
+    #[test]
+    fn a_windowed_dense_prefill_masks_each_new_row_to_its_own_window() {
+        let full = OneLayerRun::new(None, false);
+        let windowed = OneLayerRun::new(Some(WINDOW), false);
+        let (_, history) = full.evaluate(&IDS[..5], 0, &CacheRows::default());
+
+        let (windowed_rows, _) = windowed.evaluate(&IDS[..5], 0, &CacheRows::default());
+
+        for row in 0..5usize {
+            let from = row.saturating_sub(WINDOW as usize - 1);
+            let (oracle, _) = full.evaluate(&IDS[row..=row], row, &history.slice(from, row));
+            let produced = &windowed_rows[row * VOCAB..(row + 1) * VOCAB];
+            assert!(max_difference(produced, &oracle) < TOLERANCE, "prefill row {row} attends rows {from}..={row}");
+        }
+    }
+
+    #[test]
+    fn the_windowed_dense_helper_run_is_not_vacuous() {
+        let run = OneLayerRun::new(Some(WINDOW), true);
+
+        let (logits, rows) = run.evaluate(&IDS[..2], 0, &CacheRows::default());
+
+        assert_eq!(logits.len(), VOCAB, "last_row_only keeps one row of logits");
+        assert_eq!(rows.rows, 2);
+        assert!(logits.iter().any(|value| value.abs() > 1e-3), "a zero logit row would make every equality above trivially true");
     }
 }

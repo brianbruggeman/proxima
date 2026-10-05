@@ -117,11 +117,11 @@ pub struct ModelDescriptor {
     /// all -- same "unused when the arm never reads it" precedent
     /// [`Self::qk_norm`]'s own doc already sets.
     pub ple_dim: Option<u32>,
-    /// [`CacheStrategy::TwoRange`] only: lay every windowed layer's KV cache out as
-    /// a ring ([`SLIDING_KV_SYMBOL`], [`SLIDING_CACHED_LEN_INPUT`], and
-    /// [`lfm2_two_range_cached_forward_program_with_experts`]'s own
-    /// `sliding_kv_ring` argument). Inert under [`CacheStrategy::Cacheless`] and
-    /// [`CacheStrategy::SingleRange`], the same "unused when the arm never reads
+    /// [`CacheStrategy::TwoRange`] and [`CacheStrategy::SingleRange`]: lay every
+    /// windowed layer's KV cache out as a ring ([`SLIDING_KV_SYMBOL`],
+    /// [`SLIDING_CACHED_LEN_INPUT`], and the builders' own `sliding_kv_ring`
+    /// argument); a layer with no window keeps the full cache. Inert under
+    /// [`CacheStrategy::Cacheless`], the same "unused when the arm never reads
     /// it" precedent as [`Self::qk_norm`].
     pub sliding_kv_ring: bool,
     /// Qwen3-style per-head QK-norm, consulted ONLY by
@@ -567,17 +567,20 @@ pub fn build_forward(
             // structurally wrong program with no error at all, the exact
             // failure mode `TensorError::UnsupportedInBuilder`'s own doc
             // says to raise instead of work around.
-            if descriptor
-                .layers
-                .iter()
-                .any(|layer| layer.attention != first.attention)
-            {
+            if descriptor.layers.iter().any(|layer| {
+                LayerAttentionConfig {
+                    mask_window: first.attention.mask_window,
+                    ..layer.attention.clone()
+                } != first.attention
+            }) {
                 return Err(TensorError::UnsupportedInBuilder {
                     builder: "build_forward(CacheStrategy::SingleRange)",
                     feature: "non-uniform per-layer attention config",
                 });
             }
             let attention = &first.attention;
+            let layer_windows: Vec<Option<u32>> =
+                descriptor.layers.iter().map(|layer| layer.attention.mask_window).collect();
             let pairing_the_moe_layer_derives = if descriptor.qk_norm {
                 RopePairing::SplitHalf { pairs: attention.head_dim / 2 }
             } else {
@@ -616,6 +619,8 @@ pub fn build_forward(
                     descriptor.logit_scale,
                     attention.score_scale,
                     descriptor.residual_scale,
+                    &layer_windows,
+                    descriptor.sliding_kv_ring,
                 )?;
             Ok((
                 program,

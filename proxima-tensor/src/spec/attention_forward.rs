@@ -2415,6 +2415,8 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         None,
         AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
         None,
+        &[],
+        false,
     )
 }
 
@@ -2446,11 +2448,26 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     logit_scale: Option<f32>,
     score_scale: AttentionScoreScale,
     residual_scale: Option<f32>,
+    layer_windows: &[Option<u32>],
+    sliding_kv_ring: bool,
 ) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
     if residual_scale.is_some() && expert_count == 0 {
         return Err(TensorError::UnsupportedInBuilder {
             builder: "mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
             feature: "a residual scale on a dense layer",
+        });
+    }
+    if !layer_windows.is_empty() && layer_windows.len() != block_count as usize {
+        return Err(TensorError::LayerScheduleCountMismatch {
+            expected: block_count,
+            found: layer_windows.len(),
+        });
+    }
+    let windows: Vec<u32> = layer_windows.iter().flatten().copied().filter(|width| *width > 0).collect();
+    if sliding_kv_ring && windows.iter().any(|width| *width != windows[0]) {
+        return Err(TensorError::UnsupportedInBuilder {
+            builder: "mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
+            feature: "sliding_kv_ring with differing window widths (one sliding slot)",
         });
     }
     let group = query_heads / kv_heads;
@@ -2553,13 +2570,46 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     // the bucket's own zero-padding is excluded by that bound, never by a
     // mask node in this graph (`BoundOpKind::CachedAttention`'s own doc on
     // the `cached_key_rows != 0` discriminator).
-    let _cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    // A windowed layer masks the cached block too (the fused attention's
+    // `cached_len` bound cannot express a window), and a ring layer counts its
+    // rows from the sliding slot's own length input. A schedule with no window
+    // adds no node here.
+    let ring_len = (sliding_kv_ring && !windows.is_empty()).then(|| {
+        input_leaf(&mut program, DType::Float32, Vec::new(), SLIDING_CACHED_LEN_INPUT)
+    });
+    let mut window_masks: Vec<(u32, NodeId, (NodeId, NodeId))> = Vec::new();
+    for &width in &windows {
+        if window_masks.iter().any(|(built, ..)| *built == width) {
+            continue;
+        }
+        let (new_block, _) = causal_mask_windowed(&mut program, Some(width))?;
+        let cached_block = match ring_len {
+            Some(ring_len) => causal_mask_cached_windowed(
+                &mut program,
+                ring_len,
+                Extent::Symbolic(SLIDING_KV_SYMBOL),
+                Some(width),
+            )?,
+            None => causal_mask_cached_windowed(&mut program, cached_len, Extent::Symbolic(1), Some(width))?,
+        };
+        window_masks.push((width, new_block, cached_block));
+    }
 
     let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
     let mut layer_residuals: Vec<NodeId> = Vec::with_capacity(block_count as usize);
     let mut moe_sites: Vec<MoeSite> = Vec::new();
 
     for layer in 0..block_count {
+        let window = layer_windows.get(layer as usize).copied().flatten().filter(|width| *width > 0);
+        let masks = window.and_then(|width| window_masks.iter().find(|(built, ..)| *built == width));
+        let layer_is_future = masks.map_or(is_future, |(_, new_block, _)| *new_block);
+        let cached_window_mask = masks.map(|(_, _, cached_block)| *cached_block);
+        let cache_bound = if ring_len.is_some() && window.is_some() {
+            Extent::Symbolic(SLIDING_KV_SYMBOL)
+        } else {
+            Extent::Symbolic(1)
+        };
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::Float32,
@@ -2653,7 +2703,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
             &mut program,
             DType::Float32,
             alloc::vec![
-                Extent::Symbolic(1),
+                cache_bound,
                 Extent::Static(kv_heads),
                 Extent::Static(pairs)
             ],
@@ -2663,7 +2713,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
             &mut program,
             DType::Float32,
             alloc::vec![
-                Extent::Symbolic(1),
+                cache_bound,
                 Extent::Static(kv_heads),
                 Extent::Static(pairs)
             ],
@@ -2673,7 +2723,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
             &mut program,
             DType::Float32,
             alloc::vec![
-                Extent::Symbolic(1),
+                cache_bound,
                 Extent::Static(kv_heads),
                 Extent::Static(head_dim)
             ],
@@ -2742,7 +2792,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
                 group_ones,
                 head_shape_ones,
                 kv_head_shape_ones,
-                is_future,
+                layer_is_future,
                 group,
                 head_dim,
                 query_heads,
@@ -2765,6 +2815,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
                 paired_gate_up_reduce,
                 fused_qkv_reduce,
                 rope_pairing,
+                cached_window_mask,
             )?
         } else {
             let gate_inp = input_leaf(
@@ -2830,7 +2881,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
                 cos_new,
                 sin_new,
                 group_ones,
-                is_future,
+                layer_is_future,
                 group,
                 head_dim,
                 attn_norm_weight,
@@ -2850,6 +2901,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
                 v_cache,
                 qk_norm_weights,
                 residual_scale,
+                cached_window_mask,
             )?;
             moe_sites.push(site);
             (next_x, next_roots)
