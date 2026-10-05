@@ -290,6 +290,9 @@ mod layer_cache_sealing_tests {
     use super::{LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers};
     use crate::error::InteropError;
     use crate::generate::kv_ring::KvRing;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
 
     fn widths_for(layers: &[LayerCacheState]) -> Vec<LayerPadRowWidths> {
         layers
@@ -471,6 +474,68 @@ mod layer_cache_sealing_tests {
             error.to_string(),
             "cannot rewind to 7 rows: rows below 8 are sealed"
         );
+    }
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Append(usize),
+        Rewind(usize),
+    }
+
+    #[test]
+    fn seal_proptest_never_seals_a_rewindable_row() {
+        const CASES: usize = 256;
+        let operation = prop_oneof![(1usize..=5).prop_map(Op::Append), (0usize..40).prop_map(Op::Rewind)];
+        let mut runner = TestRunner::new(Config {
+            cases: CASES as u32,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        let executed = std::cell::Cell::new(0_usize);
+
+        runner
+            .run(&(0usize..=3, vec(operation, 1..60)), |(horizon, operations)| {
+                let mut cache = LayerCache::new();
+                let mut rows = 0_usize;
+                for operation in operations {
+                    let before = cache.sealed_end;
+                    match operation {
+                        Op::Append(count) => {
+                            for position in rows..rows + count {
+                                let (even, odd, value) = row_at(position);
+                                cache.append(&even, &odd, &value);
+                            }
+                            rows += count;
+                            cache.seal(2, 4, horizon);
+                            prop_assert_eq!(cache.sealed_end, before.max(rows.saturating_sub(horizon) / 4 * 4));
+                        }
+                        Op::Rewind(keep) => {
+                            let outcome = cache.try_truncate(keep, 2, 1);
+                            if keep < before {
+                                match outcome {
+                                    Err(InteropError::RewindIntoSealed { keep_positions, sealed_end }) => {
+                                        prop_assert_eq!(keep_positions, keep);
+                                        prop_assert_eq!(sealed_end, before);
+                                    }
+                                    other => prop_assert!(false, "expected a refusal, got {:?}", other),
+                                }
+                            } else {
+                                prop_assert!(outcome.is_ok());
+                                rows = rows.min(keep);
+                            }
+                        }
+                    }
+                    prop_assert_eq!(cache.k_even.len(), rows * 2);
+                    prop_assert_eq!(cache.sealed_end % 4, 0);
+                    prop_assert!(cache.sealed_end >= before);
+                    prop_assert!(cache.sealed_end <= rows);
+                }
+                executed.set(executed.get() + 1);
+                Ok(())
+            })
+            .expect("no sequence of appends and rewinds may seal a row a rewind can still reach");
+
+        assert_eq!(executed.get(), CASES);
     }
 }
 
