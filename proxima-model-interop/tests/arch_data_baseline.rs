@@ -26,14 +26,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
-    PromptCacheConfig, ServingConfig, architecture_from_metadata, metadata_f32_optional,
+    PromptCacheConfig, ServingConfig, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
+    metadata_f32_optional,
     metadata_str, metadata_u32, profiles::family_profile,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::Op;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, CacheStrategy, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
+    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
     ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind, build_forward,
     gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
     mistral_cached_forward_program_with_experts_and_layer_taps, mistral_descriptor_from_shape,
@@ -456,6 +457,134 @@ fn generic_binder_granite_moe() {
     let record = bound_record(&GRANITE_MOE);
     assert!(record.contains("\nbound_weights=243\n"), "granite moe must bind 243 weights (24 layers x 10 + token_embd + output_norm + output), got {:?}", record.lines().nth(1));
     assert_matches_fixture(&GRANITE_MOE, "bound", &record);
+}
+
+fn config_descriptors(
+    checkpoint: &Checkpoint,
+    parsed: &proxima_gguf::pipe::ParsedGguf,
+) -> Vec<(&'static str, ModelDescriptor)> {
+    if checkpoint.architecture == "gemma4" {
+        let decode = gemma4::descriptor_from_gguf(parsed, true)
+            .unwrap_or_else(|error| panic!("{}: descriptor_from_gguf failed: {error:?}", checkpoint.name));
+        let verify = ModelDescriptor {
+            last_row_only: false,
+            ..decode.clone()
+        };
+        return vec![("bind", decode), ("verify", verify)];
+    }
+    let architecture = architecture_from_metadata(parsed)
+        .unwrap_or_else(|error| panic!("{}: architecture_from_metadata failed: {error:?}", checkpoint.name));
+    let descriptor = dense_descriptor_from_gguf(parsed, &architecture)
+        .unwrap_or_else(|error| panic!("{}: dense_descriptor_from_gguf failed: {error:?}", checkpoint.name));
+    vec![("bind", descriptor)]
+}
+
+fn model_config_roundtrip(checkpoint: &Checkpoint) {
+    let mapping = checkpoint.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    assert_architecture_key(checkpoint, &parsed);
+    let incumbent = std::fs::read_to_string(checkpoint.fixture("digest"))
+        .unwrap_or_else(|error| panic!("{}: no incumbent digest: {error}", checkpoint.name));
+
+    let descriptors = config_descriptors(checkpoint, &parsed);
+    let incumbent_labels = ["bind", "verify"]
+        .into_iter()
+        .filter(|label| incumbent.contains(&format!("\n{label}.ops=")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        descriptors.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+        incumbent_labels,
+        "{}: the config set and the incumbent's programs disagree",
+        checkpoint.name
+    );
+    for (label, descriptor) in descriptors {
+        let text = toml::to_string(&descriptor)
+            .unwrap_or_else(|error| panic!("{} {label}: descriptor does not serialize: {error}", checkpoint.name));
+        let restored: ModelDescriptor = toml::from_str(&text)
+            .unwrap_or_else(|error| panic!("{} {label}: descriptor toml does not parse: {error}\n{text}", checkpoint.name));
+        assert_eq!(restored, descriptor, "{} {label}: toml round trip changed the config", checkpoint.name);
+
+        let (program, logits_root, ..) = build_forward(&restored)
+            .unwrap_or_else(|error| panic!("{} {label}: restored config does not lower: {error:?}", checkpoint.name));
+        assert!(!program.is_empty(), "{} {label}: lowered zero ops", checkpoint.name);
+        for expected in [
+            format!("{label}.ops={}", program.len()),
+            format!("{label}.ops_sha256={}", ops_digest(&program)),
+            format!("{label}.logits_root={logits_root:?}"),
+        ] {
+            assert!(
+                incumbent.lines().any(|line| line == expected),
+                "{} {label}: the restored config lowers to `{expected}`, which the incumbent digest {} lacks",
+                checkpoint.name,
+                checkpoint.fixture("digest").display()
+            );
+        }
+    }
+}
+
+#[test]
+fn model_config_roundtrip_gemma4_26b() {
+    model_config_roundtrip(&GEMMA4_26B);
+}
+
+#[test]
+fn model_config_roundtrip_gemma4_e2b() {
+    model_config_roundtrip(&GEMMA4_E2B);
+}
+
+#[test]
+fn model_config_roundtrip_openchat() {
+    model_config_roundtrip(&OPENCHAT);
+}
+
+#[test]
+fn model_config_roundtrip_qwen2() {
+    model_config_roundtrip(&QWEN2);
+}
+
+#[test]
+fn model_config_roundtrip_qwen3() {
+    model_config_roundtrip(&QWEN3);
+}
+
+#[test]
+fn model_config_roundtrip_granite_moe() {
+    model_config_roundtrip(&GRANITE_MOE);
+}
+
+#[test]
+fn model_config_text_edit_changes_the_lowered_program() {
+    let mapping = GEMMA4_E2B.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let descriptor = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+    assert!(text.contains("activation = \"GeluTanh\""), "e2b runs a gelu ffn, got:\n{text}");
+
+    let edited: ModelDescriptor = toml::from_str(&text.replace("GeluTanh", "Silu")).expect("the edited toml parses");
+    let (program, ..) = build_forward(&edited).expect("the edited config lowers");
+
+    let incumbent = std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
+    assert!(
+        !incumbent.lines().any(|line| line == format!("bind.ops_sha256={}", ops_digest(&program))),
+        "a silu ffn must not lower to the gelu program"
+    );
+    assert_ne!(
+        edited.layers.iter().map(|layer| layer.ffn.activation).collect::<Vec<_>>(),
+        descriptor.layers.iter().map(|layer| layer.ffn.activation).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn model_config_rejects_an_unknown_field() {
+    let mapping = GEMMA4_E2B.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let descriptor = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+
+    let outcome = toml::from_str::<ModelDescriptor>(&format!("block_cuont = 30\n{text}"));
+
+    let error = outcome.expect_err("an unknown key must be an error, never a silent default");
+    assert!(error.to_string().contains("unknown field"), "got: {error}");
 }
 
 fn assert_programs_identical(direct: &[Op], descriptor: &[Op]) {
