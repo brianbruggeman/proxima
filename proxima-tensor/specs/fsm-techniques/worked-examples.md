@@ -201,3 +201,13 @@ B's key rows (layout `[row][pair]`): row 0 even `[1,2]` odd `[0,3]`; row 1 even 
 - row 1 pair 1: even' = 4*0 - (-1)*1 = 1; odd' = (-1)*0 + 4*1 = 4
 
 RESULT cartridge concatenation rotation: k_b_rotated even=[[-1,-3],[0,1]] odd=[[0,2],[-2,4]] v_unchanged
+
+## threshold judge
+
+A threshold judge is one pure function of one readout. The readout is the chosen token's logprob. The rule: settle iff `readout >= h`, otherwise escalate. The comparison is inclusive, so a readout equal to `h` settles. Here `h = -0.5`.
+
+- lp = -0.2: -0.2 >= -0.5, settle
+- lp = -0.9: -0.9 < -0.5, escalate
+- lp = -0.5: -0.5 >= -0.5, settle (boundary, inclusive)
+
+RESULT threshold judge: lp=-0.2 -> settle; lp=-0.9 -> escalate; lp=-0.5 -> settle
