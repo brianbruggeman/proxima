@@ -14924,6 +14924,7 @@ mod gemma4_synthetic_parity {
             fused_qkv_reduce: false,
             head_repeats: 1,
             last_row_only: false,
+            speculative_verify: false,
         };
 
         let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden, _head_repeats) =
@@ -17545,6 +17546,7 @@ mod head_repeats {
             fused_qkv_reduce: false,
             head_repeats,
             last_row_only: false,
+            speculative_verify: false,
         }
     }
 
@@ -18006,6 +18008,7 @@ mod descriptor_config {
             .fused_qkv_reduce(source.fused_qkv_reduce)
             .head_repeats(source.head_repeats)
             .last_row_only(source.last_row_only)
+            .speculative_verify(source.speculative_verify)
             .build()
     }
 
@@ -18346,5 +18349,64 @@ mod dense_windows {
         assert_eq!(logits.len(), VOCAB, "last_row_only keeps one row of logits");
         assert_eq!(rows.rows, 2);
         assert!(logits.iter().any(|value| value.abs() > 1e-3), "a zero logit row would make every equality above trivially true");
+    }
+}
+
+mod verify_descriptor {
+    use super::head_repeats;
+    use super::*;
+
+    fn armed(cache_strategy: CacheStrategy) -> ModelDescriptor {
+        ModelDescriptor {
+            speculative_verify: true,
+            last_row_only: true,
+            ..head_repeats::descriptor(cache_strategy, 1)
+        }
+    }
+
+    #[test]
+    fn an_armed_attention_descriptor_lowers_a_verify_that_keeps_every_row() {
+        let decode = armed(CacheStrategy::SingleRange);
+
+        let verify = decode.verify().expect("an armed attention-only descriptor has a verify program");
+
+        assert!(!verify.last_row_only);
+        assert_eq!(ModelDescriptor { last_row_only: true, ..verify }, decode, "only the row count differs");
+    }
+
+    #[test]
+    fn a_descriptor_that_is_not_armed_has_no_verify_program() {
+        let decode = ModelDescriptor { speculative_verify: false, ..armed(CacheStrategy::SingleRange) };
+
+        assert_eq!(decode.verify(), None);
+    }
+
+    #[test]
+    fn a_pooled_embedding_descriptor_has_no_verify_program() {
+        let pooled = ModelDescriptor { last_row_only: false, ..armed(CacheStrategy::SingleRange) };
+
+        assert_eq!(pooled.verify(), None);
+    }
+
+    #[test]
+    fn a_descriptor_with_a_short_conv_layer_has_no_verify_program() {
+        let mut hybrid = armed(CacheStrategy::TwoRange);
+        hybrid.layers[0].kind = LayerKind::ShortConv;
+
+        assert_eq!(hybrid.verify(), None);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn validation_refuses_to_arm_verify_over_a_layer_that_cannot_rewind() {
+        use conflaguration::Validate;
+
+        let mut hybrid = armed(CacheStrategy::TwoRange);
+        hybrid.layers[0].kind = LayerKind::ShortConv;
+
+        let refusal = hybrid.validate().expect_err("a short-conv layer cannot be armed for verify");
+
+        assert!(refusal.to_string().contains("speculative_verify"), "{refusal}");
+        assert!(armed(CacheStrategy::TwoRange).validate().is_ok());
     }
 }

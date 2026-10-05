@@ -157,6 +157,7 @@ pub fn gemma4_descriptor_from_gguf(
         fused_qkv_reduce: false,
         head_repeats: 1,
         last_row_only: true,
+        speculative_verify: profile.speculative_verify,
     })
 }
 
