@@ -739,6 +739,7 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             false,
             RopePairing::SplitHalf { pairs: 32 },
             None,
+            None,
         )
         .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
@@ -15106,6 +15107,7 @@ mod gemma4_synthetic_parity {
                 true,
                 rope_pairing,
                 None,
+                None,
             )
             .expect("direct real qwen2-dims build");
 
@@ -17690,19 +17692,16 @@ mod forward_scales {
     }
 
     #[test]
-    fn single_range_refuses_a_logit_scale_until_it_lowers_one() {
-        let mut scaled = descriptor(0, 0);
-        scaled.logit_scale = Some(6.0);
+    fn logit_scale_divides_single_range_logits_by_the_scale() {
+        let (base, base_logits) = built(&descriptor(0, 0));
+        let mut scaled_descriptor = descriptor(0, 0);
+        scaled_descriptor.logit_scale = Some(6.0);
+        let (scaled, scaled_logits) = built(&scaled_descriptor);
 
-        let outcome = build_forward(&scaled, false);
-
-        assert!(matches!(
-            outcome,
-            Err(TensorError::UnsupportedInBuilder {
-                builder: "build_forward(CacheStrategy::SingleRange)",
-                feature: "a logit scale",
-            })
-        ));
+        assert_eq!(scaled.len(), base.len() + 2);
+        assert_eq!(constants_equal(&scaled, 1.0_f32 / 6.0_f32), 1);
+        assert_eq!(constants_equal(&base, 1.0_f32 / 6.0_f32), 0);
+        assert_ne!(scaled_logits, base_logits);
     }
 
     #[test]

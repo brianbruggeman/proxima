@@ -2400,6 +2400,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         last_row_only,
         rope_pairing,
         None,
+        None,
     )
 }
 
@@ -2428,6 +2429,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     last_row_only: bool,
     rope_pairing: RopePairing,
     embedding_scale: Option<EmbeddingScale>,
+    logit_scale: Option<f32>,
 ) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -2864,6 +2866,18 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
         "sdv->sdv",
         "sv->sdv",
     )?;
+    let logits = match logit_scale {
+        Some(scale) => {
+            let inverse = scalar_constant(&mut program, 1.0 / scale);
+            elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(logits, "sv->sv"), (inverse, "->sv")],
+            )?
+        }
+        None => logits,
+    };
 
     Ok((
         program,
