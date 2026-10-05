@@ -1011,7 +1011,7 @@ overlap_transfer_compute = true
 ring_rewind_slack = 512\ncheckpoint_interval = 1024\nmax_checkpoints = 4\n\
 cache_reuse_min = 64\nprewarm_chunk_tokens = 128\nfollow_up_branches = 3\n\
 follow_up_max_tokens = 64\nfollow_up_temperature_milli = 700\n\
-min_similarity_milli = 250\nblock_tokens = 32\nbloom_bits_per_entry = 8192\n\
+min_similarity_milli = 250\nblock_tokens = 32\nseal_horizon_rows = 256\nbloom_bits_per_entry = 8192\n\
 bloom_hashes = 6\n\n[speculative]\nspeculative_types = \"ngram-simple,ngram-map-k\"\n\
 n_max = 3\nn_min = 0\np_min = 0.0\nngram_simple_size_n = 16\nngram_simple_size_m = 32\n\
 ngram_simple_min_hits = 2\nngram_map_k_size_n = 12\nngram_map_k_size_m = 48\n\

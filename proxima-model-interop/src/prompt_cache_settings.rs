@@ -284,7 +284,7 @@ mod tests {
              checkpoint_interval = 2048\nmax_checkpoints = 4\ncache_reuse_min = 0\n\
              prewarm_chunk_tokens = 256\nfollow_up_branches = 0\nfollow_up_max_tokens = 48\n\
              follow_up_temperature_milli = 800\nmin_similarity_milli = 100\n\
-             bloom_bits_per_entry = 4096\nbloom_hashes = 4\n";
+             seal_horizon_rows = 256\nbloom_bits_per_entry = 4096\nbloom_hashes = 4\n";
 
         let mut with_key = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
         writeln!(with_key, "{defaults_toml}block_tokens = 128").expect("write temp toml file");
