@@ -121,6 +121,9 @@ pub(super) struct LayerCache {
     pub(super) sealed_end: usize,
     /// Rows per block the last seal call used; `0` before the first.
     pub(super) block_tokens: usize,
+    /// One record per sealed block in block order, written by the caller's
+    /// summarizer; empty when none ran.
+    pub(super) block_summaries: Vec<Vec<f32>>,
 }
 
 impl LayerCache {
@@ -132,6 +135,7 @@ impl LayerCache {
             ring: None,
             sealed_end: 0,
             block_tokens: 0,
+            block_summaries: Vec::new(),
         }
     }
 
@@ -144,6 +148,7 @@ impl LayerCache {
         if self.block_tokens != block_tokens {
             self.sealed_end = 0;
             self.block_tokens = block_tokens;
+            self.block_summaries.clear();
         }
         let rows = self.k_even.len() / even_odd_row;
         let blocks = proxima_core::kv_decision::sealed_blocks(self.sealed_end, rows, block_tokens, horizon_rows);
@@ -187,6 +192,10 @@ impl LayerCache {
         self.k_odd.truncate(keep_positions * even_odd_row);
         self.v.truncate(keep_positions * v_row);
         self.sealed_end = self.sealed_end.min(keep_positions);
+        if self.block_tokens > 0 {
+            self.sealed_end -= self.sealed_end % self.block_tokens;
+            self.block_summaries.truncate(self.sealed_end / self.block_tokens);
+        }
     }
 
     /// The in-flight rewind: refuses to cut into sealed rows; the whole-state rewinds keep the infallible `truncate`.
@@ -456,6 +465,31 @@ mod layer_cache_sealing_tests {
 
         assert_eq!(cache.k_even.len(), 4);
         assert_eq!(cache.sealed_end, 2);
+    }
+
+    #[test]
+    fn a_whole_state_rewind_keeps_only_whole_sealed_blocks_and_their_records() {
+        let mut cache = cache_with_rows(9);
+        cache.seal(2, 4, 1);
+        assert_eq!(cache.sealed_end, 8);
+        cache.block_summaries = vec![vec![60.0f32], vec![220.0f32]];
+
+        cache.truncate(5, 2, 1);
+
+        assert_eq!(cache.sealed_end, 4);
+        assert_eq!(cache.block_summaries, vec![vec![60.0f32]]);
+    }
+
+    #[test]
+    fn a_new_block_size_drops_the_records() {
+        let mut cache = cache_with_rows(9);
+        cache.seal(2, 4, 1);
+        cache.block_summaries = vec![vec![60.0f32], vec![220.0f32]];
+
+        cache.seal(2, 2, 1);
+
+        assert!(cache.block_summaries.is_empty());
+        assert_eq!(cache.sealed_end, 8);
     }
 
     #[test]
