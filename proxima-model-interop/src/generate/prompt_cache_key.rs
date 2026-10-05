@@ -23,7 +23,8 @@ use omega::MathMode;
 use proxima_tensor::NumericPolicy;
 
 use crate::rope_scaling::RopeScaling;
-use crate::serving::{GdnPrefillBackend, ServingConfig};
+use crate::serving::{AttentionConfig, GdnPrefillBackend, ServingConfig};
+use crate::serving_grammar::ReadSpec;
 
 /// The inputs that change the bytes of a cached KV/state, or how a resumed
 /// forward reads them. A plain comparable struct: two requests share an entry
@@ -72,6 +73,9 @@ pub(super) struct CacheKey {
     /// ([`LoadedModel::with_ring_write_offset_for_parity_control`]); the
     /// builder consumes the model, so entries stored before it ran can exist.
     pub(super) ring_write_offset: usize,
+    /// Which cached rows a decode step reads; rows computed under a skipped
+    /// read are not the rows a dense read computes.
+    pub(super) read: ReadSpec,
 }
 
 impl CacheKey {
@@ -177,6 +181,7 @@ impl CacheKey {
             // the cache's own policy; slack reaches the key as
             // `ring_slack_rows`
             prompt_cache: _,
+            attention: AttentionConfig { read },
         } = *config;
         Self {
             rope_scaling,
@@ -196,6 +201,29 @@ impl CacheKey {
             qwen35moe_residency_budget_bytes,
             ring_slack_rows,
             ring_write_offset,
+            read,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_separates_read_specs() {
+        let dense = ServingConfig::default();
+        let operand = ServingConfig {
+            attention: AttentionConfig { read: ReadSpec::Operand },
+            ..dense
+        };
+
+        let dense_key = CacheKey::of(&dense, false, RopeScaling::None, 0, 0);
+        let operand_key = CacheKey::of(&operand, false, RopeScaling::None, 0, 0);
+        let default_key = CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0);
+
+        assert_ne!(dense_key, operand_key);
+        assert_eq!(dense_key, default_key);
     }
 }

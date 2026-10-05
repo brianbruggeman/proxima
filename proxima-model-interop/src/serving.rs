@@ -23,6 +23,8 @@
 //! same "plain data crosses the boundary" discipline applied to runtime
 //! knobs instead, since these are per-invocation choices and cannot be
 //! `build.rs` consts.
+//! The section grammar in `serving_grammar.rs` derives serde; the `Copy` structs
+//! in this module do not.
 //!
 //! `kv_cache_key_quant`/`kv_cache_value_quant` reuse
 //! [`proxima_gguf::types::GgmlType`] rather than minting a parallel quant
@@ -53,6 +55,7 @@ use proxima_tensor::NumericPolicy;
 
 use crate::error::InteropError;
 use crate::rope_scaling::RopeScaling;
+use crate::serving_grammar::ReadSpec;
 
 /// Which tensor names a [`WeightPrecisionRule`] applies to. Deliberately not
 /// a glob: `crate::bind::bind_dense_as`/`bind_matmul_weight_as` (this rule's
@@ -714,6 +717,13 @@ impl ContextLength {
     }
 }
 
+/// The attention settings of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttentionConfig {
+    /// Which cached rows a decode step reads.
+    pub read: ReadSpec,
+}
+
 /// One field per llama-server flag the repo owner's invocation sets,
 /// plus `model_path`. See the module doc for why each field's shape is
 /// what it is and why none of this crate's dependencies grew to carry it.
@@ -1081,6 +1091,8 @@ pub struct ServingConfig<'model> {
     /// `PromptCacheConfig::off()` or `PROXIMA_PROMPT_CACHE_BYTE_BUDGET=0`.
     /// Consulted by `generate/decode.rs`'s decode-loop entry.
     pub prompt_cache: PromptCacheConfig,
+    /// Which cached rows a decode step reads.
+    pub attention: AttentionConfig,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -1212,6 +1224,7 @@ impl Default for ServingConfig<'static> {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            attention: AttentionConfig::default(),
         }
     }
 }
@@ -1567,6 +1580,11 @@ mod tests {
     /// currently-supported value runs clean -- proves the walk is a real
     /// per-field gate, not a blanket error at the top.
     #[test]
+    fn serving_section_attention_defaults_to_the_dense_read() {
+        assert_eq!(ServingConfig::default().attention, AttentionConfig { read: ReadSpec::Dense });
+    }
+
+    #[test]
     fn fully_supported_config_applies_without_error() {
         let config = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
@@ -1635,6 +1653,7 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            attention: AttentionConfig::default(),
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -1809,6 +1828,7 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            attention: AttentionConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1911,6 +1931,7 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            attention: AttentionConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -2003,6 +2024,7 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            attention: AttentionConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -2085,6 +2107,7 @@ mod tests {
             },
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
+            attention: AttentionConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);

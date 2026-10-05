@@ -150,7 +150,7 @@ pub use serving_grammar::ReadSpec;
 pub use serving::GdnPrefillBackend;
 pub use serving::{
     ContextLength, DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, NgramMapParams, NgramModParams,
-    PromptCacheConfig, REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
+    AttentionConfig, PromptCacheConfig, REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
     SpeculativeTypeSet, WeightPrecisionRule, apply_serving_config, resolve_context_length,
 };
 #[cfg(feature = "std")]
