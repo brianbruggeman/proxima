@@ -61,3 +61,31 @@ Derivation, each as the walk over A to D:
 `uses` and `inserted` are fields the cache entry does not carry today; this example shows the decision function over them, not that they exist.
 
 RESULT eviction victim: today=[branch_first,lowest_stamp] -> 5; lowest_stamp -> 3; fewest_uses -> 5; earliest_inserted -> 3; no_branch today -> 3; fewest_uses_tie -> 2; empty -> none
+
+## per-layer recompute selection
+
+A blend-shaped stage loads cached rows for 3 chunks of 4 rows each (12 rows, indices 0 to 11; chunk c holds rows 4c to 4c+3), then recomputes only the rows whose loaded values deviate most. Selection is chained layer to layer: each later layer chooses only among the rows the previous layer selected.
+
+Ratios per layer are `[0.5, 0.25, 0.125]`, the first being the check layer. The count per layer is `ceil(ratio * 12)`: `ceil(6.0) = 6`, `ceil(3.0) = 3`, `ceil(1.5) = 2`, so `[6, 3, 2]`.
+
+The deviation `d` of a row is the sum over its values of `|loaded - recomputed|`.
+
+Check layer, all 12 rows, `d` by row index 0 to 11: `[0.05, 0.90, 0.10, 0.40, 0.02, 0.30, 0.75, 0.08, 0.60, 0.15, 0.04, 0.50]`.
+
+- ranked by `d`: row 1 (0.90), row 6 (0.75), row 8 (0.60), row 11 (0.50), row 3 (0.40), row 5 (0.30), then row 9 (0.15) and below;
+- the top 6, sorted by row index: `[1,3,5,6,8,11]`;
+- per chunk: chunk 0 holds rows 1 and 3, chunk 1 holds rows 5 and 6, chunk 2 holds rows 8 and 11, so 2, 2, 2.
+
+Layer 2 sees only the 6 selected rows, with deviations: row 1 0.50, row 3 0.80, row 5 0.20, row 6 0.70, row 8 0.10, row 11 0.60.
+
+- ranked: row 3 (0.80), row 6 (0.70), row 11 (0.60), then rows 1, 5, 8;
+- the top 3, sorted: `[3,6,11]`.
+
+Layer 3 sees only rows 3, 6 and 11, with deviations 0.30, 0.90, 0.50.
+
+- ranked: row 6 (0.90), row 11 (0.50), row 3 (0.30);
+- the top 2, sorted: `[6,11]`.
+
+Each layer's set is a subset of the one before it, so the chain narrows 12 to 6 to 3 to 2 rows and a row dropped at one layer never returns.
+
+RESULT per-layer recompute selection: check=[1,3,5,6,8,11] layer2=[3,6,11] layer3=[6,11] counts=[6,3,2] per_chunk_check=[2,2,2]
