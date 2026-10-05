@@ -397,6 +397,22 @@ fn arch_data_digest_qwen35moe() {
 }
 
 #[test]
+fn arch_data_digest_granite_moe() {
+    let record = digest_record(&GRANITE_MOE);
+    for expected in [
+        "\nregistry_entry=dense\n",
+        "\nbind.residual_roots=24 sha256=",
+        "\nbind.layer_roots=24 sha256=",
+        "\nbind.router_roots=0 sha256=",
+        "\nbind.single_position_step=false\n",
+    ] {
+        assert!(record.contains(expected), "granite moe digest must contain {expected:?}, got:\n{record}");
+    }
+    assert!(record.ends_with("verify=absent\n"), "granite moe digest must end with verify=absent, got:\n{record}");
+    assert_matches_fixture(&GRANITE_MOE, "digest", &record);
+}
+
+#[test]
 fn generic_binder_gemma4_26b() {
     assert_bound(&GEMMA4_26B);
 }
