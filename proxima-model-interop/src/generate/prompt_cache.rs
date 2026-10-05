@@ -689,6 +689,16 @@ impl PromptCache {
         }
     }
 
+    pub(super) fn set_eviction_rules(&mut self, rules: &[EvictionRule]) -> Result<(), InteropError> {
+        if rules.last() != Some(&EvictionRule::Oldest) {
+            return Err(InteropError::UnsupportedServingConfig(
+                "eviction rules must end with the oldest rule so a full cache always has a victim".into(),
+            ));
+        }
+        self.eviction_rules = rules.to_vec();
+        Ok(())
+    }
+
     pub(super) fn set_cold(&mut self, tier: Arc<dyn ColdTier>) {
         self.cold = Some(ColdSlot { tier });
     }
@@ -1166,6 +1176,24 @@ impl LoadedModel<'_> {
         self.prompt_cache
             .lock()
             .stored_bytes()
+    }
+
+    /// Sets the ordered rules a full prompt cache uses to pick the entry it
+    /// gives up; the first rule that selects an entry decides. It is a setter
+    /// and not a [`crate::PromptCacheConfig`] field because that config is
+    /// `Copy` and a list is not. Without a call the list is the one
+    /// `PromptCache::eviction_victim` documents: an unused follow-up branch,
+    /// then the least recently used.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnsupportedServingConfig`] when the list does not end
+    /// with [`EvictionRule::Oldest`], because a full cache must always have a
+    /// victim.
+    pub fn set_eviction_rules(&self, rules: &[EvictionRule]) -> Result<(), InteropError> {
+        self.prompt_cache
+            .lock()
+            .set_eviction_rules(rules)
     }
 
     /// The report of the most recent request that went through the prompt
@@ -1829,6 +1857,57 @@ mod tests {
         );
         assert_eq!(held(&mut cache, &[2, 2, 2, 9]), 3);
         assert_eq!(held(&mut cache, &[3, 3, 3, 9]), 3);
+    }
+
+    #[test]
+    fn eviction_rules_setter_requires_oldest_last() {
+        let mut cache = PromptCache::new();
+
+        assert!(matches!(
+            cache.set_eviction_rules(&[]),
+            Err(InteropError::UnsupportedServingConfig(_))
+        ));
+        assert!(matches!(
+            cache.set_eviction_rules(&[EvictionRule::Branch]),
+            Err(InteropError::UnsupportedServingConfig(_))
+        ));
+        assert!(matches!(cache.set_eviction_rules(&[EvictionRule::Oldest]), Ok(())));
+        assert!(matches!(
+            cache.set_eviction_rules(&[EvictionRule::Branch, EvictionRule::Oldest]),
+            Ok(())
+        ));
+    }
+
+    #[test]
+    fn eviction_rules_choose_which_entry_a_full_cache_gives_up() {
+        let config = PromptCacheConfig {
+            max_entries: 3,
+            ..enabled_config()
+        };
+        let filled = |rules: Option<&[EvictionRule]>| {
+            let mut cache = PromptCache::new();
+            if let Some(rules) = rules {
+                cache.set_eviction_rules(rules).expect("a list ending in oldest is accepted");
+            }
+            cache.store(state_with_ids(&[1, 1, 1]), &config);
+            cache.store(branch_entry(&[1, 1, 1, 5], 3), &config);
+            cache.store(state_with_ids(&[2, 2, 2]), &config);
+            cache.store(state_with_ids(&[3, 3, 3]), &config);
+            cache
+        };
+        let held = |mut cache: PromptCache| {
+            cache
+                .take_best(&[1, 1, 1, 5, 9], &base_key(), &shared_widths(), ANY_OVERLAP)
+                .1
+                .lcp
+        };
+
+        assert_eq!(held(filled(None)), 3, "the default rules evicted the branch");
+        assert_eq!(
+            held(filled(Some(&[EvictionRule::Oldest]))),
+            4,
+            "oldest-only evicted the base and the branch survived"
+        );
     }
 
     const TRACE_A: [u32; 2] = [1, 1];
