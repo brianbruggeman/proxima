@@ -974,6 +974,22 @@ pub fn duplicate_head_reduce(
     )
 }
 
+fn scale_residual(
+    program: &mut Vec<Op>,
+    branch: NodeId,
+    scale: Option<NodeId>,
+) -> Result<NodeId, TensorError> {
+    match scale {
+        Some(scale) => elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(branch, "sd->sd"), (scale, "->sd")],
+        ),
+        None => Ok(branch),
+    }
+}
+
 /// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
 /// same relationship [`append_mistral_moe_layer`] bears to
 /// [`append_mistral_layer`]: cached attention block (RoPE + GQA +
@@ -1019,6 +1035,7 @@ pub fn append_mistral_cached_moe_layer(
     k_odd_cache: NodeId,
     v_cache: NodeId,
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
+    residual_scale: Option<NodeId>,
 ) -> Result<(NodeId, CachedLayerRoots, MoeSite), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -1407,6 +1424,7 @@ pub fn append_mistral_cached_moe_layer(
         "sugdo->sugdo",
         "so->sugdo",
     )?;
+    let attn_out = scale_residual(program, attn_out, residual_scale)?;
 
     let residual1 = elementwise(
         program,
@@ -1432,6 +1450,7 @@ pub fn append_mistral_cached_moe_layer(
         strategy: MoeProjectionStrategy::PerRoute,
     };
     let (ffn_out, site) = append_moe_ffn(program, layer, normed2, &moe_spec)?;
+    let ffn_out = scale_residual(program, ffn_out, residual_scale)?;
 
     let x_next = elementwise(
         program,
