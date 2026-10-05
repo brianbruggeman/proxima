@@ -14,7 +14,7 @@ use crate::serving::{
 
 mod levels;
 
-pub use levels::AdmissionScheduleSettings;
+pub use levels::{AdmissionScheduleSettings, PhaseScheduleSettings};
 
 fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     serde_json::from_str(raw)
@@ -307,6 +307,9 @@ pub struct ServingSettings {
     #[setting(nested)]
     #[builder(default)]
     pub admission_schedule: AdmissionScheduleSettings,
+    #[setting(nested)]
+    #[builder(default)]
+    pub phase_schedule: PhaseScheduleSettings,
 }
 
 impl Default for ServingSettings {
@@ -388,6 +391,7 @@ impl ServingSettings {
             max_command_buffers_per_token: self.max_command_buffers_per_token,
             overlap_transfer_compute: self.overlap_transfer_compute,
             admission_schedule: self.admission_schedule.as_admission_schedule(),
+            phase_schedule: self.phase_schedule.as_phase_schedule(),
             ..ServingConfig::default()
         }
     }
@@ -872,5 +876,34 @@ overlap_transfer_compute = true
             "[admission_schedule]\nmax_concurrent_requests = -1\n",
         );
         assert!(negative.is_err(), "a negative ceiling is refused");
+    }
+
+    #[test]
+    fn serving_scalars_phase_level_round_trips() {
+        let from_toml: ServingSettings =
+            conflaguration::from_toml_str("[phase_schedule]\nprefill_before_decode = false\n")
+                .expect("the phase toml parses");
+        let built = ServingSettings::builder()
+            .phase_schedule(
+                PhaseScheduleSettings::builder()
+                    .prefill_before_decode(false)
+                    .build(),
+            )
+            .build();
+        let from_env = temp_env::with_vars(
+            [(
+                "PROXIMA_SERVING_PHASE_SCHEDULE_PREFILL_BEFORE_DECODE",
+                Some("false"),
+            )],
+            || ServingSettings::from_env().expect("the phase env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+        assert!(!built.as_serving_config(&[]).phase_schedule.prefill_before_decode);
+        assert_eq!(
+            ServingSettings::default().as_serving_config(&[]).phase_schedule,
+            ServingConfig::default().phase_schedule,
+        );
     }
 }
