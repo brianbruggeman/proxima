@@ -56,6 +56,10 @@ pub enum InteropError {
     #[error("expert sidecar projection name has {found} bytes; maximum is {max}")]
     SidecarProjectionTooLong { found: usize, max: usize },
 
+    /// A kv block file's header or planes disagree with each other.
+    #[error("kv block file is malformed: {reason}")]
+    BlockFileMalformed { reason: &'static str },
+
     /// A sidecar's header or data offsets overflow the representable format.
     #[error("expert sidecar size overflow")]
     SidecarSizeOverflow,

@@ -4,6 +4,10 @@
 //! per-layer `k_even`, `k_odd` and `v` planes. These types describe that header; the
 //! length function says how many bytes a file with such a header occupies.
 
+use alloc::vec::Vec;
+
+use crate::error::InteropError;
+
 const HEADER_FIXED_BYTES: usize = 48;
 const LAYER_RECORD_BYTES: usize = 24;
 
@@ -59,6 +63,70 @@ fn plane_bytes(layer: &BlockFileLayer) -> usize {
     (layer.rows as usize).saturating_mul(row_bytes)
 }
 
+const BLOCK_FILE_MAGIC: [u8; 8] = *b"PXKVBLK1";
+const BLOCK_FILE_VERSION: u32 = 1;
+const PLANES_PER_LAYER: usize = 3;
+
+/// Writes the block file for `header` and its planes into `out`, replacing its contents.
+///
+/// `planes` is the flat list `[k_even_0, k_odd_0, v_0, k_even_1, ...]`, three per layer, an
+/// empty slice for an absent plane. Nothing is written to `out` when a refusal is returned.
+pub fn encode_block(
+    header: &BlockFileHeader,
+    planes: &[&[f32]],
+    out: &mut Vec<u8>,
+) -> Result<(), InteropError> {
+    check_planes(header, planes)?;
+    out.clear();
+    out.reserve(encoded_len(header));
+    out.extend_from_slice(&BLOCK_FILE_MAGIC);
+    out.extend_from_slice(&BLOCK_FILE_VERSION.to_le_bytes());
+    out.extend_from_slice(&header.descriptor_digest);
+    out.extend_from_slice(&header.content_key.to_le_bytes());
+    out.extend_from_slice(&header.base_position.to_le_bytes());
+    out.extend_from_slice(&(header.layers.len() as u32).to_le_bytes());
+    header.layers.iter().for_each(|layer| write_layer_record(layer, out));
+    planes
+        .iter()
+        .flat_map(|plane| plane.iter())
+        .for_each(|value| out.extend_from_slice(&value.to_le_bytes()));
+    Ok(())
+}
+
+fn write_layer_record(layer: &BlockFileLayer, out: &mut Vec<u8>) {
+    [
+        layer.rows,
+        layer.k_even_row_bytes,
+        layer.k_odd_row_bytes,
+        layer.v_row_bytes,
+        layer.ring_window,
+        layer.ring_capacity,
+    ]
+    .iter()
+    .for_each(|word| out.extend_from_slice(&word.to_le_bytes()));
+}
+
+fn check_planes(header: &BlockFileHeader, planes: &[&[f32]]) -> Result<(), InteropError> {
+    let expected_planes = header.layers.len().checked_mul(PLANES_PER_LAYER);
+    if expected_planes != Some(planes.len()) {
+        return Err(InteropError::BlockFileMalformed { reason: "plane count is not 3 per layer" });
+    }
+    let row_bytes_per_plane = |layer: &BlockFileLayer| {
+        [layer.k_even_row_bytes, layer.k_odd_row_bytes, layer.v_row_bytes]
+    };
+    let agrees = header.layers.iter().zip(planes.chunks(PLANES_PER_LAYER)).all(|(layer, chunk)| {
+        chunk.iter().zip(row_bytes_per_plane(layer)).all(|(plane, row_bytes)| {
+            plane.len().checked_mul(4)
+                == (layer.rows as usize).checked_mul(row_bytes as usize)
+        })
+    });
+    if agrees {
+        Ok(())
+    } else {
+        Err(InteropError::BlockFileMalformed { reason: "plane length disagrees with the header" })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -110,5 +178,84 @@ mod tests {
         };
 
         assert_eq!(encoded_len(&oversized), usize::MAX);
+    }
+
+    fn words_le(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    fn fixture_planes() -> Vec<Vec<f32>> {
+        vec![
+            ramp(8, 0.0),
+            ramp(8, 100.0),
+            ramp(4, 200.0),
+            ramp(6, 300.0),
+            ramp(6, 400.0),
+            ramp(3, 500.0),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ]
+    }
+
+    fn encode_fixture() -> Vec<u8> {
+        let planes = fixture_planes();
+        let views: Vec<&[f32]> = planes.iter().map(Vec::as_slice).collect();
+        let mut out = Vec::new();
+        encode_block(&fixture_header(), &views, &mut out).expect("encode the fixture");
+        out
+    }
+
+    #[test]
+    fn blockfile_encode_header_bytes() {
+        let out = encode_fixture();
+
+        assert_eq!(out[0..8], *b"PXKVBLK1");
+        assert_eq!(out[8..12], [1, 0, 0, 0]);
+        assert_eq!(out[12..28], [0x11; 16]);
+        assert_eq!(out[28..36], [8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(out[36..44], [64, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(out[44..48], [3, 0, 0, 0]);
+        assert_eq!(out[48..72], words_le(&[4, 8, 8, 4, 0, 0])[..]);
+        assert_eq!(out[72..96], words_le(&[3, 8, 8, 4, 2, 3])[..]);
+        assert_eq!(out[96..120], [0u8; 24]);
+    }
+
+    #[test]
+    fn blockfile_encode_payload_layout() {
+        let planes = fixture_planes();
+        let views: Vec<&[f32]> = planes.iter().map(Vec::as_slice).collect();
+        let mut out = encode_fixture();
+
+        assert_eq!(out.len(), 260);
+        assert_eq!(encoded_len(&fixture_header()), 260);
+        assert_eq!(out[120..124], 0.0f32.to_le_bytes());
+        assert_eq!(out[152..156], 100.0f32.to_le_bytes());
+        assert_eq!(out[200..204], 300.0f32.to_le_bytes());
+        assert_eq!(out[256..260], 501.0f32.to_le_bytes());
+        encode_block(&fixture_header(), &views, &mut out).expect("encode the fixture");
+        assert_eq!(out.len(), 260);
+    }
+
+    #[test]
+    fn blockfile_encode_refuses_malformed_planes() {
+        let mut planes = fixture_planes();
+        let mut out = vec![0xAB; 5];
+        planes[1].pop();
+        let short: Vec<&[f32]> = planes.iter().map(Vec::as_slice).collect();
+        let fewer: Vec<&[f32]> = short[..8].to_vec();
+
+        let short_result = encode_block(&fixture_header(), &short, &mut out);
+        assert!(matches!(
+            short_result,
+            Err(InteropError::BlockFileMalformed { reason: "plane length disagrees with the header" })
+        ));
+        assert_eq!(out, vec![0xAB; 5]);
+        let fewer_result = encode_block(&fixture_header(), &fewer, &mut out);
+        assert!(matches!(
+            fewer_result,
+            Err(InteropError::BlockFileMalformed { reason: "plane count is not 3 per layer" })
+        ));
+        assert_eq!(out, vec![0xAB; 5]);
     }
 }
