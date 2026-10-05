@@ -1,0 +1,32 @@
+2026-10-05T17:16:49Z LAUNCH decode_arms proxima arm=base0c process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:17:57Z EXIT decode_arms proxima arm=base0c process=0 status=exit status: 0
+2026-10-05T17:17:57Z LAUNCH decode_arms proxima arm=tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:19:04Z EXIT decode_arms proxima arm=tip process=0 status=exit status: 0
+2026-10-05T17:19:05Z LAUNCH decode_arms proxima arm=tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:20:12Z EXIT decode_arms proxima arm=tip process=1 status=exit status: 0
+2026-10-05T17:20:12Z LAUNCH decode_arms proxima arm=base0c process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:21:20Z EXIT decode_arms proxima arm=base0c process=1 status=exit status: 0
+2026-10-05T17:21:20Z LAUNCH decode_arms proxima arm=base0c process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:22:28Z EXIT decode_arms proxima arm=base0c process=2 status=exit status: 0
+2026-10-05T17:22:28Z LAUNCH decode_arms proxima arm=tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:23:36Z EXIT decode_arms proxima arm=tip process=2 status=exit status: 0
+2026-10-05T17:23:36Z LAUNCH decode_arms proxima arm=tip process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:24:43Z EXIT decode_arms proxima arm=tip process=3 status=exit status: 0
+2026-10-05T17:24:43Z LAUNCH decode_arms proxima arm=base0c process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:25:51Z EXIT decode_arms proxima arm=base0c process=3 status=exit status: 0
+2026-10-05T17:25:51Z LAUNCH decode_arms proxima arm=base0c process=4 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:26:59Z EXIT decode_arms proxima arm=base0c process=4 status=exit status: 0
+2026-10-05T17:26:59Z LAUNCH decode_arms proxima arm=tip process=4 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:28:06Z EXIT decode_arms proxima arm=tip process=4 status=exit status: 0
+2026-10-05T17:28:06Z LAUNCH decode_arms proxima arm=tip process=5 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:29:14Z EXIT decode_arms proxima arm=tip process=5 status=exit status: 0
+2026-10-05T17:29:14Z LAUNCH decode_arms proxima arm=base0c process=5 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:30:22Z EXIT decode_arms proxima arm=base0c process=5 status=exit status: 0
+2026-10-05T17:30:22Z LAUNCH decode_arms proxima arm=base0c process=6 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:31:29Z EXIT decode_arms proxima arm=base0c process=6 status=exit status: 0
+2026-10-05T17:31:29Z LAUNCH decode_arms proxima arm=tip process=6 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:32:37Z EXIT decode_arms proxima arm=tip process=6 status=exit status: 0
+2026-10-05T17:32:37Z LAUNCH decode_arms proxima arm=tip process=7 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_slice5
+2026-10-05T17:33:45Z EXIT decode_arms proxima arm=tip process=7 status=exit status: 0
+2026-10-05T17:33:45Z LAUNCH decode_arms proxima arm=base0c process=7 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_152467a9
+2026-10-05T17:34:52Z EXIT decode_arms proxima arm=base0c process=7 status=exit status: 0

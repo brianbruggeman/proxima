@@ -1,0 +1,15 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.40s
+────────────
+ Nextest run ID 7b3eafb5-524e-4d92-8703-4d3ceeda654a with nextest profile: default
+    Starting 8 tests across 8 binaries (751 tests skipped)
+        PASS [   0.021s] (1/8) proxima-tensor spec::tests::dense_windows::a_dense_window_without_a_ring_keeps_every_layer_on_the_full_cache
+        PASS [   0.021s] (2/8) proxima-tensor spec::tests::dense_windows::a_dense_schedule_with_no_window_lowers_the_program_it_always_did
+        PASS [   0.009s] (3/8) proxima-tensor spec::tests::dense_windows::a_ring_refuses_dense_windows_of_different_widths
+        PASS [   0.010s] (4/8) proxima-tensor spec::tests::dense_windows::a_ring_binds_only_the_windowed_dense_layer_to_the_sliding_slot
+        PASS [   0.022s] (5/8) proxima-tensor spec::tests::dense_windows::a_window_wider_than_the_context_changes_nothing
+        PASS [   0.024s] (6/8) proxima-tensor spec::tests::dense_windows::a_windowed_dense_decode_step_reads_exactly_the_last_window_rows
+        PASS [   0.013s] (7/8) proxima-tensor spec::tests::dense_windows::the_windowed_dense_helper_run_is_not_vacuous
+        PASS [   0.026s] (8/8) proxima-tensor spec::tests::dense_windows::a_windowed_dense_prefill_masks_each_new_row_to_its_own_window
+────────────
+     Summary [   0.087s] 8 tests run: 8 passed, 751 skipped

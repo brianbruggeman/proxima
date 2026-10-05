@@ -1,0 +1,94 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.06s
+────────────
+ Nextest run ID 3b6c5fbe-1a0d-449c-9fcb-30ab0b24cdd1 with nextest profile: default
+    Starting 48 tests across 1 binary
+        PASS [   4.961s] ( 1/48) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_26b
+        PASS [   0.903s] ( 2/48) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_e2b
+        PASS [   0.222s] ( 3/48) proxima-model-interop::arch_data_baseline arch_data_digest_granite_moe
+        PASS [   0.103s] ( 4/48) proxima-model-interop::arch_data_baseline arch_data_digest_openchat
+        PASS [   0.185s] ( 5/48) proxima-model-interop::arch_data_baseline arch_data_digest_qwen2
+        PASS [   0.230s] ( 6/48) proxima-model-interop::arch_data_baseline arch_data_digest_qwen3
+        PASS [   0.372s] ( 7/48) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35
+        PASS [   1.201s] ( 8/48) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35moe
+        PASS [   0.010s] ( 9/48) proxima-model-interop::arch_data_baseline checkpoints_toml_lists_every_baseline_checkpoint
+        PASS [   0.619s] (10/48) proxima-model-interop::arch_data_baseline descriptor_real_dims_gemma4_26b_program_equals_direct_builder
+        PASS [   0.033s] (11/48) proxima-model-interop::arch_data_baseline descriptor_real_dims_openchat_program_equals_direct_builder
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>180.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>240.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>300.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>360.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>420.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>480.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>540.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>600.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        PASS [ 606.193s] (12/48) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_e2b
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_gemma4_e2b
+        PASS [ 165.533s] (13/48) proxima-model-interop::arch_data_baseline generic_binder_gemma4_e2b
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_granite_moe
+        PASS [  66.683s] (14/48) proxima-model-interop::arch_data_baseline generic_binder_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        SLOW [>180.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        PASS [ 189.029s] (15/48) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        PASS [  24.309s] (16/48) proxima-model-interop::arch_data_baseline generic_binder_qwen2
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        SLOW [>180.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        PASS [ 237.343s] (17/48) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        PASS [  50.073s] (18/48) proxima-model-interop::arch_data_baseline generic_binder_qwen35
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>180.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>240.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>300.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>360.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>420.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>480.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>540.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>600.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>660.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>720.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>780.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>840.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>900.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>960.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>1020.000s] (─────) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        PASS [1030.298s] (19/48) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        PASS [   0.055s] (20/48) proxima-model-interop::arch_data_baseline granite_moe_config_with_the_hf_split_half_pairing_is_refused_by_the_lowering
+        PASS [   0.090s] (21/48) proxima-model-interop::arch_data_baseline granite_moe_header_declares_the_scales_the_profile_cannot_carry
+        PASS [   0.232s] (22/48) proxima-model-interop::arch_data_baseline granite_moe_program_carries_the_header_scales
+        PASS [   0.027s] (23/48) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_equals_the_gguf_header_descriptor
+        PASS [  11.743s] (24/48) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_reproduces_llama_ids
+        PASS [   0.124s] (25/48) proxima-model-interop::arch_data_baseline hand_written_qwen2_config_equals_the_gguf_header_descriptor
+        PASS [  46.586s] (26/48) proxima-model-interop::arch_data_baseline kv_in_caller_memory_gemma4_26b
+        PASS [  10.596s] (27/48) proxima-model-interop::arch_data_baseline kv_in_caller_memory_gemma4_e2b
+        PASS [  17.238s] (28/48) proxima-model-interop::arch_data_baseline kv_in_caller_memory_granite_moe
+        PASS [  25.788s] (29/48) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   9.472s] (30/48) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   9.287s] (31/48) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        PASS [  20.609s] (32/48) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   6.462s] (33/48) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  19.869s] (34/48) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+        PASS [   2.475s] (35/48) proxima-model-interop::arch_data_baseline model_config_edit_to_qwen2_changes_the_generated_ids
+        PASS [   0.737s] (36/48) proxima-model-interop::arch_data_baseline model_config_file_layer_turns_the_decode_config_into_the_verify_program
+        PASS [   0.601s] (37/48) proxima-model-interop::arch_data_baseline model_config_rejects_an_unknown_field
+        PASS [   1.200s] (38/48) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_26b
+        PASS [   0.894s] (39/48) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_e2b
+        PASS [   0.195s] (40/48) proxima-model-interop::arch_data_baseline model_config_roundtrip_granite_moe
+        PASS [   0.109s] (41/48) proxima-model-interop::arch_data_baseline model_config_roundtrip_openchat
+        PASS [   0.185s] (42/48) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen2
+        PASS [   0.231s] (43/48) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen3
+        PASS [   3.128s] (44/48) proxima-model-interop::arch_data_baseline model_config_text_edit_changes_the_lowered_program
+        PASS [   1.189s] (45/48) proxima-model-interop::arch_data_baseline window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints
+        PASS [   0.125s] (46/48) proxima-model-interop::arch_data_baseline window_ring_layers_follow_a_window_on_one_dense_layer
+        PASS [   8.767s] (47/48) proxima-model-interop::arch_data_baseline zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs
+        PASS [   6.381s] (48/48) proxima-model-interop::arch_data_baseline zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids
+────────────
+     Summary [2582.700s] 48 tests run: 48 passed (6 slow), 0 skipped
