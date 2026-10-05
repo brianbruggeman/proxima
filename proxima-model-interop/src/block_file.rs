@@ -168,6 +168,16 @@ pub fn decode_block(bytes: &[u8]) -> Result<BlockFileView<'_>, InteropError> {
     Ok(BlockFileView { header, payload: &bytes[table_end..] })
 }
 
+impl BlockFileView<'_> {
+    /// Refuses a block file whose descriptor digest is not `expected`.
+    pub fn require_digest(&self, expected: [u8; 16]) -> Result<(), InteropError> {
+        match self.header.descriptor_digest == expected {
+            true => Ok(()),
+            false => Err(InteropError::BlockFileDigestMismatch { expected, found: self.header.descriptor_digest }),
+        }
+    }
+}
+
 fn malformed(reason: &'static str) -> InteropError {
     InteropError::BlockFileMalformed { reason }
 }
@@ -393,5 +403,20 @@ mod tests {
             longer,
             Err(InteropError::BlockFileMalformed { reason: "payload length disagrees with the header" })
         ));
+    }
+
+    #[test]
+    fn blockfile_digest_mismatch_refused() {
+        let bytes = encode_fixture();
+        let view = decode_block(&bytes).expect("decode the fixture");
+
+        let refused = view.require_digest([0x22; 16]);
+
+        assert!(matches!(
+            refused,
+            Err(InteropError::BlockFileDigestMismatch { expected, found })
+                if expected == [0x22; 16] && found == [0x11; 16]
+        ));
+        assert!(matches!(view.require_digest([0x11; 16]), Ok(())));
     }
 }

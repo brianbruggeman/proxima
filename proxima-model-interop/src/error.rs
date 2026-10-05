@@ -60,6 +60,10 @@ pub enum InteropError {
     #[error("kv block file is malformed: {reason}")]
     BlockFileMalformed { reason: &'static str },
 
+    /// A kv block file was written for a different model than the one loading it.
+    #[error("kv block file was written for another model: expected digest {expected:02x?}, found {found:02x?}")]
+    BlockFileDigestMismatch { expected: [u8; 16], found: [u8; 16] },
+
     /// A sidecar's header or data offsets overflow the representable format.
     #[error("expert sidecar size overflow")]
     SidecarSizeOverflow,
