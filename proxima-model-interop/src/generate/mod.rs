@@ -80,7 +80,7 @@ use proxima_tensor::cpu::{
 use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
-use proxima_tensor::spec::{Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape};
+use proxima_tensor::spec::{ModelDescriptor, Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape};
 use proxima_tokenizer::{SamplingConfig, TokenType, Vocab, sample_next_token};
 use std::cell::RefCell;
 use std::fs::File;
