@@ -261,6 +261,16 @@ named hook changes each, and no sketch needed a new pipe type. The thesis, "ever
 technique is configuration over existing hooks", is therefore false on main today. The gaps are
 inputs and data shapes behind slots, not missing abstractions.
 
+Found by the granite parity card (2026-10-04):
+- **Fixed in 6bc35dba.** The MoE top-k fusion pass rebound the program with a plain bind and
+  dropped every fused cached-attention op. Decode then read the zero-padded KV bucket with no
+  mask. Granite decode diverged from llama at layer 0 of the first generated token.
+- **Recorded, not fixed.** The same rebind still drops gated-delta-net fusion on qwen35moe:
+  - with top-k fusion on, it has 0 GDN ops;
+  - with top-k fusion off, it has 30.
+
+  qwen is outside the test models and has no llama oracle, so no gate covers that decode path.
+
 Correctness defects on main found by the sketches (being fixed, not tracked):
 - `tokenizer.ggml.pre` is never read: every BPE vocab takes the llama3 rule
   (`proxima-tokenizer/src/pipe.rs:76`).
