@@ -22,6 +22,7 @@ const QWEN2_BLOB_SHA256: &str = "c5396e06af294bd101b30dce59131a76d2b773e76950acc
 const QWEN3_BLOB_SHA256: &str = "a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f";
 const QWEN35_BLOB_SHA256: &str = "afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5";
 const QWEN35MOE_BLOB_SHA256: &str = "f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d";
+const GRANITE_MOE_BLOB_SHA256: &str = "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 
 fn ollama_blob(sha256: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME is set");
@@ -126,6 +127,12 @@ fn qwen35_digits_split_one_per_token_and_marks_join_words_like_llama() {
 fn qwen35moe_digits_split_one_per_token_and_marks_join_words_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN35MOE_BLOB_SHA256));
     assert_family_matches_llama(&vocab, PreType::Qwen35, &family_cases!("qwen35moe"));
+}
+
+#[test]
+fn granite_refact_vocabulary_isolates_digits_like_llama() {
+    let vocab = load_vocab(&ollama_blob(GRANITE_MOE_BLOB_SHA256));
+    assert_family_matches_llama(&vocab, PreType::DigitIsolatedGpt2, &family_cases!("granite_moe"));
 }
 
 #[test]
