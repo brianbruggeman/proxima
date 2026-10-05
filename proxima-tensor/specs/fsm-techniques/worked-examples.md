@@ -276,3 +276,46 @@ The selection rule: the top blocks are chosen among the sealed blocks that are n
 Counting n over all four blocks (`ceil(0.5 * 4) = 2`) also gives 2 here, so this selection does not distinguish the two forms; the non-local form is the stated rule.
 
 RESULT block read selection: b=16 sealed=4 tail=5 n=2 top={0,1} local={3} attended_blocks={0,1,3} attended_rows=53
+
+## action speculation
+
+The entry type is an action, not a token. Environment `E`: `values: BTreeMap<u8, i64>` (a missing key reads 0) and `version: u64`; `apply(A(key, delta, version))` does `values[key] += delta; version += 1`. True policy: `true_action(E) = A(key = E.version % 3, delta = (E.values[key] rem 5) + 1, version = E.version)`. Guessing drafter: `guessed_action(E) = true_action(E)` except `delta + 1` when `E.version % 4 == 3`; the draft runs on a clone and applies its own guesses. Run: 12 steps, rows per draft = min(4, remaining); a round whose index `r` satisfies `r % 3 == 2` drafts from the environment as it was at the start of the previous round (a stale snapshot). Verify: observed row i = `true_action` on `E_i`, where `E_0` is the real environment and `E_(i+1) = E_i.apply(draft[i])`; row cache i = `E_i.apply(observed[i])`.
+
+Sequential run (each delta is `values[key] rem 5 + 1`):
+
+- S0 A(0,1,0): key 0 holds 0, 0 rem 5 = 0, delta 1; values {0:1}
+- S1 A(1,1,1): key 1 holds 0, delta 1; {0:1,1:1}
+- S2 A(2,1,2): key 2 holds 0, delta 1; {0:1,1:1,2:1}
+- S3 A(0,2,3): key 0 holds 1, 1 rem 5 = 1, delta 2; {0:3,1:1,2:1}
+- S4 A(1,2,4): key 1 holds 1, delta 2; {0:3,1:3,2:1}
+- S5 A(2,2,5): key 2 holds 1, delta 2; {0:3,1:3,2:3}
+- S6 A(0,4,6): key 0 holds 3, 3 rem 5 = 3, delta 4; {0:7,1:3,2:3}
+- S7 A(1,4,7): key 1 holds 3, delta 4; {0:7,1:7,2:3}
+- S8 A(2,4,8): key 2 holds 3, delta 4; {0:7,1:7,2:7}
+- S9 A(0,3,9): key 0 holds 7, 7 rem 5 = 2, delta 3; {0:10,1:7,2:7}
+- S10 A(1,3,10): key 1 holds 7, delta 3; {0:10,1:10,2:7}
+- S11 A(2,3,11): key 2 holds 7, delta 3; {0:10,1:10,2:10}
+
+Final environment `{0:10, 1:10, 2:10}`, version 12.
+
+Each policy is also stated as the three values of one accept rule: similarity floor, minimum run, row cap. The accepted count of a round is the length of the leading run of rows whose similarity to the observed row is at least the floor, cut at the row cap, and zero when that run is shorter than the minimum run.
+
+Equality policy (a row is accepted iff action and version are equal; rule values: floor 1.0 under exact equality, minimum run 0, row cap 8, which never binds at 4 rows):
+
+- r0: the four drafted rows are S0, S1, S2 and A(0,3,3) (version 3 satisfies `3 % 4 == 3`, so the delta 2 is guessed as 3); observed S0..S2 are equal, observed[3] = A(0,2,3) differs; accepted 3, Rollback; commits S0..S2 and S3 (4 steps)
+- r1: from E4, drafted rows S4, S5, S6 and A(1,5,7) (version 7, `7 % 4 == 3`, delta 4 guessed as 5); accepted 3, Rollback; commits S4..S7 (8 steps)
+- r2 (stale, `2 % 3 == 2`): drafts from E4 while the real environment is E8; the first drafted row S4 differs from the first observed row S8; accepted 0, Rollback; commits S8 (9 steps)
+- r3: from E9, rows = min(4, 3) = 3; drafted rows S9, S10 and A(2,4,11) (version 11, `11 % 4 == 3`, delta 3 guessed as 4); accepted 2, Rollback; commits S9, S10, S11 (12 steps)
+- totals: rounds 4, rejected rounds 4, accepted rows 3 + 3 + 0 + 2 = 8
+
+Anchor+macro policy (rule values: floor 1.0, minimum run 3, no row cap; the aligned prefix must reach 3, else accepted 0):
+
+- r0: aligned 3, accepted 3; r1: aligned 3, accepted 3; r2: stale, accepted 0
+- r3: aligned 2 < 3, so accepted 0; commits S9 (10 steps)
+- r4 (from E10, rows 2): the first drafted row S10 is aligned, the second A(2,4,11) is not; aligned 1 < 3, accepted 0; commits S10 (11 steps)
+- r5 (stale, `5 % 3 == 2`, from the start of r4 = E10, rows 1): the only drafted row S10 differs from observed S11; accepted 0; commits S11 (12 steps)
+- totals: rounds 6, rejected rounds 6, accepted rows 3 + 3 = 6
+
+Verifier-exact policy (a row is accepted iff the whole entry is equal; rule values: floor 1.0 under a similarity that is the fraction of the three fields key, delta, version that agree, minimum run 0, no row cap): the rows that differ are the same rows as under equality, so the rounds are the same as equality; totals rounds 4, rejected 4, accepted rows 8.
+
+RESULT action speculation: sequential_final={0:10,1:10,2:10} v12; equality rounds=4 rejected=4 accepted_rows=8; anchor_macro(min_skip=3) rounds=6 rejected=6 accepted_rows=6; verifier_exact rounds=4 rejected=4 accepted_rows=8
