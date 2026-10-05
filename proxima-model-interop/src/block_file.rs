@@ -225,6 +225,34 @@ fn read_layer_record(record: &[u8]) -> BlockFileLayer {
     }
 }
 
+/// A block file mapped read-only from disk.
+///
+/// Composes `memmap2::Mmap` and [`decode_block`]; `memmap2` is already in `std` while
+/// `proxima-storage` sits behind its own non-default feature. Reading the format is the
+/// format's own job and the cartridge loader reads such files from production code, while
+/// writing one belongs to whichever tier owns the directory and the crash rules.
+#[cfg(feature = "std")]
+pub struct MappedBlockFile {
+    map: memmap2::Mmap,
+}
+
+#[cfg(feature = "std")]
+impl MappedBlockFile {
+    /// Opens and maps the block file at `path`.
+    pub fn open(path: &std::path::Path) -> Result<Self, InteropError> {
+        let wrap = |source| InteropError::BlockFileIo { path: path.to_path_buf(), source };
+        let file = std::fs::File::open(path).map_err(wrap)?;
+        // a block file is written once, renamed into place and never modified in place
+        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(wrap)?;
+        Ok(Self { map })
+    }
+
+    /// Decodes the mapped bytes as a borrowed view.
+    pub fn view(&self) -> Result<BlockFileView<'_>, InteropError> {
+        decode_block(&self.map)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -497,5 +525,35 @@ mod tests {
         let mut out = Vec::new();
 
         assert_eq!(view.plane_f32(0, 0, &mut out), None);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn blockfile_read_maps_what_was_written() {
+        let directory = tempfile::tempdir().expect("create a temp directory");
+        let path = directory.path().join("0000000000000001.pxkv");
+        let bytes = encode_fixture();
+        std::fs::write(&path, &bytes).expect("write the fixture file");
+
+        let mapped = MappedBlockFile::open(&path).expect("map the fixture file");
+        let view = mapped.view().expect("decode the mapped fixture");
+
+        assert_eq!(view.header, fixture_header());
+        let read: Vec<Vec<f32>> = (0..3)
+            .flat_map(|layer| (0..3).map(move |plane| (layer, plane)))
+            .map(|(layer, plane)| read_plane(&view, layer, plane))
+            .collect();
+        assert_eq!(read.len(), 9);
+        for (got, want) in read.iter().zip(&fixture_planes()) {
+            assert_eq!(bits(got), bits(want));
+        }
+        let missing = MappedBlockFile::open(&directory.path().join("absent.pxkv"));
+        assert!(matches!(missing, Err(InteropError::BlockFileIo { .. })));
+        std::fs::write(&path, &bytes[..60]).expect("truncate the fixture file");
+        let truncated = MappedBlockFile::open(&path).expect("map the truncated file");
+        assert!(matches!(
+            truncated.view(),
+            Err(InteropError::BlockFileMalformed { reason: "truncated layer table" })
+        ));
     }
 }
