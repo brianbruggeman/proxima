@@ -82,6 +82,10 @@ pub struct ModelDescriptor {
     /// Divisor on the final logits, `logits / logit_scale`: the checkpoint's
     /// `<family>.logit_scale`, 6.0 for granite; `None` leaves the logits untouched.
     pub logit_scale: Option<f32>,
+    /// Multiplier on each sublayer output before it joins the residual stream,
+    /// `x + scale * sublayer`: the checkpoint's `<family>.residual_scale`, 0.22 for
+    /// granite; `None` is the plain add.
+    pub residual_scale: Option<f32>,
     pub layers: Vec<LayerSchedule>,
     pub cache_strategy: CacheStrategy,
     /// gemma4 E2B/E4B's per-layer-embedding preamble width
@@ -305,6 +309,7 @@ pub fn mistral_descriptor_from_shape(
         embedding_scale: profile.embedding_scale,
         logit_softcap: None,
         logit_scale: None,
+        residual_scale: None,
         layers,
         cache_strategy: CacheStrategy::SingleRange,
         // `CacheStrategy::SingleRange` has no PLE concept at all -- same
@@ -410,6 +415,11 @@ pub fn build_forward(
                 "build_forward(CacheStrategy::TwoRange)",
                 "a logit scale",
             )?;
+            refuse_when(
+                descriptor.residual_scale.is_some(),
+                "build_forward(CacheStrategy::TwoRange)",
+                "a residual scale",
+            )?;
             let (program, logits, cache_roots, moe_sites, duplicate_head_roots) =
                 lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
                     descriptor.vocab,
@@ -444,6 +454,11 @@ pub fn build_forward(
                 descriptor.logit_scale.is_some(),
                 "build_forward(CacheStrategy::Cacheless)",
                 "a logit scale",
+            )?;
+            refuse_when(
+                descriptor.residual_scale.is_some(),
+                "build_forward(CacheStrategy::Cacheless)",
+                "a residual scale",
             )?;
             let (program, logits, moe_sites, duplicate_head_roots) = lfm2_forward_program_with_experts_and_head_repeats(
                 descriptor.vocab,
@@ -505,6 +520,11 @@ pub fn build_forward(
                 });
             }
             let attention = first.attention;
+            refuse_when(
+                descriptor.residual_scale.is_some(),
+                "build_forward(CacheStrategy::SingleRange)",
+                "a residual scale",
+            )?;
             // `attention.rope_pairing` is this descriptor's own data, not
             // re-inferred from `qk_norm` here -- Qwen2 needs split-half RoPE
             // with `qk_norm` still `false` (no QK-norm tensors at all), a
