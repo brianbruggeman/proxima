@@ -18,6 +18,10 @@ use core::ops::ControlFlow;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use std::sync::OnceLock;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
@@ -828,4 +832,114 @@ fn llama_parity_qwen2() {
 #[test]
 fn llama_parity_qwen3() {
     llama_parity(&QWEN3);
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const ARENA_BYTES: usize = 4 << 30;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+static ARENA_BASE: OnceLock<usize> = OnceLock::new();
+#[cfg(all(feature = "metal", target_os = "macos"))]
+static ARENA_USED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(feature = "metal", target_os = "macos"))]
+static ARENA_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn map_arena() -> usize {
+    let pointer = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            ARENA_BYTES,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_ANON | libc::MAP_PRIVATE | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(pointer, libc::MAP_FAILED, "the kv arena could not be reserved");
+    pointer as usize
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn arena_source(byte_len: usize) -> Result<omega::PlacedBuffer, omega::MetalError> {
+    let page = omega::page_size();
+    let length = byte_len.max(1).div_ceil(page) * page;
+    let offset = ARENA_USED.fetch_add(length, Ordering::SeqCst);
+    assert!(offset + length <= ARENA_BYTES, "the kv arena is exhausted at {offset} bytes");
+    ARENA_REQUESTS.fetch_add(1, Ordering::SeqCst);
+    let base = *ARENA_BASE.get_or_init(map_arena);
+    unsafe { omega::allocate_placed_buffer_over((base + offset) as *mut u8, length) }
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn generated_ids(
+    model: &LoadedModel<'_>,
+    cases: &[LlamaCase],
+    config: &ServingConfig<'_>,
+) -> Vec<Vec<u32>> {
+    cases
+        .iter()
+        .map(|case| {
+            let (generated, _text, _stopped) = model
+                .generate_from_ids(
+                    &case.prompt_ids,
+                    LLAMA_GENERATED_TOKENS,
+                    config,
+                    &mut |_event| ControlFlow::Continue(()),
+                )
+                .unwrap_or_else(|error| panic!("generate_from_ids failed: {error:?}"));
+            generated
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches_llama: bool) {
+    let cases = llama_cases(checkpoint);
+    let mapping = checkpoint.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = LoadedModel::load(&parsed, file_bytes)
+        .unwrap_or_else(|error| panic!("{}: LoadedModel::load failed: {error:?}", checkpoint.name));
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    };
+
+    let default_ids = generated_ids(&model, &cases, &config);
+    assert_eq!(
+        ARENA_REQUESTS.load(Ordering::SeqCst),
+        0,
+        "the default buffer source never touches the arena"
+    );
+    ARENA_USED.store(0, Ordering::SeqCst);
+    ARENA_REQUESTS.store(0, Ordering::SeqCst);
+
+    let hooked = model.with_kv_buffer_source(arena_source);
+    let hooked_ids = generated_ids(&hooked, &cases, &config);
+    assert_eq!(hooked_ids, default_ids, "kv in caller memory changes the ids");
+
+    if matches_llama {
+        for (index, case) in cases.iter().enumerate() {
+            let compared = hooked_ids[index].len().min(case.generated_ids.len());
+            assert_eq!(
+                first_divergence(&case.generated_ids, &hooked_ids[index][..compared]),
+                None,
+                "{} prompt {:?} diverges from the recorded llama ids",
+                checkpoint.name,
+                case.prompt
+            );
+        }
+    }
+    assert_eq!(
+        ARENA_REQUESTS.load(Ordering::SeqCst),
+        3 * kv_owning_layers * cases.len(),
+        "the arena serves three buffers per kv-owning layer per generate call"
+    );
+    assert!(ARENA_USED.load(Ordering::SeqCst) > 0, "the arena served no bytes");
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn kv_in_caller_memory_gemma4_e2b() {
+    kv_in_caller_memory(&GEMMA4_E2B, 15, true);
 }
