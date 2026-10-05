@@ -949,3 +949,9 @@ fn kv_in_caller_memory_gemma4_e2b() {
 fn kv_in_caller_memory_gemma4_26b() {
     kv_in_caller_memory(&GEMMA4_26B, 30, true);
 }
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn kv_in_caller_memory_granite_moe() {
+    kv_in_caller_memory(&GRANITE_MOE, 24, true);
+}
