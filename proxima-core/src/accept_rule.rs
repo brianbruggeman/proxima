@@ -142,11 +142,37 @@ mod tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod config_tests {
     use super::*;
+    use crate::serving_state::action_fixture::{Action, run_sequential, run_speculative};
     use conflaguration::Settings;
 
     const FLOOR_VAR: &str = "PROXIMA_ACCEPT_RULE_SIMILARITY_FLOOR";
     const RUN_VAR: &str = "PROXIMA_ACCEPT_RULE_MIN_RUN";
     const ROWS_VAR: &str = "PROXIMA_ACCEPT_RULE_MAX_ROWS";
+
+    fn field_agreement(drafted: &Action, chosen: &Action) -> f32 {
+        f32::from(
+            u8::from(drafted.key == chosen.key)
+                + u8::from(drafted.delta == chosen.delta)
+                + u8::from(drafted.version == chosen.version),
+        ) / 3.0
+    }
+
+    fn rule_from(table: &str) -> AcceptRule {
+        conflaguration::from_toml_str(table).expect("the rule table parses")
+    }
+
+    fn assert_rule_matches_sequential(table: &str, counts: (usize, usize, usize)) {
+        let rule = rule_from(table);
+        let sequential = run_sequential();
+        let speculative = run_speculative(|draft, choices| rule.accepted_rows(draft, choices, field_agreement));
+
+        assert_eq!(speculative.history, sequential.history);
+        assert_eq!(speculative.environment, sequential.environment);
+        assert_eq!(
+            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            counts
+        );
+    }
 
     fn assert_loaders_agree(expected: &AcceptRule, floor: &str, run: &str, rows: &str) {
         let table = format!("similarity_floor = {floor}\nmin_run = {run}\nmax_rows = {rows}\n");
@@ -200,5 +226,20 @@ mod config_tests {
         temp_env::with_vars([(ROWS_VAR, Some("lots"))], || {
             assert!(AcceptRule::from_env().is_err());
         });
+    }
+
+    #[test]
+    fn configured_rule_equality_matches_sequential() {
+        assert_rule_matches_sequential("similarity_floor = 1.0\nmin_run = 0\nmax_rows = 8\n", (4, 4, 8));
+    }
+
+    #[test]
+    fn configured_rule_verifier_exact_matches_sequential() {
+        assert_rule_matches_sequential("similarity_floor = 1.0\nmin_run = 0\nmax_rows = 65535\n", (4, 4, 8));
+    }
+
+    #[test]
+    fn configured_rule_anchor_run_matches_sequential() {
+        assert_rule_matches_sequential("similarity_floor = 1.0\nmin_run = 3\nmax_rows = 65535\n", (6, 6, 6));
     }
 }
