@@ -1021,35 +1021,60 @@ fn hand_written_granite_moe_config_equals_the_gguf_header_descriptor() {
     assert_hand_written_config_equals_header(&GRANITE_MOE, "granite_moe.toml");
 }
 
+fn window_ceiling_constants(program: &[Op], window: u32) -> usize {
+    let ceiling = (window as f32 - 1.0).to_bits();
+    program
+        .iter()
+        .filter(|op| matches!(op, Op::Constant { value, .. } if value.to_bits() == ceiling))
+        .count()
+}
+
+fn full_attention(base: &ModelDescriptor) -> ModelDescriptor {
+    let layers = base
+        .layers
+        .iter()
+        .map(|layer| LayerSchedule {
+            attention: LayerAttentionConfig {
+                mask_window: None,
+                ..layer.attention.clone()
+            },
+            ..layer.clone()
+        })
+        .collect();
+    ModelDescriptor {
+        sliding_kv_ring: false,
+        layers,
+        ..base.clone()
+    }
+}
+
 #[test]
 fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
+    let variant = hand_written_config("gemma4_e2b_full_attention.toml");
     let mapping = GEMMA4_E2B.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     let base = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
-    let windowed = base.layers.iter().filter(|layer| layer.attention.mask_window.is_some()).count();
-    assert!(windowed > 0, "e2b must carry sliding layers for the variant to change anything");
+    let window = base.layers[0].attention.mask_window.expect("e2b's first layer is a sliding layer");
 
-    let mut variant = base.clone();
-    variant.sliding_kv_ring = false;
-    for layer in &mut variant.layers {
-        layer.attention.mask_window = None;
-    }
-    assert!(variant.layers.iter().all(|layer| layer.attention.mask_window.is_none()));
+    assert_eq!(variant, full_attention(&base), "the file must differ from e2b in the layer windows and the ring only");
+    assert!(
+        variant.layers.iter().all(|layer| layer.kind == LayerKind::Attention && layer.attention.mask_window.is_none()),
+        "every layer of the file must be a full-attention layer"
+    );
 
     let (base_program, ..) = build_forward(&base).expect("the base lowers");
-    let model = load_from_config(&parsed, file_bytes, &variant);
-    assert_ne!(model.op_count(), base_program.len(), "removing every window must change the graph");
+    let (variant_program, ..) = build_forward(&variant).expect("the file lowers");
+    assert!(
+        window_ceiling_constants(&base_program, window) > 0,
+        "e2b's program must carry the {window}-token window mask the variant removes"
+    );
+    assert_eq!(window_ceiling_constants(&variant_program, window), 0, "a full-attention program carries no window mask");
 
-    let prompt_ids = &llama_cases(&GEMMA4_E2B)[0].prompt_ids;
-    let config = ServingConfig {
-        prompt_cache: PromptCacheConfig::off(),
-        ..ServingConfig::default()
-    };
-    let (generated, _text, _stopped) = model
-        .generate_from_ids(prompt_ids, 8, &config, &mut |_event| ControlFlow::Continue(()))
-        .expect("the variant runs");
-    assert!(!generated.is_empty(), "the variant generated zero tokens");
+    let model = load_from_config(&parsed, file_bytes, &variant);
+    assert_eq!(model.op_count(), variant_program.len(), "the loaded model must run the file's lowering");
+    assert_ne!(model.op_count(), base_program.len(), "removing every window must change the graph");
+    assert_llama_ids(&GEMMA4_E2B, &parsed, &model);
 }
 
 fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> bool {
