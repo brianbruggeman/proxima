@@ -220,3 +220,12 @@ A classifier judge is one more pure function of class probabilities. The judge m
 - [0.4, 0.6]: argmax is index 1 (0.6 > 0.4), differs from `accept_class`, escalate
 
 RESULT classifier judge: [0.7,0.3] -> settle; [0.4,0.6] -> escalate
+
+## conformal judge
+
+A conformal judge is a pure function of vote counts over sixteen sampled answers. The bound `max_disagree` is the calibrated q-hat in units of samples, an integer, because dividing by the sample count is not exact: one disagreeing draw of 16 is 62.5 per thousand. Here `samples = 16` and `max_disagree = 13` (a q-hat of 0.8125 over 16 samples is 13 disagreements, given as a calibrated value; fitting it is out of scope). An answer is in the prediction set iff `samples - votes <= max_disagree`. The judge settles iff the set has exactly one answer, and the settled answer is that one; otherwise it escalates.
+
+- votes {A:9, B:4, C:3}: disagreements 16-9 = 7, 16-4 = 12, 16-3 = 13, all <= 13, set {A,B,C}, size 3, escalate
+- votes {A:12, B:2, C:2}: disagreements 16-12 = 4, 16-2 = 14, 16-2 = 14, only A is <= 13, set {A}, size 1, settle A
+
+RESULT conformal judge: samples=16 max_disagree=13 votes{A:9,B:4,C:3} -> escalate (|C|=3); votes{A:12,B:2,C:2} -> settle A (|C|=1)
