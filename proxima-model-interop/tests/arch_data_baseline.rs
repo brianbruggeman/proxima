@@ -661,6 +661,29 @@ fn granite_moe_header_declares_the_scales_the_profile_cannot_carry() {
     );
 }
 
+fn constants_equal(program: &[Op], value: f32) -> usize {
+    program
+        .iter()
+        .filter(|op| matches!(op, Op::Constant { value: found, .. } if *found == value))
+        .count()
+}
+
+#[test]
+fn granite_moe_program_carries_the_header_scales() {
+    let mapping = GRANITE_MOE.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("the real granite moe header parses");
+    let route = resolve(&GRANITE_MOE, &parsed);
+    let bound = route
+        .bind_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+        .expect("granite moe binds under the sliding ring layout");
+
+    assert_eq!(constants_equal(&bound.program, 12.0), 1, "embedding scale");
+    assert_eq!(constants_equal(&bound.program, 1.0_f32 / 6.0_f32), 1, "reciprocal logit scale");
+    assert_eq!(constants_equal(&bound.program, 0.22_f32), 1, "residual scale");
+    assert_eq!(constants_equal(&bound.program, 0.015625), 1, "attention scale");
+}
+
 const LLAMA_GENERATED_TOKENS: usize = 32;
 
 struct LlamaCase {
