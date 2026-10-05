@@ -127,6 +127,70 @@ fn check_planes(header: &BlockFileHeader, planes: &[&[f32]]) -> Result<(), Inter
     }
 }
 
+/// A decoded block file: the parsed header and the plane bytes borrowed from the input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockFileView<'bytes> {
+    /// The parsed header.
+    pub header: BlockFileHeader,
+    /// The bytes after the layer table, borrowed from the input.
+    pub payload: &'bytes [u8],
+}
+
+/// Parses `bytes` as a block file, refusing any file whose length disagrees with its header.
+pub fn decode_block(bytes: &[u8]) -> Result<BlockFileView<'_>, InteropError> {
+    let fixed = bytes
+        .get(..HEADER_FIXED_BYTES)
+        .ok_or(malformed("shorter than the fixed header"))?;
+    if fixed[0..8] != BLOCK_FILE_MAGIC {
+        return Err(malformed("bad magic"));
+    }
+    if read_u32(fixed, 8) != BLOCK_FILE_VERSION {
+        return Err(malformed("unsupported version"));
+    }
+    let table_end = (read_u32(fixed, 44) as usize)
+        .checked_mul(LAYER_RECORD_BYTES)
+        .and_then(|table| table.checked_add(HEADER_FIXED_BYTES))
+        .ok_or(malformed("truncated layer table"))?;
+    let table = bytes
+        .get(HEADER_FIXED_BYTES..table_end)
+        .ok_or(malformed("truncated layer table"))?;
+    let mut descriptor_digest = [0u8; 16];
+    descriptor_digest.copy_from_slice(&fixed[12..28]);
+    let header = BlockFileHeader {
+        descriptor_digest,
+        content_key: read_u64(fixed, 28),
+        base_position: read_u64(fixed, 36),
+        layers: table.as_chunks::<LAYER_RECORD_BYTES>().0.iter().map(|record| read_layer_record(record)).collect(),
+    };
+    if bytes.len() != encoded_len(&header) {
+        return Err(malformed("payload length disagrees with the header"));
+    }
+    Ok(BlockFileView { header, payload: &bytes[table_end..] })
+}
+
+fn malformed(reason: &'static str) -> InteropError {
+    InteropError::BlockFileMalformed { reason }
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from(read_u32(bytes, offset)) | (u64::from(read_u32(bytes, offset + 4)) << 32)
+}
+
+fn read_layer_record(record: &[u8]) -> BlockFileLayer {
+    BlockFileLayer {
+        rows: read_u32(record, 0),
+        k_even_row_bytes: read_u32(record, 4),
+        k_odd_row_bytes: read_u32(record, 8),
+        v_row_bytes: read_u32(record, 12),
+        ring_window: read_u32(record, 16),
+        ring_capacity: read_u32(record, 20),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -257,5 +321,77 @@ mod tests {
             Err(InteropError::BlockFileMalformed { reason: "plane count is not 3 per layer" })
         ));
         assert_eq!(out, vec![0xAB; 5]);
+    }
+
+    #[test]
+    fn blockfile_decode_reads_the_header_back() {
+        let bytes = encode_fixture();
+
+        let view = decode_block(&bytes).expect("decode the encoded fixture");
+
+        assert_eq!(view.header, fixture_header());
+        assert_eq!(view.payload.len(), 140);
+    }
+
+    #[test]
+    fn blockfile_decode_refuses_short() {
+        let result = decode_block(&[0u8; 47]);
+
+        assert!(matches!(
+            result,
+            Err(InteropError::BlockFileMalformed { reason: "shorter than the fixed header" })
+        ));
+    }
+
+    #[test]
+    fn blockfile_decode_refuses_bad_magic() {
+        let mut bytes = encode_fixture();
+        bytes[0] = b'X';
+
+        let result = decode_block(&bytes);
+
+        assert!(matches!(result, Err(InteropError::BlockFileMalformed { reason: "bad magic" })));
+    }
+
+    #[test]
+    fn blockfile_decode_refuses_bad_version() {
+        let mut bytes = encode_fixture();
+        bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+
+        let result = decode_block(&bytes);
+
+        assert!(matches!(
+            result,
+            Err(InteropError::BlockFileMalformed { reason: "unsupported version" })
+        ));
+    }
+
+    #[test]
+    fn blockfile_decode_refuses_truncated_layer_table() {
+        let bytes = encode_fixture();
+
+        let result = decode_block(&bytes[..100]);
+
+        assert!(matches!(
+            result,
+            Err(InteropError::BlockFileMalformed { reason: "truncated layer table" })
+        ));
+    }
+
+    #[test]
+    fn blockfile_decode_refuses_wrong_payload_length() {
+        let mut bytes = encode_fixture();
+        let shorter = decode_block(&bytes[..bytes.len() - 4]);
+        assert!(matches!(
+            shorter,
+            Err(InteropError::BlockFileMalformed { reason: "payload length disagrees with the header" })
+        ));
+        bytes.push(0);
+        let longer = decode_block(&bytes);
+
+        assert!(matches!(
+            longer,
+            Err(InteropError::BlockFileMalformed { reason: "payload length disagrees with the header" })
+        ));
     }
 }
