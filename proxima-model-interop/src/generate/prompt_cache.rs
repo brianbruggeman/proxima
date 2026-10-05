@@ -105,7 +105,7 @@ impl CachePath {
 pub enum MissReason {
     /// The cache holds no entry.
     Empty,
-    /// Every entry was built under a different [`CacheKey`]: its rows are not
+    /// Every entry was built under a different `CacheKey`: its rows are not
     /// the rows this request would compute.
     ConfigMismatch,
     /// No entry shares even the first token with the prompt.

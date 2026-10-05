@@ -319,7 +319,7 @@ pub trait Architecture: Send + Sync {
     /// all-positions builder yet, and speculative decode's verify step
     /// simply stays off for them (`LoadedModel::speculative_verify_program`
     /// is `None`, never a name comparison at the load site -- see
-    /// [`Gemma4Arch::speculative_verify_program`] for the one override).
+    /// `Gemma4Arch::speculative_verify_program` for the one override).
     ///
     /// # Errors
     ///
@@ -411,7 +411,7 @@ pub trait Architecture: Send + Sync {
     /// The checkpoint's own per-pair RoPE frequency-scaling factor
     /// (GGUF `ROPE_FREQS`, e.g. `rope_freqs.weight`) for the builtin
     /// `rope_cos`/`rope_sin` table's `head_dim / 2` frequency pairs --
-    /// [`crate::generate::build_position_inputs`] divides each pair's angle
+    /// `crate::generate::build_position_inputs` divides each pair's angle
     /// by `factors[pair]` before taking `cos`/`sin` when this returns
     /// `Some`. Default `None`: every pair rotates undivided, this crate's
     /// prior full-rotation behaviour for every architecture except gemma4's
@@ -446,14 +446,14 @@ pub trait Architecture: Send + Sync {
     /// This architecture's own measured default for
     /// `ServingConfig::command_buffer_chunks` -- consulted by
     /// `LoadedModel::apply_command_buffer_chunks_default` only when a
-    /// caller left that field at [`ServingConfig`]'s own type default (never
+    /// caller left that field at `ServingConfig`'s own type default (never
     /// overriding an explicit caller value), the same capability-method
     /// shape [`Architecture::speculative_verify_program`]'s own doc argues
     /// for over a `name() == "gemma4"` comparison at the call site. Default
     /// `1`: every architecture this crate ships except gemma4 has no
     /// measured chunked-submission win to default to (`intervention6`'s own
     /// race data is gemma4-decode-specific, not a universal placements-path
-    /// finding -- see [`crate::gemma4::bind::Gemma4Arch::command_buffer_chunks`]
+    /// finding -- see `crate::gemma4::bind::Gemma4Arch::command_buffer_chunks`
     /// for the one override).
     fn command_buffer_chunks(&self) -> u32 {
         1
@@ -495,11 +495,11 @@ pub trait Architecture: Send + Sync {
         crate::bind::metadata_u32(parsed, &alloc::format!("{family}.context_length")).ok()
     }
 
-    /// The KV layout [`crate::memory_fit::MemoryBudget::derive`]
+    /// The KV layout `crate::memory_fit::MemoryBudget::derive`
     /// prices: one `(kv_heads, head_dim, window)` entry per layer that owns
     /// a KV cache, `window` being `Some(rows)` for a sliding-window layer.
     /// Default: every layer with a nonzero `head_count_kv` stores every
-    /// position ([`crate::bind::kv_layers_from_metadata`]). gemma4 and
+    /// position (`crate::bind::kv_layers_from_metadata`). gemma4 and
     /// qwen35moe override it with their own layouts.
     ///
     /// # Errors

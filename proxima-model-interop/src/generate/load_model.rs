@@ -1190,8 +1190,8 @@ pub(super) fn fused_segment_experts_are_current_layer(
 }
 
 /// Releases every device buffer this checkpoint's own load caused: the
-/// no-copy/resident-copy buffers keyed under [`Self::resident_names`], and
-/// (GGUF checkpoints only -- see [`Self::checkpoint_mapping`]'s own doc) the
+/// no-copy/resident-copy buffers keyed under `Self::resident_names`, and
+/// (GGUF checkpoints only -- see `Self::checkpoint_mapping`'s own doc) the
 /// whole-mapping no-copy buffer `omega::backend::register_checkpoint_mapping`
 /// registered. Both releases are BY NAME/IDENTITY, never a blanket cache
 /// clear, so a second `LoadedModel` loaded on this same thread keeps its

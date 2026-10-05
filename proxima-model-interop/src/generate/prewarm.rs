@@ -374,9 +374,9 @@ impl LoadedModel<'_> {
     /// Runs `body` with a worker thread prefilling the end-of-answer prewarms
     /// that requests queue, under `serving_config`, and stops the worker when
     /// `body` returns. The worker waits for a queued prefix, runs it behind
-    /// [`PrewarmGate`] so a request arriving mid-prefill waits one chunk at
+    /// `PrewarmGate` so a request arriving mid-prefill waits one chunk at
     /// most, and goes back to waiting; a request itself returns the moment its
-    /// answer is stored. The worker keeps one [`BackendRuntime`] for every
+    /// answer is stored. The worker keeps one `BackendRuntime` for every
     /// job: a fresh one costs the first forward it runs about 225 ms on
     /// gemma4-E2B (317 ms against 93 ms for a 5-token prewarm).
     ///

@@ -255,16 +255,16 @@ pub enum InteropError {
     #[error(transparent)]
     Backend(#[from] omega::backend::BackendError),
 
-    /// [`crate::generate::find_input_node`] scanned the single-range
+    /// `crate::generate::find_input_node` scanned the single-range
     /// program for an [`proxima_tensor::Op::Input`] named `name` and found
-    /// none -- would mean [`crate::generate::build_single_range_program`]'s
+    /// none -- would mean `crate::generate::build_single_range_program`'s
     /// own `kv_cache.{layer}.*` naming has drifted out of sync with
     /// [`proxima_tensor::spec::mistral_single_range_cached_forward_program`]'s.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[error("single-range program has no input node named {0:?}")]
     UnboundInputName(String),
 
-    /// [`crate::generate::BackendRuntime::evaluate_with_placements`]'s
+    /// `crate::generate::BackendRuntime::evaluate_with_placements`'s
     /// direct `omega::metal` plan/execute call (bypassing the
     /// backend-polymorphic `omega::backend` entry point, since
     /// [`omega::PlacedBuffer`] is Metal-only) failed -- propagated from
@@ -508,7 +508,7 @@ pub enum InteropError {
     #[error("quality prompt fixture line {line_number}: {reason}")]
     MalformedQualityPrompt { line_number: usize, reason: String },
 
-    /// [`crate::memory_fit::fit_context_length`]: even a context length of
+    /// `crate::memory_fit::fit_context_length`: even a context length of
     /// `1` cannot fit this checkpoint's own weights (by class -- dense,
     /// mixture-of-experts, embedding/output tables, SSM state) plus the
     /// fixed arena allowance inside `limit_bytes - os_headroom_bytes` --

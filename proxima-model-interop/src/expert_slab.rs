@@ -80,7 +80,7 @@ impl ExpertProjection {
 
 /// Encodes `rows` (one MoE expert's dequantized `[out_dim, in_dim]` `f32`
 /// weights) into `codec`'s packed byte representation, one row block at a
-/// time inside [`quantize_to_kind`]'s own encoder -- no whole-model buffer
+/// time inside `quantize_to_kind`'s own encoder -- no whole-model buffer
 /// beyond this single expert's own `f32` rows. A residency policy composes
 /// this with [`ExpertSlab::page_expert`]: dequantize the expert's current
 /// bytes (`proxima_gguf::quant`'s per-codec `dequantize`/`dequantize_block`),
@@ -88,7 +88,7 @@ impl ExpertProjection {
 /// (`Q2_K` is the smallest [`Codec`] this crate's encoders
 /// support), then hand the result to [`ExpertSlab::page_expert`] -- the
 /// same [`Codec`] tag both calls share is what lets
-/// [`ExpertCopy::entry`] read the paged bytes back as the right
+/// `ExpertCopy::entry` read the paged bytes back as the right
 /// [`proxima_tensor::cpu::QuantizedBlock`] variant.
 ///
 /// # Errors
@@ -1153,10 +1153,10 @@ impl<'file> ExpertSlab<'file> {
 /// lifetime is what makes [`ExpertSlab::page_expert`]/
 /// [`ExpertSlab::evict_expert`] compile-unreachable through a `StepGuard`
 /// itself -- neither is forwarded here, so a caller holding only a
-/// `StepGuard` has no expression that names them. [`Self::as_slab_mut`] is
+/// `StepGuard` has no expression that names them. `Self::as_slab_mut` is
 /// the one deliberate, crate-private escape back to the full
 /// [`ExpertSlab`] surface the pre-gather router-boundary machinery needs
-/// (see [`ExpertSlab::open_step`]'s own doc); outside this crate a
+/// (see `ExpertSlab::open_step`'s own doc); outside this crate a
 /// `StepGuard` grants no such escape, so the borrow-checker guarantee is
 /// total for every external caller.
 #[must_use]

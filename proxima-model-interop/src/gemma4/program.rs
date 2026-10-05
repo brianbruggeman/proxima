@@ -3,7 +3,7 @@
 //! build itself: the sliding-window RoPE table's own values. Every other
 //! node this checkpoint needs (attention mixer, dense/routed FFN, per-layer
 //! norms, embedding scale, logit softcap) is now a config value
-//! [`crate::gemma4::bind::Gemma4Arch::bind`] hands that engine directly --
+//! `crate::gemma4::bind::Gemma4Arch::bind` hands that engine directly --
 //! see that module's own doc for the descriptor it builds. This file used to
 //! hold a bespoke `gemma4_forward_program`/`gemma4_attention`/
 //! `gemma4_ffn_block` graph-building layer; that layer is deleted, not
@@ -14,7 +14,7 @@
 use alloc::vec::Vec;
 
 /// Builds the sliding-window layers' own RoPE `cos`/`sin` table --
-/// [`crate::gemma4::bind::Gemma4Arch::step_inputs`]'s own seam feeds this
+/// `crate::gemma4::bind::Gemma4Arch::step_inputs`'s own seam feeds this
 /// into the `rope_cos_swa`/`rope_sin_swa` leaves
 /// [`proxima_tensor::spec::lfm2_forward_program_with_experts`] declares once
 /// a sliding layer's [`proxima_tensor::spec::RopeTableSel`] names them,
