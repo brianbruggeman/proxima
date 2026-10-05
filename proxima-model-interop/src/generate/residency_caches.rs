@@ -336,6 +336,7 @@ mod layer_cache_sealing_tests {
     use super::{BlockSummarizer, LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers};
     use crate::error::InteropError;
     use crate::generate::kv_ring::KvRing;
+    use crate::generate::kv_seal_tests::key_minmax;
     use proptest::collection::vec;
     use proptest::prelude::*;
     use proptest::test_runner::{Config, TestRunner};
@@ -603,6 +604,63 @@ mod layer_cache_sealing_tests {
             error.to_string(),
             "cannot rewind to 7 rows: rows below 8 are sealed"
         );
+    }
+
+    fn assert_record_bits(record: &[f32], expected: &[f32]) {
+        let record_bits: Vec<u32> = record.iter().map(|value| value.to_bits()).collect();
+        let expected_bits: Vec<u32> = expected.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(record_bits, expected_bits);
+    }
+
+    fn append_and_seal(cache: &mut LayerCache, position: usize) {
+        let (even, odd, value) = row_at(position);
+        cache.append(&even, &odd, &value);
+        cache.seal(2, 4, 1);
+        cache.summarize_sealed(2, 1, key_minmax);
+    }
+
+    #[test]
+    fn seal_worked_trace() {
+        let mut cache = LayerCache::new();
+        let mut appends = 0_usize;
+        let mut rewinds = 0_usize;
+        let appended: [(usize, usize); 5] = [(1, 0), (2, 0), (3, 0), (4, 0), (5, 4)];
+        for (position, (rows, sealed_end)) in (0..).zip(appended) {
+            append_and_seal(&mut cache, position);
+            appends += 1;
+            assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (rows, sealed_end));
+        }
+
+        rewinds += 1;
+        cache.try_truncate(4, 2, 1).expect("a rewind to the sealed end is allowed");
+        assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (4, 4));
+        let regrown: [(usize, usize); 5] = [(5, 4), (6, 4), (7, 4), (8, 4), (9, 8)];
+        for (position, (rows, sealed_end)) in (4..).zip(regrown) {
+            append_and_seal(&mut cache, position);
+            appends += 1;
+            assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (rows, sealed_end));
+        }
+
+        rewinds += 1;
+        cache.try_truncate(8, 2, 1).expect("a rewind to the sealed end is allowed");
+        assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (8, 8));
+
+        rewinds += 1;
+        let refused = cache.try_truncate(7, 2, 1);
+        assert!(matches!(
+            refused,
+            Err(InteropError::RewindIntoSealed {
+                keep_positions: 7,
+                sealed_end: 8
+            })
+        ));
+        assert_eq!(cache.k_even.len(), 16);
+        assert_eq!(cache.sealed_end, 8);
+
+        assert_eq!((appends, rewinds), (10, 3));
+        assert_eq!(cache.block_summaries.len(), 2);
+        assert_record_bits(&cache.block_summaries[0], &[0.0, 0.5, -3.0, -3.5, 3.0, 3.5, -0.0, -0.5]);
+        assert_record_bits(&cache.block_summaries[1], &[4.0, 4.5, -7.0, -7.5, 7.0, 7.5, -4.0, -4.5]);
     }
 
     #[derive(Clone, Debug)]
