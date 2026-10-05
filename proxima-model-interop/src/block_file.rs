@@ -253,6 +253,17 @@ impl MappedBlockFile {
     }
 }
 
+/// Digest of the bound program a block file was written for; the program fixes the layout
+/// the rows were computed for.
+///
+/// No production digest of weights or descriptor exists elsewhere. It allocates the whole
+/// debug text, so a caller digests once per model load and never per block.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn model_digest(program: &[proxima_tensor::op::Op]) -> [u8; 16] {
+    xxhash_rust::xxh3::xxh3_128(format!("{program:?}").as_bytes()).to_le_bytes()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -555,5 +566,23 @@ mod tests {
             truncated.view(),
             Err(InteropError::BlockFileMalformed { reason: "truncated layer table" })
         ));
+    }
+
+    #[test]
+    fn blockfile_model_digest_separates_programs() {
+        let build = |name: &str| {
+            let mut program = Vec::new();
+            let _ = proxima_tensor::spec::input_leaf(
+                &mut program,
+                proxima_tensor::DType::Float32,
+                vec![proxima_tensor::Extent::Static(4)],
+                name,
+            );
+            program
+        };
+        let first = build("a");
+        let second = build("b");
+        assert_ne!(model_digest(&first), model_digest(&second));
+        assert_eq!(model_digest(&first), model_digest(&first));
     }
 }
