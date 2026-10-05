@@ -48,6 +48,10 @@ gated-delta-net-fusion = ["proxima-tensor/gated-delta-net-fusion"]
 # `BoundOpKind::MoeTopK` bind-time matcher) -- same shape as
 # `gated-delta-net-fusion` above.
 moe-topk-fusion = ["proxima-tensor/moe-topk-fusion"]
+# Default-off passthrough to `proxima-tensor/top-fraction-fusion`: the Metal prepare path binds with
+# `bind_with_top_fraction`, so a rank-count top-fraction mask at or above
+# `selection.top_fraction_min_rows` lowers to the selection kernel instead of the plain expression.
+top-fraction-fusion = ["proxima-tensor/top-fraction-fusion"]
 # Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` (the
 # `BoundOpKind::Reduce::epilogue_body`/`epilogue_operands` bind-time fusion
 # pass) -- same shape as `cached-attention-streaming` above. `crate::msl`'s
