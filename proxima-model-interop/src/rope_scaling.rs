@@ -38,7 +38,8 @@ const YARN_BETA_FAST_DEFAULT: f32 = 32.0;
 const YARN_BETA_SLOW_DEFAULT: f32 = 1.0;
 
 /// The scaling law applied to `RoPE`'s inverse frequencies.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RopeScaling {
     /// Unscaled: every pair rotates at `base^(-2i/dim)`.
     #[default]
