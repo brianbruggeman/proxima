@@ -106,6 +106,32 @@ impl<Entry, Cache> ServingState<Entry, Cache> {
         }
     }
 
+    /// `Accept { n, next, cache } -> Decode { last }`: no evaluation, just
+    /// unwrapping the placement `accept` already chose.
+    pub fn resume(self) -> Result<Self, ServingFsmError> {
+        match self {
+            Self::Accept { next, cache, .. } => Ok(Self::Decode { last: next, cache }),
+            _ => Err(ServingFsmError::IllegalTransition {
+                attempted: "resume",
+            }),
+        }
+    }
+
+    /// `Rollback { snapshot, to } -> Decode { last }`: placement copy only,
+    /// no program evaluation -- `snapshot` is whichever row's `Cache`
+    /// `accept` selected as the correct resume point.
+    pub fn rollback(self) -> Result<Self, ServingFsmError> {
+        match self {
+            Self::Rollback { snapshot, to } => Ok(Self::Decode {
+                last: to,
+                cache: snapshot,
+            }),
+            _ => Err(ServingFsmError::IllegalTransition {
+                attempted: "rollback",
+            }),
+        }
+    }
+
     /// Any state `-> Done`: the caller has stopped requesting further
     /// evaluations (max tokens reached, eos observed, error surfaced).
     pub fn finish(self) -> Self {
@@ -118,6 +144,73 @@ impl<Entry, Cache> ServingState<Entry, Cache> {
             Self::Rollback { snapshot, .. } => snapshot,
         };
         Self::Done { cache }
+    }
+}
+
+impl<Entry: PartialEq + Clone, Cache> ServingState<Entry, Cache> {
+    /// `Verify { draft, snapshot } -> Accept { n, next } | Rollback { snapshot, to }`:
+    /// scores the `K`-row verify evaluation's per-row greedy argmax
+    /// (`row_tokens[i]` predicts the token that follows having consumed
+    /// input row `i`, where row `0` follows `last` and row `i>0` follows
+    /// `draft[i - 1]`) against `draft` itself. `row_caches[i]` is the exact
+    /// `Cache` the same evaluation produced at row `i` -- accepting `n`
+    /// draft tokens means resuming from `row_caches[n]` verbatim (a
+    /// placement copy the caller already computed), never replaying
+    /// anything. `n == draft.len()`: every drafted token matched, `Accept`
+    /// resumes from the confirmed final draft token. `n < draft.len()`:
+    /// `draft[n]` was wrong, so this returns `Rollback` carrying the
+    /// correct placement and the target's own token in its place.
+    pub fn accept(
+        self,
+        row_tokens: &[Entry],
+        row_caches: Vec<Cache>,
+    ) -> Result<Self, ServingFsmError> {
+        match self {
+            Self::Verify { draft, .. }
+                if draft.is_empty()
+                    || row_tokens.len() != draft.len()
+                    || row_caches.len() != draft.len() =>
+            {
+                Err(ServingFsmError::IllegalTransition {
+                    attempted: "accept",
+                })
+            }
+            Self::Verify { draft, .. } => {
+                let accepted = draft
+                    .iter()
+                    .zip(row_tokens.iter())
+                    .take_while(|(drafted, predicted)| drafted == predicted)
+                    .count();
+                let mut placements = row_caches.into_iter();
+                let placement_index = if accepted == draft.len() {
+                    accepted - 1
+                } else {
+                    accepted
+                };
+                let Some(cache) = placements.nth(placement_index) else {
+                    // unreachable given the length guard above; a bad
+                    // caller-supplied `row_caches` fails closed instead of panicking
+                    return Err(ServingFsmError::IllegalTransition {
+                        attempted: "accept",
+                    });
+                };
+                if accepted == draft.len() {
+                    Ok(Self::Accept {
+                        n: accepted,
+                        next: draft[accepted - 1].clone(),
+                        cache,
+                    })
+                } else {
+                    Ok(Self::Rollback {
+                        snapshot: cache,
+                        to: row_tokens[accepted].clone(),
+                    })
+                }
+            }
+            _ => Err(ServingFsmError::IllegalTransition {
+                attempted: "accept",
+            }),
+        }
     }
 }
 
@@ -157,6 +250,210 @@ mod tests {
         assert_eq!(
             done.advance_decode(6, 3),
             Err(ServingFsmError::IllegalTransition { attempted: "advance_decode" })
+        );
+    }
+
+    /// A minimal stand-in for `generate.rs`'s `LayerCacheState`/
+    /// `SsmLayerCache`: just enough to prove the FSM threads recurrent
+    /// state through transitions rather than patching a cache from outside.
+    #[derive(Debug, Clone, PartialEq)]
+    struct FakeCache {
+        conv_history_len: usize,
+        kv_len: usize,
+    }
+
+    impl FakeCache {
+        fn empty() -> Self {
+            Self {
+                conv_history_len: 0,
+                kv_len: 0,
+            }
+        }
+
+        fn advanced_by(&self, rows: usize) -> Self {
+            Self {
+                conv_history_len: self.conv_history_len + rows,
+                kv_len: self.kv_len + rows,
+            }
+        }
+    }
+
+
+    /// Drives every legal transition the FSM defines: `Prefill -> Decode ->
+    /// Decode -> Verify -> Accept -> Decode -> Verify -> Rollback -> Decode
+    /// -> Done`, and proves each illegal call at the wrong state is
+    /// rejected rather than silently accepted.
+    #[test]
+    fn serving_state_walkthrough_drives_every_legal_transition() {
+        let prompt = alloc::vec![1_u32, 2, 3];
+        let prompt_rows = prompt.len();
+        let state = ServingState::start(prompt, FakeCache::empty());
+        assert_eq!(
+            state,
+            ServingState::Prefill {
+                positions: alloc::vec![1, 2, 3],
+                cache: FakeCache::empty(),
+            }
+        );
+
+        let after_prefill_cache = FakeCache::empty().advanced_by(prompt_rows);
+        let state = state
+            .advance_prefill(4, after_prefill_cache.clone())
+            .expect("prefill -> decode is legal");
+        assert_eq!(
+            state,
+            ServingState::Decode {
+                last: 4,
+                cache: after_prefill_cache.clone(),
+            }
+        );
+
+        let after_first_decode_cache = after_prefill_cache.advanced_by(1);
+        let state = state
+            .advance_decode(5, after_first_decode_cache.clone())
+            .expect("decode -> decode is legal");
+        assert_eq!(
+            state,
+            ServingState::Decode {
+                last: 5,
+                cache: after_first_decode_cache.clone(),
+            }
+        );
+
+        let illegal_prefill = state
+            .clone()
+            .advance_prefill(6, after_first_decode_cache.clone());
+        assert_eq!(
+            illegal_prefill,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "advance_prefill"
+            })
+        );
+
+        let draft = alloc::vec![6_u32, 7];
+        let state = state
+            .enter_verify(draft.clone())
+            .expect("decode -> verify is legal");
+        assert_eq!(
+            state,
+            ServingState::Verify {
+                draft,
+                snapshot: after_first_decode_cache.clone(),
+                cache: after_first_decode_cache.clone(),
+            }
+        );
+
+        // full acceptance: both draft tokens (6, 7) match the target's own
+        // predictions, so accept -> resume lands back in Decode with the
+        // last draft token and row 1's placement.
+        let row_one_cache = after_first_decode_cache.advanced_by(1);
+        let row_two_cache = after_first_decode_cache.advanced_by(2);
+        let state = state
+            .accept(&[6, 7], alloc::vec![row_one_cache, row_two_cache.clone()])
+            .expect("verify -> accept is legal");
+        assert_eq!(
+            state,
+            ServingState::Accept {
+                n: 2,
+                next: 7,
+                cache: row_two_cache.clone(),
+            }
+        );
+        let state = state.resume().expect("accept -> decode is legal");
+        assert_eq!(
+            state,
+            ServingState::Decode {
+                last: 7,
+                cache: row_two_cache.clone()
+            }
+        );
+
+        let illegal_resume = state.clone().resume();
+        assert_eq!(
+            illegal_resume,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "resume"
+            })
+        );
+
+        // partial acceptance: draft proposes (100, 101), target predicts
+        // 100 (confirming draft[0]) then 55 instead of 101 -- row_caches[0]
+        // is the state after consuming `last` (used to predict draft[0]),
+        // row_caches[1] is the state after consuming draft[0] (used to
+        // predict row_tokens[1]=55); rejection at index 1 resumes from
+        // row_caches[1], since that is the state row_tokens[1] came from.
+        let draft = alloc::vec![100_u32, 101];
+        let state = state
+            .enter_verify(draft)
+            .expect("decode -> verify is legal");
+        let cache_after_last = row_two_cache.advanced_by(1);
+        let cache_after_draft_zero = row_two_cache.advanced_by(2);
+        let state = state
+            .accept(
+                &[100, 55],
+                alloc::vec![cache_after_last, cache_after_draft_zero.clone()],
+            )
+            .expect("verify -> rollback is legal on partial acceptance");
+        assert_eq!(
+            state,
+            ServingState::Rollback {
+                snapshot: cache_after_draft_zero.clone(),
+                to: 55,
+            }
+        );
+        let state = state.rollback().expect("rollback -> decode is legal");
+        assert_eq!(
+            state,
+            ServingState::Decode {
+                last: 55,
+                cache: cache_after_draft_zero
+            }
+        );
+
+        let done = state.finish();
+        assert!(matches!(done, ServingState::Done { .. }));
+
+        let past_done = done.advance_decode(8, FakeCache::empty());
+        assert_eq!(
+            past_done,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "advance_decode"
+            })
+        );
+    }
+
+    /// `accept` rejects a call whose `row_tokens`/`row_caches` lengths
+    /// don't match the draft it is scoring, and an empty draft never
+    /// reaches `accept` (verified separately since `enter_verify` accepts
+    /// any `Vec`, including empty, but `accept` must not panic on it).
+    #[test]
+    fn serving_state_accept_rejects_mismatched_or_empty_draft() {
+        let cache = FakeCache::empty();
+        let state = ServingState::start(alloc::vec![1], cache.clone())
+            .advance_prefill(2, cache.clone())
+            .expect("prefill -> decode")
+            .enter_verify(alloc::vec![3, 4])
+            .expect("decode -> verify");
+
+        let wrong_lengths = state.clone().accept(&[3], alloc::vec![cache.clone()]);
+        assert_eq!(
+            wrong_lengths,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "accept"
+            })
+        );
+
+        let empty_draft = ServingState::start(alloc::vec![1], cache.clone())
+            .advance_prefill(2, cache.clone())
+            .expect("prefill -> decode")
+            .enter_verify(Vec::new())
+            .expect("decode -> verify")
+            .accept(&[], Vec::new());
+        assert_eq!(
+            empty_draft,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "accept"
+            })
         );
     }
 }
