@@ -6711,6 +6711,9 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             crate::bind::BoundOpKind::CachedSoftmaxWeights { .. } => {
                 panic!("this Mistral cached-forward program never binds a CachedSoftmaxWeights op")
             }
+            crate::bind::BoundOpKind::TopFractionSelect { .. } => {
+                panic!("this Mistral cached-forward program never binds a TopFractionSelect op")
+            }
         }
     }
     assert_eq!(

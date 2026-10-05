@@ -313,6 +313,7 @@ fn refresh_one(
         | BoundOpKind::CachedSoftmaxWeights { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. } => Err(RefreshRefusal::MatcherFusedKind {
             position,
             node: bound_op.node,

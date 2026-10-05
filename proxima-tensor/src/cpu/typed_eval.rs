@@ -865,6 +865,12 @@ pub(super) fn run_typed_program<T: Element>(
                     reason: "moe top-k binding is not wired into the typed executor",
                 });
             }
+            BoundOpKind::TopFractionSelect { .. } => {
+                return Err(TensorError::NotLowerable {
+                    node: node.node,
+                    reason: "top-fraction select binding is not wired into the typed executor",
+                });
+            }
             BoundOpKind::Elementwise { .. } => {
                 run_elementwise_typed(node, &buffers, &index_buffers, &mut output)?
             }
@@ -1042,6 +1048,12 @@ where
                         reason: "moe top-k binding is not wired into the widened executor",
                     });
                 }
+                BoundOpKind::TopFractionSelect { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "top-fraction select binding is not wired into the widened executor",
+                    });
+                }
                 BoundOpKind::Elementwise { .. } => {
                     run_elementwise_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
@@ -1105,6 +1117,12 @@ where
                     return Err(TensorError::NotLowerable {
                         node: node.node,
                         reason: "moe top-k binding is not wired into the widened executor",
+                    });
+                }
+                BoundOpKind::TopFractionSelect { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "top-fraction select binding is not wired into the widened executor",
                     });
                 }
                 BoundOpKind::Elementwise { .. } => {

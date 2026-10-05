@@ -1061,6 +1061,7 @@ pub(super) fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
         BoundOpKind::CachedSoftmaxWeights { .. } => "cached_softmax_weights",
         BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
         BoundOpKind::MoeTopK { .. } => "moe_topk",
+        BoundOpKind::TopFractionSelect { .. } => "top_fraction_select",
     }
 }
 

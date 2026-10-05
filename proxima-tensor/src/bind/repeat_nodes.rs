@@ -59,6 +59,7 @@ fn max_node_id(built: &[BoundOp]) -> u32 {
             BoundOpKind::CachedAttention { .. }
             | BoundOpKind::Elementwise { .. }
             | BoundOpKind::Reduce { .. }
+            | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => {}
         }
@@ -128,6 +129,7 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
         | BoundOpKind::CachedSoftmaxWeights { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. } => return None,
     };
     Some(BoundOp {

@@ -867,6 +867,7 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPol
         // function's own doc), so this is the same "leaf" one-`long` shape
         // `pack_leaf_uniforms` already packs for `Iota`/`Constant`.
         BoundOpKind::MoeTopK { .. } => WORD,
+        BoundOpKind::TopFractionSelect { .. } => WORD,
     }
 }
 
@@ -940,6 +941,10 @@ pub(super) fn pack_uniforms_into(
         // `bindings` gives every kind one, and `pack_leaf_uniforms`'s single
         // `long` is exactly `sizeof(Uniforms)`.
         BoundOpKind::MoeTopK { .. } => {
+            pack_leaf_uniforms(bound, scratch);
+            Ok(())
+        }
+        BoundOpKind::TopFractionSelect { .. } => {
             pack_leaf_uniforms(bound, scratch);
             Ok(())
         }

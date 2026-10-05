@@ -739,6 +739,14 @@ mod gated {
                 top_k,
                 ..
             } => format!("{prefix}_moe_topk_e{expert_count}_k{top_k}"),
+            BoundOpKind::TopFractionSelect {
+                rows,
+                has_keep_rows,
+                ..
+            } => format!(
+                "{prefix}_top_fraction_select_r{rows}_k{}",
+                u8::from(*has_keep_rows)
+            ),
             // Candidate B's kind (`R9/PROGRESS.md`'s own "Candidate B"
             // sections) -- mechanical addition to keep this match total; not in
             // this task's isolation grant (`identity.rs` is outside the listed

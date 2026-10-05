@@ -138,6 +138,7 @@ fn reduce_output_len(chunk: &proxima_tensor::BoundOp) -> usize {
         | proxima_tensor::BoundOpKind::CachedSoftmaxWeights { .. }
         | proxima_tensor::BoundOpKind::GatedDeltaNet { .. }
         | proxima_tensor::BoundOpKind::MoeTopK { .. }
+        | proxima_tensor::BoundOpKind::TopFractionSelect { .. }
         | proxima_tensor::BoundOpKind::RoundBatchedReduce { .. }
         | proxima_tensor::BoundOpKind::Iota
         | proxima_tensor::BoundOpKind::Constant { .. } => {

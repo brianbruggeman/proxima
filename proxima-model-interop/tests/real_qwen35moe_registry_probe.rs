@@ -212,6 +212,7 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
                 }
                 proxima_tensor::bind::BoundOpKind::GatedDeltaNet { .. } => "GatedDeltaNet",
                 proxima_tensor::bind::BoundOpKind::MoeTopK { .. } => "MoeTopK",
+                proxima_tensor::bind::BoundOpKind::TopFractionSelect { .. } => "TopFractionSelect",
                 proxima_tensor::bind::BoundOpKind::Iota => "Iota",
                 proxima_tensor::bind::BoundOpKind::Constant { .. } => "Constant",
             }

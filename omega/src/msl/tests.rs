@@ -6977,3 +6977,38 @@ fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
         );
     }
 }
+
+fn top_fraction_select_op(rows: u64, has_keep_rows: bool) -> BoundOp {
+    let vector = || Layout {
+        base: 0,
+        strides: vec![1_i64].into(),
+    };
+    let scalar = || Layout {
+        base: 0,
+        strides: Vec::<i64>::new().into(),
+    };
+    let mut operands = vec![(NodeId(0), vector(), None), (NodeId(1), scalar(), None)];
+    if has_keep_rows {
+        operands.push((NodeId(2), vector(), None));
+    }
+    BoundOp {
+        node: NodeId(9),
+        dtype: DType::Float32,
+        extents: vec![rows],
+        kind: BoundOpKind::TopFractionSelect {
+            operands,
+            rows,
+            has_keep_rows,
+        },
+    }
+}
+
+#[test]
+fn rank_select_entry_and_grid_follow_rows_and_keep_flag() {
+    let policy = NumericPolicy::default();
+    let plain = top_fraction_select_op(12, false);
+    let unioned = top_fraction_select_op(12, true);
+    assert_eq!(entry_name(&plain, policy), "omega_top_fraction_select_r12_k0");
+    assert_eq!(entry_name(&unioned, policy), "omega_top_fraction_select_r12_k1");
+    assert_eq!(grid_threads(&plain, &[], policy, false).expect("grid resolves"), 1024);
+}

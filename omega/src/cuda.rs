@@ -224,6 +224,12 @@ pub fn emit_cuda_with_policy(
                 kind: "moe_topk",
             });
         }
+        BoundOpKind::TopFractionSelect { .. } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: "top_fraction_select",
+            });
+        }
         BoundOpKind::RoundBatchedReduce { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -462,6 +468,7 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
         BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
@@ -681,6 +688,7 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError>
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
         | BoundOpKind::CachedAttention { .. } => extents_product(),
