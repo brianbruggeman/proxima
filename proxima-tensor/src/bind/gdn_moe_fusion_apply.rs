@@ -124,7 +124,14 @@ pub fn bind_with_fusion(
     let built = if moe_topk_fusion_disabled {
         built
     } else {
-        apply_moe_topk_fusion(built, program, shapes, outputs)?
+        apply_moe_topk_fusion(
+            built,
+            program,
+            shapes,
+            outputs,
+            fuse_cached_attention,
+            numeric_policy,
+        )?
     };
     #[cfg(feature = "metal-moe-mul-mat-id")]
     #[cfg(feature = "std")]
@@ -1137,6 +1144,8 @@ pub(super) fn apply_moe_topk_fusion(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
+    fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let initial_candidates = moe_topk_candidates(program, shapes, &built, outputs);
     if initial_candidates.is_empty() {
@@ -1161,11 +1170,14 @@ pub(super) fn apply_moe_topk_fusion(
             }
         }
     }
-    let rebuilt = bind_plain(
+    // a plain rebind drops every `CachedAttention` spliced into `built`, and
+    // only that fused op's runtime bound masks the zero-padded kv bucket
+    let rebuilt = bind_cached_attention_fusion(
         program,
         shapes,
         &planning_outputs,
-        NumericPolicy::bit_exact(),
+        fuse_cached_attention,
+        numeric_policy,
     )?;
     let candidates = moe_topk_candidates(program, shapes, &rebuilt, outputs);
     if candidates.is_empty() {
