@@ -1,8 +1,8 @@
-//! The medium-independent boundary between `serving_fsm::ServingState<Cache>`
+//! The medium-independent boundary between `serving_state::ServingState<Entry, Cache>`
 //! and a real evaluation medium (CPU, Metal, ...), for this crate's own
 //! forward programs.
 //!
-//! `ServingState<Cache>` (`crate::serving_fsm`) is already generic over
+//! `ServingState<Entry, Cache>` (`proxima_core::serving_state`) is already generic over
 //! `Cache` -- the bug the prior wiring attempt ran into was never the FSM
 //! itself, it was that `LoadedModel::run_decode_loop_observed_seeded`
 //! (`decode.rs`, roughly lines 1250-1650) has no such boundary: its one
@@ -31,13 +31,13 @@
 //! state was already medium-independent, just not yet named as the thing a
 //! `ServingState` carries.
 //!
-//! [`ServingBackend`] is the boundary itself: one method, `evaluate`, the
-//! medium-independent op the module doc on `serving_fsm` names ("evaluate
-//! program at positions, advance the logical cache"). An implementor owns
-//! whatever the medium needs on `Self`, never inside [`ServingCache`], so
-//! cloning a `ServingCache` for `ServingState::Verify`'s `snapshot`
-//! (`serving_fsm.rs`'s `enter_verify`) never clones or aliases a device
-//! buffer -- there is no device buffer inside it to clone.
+//! [`ServingBackend`] is the boundary itself: one method, `evaluate`, what
+//! every evaluating transition of `serving_state::ServingState` performs
+//! (evaluate the program at positions, advance the logical cache). An
+//! implementor owns whatever the medium needs on `Self`, never inside
+//! [`ServingCache`], so cloning a `ServingCache` for `ServingState::Verify`'s
+//! `snapshot` (`proxima-core/src/serving_state.rs`'s `enter_verify`) never clones or
+//! aliases a device buffer -- there is no device buffer inside it to clone.
 //!
 //! [`MetalPlacementResources`] shows where `decode.rs`'s two device-resident
 //! locals belong once a Metal `ServingBackend` is written: owned fields on a
@@ -57,7 +57,7 @@ use alloc::vec::Vec;
 
 use super::*;
 
-/// The concrete `Cache` for `serving_fsm::ServingState<Cache>` against this
+/// The concrete `Cache` for `serving_state::ServingState<Entry, Cache>` against this
 /// crate's real forward programs -- logical KV/recurrent/sequence state
 /// only, one entry per layer, matching [`LoadedModel::layer_roots`]'s own
 /// per-layer discriminant. Never holds a device handle: a [`ServingBackend`]
@@ -66,7 +66,7 @@ pub(super) type ServingCache = Vec<LayerCacheState>;
 
 /// One medium-independent evaluation: place `positions` (prompt rows on a
 /// prefill call, one row on a decode call, `K` rows on a verify call --
-/// `serving_fsm::ServingState`'s own three evaluating variants), advance
+/// `serving_state::ServingState`'s own three evaluating variants), advance
 /// `cache` by however many rows this evaluation consumed, and return
 /// whatever per-step output the caller needs (`Step`: greedy token ids,
 /// logits, or both -- `ServingState` itself never inspects this).
@@ -114,13 +114,13 @@ pub(super) struct MetalPlacementResources {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_core::serving_state::ServingState;
+    use crate::ServingState;
 
     /// A CPU backend proving [`ServingBackend`]'s contract is satisfiable by
     /// the real per-layer cache mutators (`LayerCache::append`,
     /// `SsmLayerCache::advance`) rather than a stand-in -- `evaluate` places
     /// `positions`, appends deterministic synthetic K/V/state, and predicts
-    /// the next token as `positions.last() + 1` (mirrors `serving_fsm.rs`'s
+    /// the next token as `positions.last() + 1` (mirrors `proxima-core/src/serving_state.rs`'s
     /// own `fake_greedy_next`), so a caller can drive `ServingState`
     /// transitions directly off this backend's own return values.
     struct FakeCpuBackend {
@@ -170,7 +170,7 @@ mod tests {
     /// `evaluate`'s output drives `ServingState::advance_prefill` /
     /// `advance_decode` directly, and every layer's logical cache grew by
     /// exactly the rows each call placed -- proving `ServingCache` threads
-    /// through `ServingState` transitions the same way `serving_fsm.rs`'s
+    /// through `ServingState` transitions the same way `proxima-core/src/serving_state.rs`'s
     /// own `FakeCache` walkthrough proves `Cache` does, except here `Cache`
     /// is the real per-layer state this crate's decode loop already builds,
     /// not a stand-in.
