@@ -244,6 +244,7 @@ pub(crate) mod action_fixture;
 // stay denied outside `#[cfg(test)]`
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::action_fixture::{Action, run_sequential, run_speculative};
     use super::*;
 
     #[test]
@@ -676,8 +677,6 @@ mod tests {
 
     #[test]
     fn action_fixture_sequential_matches_hand_derivation() {
-        use super::action_fixture::{Action, run_sequential};
-
         let expected = [
             (0, 1, 0),
             (1, 1, 1),
@@ -702,5 +701,61 @@ mod tests {
             alloc::collections::BTreeMap::from([(0_u8, 10_i64), (1, 10), (2, 10)])
         );
         assert_eq!(trace.environment.version, 12);
+    }
+
+    fn leading_equal(draft: &[Action], choices: &[Action]) -> usize {
+        draft.iter().zip(choices).take_while(|(drafted, chosen)| drafted == chosen).count()
+    }
+
+    fn equality_policy(draft: &[Action], choices: &[Action]) -> usize {
+        leading_equal(draft, choices)
+    }
+
+    fn verifier_exact_policy(draft: &[Action], choices: &[Action]) -> usize {
+        leading_equal(draft, choices)
+    }
+
+    fn anchor_macro_policy(draft: &[Action], choices: &[Action]) -> usize {
+        let aligned = leading_equal(draft, choices);
+        if aligned >= 3 { aligned } else { 0 }
+    }
+
+    #[test]
+    fn action_speculation_equality_matches_sequential() {
+        let sequential = run_sequential();
+        let speculative = run_speculative(equality_policy);
+
+        assert_eq!(speculative.history, sequential.history);
+        assert_eq!(speculative.environment, sequential.environment);
+        assert_eq!(
+            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            (4, 4, 8)
+        );
+    }
+
+    #[test]
+    fn action_speculation_verifier_exact_matches_sequential() {
+        let sequential = run_sequential();
+        let speculative = run_speculative(verifier_exact_policy);
+
+        assert_eq!(speculative.history, sequential.history);
+        assert_eq!(speculative.environment, sequential.environment);
+        assert_eq!(
+            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            (4, 4, 8)
+        );
+    }
+
+    #[test]
+    fn action_speculation_anchor_macro_matches_sequential() {
+        let sequential = run_sequential();
+        let speculative = run_speculative(anchor_macro_policy);
+
+        assert_eq!(speculative.history, sequential.history);
+        assert_eq!(speculative.environment, sequential.environment);
+        assert_eq!(
+            (speculative.rounds, speculative.rejected_rounds, speculative.accepted_rows),
+            (6, 6, 6)
+        );
     }
 }
