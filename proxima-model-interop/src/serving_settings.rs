@@ -14,7 +14,9 @@ use crate::serving::{
 
 mod levels;
 
-pub use levels::{AdmissionScheduleSettings, PhaseScheduleSettings};
+pub use levels::{
+    AdmissionScheduleSettings, ExpertResidencyScheduleSettings, PhaseScheduleSettings,
+};
 
 fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     serde_json::from_str(raw)
@@ -310,6 +312,9 @@ pub struct ServingSettings {
     #[setting(nested)]
     #[builder(default)]
     pub phase_schedule: PhaseScheduleSettings,
+    #[setting(nested)]
+    #[builder(default)]
+    pub expert_residency_schedule: ExpertResidencyScheduleSettings,
 }
 
 impl Default for ServingSettings {
@@ -392,6 +397,7 @@ impl ServingSettings {
             overlap_transfer_compute: self.overlap_transfer_compute,
             admission_schedule: self.admission_schedule.as_admission_schedule(),
             phase_schedule: self.phase_schedule.as_phase_schedule(),
+            expert_residency_schedule: self.expert_residency_schedule.as_expert_residency_schedule(),
             ..ServingConfig::default()
         }
     }
@@ -904,6 +910,44 @@ overlap_transfer_compute = true
         assert_eq!(
             ServingSettings::default().as_serving_config(&[]).phase_schedule,
             ServingConfig::default().phase_schedule,
+        );
+    }
+
+    #[test]
+    fn serving_scalars_expert_residency_level_round_trips() {
+        let from_toml: ServingSettings = conflaguration::from_toml_str(
+            "[expert_residency_schedule]\nper_layer_budget_bytes = 268435456\n",
+        )
+        .expect("the expert residency toml parses");
+        let built = ServingSettings::builder()
+            .expert_residency_schedule(
+                ExpertResidencyScheduleSettings::builder()
+                    .per_layer_budget_bytes(268_435_456)
+                    .build(),
+            )
+            .build();
+        let from_env = temp_env::with_vars(
+            [(
+                "PROXIMA_SERVING_EXPERT_RESIDENCY_SCHEDULE_PER_LAYER_BUDGET_BYTES",
+                Some("268435456"),
+            )],
+            || ServingSettings::from_env().expect("the expert residency env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+        assert_eq!(
+            built
+                .as_serving_config(&[])
+                .expert_residency_schedule
+                .per_layer_budget_bytes,
+            268_435_456
+        );
+        assert_eq!(
+            ServingSettings::default()
+                .as_serving_config(&[])
+                .expert_residency_schedule,
+            ServingConfig::default().expert_residency_schedule,
         );
     }
 }
