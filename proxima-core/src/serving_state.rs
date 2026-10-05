@@ -233,6 +233,11 @@ impl<Entry: PartialEq + Clone, Cache> ServingState<Entry, Cache> {
     }
 }
 
+// test-only environment; a failed transition here is a broken fixture, so expect names it
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(crate) mod action_fixture;
+
 #[cfg(test)]
 // every transition here returns a typed error the assertions above it already
 // prove unreachable; `expect` documents which one, `unwrap_used`/`expect_used`
@@ -667,5 +672,35 @@ mod tests {
             ServingState::start(alloc::vec![1_u32], FakeCache::empty()).accept_rows(0, &[3, 4], caches()),
             Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
         );
+    }
+
+    #[test]
+    fn action_fixture_sequential_matches_hand_derivation() {
+        use super::action_fixture::{Action, run_sequential};
+
+        let expected = [
+            (0, 1, 0),
+            (1, 1, 1),
+            (2, 1, 2),
+            (0, 2, 3),
+            (1, 2, 4),
+            (2, 2, 5),
+            (0, 4, 6),
+            (1, 4, 7),
+            (2, 4, 8),
+            (0, 3, 9),
+            (1, 3, 10),
+            (2, 3, 11),
+        ]
+        .map(|(key, delta, version)| Action { key, delta, version });
+
+        let trace = run_sequential();
+
+        assert_eq!(trace.history, expected);
+        assert_eq!(
+            trace.environment.values,
+            alloc::collections::BTreeMap::from([(0_u8, 10_i64), (1, 10), (2, 10)])
+        );
+        assert_eq!(trace.environment.version, 12);
     }
 }
