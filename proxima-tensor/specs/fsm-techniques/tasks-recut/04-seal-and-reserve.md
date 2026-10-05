@@ -301,7 +301,7 @@ That is 10 appends (rows 1-5, then 5-9) and 3 rewinds (to 4, to 8, to 7). The te
   1. `proxima-model-interop/src/generate/residency_caches.rs`: `LayerCache` gains `pub(super) block_tokens: usize` (doc: rows per block the last seal call used; `0` before the first), `0` in `new()`. In `seal`, after the ring and zero-width early return and before the formula: `if self.block_tokens != block_tokens { self.sealed_end = 0; self.block_tokens = block_tokens; }` (a changed block size re-seals from scratch: a sealed end counted in the old blocks indexes other blocks).
 - test: in `layer_cache_sealing_tests`: `a_new_block_size_re_seals_from_scratch`: `cache_with_rows(9)`, `seal(2, 4, 1)` returns `0..2` with `sealed_end == 8` and `block_tokens == 4`; `seal(2, 2, 1)` returns `0..4` (without the reset it would return `4..4`), `sealed_end == 8` and `block_tokens == 2`; a repeated `seal(2, 2, 1)` returns `4..4`.
 - validate: `CARGO_TARGET_DIR=/private/tmp/cargo_target_ft_4_17 cargo nextest run -p proxima-model-interop --features std -E 'test(/layer_cache_sealing_tests/)'`
-- expect: `11 passed` (the 10 of the previous card plus the new one)
+- expect: `12 passed` (the 11 tests the filter matched on main before this card, including `seal_proptest_never_seals_a_rewindable_row`, plus the new one)
 - also green: `cargo clippy -p proxima-model-interop --features std,metal --all-targets`
 - stage: `proxima-model-interop/src/generate/residency_caches.rs`
 - commit: `fix(interop): re-seal a layer from scratch when the block size changes`
