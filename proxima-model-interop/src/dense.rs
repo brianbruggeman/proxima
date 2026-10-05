@@ -138,10 +138,30 @@ pub fn descriptor_from_gguf(
     // projection stays narrow there (`proxima-tensor/docs/discipline.md`
     // ROW 418/421 measured the cost of computing every row instead).
     let last_row_only = !matches!(classify_task(parsed).task, ModelTask::Embedding);
-    Ok(ModelDescriptor {
-        last_row_only,
-        ..with_header_scales(descriptor, parsed, &architecture.family)
-    })
+    let descriptor = with_header_window(with_header_scales(descriptor, parsed, &architecture.family), parsed, &architecture.family);
+    Ok(ModelDescriptor { last_row_only, ..descriptor })
+}
+
+/// `<family>.attention.sliding_window`, when the header carries it, is the
+/// window of every layer; absent or zero leaves every layer on the full
+/// causal mask, the same reading llama.cpp's `n_swa` gets.
+fn with_header_window(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: &str) -> ModelDescriptor {
+    let window = metadata_u32_optional(parsed, &format!("{family}.attention.sliding_window"));
+    if window == 0 {
+        return descriptor;
+    }
+    let layers = descriptor
+        .layers
+        .iter()
+        .map(|layer| LayerSchedule {
+            attention: LayerAttentionConfig {
+                mask_window: Some(window),
+                ..layer.attention.clone()
+            },
+            ..layer.clone()
+        })
+        .collect();
+    ModelDescriptor { layers, ..descriptor }
 }
 
 fn header_scale(parsed: &ParsedGguf, family: &str, key: &str) -> Option<f32> {
@@ -344,6 +364,47 @@ mod tests {
         let input = llama_input();
 
         assert_eq!(with_header_scales(input.clone(), &parsed, "llama"), input);
+    }
+
+    fn header_with_window(family: &str, window: u32) -> Vec<u8> {
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                ("general.architecture".to_string(), MetadataValue::String(family.into())),
+                (format!("{family}.attention.sliding_window"), MetadataValue::U32(window)),
+            ],
+            tensors: Vec::new(),
+        };
+        write_complete(&model).expect("a header with no tensors encodes")
+    }
+
+    #[test]
+    fn a_header_sliding_window_reaches_every_layer_of_the_descriptor() {
+        let bytes = header_with_window("llama", 4096);
+        let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+        let input = llama_input();
+
+        let result = with_header_window(input.clone(), &parsed, "llama");
+
+        assert_eq!(result.layers.len(), 32);
+        assert!(result.layers.iter().all(|layer| layer.attention.mask_window == Some(4096)));
+        let restored = ModelDescriptor {
+            layers: input.layers.clone(),
+            ..result
+        };
+        assert_eq!(restored, input, "the window is the only field the header changes");
+    }
+
+    #[test]
+    fn a_header_without_a_sliding_window_leaves_every_layer_unwindowed() {
+        let bytes = header_bytes("llama", &[]);
+        let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+        let input = llama_input();
+
+        assert_eq!(with_header_window(input.clone(), &parsed, "llama"), input);
+        let zero = header_with_window("llama", 0);
+        let parsed_zero = parse_complete(&zero).expect("bytes the encoder just wrote parse");
+        assert_eq!(with_header_window(input.clone(), &parsed_zero, "llama"), input);
     }
 
     #[test]
