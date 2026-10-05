@@ -119,6 +119,8 @@ pub(super) struct LayerCache {
     /// Rows below this are sealed; a ring layer never seals, and it stays
     /// `0` until a seal call raises it.
     pub(super) sealed_end: usize,
+    /// Rows per block the last seal call used; `0` before the first.
+    pub(super) block_tokens: usize,
 }
 
 impl LayerCache {
@@ -129,6 +131,7 @@ impl LayerCache {
             v: Vec::new(),
             ring: None,
             sealed_end: 0,
+            block_tokens: 0,
         }
     }
 
@@ -137,6 +140,10 @@ impl LayerCache {
         // ring slots are overwritten in place, so a ring row is never immutable; rings restore through checkpoints
         if self.ring_geometry().is_some() || even_odd_row == 0 {
             return 0..0;
+        }
+        if self.block_tokens != block_tokens {
+            self.sealed_end = 0;
+            self.block_tokens = block_tokens;
         }
         let rows = self.k_even.len() / even_odd_row;
         let blocks = proxima_core::kv_decision::sealed_blocks(self.sealed_end, rows, block_tokens, horizon_rows);
@@ -351,6 +358,18 @@ mod layer_cache_sealing_tests {
         assert_eq!(cache.seal(2, 4, 1), 1..2);
         assert_eq!(cache.sealed_end, 8);
         assert_eq!(cache.seal(2, 4, 1), 2..2);
+    }
+
+    #[test]
+    fn a_new_block_size_re_seals_from_scratch() {
+        let mut cache = cache_with_rows(9);
+        assert_eq!(cache.seal(2, 4, 1), 0..2);
+        assert_eq!(cache.sealed_end, 8);
+        assert_eq!(cache.block_tokens, 4);
+        assert_eq!(cache.seal(2, 2, 1), 0..4);
+        assert_eq!(cache.sealed_end, 8);
+        assert_eq!(cache.block_tokens, 2);
+        assert_eq!(cache.seal(2, 2, 1), 4..4);
     }
 
     #[test]
