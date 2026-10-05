@@ -1,15 +1,26 @@
 //! The accept decision for speculative rows as loadable data: [`AcceptRule::accepted_rows`] is the pure decision, and its count is the `accepted` argument of [`crate::serving_state::ServingState::accept_rows`].
 //!
 //! A similarity floor of 1.0 under exact equality, minimum run 0 and no cap reproduce [`crate::serving_state::ServingState::accept`].
+//!
+//! Under the `config` feature the rule loads from a builder, a TOML table and environment variables.
 
 /// Three scalars that decide how many leading drafted rows are accepted; copyable so it can ride in a config.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "config", derive(bon::Builder, serde::Deserialize, serde::Serialize, conflaguration::Settings, conflaguration::Validate))]
+#[cfg_attr(feature = "config", settings(prefix = "PROXIMA_ACCEPT_RULE"))]
+#[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
 pub struct AcceptRule {
     /// A drafted row counts as accepted when its similarity to the verifier's row is at least this; 1.0 admits only rows the caller's similarity scores 1.0.
+    #[cfg_attr(feature = "config", setting(default = 1.0))]
+    #[cfg_attr(feature = "config", builder(default = 1.0))]
     pub similarity_floor: f32,
     /// A leading accepted run shorter than this is discarded, so the count is 0; 3 for a rule that only commits runs of three.
+    #[cfg_attr(feature = "config", setting(default = 0))]
+    #[cfg_attr(feature = "config", builder(default = 0))]
     pub min_run: u16,
     /// The leading run is cut at this many rows; 8.
+    #[cfg_attr(feature = "config", setting(default = 65535))]
+    #[cfg_attr(feature = "config", builder(default = u16::MAX))]
     pub max_rows: u16,
 }
 
@@ -123,5 +134,71 @@ mod tests {
         assert_eq!(rule(1.0, 3, u16::MAX).accepted_rows(&draft, &choices, exact), 3);
         assert_eq!(rule(1.0, 4, u16::MAX).accepted_rows(&draft, &choices, exact), 0);
         assert_eq!(rule(1.0, 3, 2).accepted_rows(&draft, &choices, exact), 0);
+    }
+}
+
+#[cfg(all(test, feature = "config"))]
+// a failed load in a test is a broken test; expect names it
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod config_tests {
+    use super::*;
+    use conflaguration::Settings;
+
+    const FLOOR_VAR: &str = "PROXIMA_ACCEPT_RULE_SIMILARITY_FLOOR";
+    const RUN_VAR: &str = "PROXIMA_ACCEPT_RULE_MIN_RUN";
+    const ROWS_VAR: &str = "PROXIMA_ACCEPT_RULE_MAX_ROWS";
+
+    fn assert_loaders_agree(expected: &AcceptRule, floor: &str, run: &str, rows: &str) {
+        let table = format!("similarity_floor = {floor}\nmin_run = {run}\nmax_rows = {rows}\n");
+        let from_toml: AcceptRule = conflaguration::from_toml_str(&table).expect("the rule table parses");
+        assert_eq!(&from_toml, expected);
+
+        temp_env::with_vars(
+            [(FLOOR_VAR, Some(floor)), (RUN_VAR, Some(run)), (ROWS_VAR, Some(rows))],
+            || {
+                let from_env = AcceptRule::from_env().expect("the rule loads from env");
+                assert_eq!(&from_env, expected);
+            },
+        );
+    }
+
+    #[test]
+    fn accept_rule_builder_defaults_match_default_impl() {
+        assert_eq!(AcceptRule::builder().build(), AcceptRule::default());
+
+        temp_env::with_vars([(FLOOR_VAR, None::<&str>), (RUN_VAR, None), (ROWS_VAR, None)], || {
+            let from_env = AcceptRule::from_env().expect("defaults load from an empty env");
+            assert_eq!(from_env, AcceptRule::default());
+        });
+    }
+
+    #[test]
+    fn accept_rule_round_trip_similarity_floor() {
+        let rule = AcceptRule::builder().similarity_floor(0.75).build();
+
+        assert_loaders_agree(&rule, "0.75", "0", "65535");
+    }
+
+    #[test]
+    fn accept_rule_round_trip_run_and_cap() {
+        let rule = AcceptRule::builder().min_run(3).max_rows(6).build();
+
+        assert_loaders_agree(&rule, "1.0", "3", "6");
+    }
+
+    #[test]
+    fn accept_rule_rejects_malformed_values() {
+        let bad_floor = conflaguration::from_toml_str::<AcceptRule>(
+            "similarity_floor = \"high\"\nmin_run = 0\nmax_rows = 8\n",
+        );
+        let bad_rows = conflaguration::from_toml_str::<AcceptRule>(
+            "similarity_floor = 1.0\nmin_run = 0\nmax_rows = 70000\n",
+        );
+        assert!(bad_floor.is_err());
+        assert!(bad_rows.is_err());
+
+        temp_env::with_vars([(ROWS_VAR, Some("lots"))], || {
+            assert!(AcceptRule::from_env().is_err());
+        });
     }
 }

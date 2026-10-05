@@ -4306,6 +4306,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "temp-env",
  "thiserror 2.0.19",
  "thread_local",
  "tokio",
