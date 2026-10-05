@@ -106,6 +106,9 @@ pub enum CachePath {
     /// ([`crate::PromptCacheConfig::cache_reuse_min`], spec R5); the tokens
     /// between them were prefilled.
     Shift,
+    /// The entry that served the request came back from a cold tier;
+    /// `lcp` and `reused_tokens` say how much of it was used.
+    Tier,
     /// No entry could be reused; the whole prompt was prefilled.
     Miss,
 }
@@ -119,6 +122,7 @@ impl CachePath {
             Self::Rewind => "rewind",
             Self::Checkpoint => "checkpoint",
             Self::Shift => "shift",
+            Self::Tier => "tier",
             Self::Miss => "miss",
         }
     }
@@ -227,6 +231,19 @@ impl CacheReport {
             follow_up_hit_tokens: 0,
             shifted_tokens: 0,
         }
+    }
+}
+
+fn relabel_after_tier(
+    report: CacheReport,
+    restored: &Result<bool, InteropError>,
+) -> CacheReport {
+    match (restored, report.miss) {
+        (Ok(true), None) => CacheReport {
+            path: CachePath::Tier,
+            ..report
+        },
+        _ => report,
     }
 }
 
@@ -1380,7 +1397,7 @@ impl LoadedModel<'_> {
             self.lift_chunks(entry, prompt_ids, from, widths, serving_config)
         };
         let shifting = config.cache_reuse_min > 0 && config.ring_rewind_slack > 0;
-        let _restored = thaw_best_cold(&self.prompt_cache, prompt_ids, key, &config);
+        let restored = thaw_best_cold(&self.prompt_cache, prompt_ids, key, &config);
         let mut cache = self
             .prompt_cache
             .lock();
@@ -1391,6 +1408,7 @@ impl LoadedModel<'_> {
             config.min_similarity_milli,
             shifting.then_some(&mut lift as Lift<'_>),
         );
+        report = relabel_after_tier(report, &restored);
         report.prewarm_wait = waited;
         cache.last_report = Some(report);
         let bloom = cache.bloom_candidates(prompt_ids, key, report.reused_tokens);
@@ -3712,5 +3730,34 @@ mod tests {
 
         assert!(taken.is_none());
         assert_eq!(report.miss, Some(MissReason::ConfigMismatch));
+    }
+
+    fn tier_hit_report() -> CacheReport {
+        CacheReport {
+            path: CachePath::Extend,
+            miss: None,
+            reused_tokens: 4,
+            ..CacheReport::miss(5, MissReason::Empty)
+        }
+    }
+
+    #[test]
+    fn tier_label_names_the_tier_for_a_restored_hit() {
+        let relabeled = relabel_after_tier(tier_hit_report(), &Ok(true));
+
+        assert_eq!(relabeled.path, CachePath::Tier);
+        assert_eq!(relabeled.reused_tokens, 4);
+        assert_eq!(CachePath::Tier.as_str(), "tier");
+    }
+
+    #[test]
+    fn tier_label_leaves_other_outcomes_alone() {
+        let hit = tier_hit_report();
+        let miss = CacheReport::miss(5, MissReason::Empty);
+        let failure = InteropError::UnsupportedServingConfig("x".into());
+
+        assert_eq!(relabel_after_tier(hit, &Ok(false)), hit);
+        assert_eq!(relabel_after_tier(miss, &Ok(true)), miss);
+        assert_eq!(relabel_after_tier(hit, &Err(failure)), hit);
     }
 }
