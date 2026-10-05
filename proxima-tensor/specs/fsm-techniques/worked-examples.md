@@ -249,3 +249,16 @@ The always judge is the default: an absent cascade is one tier with judge `alway
 - readout missing: settle, because the judge reads no readout
 
 RESULT always judge: any readout -> settle (3 of 3 requests)
+
+## top-fraction selection
+
+The selection rule: `count = max(min_rows, ceil(fraction * M))`; `rank(i)` is the number of scores strictly greater than `score[i]` plus the number of equal scores at a lower index, so ranks are distinct and exactly `count` rows are selected; a row is selected when `rank < count` or its index is in the kept rows. Inputs: fraction 0.25, min_rows 2, keep_rows {5}, scores (12 values, indices 0 to 11, all distinct) `[0.31, 0.92, 0.15, 0.77, 0.64, 0.08, 0.55, 0.99, 0.23, 0.71, 0.40, 0.86]`.
+
+- M = 12 (fraction times M is an integer): count = max(2, ceil(0.25 * 12) = 3) = 3; ranks: 0.99 (idx 7) rank 0, 0.92 (idx 1) rank 1, 0.86 (idx 11) rank 2; selected {1,7,11} union keep {5} = {1,5,7,11}
+- M = 11 (the first 11 scores; fraction times M is not an integer): count = max(2, ceil(2.75) = 3) = 3; top three: 0.99 (7), 0.92 (1), 0.77 (3); union {5} = {1,3,5,7}
+
+The two sets differ, so the count formula is distinguishable at the two sizes.
+
+Equal scores: M = 6, fraction 0.5, min_rows 1, no kept rows, scores `[0.5, 0.9, 0.5, 0.5, 0.1, 0.9]`: count = max(1, ceil(3.0) = 3) = 3. With the tie rule: idx 1 (0.9) greater 0, equal-lower 0, rank 0; idx 5 (0.9) rank 0 + 1 = 1; idx 0 (0.5) greater 2, rank 2; idx 2 (0.5) rank 2 + 1 = 3; idx 3 (0.5) rank 2 + 2 = 4; idx 4 (0.1) greater 5, rank 5; selected (rank < 3) = {0,1,5}, 3 rows. With strictly-greater rank alone, idx 0, 2 and 3 all have rank 2, so {0,1,2,3,5} would be selected, 5 rows.
+
+RESULT top-fraction selection: fraction=0.25 min_rows=2 keep={5} M=12 -> {1,5,7,11}; M=11 -> {1,3,5,7}; ties M=6 fraction=0.5 min_rows=1 scores=[0.5,0.9,0.5,0.5,0.1,0.9] -> {0,1,5} (3 selected; strictly-greater rank alone selects 5)
