@@ -3593,6 +3593,8 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut greedy_declined = false;
 
+        let block_tokens = serving_config.prompt_cache.block_tokens as usize;
+        let seal_horizon_rows = serving_config.prompt_cache.seal_horizon_rows as usize;
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
             max_tokens,
@@ -5704,6 +5706,7 @@ impl<'file> LoadedModel<'file> {
                     // here rather than corrected twice.
                     if !active_layer_roots.is_empty() && !speculative_step {
                         cached_len += new_count;
+                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows);
                     }
 
                     // Everything below samples a token off THIS batch's logits.
@@ -5820,6 +5823,7 @@ impl<'file> LoadedModel<'file> {
                             }
                         }
                         cached_len = keep_positions;
+                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows);
                         for &extra in &emitted[1..] {
                             pending.push_back(extra);
                         }
