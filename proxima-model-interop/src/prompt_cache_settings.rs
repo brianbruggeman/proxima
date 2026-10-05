@@ -66,6 +66,10 @@ pub struct PromptCacheSettings {
     /// owning block size (`kv.block_tokens` under `ServingSettings`, 64
     /// standalone); `Some` is an explicit choice and wins.
     pub block_tokens: Option<u32>,
+    /// See [`crate::PromptCacheConfig::seal_horizon_rows`].
+    #[setting(default = 256)]
+    #[builder(default = 256)]
+    pub seal_horizon_rows: u32,
     /// See [`crate::PromptCacheConfig::bloom_bits_per_entry`].
     #[setting(default = 4096)]
     #[builder(default = 4096)]
@@ -96,6 +100,7 @@ impl PromptCacheSettings {
                 Some(value) => value,
                 None => PromptCacheConfig::standard().block_tokens,
             },
+            seal_horizon_rows: self.seal_horizon_rows,
             bloom_bits_per_entry: self.bloom_bits_per_entry,
             bloom_hashes: self.bloom_hashes,
         }
@@ -111,7 +116,7 @@ mod tests {
 
     use super::*;
 
-    const PROMPT_CACHE_ENV_KEYS: [&str; 14] = [
+    const PROMPT_CACHE_ENV_KEYS: [&str; 15] = [
         "PROXIMA_PROMPT_CACHE_BYTE_BUDGET",
         "PROXIMA_PROMPT_CACHE_MAX_ENTRIES",
         "PROXIMA_PROMPT_CACHE_RING_REWIND_SLACK",
@@ -126,6 +131,7 @@ mod tests {
         "PROXIMA_PROMPT_CACHE_BLOCK_TOKENS",
         "PROXIMA_PROMPT_CACHE_BLOOM_BITS_PER_ENTRY",
         "PROXIMA_PROMPT_CACHE_BLOOM_HASHES",
+        "PROXIMA_PROMPT_CACHE_SEAL_HORIZON_ROWS",
     ];
 
     fn cleared_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -153,6 +159,7 @@ mod tests {
             .follow_up_temperature_milli(700)
             .min_similarity_milli(250)
             .block_tokens(32)
+            .seal_horizon_rows(512)
             .bloom_bits_per_entry(8192)
             .bloom_hashes(6)
             .build();
@@ -163,7 +170,7 @@ mod tests {
             "byte_budget = 1073741824\nmax_entries = 8\nring_rewind_slack = 512\n\
              checkpoint_interval = 1024\nmax_checkpoints = 4\ncache_reuse_min = 64\n\
              prewarm_chunk_tokens = 128\nfollow_up_branches = 3\nfollow_up_max_tokens = 64\n\
-             follow_up_temperature_milli = 700\nmin_similarity_milli = 250\nblock_tokens = 32\nbloom_bits_per_entry = 8192\nbloom_hashes = 6"
+             follow_up_temperature_milli = 700\nmin_similarity_milli = 250\nblock_tokens = 32\nseal_horizon_rows = 512\nbloom_bits_per_entry = 8192\nbloom_hashes = 6"
         )
         .expect("write temp toml file");
         let via_file: PromptCacheSettings = conflaguration::from_file(toml_file.path())
@@ -184,6 +191,7 @@ mod tests {
                 "PROXIMA_PROMPT_CACHE_FOLLOW_UP_MAX_TOKENS" => Some("64"),
                 "PROXIMA_PROMPT_CACHE_MIN_SIMILARITY_MILLI" => Some("250"),
                 "PROXIMA_PROMPT_CACHE_BLOCK_TOKENS" => Some("32"),
+                "PROXIMA_PROMPT_CACHE_SEAL_HORIZON_ROWS" => Some("512"),
                 "PROXIMA_PROMPT_CACHE_BLOOM_BITS_PER_ENTRY" => Some("8192"),
                 "PROXIMA_PROMPT_CACHE_BLOOM_HASHES" => Some("6"),
                 _ => Some("700"),
@@ -204,9 +212,20 @@ mod tests {
         assert_eq!(lowered.follow_up_temperature_milli, 700);
         assert_eq!(lowered.min_similarity_milli, 250);
         assert_eq!(lowered.block_tokens, 32);
+        assert_eq!(lowered.seal_horizon_rows, 512);
         assert_eq!(lowered.bloom_bits_per_entry, 8192);
         assert_eq!(lowered.bloom_hashes, 6);
         assert!(lowered.is_enabled());
+    }
+
+    #[test]
+    fn seal_horizon_defaults_to_256_rows() {
+        let built = PromptCacheSettings::builder().build();
+
+        assert_eq!(PromptCacheConfig::standard().seal_horizon_rows, 256);
+        assert_eq!(PromptCacheConfig::off().seal_horizon_rows, 256);
+        assert_eq!(built.seal_horizon_rows, 256);
+        assert_eq!(built.as_prompt_cache_config(), PromptCacheConfig::standard());
     }
 
     /// With nothing set, every loader lands on the shipped default: the
