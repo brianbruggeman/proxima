@@ -186,3 +186,18 @@ Results:
 - granite_moe: 80 * 2.861e-05 = 2.289e-03 (rests on the unmeasured bound)
 
 RESULT readout tolerance: tol_logprob gemma4_e2b=4.673e-03 gemma4_26b=3.719e-03 granite_moe=2.289e-03 tol_margin=tol_logprob
+
+## cartridge concatenation rotation
+
+A stored block of key rows is moved to a new position by rotating each (even, odd) pair of every row by the angle of the position delta. For a pair with angle `a` per position and delta `d`: `even' = even * cos(a*d) - odd * sin(a*d)` and `odd' = odd * cos(a*d) + even * sin(a*d)`. A negative delta rotates the other way. Value rows are not rotated.
+
+Inputs: head dim 4 (2 pairs), per-pair angle per position `(pi/2, pi/4)`. Block A holds 2 rows. Block B (2 rows, base position 0) is concatenated after A, so each B row moves by delta = 2 positions: angles `(pi, pi/2)`, `cos = [-1, 0]`, `sin = [0, 1]`. These are exact in the hand arithmetic; in f32 `sin(pi)` is not exactly 0, so a test of this value uses a tolerance of 1e-6.
+
+B's key rows (layout `[row][pair]`): row 0 even `[1,2]` odd `[0,3]`; row 1 even `[0,4]` odd `[2,-1]`.
+
+- row 0 pair 0: even' = 1*(-1) - 0*0 = -1; odd' = 0*(-1) + 1*0 = 0
+- row 0 pair 1: even' = 2*0 - 3*1 = -3; odd' = 3*0 + 2*1 = 2
+- row 1 pair 0: even' = 0*(-1) - 2*0 = 0; odd' = 2*(-1) + 0*0 = -2
+- row 1 pair 1: even' = 4*0 - (-1)*1 = 1; odd' = (-1)*0 + 4*1 = 4
+
+RESULT cartridge concatenation rotation: k_b_rotated even=[[-1,-3],[0,1]] odd=[[0,2],[-2,4]] v_unchanged
