@@ -211,3 +211,12 @@ A threshold judge is one pure function of one readout. The readout is the chosen
 - lp = -0.5: -0.5 >= -0.5, settle (boundary, inclusive)
 
 RESULT threshold judge: lp=-0.2 -> settle; lp=-0.9 -> escalate; lp=-0.5 -> settle
+
+## classifier judge
+
+A classifier judge is one more pure function of class probabilities. The judge model emits `[p_accept, p_escalate]`; the probabilities are readouts the settle hook consumes, not values it produces. `accept_class = 0` is a configured value. The rule: settle iff `argmax = accept_class`, otherwise escalate.
+
+- [0.7, 0.3]: argmax is index 0 (0.7 > 0.3), equals `accept_class`, settle
+- [0.4, 0.6]: argmax is index 1 (0.6 > 0.4), differs from `accept_class`, escalate
+
+RESULT classifier judge: [0.7,0.3] -> settle; [0.4,0.6] -> escalate
