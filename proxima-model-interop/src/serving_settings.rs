@@ -1,6 +1,9 @@
 use bon::Builder;
 use conflaguration::Settings;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::MathMode;
 use proxima_gguf::types::GgmlType;
+use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
@@ -58,6 +61,28 @@ impl CacheType {
     }
 }
 
+/// the Metal math modes a serving configuration can request, spelled in
+/// lowercase; `as_math_mode` is the lowering to the backend's own enum, which
+/// is foreign and carries no serde derive.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MathModeName {
+    Safe,
+    Relaxed,
+    Fast,
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+impl MathModeName {
+    pub const fn as_math_mode(self) -> MathMode {
+        match self {
+            Self::Safe => MathMode::Safe,
+            Self::Relaxed => MathMode::Relaxed,
+            Self::Fast => MathMode::Fast,
+        }
+    }
+}
 
 /// the llama-flag surface of [`ServingConfig`], loadable from toml and env
 /// (`PROXIMA_SERVING_<FIELD>`) and fluent-buildable; `as_serving_config` lowers
@@ -129,6 +154,62 @@ pub struct ServingSettings {
     #[setting(default = 0)]
     #[builder(default = 0)]
     pub reasoning_budget: i32,
+    /// `ServingConfig::temperature`: `--temp`; `<= 0.0` samples greedily.
+    #[setting(default = 0.0)]
+    #[builder(default = 0.0)]
+    pub temperature: f32,
+    /// `ServingConfig::top_k`: `--top-k`; `<= 0` disables the filter.
+    #[setting(default = 0)]
+    #[builder(default = 0)]
+    pub top_k: i32,
+    /// `ServingConfig::top_p`: `--top-p`; `1.0` disables the filter.
+    #[setting(default = 1.0)]
+    #[builder(default = 1.0)]
+    pub top_p: f32,
+    /// `ServingConfig::min_p`: `--min-p`; `0.0` disables the filter.
+    #[setting(default = 0.0)]
+    #[builder(default = 0.0)]
+    pub min_p: f32,
+    /// `ServingConfig::repeat_last_n`: `--repeat-last-n`, the penalty window in tokens.
+    #[setting(default = 64)]
+    #[builder(default = 64)]
+    pub repeat_last_n: i32,
+    /// `ServingConfig::repeat_penalty`: `--repeat-penalty`; `1.0` disables it.
+    #[setting(default = 1.0)]
+    #[builder(default = 1.0)]
+    pub repeat_penalty: f32,
+    /// `ServingConfig::frequency_penalty`: `--frequency-penalty`.
+    #[setting(default = 0.0)]
+    #[builder(default = 0.0)]
+    pub frequency_penalty: f32,
+    /// `ServingConfig::presence_penalty`: `--presence-penalty`.
+    #[setting(default = 0.0)]
+    #[builder(default = 0.0)]
+    pub presence_penalty: f32,
+    /// `ServingConfig::seed`: `--seed`, the sampler's random seed.
+    #[setting(default = 0)]
+    #[builder(default = 0)]
+    pub seed: u64,
+    /// `ServingConfig::kv_bucket_tokens`: the key/value extent rounding step; `1` disables bucketing.
+    #[setting(default = 32)]
+    #[builder(default = 32)]
+    pub kv_bucket_tokens: usize,
+    /// `ServingConfig::math_mode`: the Metal math mode every compiled kernel uses.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[setting(resolve_with = "from_name", default_str = "relaxed")]
+    #[builder(default = MathModeName::Relaxed)]
+    pub math_mode: MathModeName,
+    /// `ServingConfig::numeric_policy`: the rewrites the plan may apply, one permission per field.
+    #[setting(
+        resolve_with = "from_json",
+        default_str = "{\"contraction\":true,\"reassociation\":true,\"nan_assumptions\":false,\"signed_zero\":false,\"approx_functions\":false,\"epilogue_sources\":false}"
+    )]
+    #[builder(default = NumericPolicy::llama_relaxed())]
+    pub numeric_policy: NumericPolicy,
+    /// `ServingConfig::exact_activations`: keep activations at full precision.
+    #[setting(default = true)]
+    #[builder(default = true)]
+    pub exact_activations: bool,
 }
 
 impl Default for ServingSettings {
@@ -159,6 +240,20 @@ impl ServingSettings {
             kv_offload: self.kv_offload,
             multimodal_projector: self.multimodal_projector,
             reasoning_budget: self.reasoning_budget,
+            temperature: self.temperature,
+            top_k: self.top_k,
+            top_p: self.top_p,
+            min_p: self.min_p,
+            repeat_last_n: self.repeat_last_n,
+            repeat_penalty: self.repeat_penalty,
+            frequency_penalty: self.frequency_penalty,
+            presence_penalty: self.presence_penalty,
+            seed: self.seed,
+            kv_bucket_tokens: self.kv_bucket_tokens,
+            numeric_policy: self.numeric_policy,
+            exact_activations: self.exact_activations,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode: self.math_mode.as_math_mode(),
             weight_precision,
             ..ServingConfig::default()
         }
@@ -313,5 +408,126 @@ beta_slow = 1.0
                 .is_err(),
             "an unknown cache type is refused"
         );
+    }
+
+    const SAMPLING_TOML: &str = r#"
+temperature = 0.7
+top_k = 40
+top_p = 0.95
+min_p = 0.05
+repeat_last_n = 128
+repeat_penalty = 1.1
+frequency_penalty = 0.2
+presence_penalty = 0.3
+seed = 424242
+kv_bucket_tokens = 64
+exact_activations = false
+MATH_MODE_LINE
+[numeric_policy]
+contraction = true
+reassociation = false
+nan_assumptions = true
+signed_zero = true
+approx_functions = true
+epilogue_sources = true
+"#;
+
+    const POLICY_JSON: &str = r#"{"contraction":true,"reassociation":false,"nan_assumptions":true,"signed_zero":true,"approx_functions":true,"epilogue_sources":true}"#;
+
+    fn granted_policy() -> NumericPolicy {
+        let mut policy = NumericPolicy::bit_exact();
+        policy.contraction = true;
+        policy.reassociation = false;
+        policy.nan_assumptions = true;
+        policy.signed_zero = true;
+        policy.approx_functions = true;
+        policy.epilogue_sources = true;
+        policy
+    }
+
+    const SAMPLING_ENV_KEYS: [&str; 13] = [
+        "PROXIMA_SERVING_TEMPERATURE",
+        "PROXIMA_SERVING_TOP_K",
+        "PROXIMA_SERVING_TOP_P",
+        "PROXIMA_SERVING_MIN_P",
+        "PROXIMA_SERVING_REPEAT_LAST_N",
+        "PROXIMA_SERVING_REPEAT_PENALTY",
+        "PROXIMA_SERVING_FREQUENCY_PENALTY",
+        "PROXIMA_SERVING_PRESENCE_PENALTY",
+        "PROXIMA_SERVING_SEED",
+        "PROXIMA_SERVING_KV_BUCKET_TOKENS",
+        "PROXIMA_SERVING_EXACT_ACTIVATIONS",
+        "PROXIMA_SERVING_NUMERIC_POLICY",
+        "PROXIMA_SERVING_MATH_MODE",
+    ];
+
+    #[test]
+    fn serving_scalars_sampling_and_policy_lower_and_round_trip() {
+        let math_mode_line = if cfg!(all(feature = "metal", target_os = "macos")) {
+            "math_mode = \"fast\""
+        } else {
+            ""
+        };
+        let toml = SAMPLING_TOML.replace("MATH_MODE_LINE", math_mode_line);
+        let from_toml: ServingSettings =
+            conflaguration::from_toml_str(&toml).expect("the sampling toml parses");
+        let builder = ServingSettings::builder()
+            .temperature(0.7)
+            .top_k(40)
+            .top_p(0.95)
+            .min_p(0.05)
+            .repeat_last_n(128)
+            .repeat_penalty(1.1)
+            .frequency_penalty(0.2)
+            .presence_penalty(0.3)
+            .seed(424_242)
+            .kv_bucket_tokens(64)
+            .exact_activations(false)
+            .numeric_policy(granted_policy());
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let builder = builder.math_mode(MathModeName::Fast);
+        let built = builder.build();
+        let from_env = temp_env::with_vars(
+            [
+                ("PROXIMA_SERVING_TEMPERATURE", Some("0.7")),
+                ("PROXIMA_SERVING_TOP_K", Some("40")),
+                ("PROXIMA_SERVING_TOP_P", Some("0.95")),
+                ("PROXIMA_SERVING_MIN_P", Some("0.05")),
+                ("PROXIMA_SERVING_REPEAT_LAST_N", Some("128")),
+                ("PROXIMA_SERVING_REPEAT_PENALTY", Some("1.1")),
+                ("PROXIMA_SERVING_FREQUENCY_PENALTY", Some("0.2")),
+                ("PROXIMA_SERVING_PRESENCE_PENALTY", Some("0.3")),
+                ("PROXIMA_SERVING_SEED", Some("424242")),
+                ("PROXIMA_SERVING_KV_BUCKET_TOKENS", Some("64")),
+                ("PROXIMA_SERVING_EXACT_ACTIVATIONS", Some("false")),
+                ("PROXIMA_SERVING_NUMERIC_POLICY", Some(POLICY_JSON)),
+                (
+                    "PROXIMA_SERVING_MATH_MODE",
+                    cfg!(all(feature = "metal", target_os = "macos")).then_some("fast"),
+                ),
+            ],
+            || ServingSettings::from_env().expect("the sampling env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+
+        let lowered = built.as_serving_config(&[]);
+        assert_eq!(lowered.temperature, 0.7);
+        assert_eq!(lowered.top_k, 40);
+        assert_eq!(lowered.seed, 424_242);
+        assert_eq!(lowered.kv_bucket_tokens, 64);
+        assert!(!lowered.exact_activations);
+        assert!(lowered.numeric_policy.nan_assumptions);
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        assert_eq!(lowered.math_mode, MathMode::Fast);
+
+        let defaults = temp_env::with_vars(
+            SAMPLING_ENV_KEYS.map(|key| (key, None::<&str>)),
+            || ServingSettings::from_env().expect("the unset env resolves to defaults"),
+        );
+        assert_eq!(defaults.numeric_policy, NumericPolicy::llama_relaxed());
+        assert_eq!(defaults.kv_bucket_tokens, 32);
+        assert_eq!(defaults, ServingSettings::default());
     }
 }
