@@ -136,6 +136,11 @@ gated-delta-net-fusion = []
 # `moe_topk_candidates`. Same disciplined-component firewall: default-off
 # until a real-model A/B lands, alloc-tier only.
 moe-topk-fusion = []
+# Bind-time collapse of the rank-count top-fraction mask (`spec::top_fraction_mask`) into one
+# `BoundOpKind::TopFractionSelect` when the score row count reaches a caller-supplied threshold.
+# The matcher rebuilds the expression through `spec::top_fraction_mask`, which lives behind
+# `config`. Default-off until the selection kernel has a measured A/B against the plain expression.
+top-fraction-fusion = ["config"]
 # Bind-time MoE round-sibling projection fusion (decode/n_tokens=1 only):
 # collapses the k round-sibling gate/up/down `Reduce` nodes
 # `append_moe_ffn`'s own `PerRoute` loop emits (one `BoundOp` per round) into

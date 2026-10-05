@@ -104,12 +104,16 @@ mod identity_copy_alias;
 mod repeat_nodes;
 mod refit_cached_attention;
 mod refresh;
+#[cfg(feature = "top-fraction-fusion")]
+mod top_fraction_fusion;
 pub use builder_compose_window::*;
 pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
 pub use refit_cached_attention::refit_cached_attention_rows;
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
+#[cfg(feature = "top-fraction-fusion")]
+pub use top_fraction_fusion::top_fraction_candidates;
 pub use types_layout_boundop::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;

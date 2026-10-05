@@ -6588,3 +6588,83 @@ fn top_fraction_select_reports_its_name_and_reads_every_operand() {
     assert_eq!(select.operands().len(), 2);
     assert_eq!(select.all_read_sources().count(), 2);
 }
+
+#[cfg(feature = "top-fraction-fusion")]
+mod top_fraction_fusion_tests {
+    use super::*;
+    use crate::spec::{input_leaf, top_fraction_mask};
+
+    const TWELVE_ROWS: u64 = 12;
+
+    struct Fixture {
+        program: Vec<Op>,
+        scores: NodeId,
+        keep_count: NodeId,
+        keep_rows: Option<NodeId>,
+        mask: NodeId,
+    }
+
+    fn fixture(with_keep_rows: bool) -> Fixture {
+        let mut program = Vec::new();
+        let scores = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "scores");
+        let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
+        let keep_rows = with_keep_rows.then(|| {
+            input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "keep_rows")
+        });
+        let mask = top_fraction_mask(&mut program, scores, keep_count, keep_rows).expect("mask lowers");
+        Fixture { program, scores, keep_count, keep_rows, mask }
+    }
+
+    fn candidates_at(
+        fixture: &Fixture,
+        rows: u64,
+        extra_outputs: &[NodeId],
+    ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
+        let shapes = shape::infer(&fixture.program, &[rows]).expect("program infers");
+        let mut outputs = alloc::vec![fixture.mask, fixture.scores, fixture.keep_count];
+        outputs.extend(fixture.keep_rows);
+        let resolved = bind_plain(&fixture.program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain binds");
+        let requested: Vec<NodeId> = [fixture.mask].into_iter().chain(extra_outputs.iter().copied()).collect();
+        top_fraction_candidates(&fixture.program, &shapes, &resolved, &requested, TWELVE_ROWS)
+    }
+
+    #[test]
+    fn rank_select_candidate_fires_at_threshold() {
+        let fixture = fixture(false);
+        let candidates = candidates_at(&fixture, 12, &[]);
+        assert_eq!(candidates.len(), 1);
+        let (fused, absorbed) = &candidates[0];
+        assert_eq!(fused.node, fixture.mask);
+        assert_eq!(fused.kind.name(), "top_fraction_select");
+        assert_eq!(absorbed.len(), 7, "the iota through the rank nodes");
+    }
+
+    #[test]
+    fn rank_select_candidate_carries_keep_rows_operand() {
+        let fixture = fixture(true);
+        let candidates = candidates_at(&fixture, 12, &[]);
+        assert_eq!(candidates.len(), 1, "the mask-only prefix is covered by the union candidate");
+        let (fused, absorbed) = &candidates[0];
+        let BoundOpKind::TopFractionSelect { operands, rows, has_keep_rows } = &fused.kind else {
+            panic!("the candidate must be a top-fraction select, got {}", fused.kind.name());
+        };
+        assert_eq!((*rows, *has_keep_rows, operands.len()), (12, true, 3));
+        let sources: Vec<NodeId> = operands.iter().map(|(node, _, _)| *node).collect();
+        assert_eq!(sources, [fixture.scores, fixture.keep_count, fixture.keep_rows.expect("union fixture")]);
+        assert_eq!(absorbed.len(), 8, "the iota through the selected nodes");
+    }
+
+    #[test]
+    fn rank_select_candidate_declines_below_threshold() {
+        let fixture = fixture(false);
+        assert!(candidates_at(&fixture, 11, &[]).is_empty());
+    }
+
+    #[test]
+    fn rank_select_candidate_declines_when_an_intermediate_is_requested() {
+        let fixture = fixture(false);
+        let rank = NodeId(fixture.mask.0 - 1);
+        assert!(candidates_at(&fixture, 12, &[rank]).is_empty());
+    }
+}
