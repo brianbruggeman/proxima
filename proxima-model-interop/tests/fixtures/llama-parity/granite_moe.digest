@@ -1,0 +1,13 @@
+checkpoint=granite_moe
+architecture=granitemoe
+registry_entry=dense
+kv_layout=SlidingRing
+bind.ops=6394
+bind.ops_sha256=3b38dc043ff3e81bbe22549c07371db0a89254bee4655e1856678f7bba1a4f96
+bind.logits_root=NodeId(6393)
+bind.hidden_root=Some(NodeId(6388))
+bind.residual_roots=24 sha256=b5e40c1091c63a784b2b67dd86d2f9838ec2ea1fec975348096b3405294ff6f5
+bind.layer_roots=24 sha256=3c8cf19feec1297d7b4b4fdadf26db150ccde6ac2daf96ebfcdb943124ae56eb
+bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+bind.single_position_step=false
+verify=absent
