@@ -166,50 +166,69 @@ impl<Entry: PartialEq + Clone, Cache> ServingState<Entry, Cache> {
         row_caches: Vec<Cache>,
     ) -> Result<Self, ServingFsmError> {
         match self {
-            Self::Verify { draft, .. }
-                if draft.is_empty()
-                    || row_tokens.len() != draft.len()
-                    || row_caches.len() != draft.len() =>
-            {
-                Err(ServingFsmError::IllegalTransition {
-                    attempted: "accept",
-                })
-            }
             Self::Verify { draft, .. } => {
                 let accepted = draft
                     .iter()
                     .zip(row_tokens.iter())
                     .take_while(|(drafted, predicted)| drafted == predicted)
                     .count();
-                let mut placements = row_caches.into_iter();
-                let placement_index = if accepted == draft.len() {
-                    accepted - 1
-                } else {
-                    accepted
-                };
-                let Some(cache) = placements.nth(placement_index) else {
-                    // unreachable given the length guard above; a bad
-                    // caller-supplied `row_caches` fails closed instead of panicking
-                    return Err(ServingFsmError::IllegalTransition {
-                        attempted: "accept",
-                    });
-                };
-                if accepted == draft.len() {
-                    Ok(Self::Accept {
-                        n: accepted,
-                        next: draft[accepted - 1].clone(),
-                        cache,
-                    })
-                } else {
-                    Ok(Self::Rollback {
-                        snapshot: cache,
-                        to: row_tokens[accepted].clone(),
-                    })
-                }
+                Self::settle(draft, accepted, row_tokens, row_caches, "accept")
             }
             _ => Err(ServingFsmError::IllegalTransition {
                 attempted: "accept",
             }),
+        }
+    }
+
+    pub fn accept_rows(
+        self,
+        accepted: usize,
+        row_tokens: &[Entry],
+        row_caches: Vec<Cache>,
+    ) -> Result<Self, ServingFsmError> {
+        match self {
+            Self::Verify { draft, .. } => {
+                Self::settle(draft, accepted, row_tokens, row_caches, "accept_rows")
+            }
+            _ => Err(ServingFsmError::IllegalTransition {
+                attempted: "accept_rows",
+            }),
+        }
+    }
+
+    fn settle(
+        draft: Vec<Entry>,
+        accepted: usize,
+        row_tokens: &[Entry],
+        row_caches: Vec<Cache>,
+        attempted: &'static str,
+    ) -> Result<Self, ServingFsmError> {
+        if draft.is_empty()
+            || row_tokens.len() != draft.len()
+            || row_caches.len() != draft.len()
+            || accepted > draft.len()
+        {
+            return Err(ServingFsmError::IllegalTransition { attempted });
+        }
+        let placement_index = if accepted == draft.len() {
+            accepted - 1
+        } else {
+            accepted
+        };
+        let Some(cache) = row_caches.into_iter().nth(placement_index) else {
+            return Err(ServingFsmError::IllegalTransition { attempted });
+        };
+        if accepted == draft.len() {
+            Ok(Self::Accept {
+                n: accepted,
+                next: draft[accepted - 1].clone(),
+                cache,
+            })
+        } else {
+            Ok(Self::Rollback {
+                snapshot: cache,
+                to: row_tokens[accepted].clone(),
+            })
         }
     }
 }
@@ -619,5 +638,34 @@ mod tests {
         );
         assert!(matches!(plain_state.finish(), ServingState::Done { .. }));
         assert!(matches!(spec_state.finish(), ServingState::Done { .. }));
+    }
+
+    #[test]
+    fn accept_rows_takes_declared_count_not_prefix() {
+        let state = ServingState::start(alloc::vec![1_u32], FakeCache::empty())
+            .advance_prefill(2, FakeCache::empty().advanced_by(2))
+            .expect("prefill advances")
+            .enter_verify(alloc::vec![3, 4])
+            .expect("verify enters");
+        let cache_one = FakeCache::empty().advanced_by(1);
+        let cache_two = FakeCache::empty().advanced_by(2);
+        let caches = || alloc::vec![cache_one.clone(), cache_two.clone()];
+
+        assert_eq!(
+            state.clone().accept_rows(0, &[3, 4], caches()),
+            Ok(ServingState::Rollback { snapshot: cache_one.clone(), to: 3 })
+        );
+        assert_eq!(
+            state.clone().accept_rows(2, &[3, 4], caches()),
+            Ok(ServingState::Accept { n: 2, next: 4, cache: cache_two.clone() })
+        );
+        assert_eq!(
+            state.clone().accept_rows(3, &[3, 4], caches()),
+            Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
+        );
+        assert_eq!(
+            ServingState::start(alloc::vec![1_u32], FakeCache::empty()).accept_rows(0, &[3, 4], caches()),
+            Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
+        );
     }
 }
