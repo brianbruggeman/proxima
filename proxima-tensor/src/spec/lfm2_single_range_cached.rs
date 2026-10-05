@@ -915,16 +915,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
     if let Some(scale) = embedding_scale {
-        let multiplier = match scale {
-            EmbeddingScale::Sqrt => (embedding as f32).sqrt(),
-        };
-        let multiplier = scalar_constant(&mut program, multiplier);
-        x = elementwise(
-            &mut program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(x, "sd->sd"), (multiplier, "->sd")],
-        )?;
+        x = append_embedding_scale(&mut program, x, embedding, scale)?;
     }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
@@ -1357,16 +1348,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
     if let Some(scale) = embedding_scale {
-        let multiplier = match scale {
-            EmbeddingScale::Sqrt => (embedding as f32).sqrt(),
-        };
-        let multiplier = scalar_constant(&mut program, multiplier);
-        x = elementwise(
-            &mut program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(x, "sd->sd"), (multiplier, "->sd")],
-        )?;
+        x = append_embedding_scale(&mut program, x, embedding, scale)?;
     }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
