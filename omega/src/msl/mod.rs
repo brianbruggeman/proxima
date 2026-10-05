@@ -117,6 +117,7 @@ mod cached_attention_decode_split;
 #[cfg(feature = "metal-attn-split-rows")]
 mod cached_attention_row_tiled;
 mod cached_softmax_weights_render;
+mod selection_render;
 #[macro_use]
 mod elementwise_reduce_core;
 #[macro_use]
@@ -155,6 +156,7 @@ use cached_attention_render::render_cached_attention;
 // render.rs`), and its only caller is `emit_and_classify::emit_inner`'s
 // `use super::*`.
 use cached_softmax_weights_render::render_cached_softmax_weights;
+use selection_render::render_top_fraction_select;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention_merge;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]

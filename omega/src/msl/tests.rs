@@ -7012,3 +7012,31 @@ fn rank_select_entry_and_grid_follow_rows_and_keep_flag() {
     assert_eq!(entry_name(&unioned, policy), "omega_top_fraction_select_r12_k1");
     assert_eq!(grid_threads(&plain, &[], policy, false).expect("grid resolves"), 1024);
 }
+
+#[test]
+fn rank_select_render_emits_kernel_entry_bindings_and_grid() {
+    let policy = NumericPolicy::default();
+    let kernel = emit(&top_fraction_select_op(12, false), &PackedOperands::new(), policy)
+        .expect("selection kernel emits");
+    assert_eq!(kernel.entry, "omega_top_fraction_select_r12_k0");
+    assert_eq!(kernel.bindings.len(), 4);
+    assert_eq!(kernel.grid.threads, 1024);
+}
+
+#[test]
+fn rank_select_render_declares_four_passes() {
+    let policy = NumericPolicy::default();
+    let kernel = emit(&top_fraction_select_op(12, false), &PackedOperands::new(), policy)
+        .expect("selection kernel emits");
+    assert!(kernel.source.contains("constexpr uint ROWS = 12u"));
+    assert_eq!(kernel.source.matches("simd_prefix_exclusive_sum").count(), 1);
+    assert_eq!(
+        kernel.source.matches("atomic_fetch_add_explicit(&histogram").count(),
+        4
+    );
+    assert!(!kernel.source.contains("keep_rows"));
+    let unioned = emit(&top_fraction_select_op(12, true), &PackedOperands::new(), policy)
+        .expect("union kernel emits");
+    assert!(unioned.source.contains("device const float* keep_rows [[buffer(2)]]"));
+    assert!(unioned.source.contains("device float* out [[buffer(3)]]"));
+}
