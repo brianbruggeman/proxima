@@ -378,6 +378,14 @@ max_query_rows = 64
 # override via OMEGA_ATTENTION_ROWS_TARGET_THREADGROUPS.
 target_threadgroups = 256
 
+[selection]
+# smallest row count at which the rank-count top-fraction expression lowers to one selection
+# kernel instead of the O(M^2) plain expression. below it the plain expression runs.
+# 256 is unmeasured (plausible, not proven): at 256 rows the plain expression is 65,536
+# compare-adds. raising it keeps the plain expression longer; lowering it launches the
+# kernel for smaller inputs. must be nonzero. override via OMEGA_SELECTION_TOP_FRACTION_MIN_ROWS.
+top_fraction_min_rows = 256
+
 [cached_attention]
 # Metal's per-threadgroup `threadgroup` memory ceiling on every GPU family
 # this crate targets -- `render_cached_attention`'s single-range dynamic

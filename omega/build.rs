@@ -596,6 +596,14 @@ fn emit_sizing_consts() {
         "pub const LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES: u64 = {arena_allowance_bytes};\n"
     ));
 
+    let selection_top_fraction_min_rows = require_nonzero(
+        "selection.top_fraction_min_rows",
+        resolve_int(&root, "selection", "top_fraction_min_rows"),
+    );
+    out.push_str(&format!(
+        "pub const SELECTION_TOP_FRACTION_MIN_ROWS: u64 = {selection_top_fraction_min_rows};\n"
+    ));
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     let out_path = out_dir.join("omega_sized.rs");
     fs::write(&out_path, out).unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));
