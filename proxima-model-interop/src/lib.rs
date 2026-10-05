@@ -27,6 +27,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 mod architecture;
 mod bind;
+#[cfg(feature = "std")]
+pub mod block_file;
 pub mod capability;
 #[cfg(feature = "std")]
 mod dense;
