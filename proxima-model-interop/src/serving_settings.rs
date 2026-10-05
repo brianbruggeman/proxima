@@ -7,6 +7,8 @@ use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
+use crate::prompt_cache_settings::PromptCacheSettings;
+use crate::speculative_settings::SpeculativeSettings;
 use crate::serving::{
     ContextLength, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, GdnPrefillBackend, NamePattern,
     ServingConfig, WeightPrecisionRule,
@@ -315,6 +317,12 @@ pub struct ServingSettings {
     #[setting(nested)]
     #[builder(default)]
     pub expert_residency_schedule: ExpertResidencyScheduleSettings,
+    #[setting(nested, override_prefix = "PROXIMA_SPECULATIVE")]
+    #[builder(default = SpeculativeSettings::builder().build())]
+    pub speculative: SpeculativeSettings,
+    #[setting(nested, override_prefix = "PROXIMA_PROMPT_CACHE")]
+    #[builder(default = PromptCacheSettings::builder().build())]
+    pub prompt_cache: PromptCacheSettings,
 }
 
 impl Default for ServingSettings {
@@ -398,6 +406,8 @@ impl ServingSettings {
             admission_schedule: self.admission_schedule.as_admission_schedule(),
             phase_schedule: self.phase_schedule.as_phase_schedule(),
             expert_residency_schedule: self.expert_residency_schedule.as_expert_residency_schedule(),
+            speculative: self.speculative.as_speculative_config(),
+            prompt_cache: self.prompt_cache.as_prompt_cache_config(),
             ..ServingConfig::default()
         }
     }
@@ -412,9 +422,53 @@ impl ServingSettings {
 }
 
 #[cfg(test)]
+mod round_trip {
+    use conflaguration::Settings;
+
+    use super::ServingSettings;
+
+    const SECTION_PREFIXES: [&str; 3] = [
+        "PROXIMA_SERVING_",
+        "PROXIMA_SPECULATIVE_",
+        "PROXIMA_PROMPT_CACHE_",
+    ];
+
+    fn cleared_section_env() -> Vec<(String, Option<String>)> {
+        std::env::vars_os()
+            .filter_map(|(key, _)| key.into_string().ok())
+            .filter(|key| SECTION_PREFIXES.iter().any(|prefix| key.starts_with(prefix)))
+            .map(|key| (key, None))
+            .collect()
+    }
+
+    pub(super) fn assert_three_ways(
+        toml_text: &str,
+        env_pairs: &[(&str, &str)],
+        via_builder: &ServingSettings,
+    ) {
+        let parsed_toml: ServingSettings = conflaguration::from_toml_str(toml_text)
+            .unwrap_or_else(|err| panic!("the toml loader failed: {err}"));
+        let mut env = cleared_section_env();
+        env.extend(
+            env_pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), Some((*value).to_owned()))),
+        );
+        let parsed_env = temp_env::with_vars(env, || {
+            ServingSettings::from_env()
+                .unwrap_or_else(|err| panic!("the env loader failed: {err}"))
+        });
+
+        assert_eq!(&parsed_toml, via_builder, "the toml loader differs from the builder");
+        assert_eq!(&parsed_env, via_builder, "the env loader differs from the builder");
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::speculative_settings::{SpeculativeTypeName, SpeculativeTypeNameSet};
 
     #[test]
     fn serving_section_cache_type_round_trips_json() {
@@ -949,5 +1003,101 @@ overlap_transfer_compute = true
                 .expert_residency_schedule,
             ServingConfig::default().expert_residency_schedule,
         );
+    }
+
+    #[test]
+    fn serving_scalars_speculative_and_prompt_cache_round_trip() {
+        let toml_text = "[prompt_cache]\nbyte_budget = 1073741824\nmax_entries = 8\n\
+ring_rewind_slack = 512\ncheckpoint_interval = 1024\nmax_checkpoints = 4\n\
+cache_reuse_min = 64\nprewarm_chunk_tokens = 128\nfollow_up_branches = 3\n\
+follow_up_max_tokens = 64\nfollow_up_temperature_milli = 700\n\
+min_similarity_milli = 250\nblock_tokens = 32\nbloom_bits_per_entry = 8192\n\
+bloom_hashes = 6\n\n[speculative]\nspeculative_types = \"ngram-simple,ngram-map-k\"\n\
+n_max = 3\nn_min = 0\np_min = 0.0\nngram_simple_size_n = 16\nngram_simple_size_m = 32\n\
+ngram_simple_min_hits = 2\nngram_map_k_size_n = 12\nngram_map_k_size_m = 48\n\
+ngram_map_k_min_hits = 1\nngram_map_k4v_size_n = 12\nngram_map_k4v_size_m = 48\n\
+ngram_map_k4v_min_hits = 1\nngram_mod_n_match = 24\nngram_mod_n_max = 64\n\
+ngram_mod_n_min = 48\n";
+        let env_pairs = [
+            ("PROXIMA_PROMPT_CACHE_BYTE_BUDGET", "1073741824"),
+            ("PROXIMA_PROMPT_CACHE_MAX_ENTRIES", "8"),
+            ("PROXIMA_PROMPT_CACHE_RING_REWIND_SLACK", "512"),
+            ("PROXIMA_PROMPT_CACHE_CHECKPOINT_INTERVAL", "1024"),
+            ("PROXIMA_PROMPT_CACHE_MAX_CHECKPOINTS", "4"),
+            ("PROXIMA_PROMPT_CACHE_CACHE_REUSE_MIN", "64"),
+            ("PROXIMA_PROMPT_CACHE_PREWARM_CHUNK_TOKENS", "128"),
+            ("PROXIMA_PROMPT_CACHE_FOLLOW_UP_BRANCHES", "3"),
+            ("PROXIMA_PROMPT_CACHE_FOLLOW_UP_MAX_TOKENS", "64"),
+            ("PROXIMA_PROMPT_CACHE_FOLLOW_UP_TEMPERATURE_MILLI", "700"),
+            ("PROXIMA_PROMPT_CACHE_MIN_SIMILARITY_MILLI", "250"),
+            ("PROXIMA_PROMPT_CACHE_BLOCK_TOKENS", "32"),
+            ("PROXIMA_PROMPT_CACHE_BLOOM_BITS_PER_ENTRY", "8192"),
+            ("PROXIMA_PROMPT_CACHE_BLOOM_HASHES", "6"),
+            ("PROXIMA_SPECULATIVE_TYPES", "ngram-simple,ngram-map-k"),
+            ("PROXIMA_SPECULATIVE_N_MAX", "3"),
+            ("PROXIMA_SPECULATIVE_N_MIN", "0"),
+            ("PROXIMA_SPECULATIVE_P_MIN", "0.0"),
+            ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_N", "16"),
+            ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_SIZE_M", "32"),
+            ("PROXIMA_SPECULATIVE_NGRAM_SIMPLE_MIN_HITS", "2"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MAP_K_SIZE_N", "12"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MAP_K_SIZE_M", "48"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MAP_K_MIN_HITS", "1"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_SIZE_N", "12"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_SIZE_M", "48"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MAP_K4V_MIN_HITS", "1"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MOD_N_MATCH", "24"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MOD_N_MAX", "64"),
+            ("PROXIMA_SPECULATIVE_NGRAM_MOD_N_MIN", "48"),
+        ];
+        let via_builder = ServingSettings::builder()
+            .prompt_cache(
+                PromptCacheSettings::builder()
+                    .byte_budget(1_073_741_824)
+                    .max_entries(8)
+                    .ring_rewind_slack(512)
+                    .checkpoint_interval(1024)
+                    .max_checkpoints(4)
+                    .cache_reuse_min(64)
+                    .prewarm_chunk_tokens(128)
+                    .follow_up_branches(3)
+                    .follow_up_max_tokens(64)
+                    .follow_up_temperature_milli(700)
+                    .min_similarity_milli(250)
+                    .block_tokens(32)
+                    .bloom_bits_per_entry(8192)
+                    .bloom_hashes(6)
+                    .build(),
+            )
+            .speculative(
+                SpeculativeSettings::builder()
+                    .speculative_types(
+                        SpeculativeTypeNameSet::empty()
+                            .insert(SpeculativeTypeName::NgramSimple)
+                            .insert(SpeculativeTypeName::NgramMapK),
+                    )
+                    .ngram_simple_size_n(16)
+                    .ngram_simple_size_m(32)
+                    .ngram_simple_min_hits(2)
+                    .build(),
+            )
+            .build();
+
+        round_trip::assert_three_ways(toml_text, &env_pairs, &via_builder);
+
+        let lowered = via_builder.as_serving_config(&[]);
+        assert_eq!(lowered.prompt_cache.byte_budget, 1_073_741_824);
+        assert_eq!(lowered.speculative.ngram_simple.size_n, 16);
+
+        let off_switch = temp_env::with_vars(
+            [("PROXIMA_PROMPT_CACHE_BYTE_BUDGET", Some("0"))],
+            || ServingSettings::from_env().expect("the off switch env parses"),
+        );
+        assert!(!off_switch.as_serving_config(&[]).prompt_cache.is_enabled());
+
+        let refused = conflaguration::from_toml_str::<ServingSettings>(
+            "[prompt_cache]\nbyte_budget = \"large\"\n",
+        );
+        assert!(refused.is_err(), "a string byte budget is refused");
     }
 }
