@@ -160,6 +160,30 @@ pub struct ModelDescriptor {
     /// `false` keeps every new row's logits, which a speculative verify step and pooled
     /// embeddings read.
     pub last_row_only: bool,
+    /// `true` lowers a second program with every new row's logits
+    /// ([`Self::verify`]) next to the decode program, so a speculative step can
+    /// check a drafted run in one forward. Off unless the family's measured
+    /// verify cost pays for the drafts it checks; the family profile carries the
+    /// default and a config layer overrides it.
+    #[serde(default)]
+    pub speculative_verify: bool,
+}
+
+impl ModelDescriptor {
+    /// The descriptor of the verify program: this one with every new row's
+    /// logits kept. `None` unless [`Self::speculative_verify`] is set, the
+    /// program samples a last row (a pooled-embedding program has no draft to
+    /// check), and every layer rewinds by truncating its cache
+    /// ([`LayerKind::Attention`]; a state-space or short-conv layer carries
+    /// state a rejected draft would have to undo).
+    #[must_use]
+    pub fn verify(&self) -> Option<Self> {
+        let rewinds = self.layers.iter().all(|layer| layer.kind == LayerKind::Attention);
+        (self.speculative_verify && self.last_row_only && rewinds).then(|| Self {
+            last_row_only: false,
+            ..self.clone()
+        })
+    }
 }
 
 #[cfg(feature = "config")]
@@ -175,6 +199,11 @@ impl conflaguration::Validate for ModelDescriptor {
         require(self.embedding > 0, "embedding", "must be positive");
         require(self.query_heads > 0, "query_heads", "must be positive");
         require(self.block_count > 0, "block_count", "must be positive");
+        require(
+            !self.speculative_verify || self.verify().is_some() || !self.last_row_only,
+            "speculative_verify",
+            "needs layers that rewind by truncating their cache",
+        );
         require(
             self.layers.len() == self.block_count as usize,
             "layers",
@@ -240,6 +269,11 @@ pub struct FamilyProfile {
     /// families are [`RopeLayout::SplitHalf`], NORM families are
     /// [`RopeLayout::Adjacent`]. Never inferred from tensor presence.
     pub rope_layout: RopeLayout,
+    /// Lower the verify program by default ([`ModelDescriptor::speculative_verify`]):
+    /// set only for a family whose measured verify step costs less than the
+    /// tokens its drafts save.
+    #[serde(default)]
+    pub speculative_verify: bool,
 }
 
 /// Which channels RoPE rotates together: `(i, i + rotary_dim / 2)` or
@@ -382,6 +416,7 @@ pub fn mistral_descriptor_from_shape(
         fused_qkv_reduce,
         head_repeats: 1,
         last_row_only: true,
+        speculative_verify: profile.speculative_verify,
     }
 }
 
