@@ -1044,6 +1044,34 @@ pub fn allocate_placed_buffer(byte_len: usize) -> Result<PlacedBuffer, MetalErro
         })
 }
 
+/// Wraps memory the caller owns as a placed buffer without copying it, so the
+/// buffer and the range alias the same bytes. The placement of a kv buffer is
+/// the caller's decision, and this is how a caller places it in memory it
+/// owns. [`allocate_placed_buffer`] is the owning form; the call underneath is
+/// `create_no_copy_buffer` (`newBufferWithBytesNoCopy` with no deallocator).
+///
+/// # Safety
+/// `base` must point to `byte_len` bytes that outlive every use of the
+/// returned buffer and are not freed, remapped or reused while a command
+/// buffer is in flight. The buffer never owns the memory.
+///
+/// # Errors
+/// Refuses a null or non-page-aligned pointer, a zero or non-page-aligned
+/// length, and propagates a device refusal.
+#[cfg(feature = "metal-output-placement")]
+pub unsafe fn allocate_placed_buffer_over(
+    base: *mut u8,
+    byte_len: usize,
+) -> Result<PlacedBuffer, MetalError> {
+    if base.is_null() || byte_len == 0 || !is_page_aligned(base.cast(), byte_len) {
+        return Err(MetalError::CompileFailed {
+            log: "a placed buffer over caller memory needs a page-aligned, non-null pointer and a non-zero page-aligned length".to_string(),
+        });
+    }
+    let (device, _queue) = device_and_queue()?;
+    create_no_copy_buffer(&device, base.cast(), byte_len)
+}
+
 /// Zero-fills the first `byte_len` bytes of `buffer`. A freshly allocated
 /// `MTLBuffer`'s contents are undefined (`allocate_fault_buffer`'s own
 /// doc), and [`allocate_placed_buffer`] never zero-fills -- most callers
