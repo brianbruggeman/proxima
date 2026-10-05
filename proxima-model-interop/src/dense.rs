@@ -34,8 +34,8 @@
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    AttentionScoreScale, EmbeddingScale, LayerAttentionConfig, LayerSchedule, ModelDescriptor, Qwen35LayerRoots,
-    build_forward, mistral_descriptor_from_shape,
+    AttentionScoreScale, EmbeddingScale, LayerAttentionConfig, LayerSchedule, ModelDescriptor,
+    Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape,
 };
 
 use crate::architecture::{Architecture, BoundProgram};
@@ -67,32 +67,58 @@ impl Architecture for DenseArch {
     ) -> Result<BoundProgram<'file>, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
         let descriptor = descriptor_from_gguf(parsed, &architecture)?;
-        // `&[]`: this entry point takes no `ServingConfig`, so there is no
-        // `weight_precision` rule set to thread here yet --
-        // `crate::bind::bind_all_weights`'s own doc names this as the
-        // wiring a future slice does, unchanged from `load_inner`'s prior
-        // inline call.
-        let weights = bind_all_weights(parsed, file_bytes, &architecture, false, false, &[])?;
-        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
-            build_forward(&descriptor)?;
-        Ok(BoundProgram {
-            weights,
-            architecture,
-            program,
-            logits_root,
-            hidden_root,
-            residual_roots: layer_residuals,
-            layer_roots: cache_roots
-                .into_iter()
-                .map(Qwen35LayerRoots::Attention)
-                .collect(),
-            qwen35moe_layer_diagnostics: Vec::new(),
-            router_roots: Vec::new(),
-            moe_sites,
-            duplicate_head_roots: Vec::new(),
-            single_position_step: false,
-        })
+        bind_descriptor(parsed, file_bytes, architecture, &descriptor)
     }
+
+    /// The same weights and cache leaves as [`Self::bind`] with every new
+    /// position's logits row kept, when the family profile arms it
+    /// ([`ModelDescriptor::verify`]); every family's default is off until its
+    /// verify step is measured to pay for the drafts it checks.
+    fn speculative_verify_program<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
+        let architecture = architecture_from_metadata(parsed)?;
+        let descriptor = descriptor_from_gguf(parsed, &architecture)?;
+        descriptor
+            .verify()
+            .map(|verify| bind_descriptor(parsed, file_bytes, architecture, &verify))
+            .transpose()
+    }
+}
+
+fn bind_descriptor<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    architecture: ModelArchitecture,
+    descriptor: &ModelDescriptor,
+) -> Result<BoundProgram<'file>, InteropError> {
+    // `&[]`: this entry point takes no `ServingConfig`, so there is no
+    // `weight_precision` rule set to thread here yet --
+    // `crate::bind::bind_all_weights`'s own doc names this as the
+    // wiring a future slice does, unchanged from `load_inner`'s prior
+    // inline call.
+    let weights = bind_all_weights(parsed, file_bytes, &architecture, false, false, &[])?;
+    let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
+        build_forward(descriptor)?;
+    Ok(BoundProgram {
+        weights,
+        architecture,
+        program,
+        logits_root,
+        hidden_root,
+        residual_roots: layer_residuals,
+        layer_roots: cache_roots
+            .into_iter()
+            .map(Qwen35LayerRoots::Attention)
+            .collect(),
+        qwen35moe_layer_diagnostics: Vec::new(),
+        router_roots: Vec::new(),
+        moe_sites,
+        duplicate_head_roots: Vec::new(),
+        single_position_step: false,
+    })
 }
 
 /// The dense checkpoint's whole pre-lowering program as one config:

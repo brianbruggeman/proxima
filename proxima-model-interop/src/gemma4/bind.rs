@@ -857,7 +857,7 @@ impl ArchitectureTrait for Gemma4Arch {
         parsed: &ParsedGguf,
         file_bytes: &'file [u8],
     ) -> Result<Option<BoundProgram<'file>>, InteropError> {
-        bind_gemma4_all_positions_logits(parsed, file_bytes).map(Some)
+        self.speculative_verify_program_with_kv_layout(parsed, file_bytes, KvLayout::Full)
     }
 
     #[cfg(feature = "std")]
@@ -867,7 +867,11 @@ impl ArchitectureTrait for Gemma4Arch {
         file_bytes: &'file [u8],
         layout: KvLayout,
     ) -> Result<Option<BoundProgram<'file>>, InteropError> {
-        bind_gemma4_with_last_row_only(parsed, file_bytes, false, layout).map(Some)
+        let header = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
+        header
+            .verify()
+            .map(|_| bind_gemma4_with_last_row_only(parsed, file_bytes, false, layout))
+            .transpose()
     }
 
     /// Feeds the sliding-window RoPE table the `rope_cos_swa`/`rope_sin_swa`

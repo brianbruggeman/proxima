@@ -2747,21 +2747,20 @@ impl<'file> LoadedModel<'file> {
                     .map_or_else(|| crate::bind::checkpoint_has_qk_norm(parsed), |config| config.qk_norm);
                 build_single_range_program(&bound.architecture, qk_norm)?
             };
-            // Capability-derived, never a name comparison -- see
-            // [`crate::architecture::Architecture::speculative_verify_program`]'s
-            // own doc. `Gemma4Arch` is this crate's only override today;
-            // every other registered architecture's default `Ok(None)`
-            // keeps this field `None`.
-            let speculative_verify_program = resolved
-                .speculative_verify_program_with_kv_layout(parsed, file_bytes, kv_layout)?
-                .map(|verify_bound| match descriptor {
-                    Some(config) => verify_bound.lowered_from(&ModelDescriptor {
-                        last_row_only: false,
-                        ..config.clone()
-                    }),
-                    None => Ok(verify_bound),
-                })
-                .transpose()?
+            // Armed by the descriptor ([`ModelDescriptor::verify`]), never by a
+            // name: a config decides directly, and without one the architecture
+            // reads its own header descriptor ([`crate::architecture::Architecture::speculative_verify_program`]).
+            let speculative_verify_program = match descriptor {
+                Some(config) => config
+                    .verify()
+                    .map(|verify| {
+                        resolved
+                            .bind_with_kv_layout(parsed, file_bytes, kv_layout)?
+                            .lowered_from(&verify)
+                    })
+                    .transpose()?,
+                None => resolved.speculative_verify_program_with_kv_layout(parsed, file_bytes, kv_layout)?,
+            }
                 .map(|verify_bound| {
                     (
                         verify_bound.program,

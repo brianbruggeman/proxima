@@ -24,6 +24,7 @@ sliding_kv_ring = false
 cache_strategy = "TwoRange"
 head_repeats = 1
 last_row_only = true
+speculative_verify = true
 
 # blocks 0..15: own k and v, three groups of four 256-wide layers then one 512-wide layer
 [[layers]]
