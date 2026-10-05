@@ -246,6 +246,9 @@ fn cov_percent(values: &[f64]) -> f64 {
 }
 
 fn outlier_flags(values: &[f64]) -> Vec<bool> {
+    if values.is_empty() {
+        return Vec::new();
+    }
     let center = median(values);
     let deviations: Vec<f64> = values.iter().map(|value| (value - center).abs()).collect();
     let mad = median(&deviations);
