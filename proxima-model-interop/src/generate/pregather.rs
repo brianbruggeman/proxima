@@ -2491,6 +2491,14 @@ impl<'file> LoadedModel<'file> {
         self
     }
 
+    /// The placement hook of the device kv, [`DeviceKv::adopt`] in `device_kv.rs`: replaces where its buffers come from. Compose it with [`omega::allocate_placed_buffer_over`] to put the kv in memory you own; the default, [`omega::allocate_placed_buffer`], reproduces today's allocation.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[must_use]
+    pub fn with_kv_buffer_source(mut self, source: fn(usize) -> Result<omega::PlacedBuffer, omega::MetalError>) -> Self {
+        self.kv_buffer_source = source;
+        self
+    }
+
     /// [`Self::load`] with the paired gate/up reduce
     /// (`proxima_tensor::spec::append_mistral_cached_layer`'s
     /// `paired_gate_up_reduce`) flipped on: one `Op::Reduce` per layer over
@@ -2702,6 +2710,8 @@ impl<'file> LoadedModel<'file> {
             prompt_cache: Mutex::new(PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_buffer_source: allocate_placed_buffer,
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
                 weights: bound.weights,
@@ -2833,6 +2843,8 @@ impl<'file> LoadedModel<'file> {
             prompt_cache: Mutex::new(PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_buffer_source: allocate_placed_buffer,
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights,
@@ -2951,6 +2963,8 @@ impl<'file> LoadedModel<'file> {
             prompt_cache: Mutex::new(PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_buffer_source: allocate_placed_buffer,
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights,
