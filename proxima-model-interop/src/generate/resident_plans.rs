@@ -150,6 +150,7 @@ impl PlanIdentity {
             prompt_cache: _,
             // a skipped read has no lowering yet, so every resident plan is a dense plan
             attention: _,
+            prefill: _,
         } = *config;
         Self {
             numeric_policy,
