@@ -152,12 +152,22 @@ pub(super) fn prepare(
 
     #[cfg(feature = "instrument")]
     let bind_started = read_ticks();
+    #[cfg(not(feature = "top-fraction-fusion"))]
     let mut resolved = bind_with_fusion(
         program,
         &shapes,
         &effective_outputs,
         fuse_cached_attention,
         numeric_policy,
+    )?;
+    #[cfg(feature = "top-fraction-fusion")]
+    let mut resolved = bind_with_top_fraction(
+        program,
+        &shapes,
+        &effective_outputs,
+        fuse_cached_attention,
+        numeric_policy,
+        crate::sized::SELECTION_TOP_FRACTION_MIN_ROWS,
     )?;
     #[cfg(feature = "instrument")]
     counter!(PREPARE_BIND_TICKS, elapsed_ticks(bind_started));
