@@ -116,7 +116,7 @@ pub use expert_slab::{
 pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
 pub use generate::{
-    CachePath, CacheReport, DecodeMetrics, EvictionRule, LoadedModel, MissReason, Phase,
+    CachePath, CacheReport, ColdTier, DecodeMetrics, EvictionRule, LoadedModel, MissReason, Phase,
     PrefixState,
     PrewarmReport, PrewarmSkip,
     SpeculativeDecodeStats, SpeculativeTypeStats, TokenEvent,
