@@ -68,6 +68,7 @@ pub mod profiles;
 mod qwen35;
 pub mod rope_scaling;
 mod serving;
+mod serving_grammar;
 #[cfg(feature = "std")]
 mod prompt_cache_settings;
 #[cfg(feature = "std")]
@@ -144,6 +145,7 @@ pub use residency::{
     ServeDecision, ServePrecision,
 };
 pub use rope_scaling::RopeScaling;
+pub use serving_grammar::ReadSpec;
 #[cfg(feature = "std")]
 pub use serving::GdnPrefillBackend;
 pub use serving::{
