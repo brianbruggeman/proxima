@@ -996,6 +996,20 @@ fn zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids() {
 }
 
 #[test]
+fn hand_written_qwen2_config_equals_the_gguf_header_descriptor() {
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs/qwen2.toml");
+    let written: ModelDescriptor = conflaguration::from_file(&config_path)
+        .unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()));
+    let mapping = QWEN2.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let architecture = architecture_from_metadata(&parsed).expect("qwen2 declares an architecture");
+
+    let derived = dense_descriptor_from_gguf(&parsed, &architecture).expect("the qwen2 header carries every key the descriptor reads");
+
+    assert_eq!(written, derived, "the hand-written config disagrees with the checkpoint's own header");
+}
+
+#[test]
 fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
     let mapping = GEMMA4_E2B.open();
     let file_bytes: &[u8] = &mapping;
@@ -1004,14 +1018,11 @@ fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
     let windowed = base.layers.iter().filter(|layer| layer.attention.mask_window.is_some()).count();
     assert!(windowed > 0, "e2b must carry sliding layers for the variant to change anything");
 
-    let text = toml::to_string(&base).expect("a descriptor serializes to toml");
-    let variant_text = text
-        .lines()
-        .filter(|line| !line.starts_with("mask_window = "))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replace("sliding_kv_ring = true", "sliding_kv_ring = false");
-    let variant: ModelDescriptor = toml::from_str(&variant_text).expect("the variant toml parses");
+    let mut variant = base.clone();
+    variant.sliding_kv_ring = false;
+    for layer in &mut variant.layers {
+        layer.attention.mask_window = None;
+    }
     assert!(variant.layers.iter().all(|layer| layer.attention.mask_window.is_none()));
 
     let (base_program, ..) = build_forward(&base).expect("the base lowers");
