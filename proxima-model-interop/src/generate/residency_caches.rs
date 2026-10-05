@@ -257,11 +257,64 @@ mod layer_cache_truncate_tests {
     }
 }
 
+/// Raises each attention layer's sealed end to what `kv_decision::sealed_blocks` allows for the rows it holds.
+pub(super) fn seal_attention_layers(
+    layer_caches: &mut [LayerCacheState],
+    widths: &[LayerPadRowWidths],
+    block_tokens: usize,
+    horizon_rows: usize,
+) {
+    for (state, width) in layer_caches.iter_mut().zip(widths) {
+        let (LayerCacheState::Attention(cache), LayerPadRowWidths::Attention { even_odd_row, .. }) = (state, width) else {
+            continue;
+        };
+        // ring slots are overwritten in place, so a ring row is never immutable; rings restore through checkpoints
+        if cache.ring_geometry().is_some() || *even_odd_row == 0 {
+            continue;
+        }
+        let rows = cache.k_even.len() / *even_odd_row;
+        let blocks = proxima_core::kv_decision::sealed_blocks(cache.sealed_end, rows, block_tokens, horizon_rows);
+        cache.sealed_end = cache.sealed_end.max(blocks.end * block_tokens);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layer_cache_sealing_tests {
-    use super::LayerCache;
+    use super::{LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers};
     use crate::error::InteropError;
+    use crate::generate::kv_ring::KvRing;
+
+    fn widths_for(layers: &[LayerCacheState]) -> Vec<LayerPadRowWidths> {
+        layers
+            .iter()
+            .map(|state| match state {
+                LayerCacheState::Attention(_) => LayerPadRowWidths::Attention { even_odd_row: 2, v_row: 1 },
+                _ => LayerPadRowWidths::SharedFromLayer,
+            })
+            .collect()
+    }
+
+    fn attention(layers: &mut [LayerCacheState], index: usize) -> &mut LayerCache {
+        match &mut layers[index] {
+            LayerCacheState::Attention(cache) => cache,
+            _ => panic!("layer {index} is not an attention layer"),
+        }
+    }
+
+    fn seal(layers: &mut [LayerCacheState], block_tokens: usize, horizon_rows: usize) {
+        let widths = widths_for(layers);
+        seal_attention_layers(layers, &widths, block_tokens, horizon_rows);
+    }
+
+    fn ring_of_eight_rows() -> LayerCache {
+        let mut cache = LayerCache::ring(KvRing::new(4, 0, 2, 1, 0), 8);
+        for position in 0..8 {
+            let (even, odd, value) = row_at(position);
+            cache.append_at(position, &even, &odd, &value);
+        }
+        cache
+    }
 
     fn row_at(position: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let at = position as f32;
@@ -275,6 +328,69 @@ mod layer_cache_sealing_tests {
             cache.append(&even, &odd, &value);
         }
         cache
+    }
+
+    #[test]
+    fn seal_full_block_inside_horizon_not_sealed() {
+        let mut layers = vec![LayerCacheState::Attention(cache_with_rows(4))];
+
+        seal(&mut layers, 4, 1);
+
+        assert_eq!(attention(&mut layers, 0).sealed_end, 0);
+    }
+
+    #[test]
+    fn seal_partial_block_never_sealed() {
+        let mut layers = vec![LayerCacheState::Attention(cache_with_rows(3))];
+
+        seal(&mut layers, 4, 0);
+
+        assert_eq!(attention(&mut layers, 0).sealed_end, 0);
+    }
+
+    #[test]
+    fn seal_bytes_unchanged_after_later_appends() {
+        let mut layers = vec![LayerCacheState::Attention(cache_with_rows(5))];
+        seal(&mut layers, 4, 1);
+        let cache = attention(&mut layers, 0);
+        assert_eq!(cache.sealed_end, 4);
+        let (even, odd, value) = (cache.k_even[..8].to_vec(), cache.k_odd[..8].to_vec(), cache.v[..4].to_vec());
+
+        for position in 5..10 {
+            let (row_even, row_odd, row_value) = row_at(position);
+            attention(&mut layers, 0).append(&row_even, &row_odd, &row_value);
+        }
+        seal(&mut layers, 4, 1);
+
+        let cache = attention(&mut layers, 0);
+        assert_eq!(cache.sealed_end, 8);
+        let bits = |values: &[f32]| values.iter().map(|value| value.to_bits()).collect::<Vec<u32>>();
+        assert_eq!(bits(&cache.k_even[..8]), bits(&even));
+        assert_eq!(bits(&cache.k_odd[..8]), bits(&odd));
+        assert_eq!(bits(&cache.v[..4]), bits(&value));
+    }
+
+    #[test]
+    fn ring_layer_never_reports_sealed_rows() {
+        let mut layers = vec![LayerCacheState::Attention(ring_of_eight_rows())];
+
+        seal(&mut layers, 4, 0);
+
+        assert_eq!(attention(&mut layers, 0).sealed_end, 0);
+    }
+
+    #[test]
+    fn decode_commit_seals_attention_layers_only() {
+        let mut layers = vec![
+            LayerCacheState::Attention(cache_with_rows(8)),
+            LayerCacheState::Attention(ring_of_eight_rows()),
+            LayerCacheState::SharedFromLayer,
+        ];
+
+        seal(&mut layers, 4, 0);
+
+        assert_eq!(attention(&mut layers, 0).sealed_end, 8);
+        assert_eq!(attention(&mut layers, 1).sealed_end, 0);
     }
 
     #[test]
