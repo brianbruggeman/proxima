@@ -163,6 +163,9 @@ pub enum MissReason {
     /// A layer holds state that cannot be rewound (a recurrent layer, or a
     /// cache shape this build does not truncate).
     UnrewindableLayer,
+    /// The best match was a cold entry whose tier read failed, so the request
+    /// prefilled in full.
+    TierRestoreFailed,
 }
 
 impl MissReason {
@@ -177,6 +180,7 @@ impl MissReason {
             Self::RingSlackExceeded { .. } => "ring_slack_exceeded",
             Self::RingRowsStale { .. } => "ring_rows_stale",
             Self::UnrewindableLayer => "unrewindable_layer",
+            Self::TierRestoreFailed => "tier_restore_failed",
         }
     }
 }
@@ -241,6 +245,10 @@ fn relabel_after_tier(
     match (restored, report.miss) {
         (Ok(true), None) => CacheReport {
             path: CachePath::Tier,
+            ..report
+        },
+        (Err(_), Some(_)) => CacheReport {
+            miss: Some(MissReason::TierRestoreFailed),
             ..report
         },
         _ => report,
@@ -3758,6 +3766,26 @@ mod tests {
 
         assert_eq!(relabel_after_tier(hit, &Ok(false)), hit);
         assert_eq!(relabel_after_tier(miss, &Ok(true)), miss);
+        assert_eq!(relabel_after_tier(hit, &Err(failure)), hit);
+    }
+
+    #[test]
+    fn tier_failure_restore_error_names_the_miss() {
+        let miss = CacheReport::miss(5, MissReason::Empty);
+        let failure = InteropError::UnsupportedServingConfig("x".into());
+
+        let named = relabel_after_tier(miss, &Err(failure));
+
+        assert_eq!(named.miss, Some(MissReason::TierRestoreFailed));
+        assert_eq!(named.path, CachePath::Miss);
+        assert_eq!(MissReason::TierRestoreFailed.as_str(), "tier_restore_failed");
+    }
+
+    #[test]
+    fn tier_failure_restore_error_leaves_a_hit_alone() {
+        let hit = tier_hit_report();
+        let failure = InteropError::UnsupportedServingConfig("x".into());
+
         assert_eq!(relabel_after_tier(hit, &Err(failure)), hit);
     }
 }
