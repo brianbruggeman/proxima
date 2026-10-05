@@ -41,6 +41,7 @@ extern crate alloc;
 pub mod arch;
 #[cfg(feature = "alloc")]
 pub mod arena;
+pub mod kv_decision;
 pub mod ring;
 #[cfg(feature = "alloc")]
 pub mod serving_state;
