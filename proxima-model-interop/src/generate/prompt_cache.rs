@@ -65,6 +65,30 @@ pub(super) const fn entry_is_reusable(
     lcp > 0 && (lcp == stored_len || lcp * 1000 > min_similarity_milli as usize * prompt_len)
 }
 
+/// One rule for choosing which entry a full cache gives up. A rule list is
+/// tried in order and the first rule that selects an entry decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictionRule {
+    /// Selects the first entry that is an unused follow-up branch.
+    Branch,
+    /// Selects the entry with the lowest stamp, and always selects one when
+    /// any entry exists.
+    Oldest,
+}
+
+fn rule_victim(
+    candidates: impl Iterator<Item = (u64, bool)> + Clone,
+    rules: &[EvictionRule],
+) -> Option<u64> {
+    rules
+        .iter()
+        .find_map(|rule| match rule {
+            EvictionRule::Branch => candidates.clone().find(|&(_, is_branch)| is_branch),
+            EvictionRule::Oldest => candidates.clone().next(),
+        })
+        .map(|(stamp, _)| stamp)
+}
+
 /// How a request used the cache (spec R8's `cache_path`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePath {
@@ -550,6 +574,7 @@ pub(super) struct PromptCache {
     last_report: Option<CacheReport>,
     prewarm_suffix: Vec<u32>,
     follow_up_closing: Vec<u32>,
+    eviction_rules: Vec<EvictionRule>,
 }
 
 /// What the per-entry bloom filters say about a prompt whose prefix stopped
@@ -578,6 +603,7 @@ impl PromptCache {
             last_report: None,
             prewarm_suffix: Vec::new(),
             follow_up_closing: Vec::new(),
+            eviction_rules: vec![EvictionRule::Branch, EvictionRule::Oldest],
         }
     }
 
@@ -820,14 +846,16 @@ impl PromptCache {
         Some(entry)
     }
 
-    /// The entry to evict next: an unused follow-up branch before any entry a
-    /// request produced, then the least recently used.
+    /// The entry to evict next, chosen by the first rule that selects one;
+    /// the default list is an unused follow-up branch, then the least recently
+    /// used.
     fn eviction_victim(&self) -> Option<u64> {
-        self.entries
-            .iter()
-            .find(|(_, held)| held.branch_base.is_some())
-            .or_else(|| self.entries.iter().next())
-            .map(|(stamp, _)| *stamp)
+        rule_victim(
+            self.entries
+                .iter()
+                .map(|(stamp, entry)| (*stamp, entry.branch_base.is_some())),
+            &self.eviction_rules,
+        )
     }
 
     fn rebuild_after(&mut self, lost: &TrieError) {
@@ -1636,6 +1664,19 @@ mod tests {
 
         assert_eq!(report.lcp, 4);
         assert_eq!(report.follow_up_hit_tokens, 0);
+    }
+
+    #[test]
+    fn eviction_rules_default_reproduces_branch_then_oldest() {
+        let mixed = [(3, false), (5, true), (7, true), (9, false)];
+        let plain = [(3, false), (9, false)];
+        let default = [EvictionRule::Branch, EvictionRule::Oldest];
+
+        assert_eq!(rule_victim(mixed.into_iter(), &default), Some(5));
+        assert_eq!(rule_victim(mixed.into_iter(), &[EvictionRule::Oldest]), Some(3));
+        assert_eq!(rule_victim(plain.into_iter(), &default), Some(3));
+        assert_eq!(rule_victim(std::iter::empty(), &default), None);
+        assert_eq!(rule_victim(plain.into_iter(), &[EvictionRule::Branch]), None);
     }
 
     #[test]

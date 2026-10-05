@@ -264,7 +264,7 @@ use kv_ring::{
 };
 pub use load_model::*;
 pub use prewarm::{PrewarmReport, PrewarmSkip};
-pub use prompt_cache::{CachePath, CacheReport, MissReason};
+pub use prompt_cache::{CachePath, CacheReport, EvictionRule, MissReason};
 use prompt_cache::PromptCache;
 use prewarm_gate::PrewarmGate;
 use prewarm_queue::PrewarmQueue;
