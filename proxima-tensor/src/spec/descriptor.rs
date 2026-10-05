@@ -520,11 +520,6 @@ pub fn build_forward(
                 });
             }
             let attention = first.attention;
-            refuse_when(
-                descriptor.residual_scale.is_some(),
-                "build_forward(CacheStrategy::SingleRange)",
-                "a residual scale",
-            )?;
             // `attention.rope_pairing` is this descriptor's own data, not
             // re-inferred from `qk_norm` here -- Qwen2 needs split-half RoPE
             // with `qk_norm` still `false` (no QK-norm tensors at all), a
@@ -551,6 +546,7 @@ pub fn build_forward(
                     descriptor.embedding_scale,
                     descriptor.logit_scale,
                     attention.score_scale,
+                    descriptor.residual_scale,
                 )?;
             Ok((
                 program,

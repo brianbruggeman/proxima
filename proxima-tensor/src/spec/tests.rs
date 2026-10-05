@@ -741,6 +741,7 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             None,
             None,
             AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
+            None,
         )
         .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
@@ -15111,6 +15112,7 @@ mod gemma4_synthetic_parity {
                 None,
                 None,
                 AttentionScoreScale::InverseSqrtQueryPreAttnScalar(REAL_HEAD_DIM),
+                None,
             )
             .expect("direct real qwen2-dims build");
 
@@ -17735,24 +17737,34 @@ mod forward_scales {
     }
 
     #[test]
-    fn single_range_refuses_a_residual_scale_until_it_lowers_one() {
-        for (expert_count, expert_used_count) in [(0, 0), (4, 2)] {
-            let mut descriptor = descriptor(expert_count, expert_used_count);
-            descriptor.residual_scale = Some(0.22);
+    fn moe_residual_scale_adds_one_constant_and_two_multiplies_per_layer() {
+        let (base, _base_logits) = built(&descriptor(4, 2));
+        let mut scaled_descriptor = descriptor(4, 2);
+        scaled_descriptor.residual_scale = Some(0.22);
+        let (scaled, _scaled_logits) = built(&scaled_descriptor);
 
-            let outcome = build_forward(&descriptor, true);
+        assert_eq!(scaled.len(), base.len() + 5);
+        assert_eq!(constants_equal(&scaled, 0.22_f32), 1);
+        assert_eq!(constants_equal(&base, 0.22_f32), 0);
+    }
 
-            assert!(
-                matches!(
-                    outcome,
-                    Err(TensorError::UnsupportedInBuilder {
-                        builder: "build_forward(CacheStrategy::SingleRange)",
-                        feature: "a residual scale",
-                    })
-                ),
-                "experts {expert_count} must refuse a residual scale"
-            );
-        }
+    #[test]
+    fn dense_single_range_refuses_a_residual_scale() {
+        let mut dense = descriptor(0, 0);
+        dense.residual_scale = Some(0.22);
+
+        let outcome = build_forward(&dense, true);
+
+        assert!(
+            matches!(
+                outcome,
+                Err(TensorError::UnsupportedInBuilder {
+                    builder: "mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
+                    feature: "a residual scale on a dense layer",
+                })
+            ),
+            "a dense layer must refuse a residual scale"
+        );
     }
 
     #[test]

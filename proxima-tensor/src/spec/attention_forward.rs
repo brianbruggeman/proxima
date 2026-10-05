@@ -2409,6 +2409,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         None,
         None,
         AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
+        None,
     )
 }
 
@@ -2439,7 +2440,14 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     embedding_scale: Option<EmbeddingScale>,
     logit_scale: Option<f32>,
     score_scale: AttentionScoreScale,
+    residual_scale: Option<f32>,
 ) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
+    if residual_scale.is_some() && expert_count == 0 {
+        return Err(TensorError::UnsupportedInBuilder {
+            builder: "mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
+            feature: "a residual scale on a dense layer",
+        });
+    }
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
 
@@ -2470,6 +2478,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     // dense checkpoint with no QK-norm keeps the identical node count this
     // function has always emitted.
     let inv_head_dim = qk_norm.then(|| scalar_constant(&mut program, 1.0 / head_dim as f32));
+    let residual_scale = residual_scale.map(|scale| scalar_constant(&mut program, scale));
     let cos_new = input_leaf(
         &mut program,
         DType::Float32,
@@ -2835,6 +2844,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
                 k_odd_cache,
                 v_cache,
                 qk_norm_weights,
+                residual_scale,
             )?;
             moe_sites.push(site);
             (next_x, next_roots)
