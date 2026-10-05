@@ -258,6 +258,9 @@ pub use bind::{
 #[cfg(feature = "instrument")]
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{RepeatNodeRefusal, apply_repeat_nodes};
+#[cfg(feature = "top-fraction-fusion")]
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use bind::bind_with_top_fraction;
 pub use convert::{Convert, SimdConvert};
 #[cfg(any(
     feature = "q4k-int8-dot",
