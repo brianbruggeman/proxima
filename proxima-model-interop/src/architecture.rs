@@ -317,11 +317,11 @@ pub trait Architecture: Send + Sync {
     /// leaves, but `BoundProgram::logits_root` gathers EVERY new position's
     /// own row instead of just the last one, so one forward over
     /// `[current, draft...]` reads back one row per drafted token. Default
-    /// `Ok(None)`: every architecture this crate ships except gemma4 has no
-    /// all-positions builder yet, and speculative decode's verify step
-    /// simply stays off for them (`LoadedModel::speculative_verify_program`
-    /// is `None`, never a name comparison at the load site -- see
-    /// `Gemma4Arch::speculative_verify_program` for the one override).
+    /// `Ok(None)`: the architecture's own header descriptor does not arm verify
+    /// ([`proxima_tensor::spec::ModelDescriptor::verify`]; the family profile
+    /// carries the default), so speculative decode's verify step stays off
+    /// (`LoadedModel::speculative_verify_program` is `None`, never a name
+    /// comparison at the load site).
     ///
     /// # Errors
     ///

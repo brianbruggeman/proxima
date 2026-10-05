@@ -2,6 +2,7 @@ embedding_scale = "Sqrt"
 score_scale_inverse_sqrt_head_dim = false
 value_norm = true
 rope_layout = "split_half"
+speculative_verify = true
 
 [ffn]
 post_attention_norm = true

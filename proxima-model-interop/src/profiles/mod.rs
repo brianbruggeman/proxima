@@ -105,6 +105,15 @@ mod tests {
     }
 
     #[test]
+    fn only_the_family_whose_verify_step_was_measured_to_pay_arms_it_by_default() {
+        for (family, _) in FAMILY_PROFILES {
+            let armed = family_profile(family).expect("profile embedded").speculative_verify;
+
+            assert_eq!(armed, *family == "gemma4", "{family}");
+        }
+    }
+
+    #[test]
     fn qwen2_profile_is_split_half_from_its_own_data() {
         let profile = family_profile("qwen2").expect("qwen2 profile embedded");
 
