@@ -285,25 +285,51 @@ mod layer_cache_truncate_tests {
     }
 }
 
-/// Raises each attention layer's sealed end to what `kv_decision::sealed_blocks` allows for the rows it holds.
+/// Folds one sealed block's rows into the record kept for that block: the K even plane rows, the K odd plane rows and
+/// the V rows, each row-major. K rows are `even_odd_row` wide; V rows are `value.len() / (k_even.len() / even_odd_row)`
+/// wide. [`seal_attention_layers`], which a seal call feeds, calls it once per newly sealed block of a full-attention layer.
+pub type BlockSummarizer = fn(k_even: &[f32], k_odd: &[f32], value: &[f32], even_odd_row: usize) -> Vec<f32>;
+
+/// Raises each attention layer's sealed end to what `kv_decision::sealed_blocks` allows for the rows it holds, then
+/// brings its per-block records up to the sealed blocks when a summarizer is given.
 pub(super) fn seal_attention_layers(
     layer_caches: &mut [LayerCacheState],
     widths: &[LayerPadRowWidths],
     block_tokens: usize,
     horizon_rows: usize,
+    summarize: Option<BlockSummarizer>,
 ) {
     for (state, width) in layer_caches.iter_mut().zip(widths) {
-        let (LayerCacheState::Attention(cache), LayerPadRowWidths::Attention { even_odd_row, .. }) = (state, width) else {
+        let (LayerCacheState::Attention(cache), LayerPadRowWidths::Attention { even_odd_row, v_row }) = (state, width) else {
             continue;
         };
         cache.seal(*even_odd_row, block_tokens, horizon_rows);
+        let Some(summarizer) = summarize else {
+            continue;
+        };
+        if cache.ring_geometry().is_some() || cache.block_tokens == 0 {
+            continue;
+        }
+        let sealed_blocks = cache.sealed_end / cache.block_tokens;
+        cache.block_summaries.truncate(sealed_blocks);
+        for block in cache.block_summaries.len()..sealed_blocks {
+            let k_rows = cache.block_tokens * even_odd_row;
+            let v_rows = cache.block_tokens * v_row;
+            let record = summarizer(
+                &cache.k_even[block * k_rows..(block + 1) * k_rows],
+                &cache.k_odd[block * k_rows..(block + 1) * k_rows],
+                &cache.v[block * v_rows..(block + 1) * v_rows],
+                *even_odd_row,
+            );
+            cache.block_summaries.push(record);
+        }
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layer_cache_sealing_tests {
-    use super::{LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers};
+    use super::{BlockSummarizer, LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers};
     use crate::error::InteropError;
     use crate::generate::kv_ring::KvRing;
     use proptest::collection::vec;
@@ -327,9 +353,13 @@ mod layer_cache_sealing_tests {
         }
     }
 
-    fn seal(layers: &mut [LayerCacheState], block_tokens: usize, horizon_rows: usize) {
+    fn seal(layers: &mut [LayerCacheState], block_tokens: usize, horizon_rows: usize, summarize: Option<BlockSummarizer>) {
         let widths = widths_for(layers);
-        seal_attention_layers(layers, &widths, block_tokens, horizon_rows);
+        seal_attention_layers(layers, &widths, block_tokens, horizon_rows, summarize);
+    }
+
+    fn value_sum(_k_even: &[f32], _k_odd: &[f32], value: &[f32], _even_odd_row: usize) -> Vec<f32> {
+        vec![value.iter().sum()]
     }
 
     fn ring_of_eight_rows() -> LayerCache {
@@ -392,7 +422,7 @@ mod layer_cache_sealing_tests {
     fn seal_full_block_inside_horizon_not_sealed() {
         let mut layers = vec![LayerCacheState::Attention(cache_with_rows(4))];
 
-        seal(&mut layers, 4, 1);
+        seal(&mut layers, 4, 1, None);
 
         assert_eq!(attention(&mut layers, 0).sealed_end, 0);
     }
@@ -401,7 +431,7 @@ mod layer_cache_sealing_tests {
     fn seal_partial_block_never_sealed() {
         let mut layers = vec![LayerCacheState::Attention(cache_with_rows(3))];
 
-        seal(&mut layers, 4, 0);
+        seal(&mut layers, 4, 0, None);
 
         assert_eq!(attention(&mut layers, 0).sealed_end, 0);
     }
@@ -409,7 +439,7 @@ mod layer_cache_sealing_tests {
     #[test]
     fn seal_bytes_unchanged_after_later_appends() {
         let mut layers = vec![LayerCacheState::Attention(cache_with_rows(5))];
-        seal(&mut layers, 4, 1);
+        seal(&mut layers, 4, 1, None);
         let cache = attention(&mut layers, 0);
         assert_eq!(cache.sealed_end, 4);
         let (even, odd, value) = (cache.k_even[..8].to_vec(), cache.k_odd[..8].to_vec(), cache.v[..4].to_vec());
@@ -418,7 +448,7 @@ mod layer_cache_sealing_tests {
             let (row_even, row_odd, row_value) = row_at(position);
             attention(&mut layers, 0).append(&row_even, &row_odd, &row_value);
         }
-        seal(&mut layers, 4, 1);
+        seal(&mut layers, 4, 1, None);
 
         let cache = attention(&mut layers, 0);
         assert_eq!(cache.sealed_end, 8);
@@ -432,7 +462,7 @@ mod layer_cache_sealing_tests {
     fn ring_layer_never_reports_sealed_rows() {
         let mut layers = vec![LayerCacheState::Attention(ring_of_eight_rows())];
 
-        seal(&mut layers, 4, 0);
+        seal(&mut layers, 4, 0, None);
 
         assert_eq!(attention(&mut layers, 0).sealed_end, 0);
     }
@@ -445,7 +475,7 @@ mod layer_cache_sealing_tests {
             LayerCacheState::SharedFromLayer,
         ];
 
-        seal(&mut layers, 4, 0);
+        seal(&mut layers, 4, 0, None);
 
         assert_eq!(attention(&mut layers, 0).sealed_end, 8);
         assert_eq!(attention(&mut layers, 1).sealed_end, 0);
@@ -478,6 +508,33 @@ mod layer_cache_sealing_tests {
 
         assert_eq!(cache.sealed_end, 4);
         assert_eq!(cache.block_summaries, vec![vec![60.0f32]]);
+    }
+
+    #[test]
+    fn commit_summarizes_sealed_blocks_only_when_a_summarizer_is_given() {
+        let mut layers = vec![LayerCacheState::Attention(cache_with_rows(8))];
+        let mut plain = layers.clone();
+
+        seal(&mut layers, 4, 0, Some(value_sum));
+        seal(&mut plain, 4, 0, None);
+
+        assert_eq!(attention(&mut layers, 0).block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+        assert!(attention(&mut plain, 0).block_summaries.is_empty());
+        assert_eq!(attention(&mut plain, 0).sealed_end, 8);
+    }
+
+    #[test]
+    fn a_summarizer_that_arrives_late_catches_up_and_is_idempotent() {
+        let mut layers = vec![LayerCacheState::Attention(cache_with_rows(9))];
+
+        seal(&mut layers, 4, 1, None);
+        assert_eq!(attention(&mut layers, 0).sealed_end, 8);
+        assert!(attention(&mut layers, 0).block_summaries.is_empty());
+        seal(&mut layers, 4, 1, Some(value_sum));
+        assert_eq!(attention(&mut layers, 0).block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+        seal(&mut layers, 4, 1, Some(value_sum));
+
+        assert_eq!(attention(&mut layers, 0).block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
     }
 
     #[test]

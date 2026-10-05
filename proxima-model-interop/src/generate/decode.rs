@@ -5706,7 +5706,7 @@ impl<'file> LoadedModel<'file> {
                     // here rather than corrected twice.
                     if !active_layer_roots.is_empty() && !speculative_step {
                         cached_len += new_count;
-                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows);
+                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows, None);
                     }
 
                     // Everything below samples a token off THIS batch's logits.
@@ -5823,7 +5823,7 @@ impl<'file> LoadedModel<'file> {
                             }
                         }
                         cached_len = keep_positions;
-                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows);
+                        seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows, None);
                         for &extra in &emitted[1..] {
                             pending.push_back(extra);
                         }
