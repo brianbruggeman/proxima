@@ -181,6 +181,8 @@ impl CacheKey {
             // the cache's own policy; slack reaches the key as
             // `ring_slack_rows`
             prompt_cache: _,
+            // stages choose where rows come from; a stage that changes what a row means adds its identity to the key
+            prefill: _,
             attention: AttentionConfig { read },
         } = *config;
         Self {
@@ -210,6 +212,8 @@ impl CacheKey {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::serving::PrefillConfig;
+    use crate::serving_grammar::AssembleStep;
 
     #[test]
     fn cache_key_separates_read_specs() {
@@ -225,5 +229,19 @@ mod tests {
 
         assert_ne!(dense_key, operand_key);
         assert_eq!(dense_key, default_key);
+    }
+
+    #[test]
+    fn cache_key_ignores_the_assemble_list() {
+        let steps = [AssembleStep::Prefix, AssembleStep::Shift];
+        let config = ServingConfig {
+            prefill: PrefillConfig { assemble: &steps },
+            ..ServingConfig::default()
+        };
+
+        let staged_key = CacheKey::of(&config, false, RopeScaling::None, 0, 0);
+        let default_key = CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0);
+
+        assert_eq!(staged_key, default_key);
     }
 }

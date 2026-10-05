@@ -55,7 +55,7 @@ use proxima_tensor::NumericPolicy;
 
 use crate::error::InteropError;
 use crate::rope_scaling::RopeScaling;
-use crate::serving_grammar::ReadSpec;
+use crate::serving_grammar::{AssembleStep, ReadSpec};
 
 /// Which tensor names a [`WeightPrecisionRule`] applies to. Deliberately not
 /// a glob: `crate::bind::bind_dense_as`/`bind_matmul_weight_as` (this rule's
@@ -724,6 +724,15 @@ pub struct AttentionConfig {
     pub read: ReadSpec,
 }
 
+/// The prefill settings of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PrefillConfig<'model> {
+    /// Ordered stages that build the starting cache of a request; empty is
+    /// today's behaviour: prefix reuse, plus shifted-chunk reuse when the
+    /// prompt cache's `cache_reuse_min` and `ring_rewind_slack` are above 0.
+    pub assemble: &'model [AssembleStep],
+}
+
 /// One field per llama-server flag the repo owner's invocation sets,
 /// plus `model_path`. See the module doc for why each field's shape is
 /// what it is and why none of this crate's dependencies grew to carry it.
@@ -1093,6 +1102,10 @@ pub struct ServingConfig<'model> {
     pub prompt_cache: PromptCacheConfig,
     /// Which cached rows a decode step reads.
     pub attention: AttentionConfig,
+    /// Ordered stages that build the starting cache of a request. Empty is
+    /// today's behaviour: prefix reuse, plus shifted-chunk reuse when the
+    /// prompt cache's `cache_reuse_min` and `ring_rewind_slack` are above 0.
+    pub prefill: PrefillConfig<'model>,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -1225,6 +1238,7 @@ impl Default for ServingConfig<'static> {
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
             attention: AttentionConfig::default(),
+            prefill: PrefillConfig::default(),
         }
     }
 }
@@ -1585,6 +1599,11 @@ mod tests {
     }
 
     #[test]
+    fn serving_section_prefill_defaults_to_todays_assemble() {
+        assert!(ServingConfig::default().prefill.assemble.is_empty());
+    }
+
+    #[test]
     fn fully_supported_config_applies_without_error() {
         let config = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
@@ -1654,6 +1673,7 @@ mod tests {
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
             attention: AttentionConfig::default(),
+            prefill: PrefillConfig::default(),
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -1829,6 +1849,7 @@ mod tests {
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
             attention: AttentionConfig::default(),
+            prefill: PrefillConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1932,6 +1953,7 @@ mod tests {
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
             attention: AttentionConfig::default(),
+            prefill: PrefillConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -2025,6 +2047,7 @@ mod tests {
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
             attention: AttentionConfig::default(),
+            prefill: PrefillConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -2108,6 +2131,7 @@ mod tests {
             speculative: SpeculativeConfig::default(),
             prompt_cache: PromptCacheConfig::default(),
             attention: AttentionConfig::default(),
+            prefill: PrefillConfig::default(),
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);
