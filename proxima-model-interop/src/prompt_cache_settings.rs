@@ -62,10 +62,10 @@ pub struct PromptCacheSettings {
     #[setting(default = 100)]
     #[builder(default = 100)]
     pub min_similarity_milli: u32,
-    /// See [`crate::PromptCacheConfig::block_tokens`].
-    #[setting(default = 64)]
-    #[builder(default = 64)]
-    pub block_tokens: u32,
+    /// See [`crate::PromptCacheConfig::block_tokens`]. `None` takes the
+    /// owning block size (`kv.block_tokens` under `ServingSettings`, 64
+    /// standalone); `Some` is an explicit choice and wins.
+    pub block_tokens: Option<u32>,
     /// See [`crate::PromptCacheConfig::bloom_bits_per_entry`].
     #[setting(default = 4096)]
     #[builder(default = 4096)]
@@ -92,7 +92,10 @@ impl PromptCacheSettings {
             follow_up_max_tokens: self.follow_up_max_tokens,
             follow_up_temperature_milli: self.follow_up_temperature_milli,
             min_similarity_milli: self.min_similarity_milli,
-            block_tokens: self.block_tokens,
+            block_tokens: match self.block_tokens {
+                Some(value) => value,
+                None => PromptCacheConfig::standard().block_tokens,
+            },
             bloom_bits_per_entry: self.bloom_bits_per_entry,
             bloom_hashes: self.bloom_hashes,
         }
@@ -235,5 +238,48 @@ mod tests {
             assert_eq!(from_env.as_prompt_cache_config(), PromptCacheConfig::off());
             assert!(!from_env.as_prompt_cache_config().is_enabled());
         });
+    }
+
+    #[test]
+    fn serving_scalars_prompt_cache_block_tokens_is_optional() {
+        temp_env::with_vars(cleared_env(), || {
+            let unset = PromptCacheSettings::from_env()
+                .unwrap_or_else(|err| panic!("from_env failed: {err}"));
+            assert_eq!(unset.block_tokens, None);
+            assert_eq!(unset.as_prompt_cache_config().block_tokens, 64);
+        });
+
+        let mut env = cleared_env();
+        env.iter_mut().for_each(|(key, value)| {
+            if *key == "PROXIMA_PROMPT_CACHE_BLOCK_TOKENS" {
+                *value = Some("128");
+            }
+        });
+        temp_env::with_vars(env, || {
+            let set = PromptCacheSettings::from_env()
+                .unwrap_or_else(|err| panic!("from_env failed: {err}"));
+            assert_eq!(set.block_tokens, Some(128));
+            assert_eq!(set.as_prompt_cache_config().block_tokens, 128);
+        });
+        let defaults_toml = "byte_budget = 2147483648\nmax_entries = 4\nring_rewind_slack = 256\n\
+             checkpoint_interval = 2048\nmax_checkpoints = 4\ncache_reuse_min = 0\n\
+             prewarm_chunk_tokens = 256\nfollow_up_branches = 0\nfollow_up_max_tokens = 48\n\
+             follow_up_temperature_milli = 800\nmin_similarity_milli = 100\n\
+             bloom_bits_per_entry = 4096\nbloom_hashes = 4\n";
+
+        let mut with_key = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
+        writeln!(with_key, "{defaults_toml}block_tokens = 128").expect("write temp toml file");
+        let from_toml: PromptCacheSettings = conflaguration::from_file(with_key.path())
+            .unwrap_or_else(|err| panic!("from_file failed: {err}"));
+        assert_eq!(from_toml.block_tokens, Some(128));
+
+        let mut without_key = NamedTempFile::with_suffix(".toml").expect("create temp toml file");
+        writeln!(without_key, "{defaults_toml}").expect("write temp toml file");
+        let from_toml_unset: PromptCacheSettings = conflaguration::from_file(without_key.path())
+            .unwrap_or_else(|err| panic!("from_file failed: {err}"));
+        assert_eq!(from_toml_unset.block_tokens, None);
+
+        let via_builder = PromptCacheSettings::builder().block_tokens(128).build();
+        assert_eq!(via_builder, from_toml);
     }
 }
