@@ -738,6 +738,7 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             false,
             false,
             RopePairing::SplitHalf { pairs: 32 },
+            None,
         )
         .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
@@ -15103,6 +15104,7 @@ mod gemma4_synthetic_parity {
                 false,
                 true,
                 rope_pairing,
+                None,
             )
             .expect("direct real qwen2-dims build");
 
@@ -17618,6 +17620,13 @@ mod forward_scales {
         (program, logits)
     }
 
+    fn constants_equal(program: &[Op], value: f32) -> usize {
+        program
+            .iter()
+            .filter(|op| matches!(op, Op::Constant { value: found, .. } if *found == value))
+            .count()
+    }
+
     #[test]
     fn dense_default_graph_equals_the_pre_change_graph() {
         let (program, _logits) = built(&descriptor(0, 0));
@@ -17632,5 +17641,39 @@ mod forward_scales {
 
         assert_eq!(program.len(), MOE_PRE_CHANGE_NODES);
         assert_eq!(digest(&program), MOE_PRE_CHANGE_DIGEST);
+    }
+
+    #[test]
+    fn embedding_factor_adds_one_constant_and_one_multiply() {
+        let base = built(&descriptor(0, 0)).0;
+        let mut scaled_descriptor = descriptor(0, 0);
+        scaled_descriptor.embedding_scale = Some(EmbeddingScale::Factor(12.0));
+        let scaled = built(&scaled_descriptor).0;
+
+        assert_eq!(scaled.len(), base.len() + 2);
+        assert_eq!(constants_equal(&scaled, 12.0), 1);
+        assert_eq!(constants_equal(&base, 12.0), 0);
+    }
+
+    #[test]
+    fn embedding_sqrt_multiplies_by_the_square_root_of_the_width() {
+        let base = built(&descriptor(0, 0)).0;
+        let mut scaled_descriptor = descriptor(0, 0);
+        scaled_descriptor.embedding_scale = Some(EmbeddingScale::Sqrt);
+        let scaled = built(&scaled_descriptor).0;
+
+        assert_eq!(scaled.len(), base.len() + 2);
+        assert_eq!(constants_equal(&scaled, 8.0_f32.sqrt()), 1);
+    }
+
+    #[test]
+    fn profile_toml_can_carry_a_literal_embedding_factor() {
+        let profile = toml::from_str::<FamilyProfile>(&format!(
+            "embedding_scale = {{ Factor = 12.0 }}\n{}",
+            profile_text("adjacent")
+        ))
+        .expect("the factor profile parses");
+
+        assert_eq!(profile.embedding_scale, Some(EmbeddingScale::Factor(12.0)));
     }
 }

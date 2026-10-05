@@ -108,10 +108,37 @@ pub struct RopeTableSel {
 /// [`lfm2_forward_program_with_experts`] served before this knob existed.
 /// `None` (every caller in this crate today) reproduces the prior
 /// unscaled embedding node-for-node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub enum EmbeddingScale {
     /// Multiply by `sqrt(embedding)`.
     Sqrt,
+    /// Multiply by a literal factor the checkpoint declares (`<family>.embedding_scale`, 12.0 for granite).
+    Factor(f32),
+}
+
+impl EmbeddingScale {
+    #[must_use]
+    pub fn multiplier(self, embedding: u32) -> f32 {
+        match self {
+            Self::Sqrt => (embedding as f32).sqrt(),
+            Self::Factor(factor) => factor,
+        }
+    }
+}
+
+pub(crate) fn append_embedding_scale(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    embedding: u32,
+    scale: EmbeddingScale,
+) -> Result<NodeId, TensorError> {
+    let multiplier = scalar_constant(program, scale.multiplier(embedding));
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sd->sd"), (multiplier, "->sd")],
+    )
 }
 
 /// The nonlinearity `append_activation` composes for an FFN's
@@ -1802,16 +1829,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
     if let Some(scale) = embedding_scale {
-        let multiplier = match scale {
-            EmbeddingScale::Sqrt => (embedding as f32).sqrt(),
-        };
-        let multiplier = scalar_constant(&mut program, multiplier);
-        x = elementwise(
-            &mut program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(x, "sd->sd"), (multiplier, "->sd")],
-        )?;
+        x = append_embedding_scale(&mut program, x, embedding, scale)?;
     }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
@@ -2381,6 +2399,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         fused_qkv_reduce,
         last_row_only,
         rope_pairing,
+        None,
     )
 }
 
@@ -2408,6 +2427,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     fused_qkv_reduce: bool,
     last_row_only: bool,
     rope_pairing: RopePairing,
+    embedding_scale: Option<EmbeddingScale>,
 ) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -2427,6 +2447,9 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
         "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
+    if let Some(scale) = embedding_scale {
+        x = append_embedding_scale(&mut program, x, embedding, scale)?;
+    }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");

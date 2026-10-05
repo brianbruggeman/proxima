@@ -147,7 +147,7 @@ pub struct ModelDescriptor {
 /// width) stays in the GGUF/HF reader: [`LayerFfnConfig::dense_feed_forward`]
 /// and [`LayerFfnConfig::ple`] are left at their defaults here and overridden
 /// per layer by the builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyProfile {
     /// Multiplier on the embedding lookup (`Some(Sqrt)` for a family that
@@ -503,6 +503,7 @@ pub fn build_forward(
                     descriptor.fused_qkv_reduce,
                     last_row_only,
                     attention.rope_pairing,
+                    descriptor.embedding_scale,
                 )?;
             Ok((
                 program,
