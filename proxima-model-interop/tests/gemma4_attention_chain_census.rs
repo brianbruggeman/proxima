@@ -512,10 +512,12 @@ async fn gemma4_attention_chain_census() {
     // online-softmax construction emits alongside the ONE the recognizer's
     // own walk actually uses (152, correctly absorbed already) -- dead in
     // BOTH binds, present in neither once pruned) inflating one side.
-    // A constant the program emits once ahead of layer 0 and every layer's
-    // chain reads (an attention scale, a mask bound) has no consumer once the
-    // fused or split attention absorbs all of them, so it is pruned without
-    // sitting inside any layer's [q,wo) span. Nothing else may be.
+    // A node the program emits once ahead of layer 0 and every layer's chain
+    // reads (an attention scale, a mask bound, the mask's index generators)
+    // has no consumer once the fused or split attention absorbs all of them,
+    // so it is pruned without sitting inside any layer's [q,wo) span. Nothing
+    // else may be: every reader of such a node must itself be absorbed, be
+    // pruned the same way, or be the anchor whose kind the fusion rewrote.
     let fused_ids: BTreeSet<u32> = fused_bound_ops.iter().map(|bound| bound.node.0).collect();
     let orphaned_outside_spans: Vec<&BoundOp> = unfused_bound_ops
         .iter()
@@ -530,17 +532,39 @@ async fn gemma4_attention_chain_census() {
             .map(|bound| (bound.node.0, bound.kind.name()))
             .collect::<Vec<_>>()
     );
+    let orphan_ids: BTreeSet<u32> = orphaned_outside_spans.iter().map(|bound| bound.node.0).collect();
+    let unfused_kinds: BTreeMap<u32, &str> = unfused_bound_ops
+        .iter()
+        .map(|bound| (bound.node.0, bound.kind.name()))
+        .collect();
+    let rewritten_ids: BTreeSet<u32> = fused_bound_ops
+        .iter()
+        .filter(|bound| unfused_kinds.get(&bound.node.0).is_some_and(|kind| *kind != bound.kind.name()))
+        .map(|bound| bound.node.0)
+        .collect();
+    let surviving_readers: Vec<(u32, u32)> = orphaned_outside_spans
+        .iter()
+        .flat_map(|orphan| {
+            unfused_bound_ops
+                .iter()
+                .filter(|reader| read_sources(reader).contains(&orphan.node.0))
+                .filter(|reader| {
+                    !span_absorbed_ids.contains(&reader.node.0)
+                        && !orphan_ids.contains(&reader.node.0)
+                        && !rewritten_ids.contains(&reader.node.0)
+                })
+                .map(|reader| (orphan.node.0, reader.node.0))
+        })
+        .collect();
     assert!(
-        orphaned_outside_spans
-            .iter()
-            .all(|bound| bound.kind.name() == "constant"),
-        "a node outside every layer's [q,wo) span was absorbed and it is not a constant whose \
-         readers were all absorbed"
+        surviving_readers.is_empty(),
+        "a node outside every layer's [q,wo) span was absorbed while a reader outside every \
+         absorbed set still reads it: (orphan, reader) pairs {surviving_readers:?}"
     );
     assert_eq!(
         total_absorbed + orphaned_outside_spans.len(),
         unfused_bound_ops.len() - fused_bound_ops.len(),
-        "summed per-layer absorbed_count plus the constants orphaned outside every span must \
+        "summed per-layer absorbed_count plus the nodes orphaned outside every span must \
          equal the pruned unfused/fused total delta -- a mismatch means a layer's span window \
          missed a node"
     );
