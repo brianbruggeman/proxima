@@ -6667,4 +6667,94 @@ mod top_fraction_fusion_tests {
         let rank = NodeId(fixture.mask.0 - 1);
         assert!(candidates_at(&fixture, 12, &[rank]).is_empty());
     }
+
+    const TWELVE_SCORES: [f32; 12] = [0.5, 3.0, 1.5, 3.0, 0.1, 2.5, 0.9, 4.0, 1.1, 2.0, 0.3, 5.0];
+
+    fn kinds(bound: &[BoundOp]) -> Vec<&'static str> {
+        bound.iter().map(|bound_op| bound_op.kind.name()).collect()
+    }
+
+    fn fused_count(bound: &[BoundOp]) -> usize {
+        bound
+            .iter()
+            .filter(|bound_op| bound_op.kind.name() == "top_fraction_select")
+            .count()
+    }
+
+    fn bind_both(fixture: &Fixture, rows: usize) -> (Vec<BoundOp>, Vec<BoundOp>) {
+        let shapes = shape::infer(&fixture.program, &[rows as u64]).expect("program infers");
+        let outputs = [fixture.mask];
+        let plain = bind_with_fusion(&fixture.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
+            .expect("plain binds");
+        let fused = bind_with_top_fraction(
+            &fixture.program, &shapes, &outputs, true, NumericPolicy::bit_exact(), TWELVE_ROWS,
+        )
+        .expect("fused binds");
+        (plain, fused)
+    }
+
+    fn selected_rows(fixture: &Fixture, bound: &[BoundOp], rows: usize, keep_first: bool) -> Vec<usize> {
+        let keep = rows.div_ceil(4) as f32;
+        let mut inputs = alloc::vec![
+            (fixture.scores, TWELVE_SCORES[..rows].to_vec()),
+            (fixture.keep_count, alloc::vec![keep]),
+        ];
+        if let Some(node) = fixture.keep_rows {
+            let mut flags = alloc::vec![0.0_f32; rows];
+            flags[0] = f32::from(u8::from(keep_first));
+            inputs.push((node, flags));
+        }
+        let buffers = run_resolved(fixture.program.len(), bound, inputs);
+        let mask = buffers[fixture.mask.0 as usize].as_ref().expect("mask resolves");
+        assert_eq!(mask.len(), rows, "a vacuous mask proves nothing");
+        mask.iter().enumerate().filter(|(_, value)| **value == 1.0).map(|(row, _)| row).collect()
+    }
+
+    #[test]
+    fn rank_select_fusion_fires_at_threshold() {
+        let fixture = fixture(false);
+        let (plain, fused) = bind_both(&fixture, 12);
+        assert_eq!(fused_count(&fused), 1, "kinds {:?}", kinds(&fused));
+        assert!(fused.len() < plain.len(), "fused {:?} plain {:?}", kinds(&fused), kinds(&plain));
+    }
+
+    #[test]
+    fn rank_select_fusion_declines_below_threshold() {
+        let fixture = fixture(false);
+        let (plain, fused) = bind_both(&fixture, 11);
+        assert_eq!(fused_count(&fused), 0);
+        assert_eq!(kinds(&fused), kinds(&plain));
+    }
+
+    #[test]
+    fn rank_select_fusion_declines_when_an_intermediate_is_requested() {
+        let fixture = fixture(false);
+        let shapes = shape::infer(&fixture.program, &[12]).expect("program infers");
+        let rank = NodeId(fixture.mask.0 - 1);
+        let bound = bind_with_top_fraction(
+            &fixture.program,
+            &shapes,
+            &[fixture.mask, rank],
+            true,
+            NumericPolicy::bit_exact(),
+            TWELVE_ROWS,
+        )
+        .expect("binds");
+        assert_eq!(fused_count(&bound), 0, "kinds {:?}", kinds(&bound));
+    }
+
+    #[test]
+    fn rank_select_fused_equals_plain_twelve_scores() {
+        let plain_fixture = fixture(false);
+        let union_fixture = fixture(true);
+        for (rows, expected) in [(11_usize, alloc::vec![1, 3, 7]), (12, alloc::vec![1, 7, 11])] {
+            let (plain, fused) = bind_both(&plain_fixture, rows);
+            assert_eq!(selected_rows(&plain_fixture, &plain, rows, false), expected, "plain rows {rows}");
+            assert_eq!(selected_rows(&plain_fixture, &fused, rows, false), expected, "fused rows {rows}");
+        }
+        let (plain, fused) = bind_both(&union_fixture, 12);
+        assert_eq!(selected_rows(&union_fixture, &plain, 12, true), alloc::vec![0, 1, 7, 11]);
+        assert_eq!(selected_rows(&union_fixture, &fused, 12, true), alloc::vec![0, 1, 7, 11]);
+        assert_eq!(fused_count(&fused), 1);
+    }
 }

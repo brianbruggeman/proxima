@@ -109,3 +109,77 @@ pub fn top_fraction_candidates(
     candidates.retain(|(fused, _)| !covered.contains(&fused.node));
     candidates
 }
+
+fn apply_top_fraction_fusion(
+    built: Vec<BoundOp>,
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    min_rows: u64,
+) -> Result<Vec<BoundOp>, TensorError> {
+    let initial = top_fraction_candidates(program, shapes, &built, outputs, min_rows);
+    if initial.is_empty() {
+        return Ok(built);
+    }
+    let mut planning_outputs = outputs.to_vec();
+    if planning_outputs.is_empty() {
+        let root = program
+            .len()
+            .checked_sub(1)
+            .map(|position| NodeId(position as u32))
+            .ok_or(TensorError::Empty)?;
+        planning_outputs.push(root);
+    }
+    for (fused, _) in &initial {
+        for (source, _, _) in fused.operands() {
+            if !planning_outputs.contains(source) {
+                planning_outputs.push(*source);
+            }
+        }
+    }
+    let rebuilt = bind_plain(program, shapes, &planning_outputs, NumericPolicy::bit_exact())?;
+    let candidates = top_fraction_candidates(program, shapes, &rebuilt, outputs, min_rows);
+    if candidates.is_empty() {
+        return Ok(built);
+    }
+    let fused_by_node = candidates
+        .iter()
+        .map(|(fused, _)| (fused.node, fused))
+        .collect::<BTreeMap<_, _>>();
+    let absorbed = candidates
+        .iter()
+        .flat_map(|(_, absorbed)| absorbed.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut rewritten = Vec::with_capacity(rebuilt.len());
+    for bound in rebuilt {
+        if let Some(fused) = fused_by_node.get(&bound.node) {
+            rewritten.push((*fused).clone());
+        } else if !absorbed.contains(&bound.node) {
+            rewritten.push(bound);
+        }
+    }
+    Ok(rewritten)
+}
+
+/// [`bind_with_fusion`], then collapses every `spec::top_fraction_mask` expression whose score
+/// row count is at least `min_rows` into one `BoundOpKind::TopFractionSelect`. The threshold is
+/// an argument because it lives in `omega`'s sizing file, which this crate cannot see. Expressions
+/// below the threshold, and expressions whose intermediate nodes are requested outputs or are read
+/// outside the expression, are left exactly as `bind_with_fusion` binds them.
+pub fn bind_with_top_fraction(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
+    min_rows: u64,
+) -> Result<Vec<BoundOp>, TensorError> {
+    let built = bind_with_fusion(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+    )?;
+    apply_top_fraction_fusion(built, program, shapes, outputs, min_rows)
+}
