@@ -11,8 +11,9 @@ use super::*;
 /// `#[cfg(feature = "gemma4-kv-cache")]` compile-time split
 /// (`proxima-model-interop::gemma4::bind::Gemma4Arch::bind`), not as data a
 /// caller can hold and branch on at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CacheStrategy {
+    #[default]
     Cacheless,
     TwoRange,
     /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]'s own
@@ -50,7 +51,17 @@ pub enum CacheStrategy {
 /// cache-engine choice into one value a caller can build ahead of time --
 /// today every caller re-derives and re-passes these as separate positional
 /// arguments at each forward-program call site.
+///
+/// At the std boundary (`config` feature) this is a conflaguration config:
+/// `Settings` reads the scalar fields from `PROXIMA_MODEL_*` env vars over a
+/// seeded value (`conflaguration::builder().value(base).env().file(path)`),
+/// and the `bon` builder constructs the same value fluently. The structured
+/// fields (`layers`, `embedding_scale`, `cache_strategy`) have no env
+/// spelling; a TOML layer sets them.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "config", derive(bon::Builder, conflaguration::Settings))]
+#[cfg_attr(feature = "config", settings(prefix = "PROXIMA_MODEL"))]
+#[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
 #[serde(deny_unknown_fields)]
 pub struct ModelDescriptor {
     pub vocab: u32,
@@ -78,6 +89,7 @@ pub struct ModelDescriptor {
     /// `layers` holds no `ShortConv` entry, as every gemma4 layer is
     /// [`LayerKind::Attention`].
     pub l_cache: u32,
+    #[cfg_attr(feature = "config", setting(skip))]
     pub embedding_scale: Option<EmbeddingScale>,
     pub logit_softcap: Option<f32>,
     /// Divisor on the final logits, `logits / logit_scale`: the checkpoint's
@@ -87,7 +99,9 @@ pub struct ModelDescriptor {
     /// `x + scale * sublayer`: the checkpoint's `<family>.residual_scale`, 0.22 for
     /// granite; `None` is the plain add.
     pub residual_scale: Option<f32>,
+    #[cfg_attr(feature = "config", setting(skip))]
     pub layers: Vec<LayerSchedule>,
+    #[cfg_attr(feature = "config", setting(skip))]
     pub cache_strategy: CacheStrategy,
     /// gemma4 E2B/E4B's per-layer-embedding preamble width
     /// (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc,
@@ -141,6 +155,42 @@ pub struct ModelDescriptor {
     /// `false` keeps every new row's logits, which a speculative verify step and pooled
     /// embeddings read.
     pub last_row_only: bool,
+}
+
+#[cfg(feature = "config")]
+impl conflaguration::Validate for ModelDescriptor {
+    fn validate(&self) -> conflaguration::Result<()> {
+        let mut errors = Vec::new();
+        let mut require = |holds: bool, field: &str, message: &str| {
+            if !holds {
+                errors.push(conflaguration::ValidationMessage::new(field, message));
+            }
+        };
+        require(self.vocab > 0, "vocab", "must be positive");
+        require(self.embedding > 0, "embedding", "must be positive");
+        require(self.query_heads > 0, "query_heads", "must be positive");
+        require(self.block_count > 0, "block_count", "must be positive");
+        require(
+            self.layers.len() == self.block_count as usize,
+            "layers",
+            "must hold one entry per block",
+        );
+        require(
+            self.expert_used_count <= self.expert_count,
+            "expert_used_count",
+            "must not exceed expert_count",
+        );
+        require(
+            self.leading_dense_block_count <= self.block_count,
+            "leading_dense_block_count",
+            "must not exceed block_count",
+        );
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(conflaguration::Error::Validation { errors })
+        }
+    }
 }
 
 /// The values a family's GGUF header and HF `config.json` do not carry, as
