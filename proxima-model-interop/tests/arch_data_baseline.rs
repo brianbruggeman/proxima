@@ -31,6 +31,7 @@ use proxima_model_interop::{
     metadata_str, metadata_u32, profiles::family_profile,
 };
 use proxima_tensor::cpu::QuantizedBlock;
+use proxima_tensor::TensorError;
 use proxima_tensor::op::Op;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, CacheStrategy, EmbeddingScale, ExpertGatingFunc, FfnCombination,
@@ -979,11 +980,26 @@ fn load_from_config<'file>(
         .unwrap_or_else(|error| panic!("load_with_descriptor failed: {error:?}"))
 }
 
+fn hand_written_config(file: &str) -> ModelDescriptor {
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs").join(file);
+    conflaguration::from_file(&config_path).unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()))
+}
+
+fn assert_hand_written_config_equals_header(checkpoint: &Checkpoint, file: &str) {
+    let written = hand_written_config(file);
+    let mapping = checkpoint.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let architecture = architecture_from_metadata(&parsed).expect("the checkpoint declares an architecture");
+
+    let derived = dense_descriptor_from_gguf(&parsed, &architecture)
+        .unwrap_or_else(|error| panic!("{}: the header does not yield a descriptor: {error:?}", checkpoint.name));
+
+    assert_eq!(written, derived, "{file} disagrees with {}'s own header", checkpoint.name);
+}
+
 #[test]
 fn zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids() {
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs/qwen2.toml");
-    let config: ModelDescriptor = conflaguration::from_file(&config_path)
-        .unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()));
+    let config = hand_written_config("qwen2.toml");
     let mapping = QWEN2.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
@@ -997,16 +1013,12 @@ fn zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids() {
 
 #[test]
 fn hand_written_qwen2_config_equals_the_gguf_header_descriptor() {
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs/qwen2.toml");
-    let written: ModelDescriptor = conflaguration::from_file(&config_path)
-        .unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()));
-    let mapping = QWEN2.open();
-    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let architecture = architecture_from_metadata(&parsed).expect("qwen2 declares an architecture");
+    assert_hand_written_config_equals_header(&QWEN2, "qwen2.toml");
+}
 
-    let derived = dense_descriptor_from_gguf(&parsed, &architecture).expect("the qwen2 header carries every key the descriptor reads");
-
-    assert_eq!(written, derived, "the hand-written config disagrees with the checkpoint's own header");
+#[test]
+fn hand_written_granite_moe_config_equals_the_gguf_header_descriptor() {
+    assert_hand_written_config_equals_header(&GRANITE_MOE, "granite_moe.toml");
 }
 
 #[test]
@@ -1040,33 +1052,71 @@ fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
     assert!(!generated.is_empty(), "the variant generated zero tokens");
 }
 
-#[test]
-fn model_config_edit_to_qwen2_changes_the_generated_ids() {
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs/qwen2.toml");
-    let written: ModelDescriptor = conflaguration::from_file(&config_path)
-        .unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()));
-    let edited = ModelDescriptor {
-        embedding_scale: Some(EmbeddingScale::Factor(3.0)),
-        ..written
-    };
-    let mapping = QWEN2.open();
+fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> bool {
+    let mapping = checkpoint.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
-    let model = load_from_config(&parsed, file_bytes, &edited);
-    let case = &llama_cases(&QWEN2)[0];
-    let config = ServingConfig {
+    let model = load_from_config(&parsed, file_bytes, config);
+    let case = &llama_cases(checkpoint)[0];
+    let serving = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
         ..ServingConfig::default()
     };
 
     let (generated, _text, _stopped) = model
-        .generate_from_ids(&case.prompt_ids, LLAMA_GENERATED_TOKENS, &config, &mut |_event| ControlFlow::Continue(()))
+        .generate_from_ids(&case.prompt_ids, LLAMA_GENERATED_TOKENS, &serving, &mut |_event| ControlFlow::Continue(()))
         .expect("the edited config runs");
 
     let compared = &generated[..generated.len().min(case.generated_ids.len())];
+    first_divergence(&case.generated_ids, compared).is_some()
+}
+
+#[test]
+fn model_config_edit_to_qwen2_changes_the_generated_ids() {
+    let edited = ModelDescriptor {
+        embedding_scale: Some(EmbeddingScale::Factor(3.0)),
+        ..hand_written_config("qwen2.toml")
+    };
+
     assert!(
-        first_divergence(&case.generated_ids, compared).is_some(),
+        generated_ids_diverge_from_llama(&QWEN2, &edited),
         "an embedding scale of 3.0 left llama's ids unchanged, so the config is not what runs"
+    );
+}
+
+#[test]
+fn hand_written_granite_moe_config_reproduces_llama_ids() {
+    let config = hand_written_config("granite_moe.toml");
+    let mapping = GRANITE_MOE.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+
+    let model = load_from_config(&parsed, file_bytes, &config);
+
+    assert_llama_ids(&GRANITE_MOE, &parsed, &model);
+}
+
+#[test]
+fn granite_moe_config_with_the_hf_split_half_pairing_is_refused_by_the_lowering() {
+    let written = hand_written_config("granite_moe.toml");
+    let layers = written
+        .layers
+        .iter()
+        .map(|layer| LayerSchedule {
+            attention: LayerAttentionConfig {
+                rope_pairing: RopePairing::SplitHalf { pairs: layer.attention.head_dim / 2 },
+                ..layer.attention.clone()
+            },
+            ..layer.clone()
+        })
+        .collect();
+    let split_half = ModelDescriptor { layers, ..written };
+
+    let refusal = build_forward(&split_half).expect_err("the moe layer expresses split-half only with qk-norm");
+
+    assert!(
+        matches!(refusal, TensorError::UnsupportedInBuilder { feature: "a rope pairing the moe layer cannot express", .. }),
+        "got {refusal:?}"
     );
 }
 
