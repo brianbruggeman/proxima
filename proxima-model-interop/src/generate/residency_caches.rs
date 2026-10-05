@@ -132,6 +132,18 @@ impl LayerCache {
         }
     }
 
+    /// Raises the sealed end to what `kv_decision::sealed_blocks` allows and returns the newly sealed block range.
+    pub(super) fn seal(&mut self, even_odd_row: usize, block_tokens: usize, horizon_rows: usize) -> core::ops::Range<usize> {
+        // ring slots are overwritten in place, so a ring row is never immutable; rings restore through checkpoints
+        if self.ring_geometry().is_some() || even_odd_row == 0 {
+            return 0..0;
+        }
+        let rows = self.k_even.len() / even_odd_row;
+        let blocks = proxima_core::kv_decision::sealed_blocks(self.sealed_end, rows, block_tokens, horizon_rows);
+        self.sealed_end = self.sealed_end.max(blocks.end * block_tokens);
+        blocks
+    }
+
     pub(super) fn append(&mut self, even: &[f32], odd: &[f32], value: &[f32]) {
         self.k_even.extend_from_slice(even);
         self.k_odd.extend_from_slice(odd);
@@ -268,13 +280,7 @@ pub(super) fn seal_attention_layers(
         let (LayerCacheState::Attention(cache), LayerPadRowWidths::Attention { even_odd_row, .. }) = (state, width) else {
             continue;
         };
-        // ring slots are overwritten in place, so a ring row is never immutable; rings restore through checkpoints
-        if cache.ring_geometry().is_some() || *even_odd_row == 0 {
-            continue;
-        }
-        let rows = cache.k_even.len() / *even_odd_row;
-        let blocks = proxima_core::kv_decision::sealed_blocks(cache.sealed_end, rows, block_tokens, horizon_rows);
-        cache.sealed_end = cache.sealed_end.max(blocks.end * block_tokens);
+        cache.seal(*even_odd_row, block_tokens, horizon_rows);
     }
 }
 
@@ -328,6 +334,27 @@ mod layer_cache_sealing_tests {
             cache.append(&even, &odd, &value);
         }
         cache
+    }
+
+    #[test]
+    fn seal_returns_the_newly_sealed_block_range() {
+        let mut cache = cache_with_rows(5);
+        assert_eq!(cache.seal(2, 4, 1), 0..1);
+        assert_eq!(cache.sealed_end, 4);
+        for position in 5..10 {
+            let (even, odd, value) = row_at(position);
+            cache.append(&even, &odd, &value);
+        }
+        assert_eq!(cache.seal(2, 4, 1), 1..2);
+        assert_eq!(cache.sealed_end, 8);
+        assert_eq!(cache.seal(2, 4, 1), 2..2);
+    }
+
+    #[test]
+    fn seal_returns_an_empty_range_for_a_ring_layer_and_a_partial_block() {
+        assert_eq!(ring_of_eight_rows().seal(2, 4, 0), 0..0);
+        assert_eq!(cache_with_rows(3).seal(2, 4, 0), 0..0);
+        assert_eq!(cache_with_rows(8).seal(0, 4, 0), 0..0);
     }
 
     #[test]
