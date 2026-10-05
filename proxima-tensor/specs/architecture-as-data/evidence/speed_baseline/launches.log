@@ -1,0 +1,13 @@
+2026-10-05T11:38:30Z LAUNCH decode_arms proxima arm=base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da
+2026-10-05T11:39:05Z EXIT decode_arms proxima arm=base process=0 status=exit status: 0
+2026-10-05T11:39:05Z LAUNCH decode_arms proxima arm=ctl process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da_ctl
+2026-10-05T11:39:40Z EXIT decode_arms proxima arm=ctl process=0 status=exit status: 0
+2026-10-05T11:39:40Z LAUNCH decode_arms proxima arm=ctl process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da_ctl
+2026-10-05T11:40:14Z EXIT decode_arms proxima arm=ctl process=1 status=exit status: 0
+2026-10-05T11:40:14Z LAUNCH decode_arms proxima arm=base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da
+2026-10-05T11:40:49Z EXIT decode_arms proxima arm=base process=1 status=exit status: 0
+2026-10-05T11:40:49Z LAUNCH decode_arms llama-server port=8097 requests=8
+2026-10-05T11:41:04Z EXIT decode_arms llama-server
+2026-10-05T11:41:04Z LAUNCH decode_arms ollama tag=gemma4:e2b-it-qat requests=8
+2026-10-05T11:41:20Z ollama quit requested
+2026-10-05T11:41:20Z EXIT decode_arms ollama

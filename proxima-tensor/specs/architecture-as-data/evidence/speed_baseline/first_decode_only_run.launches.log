@@ -1,0 +1,8 @@
+2026-10-05T11:19:32Z LAUNCH decode_arms proxima arm=base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da
+2026-10-05T11:20:08Z EXIT decode_arms proxima arm=base process=0 status=exit status: 0
+2026-10-05T11:20:08Z LAUNCH decode_arms proxima arm=ctl process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da_ctl
+2026-10-05T11:20:43Z EXIT decode_arms proxima arm=ctl process=0 status=exit status: 0
+2026-10-05T11:20:43Z LAUNCH decode_arms proxima arm=ctl process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da_ctl
+2026-10-05T11:21:18Z EXIT decode_arms proxima arm=ctl process=1 status=exit status: 0
+2026-10-05T11:21:18Z LAUNCH decode_arms proxima arm=base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/decode_gbps_baseline_9f0647da
+2026-10-05T11:21:52Z EXIT decode_arms proxima arm=base process=1 status=exit status: 0
