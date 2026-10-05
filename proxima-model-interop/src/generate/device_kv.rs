@@ -26,6 +26,9 @@
 
 use super::*;
 
+/// The placement hook of the device kv: the allocator the three buffers of each layer come from; the default is [`omega::allocate_placed_buffer`]; [`omega::allocate_placed_buffer_over`] wraps memory a caller owns.
+pub(super) type KvBufferSource = fn(usize) -> Result<PlacedBuffer, omega::MetalError>;
+
 /// The three `kv_cache.{layer}.*` leaf nodes of one layer in one program.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KvLeafNodes {
@@ -70,6 +73,7 @@ impl DeviceKvLayer {
         v_row: usize,
         full_capacity_rows: usize,
         max_step_rows: usize,
+        source: KvBufferSource,
     ) -> Result<Self, InteropError> {
         let window = cache.ring_geometry().map(|ring| ring.window);
         let retain = cache.ring_geometry().map_or(0, |ring| ring.capacity);
@@ -80,9 +84,9 @@ impl DeviceKvLayer {
         };
         let even_odd_row_bytes = even_odd_row * core::mem::size_of::<f32>();
         let v_row_bytes = v_row * core::mem::size_of::<f32>();
-        let k_even = allocate_placed_buffer(capacity_rows * even_odd_row_bytes)?;
-        let k_odd = allocate_placed_buffer(capacity_rows * even_odd_row_bytes)?;
-        let v = allocate_placed_buffer(capacity_rows * v_row_bytes)?;
+        let k_even = source(capacity_rows * even_odd_row_bytes)?;
+        let k_odd = source(capacity_rows * even_odd_row_bytes)?;
+        let v = source(capacity_rows * v_row_bytes)?;
         Ok(Self {
             k_even,
             k_odd,
@@ -212,6 +216,7 @@ impl DeviceKv {
         positions_needed: usize,
         bucket_tokens: usize,
         max_step_rows: usize,
+        source: KvBufferSource,
     ) -> Result<Option<Self>, InteropError> {
         let full_capacity_rows =
             kv_extent(positions_needed + max_step_rows, usize::MAX, bucket_tokens) + bucket_tokens;
@@ -237,6 +242,7 @@ impl DeviceKv {
                         *v_row,
                         full_capacity_rows,
                         max_step_rows,
+                        source,
                     )?;
                     device_layer.seed(cache, cached_len);
                     layers.push(Some(device_layer));
@@ -427,7 +433,15 @@ mod tests {
             even_odd_row: EVEN_ODD_ROW,
             v_row: V_ROW,
         }];
-        let device = DeviceKv::adopt(&mut caches, &widths, positions, total_positions, 4, 3)
+        let device = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            positions,
+            total_positions,
+            4,
+            3,
+            allocate_placed_buffer,
+        )
             .expect("device kv allocates on the real Metal device")
             .expect("a plain attention cache is adoptable");
         (device, caches)
@@ -554,7 +568,14 @@ mod tests {
         let positions = 37;
         let capacity_rows = 48;
         let cache = host_cache(None, positions);
-        let mut layer = DeviceKvLayer::allocate(&cache, EVEN_ODD_ROW, V_ROW, capacity_rows, 3)
+        let mut layer = DeviceKvLayer::allocate(
+            &cache,
+            EVEN_ODD_ROW,
+            V_ROW,
+            capacity_rows,
+            3,
+            allocate_placed_buffer,
+        )
             .expect("device kv allocates on the real Metal device");
         let dirty = alloc::vec![f32::NAN; capacity_rows * EVEN_ODD_ROW.max(V_ROW)];
         omega::write_placed_buffer_f32(&layer.k_even, 0, &dirty[..capacity_rows * EVEN_ODD_ROW]);
@@ -582,6 +603,52 @@ mod tests {
         );
     }
 
+    static REQUESTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+    fn recording_source(byte_len: usize) -> Result<PlacedBuffer, omega::MetalError> {
+        REQUESTED
+            .lock()
+            .expect("the recording lock is never poisoned")
+            .push(byte_len);
+        allocate_placed_buffer(byte_len)
+    }
+
+    #[test]
+    fn adopt_takes_every_buffer_from_the_given_source() {
+        let mut caches = alloc::vec![
+            LayerCacheState::Attention(host_cache(None, 37)),
+            LayerCacheState::Attention(host_cache(Some(8), 37)),
+        ];
+        let widths = [
+            LayerPadRowWidths::Attention {
+                even_odd_row: EVEN_ODD_ROW,
+                v_row: V_ROW,
+            },
+            LayerPadRowWidths::Attention {
+                even_odd_row: EVEN_ODD_ROW,
+                v_row: V_ROW,
+            },
+        ];
+
+        let device = DeviceKv::adopt(&mut caches, &widths, 37, 80, 4, 3, recording_source)
+            .expect("device kv allocates on the real Metal device");
+
+        assert!(device.is_some(), "two plain attention layers are adoptable");
+        let requested = REQUESTED
+            .lock()
+            .expect("the recording lock is never poisoned");
+        assert_eq!(requested.len(), 6, "three buffers per layer, two layers");
+        for sizes in requested.chunks(3) {
+            assert!(sizes[0] > 0, "a layer buffer is never empty");
+            assert_eq!(sizes[0], sizes[1], "k_even and k_odd are the same size");
+            assert_eq!(
+                sizes[0] * V_ROW,
+                sizes[2] * EVEN_ODD_ROW,
+                "v holds the same rows at its own width"
+            );
+        }
+    }
+
     #[test]
     fn a_cache_that_misses_positions_is_not_adopted() {
         let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 10))];
@@ -589,7 +656,7 @@ mod tests {
             even_odd_row: EVEN_ODD_ROW,
             v_row: V_ROW,
         }];
-        let adopted = DeviceKv::adopt(&mut caches, &widths, 12, 40, 4, 3)
+        let adopted = DeviceKv::adopt(&mut caches, &widths, 12, 40, 4, 3, allocate_placed_buffer)
             .expect("the allocation path itself succeeds");
         assert!(
             adopted.is_none(),
