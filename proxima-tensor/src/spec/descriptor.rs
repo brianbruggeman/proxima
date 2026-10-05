@@ -530,6 +530,7 @@ pub fn build_forward(
                     attention.rope_pairing,
                     descriptor.embedding_scale,
                     descriptor.logit_scale,
+                    attention.score_scale,
                 )?;
             Ok((
                 program,

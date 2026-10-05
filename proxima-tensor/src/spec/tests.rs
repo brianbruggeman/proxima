@@ -740,6 +740,7 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             RopePairing::SplitHalf { pairs: 32 },
             None,
             None,
+            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
         )
         .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
@@ -15108,6 +15109,7 @@ mod gemma4_synthetic_parity {
                 rope_pairing,
                 None,
                 None,
+                AttentionScoreScale::InverseSqrtQueryPreAttnScalar(REAL_HEAD_DIM),
             )
             .expect("direct real qwen2-dims build");
 
@@ -17718,5 +17720,43 @@ mod forward_scales {
         .expect("the factor profile parses");
 
         assert_eq!(profile.embedding_scale, Some(EmbeddingScale::Factor(12.0)));
+    }
+
+    fn with_score_scale(score_scale: AttentionScoreScale) -> (Vec<Op>, Vec<Op>) {
+        let (base, _) = built(&descriptor(0, 0));
+        let mut scaled_descriptor = descriptor(0, 0);
+        scaled_descriptor
+            .layers
+            .iter_mut()
+            .for_each(|layer| layer.attention.score_scale = score_scale);
+        let (scaled, _) = built(&scaled_descriptor);
+        (base, scaled)
+    }
+
+    #[test]
+    fn attention_factor_replaces_the_inverse_square_root_constant() {
+        let (base, scaled) = with_score_scale(AttentionScoreScale::Factor(0.015625));
+
+        assert_eq!(scaled.len(), base.len());
+        assert_eq!(constants_equal(&scaled, 0.015625), 1);
+        assert_eq!(
+            constants_equal(&scaled, 0.5) + 1,
+            constants_equal(&base, 0.5)
+        );
+    }
+
+    #[test]
+    fn unscaled_attention_uses_a_constant_of_one() {
+        let (base, scaled) = with_score_scale(AttentionScoreScale::Unscaled);
+
+        assert_eq!(scaled.len(), base.len());
+        assert_eq!(
+            constants_equal(&scaled, 1.0),
+            constants_equal(&base, 1.0) + 1
+        );
+        assert_eq!(
+            constants_equal(&scaled, 0.5) + 1,
+            constants_equal(&base, 0.5)
+        );
     }
 }
