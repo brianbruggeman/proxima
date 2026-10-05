@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+────────────
+ Nextest run ID a429a76a-a7d4-44da-b525-a74dcf56b12a with nextest profile: default
+    Starting 16 tests across 35 binaries (794 tests skipped)
+        PASS [   0.011s] ( 1/16) proxima-model-interop capability::tests::supported_dense_cpu_codecs_matches_the_six_hand_written_test_functions
+        PASS [   0.029s] ( 2/16) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_equals_the_gguf_header_descriptor
+        PASS [   9.710s] ( 3/16) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_reproduces_llama_ids
+        PASS [   0.113s] ( 4/16) proxima-model-interop::arch_data_baseline hand_written_qwen2_config_equals_the_gguf_header_descriptor
+        PASS [   2.561s] ( 5/16) proxima-model-interop::arch_data_baseline model_config_edit_to_qwen2_changes_the_generated_ids
+        PASS [   0.718s] ( 6/16) proxima-model-interop::arch_data_baseline model_config_file_layer_turns_the_decode_config_into_the_verify_program
+        PASS [   0.588s] ( 7/16) proxima-model-interop::arch_data_baseline model_config_rejects_an_unknown_field
+        PASS [   1.183s] ( 8/16) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_26b
+        PASS [   0.872s] ( 9/16) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_e2b
+        PASS [   0.191s] (10/16) proxima-model-interop::arch_data_baseline model_config_roundtrip_granite_moe
+        PASS [   0.108s] (11/16) proxima-model-interop::arch_data_baseline model_config_roundtrip_openchat
+        PASS [   0.181s] (12/16) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen2
+        PASS [   0.229s] (13/16) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen3
+        PASS [   3.073s] (14/16) proxima-model-interop::arch_data_baseline model_config_text_edit_changes_the_lowered_program
+        PASS [   8.695s] (15/16) proxima-model-interop::arch_data_baseline zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs
+        PASS [   6.455s] (16/16) proxima-model-interop::arch_data_baseline zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids
+────────────
+     Summary [  34.723s] 16 tests run: 16 passed, 794 skipped

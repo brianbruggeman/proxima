@@ -1,0 +1,48 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.65s
+────────────
+ Nextest run ID b548145a-bd19-4cd4-805c-7c532eaebc0d with nextest profile: default
+    Starting 2 tests across 35 binaries (808 tests skipped)
+        FAIL [   9.644s] (1/2) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+  stdout ───
+
+    running 1 test
+    test generic_verify_llama_parity_gemma4_e2b ... FAILED
+
+    failures:
+
+    failures:
+        generic_verify_llama_parity_gemma4_e2b
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 52 filtered out; finished in 9.63s
+
+  stderr ───
+
+    thread 'generic_verify_llama_parity_gemma4_e2b' (60085569) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1014:5:
+    gemma4_e2b: the verify program never ran across 3 prompts, so nothing was checked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [  10.353s] (2/2) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+  stdout ───
+
+    running 1 test
+    test generic_verify_llama_parity_qwen2 ... FAILED
+
+    failures:
+
+    failures:
+        generic_verify_llama_parity_qwen2
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 52 filtered out; finished in 10.34s
+
+  stderr ───
+
+    thread 'generic_verify_llama_parity_qwen2' (60085755) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1014:5:
+    qwen2: the verify program never ran across 3 prompts, so nothing was checked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  20.007s] 2 tests run: 0 passed, 2 failed, 808 skipped
+        FAIL [   9.644s] (1/2) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        FAIL [  10.353s] (2/2) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+error: test run failed
