@@ -17,6 +17,7 @@ Command per fixture, no BOS (the Rust tests call `encode`, which adds none):
 | qwen3 | Ollama blob sha256 a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f (qwen3:8b) | `qwen2` | QWEN2 |
 | qwen35 | Ollama blob sha256 afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5 | `qwen35` | QWEN35 |
 | qwen35moe | Ollama blob sha256 f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d | `qwen35` | QWEN35 |
+| granite_moe | Ollama blob sha256 cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 (granite3.1-moe:1b) | `refact` | REFACT |
 | deepseek_coder_33b_no_pre | `~/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf` (vocab only; the file carries no `tokenizer.ggml.pre`, llama.cpp logs "missing pre-tokenizer type, using: 'default'") | none | DEFAULT (four-pass regex) |
 
 `texts/*.txt` are the exact input bytes, shared by every family: prices, dates and times, phone-like numbers,
