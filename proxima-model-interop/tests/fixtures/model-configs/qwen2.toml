@@ -1,0 +1,738 @@
+vocab = 151936
+embedding = 896
+feed_forward = 4864
+expert_feed_forward = 4864
+query_heads = 14
+block_count = 24
+expert_count = 0
+expert_used_count = 0
+leading_dense_block_count = 24
+l_cache = 0
+cache_strategy = "SingleRange"
+sliding_kv_ring = false
+qk_norm = false
+qkv_biases = true
+paired_gate_up_reduce = false
+fused_qkv_reduce = false
+head_repeats = 1
+last_row_only = true
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false
+
+[[layers]]
+kind = "Attention"
+
+[layers.attention]
+head_dim = 64
+kv_heads = 2
+value_source_kind = "ProjectedV"
+key_source_kind = "ProjectedK"
+value_norm = false
+
+[layers.attention.rope_table]
+cos_name = "rope_cos"
+sin_name = "rope_sin"
+
+[layers.attention.rope_pairing.SplitHalf]
+pairs = 32
+
+[layers.attention.score_scale]
+InverseSqrtQueryPreAttnScalar = 64
+
+[layers.ffn]
+post_attention_norm = false
+combination = "Exclusive"
+output_scale = false
+routed_gating = "Softmax"
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+ple = false

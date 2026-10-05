@@ -503,6 +503,8 @@ fn model_config_roundtrip(checkpoint: &Checkpoint) {
         let restored: ModelDescriptor = toml::from_str(&text)
             .unwrap_or_else(|error| panic!("{} {label}: descriptor toml does not parse: {error}\n{text}", checkpoint.name));
         assert_eq!(restored, descriptor, "{} {label}: toml round trip changed the config", checkpoint.name);
+        conflaguration::Validate::validate(&restored)
+            .unwrap_or_else(|error| panic!("{} {label}: the real checkpoint's config fails validation: {error}", checkpoint.name));
 
         let (program, logits_root, ..) = build_forward(&restored)
             .unwrap_or_else(|error| panic!("{} {label}: restored config does not lower: {error:?}", checkpoint.name));
@@ -877,17 +879,21 @@ fn first_divergence(expected: &[u32], actual: &[u32]) -> Option<usize> {
 }
 
 fn llama_parity(checkpoint: &Checkpoint) {
-    let cases = llama_cases(checkpoint);
     let mapping = checkpoint.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     let model = LoadedModel::load(&parsed, file_bytes)
         .unwrap_or_else(|error| panic!("{}: LoadedModel::load failed: {error:?}", checkpoint.name));
+    assert_llama_ids(checkpoint, &parsed, &model);
+}
+
+fn assert_llama_ids(checkpoint: &Checkpoint, parsed: &proxima_gguf::pipe::ParsedGguf, model: &LoadedModel<'_>) {
+    let cases = llama_cases(checkpoint);
     let config = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
         ..ServingConfig::default()
     };
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)
         .expect("builds the vocab from the checkpoint metadata");
     let wants_bos = vocab
         .add_bos_token()
@@ -961,6 +967,127 @@ fn llama_parity_qwen2() {
 #[test]
 fn llama_parity_qwen3() {
     llama_parity(&QWEN3);
+}
+
+fn load_from_config<'file>(
+    parsed: &proxima_gguf::pipe::ParsedGguf,
+    file_bytes: &'file [u8],
+    config: &ModelDescriptor,
+) -> LoadedModel<'file> {
+    conflaguration::Validate::validate(config).expect("the config is internally consistent");
+    LoadedModel::load_with_descriptor(parsed, file_bytes, config)
+        .unwrap_or_else(|error| panic!("load_with_descriptor failed: {error:?}"))
+}
+
+#[test]
+fn zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids() {
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs/qwen2.toml");
+    let config: ModelDescriptor = conflaguration::from_file(&config_path)
+        .unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()));
+    let mapping = QWEN2.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+
+    let model = load_from_config(&parsed, file_bytes, &config);
+
+    let (program, ..) = build_forward(&config).expect("the hand-written config lowers");
+    assert_eq!(model.op_count(), program.len(), "the loaded model must run the config's lowering");
+    assert_llama_ids(&QWEN2, &parsed, &model);
+}
+
+#[test]
+fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
+    let mapping = GEMMA4_E2B.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let base = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let windowed = base.layers.iter().filter(|layer| layer.attention.mask_window.is_some()).count();
+    assert!(windowed > 0, "e2b must carry sliding layers for the variant to change anything");
+
+    let text = toml::to_string(&base).expect("a descriptor serializes to toml");
+    let variant_text = text
+        .lines()
+        .filter(|line| !line.starts_with("mask_window = "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("sliding_kv_ring = true", "sliding_kv_ring = false");
+    let variant: ModelDescriptor = toml::from_str(&variant_text).expect("the variant toml parses");
+    assert!(variant.layers.iter().all(|layer| layer.attention.mask_window.is_none()));
+
+    let (base_program, ..) = build_forward(&base).expect("the base lowers");
+    let model = load_from_config(&parsed, file_bytes, &variant);
+    assert_ne!(model.op_count(), base_program.len(), "removing every window must change the graph");
+
+    let prompt_ids = &llama_cases(&GEMMA4_E2B)[0].prompt_ids;
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    };
+    let (generated, _text, _stopped) = model
+        .generate_from_ids(prompt_ids, 8, &config, &mut |_event| ControlFlow::Continue(()))
+        .expect("the variant runs");
+    assert!(!generated.is_empty(), "the variant generated zero tokens");
+}
+
+#[test]
+fn model_config_edit_to_qwen2_changes_the_generated_ids() {
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs/qwen2.toml");
+    let written: ModelDescriptor = conflaguration::from_file(&config_path)
+        .unwrap_or_else(|error| panic!("{} does not load: {error}", config_path.display()));
+    let edited = ModelDescriptor {
+        embedding_scale: Some(EmbeddingScale::Factor(3.0)),
+        ..written
+    };
+    let mapping = QWEN2.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = load_from_config(&parsed, file_bytes, &edited);
+    let case = &llama_cases(&QWEN2)[0];
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    };
+
+    let (generated, _text, _stopped) = model
+        .generate_from_ids(&case.prompt_ids, LLAMA_GENERATED_TOKENS, &config, &mut |_event| ControlFlow::Continue(()))
+        .expect("the edited config runs");
+
+    let compared = &generated[..generated.len().min(case.generated_ids.len())];
+    assert!(
+        first_divergence(&case.generated_ids, compared).is_some(),
+        "an embedding scale of 3.0 left llama's ids unchanged, so the config is not what runs"
+    );
+}
+
+#[test]
+fn model_config_file_layer_turns_the_decode_config_into_the_verify_program() {
+    let mapping = GEMMA4_E2B.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let decode = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let directory = tempfile::tempdir().expect("a scratch directory");
+    let layer_path = directory.path().join("verify.toml");
+    std::fs::write(&layer_path, "last_row_only = false\n").expect("the layer file is written");
+
+    let layered: ModelDescriptor = conflaguration::builder()
+        .value(decode)
+        .env()
+        .file(&layer_path)
+        .validate()
+        .build()
+        .expect("the layered descriptor validates");
+
+    let (program, logits_root, ..) = build_forward(&layered).expect("the layered config lowers");
+    let incumbent = std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
+    for expected in [
+        format!("verify.ops={}", program.len()),
+        format!("verify.ops_sha256={}", ops_digest(&program)),
+        format!("verify.logits_root={logits_root:?}"),
+    ] {
+        assert!(
+            incumbent.lines().any(|line| line == expected),
+            "the file layer lowers to `{expected}`, which the incumbent verify digest lacks"
+        );
+    }
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
