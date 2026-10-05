@@ -72,6 +72,8 @@ mod serving;
 mod prompt_cache_settings;
 #[cfg(feature = "std")]
 mod speculative_settings;
+#[cfg(feature = "std")]
+mod serving_settings;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 mod source;
 pub mod task;
@@ -155,6 +157,8 @@ pub use proxima_core::ServingState;
 pub use prompt_cache_settings::PromptCacheSettings;
 #[cfg(feature = "std")]
 pub use speculative_settings::{SpeculativeSettings, SpeculativeTypeName, SpeculativeTypeNameSet};
+#[cfg(feature = "std")]
+pub use serving_settings::CacheType;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 pub use source::{CheckpointMapping, CheckpointSourceError};
 pub use task::{ModelTask, TaskProfile, classify_task};
