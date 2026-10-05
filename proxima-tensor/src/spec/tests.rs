@@ -17975,4 +17975,93 @@ mod descriptor_config {
 
         assert!(error.to_string().contains("unknown field"), "got: {error}");
     }
+
+    fn rebuilt_by_builder(source: &ModelDescriptor) -> ModelDescriptor {
+        ModelDescriptor::builder()
+            .vocab(source.vocab)
+            .embedding(source.embedding)
+            .feed_forward(source.feed_forward)
+            .expert_feed_forward(source.expert_feed_forward)
+            .query_heads(source.query_heads)
+            .block_count(source.block_count)
+            .expert_count(source.expert_count)
+            .expert_used_count(source.expert_used_count)
+            .leading_dense_block_count(source.leading_dense_block_count)
+            .l_cache(source.l_cache)
+            .maybe_embedding_scale(source.embedding_scale)
+            .maybe_logit_softcap(source.logit_softcap)
+            .maybe_logit_scale(source.logit_scale)
+            .maybe_residual_scale(source.residual_scale)
+            .layers(source.layers.clone())
+            .cache_strategy(source.cache_strategy)
+            .maybe_ple_dim(source.ple_dim)
+            .sliding_kv_ring(source.sliding_kv_ring)
+            .qk_norm(source.qk_norm)
+            .qkv_biases(source.qkv_biases)
+            .paired_gate_up_reduce(source.paired_gate_up_reduce)
+            .fused_qkv_reduce(source.fused_qkv_reduce)
+            .head_repeats(source.head_repeats)
+            .last_row_only(source.last_row_only)
+            .build()
+    }
+
+    #[test]
+    fn the_fluent_builder_and_the_toml_config_build_the_same_descriptor() {
+        for (label, descriptor) in descriptors() {
+            let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+            let from_toml: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+
+            assert_eq!(rebuilt_by_builder(&descriptor), from_toml, "{label}: builder and toml diverged");
+        }
+    }
+
+    #[test]
+    fn env_then_an_explicit_toml_layer_override_a_seeded_descriptor_in_that_order() {
+        let seeded = head_repeats::descriptor(CacheStrategy::TwoRange, 1);
+        let variant: toml::Table = toml::from_str("vocab = 17\nlast_row_only = true\ncache_strategy = \"Cacheless\"\n")
+            .expect("the variant layer parses");
+        let environment = [
+            ("PROXIMA_MODEL_VOCAB", Some("99")),
+            ("PROXIMA_MODEL_QUERY_HEADS", Some("4")),
+            ("PROXIMA_MODEL_LOGIT_SOFTCAP", Some("50")),
+        ];
+
+        let layered = temp_env::with_vars(environment, || {
+            conflaguration::builder()
+                .value(seeded.clone())
+                .env()
+                .mapping(&variant)
+                .validate()
+                .build()
+        })
+        .expect("the layered descriptor validates");
+
+        assert_eq!(layered.vocab, 17, "the file layer comes after env and wins");
+        assert_eq!(layered.query_heads, 4, "env overrides the seeded value");
+        assert_eq!(layered.logit_softcap, Some(50.0));
+        assert!(layered.last_row_only);
+        assert_eq!(layered.cache_strategy, CacheStrategy::Cacheless);
+        assert_eq!(layered.layers, seeded.layers, "a key no layer names keeps the seeded value");
+        assert_eq!(layered.embedding, seeded.embedding);
+    }
+
+    #[test]
+    fn validation_names_the_field_whose_count_disagrees() {
+        let mut descriptor = head_repeats::descriptor(CacheStrategy::TwoRange, 1);
+        descriptor.layers.pop();
+        descriptor.expert_used_count = 3;
+
+        let error = descriptor.validate().expect_err("one layer short and more experts used than exist");
+
+        let message = error.to_string();
+        assert!(message.contains("layers"), "got: {message}");
+        assert!(message.contains("expert_used_count"), "got: {message}");
+    }
+
+    #[test]
+    fn every_descriptor_the_lowering_tests_build_validates() {
+        for (label, descriptor) in descriptors() {
+            descriptor.validate().unwrap_or_else(|error| panic!("{label}: {error}"));
+        }
+    }
 }
