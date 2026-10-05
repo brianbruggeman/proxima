@@ -447,6 +447,13 @@ fn generic_binder_qwen35moe() {
     assert_bound(&QWEN35MOE);
 }
 
+#[test]
+fn generic_binder_granite_moe() {
+    let record = bound_record(&GRANITE_MOE);
+    assert!(record.contains("\nbound_weights=243\n"), "granite moe must bind 243 weights (24 layers x 10 + token_embd + output_norm + output), got {:?}", record.lines().nth(1));
+    assert_matches_fixture(&GRANITE_MOE, "bound", &record);
+}
+
 fn assert_programs_identical(direct: &[Op], descriptor: &[Op]) {
     assert_eq!(direct.len(), descriptor.len(), "op count mismatch");
     let first_divergence = direct
