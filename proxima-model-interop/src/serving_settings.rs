@@ -12,6 +12,10 @@ use crate::serving::{
     ServingConfig, WeightPrecisionRule,
 };
 
+mod levels;
+
+pub use levels::AdmissionScheduleSettings;
+
 fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     serde_json::from_str(raw)
 }
@@ -300,6 +304,9 @@ pub struct ServingSettings {
     #[setting(default = false)]
     #[builder(default = false)]
     pub overlap_transfer_compute: bool,
+    #[setting(nested)]
+    #[builder(default)]
+    pub admission_schedule: AdmissionScheduleSettings,
 }
 
 impl Default for ServingSettings {
@@ -380,6 +387,7 @@ impl ServingSettings {
             command_buffer_chunks: self.command_buffer_chunks,
             max_command_buffers_per_token: self.max_command_buffers_per_token,
             overlap_transfer_compute: self.overlap_transfer_compute,
+            admission_schedule: self.admission_schedule.as_admission_schedule(),
             ..ServingConfig::default()
         }
     }
@@ -830,5 +838,39 @@ overlap_transfer_compute = true
         assert_eq!(lowered.command_buffer_chunks, today.command_buffer_chunks);
         assert_eq!(lowered.max_command_buffers_per_token, today.max_command_buffers_per_token);
         assert_eq!(lowered.overlap_transfer_compute, today.overlap_transfer_compute);
+    }
+
+    #[test]
+    fn serving_scalars_admission_level_round_trips() {
+        let from_toml: ServingSettings =
+            conflaguration::from_toml_str("[admission_schedule]\nmax_concurrent_requests = 4\n")
+                .expect("the admission toml parses");
+        let built = ServingSettings::builder()
+            .admission_schedule(
+                AdmissionScheduleSettings::builder()
+                    .max_concurrent_requests(4)
+                    .build(),
+            )
+            .build();
+        let from_env = temp_env::with_vars(
+            [(
+                "PROXIMA_SERVING_ADMISSION_SCHEDULE_MAX_CONCURRENT_REQUESTS",
+                Some("4"),
+            )],
+            || ServingSettings::from_env().expect("the admission env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+        assert_eq!(built.as_serving_config(&[]).admission_schedule.max_concurrent_requests, 4);
+        assert_eq!(
+            ServingSettings::default().as_serving_config(&[]).admission_schedule,
+            ServingConfig::default().admission_schedule,
+        );
+
+        let negative = conflaguration::from_toml_str::<ServingSettings>(
+            "[admission_schedule]\nmax_concurrent_requests = -1\n",
+        );
+        assert!(negative.is_err(), "a negative ceiling is refused");
     }
 }
