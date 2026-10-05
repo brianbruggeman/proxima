@@ -5816,7 +5816,7 @@ impl<'file> LoadedModel<'file> {
                                 LayerCacheState::Attention(cache),
                             ) = (widths, &mut layer_caches[layer])
                             {
-                                cache.truncate(keep_positions, *even_odd_row, *v_row);
+                                cache.try_truncate(keep_positions, *even_odd_row, *v_row)?;
                             }
                         }
                         cached_len = keep_positions;
