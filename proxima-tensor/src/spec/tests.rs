@@ -17637,6 +17637,29 @@ mod forward_scales {
             .count()
     }
 
+    fn moe_descriptor_with(rope_layout: &str, qk_norm: bool) -> ModelDescriptor {
+        let profile = toml::from_str::<FamilyProfile>(&profile_text(rope_layout))
+            .expect("the moe profile parses");
+        mistral_descriptor_from_shape(
+            16, 8, 16, 2, 1, 4, 2, 4, 2, qk_norm, false, false, false, &profile,
+        )
+    }
+
+    #[test]
+    fn single_range_moe_refuses_a_pairing_its_layer_cannot_express() {
+        let refused = build_forward(&moe_descriptor_with("split_half", false), true);
+
+        assert!(matches!(
+            refused,
+            Err(TensorError::UnsupportedInBuilder {
+                feature: "a rope pairing the moe layer cannot express",
+                ..
+            })
+        ));
+        assert!(build_forward(&moe_descriptor_with("split_half", true), true).is_ok());
+        assert!(build_forward(&moe_descriptor_with("adjacent", false), true).is_ok());
+    }
+
     #[test]
     fn dense_default_graph_equals_the_pre_change_graph() {
         let (program, _logits) = built(&descriptor(0, 0));

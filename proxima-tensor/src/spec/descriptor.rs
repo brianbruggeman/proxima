@@ -520,6 +520,17 @@ pub fn build_forward(
                 });
             }
             let attention = first.attention;
+            let pairing_the_moe_layer_derives = if descriptor.qk_norm {
+                RopePairing::SplitHalf { pairs: attention.head_dim / 2 }
+            } else {
+                RopePairing::Interleaved
+            };
+            refuse_when(
+                descriptor.expert_count > 0
+                    && attention.rope_pairing != pairing_the_moe_layer_derives,
+                "build_forward(CacheStrategy::SingleRange)",
+                "a rope pairing the moe layer cannot express",
+            )?;
             // `attention.rope_pairing` is this descriptor's own data, not
             // re-inferred from `qk_norm` here -- Qwen2 needs split-half RoPE
             // with `qk_norm` still `false` (no QK-norm tensors at all), a
