@@ -159,7 +159,8 @@ pub use prompt_cache_settings::PromptCacheSettings;
 pub use speculative_settings::{SpeculativeSettings, SpeculativeTypeName, SpeculativeTypeNameSet};
 #[cfg(feature = "std")]
 pub use serving_settings::{
-    AdmissionScheduleSettings, CacheType, ServingSettings, WeightPrecisionRuleSettings,
+    AdmissionScheduleSettings, CacheType, PhaseScheduleSettings, ServingSettings,
+    WeightPrecisionRuleSettings,
 };
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 pub use source::{CheckpointMapping, CheckpointSourceError};
