@@ -1,5 +1,5 @@
 use super::*;
-use crate::block_file::{BlockFileHeader, BlockFileLayer, encode_block};
+use crate::block_file::{BlockFileHeader, BlockFileLayer, BlockFileView, encode_block};
 
 fn malformed(reason: &'static str) -> InteropError {
     InteropError::BlockFileMalformed { reason }
@@ -81,6 +81,42 @@ fn layer_planes(entry: &LayerCacheState) -> [&[f32]; 3] {
     }
 }
 
+fn read_plane(view: &BlockFileView<'_>, layer: usize, plane: usize) -> Result<Vec<f32>, InteropError> {
+    let mut values = Vec::new();
+    view.plane_f32(layer, plane, &mut values)
+        .ok_or(malformed("plane is not whole f32 values"))?;
+    Ok(values)
+}
+
+fn restored_ring(record: &BlockFileLayer) -> Result<Option<KvRing>, InteropError> {
+    if record.ring_window == 0 {
+        return Ok(None);
+    }
+    let window = record.ring_window as usize;
+    let capacity = record.ring_capacity as usize;
+    if window > capacity {
+        return Err(malformed("ring window exceeds ring capacity"));
+    }
+    let even_odd_row = record.k_even_row_bytes as usize / size_of::<f32>();
+    let v_row = record.v_row_bytes as usize / size_of::<f32>();
+    Ok(Some(KvRing::new(window, capacity - window, even_odd_row, v_row, 0)))
+}
+
+fn restored_layer(view: &BlockFileView<'_>, layer: usize) -> Result<LayerCacheState, InteropError> {
+    let record = &view.header.layers[layer];
+    if record.rows == 0 {
+        return Ok(LayerCacheState::SharedFromLayer);
+    }
+    let ring = restored_ring(record)?;
+    Ok(LayerCacheState::Attention(LayerCache {
+        k_even: read_plane(view, layer, 0)?,
+        k_odd: read_plane(view, layer, 1)?,
+        v: read_plane(view, layer, 2)?,
+        ring,
+        ..LayerCache::new()
+    }))
+}
+
 impl PrefixState {
     /// Writes this state's rows into `out` as a kv block file whose `base_position` is 0.
     ///
@@ -110,6 +146,30 @@ impl PrefixState {
         let header = BlockFileHeader { descriptor_digest, content_key, base_position: 0, layers };
         let planes = self.layer_caches.iter().flat_map(layer_planes).collect::<Vec<_>>();
         encode_block(&header, &planes, out)
+    }
+
+    /// Rebuilds a state from a decoded block file, the inverse of [`PrefixState::to_block_file`].
+    ///
+    /// Composes `BlockFileView::plane_f32`: each plane is read into a fresh vector, ring layers
+    /// get their geometry back with a zero write offset, and layers with no rows become shared-KV
+    /// layers. `ids` and `cached_len` come from the caller because the file carries rows only.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::BlockFileMalformed`] when `cached_len` exceeds `ids`, a plane is not whole
+    /// `f32` values, or a ring window exceeds its capacity.
+    pub fn from_block_file(
+        ids: Vec<u32>,
+        cached_len: usize,
+        view: &BlockFileView<'_>,
+    ) -> Result<PrefixState, InteropError> {
+        if cached_len > ids.len() {
+            return Err(malformed("cached length exceeds ids"));
+        }
+        let layer_caches = (0..view.header.layers.len())
+            .map(|layer| restored_layer(view, layer))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PrefixState { ids, layer_caches, cached_len })
     }
 }
 
@@ -220,5 +280,90 @@ mod tests {
         let refused = state.to_block_file([0; 16], 1, &mut out);
 
         assert!(matches!(refused, Err(InteropError::BlockFileMalformed { reason: "nothing cached" })));
+    }
+
+    fn one_row_header(ring_window: u32, ring_capacity: u32) -> BlockFileHeader {
+        let layer = BlockFileLayer {
+            rows: 1,
+            k_even_row_bytes: 4,
+            k_odd_row_bytes: 4,
+            v_row_bytes: 4,
+            ring_window,
+            ring_capacity,
+        };
+        BlockFileHeader { descriptor_digest: [0x33; 16], content_key: 1, base_position: 0, layers: vec![layer] }
+    }
+
+    fn one_row_bytes(header: &BlockFileHeader) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_block(header, &[&[1.0], &[2.0], &[3.0]], &mut out).expect("one row block encodes");
+        out
+    }
+
+    #[test]
+    fn prefix_state_file_round_trips_every_layer_bit_for_bit() {
+        let state = three_layer_state();
+        let mut first = Vec::new();
+        state.to_block_file([0x33; 16], 0xABCD, &mut first).expect("the state encodes");
+        let view = decode_block(&first).expect("the encoded state decodes");
+
+        let restored = PrefixState::from_block_file(state.ids.clone(), state.cached_len, &view)
+            .expect("the decoded state restores");
+
+        let attention = |state: &PrefixState, layer: usize| match &state.layer_caches[layer] {
+            LayerCacheState::Attention(cache) => cache.clone(),
+            _ => panic!("fixture layer {layer} is an attention layer"),
+        };
+        for layer in 0..2 {
+            let (source, back) = (attention(&state, layer), attention(&restored, layer));
+            assert_eq!(bits(&back.k_even), bits(&source.k_even));
+            assert_eq!(bits(&back.k_odd), bits(&source.k_odd));
+            assert_eq!(bits(&back.v), bits(&source.v));
+        }
+        assert_eq!(attention(&restored, 1).ring_geometry(), Some(&KvRing::new(2, 1, 2, 1, 0)));
+        assert!(matches!(restored.layer_caches[2], LayerCacheState::SharedFromLayer));
+        assert_eq!(restored.cached_len, state.cached_len);
+        assert_eq!(restored.ids, state.ids);
+        let mut second = Vec::new();
+        restored.to_block_file([0x33; 16], 0xABCD, &mut second).expect("the restored state encodes");
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn prefix_state_file_restore_refuses_a_ring_window_over_its_capacity() {
+        let bytes = one_row_bytes(&one_row_header(4, 3));
+        let view = decode_block(&bytes).expect("the hand built block decodes");
+
+        let refused = PrefixState::from_block_file(vec![2], 1, &view);
+
+        assert!(matches!(
+            refused,
+            Err(InteropError::BlockFileMalformed { reason: "ring window exceeds ring capacity" })
+        ));
+    }
+
+    #[test]
+    fn prefix_state_file_restore_refuses_cached_length_over_ids() {
+        let bytes = one_row_bytes(&one_row_header(0, 0));
+        let view = decode_block(&bytes).expect("the hand built block decodes");
+
+        let refused = PrefixState::from_block_file(vec![2, 818, 5279, 529], 5, &view);
+
+        assert!(matches!(refused, Err(InteropError::BlockFileMalformed { reason: "cached length exceeds ids" })));
+    }
+
+    #[test]
+    fn prefix_state_file_restore_refuses_a_plane_that_is_not_whole_floats() {
+        let mut bytes = one_row_bytes(&one_row_header(0, 0));
+        bytes[48 + 4..48 + 8].copy_from_slice(&6u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        let view = decode_block(&bytes).expect("the patched block still decodes");
+
+        let refused = PrefixState::from_block_file(vec![2], 1, &view);
+
+        assert!(matches!(
+            refused,
+            Err(InteropError::BlockFileMalformed { reason: "plane is not whole f32 values" })
+        ));
     }
 }
