@@ -665,6 +665,50 @@ fn cached_attention_rewrite_accepts_the_qwen3_gqa_qk_norm_fixture() {
     );
 }
 
+/// A granite-shaped decoder (GQA attention, 8 experts routed 2 at a time)
+/// binds one fused attention step AND one fused top-k routing op per layer:
+/// the top-k rewrite rebinds the program to materialize its router scores,
+/// and that rebind used to discard every cached-attention op the earlier
+/// stage had spliced in, so decode ran the zero-padded kv bucket unmasked.
+#[test]
+#[cfg(all(feature = "cached-attention-streaming", feature = "moe-topk-fusion"))]
+fn moe_topk_fusion_keeps_the_cached_attention_ops_of_a_moe_decoder() {
+    const LAYERS: u32 = 3;
+    let (program, roots, cache_roots, _moe_sites) =
+        crate::spec::mistral_cached_forward_program_with_experts(
+            64, 64, 128, 4, 2, 16, LAYERS, 8, 2, false, false, false, false,
+        )
+        .expect("moe gqa decoder fixture builds");
+    let mut outputs = alloc::vec![roots.logits];
+    for (even, odd, value) in cache_roots {
+        outputs.extend_from_slice(&[even, odd, value]);
+    }
+    let shapes = crate::shape::infer(&program, &[1, 5]).expect("moe gqa decoder fixture infers");
+    let kinds_of = |fuse_cached_attention: bool| {
+        let bound = bind_with_fusion(
+            &program,
+            &shapes,
+            &outputs,
+            fuse_cached_attention,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("moe gqa decoder fixture binds");
+        let count = |name: &str| bound.iter().filter(|op| op.kind.name() == name).count();
+        (count("cached_attention"), count("moe_topk"))
+    };
+
+    assert_eq!(
+        kinds_of(true),
+        (LAYERS as usize, LAYERS as usize),
+        "every layer must keep its cached-attention op next to its top-k routing op"
+    );
+    assert_eq!(
+        kinds_of(false),
+        (0, LAYERS as usize),
+        "a caller that cannot render cached attention must still get the top-k routing op"
+    );
+}
+
 /// The real openchat-3.5/Mistral-7B shape (`vocab=32_002`,
 /// `hidden=4096`, `ffn=14336`, `32` query heads, `8` KV heads,
 /// `head_dim=128`, `32` layers) bound at one new token against a
