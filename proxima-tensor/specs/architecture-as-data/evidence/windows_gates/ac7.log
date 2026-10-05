@@ -1,0 +1,10 @@
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.08s
+────────────
+ Nextest run ID 974db8f6-b570-4a89-b430-6328e8d6624e with nextest profile: default
+    Starting 2 tests across 35 binaries (642 tests skipped)
+        PASS [   1.227s] (1/2) proxima-model-interop::arch_data_baseline window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints
+        PASS [   0.136s] (2/2) proxima-model-interop::arch_data_baseline window_ring_layers_follow_a_window_on_one_dense_layer
+────────────
+     Summary [   1.366s] 2 tests run: 2 passed, 642 skipped

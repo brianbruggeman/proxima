@@ -1,0 +1,6 @@
+11:54  up 4 days, 21:58, 7 users, load averages: 4.15 5.26 6.10
+17029 137.6 a background daemon in ~/.local/bin
+55233  14.5 /System/Applications/Messages.app/Contents/MacOS/Messages
+  476  14.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+31461  11.4 claude
+ 1023   6.6 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
