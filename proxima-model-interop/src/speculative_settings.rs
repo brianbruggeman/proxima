@@ -189,7 +189,7 @@ impl SpeculativeTypeNameSet {
     }
 
     /// This set's members in llama's own fixed priority order
-    /// ([`PRIORITY_ORDER`]'s own doc).
+    /// (`PRIORITY_ORDER`'s own doc).
     pub fn iter(self) -> impl Iterator<Item = SpeculativeTypeName> {
         PRIORITY_ORDER.into_iter().filter(move |&name| self.contains(name))
     }

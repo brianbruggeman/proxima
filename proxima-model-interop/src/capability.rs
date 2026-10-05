@@ -272,7 +272,7 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
 ///
 /// `Codec` carries 29 variants; only 14 have a CPU decode/matmul path
 /// (`proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` returns
-/// `Some`, mirrored by [`ALL_CODECS`]'s `cpu_supported` field below) -- the
+/// `Some`, mirrored by `ALL_CODECS`'s `cpu_supported` field below) -- the
 /// other 15 are recognized (this table names every one) but no construction
 /// site in this crate or `proxima_tensor` ever builds a
 /// [`proxima_tensor::cpu::QuantizedBlock::Packed`] carrying one, matching

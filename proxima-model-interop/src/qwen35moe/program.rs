@@ -169,7 +169,7 @@ fn append_qwen35moe_ffn(
 /// One layer's own diagnostic [`NodeId`]s -- production-neutral: every field
 /// is a root the forward program already computes for its normal decode
 /// work, just named and returned so a test can request them from
-/// [`proxima_model_interop::LoadedModel::forward_node_values`] without
+/// `proxima_model_interop::LoadedModel::forward_node_values` without
 /// hand-counting `Op::Input`s the way earlier bisection tests in this crate
 /// did. `ssm_taps` is `Some` only for [`LayerKind::Gdn`] layers,
 /// `dense_attention_taps` only for [`LayerKind::Attention`] layers
@@ -201,7 +201,7 @@ pub struct Qwen35MoeLayerDiagnostics {
 ///
 /// # Errors
 ///
-/// [`Error::TensorProgram`] if any composed builder fails to lower.
+/// `Error::TensorProgram` if any composed builder fails to lower.
 /// [`qwen35moe_forward_program`]'s own return shape: the built `Vec<Op>`,
 /// its logits/hidden roots, each layer's production cache-root tag, every
 /// [`MoeSite`] `append_moe_ffn` registered, and each layer's own

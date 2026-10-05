@@ -1779,7 +1779,7 @@ impl<'file> LoadedModel<'file> {
     /// a thin forward onto [`crate::expert_slab::ExpertSlab::page_expert`],
     /// the primitive this method composes (P2 teaching surface: read that
     /// method's own doc for the aliasing/ownership contract this call
-    /// changes). `layer` is the [`crate::bind::build_expert_slab`] SITE
+    /// changes). `layer` is the `crate::bind::build_expert_slab` SITE
     /// index (one slot per `blk.{n}.{ffn_gate,ffn_up,ffn_down}_exps.weight`
     /// tensor this checkpoint's own forward program bound, in that order),
     /// not necessarily the checkpoint's transformer layer number when more
@@ -1968,7 +1968,7 @@ impl<'file> LoadedModel<'file> {
     /// trait-object allocation.
     ///
     /// The method deliberately does not apply actions while a step is active:
-    /// [`ExpertSlab`] returns its typed boundary error, preventing a policy
+    /// `ExpertSlab` returns its typed boundary error, preventing a policy
     /// update from invalidating the borrowed sources of the current step.
     pub fn apply_expert_residency<Page>(
         &self,
@@ -2334,7 +2334,7 @@ impl<'file> LoadedModel<'file> {
     /// [`Self::prefill_prefix`] and decode multiple arms (e.g. speculation
     /// off vs on) from the SAME cached [`PrefixState`] instead of
     /// re-prefilling per arm. Threads straight through to the same
-    /// [`Self::run_decode_loop_observed_seeded`] call
+    /// `Self::run_decode_loop_observed_seeded` call
     /// [`Self::generate_from_prefix`] itself makes -- no decode loop is
     /// duplicated here.
     ///
@@ -2681,7 +2681,7 @@ impl<'file> LoadedModel<'file> {
     /// per generated token, `text_piece`s concatenating to this call's
     /// returned `String` on the same ids as its returned `Vec<u32>`.
     /// Returning [`ControlFlow::Break`] from any call ends decoding after
-    /// that token, same as [`decode_until_stop_or_budget`]'s own doc: this
+    /// that token, same as `decode_until_stop_or_budget`'s own doc: this
     /// call then returns `finished = false`, exactly like running out of
     /// `max_tokens`, never mistaken for the model's own eos.
     ///
@@ -2738,7 +2738,7 @@ impl<'file> LoadedModel<'file> {
     /// [`Self::generate_streaming`], plus `speculative_stats` (out
     /// parameter, zeroed by the caller before this call): every speculative
     /// verify step this decode makes accumulates into it via
-    /// [`Self::run_decode_loop_observed_with_stats`], so `examples/
+    /// `Self::run_decode_loop_observed_with_stats`, so `examples/
     /// speculative_bench.rs` reads verify-step/drafted/accepted counts off
     /// this call's own return path instead of the telemetry ring
     /// (`speculative_decode_parity.rs`'s own doc on that ring dropping
@@ -2751,13 +2751,13 @@ impl<'file> LoadedModel<'file> {
     ///
     /// `forced_draft_width`, when `Some(k)`, bypasses every real drafter and
     /// forces `k`-wide verify steps for this call's whole decode -- see
-    /// [`Self::run_decode_loop_observed_seeded`]'s own doc on the parameter.
+    /// `Self::run_decode_loop_observed_seeded`'s own doc on the parameter.
     /// `None` for every caller except `examples/speculative_bench.rs`'s
     /// verify-width sweep, which measures the verify program's own per-width
     /// cost directly (SPEC's architecture paragraph, "ms per verify forward
     /// at width k+1... via the verify program with forced drafts") without a
     /// real n-gram match happening to land at that width. Deliberately a
-    /// call-site argument, not a [`ServingConfig`]/[`SpeculativeConfig`]
+    /// call-site argument, not a `ServingConfig`/`SpeculativeConfig`
     /// field: it is a measurement knob for this one harness, not a servable
     /// setting -- keeping it out of the config surface means no builder
     /// setter, TOML key, or env var ever reaches it.

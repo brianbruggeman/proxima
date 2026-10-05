@@ -1322,7 +1322,7 @@ pub fn bind_matmul_weight<'file>(
 /// Binds a packed matrix through the program's `[in, out]` layout by
 /// dequantizing and transposing it. This is the explicit escape hatch for a
 /// packed tensor whose on-disk axis order cannot be represented by a borrowed
-/// [`QuantizedBlock`] view (the Qwen35 router is `[expert, embedding]` on disk
+/// `QuantizedBlock` view (the Qwen35 router is `[expert, embedding]` on disk
 /// but its contraction consumes `[embedding, expert]`).
 #[cfg(feature = "std")]
 pub fn bind_matmul_weight_transposed_f32<'file>(
@@ -1998,7 +1998,7 @@ fn bind_moe_stacked_experts<'file>(
 /// One MoE-only weight family (`ffn_gate`/`ffn_up`/`ffn_down`) for one
 /// layer. Tries a single native stacked tensor first
 /// (`blk.{layer}.{projection}_exps.weight`, see
-/// [`bind_moe_stacked_experts`] -- always packed now) before falling back to
+/// `bind_moe_stacked_experts` -- always packed now) before falling back to
 /// [`proxima_gguf::restack::discover_experts`]/`plan_stack`/`restack_into`
 /// for the per-expert-tensor convention
 /// (`blk.{layer}.{projection}.{expert}.weight`, `restack.rs`'s own module
@@ -2023,17 +2023,17 @@ fn bind_moe_stacked_experts<'file>(
 /// **That gap is closed.** `run_reduce_quantized` now derives
 /// `per_expert_bytes` from the gathered axis's own extent and slices
 /// `expert_index * per_expert_bytes` out of the packed buffer per token (see
-/// that function's own doc and [`bind_moe_stacked_experts`]'s). So this
+/// that function's own doc and `bind_moe_stacked_experts`'s). So this
 /// fallback now binds any codec [`Codec`] names --
 /// `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` -- as an owned-but-still-packed buffer
 /// ([`BoundWeights::packed_owned`]) instead of dequantizing: `restack_into`'s
 /// byte-concatenation is already exactly the contiguous `[expert, rows, k]`
 /// packed layout the gather resolves, so no dequantize-then-transpose step
 /// is needed at all for those codecs -- the restacked bytes bind as-is.
-/// `F32` is the one exception, still dequantized-then-[`transpose_expert_stack`]:
+/// `F32` is the one exception, still dequantized-then-`transpose_expert_stack`:
 /// `run_reduce_quantized`'s gather arm rejects a `Float32` weight block
 /// outright (that codec's gather already resolves through the generic
-/// buffer path [`bind_moe_stacked_experts`]'s `F32` arm uses, which expects
+/// buffer path `bind_moe_stacked_experts`'s `F32` arm uses, which expects
 /// the `[in, out]`-transposed layout this fallback's owned buffers have
 /// always produced).
 ///
@@ -2041,7 +2041,7 @@ fn bind_moe_stacked_experts<'file>(
 ///
 /// [`InteropError::UnknownTensor`] if neither tensor layout is present, or
 /// discovery/planning/restacking failed (see
-/// [`restack_error_as_interop_error`]); [`InteropError::UnrepresentableGgmlType`]
+/// `restack_error_as_interop_error`); `InteropError::UnrepresentableGgmlType`
 /// for a block-quantized type this crate has no dequantizer for.
 #[cfg(feature = "std")]
 // one weight family's own tensor shape (layer/projection/expert_count/

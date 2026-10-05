@@ -3214,7 +3214,7 @@ pub struct SpeculativeDecodeStats {
     /// drafted tokens that matched `select_decoded_token`'s own choice.
     pub accepted_total: u64,
     /// Per-`SpeculativeType` breakdown of the same two totals, indexed by
-    /// [`speculative_ngram_type_index`] -- lets a caller (`speculative_bench.rs`)
+    /// `speculative_ngram_type_index` -- lets a caller (`speculative_bench.rs`)
     /// attribute drafted/accepted counts to whichever `DrafterSet` member
     /// actually won each verify step, when more than one n-gram type is
     /// enabled at once.
@@ -3243,7 +3243,7 @@ pub fn speculative_ngram_type_index(type_id: crate::SpeculativeType) -> Option<u
     }
 }
 
-/// One [`SpeculativeType`]'s own drafted/accepted totals, part of
+/// One `SpeculativeType`'s own drafted/accepted totals, part of
 /// [`SpeculativeDecodeStats::per_type`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpeculativeTypeStats {
@@ -3260,9 +3260,9 @@ impl SpeculativeDecodeStats {
         self.accepted_total += accepted as u64;
     }
 
-    /// Attributes one verify step's counts to the [`SpeculativeType`] that
+    /// Attributes one verify step's counts to the `SpeculativeType` that
     /// actually drafted it -- a no-op for a type
-    /// [`speculative_ngram_type_index`] does not recognise.
+    /// `speculative_ngram_type_index` does not recognise.
     pub fn record_per_type(&mut self, type_id: crate::SpeculativeType, drafted: usize, accepted: usize) {
         if let Some(index) = speculative_ngram_type_index(type_id) {
             self.per_type[index].drafted += drafted as u64;
@@ -3270,8 +3270,8 @@ impl SpeculativeDecodeStats {
         }
     }
 
-    /// Read one [`SpeculativeType`]'s own totals -- zero for a type
-    /// [`speculative_ngram_type_index`] does not recognise.
+    /// Read one `SpeculativeType`'s own totals -- zero for a type
+    /// `speculative_ngram_type_index` does not recognise.
     #[must_use]
     pub fn per_type_stats(&self, type_id: crate::SpeculativeType) -> SpeculativeTypeStats {
         speculative_ngram_type_index(type_id)
