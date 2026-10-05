@@ -138,3 +138,18 @@ Instance: block size b = 64, hot tail H = 64, n_min = 16, local blocks L = 1, la
 - keep_ratio 0.9: n = min(62, max(16, ceil(55.8) = 56)) = 56; rows = 57*64 + 65 = 3713 and 57*64 + 66 = 3714; per layer 7427; total 7 * 7427 = 51989.
 
 RESULT block read rows: P=4096 T=2 layers=7 b=64 H=64 n_min=16 L=1 keep=0.1 -> 16149; keep=0.9 -> 51989
+
+## sampled read budget
+
+A sampled read's output has relative error at most epsilon with probability at least 1 - delta. The number of sampled rows n is sized from a base-rate sample of per-row weights, so the budget is a function of the observed spread and never of the scores of the rows being read.
+
+Rule (two-sided normal quantile): `n = ceil((z * sd / (epsilon * mu))^2)` with `z = z_(1 - delta/2)`, and `mu` and `sd` the sample mean and sample standard deviation (n-1 denominator) over the base-rate sample.
+
+Instance: epsilon = 0.05, delta = 0.05, so z = z_0.975 = 1.959964. Base-rate sample of 8 per-row weights `[0.9, 1.1, 1.0, 1.2, 0.8, 1.0, 1.1, 0.9]`.
+
+- mu = 8.0 / 8 = 1.0;
+- squared deviations 0.01, 0.01, 0, 0.04, 0.04, 0, 0.01, 0.01, sum 0.12;
+- variance = 0.12 / 7 = 0.0171429; sd = 0.130931;
+- z * sd / (epsilon * mu) = 1.959964 * 0.130931 / 0.05 = 5.13239; squared = 26.3414; n = ceil(26.3414) = 27.
+
+RESULT sampled read budget: mu=1.0 sd=0.1309 z=1.959964 n=27
