@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use super::device_kv::KvBufferSource;
+use super::residency_caches::BlockSummarizer;
 
 /// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
 /// individually -- the discipline log's own "top 20 ops by GPU time" ask.
@@ -835,6 +836,8 @@ pub struct LoadedModel<'file> {
     /// on the model [`Self::with_ring_write_offset_for_parity_control`]
     /// hands back.
     pub(super) ring_write_offset: usize,
+    /// The fold each sealed block of a full-attention layer is summarized by; `None` keeps no summaries.
+    pub(super) block_summarizer: Option<BlockSummarizer>,
     /// This checkpoint's own weight bytes, by class
     /// (`crate::bind::tensor_bytes_by_class`'s own dense/expert/table
     /// split, plus the SSM state bytes a qwen35 checkpoint's layers hold)

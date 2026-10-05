@@ -2491,6 +2491,14 @@ impl<'file> LoadedModel<'file> {
         self
     }
 
+    /// The seal hook's summary slot, [`LayerCache::summarize_sealed`] in `residency_caches.rs`: every sealed block of a full-attention layer is folded to one record by `summarizer`, a plain `fn` the caller supplies. Entries stored in the prompt cache before it are dropped because their sealed blocks carry no summaries; a model built without it keeps none.
+    #[must_use]
+    pub fn with_block_summarizer(mut self, summarizer: BlockSummarizer) -> Self {
+        self.clear_prompt_cache();
+        self.block_summarizer = Some(summarizer);
+        self
+    }
+
     /// The placement hook of the device kv, [`DeviceKv::adopt`] in `device_kv.rs`: replaces where its buffers come from. Compose it with [`omega::allocate_placed_buffer_over`] to put the kv in memory you own; the default, [`omega::allocate_placed_buffer`], reproduces today's allocation.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[must_use]
@@ -2721,6 +2729,7 @@ impl<'file> LoadedModel<'file> {
                 rope_scaling,
                 kv_layers,
                 ring_write_offset: 0,
+                block_summarizer: None,
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                     dense_bytes: dense_weight_bytes,
@@ -2854,6 +2863,7 @@ impl<'file> LoadedModel<'file> {
             rope_scaling,
             kv_layers,
             ring_write_offset: 0,
+            block_summarizer: None,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
@@ -2977,6 +2987,7 @@ impl<'file> LoadedModel<'file> {
             rope_scaling: RopeScaling::None,
             kv_layers,
             ring_write_offset: 0,
+            block_summarizer: None,
             // safetensors carries no `_exps.`-style naming convention this
             // crate has confirmed against a real checkpoint the way
             // `crate::bind::tensor_bytes_by_class` has for GGUF -- every
