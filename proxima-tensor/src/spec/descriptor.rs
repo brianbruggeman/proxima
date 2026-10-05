@@ -505,11 +505,6 @@ pub fn build_forward(
                 });
             }
             let attention = first.attention;
-            refuse_when(
-                descriptor.logit_scale.is_some(),
-                "build_forward(CacheStrategy::SingleRange)",
-                "a logit scale",
-            )?;
             // `attention.rope_pairing` is this descriptor's own data, not
             // re-inferred from `qk_norm` here -- Qwen2 needs split-half RoPE
             // with `qk_norm` still `false` (no QK-norm tensors at all), a
@@ -534,6 +529,7 @@ pub fn build_forward(
                     last_row_only,
                     attention.rope_pairing,
                     descriptor.embedding_scale,
+                    descriptor.logit_scale,
                 )?;
             Ok((
                 program,
