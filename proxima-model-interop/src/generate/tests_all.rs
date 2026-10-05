@@ -5138,7 +5138,9 @@ mod block_summarizer_tests {
         let bytes = gemma4_checkpoint();
         let parsed = proxima_gguf::pipe::parse_complete(&bytes).expect("parses the gemma4 fixture");
         let model = LoadedModel::load(&parsed, &bytes).expect("loads the gemma4 fixture");
-        model.generate_with_serving_config(&prompt_of(40, '3'), 2, config(0)).expect("the synthetic checkpoint generates");
+        // the metal fit gate clamps the cache budget to the host working set left after the kv a synthetic checkpoint reserves at its default context
+        let ungated = ServingConfig { gpu_memory_fit: false, ..config(0) };
+        model.generate_with_serving_config(&prompt_of(40, '3'), 2, ungated).expect("the synthetic checkpoint generates");
         assert!(model.prompt_cache_bytes() > 0, "the default prompt cache stored the prompt");
 
         let model = model.with_block_summarizer(block_row_count);
