@@ -14,6 +14,12 @@
 //! from its arm's pooled median exceeds `3 * 1.4826 * MAD` of that pool. Raw
 //! runs, the outliers, and both summaries (all runs, outliers removed) print.
 //!
+//! Every proxima child runs under `/usr/bin/time -l`, whose `maximum resident
+//! set size` and `peak memory footprint` lines are the per-process memory
+//! read; a child that prints `gpu_peak_bytes` (the Metal device's allocated
+//! size sampled at every token) adds the peak GPU allocation. `--model` names
+//! the checkpoint for children that read `PROXIMA_DECODE_MODEL_GGUF`.
+//!
 //! ```sh
 //! cargo run --release -p proxima-model-interop --example decode_arms -- \
 //!   --prompt-file prompt1k.txt --log launches.log --processes 2 --runs 7 \
@@ -95,6 +101,7 @@ struct Arguments {
     llama_server: Option<PathBuf>,
     ollama_tag: Option<String>,
     http_requests: usize,
+    model: String,
 }
 
 fn parse_arguments() -> Arguments {
@@ -107,6 +114,7 @@ fn parse_arguments() -> Arguments {
         llama_server: None,
         ollama_tag: None,
         http_requests: 7,
+        model: MODEL_PATH.to_string(),
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -120,6 +128,7 @@ fn parse_arguments() -> Arguments {
             "--processes" => arguments.processes = value().parse().expect("integer"),
             "--runs" => arguments.runs = value().parse().expect("integer"),
             "--requests" => arguments.http_requests = value().parse().expect("integer"),
+            "--model" => arguments.model = value(),
             "--llama-server" => arguments.llama_server = Some(PathBuf::from(value())),
             "--ollama" => arguments.ollama_tag = Some(value()),
             "--ignore-ollama" => {
@@ -250,6 +259,10 @@ struct ArmRuns {
     label: String,
     runs: Vec<(usize, usize, f64)>,
     prefill_runs: Vec<(usize, usize, f64)>,
+    ttft_runs: Vec<(usize, usize, f64)>,
+    gpu_peak_runs: Vec<(usize, usize, f64)>,
+    rss_by_process: Vec<(usize, usize, f64)>,
+    footprint_by_process: Vec<(usize, usize, f64)>,
     ids_by_run: Vec<Vec<u64>>,
     extra: Vec<String>,
 }
@@ -298,10 +311,36 @@ fn print_summary(arm: &ArmRuns) {
     if !arm.prefill_runs.is_empty() {
         print_metric(&arm.label, "prefill_ms", &arm.prefill_runs);
     }
+    if !arm.ttft_runs.is_empty() {
+        print_metric(&arm.label, "ttft_ms", &arm.ttft_runs);
+    }
+    print_memory(arm);
     for line in &arm.extra {
         println!("extra arm={} {line}", arm.label);
     }
     std::io::stdout().flush().expect("flush stdout");
+}
+
+fn print_memory(arm: &ArmRuns) {
+    for (name, series) in [
+        ("peak_rss_bytes", &arm.rss_by_process),
+        ("peak_footprint_bytes", &arm.footprint_by_process),
+        ("peak_gpu_bytes", &arm.gpu_peak_runs),
+    ] {
+        for (process, _, value) in series {
+            println!("memory arm={} metric={name} process={process} value={value:.0}", arm.label);
+        }
+        let values: Vec<f64> = series.iter().map(|entry| entry.2).collect();
+        if !values.is_empty() {
+            println!(
+                "summary arm={} metric={name} n={} median={:.0} max={:.0}",
+                arm.label,
+                values.len(),
+                median(&values),
+                values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            );
+        }
+    }
 }
 
 // bound: arm median <= reference median + max(reference MAD, 2% of reference median), outliers removed
@@ -312,7 +351,36 @@ fn print_bounds(arms: &[ArmRuns]) {
     for arm in arms.iter().skip(1) {
         bound_line(arm, reference, "ms_per_token", |each| &each.runs);
         bound_line(arm, reference, "prefill_ms", |each| &each.prefill_runs);
+        bound_line(arm, reference, "ttft_ms", |each| &each.ttft_runs);
+        memory_bound_line(arm, reference, "peak_rss_bytes", |each| &each.rss_by_process);
+        memory_bound_line(arm, reference, "peak_footprint_bytes", |each| &each.footprint_by_process);
+        memory_bound_line(arm, reference, "peak_gpu_bytes", |each| &each.gpu_peak_runs);
     }
+}
+
+// bound: arm median <= reference median + 2% of reference median; one value per process, no outlier removal
+fn memory_bound_line(
+    arm: &ArmRuns,
+    reference: &ArmRuns,
+    metric: &str,
+    select: impl Fn(&ArmRuns) -> &Vec<(usize, usize, f64)>,
+) {
+    let arm_values: Vec<f64> = select(arm).iter().map(|entry| entry.2).collect();
+    let reference_values: Vec<f64> = select(reference).iter().map(|entry| entry.2).collect();
+    if arm_values.is_empty() || reference_values.is_empty() {
+        println!("bound metric={metric} arm={} vs={} n=0", arm.label, reference.label);
+        return;
+    }
+    let reference_median = median(&reference_values);
+    let slack = reference_median * 0.02;
+    let arm_median = median(&arm_values);
+    println!(
+        "bound metric={metric} arm={} vs={} arm_median={arm_median:.0} reference_median={reference_median:.0} delta={:.0} limit={slack:.0} within={}",
+        arm.label,
+        reference.label,
+        arm_median - reference_median,
+        arm_median <= reference_median + slack
+    );
 }
 
 fn bound_line(
@@ -371,11 +439,14 @@ fn run_proxima_process(
             binary.display()
         ),
     );
-    let output = Command::new(binary)
+    let output = Command::new("/usr/bin/time")
+        .arg("-l")
+        .arg(binary)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", std::env::var("HOME").expect("HOME"))
-        .env("PROXIMA_GEMMA4_E2B_GGUF", MODEL_PATH)
+        .env("PROXIMA_GEMMA4_E2B_GGUF", &arguments.model)
+        .env("PROXIMA_DECODE_MODEL_GGUF", &arguments.model)
         .env("PROXIMA_SPECULATIVE_TYPES", "none")
         .env("PROXIMA_PROMPT", prompt)
         .env("PROXIMA_MAX_TOKENS", NEW_TOKENS.to_string())
@@ -405,7 +476,14 @@ fn run_proxima_process(
     std::fs::write(&raw_path, &output.stderr).expect("persist raw child stderr");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut parsed = 0usize;
+    let mut gpu_peak = 0.0f64;
     for line in stderr.lines() {
+        if let Some(bytes) = time_report_bytes(line, "maximum resident set size") {
+            arm.rss_by_process.push((process, 0, bytes));
+        }
+        if let Some(bytes) = time_report_bytes(line, "peak memory footprint") {
+            arm.footprint_by_process.push((process, 0, bytes));
+        }
         if line.contains("token_ids run_index=") {
             arm.ids_by_run.push(parse_ids(line));
         }
@@ -427,6 +505,13 @@ fn run_proxima_process(
                 .parse()
                 .expect("float");
             let prefill_ms = wall_ms - value * (tokens - 1.0);
+            let ttft = field_after(line, "ttft_ms=").and_then(|text| text.parse::<f64>().ok());
+            if let Some(ttft) = ttft.filter(|_| run_index > 0) {
+                arm.ttft_runs.push((process, run_index, ttft));
+            }
+            if let Some(bytes) = field_after(line, "gpu_peak_bytes=").and_then(|text| text.parse::<f64>().ok()) {
+                gpu_peak = gpu_peak.max(bytes);
+            }
             if run_index > 0 {
                 arm.runs.push((process, run_index, value));
                 arm.prefill_runs.push((process, run_index, prefill_ms));
@@ -444,6 +529,20 @@ fn run_proxima_process(
         arguments.runs + 1,
         "N mismatch: run=done lines parsed"
     );
+    if gpu_peak > 0.0 {
+        arm.gpu_peak_runs.push((process, 0, gpu_peak));
+    }
+    assert!(
+        arm.rss_by_process.iter().any(|entry| entry.0 == process),
+        "no maximum resident set size line from /usr/bin/time -l for arm {} process {process}",
+        arm.label
+    );
+}
+
+fn time_report_bytes(line: &str, label: &str) -> Option<f64> {
+    let trimmed = line.trim();
+    let value = trimmed.strip_suffix(label)?.trim();
+    value.parse::<f64>().ok()
 }
 
 fn http_request(port: u16, method: &str, path: &str, body: &str, timeout: Duration) -> String {
@@ -519,7 +618,7 @@ fn run_llama_arm(arguments: &Arguments, binary: &PathBuf, prompt: &str) -> ArmRu
             .env("HOME", std::env::var("HOME").expect("HOME"))
             .args([
                 "--model",
-                MODEL_PATH,
+                &arguments.model,
                 "-c",
                 "4096",
                 "-ngl",
@@ -548,6 +647,10 @@ fn run_llama_arm(arguments: &Arguments, binary: &PathBuf, prompt: &str) -> ArmRu
         label: "llama-server".to_string(),
         runs: Vec::new(),
         prefill_runs: Vec::new(),
+        ttft_runs: Vec::new(),
+        gpu_peak_runs: Vec::new(),
+        rss_by_process: Vec::new(),
+        footprint_by_process: Vec::new(),
         ids_by_run: Vec::new(),
         extra: Vec::new(),
     };
@@ -624,6 +727,10 @@ fn run_ollama_arm(arguments: &Arguments, tag: &str, prompt: &str) -> ArmRuns {
         label: "ollama".to_string(),
         runs: Vec::new(),
         prefill_runs: Vec::new(),
+        ttft_runs: Vec::new(),
+        gpu_peak_runs: Vec::new(),
+        rss_by_process: Vec::new(),
+        footprint_by_process: Vec::new(),
         ids_by_run: Vec::new(),
         extra: Vec::new(),
     };
@@ -690,6 +797,10 @@ fn main() {
             label: label.clone(),
             runs: Vec::new(),
             prefill_runs: Vec::new(),
+            ttft_runs: Vec::new(),
+            gpu_peak_runs: Vec::new(),
+            rss_by_process: Vec::new(),
+            footprint_by_process: Vec::new(),
             ids_by_run: Vec::new(),
             extra: Vec::new(),
         })
