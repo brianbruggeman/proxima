@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
-    PromptCacheConfig, ServingConfig, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
+    PromptCacheConfig, ServingConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
     metadata_f32_optional,
     metadata_str, metadata_u32, profiles::family_profile,
 };
@@ -968,6 +968,86 @@ fn llama_parity_qwen2() {
 #[test]
 fn llama_parity_qwen3() {
     llama_parity(&QWEN3);
+}
+
+const FORCED_DRAFT_WIDTHS: [u16; 2] = [1, 3];
+
+fn generic_verify_llama_parity(checkpoint: &Checkpoint) {
+    let mapping = checkpoint.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let armed = ModelDescriptor {
+        speculative_verify: true,
+        ..config_descriptors(checkpoint, &parsed).remove(0).1
+    };
+    let model = load_from_config(&parsed, file_bytes, &armed);
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    };
+    let cases = llama_cases(checkpoint);
+    let mut verify_steps_total = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        for width in FORCED_DRAFT_WIDTHS {
+            let mut stats = SpeculativeDecodeStats::default();
+            let (generated, _text, _stopped) = model
+                .generate_from_ids_with_speculative_stats(
+                    &case.prompt_ids,
+                    LLAMA_GENERATED_TOKENS,
+                    &config,
+                    &mut |_event| ControlFlow::Continue(()),
+                    &mut stats,
+                    Some(width),
+                )
+                .unwrap_or_else(|error| panic!("{}: speculative generate failed: {error:?}", checkpoint.name));
+            verify_steps_total += stats.verify_steps;
+            let compared = &generated[..generated.len().min(case.generated_ids.len())];
+            if let Some(index) = first_divergence(&case.generated_ids, compared) {
+                failures.push(format!(
+                    "{} prompt {:?} draft width {width}: first divergent index {index}; llama {:?}, proxima {:?}",
+                    checkpoint.name, case.prompt, case.generated_ids, generated
+                ));
+            }
+        }
+    }
+    assert!(
+        verify_steps_total > 0,
+        "{}: the verify program never ran across {} prompts, so nothing was checked",
+        checkpoint.name,
+        cases.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} divergences from llama.cpp with speculation on:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn generic_verify_llama_parity_gemma4_e2b() {
+    generic_verify_llama_parity(&GEMMA4_E2B);
+}
+
+#[test]
+fn generic_verify_llama_parity_openchat() {
+    generic_verify_llama_parity(&OPENCHAT);
+}
+
+#[test]
+fn generic_verify_llama_parity_qwen2() {
+    generic_verify_llama_parity(&QWEN2);
+}
+
+#[test]
+fn generic_verify_llama_parity_qwen3() {
+    generic_verify_llama_parity(&QWEN3);
+}
+
+#[test]
+fn generic_verify_llama_parity_granite_moe() {
+    generic_verify_llama_parity(&GRANITE_MOE);
 }
 
 fn load_from_config<'file>(

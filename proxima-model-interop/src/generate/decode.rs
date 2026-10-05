@@ -2284,6 +2284,48 @@ impl<'file> LoadedModel<'file> {
         self.generate_from_ids_with_turn_ends(prompt_ids, &[], max_tokens, serving_config, on_token)
     }
 
+    /// [`Self::generate_from_ids`], plus `speculative_stats` and
+    /// `forced_draft_width` -- the same pair
+    /// [`Self::generate_streaming_with_speculative_stats`] adds onto
+    /// [`Self::generate_streaming`], for a caller that holds the prompt as
+    /// token ids (a recorded oracle capture) and needs the verify program
+    /// to actually run: it always takes the two-range path, which is the one
+    /// that owns the verify branch, where the text entry points hand a dense
+    /// Metal decode to the placed-KV loop.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`].
+    pub fn generate_from_ids_with_speculative_stats(
+        &self,
+        prompt_ids: &[u32],
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        speculative_stats: &mut SpeculativeDecodeStats,
+        forced_draft_width: Option<u16>,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let effective_serving_config = self.effective_serving_config(serving_config)?;
+        let mut runtime = self.backend_runtime(&effective_serving_config);
+        let (generated_ids, text, stopped_by_eos, _final_state) = self
+            .run_decode_loop_through_cache(
+                prompt_ids.to_vec(),
+                &[],
+                max_tokens,
+                &effective_serving_config,
+                &mut runtime,
+                None,
+                &mut LogitsSink::Discard,
+                &mut NodeValuesSink::Discard,
+                on_token,
+                None,
+                true,
+                Some(speculative_stats),
+                forced_draft_width,
+            )?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
     /// [`Self::generate_from_ids`], with the caller marking where turns end.
     /// `turn_ends` are token counts into `prompt_ids` -- the index just past an
     /// end-of-turn token -- and the prefill stops at each to snapshot the
