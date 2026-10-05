@@ -751,6 +751,7 @@ fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         | BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. } => Ok(pack_leaf_uniforms(bound)),
     }

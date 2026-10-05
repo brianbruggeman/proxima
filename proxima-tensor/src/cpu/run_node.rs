@@ -183,6 +183,10 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
             run_gated_delta_net(resolved, buffers, output, gdn_state_sink)
         }
         BoundOpKind::MoeTopK { .. } => run_moe_topk(resolved, buffers, output, moe_topk_extra_sink),
+        BoundOpKind::TopFractionSelect { .. } => Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "top-fraction select has no cpu runner",
+        }),
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);

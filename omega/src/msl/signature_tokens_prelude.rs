@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const SELECTION_THREADGROUP_WIDTH: u64 = 1024;
+
 pub(super) fn grid_threads(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -233,6 +235,7 @@ pub(super) fn grid_threads(
         // reduction (`live`/`reduce_val`/`reduce_idx` are `threadgroup`
         // arrays, coherent only within one threadgroup) requires.
         BoundOpKind::MoeTopK { expert_count, .. } => *expert_count,
+        BoundOpKind::TopFractionSelect { .. } => SELECTION_THREADGROUP_WIDTH,
         // One threadgroup per attention row, `width` lanes cooperating --
         // `render_cached_softmax_weights`'s own doc; `tiled_gemm_
         // threadgroup_width`'s sibling arm sets `width` as the threadgroup
@@ -483,6 +486,14 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
             top_k,
             ..
         } => format!("omega_moe_topk_e{expert_count}_k{top_k}"),
+        BoundOpKind::TopFractionSelect {
+            rows,
+            has_keep_rows,
+            ..
+        } => format!(
+            "omega_top_fraction_select_r{rows}_k{}",
+            u8::from(*has_keep_rows)
+        ),
         // `render_cached_softmax_weights` renders one kernel per
         // `(cached_key_rows, attention_rows, head_dim)` triple -- no other
         // field this kind carries changes the emitted text (operand

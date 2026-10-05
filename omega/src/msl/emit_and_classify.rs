@@ -87,6 +87,10 @@ pub(super) fn emit_inner(
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
         BoundOpKind::GatedDeltaNet { .. } => render_gated_delta_net(resolved, &entry),
         BoundOpKind::MoeTopK { .. } => render_moe_topk(resolved, &entry),
+        BoundOpKind::TopFractionSelect { .. } => Err(EmitError::EpilogueNotSupported {
+            node: resolved.node,
+            reason: "top_fraction_select has no metal renderer",
+        }),
     }?;
     // Coupled to `render_cached_attention`'s own final-store branch by
     // construction: whenever the rendered SOURCE writes the scratch layout

@@ -127,6 +127,7 @@ pub(super) fn apply_identity_copy_alias(built: Vec<BoundOp>, outputs: &[NodeId])
             | BoundOpKind::CachedSoftmaxWeights { operands, .. }
             | BoundOpKind::GatedDeltaNet { operands, .. }
             | BoundOpKind::MoeTopK { operands, .. }
+            | BoundOpKind::TopFractionSelect { operands, .. }
             | BoundOpKind::Elementwise { operands, .. } => {
                 rewrite_read_sources(operands, &alias_of);
             }

@@ -313,6 +313,15 @@ pub enum BoundOpKind {
         weights: Vec<NodeId>,
         weight_total: NodeId,
     },
+    /// The bound form of `spec::top_fraction_mask`: a 0/1 f32 mask over `rows` scores, 1.0 on the
+    /// `keep_count` highest (lower index wins a tie). `operands` is `[scores, keep_count]`, plus
+    /// `keep_rows` last when `has_keep_rows`. Scores must be finite; `-0.0` and `0.0` compare equal.
+    /// Built only by the bind-time fusion that collapses the expression; nothing else produces it.
+    TopFractionSelect {
+        operands: BoundOperands,
+        rows: u64,
+        has_keep_rows: bool,
+    },
     Elementwise {
         body: ComposedBody,
         operands: BoundOperands,
@@ -542,6 +551,7 @@ impl BoundOpKind {
             BoundOpKind::CachedSoftmaxWeights { .. } => "cached_softmax_weights",
             BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
             BoundOpKind::MoeTopK { .. } => "moe_topk",
+            BoundOpKind::TopFractionSelect { .. } => "top_fraction_select",
             BoundOpKind::Elementwise { .. } => "elementwise",
             BoundOpKind::Reduce {
                 keep: Keep::Reduce, ..
@@ -573,6 +583,7 @@ impl BoundOp {
             | BoundOpKind::CachedSoftmaxWeights { operands, .. }
             | BoundOpKind::GatedDeltaNet { operands, .. }
             | BoundOpKind::MoeTopK { operands, .. }
+            | BoundOpKind::TopFractionSelect { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
             | BoundOpKind::Reduce { operands, .. }
             | BoundOpKind::RoundBatchedReduce { operands, .. } => operands,
@@ -609,6 +620,7 @@ impl BoundOp {
             | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::Elementwise { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => &[],
@@ -627,7 +639,8 @@ impl BoundOp {
             BoundOpKind::CachedAttention { .. }
             | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
-            | BoundOpKind::MoeTopK { .. } => &EMPTY_BODY,
+            | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::TopFractionSelect { .. } => &EMPTY_BODY,
             BoundOpKind::Elementwise { body, .. } => body,
             BoundOpKind::Reduce { element_body, .. }
             | BoundOpKind::RoundBatchedReduce { element_body, .. } => element_body,
@@ -716,7 +729,8 @@ impl BoundOp {
             BoundOpKind::CachedAttention { .. }
             | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
-            | BoundOpKind::MoeTopK { .. } => None,
+            | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::TopFractionSelect { .. } => None,
             // a round-merged fold is never split: `extents`' trailing round
             // axis has no `rebase_chunk` handling yet (this variant's own
             // doc), and every existing caller (`metal-moe-mul-mat-id`
@@ -799,6 +813,7 @@ impl BoundOp {
             // explicit for the same reason `Iota`/`Constant` below are.
             kind @ (BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::CachedSoftmaxWeights { .. }) => kind.clone(),
             BoundOpKind::Reduce {
                 element_body,

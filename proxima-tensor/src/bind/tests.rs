@@ -1828,6 +1828,7 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
             | BoundOpKind::Constant { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::CachedSoftmaxWeights { .. } => continue,
         };
         for (node, layout, lookup) in operands.iter_mut() {
@@ -6551,4 +6552,39 @@ mod moe_routing_census {
             );
         }
     }
+}
+
+#[test]
+fn top_fraction_select_reports_its_name_and_reads_every_operand() {
+    let select = BoundOp {
+        node: NodeId(9),
+        dtype: DType::Float32,
+        extents: alloc::vec![12],
+        kind: BoundOpKind::TopFractionSelect {
+            operands: alloc::vec![
+                (
+                    NodeId(0),
+                    Layout {
+                        base: 0,
+                        strides: SmallVec::from_slice(&[1]),
+                    },
+                    None,
+                ),
+                (
+                    NodeId(1),
+                    Layout {
+                        base: 0,
+                        strides: SmallVec::new(),
+                    },
+                    None,
+                ),
+            ],
+            rows: 12,
+            has_keep_rows: false,
+        },
+    };
+
+    assert_eq!(select.kind.name(), "top_fraction_select");
+    assert_eq!(select.operands().len(), 2);
+    assert_eq!(select.all_read_sources().count(), 2);
 }

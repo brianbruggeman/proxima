@@ -229,6 +229,7 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
             | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => &[],
         };

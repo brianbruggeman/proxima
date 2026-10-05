@@ -246,6 +246,12 @@ pub fn emit_wgsl_with_policy(
                 kind: "moe_topk",
             });
         }
+        BoundOpKind::TopFractionSelect { .. } => {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "top_fraction_select",
+            });
+        }
         BoundOpKind::RoundBatchedReduce { .. } => {
             return Err(EmitError::UnsupportedOpKind {
                 node: resolved.node,
@@ -566,6 +572,7 @@ fn grid_threads(resolved: &BoundOp) -> Result<u64, EmitError> {
         | BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. } => extents_product(),
     }
