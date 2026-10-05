@@ -220,6 +220,7 @@ mod alloc_probe;
 mod arena;
 mod prefix_trie;
 mod block_bloom;
+mod prefix_state_file;
 mod prewarm;
 mod prewarm_follow_up;
 mod prewarm_gate;
