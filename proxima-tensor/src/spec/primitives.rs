@@ -1457,3 +1457,83 @@ pub fn causal_mask_merged_windowed(
         &[(is_future, "st->st"), (too_old, "st->st")],
     )
 }
+
+/// Marks the `keep_count` highest `scores` rows with 1.0 and every other row with 0.0, in the
+/// five-op algebra: a row's rank is the number of rows scoring higher plus the number of
+/// lower-indexed rows scoring equal, and a row is kept when `keep_count > rank`. Equal scores
+/// therefore keep the lower index and exactly `keep_count` rows are kept. `keep_rows`, when
+/// given, is a rank-1 node holding 1.0 on rows kept regardless of rank. `scores` is rank-1
+/// over `Extent::Symbolic(0)`; `keep_count` is a rank-0 input the caller fills with how many
+/// rows to keep. Scores must be finite.
+///
+/// The nodes are appended in a fixed order (the bind-time fusion recognises the expression by
+/// rebuilding it with this function and comparing), and the cost is O(rows squared), which is
+/// why `omega` lowers it to a selection kernel at `selection.top_fraction_min_rows`.
+pub fn top_fraction_mask(
+    program: &mut Vec<Op>,
+    scores: NodeId,
+    keep_count: NodeId,
+    keep_rows: Option<NodeId>,
+) -> Result<NodeId, TensorError> {
+    let iota = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(0),
+        },
+    );
+    let greater = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(scores, "j->ij"), (scores, "i->ij")],
+    )?;
+    let equal = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(scores, "j->ij"), (scores, "i->ij")],
+    )?;
+    let lower = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(iota, "i->ij"), (iota, "j->ij")],
+    )?;
+    let tie = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(equal, "ij->ij"), (lower, "ij->ij")],
+    )?;
+    let hit = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(greater, "ij->ij"), (tie, "ij->ij")],
+    )?;
+    let rank = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        hit,
+        "ij->ij",
+        "i->ij",
+    )?;
+    let selected = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(keep_count, "->i"), (rank, "i->i")],
+    )?;
+    match keep_rows {
+        Some(keep) => elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Maximum,
+            &[(selected, "i->i"), (keep, "i->i")],
+        ),
+        None => Ok(selected),
+    }
+}
