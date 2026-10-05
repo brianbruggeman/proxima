@@ -456,4 +456,168 @@ mod tests {
             })
         );
     }
+
+    /// Prompt-lookup / n-gram drafting: find the most recent earlier occurrence
+    /// of `history`'s own last `ngram` tokens elsewhere in `history` (the
+    /// prompt+generated id sequence so far), and draft up to `max_k` tokens
+    /// (`max_k` up to 5) that followed that occurrence -- no second model, pure
+    /// string match over ids already produced. Returns an empty draft (never
+    /// entering `Verify`) when `history` is too short or no earlier occurrence
+    /// exists.
+    fn draft_prompt_lookup<Entry: PartialEq + Clone>(history: &[Entry], ngram: usize, max_k: usize) -> Vec<Entry> {
+        if ngram == 0 || max_k == 0 || history.len() <= ngram {
+            return Vec::new();
+        }
+        let needle = &history[history.len() - ngram..];
+        let search_end = history.len() - ngram;
+        for start in (0..search_end).rev() {
+            if &history[start..start + ngram] == needle {
+                let match_end = start + ngram;
+                let available = history.len() - match_end;
+                let take = available.min(max_k);
+                return history[match_end..match_end + take].to_vec();
+            }
+        }
+        Vec::new()
+    }
+
+    /// Worked example for [`draft_prompt_lookup`]: history `[5, 1, 2, 3, 9,
+    /// 1, 2, 3]`'s last `ngram=2` tokens are `[2, 3]`; scanning backward
+    /// from the trailing occurrence, the first EARLIER `[2, 3]` is at index
+    /// 2, so the draft is whatever followed it there -- `[9, 1, 2, 3]`, the
+    /// four tokens between that earlier match and the end of history.
+    /// `max_k=2` caps that same draft to its first two tokens; `max_k=0`,
+    /// too-short history, and no earlier occurrence all draft nothing.
+    #[test]
+    fn serving_state_draft_prompt_lookup_finds_the_earlier_occurrence() {
+        let history = alloc::vec![5_u32, 1, 2, 3, 9, 1, 2, 3];
+        assert_eq!(draft_prompt_lookup(&history, 2, 5), alloc::vec![9, 1, 2, 3]);
+        assert_eq!(draft_prompt_lookup(&history, 2, 2), alloc::vec![9, 1]);
+        assert_eq!(draft_prompt_lookup(&history, 2, 0), Vec::<u32>::new());
+        assert_eq!(draft_prompt_lookup(&[1, 2], 2, 5), Vec::<u32>::new());
+        assert_eq!(draft_prompt_lookup(&[9, 9, 9], 1, 1), alloc::vec![9]);
+    }
+
+    /// A pure, deterministic stand-in for the target model: `state` is the
+    /// running token count (`FakeCache`'s `kv_len` doubles as it), and the
+    /// "greedy argmax" for any input token is `input + 1` up to a `vocab`
+    /// ceiling, wrapping to keep every generated id in range -- enough to
+    /// drive both a plain sequential loop and a speculative loop through
+    /// identical arithmetic so their outputs are comparable byte-for-byte.
+    fn fake_greedy_next(input: u32, vocab: u32) -> u32 {
+        (input + 1) % vocab
+    }
+
+    /// The oracle at the FSM level: plain greedy decode
+    /// (one `advance_decode` per token, no drafting) produces the exact
+    /// same 32-token sequence as speculative decode (prompt-lookup drafts
+    /// up to `K=5`, scored via `accept`/`resume`/`rollback`) against the
+    /// same deterministic target function -- proving this module's own
+    /// control flow never changes what greedy decoding would have produced,
+    /// independent of any model program.
+    #[test]
+    fn serving_state_speculation_matches_plain_greedy_for_thirty_two_tokens() {
+        // a small vocab wraps `fake_greedy_next`'s output within the
+        // 32-token run, so its own 2-grams recur and `draft_prompt_lookup`
+        // actually finds matches -- proving the Accept/resume path, not
+        // just the empty-draft fallback (a wide vocab like 97 never repeats
+        // in 32 tokens from a single seed and would silently never draft).
+        const VOCAB: u32 = 11;
+        const TOKENS: usize = 32;
+        const K: usize = 5;
+        const NGRAM: usize = 2;
+        let seed_prompt = alloc::vec![3_u32, 5];
+
+        let mut plain_history = seed_prompt.clone();
+        let mut plain_state = ServingState::start(seed_prompt.clone(), FakeCache::empty());
+        let mut last = *plain_history.last().expect("seed prompt is non-empty");
+        plain_state = plain_state
+            .advance_prefill(last, FakeCache::empty())
+            .expect("prefill -> decode");
+        for _ in 0..TOKENS {
+            let next = fake_greedy_next(last, VOCAB);
+            plain_state = plain_state
+                .advance_decode(next, FakeCache::empty())
+                .expect("decode -> decode");
+            plain_history.push(next);
+            last = next;
+        }
+
+        let mut spec_history = seed_prompt.clone();
+        let mut spec_state = ServingState::start(seed_prompt.clone(), FakeCache::empty());
+        let mut last = *spec_history.last().expect("seed prompt is non-empty");
+        spec_state = spec_state
+            .advance_prefill(last, FakeCache::empty())
+            .expect("prefill -> decode");
+        let mut verify_rounds = 0usize;
+        let mut draft_tokens_accepted = 0usize;
+        while spec_history.len() - seed_prompt.len() < TOKENS {
+            let draft = draft_prompt_lookup(&spec_history, NGRAM, K);
+            if draft.is_empty() {
+                let next = fake_greedy_next(last, VOCAB);
+                spec_state = spec_state
+                    .advance_decode(next, FakeCache::empty())
+                    .expect("decode -> decode");
+                spec_history.push(next);
+                last = next;
+                continue;
+            }
+            let mut row_tokens = Vec::with_capacity(draft.len());
+            let mut feed = last;
+            for &drafted in &draft {
+                row_tokens.push(fake_greedy_next(feed, VOCAB));
+                feed = drafted;
+            }
+            let row_caches = alloc::vec![FakeCache::empty(); draft.len()];
+            verify_rounds += 1;
+            let verifying = spec_state
+                .enter_verify(draft.clone())
+                .expect("decode -> verify");
+            let outcome = verifying
+                .accept(&row_tokens, row_caches)
+                .expect("verify -> accept | rollback");
+            spec_state = match outcome {
+                ServingState::Accept { n, next, cache } => {
+                    draft_tokens_accepted += n;
+                    for token in &draft {
+                        spec_history.push(*token);
+                    }
+                    last = next;
+                    ServingState::Accept { n, next, cache }
+                        .resume()
+                        .expect("accept -> decode")
+                }
+                ServingState::Rollback { snapshot, to } => {
+                    let accepted = draft
+                        .iter()
+                        .zip(row_tokens.iter())
+                        .take_while(|(drafted, predicted)| drafted == predicted)
+                        .count();
+                    for token in &draft[..accepted] {
+                        spec_history.push(*token);
+                    }
+                    spec_history.push(to);
+                    last = to;
+                    ServingState::Rollback { snapshot, to }
+                        .rollback()
+                        .expect("rollback -> decode")
+                }
+                _ => unreachable!("accept only ever returns Accept or Rollback"),
+            };
+            spec_history
+                .truncate(seed_prompt.len() + TOKENS.min(spec_history.len() - seed_prompt.len()));
+        }
+
+        assert!(
+            verify_rounds > 0 && draft_tokens_accepted > 0,
+            "the small vocab must make draft_prompt_lookup find real matches -- a zero count here means \
+             this run degenerated to the empty-draft fallback and never exercised accept/resume at all"
+        );
+        assert_eq!(
+            spec_history, plain_history,
+            "speculative and plain greedy must produce identical token ids"
+        );
+        assert!(matches!(plain_state.finish(), ServingState::Done { .. }));
+        assert!(matches!(spec_state.finish(), ServingState::Done { .. }));
+    }
 }
