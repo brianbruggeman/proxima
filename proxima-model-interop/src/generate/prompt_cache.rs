@@ -341,6 +341,12 @@ impl PrefixState {
             .map(|state| match state {
                 LayerCacheState::Attention(cache) => {
                     float_bytes(&[&cache.k_even, &cache.k_odd, &cache.v])
+                        + cache.block_summaries.capacity() * size_of::<Vec<f32>>()
+                        + cache
+                            .block_summaries
+                            .iter()
+                            .map(|record| record.capacity() * size_of::<f32>())
+                            .sum::<usize>()
                 }
                 LayerCacheState::DenseAttention(cache) => {
                     float_bytes(&[&cache.k_first, &cache.k_second, &cache.k_pass, &cache.v])
@@ -1776,6 +1782,23 @@ mod tests {
             ],
             cached_len: stored_len,
         }
+    }
+
+    #[test]
+    fn prefix_state_byte_len_counts_block_summaries() {
+        let baseline = gemma_like_state(8);
+        let mut with_records = gemma_like_state(8);
+        match &mut with_records.layer_caches[1] {
+            LayerCacheState::Attention(cache) => {
+                cache.block_summaries = vec![vec![0.0f32; 8], vec![0.0f32; 8]];
+            }
+            _ => panic!("layer 1 of the gemma-like state is a full attention layer"),
+        }
+
+        assert_eq!(
+            with_records.byte_len() - baseline.byte_len(),
+            2 * size_of::<Vec<f32>>() + 2 * 8 * size_of::<f32>()
+        );
     }
 
     fn gemma_like_widths() -> Vec<LayerPadRowWidths> {
