@@ -100,7 +100,7 @@ pub use bind::{
 };
 pub use bind::{ModelArchitecture, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
-pub use dense::DenseArch;
+pub use dense::{DenseArch, descriptor_from_gguf as dense_descriptor_from_gguf};
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]

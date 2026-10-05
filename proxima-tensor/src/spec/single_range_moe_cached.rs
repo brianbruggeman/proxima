@@ -699,7 +699,7 @@ pub fn mistral_single_range_cached_forward_program_with_biases(
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
-    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(head_dim as f32));
     // only materialized when a layer actually consumes it (`qk_norm`), same
     // guard `mistral_cached_forward_program_with_experts` uses so a dense
     // checkpoint's own node count is unaffected by this feature existing.
@@ -1467,7 +1467,7 @@ pub fn append_mistral_cached_moe_layer(
 /// 24-layer stack, and GGUF carries no `layer_types` metadata key for this
 /// architecture (confirmed absent on the real checkpoint's own metadata dump)
 /// -- the only ground truth is which tensors a block's own name prefix owns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum LayerKind {
     Attention,
     ShortConv,

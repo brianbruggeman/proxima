@@ -56,7 +56,7 @@ pub struct AttentionMixerOutput {
 /// reaches that layer and can build (or skip) its `attn_v.weight` leaf, so
 /// [`LayerAttentionConfig`] carries this kind rather than a [`ValueSource`]
 /// itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ValueSourceKind {
     ProjectedV,
     SharedWithKey,
@@ -82,7 +82,7 @@ pub enum ValueSourceKind {
 /// alone -- so a schedule entry with `key_source_kind: SharedFromLayer(n)`
 /// always pairs with `value_source_kind: SharedFromLayer(n)` for the same
 /// `n`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum KeySourceKind {
     ProjectedK,
     SharedFromLayer(u32),
@@ -96,10 +96,11 @@ pub enum KeySourceKind {
 /// pair shares the SAME declared leaf (declared once, at first use), so a
 /// heterogeneous schedule with two distinct windows (Gemma 4's sliding vs
 /// full layers) declares two leaf pairs total, not one per layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RopeTableSel {
-    pub cos_name: &'static str,
-    pub sin_name: &'static str,
+    pub cos_name: String,
+    pub sin_name: String,
 }
 
 /// A multiplier applied to the embedding lookup's own output before the
@@ -108,7 +109,7 @@ pub struct RopeTableSel {
 /// [`lfm2_forward_program_with_experts`] served before this knob existed.
 /// `None` (every caller in this crate today) reproduces the prior
 /// unscaled embedding node-for-node.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub enum EmbeddingScale {
     /// Multiply by `sqrt(embedding)`.
     Sqrt,
@@ -120,7 +121,7 @@ impl EmbeddingScale {
     #[must_use]
     pub fn multiplier(self, embedding: u32) -> f32 {
         match self {
-            Self::Sqrt => (embedding as f32).sqrt(),
+            Self::Sqrt => libm::sqrtf(embedding as f32),
             Self::Factor(factor) => factor,
         }
     }
@@ -148,7 +149,7 @@ pub(crate) fn append_embedding_scale(
 /// needed a different nonlinearity on the same graph shape. `Silu` (every
 /// caller in this crate today, [`LayerFfnConfig::exclusive`]'s default)
 /// reproduces the prior hardcoded chain node-for-node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Activation {
     /// `silu(x) = x * sigmoid(x)`.
     Silu,
@@ -267,7 +268,8 @@ pub(super) fn append_activation(
 /// layer runs BOTH FFNs in parallel; hoisted out of [`LayerFfnConfig`] and
 /// onto this variant's payload so a schedule cannot name them under
 /// [`FfnCombination::Exclusive`], where dense and routed never coexist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParallelDenseMoeConfig {
     /// Sub-norm placement -- Gemma names these `blk.{layer}.post_ffw_norm_1.weight`
     /// (dense branch), `blk.{layer}.post_ffw_norm_2.weight` (routed branch),
@@ -306,7 +308,7 @@ pub struct ParallelDenseMoeConfig {
 /// (optionally) normalized on its own before the sum, and the sum
 /// (optionally) normalized again -- see [`ParallelDenseMoeConfig`]'s own
 /// fields for which sub-norms apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum FfnCombination {
     Exclusive,
     ParallelDenseMoe(ParallelDenseMoeConfig),
@@ -328,7 +330,8 @@ pub enum FfnCombination {
 /// [`FfnCombination::ParallelDenseMoe`]'s routed half); a field legal under
 /// only one variant lives on that variant's own payload instead --
 /// [`ParallelDenseMoeConfig`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayerFfnConfig {
     /// `true` builds and applies `blk.{layer}.post_attention_norm.weight`
     /// to the attention sub-block's output before its residual add
@@ -414,7 +417,7 @@ impl LayerFfnConfig {
 /// How a [`LayerAttentionConfig`] layer scales its raw attention scores
 /// before the causal mask -- see [`LayerAttentionConfig::score_scale`]'s own
 /// doc for which architecture uses which variant and why.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub enum AttentionScoreScale {
     /// `1/sqrt(query_pre_attn_scalar)`, the Gemma 2/3 convention. LFM2 and
     /// every other pre-existing caller passes its own `head_dim` here,
@@ -431,7 +434,7 @@ impl AttentionScoreScale {
     #[must_use]
     pub fn multiplier(self) -> f32 {
         match self {
-            Self::InverseSqrtQueryPreAttnScalar(scalar) => 1.0 / (scalar as f32).sqrt(),
+            Self::InverseSqrtQueryPreAttnScalar(scalar) => 1.0 / libm::sqrtf(scalar as f32),
             Self::Unscaled => 1.0,
             Self::Factor(factor) => factor,
         }
@@ -449,7 +452,8 @@ impl AttentionScoreScale {
 /// knobs [`append_attention_mixer`] already generalized in the slice before
 /// this one -- `query_heads` stays a top-level uniform parameter because
 /// every caller in this crate still needs it uniform.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayerAttentionConfig {
     pub head_dim: u32,
     pub kv_heads: u32,
@@ -493,7 +497,8 @@ pub struct LayerAttentionConfig {
 /// [`LayerKind::Attention`] (every [`LayerKind::ShortConv`] block still
 /// carries one, simply unread, so every schedule entry stays the same
 /// shape regardless of that block's own kind).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayerSchedule {
     pub kind: LayerKind,
     pub attention: LayerAttentionConfig,
@@ -1060,7 +1065,7 @@ pub(crate) fn append_routed_expert_ffn(
         // (`normed * (scale * root) == normed * scale * root`) rather than
         // a separate op consuming the norm's own output -- an equivalent
         // op-count-wise placement of the same constant multiply.
-        let inv_sqrt_embedding = scalar_constant(program, 1.0 / (embedding as f32).sqrt());
+        let inv_sqrt_embedding = scalar_constant(program, 1.0 / libm::sqrtf(embedding as f32));
         let rooted_router_scale_weight = elementwise(
             program,
             DType::Float32,
@@ -1502,15 +1507,15 @@ where
                     program,
                     DType::Float32,
                     alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-                    config.rope_table.cos_name,
+                    &config.rope_table.cos_name,
                 );
                 let sin = input_leaf(
                     program,
                     DType::Float32,
                     alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-                    config.rope_table.sin_name,
+                    &config.rope_table.sin_name,
                 );
-                rope_table_cache.push((config.rope_table, pairs, cos, sin));
+                rope_table_cache.push((config.rope_table.clone(), pairs, cos, sin));
                 (cos, sin)
             }
         };
@@ -1601,7 +1606,7 @@ pub(crate) fn append_ple_shared_projections(
         "per_layer_token_embd.weight",
     );
     let emb_gathered = embedding_lookup(program, emb_table, ids);
-    let emb_scale = scalar_constant(program, (ple_dim as f32).sqrt());
+    let emb_scale = scalar_constant(program, libm::sqrtf(ple_dim as f32));
     let emb_flat = elementwise(
         program,
         DType::Float32,
@@ -1630,7 +1635,7 @@ pub(crate) fn append_ple_shared_projections(
         "sdo->sdo",
         "so->sdo",
     )?;
-    let proj_scale = scalar_constant(program, 1.0 / (embedding as f32).sqrt());
+    let proj_scale = scalar_constant(program, 1.0 / libm::sqrtf(embedding as f32));
     let proj_flat = elementwise(
         program,
         DType::Float32,
@@ -3080,9 +3085,9 @@ pub fn qwen35_forward_program_with_last_row(
     // (`self.scaling = self.head_dim**-0.5` where `self.head_dim` is the
     // real width, `modeling_qwen3_next.py:262,264`), not
     // `rotary_dim`-based.
-    let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (attn_head_dim as f32).sqrt());
+    let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(attn_head_dim as f32));
     let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / attn_head_dim as f32);
-    let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (ssm_d_state as f32).sqrt());
+    let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(ssm_d_state as f32));
     let head_v_dim = ssm_d_inner / ssm_dt_rank;
     let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
     let cos_new = input_leaf(

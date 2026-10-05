@@ -237,7 +237,7 @@ pub mod partition;
 pub mod shape;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod sized;
-#[cfg(feature = "config")]
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod spec;
 // also active under plain `cfg(test)` (no feature flag needed) so this
 // crate's own `#[cfg(test)] mod tests` blocks (spec.rs, cpu.rs) can reach it

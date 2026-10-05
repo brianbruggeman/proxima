@@ -53,7 +53,7 @@ metal-attn-split-rows = ["metal-attn-split-decode"]
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
-config = ["std", "dep:bon", "dep:conflaguration", "dep:serde", "smallvec/serde"]
+config = ["std", "dep:bon", "dep:conflaguration", "smallvec/serde"]
 # Correctness proof (`spec.rs`'s `cpu_mask_zero_ulp`) for the general
 # bucketing mechanism `proxima-model-interop`'s placed-KV Metal decode path
 # relies on: rounding the growing KV extent (`Extent::Symbolic(1)` in
@@ -273,7 +273,7 @@ proxima-gguf = { workspace = true, default-features = false, features = ["alloc"
 # reaches them at every tier this crate has, alloc included.
 proxima-primitives = { workspace = true }
 proxima-telemetry = { workspace = true, optional = true }
-serde = { workspace = true, features = ["derive"], optional = true }
+serde = { workspace = true, features = ["alloc", "derive"] }
 smallvec.workspace = true
 thiserror = { workspace = true, default-features = false }
 

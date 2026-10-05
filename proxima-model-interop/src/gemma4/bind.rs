@@ -655,7 +655,7 @@ pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 /// profile `general.architecture` names, so the values GGUF does not carry come
 /// from `crate::profiles` and never from this module.
 #[cfg(feature = "std")]
-fn descriptor_from_gguf(
+pub fn descriptor_from_gguf(
     parsed: &ParsedGguf,
     sliding_kv_ring: bool,
 ) -> Result<ModelDescriptor, InteropError> {
@@ -720,7 +720,10 @@ fn bind_gemma4_with_last_row_only<'file>(
     // every gemma4 shape routes through `TwoRange` (all layers are `LayerKind::Attention`);
     // the two-range engine, not single-range, because the first step processes the whole
     // prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own module doc)
-    let descriptor = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
+    let descriptor = ModelDescriptor {
+        last_row_only,
+        ..descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?
+    };
     #[cfg(feature = "instrument")]
     let descriptor = ModelDescriptor {
         head_repeats: head_repeats_from_env(),
@@ -729,7 +732,7 @@ fn bind_gemma4_with_last_row_only<'file>(
     let schedule = &descriptor.layers;
     let cache_strategy = descriptor.cache_strategy;
         let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
-            build_forward(&descriptor, last_row_only)?;
+            build_forward(&descriptor)?;
         let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
             CacheStrategy::TwoRange => {
                 // `cache_roots` holds one entry per REAL cache-owning layer,
@@ -1137,7 +1140,7 @@ mod declared_leaves_match_bound_leaves_tests {
         let mut descriptor = descriptor_from_gguf(parsed, false)
             .expect("the e2b-shaped header carries every key the descriptor reads");
         descriptor.cache_strategy = CacheStrategy::Cacheless;
-        let (program, ..) = build_forward(&descriptor, true).expect("gemma4 e2b-shaped forward program lowers");
+        let (program, ..) = build_forward(&descriptor).expect("gemma4 e2b-shaped forward program lowers");
 
         program
             .iter()
@@ -1222,7 +1225,7 @@ mod declared_leaves_match_bound_leaves_tests {
         ];
 
         for (layer, source) in shared_sources {
-            let attention = descriptor.layers[layer].attention;
+            let attention = descriptor.layers[layer].attention.clone();
             assert_eq!(
                 attention.key_source_kind,
                 KeySourceKind::SharedFromLayer(source),

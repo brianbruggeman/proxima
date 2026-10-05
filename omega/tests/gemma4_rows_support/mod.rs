@@ -54,13 +54,13 @@ fn attention(
         key_source_kind: KeySourceKind::ProjectedK,
         rope_table: if full {
             RopeTableSel {
-                cos_name: "rope_cos",
-                sin_name: "rope_sin",
+                cos_name: "rope_cos".into(),
+                sin_name: "rope_sin".into(),
             }
         } else {
             RopeTableSel {
-                cos_name: "rope_cos_swa",
-                sin_name: "rope_sin_swa",
+                cos_name: "rope_cos_swa".into(),
+                sin_name: "rope_sin_swa".into(),
             }
         },
         rope_pairing: RopePairing::SplitHalf {

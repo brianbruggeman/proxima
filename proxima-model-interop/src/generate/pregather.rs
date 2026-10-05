@@ -2805,7 +2805,7 @@ impl<'file> LoadedModel<'file> {
             &profile,
         );
         let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
-            build_forward(&descriptor, true)?;
+            build_forward(&descriptor)?;
         // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`/
         // `wq`/`wk`/`wv` leaves (`build_single_range_program`) do not know
         // about `paired_gate_up_reduce`/`fused_qkv_reduce` yet --
@@ -2959,7 +2959,7 @@ impl<'file> LoadedModel<'file> {
             &profile,
         );
         let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
-            build_forward(&descriptor, true)?;
+            build_forward(&descriptor)?;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);

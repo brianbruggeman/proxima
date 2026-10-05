@@ -48,12 +48,9 @@
 //! `build_base_pattern` splices an empty (gathered) entry back in at that
 //! position.
 
-use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use bon::Builder;
-use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 
 use crate::dtype::DType;
@@ -80,6 +77,8 @@ mod attention_forward;
 #[macro_use]
 mod lfm2_single_range_cached;
 mod descriptor;
+#[cfg(feature = "config")]
+mod program_spec;
 mod gguf_descriptor;
 pub use attention_forward::*;
 pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};
@@ -90,6 +89,8 @@ pub use lfm2_qwen35_gdn::*;
 pub use lfm2_single_range_cached::*;
 pub use mistral_forward_cached::*;
 pub use mistral_layer_moe::*;
+#[cfg(feature = "config")]
+pub use program_spec::*;
 pub use primitives::*;
 pub use single_range_moe_cached::*;
 

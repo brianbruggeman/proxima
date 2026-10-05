@@ -1,3 +1,4 @@
+use conflaguration::Validate;
 use super::*;
 use proxima_primitives::Codec;
 
@@ -7967,8 +7968,8 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
                 value_source_kind: ValueSourceKind::ProjectedV,
                 key_source_kind: KeySourceKind::ProjectedK,
                 rope_table: RopeTableSel {
-                    cos_name: "rope_cos",
-                    sin_name: "rope_sin",
+                    cos_name: "rope_cos".into(),
+                    sin_name: "rope_sin".into(),
                 },
                 rope_pairing: RopePairing::Interleaved,
                 score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
@@ -8024,8 +8025,8 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         value_source_kind: ValueSourceKind::ProjectedV,
         key_source_kind: KeySourceKind::ProjectedK,
         rope_table: RopeTableSel {
-            cos_name: "rope_cos",
-            sin_name: "rope_sin",
+            cos_name: "rope_cos".into(),
+            sin_name: "rope_sin".into(),
         },
         rope_pairing: RopePairing::Interleaved,
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
@@ -8034,7 +8035,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
     let schedule = [
         LayerSchedule {
             kind: LayerKind::Attention,
-            attention,
+            attention: attention.clone(),
             ffn: LayerFfnConfig::exclusive(),
         },
         LayerSchedule {
@@ -12852,8 +12853,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa"
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -12872,8 +12873,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin"
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -13235,8 +13236,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa"
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -13255,8 +13256,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin"
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -13552,8 +13553,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa"
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -13572,8 +13573,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin"
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -13782,8 +13783,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa"
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -13802,8 +13803,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin"
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -14015,13 +14016,13 @@ mod gemma4_synthetic_parity {
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: if full {
                         RopeTableSel {
-                            cos_name: "rope_cos",
-                            sin_name: "rope_sin",
+                            cos_name: "rope_cos".into(),
+                            sin_name: "rope_sin".into(),
                         }
                     } else {
                         RopeTableSel {
-                            cos_name: "rope_cos_swa",
-                            sin_name: "rope_sin_swa",
+                            cos_name: "rope_cos_swa".into(),
+                            sin_name: "rope_sin_swa".into(),
                         }
                     },
                     rope_pairing: RopePairing::SplitHalf {
@@ -14456,8 +14457,8 @@ mod gemma4_synthetic_parity {
             value_source_kind: ValueSourceKind::ProjectedV,
             key_source_kind: KeySourceKind::ProjectedK,
             rope_table: RopeTableSel {
-                cos_name: "rope_cos_swa",
-                sin_name: "rope_sin_swa",
+                cos_name: "rope_cos_swa".into(),
+                sin_name: "rope_sin_swa".into(),
             },
             rope_pairing: RopePairing::SplitHalf { pairs: PAIRS as u32 },
             score_scale: AttentionScoreScale::Unscaled,
@@ -14470,8 +14471,8 @@ mod gemma4_synthetic_parity {
             value_source_kind: ValueSourceKind::SharedWithKey,
             key_source_kind: KeySourceKind::ProjectedK,
             rope_table: RopeTableSel {
-                cos_name: "rope_cos",
-                sin_name: "rope_sin",
+                cos_name: "rope_cos".into(),
+                sin_name: "rope_sin".into(),
             },
             rope_pairing: RopePairing::SplitHalf { pairs: PAIRS as u32 },
             score_scale: AttentionScoreScale::Unscaled,
@@ -14484,8 +14485,8 @@ mod gemma4_synthetic_parity {
             value_source_kind: ValueSourceKind::SharedFromLayer(1),
             key_source_kind: KeySourceKind::SharedFromLayer(1),
             rope_table: RopeTableSel {
-                cos_name: "rope_cos",
-                sin_name: "rope_sin",
+                cos_name: "rope_cos".into(),
+                sin_name: "rope_sin".into(),
             },
             rope_pairing: RopePairing::SplitHalf { pairs: PAIRS as u32 },
             score_scale: AttentionScoreScale::Unscaled,
@@ -14768,7 +14769,7 @@ mod gemma4_synthetic_parity {
     /// [`two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`],
     /// but through the generic [`build_forward`] dispatch instead of a
     /// direct [`lfm2_two_range_cached_forward_program_with_experts`] call --
-    /// proves `build_forward(&descriptor, ..)` with
+    /// proves `build_forward(&descriptor)` with
     /// `descriptor.cache_strategy == CacheStrategy::TwoRange` lowers to the
     /// SAME op graph that direct call already proves matches the prefill
     /// oracle, at this module's synthetic gemma4-shaped dims (2 layers, one
@@ -14860,8 +14861,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa"
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -14880,8 +14881,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin"
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -14920,10 +14921,11 @@ mod gemma4_synthetic_parity {
             paired_gate_up_reduce: false,
             fused_qkv_reduce: false,
             head_repeats: 1,
+            last_row_only: false,
         };
 
         let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden, _head_repeats) =
-            build_forward(&descriptor, false)
+            build_forward(&descriptor)
                 .expect("build_forward's TwoRange path lowers the gemma4-shaped descriptor");
 
         let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
@@ -15138,7 +15140,7 @@ mod gemma4_synthetic_parity {
         assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
 
         let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b, _head_repeats_b) =
-            build_forward(&descriptor_b, true).expect("build_forward real qwen2-dims build");
+            build_forward(&descriptor_b).expect("build_forward real qwen2-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
         assert_eq!(roots_a.logits, logits_b, "root node id mismatch");
@@ -15259,8 +15261,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa"
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -15279,8 +15281,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin"
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -15549,8 +15551,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa"
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -15569,8 +15571,8 @@ mod gemma4_synthetic_parity {
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin"
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into()
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32
@@ -15966,13 +15968,13 @@ mod gemma4_synthetic_parity {
                     key_source_kind: source,
                     rope_table: if full {
                         RopeTableSel {
-                            cos_name: "rope_cos",
-                            sin_name: "rope_sin",
+                            cos_name: "rope_cos".into(),
+                            sin_name: "rope_sin".into(),
                         }
                     } else {
                         RopeTableSel {
-                            cos_name: "rope_cos_swa",
-                            sin_name: "rope_sin_swa",
+                            cos_name: "rope_cos_swa".into(),
+                            sin_name: "rope_sin_swa".into(),
                         }
                     },
                     rope_pairing: RopePairing::SplitHalf {
@@ -16019,7 +16021,7 @@ mod gemma4_synthetic_parity {
             .iter()
             .map(|attention| LayerSchedule {
                 kind: LayerKind::Attention,
-                attention: *attention,
+                attention: attention.clone(),
                 ffn: ffn_config,
             })
             .collect();
@@ -16238,8 +16240,8 @@ mod gemma4_synthetic_parity {
                 value_source_kind,
                 key_source_kind: KeySourceKind::ProjectedK,
                 rope_table: RopeTableSel {
-                    cos_name: "rope_cos",
-                    sin_name: "rope_sin",
+                    cos_name: "rope_cos".into(),
+                    sin_name: "rope_sin".into(),
                 },
                 rope_pairing: RopePairing::SplitHalf {
                     pairs: PAIRS as u32,
@@ -17500,8 +17502,8 @@ mod head_repeats {
             value_source_kind: ValueSourceKind::ProjectedV,
             key_source_kind: KeySourceKind::ProjectedK,
             rope_table: RopeTableSel {
-                cos_name: "rope_cos",
-                sin_name: "rope_sin",
+                cos_name: "rope_cos".into(),
+                sin_name: "rope_sin".into(),
             },
             rope_pairing: RopePairing::Interleaved,
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
@@ -17510,7 +17512,7 @@ mod head_repeats {
         let layers = (0..2)
             .map(|_| LayerSchedule {
                 kind: LayerKind::Attention,
-                attention,
+                attention: attention.clone(),
                 ffn: LayerFfnConfig::exclusive(),
             })
             .collect();
@@ -17538,12 +17540,13 @@ mod head_repeats {
             paired_gate_up_reduce: false,
             fused_qkv_reduce: false,
             head_repeats,
+            last_row_only: false,
         }
     }
 
     fn built(cache_strategy: CacheStrategy, head_repeats: u32) -> (Vec<Op>, Vec<NodeId>) {
         let (program, _logits, _cache_roots, _moe_sites, _residuals, _hidden, duplicates) =
-            build_forward(&descriptor(cache_strategy, head_repeats), false)
+            build_forward(&descriptor(cache_strategy, head_repeats))
                 .expect("the two-layer dense descriptor lowers");
         (program, duplicates)
     }
@@ -17629,7 +17632,7 @@ mod forward_scales {
 
     fn built(descriptor: &ModelDescriptor) -> (Vec<Op>, NodeId) {
         let (program, logits, ..) =
-            build_forward(descriptor, true).expect("the single-range descriptor lowers");
+            build_forward(descriptor).expect("the single-range descriptor lowers");
         (program, logits)
     }
 
@@ -17650,7 +17653,7 @@ mod forward_scales {
 
     #[test]
     fn single_range_moe_refuses_a_pairing_its_layer_cannot_express() {
-        let refused = build_forward(&moe_descriptor_with("split_half", false), true);
+        let refused = build_forward(&moe_descriptor_with("split_half", false));
 
         assert!(matches!(
             refused,
@@ -17659,8 +17662,8 @@ mod forward_scales {
                 ..
             })
         ));
-        assert!(build_forward(&moe_descriptor_with("split_half", true), true).is_ok());
-        assert!(build_forward(&moe_descriptor_with("adjacent", false), true).is_ok());
+        assert!(build_forward(&moe_descriptor_with("split_half", true)).is_ok());
+        assert!(build_forward(&moe_descriptor_with("adjacent", false)).is_ok());
     }
 
     #[test]
@@ -17708,7 +17711,7 @@ mod forward_scales {
             let mut scaled = head_repeats::descriptor(strategy, 1);
             scaled.logit_scale = Some(6.0);
 
-            let outcome = build_forward(&scaled, false);
+            let outcome = build_forward(&scaled);
 
             assert!(
                 matches!(
@@ -17747,7 +17750,7 @@ mod forward_scales {
             let mut descriptor = head_repeats::descriptor(strategy, 1);
             descriptor.residual_scale = Some(0.22);
 
-            let outcome = build_forward(&descriptor, false);
+            let outcome = build_forward(&descriptor);
 
             assert!(
                 matches!(
@@ -17779,7 +17782,7 @@ mod forward_scales {
         let mut dense = descriptor(0, 0);
         dense.residual_scale = Some(0.22);
 
-        let outcome = build_forward(&dense, true);
+        let outcome = build_forward(&dense);
 
         assert!(
             matches!(

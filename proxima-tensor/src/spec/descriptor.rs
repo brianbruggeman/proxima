@@ -11,7 +11,7 @@ use super::*;
 /// `#[cfg(feature = "gemma4-kv-cache")]` compile-time split
 /// (`proxima-model-interop::gemma4::bind::Gemma4Arch::bind`), not as data a
 /// caller can hold and branch on at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CacheStrategy {
     Cacheless,
     TwoRange,
@@ -50,7 +50,8 @@ pub enum CacheStrategy {
 /// cache-engine choice into one value a caller can build ahead of time --
 /// today every caller re-derives and re-passes these as separate positional
 /// arguments at each forward-program call site.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelDescriptor {
     pub vocab: u32,
     pub embedding: u32,
@@ -136,6 +137,10 @@ pub struct ModelDescriptor {
     /// [`CacheStrategy::SingleRange`], same "unused when the arm never reads it"
     /// precedent as [`Self::qk_norm`].
     pub head_repeats: u32,
+    /// `true` gathers the LM head to the last new row, which is all decode and prefill sample;
+    /// `false` keeps every new row's logits, which a speculative verify step and pooled
+    /// embeddings read.
+    pub last_row_only: bool,
 }
 
 /// The values a family's GGUF header and HF `config.json` do not carry, as
@@ -276,8 +281,8 @@ pub fn mistral_descriptor_from_shape(
         value_source_kind: ValueSourceKind::ProjectedV,
         key_source_kind: KeySourceKind::ProjectedK,
         rope_table: RopeTableSel {
-            cos_name: "rope_cos",
-            sin_name: "rope_sin",
+            cos_name: "rope_cos".into(),
+            sin_name: "rope_sin".into(),
         },
         rope_pairing: profile.rope_pairing(head_dim),
         score_scale: profile.score_scale(head_dim),
@@ -287,7 +292,7 @@ pub fn mistral_descriptor_from_shape(
     let layers: Vec<LayerSchedule> = (0..block_count)
         .map(|_| LayerSchedule {
             kind: LayerKind::Attention,
-            attention,
+            attention: attention.clone(),
             ffn,
         })
         .collect();
@@ -321,6 +326,7 @@ pub fn mistral_descriptor_from_shape(
         paired_gate_up_reduce,
         fused_qkv_reduce,
         head_repeats: 1,
+        last_row_only: true,
     }
 }
 
@@ -381,11 +387,9 @@ fn refuse_when(
 /// the plain builder and wraps that builder's three-tuple return
 /// (`program, logits, moe_sites`, no cache roots) into this function's own
 /// return shape with `cache_roots` always empty, so callers never match on
-/// which engine actually built the program. `last_row_only` stays a call
-/// parameter rather than a `ModelDescriptor` field because it shapes a
-/// single call's graph (whole-sequence logits vs. one gathered row), not the
-/// model itself -- the same role it already plays as each builder's own
-/// trailing positional argument.
+/// which engine actually built the program. `last_row_only` is a
+/// [`ModelDescriptor`] field, so the verify shape is data: one config lowers
+/// the decode program or the verify program by flipping it.
 ///
 /// [`CacheStrategy::SingleRange`] dispatches to
 /// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
@@ -406,7 +410,6 @@ fn refuse_when(
 /// same-shaped return.
 pub fn build_forward(
     descriptor: &ModelDescriptor,
-    last_row_only: bool,
 ) -> Result<BuildForwardProgram, TensorError> {
     match descriptor.cache_strategy {
         CacheStrategy::TwoRange => {
@@ -434,7 +437,7 @@ pub fn build_forward(
                     &descriptor.layers,
                     descriptor.embedding_scale,
                     descriptor.logit_softcap,
-                    last_row_only,
+                    descriptor.last_row_only,
                     descriptor.ple_dim,
                     descriptor.sliding_kv_ring,
                     descriptor.head_repeats,
@@ -474,7 +477,7 @@ pub fn build_forward(
                 &descriptor.layers,
                 descriptor.embedding_scale,
                 descriptor.logit_softcap,
-                last_row_only,
+                descriptor.last_row_only,
                 descriptor.ple_dim,
                 descriptor.head_repeats,
             )?;
@@ -519,7 +522,7 @@ pub fn build_forward(
                     feature: "non-uniform per-layer attention config",
                 });
             }
-            let attention = first.attention;
+            let attention = &first.attention;
             let pairing_the_moe_layer_derives = if descriptor.qk_norm {
                 RopePairing::SplitHalf { pairs: attention.head_dim / 2 }
             } else {
@@ -552,7 +555,7 @@ pub fn build_forward(
                     descriptor.qkv_biases,
                     descriptor.paired_gate_up_reduce,
                     descriptor.fused_qkv_reduce,
-                    last_row_only,
+                    descriptor.last_row_only,
                     attention.rope_pairing,
                     descriptor.embedding_scale,
                     descriptor.logit_scale,

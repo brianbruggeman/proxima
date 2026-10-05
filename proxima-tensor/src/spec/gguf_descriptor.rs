@@ -67,8 +67,8 @@ pub fn gemma4_descriptor_from_gguf(
         value_source_kind: ValueSourceKind::ProjectedV,
         key_source_kind: KeySourceKind::ProjectedK,
         rope_table: RopeTableSel {
-            cos_name: "rope_cos_swa",
-            sin_name: "rope_sin_swa",
+            cos_name: "rope_cos_swa".into(),
+            sin_name: "rope_sin_swa".into(),
         },
         rope_pairing: profile.rope_pairing(rotary_dim_swa),
         score_scale: profile.score_scale(key_length_swa),
@@ -84,8 +84,8 @@ pub fn gemma4_descriptor_from_gguf(
             ValueSourceKind::SharedWithKey
         },
         rope_table: RopeTableSel {
-            cos_name: "rope_cos",
-            sin_name: "rope_sin",
+            cos_name: "rope_cos".into(),
+            sin_name: "rope_sin".into(),
         },
         rope_pairing: profile.rope_pairing(rotary_dim),
         score_scale: profile.score_scale(key_length),
@@ -99,7 +99,7 @@ pub fn gemma4_descriptor_from_gguf(
         .zip(&feed_forward_by_layer)
         .enumerate()
         .map(|(layer, ((&is_sliding, &kv_heads), &feed_forward))| {
-            let template = if is_sliding { sliding } else { full };
+            let template = if is_sliding { sliding.clone() } else { full.clone() };
             let attention = LayerAttentionConfig { kv_heads, ..template };
             // a shared layer's V is already post-norm, re-norming would double-apply
             let attention = if layer as u32 >= first_shared_idx {
@@ -156,6 +156,7 @@ pub fn gemma4_descriptor_from_gguf(
         paired_gate_up_reduce: false,
         fused_qkv_reduce: false,
         head_repeats: 1,
+        last_row_only: true,
     })
 }
 
