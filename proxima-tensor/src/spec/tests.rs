@@ -17844,3 +17844,60 @@ mod forward_scales {
         );
     }
 }
+
+const TWELVE_SCORES: [f32; 12] = [0.5, 3.0, 1.5, 3.0, 0.1, 2.5, 0.9, 4.0, 1.1, 2.0, 0.3, 5.0];
+
+fn evaluate_twelve_scores(rows: usize, keep_rows_data: Option<&[f32]>) -> Vec<f32> {
+    let mut program = Vec::new();
+    let scores = input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "scores");
+    let keep_count = input_leaf(&mut program, DType::Float32, Vec::new(), "keep_count");
+    let keep_rows = keep_rows_data
+        .map(|_| input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "keep_rows"));
+    let mask = top_fraction_mask(&mut program, scores, keep_count, keep_rows)
+        .expect("the top-fraction mask lowers");
+    let keep = [rows.div_ceil(4) as f32];
+    let mut inputs: Vec<(&str, &[f32])> =
+        vec![("scores", &TWELVE_SCORES[..rows]), ("keep_count", &keep)];
+    if let Some(data) = keep_rows_data {
+        inputs.push(("keep_rows", data));
+    }
+    let evaluated = crate::cpu::evaluate_named(&program, &[rows as u64], &inputs, &[mask])
+        .expect("the top-fraction mask evaluates");
+    let (values, _shape) = evaluated.get(mask).expect("the mask node was requested");
+    values.to_vec()
+}
+
+fn selected_rows(mask: &[f32]) -> Vec<usize> {
+    mask.iter()
+        .enumerate()
+        .filter(|(_, value)| **value == 1.0)
+        .map(|(row, _)| row)
+        .collect()
+}
+
+#[test]
+fn top_fraction_cpu_worked_below() {
+    let mask = evaluate_twelve_scores(11, None);
+
+    assert_eq!(mask.len(), 11);
+    assert_eq!(selected_rows(&mask), vec![1, 3, 7]);
+}
+
+#[test]
+fn top_fraction_cpu_worked_at() {
+    let mask = evaluate_twelve_scores(12, None);
+
+    assert_eq!(mask.len(), 12);
+    assert_eq!(selected_rows(&mask), vec![1, 7, 11]);
+}
+
+#[test]
+fn rank_select_cpu_keep_rows_union() {
+    let mut keep = [0.0_f32; 12];
+    keep[0] = 1.0;
+
+    let mask = evaluate_twelve_scores(12, Some(&keep));
+
+    assert_eq!(mask.len(), 12);
+    assert_eq!(selected_rows(&mask), vec![0, 1, 7, 11]);
+}
