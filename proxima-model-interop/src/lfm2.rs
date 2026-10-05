@@ -619,8 +619,8 @@ pub fn uniform_lfm2_schedule(architecture: &Lfm2Architecture) -> Vec<LayerSchedu
         value_source_kind: ValueSourceKind::ProjectedV,
         key_source_kind: KeySourceKind::ProjectedK,
         rope_table: RopeTableSel {
-            cos_name: "rope_cos",
-            sin_name: "rope_sin",
+            cos_name: "rope_cos".into(),
+            sin_name: "rope_sin".into(),
         },
         rope_pairing: RopePairing::Interleaved,
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(architecture.head_dim),
@@ -632,7 +632,7 @@ pub fn uniform_lfm2_schedule(architecture: &Lfm2Architecture) -> Vec<LayerSchedu
         .iter()
         .map(|&kind| LayerSchedule {
             kind,
-            attention,
+            attention: attention.clone(),
             ffn,
         })
         .collect()

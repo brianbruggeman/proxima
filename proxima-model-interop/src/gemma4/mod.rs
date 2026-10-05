@@ -11,4 +11,6 @@ pub mod program;
 pub use bind::{
     GEMMA4, Gemma4Arch, bind_gemma4_all_positions_logits, bind_gemma4_weights, gemma4_tensor_names,
 };
+#[cfg(feature = "std")]
+pub use bind::descriptor_from_gguf;
 pub use hparams::{Architecture, from_metadata};

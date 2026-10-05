@@ -61,7 +61,7 @@ pub fn mistral_forward_program(
     // attention's usual `1/sqrt(d_k)`, the same two IEEE ops the deleted
     // five-node `Iota` derivation performed, at build time instead of once
     // per forward pass.
-    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(head_dim as f32));
     let cos = input_leaf(
         &mut program,
         DType::Float32,

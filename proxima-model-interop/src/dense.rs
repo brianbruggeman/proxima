@@ -66,55 +66,15 @@ impl Architecture for DenseArch {
         file_bytes: &'file [u8],
     ) -> Result<BoundProgram<'file>, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
-        let profile = family_profile(&architecture.family)?;
-        require_full_rotary(parsed, &architecture)?;
-        // This builder has one KV cache shape for every layer. Preserve a
-        // checkpoint's per-layer configuration in `ModelArchitecture`, but
-        // do not silently select a representative value for this uniform
-        // program.
-        architecture.uniform_kv_heads()?;
+        let descriptor = descriptor_from_gguf(parsed, &architecture)?;
         // `&[]`: this entry point takes no `ServingConfig`, so there is no
         // `weight_precision` rule set to thread here yet --
         // `crate::bind::bind_all_weights`'s own doc names this as the
         // wiring a future slice does, unchanged from `load_inner`'s prior
         // inline call.
         let weights = bind_all_weights(parsed, file_bytes, &architecture, false, false, &[])?;
-        let qk_norm = checkpoint_has_qk_norm(parsed);
-        // Encoder-style tasks consume the full hidden sequence for pooling or
-        // a task head. Decoder generation only needs the final row, so keep
-        // the expensive vocab projection narrow there. The task classifier
-        // runs before this bind and prevents a non-generation checkpoint from
-        // being mistaken for a decoder by the caller.
-        let last_row_only = !matches!(classify_task(parsed).task, ModelTask::Embedding);
-        // `last_row_only` -- the decode loop
-        // (`crate::generate::LoadedModel`'s own decode step) only ever
-        // samples the LAST row's logits, greedy or not; see
-        // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
-        // own doc on that flag and `proxima-tensor/docs/discipline.md`
-        // ROW 418/421 for the measured cost of computing every row instead.
-        // Every family's values the header does not carry (RoPE pairing
-        // included) come from its profile; `build_forward_matches_direct_builder_call_at_real_mistral_dims`
-        // and `..._at_real_qwen2_dims` (`proxima-tensor/src/spec/tests.rs`)
-        // prove the descriptor route byte-identical to the direct builder.
-        let descriptor = mistral_descriptor_from_shape(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.query_heads,
-            architecture.kv_heads,
-            architecture.head_dim,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            qk_norm,
-            checkpoint_qkv_biases(parsed, &architecture)?,
-            false,
-            false,
-            &profile,
-        );
-        let descriptor = with_header_scales(descriptor, parsed, &architecture.family);
         let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
-            build_forward(&descriptor, last_row_only)?;
+            build_forward(&descriptor)?;
         Ok(BoundProgram {
             weights,
             architecture,
@@ -135,6 +95,55 @@ impl Architecture for DenseArch {
     }
 }
 
+/// The dense checkpoint's whole pre-lowering program as one config:
+/// [`mistral_descriptor_from_shape`] over the family profile
+/// `general.architecture` names, the header's own scales layered on top, and
+/// the logits row count the checkpoint's task needs. [`build_forward`] over
+/// the result is the entire lowering; serialize the descriptor and a restored
+/// copy lowers to the same program.
+///
+/// # Errors
+///
+/// The family has no profile, the header declares partial rotary, or the
+/// per-layer KV head counts differ (this program has one cache shape).
+pub fn descriptor_from_gguf(
+    parsed: &ParsedGguf,
+    architecture: &ModelArchitecture,
+) -> Result<ModelDescriptor, InteropError> {
+    let profile = family_profile(&architecture.family)?;
+    require_full_rotary(parsed, architecture)?;
+    // This builder has one KV cache shape for every layer. Preserve a
+    // checkpoint's per-layer configuration in `ModelArchitecture`, but
+    // do not silently select a representative value for this uniform
+    // program.
+    architecture.uniform_kv_heads()?;
+    let descriptor = mistral_descriptor_from_shape(
+        architecture.vocab,
+        architecture.embedding,
+        architecture.feed_forward,
+        architecture.query_heads,
+        architecture.kv_heads,
+        architecture.head_dim,
+        architecture.block_count,
+        architecture.expert_count,
+        architecture.expert_used_count,
+        checkpoint_has_qk_norm(parsed),
+        checkpoint_qkv_biases(parsed, architecture)?,
+        false,
+        false,
+        &profile,
+    );
+    // Encoder-style tasks consume the full hidden sequence for pooling or a
+    // task head; decoder generation samples only the final row, so the vocab
+    // projection stays narrow there (`proxima-tensor/docs/discipline.md`
+    // ROW 418/421 measured the cost of computing every row instead).
+    let last_row_only = !matches!(classify_task(parsed).task, ModelTask::Embedding);
+    Ok(ModelDescriptor {
+        last_row_only,
+        ..with_header_scales(descriptor, parsed, &architecture.family)
+    })
+}
+
 fn header_scale(parsed: &ParsedGguf, family: &str, key: &str) -> Option<f32> {
     let value = metadata_f32_optional(parsed, &format!("{family}.{key}"), 0.0);
     (value != 0.0).then_some(value)
@@ -148,9 +157,9 @@ fn with_header_scales(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: 
             .map(|layer| LayerSchedule {
                 attention: LayerAttentionConfig {
                     score_scale: AttentionScoreScale::Factor(scale),
-                    ..layer.attention
+                    ..layer.attention.clone()
                 },
-                ..*layer
+                ..layer.clone()
             })
             .collect(),
         None => descriptor.layers.clone(),

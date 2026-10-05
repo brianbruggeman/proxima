@@ -79,8 +79,8 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
                     value_source_kind: ValueSourceKind::ProjectedV,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos_swa",
-                        sin_name: "rope_sin_swa",
+                        cos_name: "rope_cos_swa".into(),
+                        sin_name: "rope_sin_swa".into(),
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: architecture.key_length_swa / 2,
@@ -96,8 +96,8 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
                     value_source_kind: ValueSourceKind::SharedWithKey,
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
-                        cos_name: "rope_cos",
-                        sin_name: "rope_sin",
+                        cos_name: "rope_cos".into(),
+                        sin_name: "rope_sin".into(),
                     },
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: architecture.key_length / 2,

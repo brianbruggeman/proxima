@@ -592,7 +592,7 @@ fn gather_expert_scale(program: &mut Vec<Op>, scale: NodeId, route: NodeId) -> N
 /// does not exist on that checkpoint. `Sigmoid` is `_TYPE_SIGMOID` (`2`),
 /// LFM2's own value (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:209`'s
 /// `router_logits.sigmoid()`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ExpertGatingFunc {
     Softmax,
     Sigmoid,

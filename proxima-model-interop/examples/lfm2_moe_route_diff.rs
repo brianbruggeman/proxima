@@ -83,7 +83,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
     .expect("build shallow throwaway lfm2 program");
 
     let mut deep_schedule = shallow_schedule.to_vec();
-    deep_schedule.push(full_schedule[(depth - 1) as usize]);
+    deep_schedule.push(full_schedule[(depth - 1) as usize].clone());
     let (deep, _, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,

@@ -105,22 +105,18 @@ pub enum TensorError {
         block_bytes: usize,
     },
 
-    // these five carry free-form parsed text and are only ever constructed
-    // by `spec.rs`, which is itself `config`-only (std+alloc); scoping them
-    // to `config` keeps `TensorError` alloc-free outside that tier instead
-    // of dragging `alloc::string::String` into every build that can never
-    // produce these variants.
-    #[cfg(feature = "config")]
     #[error("map `{0}` is not `operand->iteration` notation")]
     MalformedMap(alloc::string::String),
 
-    #[cfg(feature = "config")]
     #[error("map `{notation}` projects `{letter}`, which the iteration space lacks")]
     UnknownIndexLetter {
         notation: alloc::string::String,
         letter: char,
     },
 
+    // these three carry free-form text from the TOML graph spec, which is
+    // `config`-only; the two above are raised by the notation parsers every
+    // forward builder shares.
     #[cfg(feature = "config")]
     #[error("spec references node `{0}` before it is defined")]
     UnknownNode(alloc::string::String),

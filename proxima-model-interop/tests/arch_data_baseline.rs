@@ -510,7 +510,7 @@ fn gemma4_26b_hand_written_layers() -> Vec<LayerSchedule> {
                     mask_window,
                     value_source_kind,
                     key_source_kind: KeySourceKind::ProjectedK,
-                    rope_table: RopeTableSel { cos_name, sin_name },
+                    rope_table: RopeTableSel { cos_name: cos_name.into(), sin_name: sin_name.into() },
                     rope_pairing: RopePairing::SplitHalf { pairs: head_dim / 2 },
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
@@ -559,7 +559,7 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
         .expect("direct real-dims build");
 
     let (program, logits, roots, moe, ..) =
-        build_forward(&descriptor, true).expect("build_forward real-dims build");
+        build_forward(&descriptor).expect("build_forward real-dims build");
 
     assert_programs_identical(&direct, &program);
     assert_eq!(direct_logits, logits, "root node id mismatch");
@@ -613,7 +613,7 @@ fn descriptor_real_dims_openchat_program_equals_direct_builder() {
     );
 
     let (program, logits, cache_roots, moe, residuals, hidden, _head_repeats) =
-        build_forward(&descriptor, true).expect("build_forward real-dims build");
+        build_forward(&descriptor).expect("build_forward real-dims build");
 
     assert_programs_identical(&direct, &program);
     assert_eq!(direct_roots.logits, logits, "root node id mismatch");
