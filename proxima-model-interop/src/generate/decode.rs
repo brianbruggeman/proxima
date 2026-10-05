@@ -3948,6 +3948,7 @@ impl<'file> LoadedModel<'file> {
                             positions_needed,
                             serving_config.kv_bucket_tokens,
                             device_kv_step_rows,
+                            allocate_placed_buffer,
                         )?;
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
