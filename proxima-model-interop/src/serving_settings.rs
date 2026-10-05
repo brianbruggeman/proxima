@@ -1,7 +1,7 @@
 use bon::Builder;
 use conflaguration::Settings;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use omega::MathMode;
+use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::NumericPolicy;
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,27 @@ impl MathModeName {
             Self::Safe => MathMode::Safe,
             Self::Relaxed => MathMode::Relaxed,
             Self::Fast => MathMode::Fast,
+        }
+    }
+}
+
+/// the Metal dispatch encodings a serving configuration can request, spelled in
+/// lowercase; `as_dispatch_type` is the lowering to the backend's own enum,
+/// which is foreign and carries no serde derive.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchTypeName {
+    Serial,
+    Concurrent,
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+impl DispatchTypeName {
+    pub const fn as_dispatch_type(self) -> DispatchType {
+        match self {
+            Self::Serial => DispatchType::Serial,
+            Self::Concurrent => DispatchType::Concurrent,
         }
     }
 }
@@ -210,6 +231,11 @@ pub struct ServingSettings {
     #[setting(default = true)]
     #[builder(default = true)]
     pub exact_activations: bool,
+    /// `ServingConfig::dispatch_type`: whether Metal dispatches run one at a time or may overlap.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[setting(resolve_with = "from_name", default_str = "serial")]
+    #[builder(default = DispatchTypeName::Serial)]
+    pub dispatch_type: DispatchTypeName,
 }
 
 impl Default for ServingSettings {
@@ -254,6 +280,8 @@ impl ServingSettings {
             exact_activations: self.exact_activations,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: self.math_mode.as_math_mode(),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch_type: self.dispatch_type.as_dispatch_type(),
             weight_precision,
             ..ServingConfig::default()
         }
@@ -529,5 +557,32 @@ epilogue_sources = true
         assert_eq!(defaults.numeric_policy, NumericPolicy::llama_relaxed());
         assert_eq!(defaults.kv_bucket_tokens, 32);
         assert_eq!(defaults, ServingSettings::default());
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn serving_scalars_dispatch_type_lowers_and_round_trips() {
+        let from_toml: ServingSettings = conflaguration::from_toml_str("dispatch_type = \"concurrent\"")
+            .expect("the dispatch type toml parses");
+        let built = ServingSettings::builder()
+            .dispatch_type(DispatchTypeName::Concurrent)
+            .build();
+        let from_env = temp_env::with_vars(
+            [("PROXIMA_SERVING_DISPATCH_TYPE", Some("concurrent"))],
+            || ServingSettings::from_env().expect("the dispatch type env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+        assert_eq!(
+            built.as_serving_config(&[]).dispatch_type,
+            DispatchType::Concurrent
+        );
+        assert_eq!(
+            ServingSettings::default().as_serving_config(&[]).dispatch_type,
+            DispatchType::Serial
+        );
+        let refused = conflaguration::from_toml_str::<ServingSettings>("dispatch_type = \"parallel\"");
+        assert!(refused.is_err(), "an unknown dispatch type is refused");
     }
 }
