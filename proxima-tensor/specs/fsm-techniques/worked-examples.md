@@ -89,3 +89,30 @@ Layer 3 sees only rows 3, 6 and 11, with deviations 0.30, 0.90, 0.50.
 Each layer's set is a subset of the one before it, so the chain narrows 12 to 6 to 3 to 2 rows and a row dropped at one layer never returns.
 
 RESULT per-layer recompute selection: check=[1,3,5,6,8,11] layer2=[3,6,11] layer3=[6,11] counts=[6,3,2] per_chunk_check=[2,2,2]
+
+## block scoring
+
+A read stage scores sealed blocks against a pooled query and attends to the top-n non-local blocks plus the local blocks. Head dimension 2, 4 sealed blocks with per-dimension key min and max:
+
+- B0: min (0,0), max (1,1);
+- B1: min (-2,-1), max (0,3);
+- B2: min (1,-3), max (2,-1);
+- B3: min (-1,-1), max (1,1).
+
+Pooled query q = (2,-1). The score of block i is the sum over dims j of `max(q_j * kmax_ij, q_j * kmin_ij)`:
+
+- B0: max(2,0) + max(-1,0) = 2 + 0 = 2;
+- B1: max(0,-4) + max(-3,1) = 0 + 1 = 1;
+- B2: max(4,2) + max(1,3) = 4 + 3 = 7;
+- B3: max(2,-2) + max(-1,1) = 2 + 1 = 3.
+
+Scores by block: `[2, 1, 7, 3]`.
+
+Selection: the most recent sealed block is local (`local_blocks = 1`, B3) and never competes for a top slot. The non-local count is `nonlocal = M - local = 3`, and `n = min(nonlocal, max(n_min, ceil(keep_ratio * nonlocal)))` with `n_min = 1`, taken over the scores of B0 to B2, `[2, 1, 7]`:
+
+- keep_ratio 0.25: `ceil(0.75) = 1`, n = 1, top = {B2}, attended = {B2} plus local {B3} = {2,3};
+- keep_ratio 0.75: `ceil(2.25) = 3`, n = min(3, 3) = 3, top = {B2, B0, B1}, attended = {0,1,2,3}.
+
+An earlier form counted n over all four blocks and let the local block compete, which listed `{0,2,3}` at 0.75; the stated rule counts non-local blocks only, so the attended count is a function of lengths and not of the scores.
+
+RESULT block scoring: scores=[2,1,7,3] keep0.25:n=1,attended={2,3} keep0.75:n=3,attended={0,1,2,3}
