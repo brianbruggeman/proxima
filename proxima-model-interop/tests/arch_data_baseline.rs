@@ -32,12 +32,12 @@ use proxima_model_interop::{
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::TensorError;
-use proxima_tensor::op::Op;
+use proxima_tensor::op::{Extent, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, CacheStrategy, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
     ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind, build_forward,
-    gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
+    SLIDING_KV_SYMBOL, gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
     mistral_cached_forward_program_with_experts_and_layer_taps, mistral_descriptor_from_shape,
 };
 use sha2::{Digest, Sha256};
@@ -1296,4 +1296,82 @@ fn kv_in_caller_memory_gemma4_26b() {
 #[test]
 fn kv_in_caller_memory_granite_moe() {
     kv_in_caller_memory(&GRANITE_MOE, 24, true);
+}
+
+fn ring_layers(descriptor: &ModelDescriptor) -> Vec<bool> {
+    let (program, ..) = build_forward(descriptor).expect("the descriptor lowers");
+    let leading_extent = |name: &str| {
+        program.iter().find_map(|op| match op {
+            Op::Input { name: Some(leaf), shape, .. } if leaf == name => shape.first().copied(),
+            _ => None,
+        })
+    };
+    descriptor
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(layer, entry)| {
+            let owner = match entry.attention.key_source_kind {
+                KeySourceKind::SharedFromLayer(source) => source as usize,
+                _ => layer,
+            };
+            let extent = leading_extent(&format!("kv_cache.{owner}.k_even"));
+            assert!(extent.is_some(), "layer {layer} reads kv_cache.{owner}, which the program does not declare");
+            extent == Some(Extent::Symbolic(SLIDING_KV_SYMBOL))
+        })
+        .collect()
+}
+
+fn llama_swa_flags(checkpoint: &Checkpoint) -> Vec<bool> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/llama-parity")
+        .join(checkpoint.name)
+        .join("swa_layers.txt");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let flags: Vec<(usize, bool)> = text
+        .lines()
+        .filter(|line| line.starts_with("load_tensors: layer"))
+        .map(|line| {
+            let layer = line["load_tensors: layer".len()..].split_whitespace().next().expect("a layer index");
+            let flag = line.rsplit("is_swa = ").next().expect("an is_swa flag").trim();
+            (layer.parse().expect("layer index is an integer"), flag == "1")
+        })
+        .collect();
+    let indices: Vec<usize> = flags.iter().map(|(layer, _)| *layer).collect();
+    assert_eq!(indices, (0..flags.len()).collect::<Vec<_>>(), "{}: layers listed out of order or with gaps", path.display());
+    flags.into_iter().map(|(_, flag)| flag).collect()
+}
+
+#[test]
+fn window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints() {
+    for checkpoint in [&GEMMA4_E2B, &GEMMA4_26B] {
+        let mapping = checkpoint.open();
+        let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+        let descriptor = gemma4::descriptor_from_gguf(&parsed, true)
+            .unwrap_or_else(|error| panic!("{}: descriptor_from_gguf failed: {error:?}", checkpoint.name));
+
+        let ring = ring_layers(&descriptor);
+        let oracle = llama_swa_flags(checkpoint);
+
+        assert!(oracle.iter().any(|flag| *flag) && oracle.iter().any(|flag| !*flag), "{}: the oracle must mix windowed and full layers", checkpoint.name);
+        assert_eq!(ring, oracle, "{}: the layers lowered onto the ring are not the layers llama.cpp marks is_swa", checkpoint.name);
+    }
+}
+
+#[test]
+fn window_ring_layers_follow_a_window_on_one_dense_layer() {
+    let mapping = QWEN2.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let architecture = architecture_from_metadata(&parsed).expect("the checkpoint declares an architecture");
+    let mut descriptor = dense_descriptor_from_gguf(&parsed, &architecture).expect("the header yields a descriptor");
+    let windowed_layer = 5;
+    descriptor.layers[windowed_layer].attention.mask_window = Some(64);
+    descriptor.sliding_kv_ring = true;
+
+    let ring = ring_layers(&descriptor);
+
+    let expected: Vec<bool> = (0..descriptor.layers.len()).map(|layer| layer == windowed_layer).collect();
+    assert_eq!(ring, expected, "exactly the windowed dense layer sits on the ring");
+    let unwindowed = ModelDescriptor { sliding_kv_ring: true, ..dense_descriptor_from_gguf(&parsed, &architecture).expect("the header yields a descriptor") };
+    assert!(ring_layers(&unwindowed).iter().all(|on_ring| !on_ring), "control: a header with no window puts no layer on the ring");
 }
