@@ -198,6 +198,26 @@ impl LayerCache {
         }
     }
 
+    /// Brings the per-block records up to the sealed blocks, one `summarize` call per block that has none.
+    pub(super) fn summarize_sealed(&mut self, even_odd_row: usize, v_row: usize, summarize: BlockSummarizer) {
+        if self.ring_geometry().is_some() || self.block_tokens == 0 {
+            return;
+        }
+        let sealed_blocks = self.sealed_end / self.block_tokens;
+        self.block_summaries.truncate(sealed_blocks);
+        for block in self.block_summaries.len()..sealed_blocks {
+            let k_rows = self.block_tokens * even_odd_row;
+            let v_rows = self.block_tokens * v_row;
+            let record = summarize(
+                &self.k_even[block * k_rows..(block + 1) * k_rows],
+                &self.k_odd[block * k_rows..(block + 1) * k_rows],
+                &self.v[block * v_rows..(block + 1) * v_rows],
+                even_odd_row,
+            );
+            self.block_summaries.push(record);
+        }
+    }
+
     /// The in-flight rewind: refuses to cut into sealed rows; the whole-state rewinds keep the infallible `truncate`.
     pub(super) fn try_truncate(
         &mut self,
@@ -287,7 +307,7 @@ mod layer_cache_truncate_tests {
 
 /// Folds one sealed block's rows into the record kept for that block: the K even plane rows, the K odd plane rows and
 /// the V rows, each row-major. K rows are `even_odd_row` wide; V rows are `value.len() / (k_even.len() / even_odd_row)`
-/// wide. [`seal_attention_layers`], which a seal call feeds, calls it once per newly sealed block of a full-attention layer.
+/// wide. [`LayerCache::summarize_sealed`] calls it once per newly sealed block of a full-attention layer.
 pub type BlockSummarizer = fn(k_even: &[f32], k_odd: &[f32], value: &[f32], even_odd_row: usize) -> Vec<f32>;
 
 /// Raises each attention layer's sealed end to what `kv_decision::sealed_blocks` allows for the rows it holds, then
@@ -304,24 +324,8 @@ pub(super) fn seal_attention_layers(
             continue;
         };
         cache.seal(*even_odd_row, block_tokens, horizon_rows);
-        let Some(summarizer) = summarize else {
-            continue;
-        };
-        if cache.ring_geometry().is_some() || cache.block_tokens == 0 {
-            continue;
-        }
-        let sealed_blocks = cache.sealed_end / cache.block_tokens;
-        cache.block_summaries.truncate(sealed_blocks);
-        for block in cache.block_summaries.len()..sealed_blocks {
-            let k_rows = cache.block_tokens * even_odd_row;
-            let v_rows = cache.block_tokens * v_row;
-            let record = summarizer(
-                &cache.k_even[block * k_rows..(block + 1) * k_rows],
-                &cache.k_odd[block * k_rows..(block + 1) * k_rows],
-                &cache.v[block * v_rows..(block + 1) * v_rows],
-                *even_odd_row,
-            );
-            cache.block_summaries.push(record);
+        if let Some(summarizer) = summarize {
+            cache.summarize_sealed(*even_odd_row, *v_row, summarizer);
         }
     }
 }
@@ -535,6 +539,21 @@ mod layer_cache_sealing_tests {
         seal(&mut layers, 4, 1, Some(value_sum));
 
         assert_eq!(attention(&mut layers, 0).block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+    }
+
+    #[test]
+    fn summarize_sealed_fills_missing_blocks_and_is_idempotent() {
+        let mut cache = cache_with_rows(9);
+        cache.seal(2, 4, 1);
+
+        cache.summarize_sealed(2, 1, value_sum);
+        assert_eq!(cache.block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+        cache.summarize_sealed(2, 1, value_sum);
+        assert_eq!(cache.block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
+
+        cache.truncate(5, 2, 1);
+        cache.summarize_sealed(2, 1, value_sum);
+        assert_eq!(cache.block_summaries, vec![vec![60.0f32]]);
     }
 
     #[test]
