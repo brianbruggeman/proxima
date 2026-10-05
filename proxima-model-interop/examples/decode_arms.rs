@@ -249,27 +249,36 @@ fn outlier_flags(values: &[f64]) -> Vec<bool> {
 struct ArmRuns {
     label: String,
     runs: Vec<(usize, usize, f64)>,
+    prefill_runs: Vec<(usize, usize, f64)>,
     ids_by_run: Vec<Vec<u64>>,
     extra: Vec<String>,
 }
 
-fn print_summary(arm: &ArmRuns) {
-    let values: Vec<f64> = arm.runs.iter().map(|run| run.2).collect();
+fn mad(values: &[f64]) -> f64 {
+    let center = median(values);
+    let deviations: Vec<f64> = values.iter().map(|value| (value - center).abs()).collect();
+    median(&deviations)
+}
+
+fn kept_values(runs: &[(usize, usize, f64)]) -> Vec<f64> {
+    let values: Vec<f64> = runs.iter().map(|run| run.2).collect();
     let flags = outlier_flags(&values);
-    for ((process, run, value), flagged) in arm.runs.iter().zip(&flags) {
-        println!(
-            "arm={} process={process} run={run} ms_per_token={value:.4} outlier={flagged}",
-            arm.label
-        );
-    }
-    let kept: Vec<f64> = values
+    values
         .iter()
         .zip(&flags)
         .filter_map(|(value, flagged)| (!flagged).then_some(*value))
-        .collect();
+        .collect()
+}
+
+fn print_metric(label: &str, metric: &str, runs: &[(usize, usize, f64)]) {
+    let values: Vec<f64> = runs.iter().map(|run| run.2).collect();
+    let flags = outlier_flags(&values);
+    for ((process, run, value), flagged) in runs.iter().zip(&flags) {
+        println!("arm={label} metric={metric} process={process} run={run} value={value:.4} outlier={flagged}");
+    }
+    let kept = kept_values(runs);
     println!(
-        "summary arm={} n_all={} median_all={:.4} cov_all_pct={:.2} min_all={:.4} max_all={:.4} | n_kept={} median_kept={:.4} cov_kept_pct={:.2} min_kept={:.4} max_kept={:.4}",
-        arm.label,
+        "summary arm={label} metric={metric} n_all={} median_all={:.4} cov_all_pct={:.2} min_all={:.4} max_all={:.4} | n_kept={} median_kept={:.4} mad_kept={:.4} cov_kept_pct={:.2} min_kept={:.4} max_kept={:.4}",
         values.len(),
         median(&values),
         cov_percent(&values),
@@ -277,14 +286,57 @@ fn print_summary(arm: &ArmRuns) {
         values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         kept.len(),
         median(&kept),
+        mad(&kept),
         cov_percent(&kept),
         kept.iter().copied().fold(f64::INFINITY, f64::min),
         kept.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     );
+}
+
+fn print_summary(arm: &ArmRuns) {
+    print_metric(&arm.label, "ms_per_token", &arm.runs);
+    if !arm.prefill_runs.is_empty() {
+        print_metric(&arm.label, "prefill_ms", &arm.prefill_runs);
+    }
     for line in &arm.extra {
         println!("extra arm={} {line}", arm.label);
     }
     std::io::stdout().flush().expect("flush stdout");
+}
+
+// bound: arm median <= reference median + max(reference MAD, 2% of reference median), outliers removed
+fn print_bounds(arms: &[ArmRuns]) {
+    let Some(reference) = arms.first() else {
+        return;
+    };
+    for arm in arms.iter().skip(1) {
+        bound_line(arm, reference, "ms_per_token", |each| &each.runs);
+        bound_line(arm, reference, "prefill_ms", |each| &each.prefill_runs);
+    }
+}
+
+fn bound_line(
+    arm: &ArmRuns,
+    reference: &ArmRuns,
+    metric: &str,
+    select: impl Fn(&ArmRuns) -> &Vec<(usize, usize, f64)>,
+) {
+    let arm_kept = kept_values(select(arm));
+    let reference_kept = kept_values(select(reference));
+    if arm_kept.is_empty() || reference_kept.is_empty() {
+        println!("bound metric={metric} arm={} vs={} n=0", arm.label, reference.label);
+        return;
+    }
+    let reference_median = median(&reference_kept);
+    let slack = mad(&reference_kept).max(reference_median * 0.02);
+    let arm_median = median(&arm_kept);
+    println!(
+        "bound metric={metric} arm={} vs={} arm_median={arm_median:.4} reference_median={reference_median:.4} delta={:.4} limit={slack:.4} within={}",
+        arm.label,
+        reference.label,
+        arm_median - reference_median,
+        arm_median <= reference_median + slack
+    );
 }
 
 fn field_after<'text>(line: &'text str, key: &str) -> Option<&'text str> {
@@ -366,8 +418,18 @@ fn run_proxima_process(
                 .expect("decode_ms_per_token")
                 .parse()
                 .expect("float");
+            let wall_ms: f64 = field_after(line, "wall_ms=")
+                .expect("wall_ms")
+                .parse()
+                .expect("float");
+            let tokens: f64 = field_after(line, "tokens_generated=")
+                .expect("tokens_generated")
+                .parse()
+                .expect("float");
+            let prefill_ms = wall_ms - value * (tokens - 1.0);
             if run_index > 0 {
                 arm.runs.push((process, run_index, value));
+                arm.prefill_runs.push((process, run_index, prefill_ms));
             }
             println!(
                 "raw arm={} process={process} run={run_index} ms_per_token={value:.4}",
@@ -485,6 +547,7 @@ fn run_llama_arm(arguments: &Arguments, binary: &PathBuf, prompt: &str) -> ArmRu
     let mut arm = ArmRuns {
         label: "llama-server".to_string(),
         runs: Vec::new(),
+        prefill_runs: Vec::new(),
         ids_by_run: Vec::new(),
         extra: Vec::new(),
     };
@@ -514,6 +577,7 @@ fn run_llama_arm(arguments: &Arguments, binary: &PathBuf, prompt: &str) -> ArmRu
             .collect();
         if request > 0 {
             arm.runs.push((0, request, per_token));
+            arm.prefill_runs.push((0, request, parsed["timings"]["prompt_ms"].as_f64().expect("prompt_ms")));
         }
         arm.extra.push(format!(
             "request={request} prompt_n={prompt_n} predicted_n={} ids_len={}",
@@ -559,6 +623,7 @@ fn run_ollama_arm(arguments: &Arguments, tag: &str, prompt: &str) -> ArmRuns {
     let mut arm = ArmRuns {
         label: "ollama".to_string(),
         runs: Vec::new(),
+        prefill_runs: Vec::new(),
         ids_by_run: Vec::new(),
         extra: Vec::new(),
     };
@@ -580,6 +645,7 @@ fn run_ollama_arm(arguments: &Arguments, tag: &str, prompt: &str) -> ArmRuns {
         ));
         if request > 0 {
             arm.runs.push((0, request, per_token));
+            arm.prefill_runs.push((0, request, parsed["prompt_eval_duration"].as_f64().expect("prompt_eval_duration") / 1e6));
         }
     }
     quit_ollama(arguments);
@@ -623,6 +689,7 @@ fn main() {
         .map(|(label, _)| ArmRuns {
             label: label.clone(),
             runs: Vec::new(),
+            prefill_runs: Vec::new(),
             ids_by_run: Vec::new(),
             extra: Vec::new(),
         })
@@ -637,6 +704,7 @@ fn main() {
     for arm in &arms {
         print_summary(arm);
     }
+    print_bounds(&arms);
     if let Some(binary) = &arguments.llama_server {
         arms.push(run_llama_arm(&arguments, binary, &prompt));
     }
