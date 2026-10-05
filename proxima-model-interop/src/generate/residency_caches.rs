@@ -169,6 +169,23 @@ impl LayerCache {
         self.v.truncate(keep_positions * v_row);
         self.sealed_end = self.sealed_end.min(keep_positions);
     }
+
+    /// The in-flight rewind: refuses to cut into sealed rows; the whole-state rewinds keep the infallible `truncate`.
+    pub(super) fn try_truncate(
+        &mut self,
+        keep_positions: usize,
+        even_odd_row: usize,
+        v_row: usize,
+    ) -> Result<(), InteropError> {
+        if keep_positions < self.sealed_end {
+            return Err(InteropError::RewindIntoSealed {
+                keep_positions,
+                sealed_end: self.sealed_end,
+            });
+        }
+        self.truncate(keep_positions, even_odd_row, v_row);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +291,30 @@ mod layer_cache_sealing_tests {
 
         assert_eq!(cache.k_even.len(), 4);
         assert_eq!(cache.sealed_end, 2);
+    }
+
+    #[test]
+    fn rewind_into_sealed_rows_is_refused() {
+        let mut cache = cache_with_rows(6);
+        cache.sealed_end = 4;
+
+        let refused = cache.try_truncate(3, 2, 1);
+
+        assert!(matches!(
+            refused,
+            Err(InteropError::RewindIntoSealed {
+                keep_positions: 3,
+                sealed_end: 4
+            })
+        ));
+        assert_eq!(cache.k_even.len(), 12);
+
+        assert!(cache.try_truncate(4, 2, 1).is_ok());
+        assert_eq!(cache.k_even.len(), 8);
+        assert_eq!(cache.v.len(), 4);
+
+        assert!(cache.try_truncate(9, 2, 1).is_ok());
+        assert_eq!(cache.k_even.len(), 8);
     }
 
     #[test]
