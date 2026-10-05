@@ -552,6 +552,8 @@ pub struct PromptCacheConfig {
     /// blocks up instead of comparing every entry. Smaller blocks find shorter
     /// overlaps and cost more index entries per cached token.
     pub block_tokens: u32,
+    /// How many rows behind the newest row a full block's last row must be before the block is sealed. A sealed block is never rewound by an in-flight decode, so this is the deepest rewind a decode may make. `0` seals a block as soon as it is full.
+    pub seal_horizon_rows: u32,
     /// Bits of the bloom filter each entry keeps over its blocks' content, which
     /// says whether a block of a prompt probably appears anywhere in the entry
     /// once the prefix has stopped matching. One filter costs `bits / 8` bytes.
@@ -579,6 +581,7 @@ impl PromptCacheConfig {
             follow_up_temperature_milli: 800,
             min_similarity_milli: 100,
             block_tokens: 64,
+            seal_horizon_rows: 256,
             bloom_bits_per_entry: 4096,
             bloom_hashes: 4,
         }
