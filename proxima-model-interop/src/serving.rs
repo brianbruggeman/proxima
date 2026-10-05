@@ -151,7 +151,8 @@ pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "metal") {
 /// `--reasoning-budget -1` (upstream's own sentinel for "unbounded").
 pub const REASONING_BUDGET_UNBOUNDED: i32 = -1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GdnPrefillBackend {
     Cpu,
     Mlx,
