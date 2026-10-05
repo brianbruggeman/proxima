@@ -229,3 +229,13 @@ A conformal judge is a pure function of vote counts over sixteen sampled answers
 - votes {A:12, B:2, C:2}: disagreements 16-12 = 4, 16-2 = 14, 16-2 = 14, only A is <= 13, set {A}, size 1, settle A
 
 RESULT conformal judge: samples=16 max_disagree=13 votes{A:9,B:4,C:3} -> escalate (|C|=3); votes{A:12,B:2,C:2} -> settle A (|C|=1)
+
+## isotonic judge
+
+An isotonic judge is a pure function of the per-token margins of the answer. The margin of a token is `p_top1 - p_top2`; `u = 1 - mean(margins)`. The fitted table `g` is supplied (a calibration output; producing it is a fitter and out of scope), keyed by the serving configuration and read at the exact grid point `u`: grid `u = 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0` with `g = 0, 0, 0.5, 0.5, 0.5, 0.5, 1, 1`. The judge settles iff `g(u) <= theta`, otherwise it escalates. Here `theta = 0.5`. All means and u values below are exact in binary.
+
+- margins [0.875, 0.625, 0.75]: sum 2.25, mean 0.75, u = 0.25, g(0.25) = 0, 0 <= 0.5, settle
+- margins [0.5, 0.5, 0.5]: mean 0.5, u = 0.5, g(0.5) = 0.5, 0.5 <= 0.5, settle (boundary, inclusive)
+- margins [0.25, 0.0, 0.125]: sum 0.375, mean 0.125, u = 0.875, g(0.875) = 1, 1 > 0.5, escalate
+
+RESULT isotonic judge: u=0.25 g=0 -> settle; u=0.5 g=0.5 -> settle; u=0.875 g=1 -> escalate
