@@ -99,7 +99,12 @@ pub struct ModelDescriptor {
     /// `x + scale * sublayer`: the checkpoint's `<family>.residual_scale`, 0.22 for
     /// granite; `None` is the plain add.
     pub residual_scale: Option<f32>,
+    /// One entry per block. In a config file an entry may carry `repeat = N`
+    /// ("this layer, N times"), or hold a `pattern` of entries that `repeat`s
+    /// (gemma4's four sliding layers then a full one, three times); it expands
+    /// to one [`LayerSchedule`] per block on load and serializes expanded.
     #[cfg_attr(feature = "config", setting(skip))]
+    #[serde(deserialize_with = "layer_runs::deserialize")]
     pub layers: Vec<LayerSchedule>,
     #[cfg_attr(feature = "config", setting(skip))]
     pub cache_strategy: CacheStrategy,

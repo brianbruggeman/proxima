@@ -77,6 +77,7 @@ mod attention_forward;
 #[macro_use]
 mod lfm2_single_range_cached;
 mod descriptor;
+mod layer_runs;
 #[cfg(feature = "config")]
 mod program_spec;
 mod gguf_descriptor;
