@@ -42,6 +42,8 @@ pub mod arch;
 #[cfg(feature = "alloc")]
 pub mod arena;
 pub mod ring;
+#[cfg(feature = "alloc")]
+pub mod serving_state;
 // per-worker BytesMut reservoir; std-only (thread_local has no no_std
 // analog). folded in from the former proxima-io satellite crate.
 #[cfg(feature = "alloc")]
@@ -85,6 +87,8 @@ pub use factory::FactoryRegistry;
 pub use factory::Named;
 #[cfg(feature = "config")]
 pub use factory::{Composition, Factory, FactorySpec};
+#[cfg(feature = "alloc")]
+pub use serving_state::ServingFsmError;
 
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
