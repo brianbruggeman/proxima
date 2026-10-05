@@ -1,0 +1,56 @@
+# gemma4 e2b (ollama gemma4:e2b-it-qat) with every layer full-attention: no sliding window on any
+# layer, so the ring kv layout is off. dims are the checkpoint's own (llama-parity/gemma4_e2b/gguf_kv.txt):
+# 35 blocks of 1536, 8 query heads over 1 kv head, ple width 256, softcap 30, vocab 262144, the
+# last 20 blocks reading the k and v of block 13 (sliding-shaped) or 14 (full-shaped). the four
+# 256-wide layers per group keep that width because their weights are 256-wide.
+vocab = 262144
+embedding = 1536
+feed_forward = 6144
+expert_feed_forward = 0
+query_heads = 8
+block_count = 35
+expert_count = 0
+expert_used_count = 0
+leading_dense_block_count = 35
+l_cache = 0
+embedding_scale = "Sqrt"
+logit_softcap = 30.0
+ple_dim = 256
+qk_norm = false
+qkv_biases = false
+paired_gate_up_reduce = false
+fused_qkv_reduce = false
+sliding_kv_ring = false
+cache_strategy = "TwoRange"
+head_repeats = 1
+last_row_only = true
+
+# blocks 0..15: own k and v, three groups of four 256-wide layers then one 512-wide layer
+[[layers]]
+repeat = 3
+
+[[layers.pattern]]
+repeat = 4
+kind = "Attention"
+attention = { head_dim = 256, kv_heads = 1, value_source_kind = "ProjectedV", key_source_kind = "ProjectedK", score_scale = "Unscaled", value_norm = true, rope_table = { cos_name = "rope_cos_swa", sin_name = "rope_sin_swa" }, rope_pairing = { SplitHalf = { pairs = 128 } } }
+ffn = { post_attention_norm = true, combination = "Exclusive", output_scale = true, routed_gating = "Softmax", routed_expert_bias = false, activation = "GeluTanh", dense_feed_forward = 6144, exclusive_dense_post_norm = true, ple = true }
+
+[[layers.pattern]]
+kind = "Attention"
+attention = { head_dim = 512, kv_heads = 1, value_source_kind = "ProjectedV", key_source_kind = "ProjectedK", score_scale = "Unscaled", value_norm = true, rope_table = { cos_name = "rope_cos", sin_name = "rope_sin" }, rope_pairing = { SplitHalf = { pairs = 256 } } }
+ffn = { post_attention_norm = true, combination = "Exclusive", output_scale = true, routed_gating = "Softmax", routed_expert_bias = false, activation = "GeluTanh", dense_feed_forward = 6144, exclusive_dense_post_norm = true, ple = true }
+
+# blocks 15..35: shared k and v, four groups, wider dense ffn
+[[layers]]
+repeat = 4
+
+[[layers.pattern]]
+repeat = 4
+kind = "Attention"
+attention = { head_dim = 256, kv_heads = 1, value_source_kind = { SharedFromLayer = 13 }, key_source_kind = { SharedFromLayer = 13 }, score_scale = "Unscaled", value_norm = false, rope_table = { cos_name = "rope_cos_swa", sin_name = "rope_sin_swa" }, rope_pairing = { SplitHalf = { pairs = 128 } } }
+ffn = { post_attention_norm = true, combination = "Exclusive", output_scale = true, routed_gating = "Softmax", routed_expert_bias = false, activation = "GeluTanh", dense_feed_forward = 12288, exclusive_dense_post_norm = true, ple = true }
+
+[[layers.pattern]]
+kind = "Attention"
+attention = { head_dim = 512, kv_heads = 1, value_source_kind = { SharedFromLayer = 14 }, key_source_kind = { SharedFromLayer = 14 }, score_scale = "Unscaled", value_norm = false, rope_table = { cos_name = "rope_cos", sin_name = "rope_sin" }, rope_pairing = { SplitHalf = { pairs = 256 } } }
+ffn = { post_attention_norm = true, combination = "Exclusive", output_scale = true, routed_gating = "Softmax", routed_expert_bias = false, activation = "GeluTanh", dense_feed_forward = 12288, exclusive_dense_post_norm = true, ple = true }
