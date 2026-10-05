@@ -153,3 +153,17 @@ Instance: epsilon = 0.05, delta = 0.05, so z = z_0.975 = 1.959964. Base-rate sam
 - z * sd / (epsilon * mu) = 1.959964 * 0.130931 / 0.05 = 5.13239; squared = 26.3414; n = ceil(26.3414) = 27.
 
 RESULT sampled read budget: mu=1.0 sd=0.1309 z=1.959964 n=27
+
+## row tolerance
+
+Each sublayer ends in a reduction accumulated in f32 as a tree. A tree reduction of n terms has relative error at most `ceil(log2 n) * u`, `u = 2^-24`. Rows are compared K and V at every layer, so `tau = 2 * L * ceil(log2 n) * u` with L = block_count and n the widest reduction in the model: `n = max(embedding_length, head_count * key_length, max over layers of feed_forward_length, expert_feed_forward_length)`. The attention output projection reduces over `head_count * key_length`. The comparison is `max_i |a_i - b_i| <= tau * max_i |b_i|` per row.
+
+Inputs (headers under `proxima-model-interop/tests/fixtures/llama-parity/<model>/gguf_kv.txt`):
+
+- gemma4_e2b: L 35; embedding 1536; attention 8 x 512 = 4096; feed forward 12288 (layers 15 to 34; layers 0 to 14 are 6144, as in `proxima-model-interop/src/gemma4/bind.rs::e2b_shaped`); n = 12288, ceil(log2) = 14; tau = 2*35*14*2^-24 = 5.841e-05.
+- gemma4_26b: L 30; embedding 2816; attention 16 x 512 = 8192; feed forward 2112; expert 704; n = 8192, ceil(log2) = 13; tau = 2*30*13*2^-24 = 4.649e-05.
+- granite_moe: L 24; embedding 1024; attention 16 x 64 = 1024 (no `key_length` key, so head width is `rope.dimension_count` 64); expert feed forward 512; n = 1024, ceil(log2) = 10; tau = 2*24*10*2^-24 = 2.861e-05.
+
+Assumption: a kernel that reduces sequentially instead of as a tree would exceed these bounds; if a measured gap exceeds tau the test fails and tau is not widened. The earlier gemma4 E2B value (5.424e-05) used n = 6144, missing the 20 shared-cache layers' 12288, and omitted the attention width.
+
+RESULT row tolerance: gemma4_e2b=5.841e-05 gemma4_26b=4.649e-05 granite_moe=2.861e-05
