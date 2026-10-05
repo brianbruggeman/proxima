@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
-    PromptCacheConfig, ServingConfig, architecture_from_metadata, profiles::family_profile,
+    PromptCacheConfig, ServingConfig, architecture_from_metadata, metadata_f32_optional,
+    metadata_str, metadata_u32, profiles::family_profile,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::Op;
@@ -87,8 +88,14 @@ const QWEN35MOE: Checkpoint = Checkpoint {
     path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d",
     architecture: "qwen35moe",
 };
+const GRANITE_MOE: Checkpoint = Checkpoint {
+    name: "granite_moe",
+    env: "PROXIMA_ARCH_GRANITE_MOE_GGUF",
+    path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
+    architecture: "granitemoe",
+};
 
-const ALL: [&Checkpoint; 7] = [
+const ALL: [&Checkpoint; 8] = [
     &GEMMA4_26B,
     &GEMMA4_E2B,
     &OPENCHAT,
@@ -96,6 +103,7 @@ const ALL: [&Checkpoint; 7] = [
     &QWEN3,
     &QWEN35,
     &QWEN35MOE,
+    &GRANITE_MOE,
 ];
 
 impl Checkpoint {
@@ -604,6 +612,30 @@ fn checkpoints_toml_lists_every_baseline_checkpoint() {
             );
         }
     }
+}
+
+#[test]
+fn granite_moe_header_declares_the_scales_the_profile_cannot_carry() {
+    let mapping = GRANITE_MOE.open();
+    let parsed = parse_complete(&mapping).expect("the real granite moe header parses");
+    assert_architecture_key(&GRANITE_MOE, &parsed);
+
+    let scale = |key: &str| metadata_f32_optional(&parsed, &format!("granitemoe.{key}"), -1.0);
+    let count = |key: &str| {
+        metadata_u32(&parsed, &format!("granitemoe.{key}")).expect("granite header declares the key")
+    };
+    assert_eq!(scale("embedding_scale"), 12.0);
+    assert_eq!(scale("residual_scale"), 0.22_f32);
+    assert_eq!(scale("logit_scale"), 6.0);
+    assert_eq!(scale("attention.scale"), 0.015625);
+    assert_eq!(count("expert_count"), 32);
+    assert_eq!(count("expert_used_count"), 8);
+    assert_eq!(count("block_count"), 24);
+    assert_eq!(count("embedding_length"), 1024);
+    assert_eq!(
+        metadata_str(&parsed, "tokenizer.ggml.pre").expect("granite declares a pre-tokenizer"),
+        "refact"
+    );
 }
 
 const LLAMA_GENERATED_TOKENS: usize = 32;
