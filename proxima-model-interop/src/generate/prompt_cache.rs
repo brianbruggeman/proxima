@@ -404,17 +404,20 @@ pub trait ColdTier: Send + Sync {
     fn discard(&self, stamp: u64) -> Result<(), InteropError>;
 
     /// Makes `model`'s prompt cache hand its evicted entries to this tier.
-    fn install(self: Arc<Self>, model: &LoadedModel<'_>)
+    /// `max_entries` bounds the cold entries the cache keeps; past it the
+    /// oldest cold entry is discarded.
+    fn install(self: Arc<Self>, model: &LoadedModel<'_>, max_entries: usize)
     where
         Self: Sized + 'static,
     {
-        model.prompt_cache.lock().set_cold(self);
+        model.prompt_cache.lock().set_cold(self, max_entries);
     }
 }
 
 struct ColdSlot {
     // an open set of tiers behind one slot on the non-generic model type
     tier: Arc<dyn ColdTier>,
+    max_entries: usize,
 }
 
 impl ColdSlot {
@@ -699,8 +702,8 @@ impl PromptCache {
         Ok(())
     }
 
-    pub(super) fn set_cold(&mut self, tier: Arc<dyn ColdTier>) {
-        self.cold = Some(ColdSlot { tier });
+    pub(super) fn set_cold(&mut self, tier: Arc<dyn ColdTier>, max_entries: usize) {
+        self.cold = Some(ColdSlot { tier, max_entries });
     }
 
     pub(super) fn set_follow_up_closing(&mut self, closing: &[u32]) {
@@ -919,7 +922,7 @@ impl PromptCache {
             let entries = &self.entries;
             match self.index.insert(stamp, ids, &|held| ids_in(entries, held)) {
                 Ok(()) => return true,
-                Err(TrieError::Full { .. }) => match self.eviction_victim() {
+                Err(TrieError::Full { .. }) => match self.cold_victim().or_else(|| self.eviction_victim()) {
                     Some(victim) => {
                         self.drop_entry(victim);
                     }
@@ -958,6 +961,27 @@ impl PromptCache {
         )
     }
 
+    fn cold_victim(&self) -> Option<u64> {
+        self.entries
+            .iter()
+            .find(|(_, entry)| entry.is_cold())
+            .map(|(stamp, _)| *stamp)
+    }
+
+    fn cold_count(&self) -> usize {
+        self.entries.values().filter(|entry| entry.is_cold()).count()
+    }
+
+    fn trim_cold(&mut self) {
+        let limit = self.cold.as_ref().map_or(usize::MAX, |slot| slot.max_entries);
+        while self.cold_count() > limit {
+            let Some(victim) = self.cold_victim() else {
+                return;
+            };
+            self.drop_entry(victim);
+        }
+    }
+
     fn hot_count(&self) -> usize {
         self.entries.values().filter(|entry| !entry.is_cold()).count()
     }
@@ -976,7 +1000,9 @@ impl PromptCache {
                 "prompt cache entry dropped, the cold tier could not take it"
             );
             self.drop_entry(stamp);
+            return;
         }
+        self.trim_cold();
     }
 
     fn rebuild_after(&mut self, lost: &TrieError) {
@@ -1086,7 +1112,8 @@ impl PromptCache {
     /// and the index when the config asks for other ones than it holds.
     fn reconfigure(&mut self, config: &PromptCacheConfig) {
         let block = (config.block_tokens as usize).max(1);
-        let entry_capacity = config.max_entries as usize;
+        let entry_capacity = config.max_entries as usize
+            + self.cold.as_ref().map_or(0, |slot| slot.max_entries);
         let unchanged = self.index.block_tokens() == block
             && self.index.entry_capacity() >= entry_capacity
             && self.bloom_bits == config.bloom_bits_per_entry
@@ -1913,6 +1940,8 @@ mod tests {
     const TRACE_A: [u32; 2] = [1, 1];
     const TRACE_B: [u32; 2] = [2, 2];
     const TRACE_C: [u32; 2] = [3, 3];
+    const TRACE_D: [u32; 2] = [4, 4];
+    const TRACE_E: [u32; 2] = [5, 5];
 
     struct RecordingTier {
         demoted: Mutex<Vec<u64>>,
@@ -1952,10 +1981,10 @@ mod tests {
         }
     }
 
-    fn cache_with_tier(tier: &Arc<RecordingTier>) -> PromptCache {
+    fn cache_with_tier(tier: &Arc<RecordingTier>, max_entries: usize) -> PromptCache {
         let mut cache = PromptCache::new();
         let handle: Arc<RecordingTier> = Arc::clone(tier);
-        cache.set_cold(handle);
+        cache.set_cold(handle, max_entries);
         cache
     }
 
@@ -1972,7 +2001,7 @@ mod tests {
     #[test]
     fn tier_demote_evicted_entry_is_kept_cold_and_handed_to_the_tier() {
         let tier = RecordingTier::new(false);
-        let mut cache = cache_with_tier(&tier);
+        let mut cache = cache_with_tier(&tier, 6);
 
         store_trace(&mut cache);
 
@@ -1994,14 +2023,14 @@ mod tests {
     #[test]
     fn tier_demote_discards_a_cold_entry_when_it_leaves_the_cache() {
         let tier = RecordingTier::new(false);
-        let mut cache = cache_with_tier(&tier);
+        let mut cache = cache_with_tier(&tier, 6);
         store_trace(&mut cache);
 
         cache.clear();
 
         assert_eq!(*tier.discarded.lock(), vec![0]);
         let dropped_tier = RecordingTier::new(false);
-        let mut dropped = cache_with_tier(&dropped_tier);
+        let mut dropped = cache_with_tier(&dropped_tier, 6);
         store_trace(&mut dropped);
 
         drop(dropped);
@@ -2010,9 +2039,54 @@ mod tests {
     }
 
     #[test]
+    fn tier_demote_trims_cold_entries_past_the_tier_limit() {
+        let tier = RecordingTier::new(false);
+        let mut cache = cache_with_tier(&tier, 1);
+        let config = PromptCacheConfig {
+            max_entries: 2,
+            ..enabled_config()
+        };
+
+        for trace in [TRACE_A, TRACE_B, TRACE_C, TRACE_D] {
+            cache.store(state_with_ids(&trace), &config);
+        }
+
+        assert_eq!(cache.held(), vec![(1, true), (2, false), (3, false)]);
+        assert_eq!(*tier.demoted.lock(), vec![0, 1]);
+        assert_eq!(*tier.discarded.lock(), vec![0]);
+        let wide_tier = RecordingTier::new(false);
+        let mut wide = cache_with_tier(&wide_tier, 6);
+        store_trace(&mut wide);
+        assert_eq!(wide.index.entry_capacity(), 8);
+    }
+
+    #[test]
+    fn tier_demote_trims_cold_entries_when_the_hot_limit_shrinks() {
+        let tier = RecordingTier::new(false);
+        let mut cache = cache_with_tier(&tier, 1);
+        let roomy = PromptCacheConfig {
+            max_entries: 4,
+            ..enabled_config()
+        };
+        let tight = PromptCacheConfig {
+            max_entries: 2,
+            ..enabled_config()
+        };
+
+        for trace in [TRACE_A, TRACE_B, TRACE_C, TRACE_D] {
+            cache.store(state_with_ids(&trace), &roomy);
+        }
+        cache.store(state_with_ids(&TRACE_E), &tight);
+
+        assert_eq!(cache.held(), vec![(2, true), (3, false), (4, false)]);
+        assert_eq!(*tier.demoted.lock(), vec![0, 1, 2]);
+        assert_eq!(*tier.discarded.lock(), vec![0, 1]);
+    }
+
+    #[test]
     fn tier_demote_drops_an_entry_the_tier_refuses() {
         let tier = RecordingTier::new(true);
-        let mut cache = cache_with_tier(&tier);
+        let mut cache = cache_with_tier(&tier, 6);
 
         store_trace(&mut cache);
 
