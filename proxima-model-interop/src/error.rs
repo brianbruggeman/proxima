@@ -51,6 +51,11 @@ pub enum InteropError {
     #[error("expert sidecar io: {0}")]
     SidecarIo(#[from] std::io::Error),
 
+    /// A kv block file could not be opened or mapped.
+    #[cfg(feature = "std")]
+    #[error("kv block file io at {path:?}: {source}")]
+    BlockFileIo { path: std::path::PathBuf, source: std::io::Error },
+
     /// A sidecar descriptor cannot encode its projection name in the fixed
     /// wire field.
     #[error("expert sidecar projection name has {found} bytes; maximum is {max}")]
