@@ -34,7 +34,7 @@ use core::ops::{ControlFlow, Range};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use proxima_telemetry::{debug, error};
+use proxima_telemetry::{debug, error, warn};
 
 use super::block_bloom::{BlockBloom, content_hashes};
 use super::chunk_shift::MovedRun;
@@ -383,6 +383,80 @@ impl PrefixState {
     }
 }
 
+/// Where the prompt cache hands an entry it is evicting, so the entry stays
+/// reachable at a cost lower than its rows in memory.
+///
+/// [`PromptCache::store`] calls `demote` for each entry its budget evicts. A
+/// tier composes `PrefixState::to_block_file` and
+/// `PrefixState::from_block_file` with its own file code to keep the copy.
+/// The slot is a trait and not a pipe because a demote runs inside the
+/// synchronous cache store under the cache lock, and a pipe's call is
+/// asynchronous. `install` is a method here and not a `LoadedModel` setter
+/// because a tier and the way to install it travel together, and not a
+/// `PromptCacheConfig` field because that config is `Copy`. A tier must not
+/// call back into the cache: `demote` and `discard` run under its lock.
+pub trait ColdTier: Send + Sync {
+    /// Takes a copy of an entry the cache is evicting and returns how many
+    /// bytes the tier now holds for it; `Err` means it could not take it.
+    fn demote(&self, stamp: u64, ids: &[u32], state: &PrefixState) -> Result<u64, InteropError>;
+
+    /// The entry left the cache; the tier frees its copy.
+    fn discard(&self, stamp: u64) -> Result<(), InteropError>;
+
+    /// Makes `model`'s prompt cache hand its evicted entries to this tier.
+    fn install(self: Arc<Self>, model: &LoadedModel<'_>)
+    where
+        Self: Sized + 'static,
+    {
+        model.prompt_cache.lock().set_cold(self);
+    }
+}
+
+struct ColdSlot {
+    // an open set of tiers behind one slot on the non-generic model type
+    tier: Arc<dyn ColdTier>,
+}
+
+impl ColdSlot {
+    fn demote(&self, stamp: u64, entry: &mut CacheEntry) -> Result<(), InteropError> {
+        let bytes = self.tier.demote(stamp, &entry.state.ids, &entry.state)?;
+        debug!(
+            cache_stamp = stamp,
+            tier_bytes = bytes,
+            "prompt cache entry moved to its cold tier"
+        );
+        entry.state.layer_caches = Vec::new();
+        entry.checkpoints = Vec::new();
+        entry.moved = Vec::new();
+        entry.prewarmed = None;
+        entry.branch_base = None;
+        entry.cold = Some(ColdHold {
+            tier: Arc::clone(&self.tier),
+            stamp,
+        });
+        Ok(())
+    }
+}
+
+/// Owns the tier's copy of one cold entry, so every way the entry leaves the
+/// cache frees that copy.
+struct ColdHold {
+    tier: Arc<dyn ColdTier>,
+    stamp: u64,
+}
+
+impl Drop for ColdHold {
+    fn drop(&mut self) {
+        if let Err(error) = self.tier.discard(self.stamp) {
+            error!(
+                cache_stamp = self.stamp,
+                tier_error = %error,
+                "cold prompt cache entry could not be removed from its tier"
+            );
+        }
+    }
+}
+
 /// One cached conversation: the state, the checkpoints that let it rewind
 /// past its ring's slack, and where the rings were last restored to.
 pub(super) struct CacheEntry {
@@ -409,6 +483,7 @@ pub(super) struct CacheEntry {
     /// in prompt order; the request writes each at its position as its prefill
     /// reaches it ([`CacheEntry::apply_moved`]).
     pub(super) moved: Vec<MovedRun>,
+    cold: Option<ColdHold>,
 }
 
 impl CacheEntry {
@@ -422,7 +497,12 @@ impl CacheEntry {
             branch_base: None,
             bloom: None,
             moved: Vec::new(),
+            cold: None,
         }
+    }
+
+    const fn is_cold(&self) -> bool {
+        self.cold.is_some()
     }
 
     /// An entry holding nothing yet, for a request or prewarm no entry served.
@@ -575,6 +655,7 @@ pub(super) struct PromptCache {
     prewarm_suffix: Vec<u32>,
     follow_up_closing: Vec<u32>,
     eviction_rules: Vec<EvictionRule>,
+    cold: Option<ColdSlot>,
 }
 
 /// What the per-entry bloom filters say about a prompt whose prefix stopped
@@ -604,7 +685,12 @@ impl PromptCache {
             prewarm_suffix: Vec::new(),
             follow_up_closing: Vec::new(),
             eviction_rules: vec![EvictionRule::Branch, EvictionRule::Oldest],
+            cold: None,
         }
+    }
+
+    pub(super) fn set_cold(&mut self, tier: Arc<dyn ColdTier>) {
+        self.cold = Some(ColdSlot { tier });
     }
 
     pub(super) fn set_follow_up_closing(&mut self, closing: &[u32]) {
@@ -743,7 +829,10 @@ impl PromptCache {
             &|stamp| ids_in(&self.entries, stamp),
             sub_block,
             |stamp, from| {
-                let entry = self.entries.get(&stamp).filter(|entry| entry.key == *key)?;
+                let entry = self
+                    .entries
+                    .get(&stamp)
+                    .filter(|entry| entry.key == *key && !entry.is_cold())?;
                 let ids = &entry.state.ids;
                 let lcp = from + longest_common_prefix(ids.get(from..)?, prompt_ids.get(from..)?);
                 entry_is_reusable(lcp, ids.len(), prompt_ids.len(), min_similarity_milli)
@@ -853,9 +942,31 @@ impl PromptCache {
         rule_victim(
             self.entries
                 .iter()
+                .filter(|(_, entry)| !entry.is_cold())
                 .map(|(stamp, entry)| (*stamp, entry.branch_base.is_some())),
             &self.eviction_rules,
         )
+    }
+
+    fn hot_count(&self) -> usize {
+        self.entries.values().filter(|entry| !entry.is_cold()).count()
+    }
+
+    /// Moves entry `stamp` to the cold tier when one is installed and takes
+    /// it, otherwise drops it.
+    fn evict(&mut self, stamp: u64) {
+        let (Some(slot), Some(entry)) = (self.cold.as_ref(), self.entries.get_mut(&stamp)) else {
+            self.drop_entry(stamp);
+            return;
+        };
+        if let Err(error) = slot.demote(stamp, entry) {
+            warn!(
+                cache_stamp = stamp,
+                tier_error = %error,
+                "prompt cache entry dropped, the cold tier could not take it"
+            );
+            self.drop_entry(stamp);
+        }
     }
 
     fn rebuild_after(&mut self, lost: &TrieError) {
@@ -934,6 +1045,19 @@ impl PromptCache {
     }
 
     #[cfg(test)]
+    pub(super) fn held(&self) -> Vec<(u64, bool)> {
+        self.entries
+            .iter()
+            .map(|(stamp, entry)| (*stamp, entry.is_cold()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn entry(&self, stamp: u64) -> Option<&CacheEntry> {
+        self.entries.get(&stamp)
+    }
+
+    #[cfg(test)]
     pub(super) fn index_byte_len(&self) -> usize {
         self.index.byte_len()
     }
@@ -996,11 +1120,11 @@ impl PromptCache {
             return None;
         }
         let max_entries = config.max_entries as usize;
-        while self.entries.len() > max_entries || self.stored_bytes() > budget {
+        while self.hot_count() > max_entries || self.stored_bytes() > budget {
             let victim = self.eviction_victim()?;
-            self.drop_entry(victim);
+            self.evict(victim);
         }
-        Some(self.entries.len())
+        Some(self.hot_count())
     }
 
     pub(super) fn stored_bytes(&self) -> usize {
@@ -1705,6 +1829,117 @@ mod tests {
         );
         assert_eq!(held(&mut cache, &[2, 2, 2, 9]), 3);
         assert_eq!(held(&mut cache, &[3, 3, 3, 9]), 3);
+    }
+
+    const TRACE_A: [u32; 2] = [1, 1];
+    const TRACE_B: [u32; 2] = [2, 2];
+    const TRACE_C: [u32; 2] = [3, 3];
+
+    struct RecordingTier {
+        demoted: Mutex<Vec<u64>>,
+        discarded: Mutex<Vec<u64>>,
+        refuses: bool,
+    }
+
+    impl RecordingTier {
+        fn new(refuses: bool) -> Arc<Self> {
+            Arc::new(Self {
+                demoted: Mutex::new(Vec::new()),
+                discarded: Mutex::new(Vec::new()),
+                refuses,
+            })
+        }
+    }
+
+    impl ColdTier for RecordingTier {
+        fn demote(
+            &self,
+            stamp: u64,
+            _ids: &[u32],
+            _state: &PrefixState,
+        ) -> Result<u64, InteropError> {
+            if self.refuses {
+                return Err(InteropError::UnsupportedServingConfig(
+                    "recording tier is full".into(),
+                ));
+            }
+            self.demoted.lock().push(stamp);
+            Ok(0)
+        }
+
+        fn discard(&self, stamp: u64) -> Result<(), InteropError> {
+            self.discarded.lock().push(stamp);
+            Ok(())
+        }
+    }
+
+    fn cache_with_tier(tier: &Arc<RecordingTier>) -> PromptCache {
+        let mut cache = PromptCache::new();
+        let handle: Arc<RecordingTier> = Arc::clone(tier);
+        cache.set_cold(handle);
+        cache
+    }
+
+    fn store_trace(cache: &mut PromptCache) {
+        let config = PromptCacheConfig {
+            max_entries: 2,
+            ..enabled_config()
+        };
+        for trace in [TRACE_A, TRACE_B, TRACE_C] {
+            cache.store(state_with_ids(&trace), &config);
+        }
+    }
+
+    #[test]
+    fn tier_demote_evicted_entry_is_kept_cold_and_handed_to_the_tier() {
+        let tier = RecordingTier::new(false);
+        let mut cache = cache_with_tier(&tier);
+
+        store_trace(&mut cache);
+
+        assert_eq!(cache.held(), vec![(0, true), (1, false), (2, false)]);
+        let cold = cache.entry(0).expect("the evicted entry stays in the cache");
+        assert!(cold.state.layer_caches.is_empty());
+        assert!(cold.checkpoints.is_empty());
+        assert_eq!(cold.state.ids, TRACE_A);
+        assert_eq!(*tier.demoted.lock(), vec![0]);
+        assert!(tier.discarded.lock().is_empty());
+        let mut prompt = TRACE_A.to_vec();
+        prompt.push(9);
+        let (_, report) = cache.take_best(&prompt, &base_key(), &shared_widths(), ANY_OVERLAP);
+        assert_eq!(report.path, CachePath::Miss);
+        assert_eq!(report.reused_tokens, 0);
+        assert!(cache.held().contains(&(0, true)));
+    }
+
+    #[test]
+    fn tier_demote_discards_a_cold_entry_when_it_leaves_the_cache() {
+        let tier = RecordingTier::new(false);
+        let mut cache = cache_with_tier(&tier);
+        store_trace(&mut cache);
+
+        cache.clear();
+
+        assert_eq!(*tier.discarded.lock(), vec![0]);
+        let dropped_tier = RecordingTier::new(false);
+        let mut dropped = cache_with_tier(&dropped_tier);
+        store_trace(&mut dropped);
+
+        drop(dropped);
+
+        assert_eq!(*dropped_tier.discarded.lock(), vec![0]);
+    }
+
+    #[test]
+    fn tier_demote_drops_an_entry_the_tier_refuses() {
+        let tier = RecordingTier::new(true);
+        let mut cache = cache_with_tier(&tier);
+
+        store_trace(&mut cache);
+
+        assert_eq!(cache.held(), vec![(1, false), (2, false)]);
+        assert!(tier.demoted.lock().is_empty());
+        assert!(tier.discarded.lock().is_empty());
     }
 
     #[test]
