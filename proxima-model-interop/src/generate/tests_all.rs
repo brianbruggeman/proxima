@@ -2522,6 +2522,9 @@ pub(super) mod memory_fit_gate_tests {
     use crate::serving::ContextLength;
     use crate::serving::ServingConfig;
 
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    use omega::allocate_placed_buffer;
+
     use super::LoadedModel;
 
     const TRAINED_CONTEXT_LENGTH: u32 = 131_072;
@@ -2553,6 +2556,30 @@ pub(super) mod memory_fit_gate_tests {
             family: String::new(),
             sliding_rope: None,
         }
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    static REQUESTS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn counting_source(byte_len: usize) -> Result<omega::PlacedBuffer, omega::MetalError> {
+        REQUESTS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        allocate_placed_buffer(byte_len)
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[test]
+    fn with_kv_buffer_source_replaces_the_default_source() {
+        use core::sync::atomic::Ordering;
+
+        let default_buffer = (model_with(1_000_000).kv_buffer_source)(4096);
+        assert!(default_buffer.is_ok(), "the default source must place 4096 bytes");
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 0, "the default source must not touch the counter");
+
+        let model = model_with(1_000_000).with_kv_buffer_source(counting_source);
+        let counted_buffer = (model.kv_buffer_source)(4096);
+        assert!(counted_buffer.is_ok(), "the replacement source must place 4096 bytes");
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 1, "the replacement source must be the one asked");
     }
 
     fn model_with(dense_weight_bytes: u64) -> LoadedModel<'static> {
@@ -2600,6 +2627,8 @@ pub(super) mod memory_fit_gate_tests {
             prompt_cache: Mutex::new(crate::generate::PromptCache::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: crate::generate::Arc::new(()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_buffer_source: allocate_placed_buffer,
             prewarm_gate: crate::generate::PrewarmGate::new(),
             prewarm_queue: crate::generate::PrewarmQueue::new(),
         }
