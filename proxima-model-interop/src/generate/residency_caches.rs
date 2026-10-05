@@ -244,6 +244,7 @@ mod layer_cache_truncate_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layer_cache_sealing_tests {
     use super::LayerCache;
+    use crate::error::InteropError;
 
     fn row_at(position: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let at = position as f32;
@@ -273,6 +274,19 @@ mod layer_cache_sealing_tests {
 
         assert_eq!(cache.k_even.len(), 4);
         assert_eq!(cache.sealed_end, 2);
+    }
+
+    #[test]
+    fn rewind_error_names_both_lengths() {
+        let error = InteropError::RewindIntoSealed {
+            keep_positions: 7,
+            sealed_end: 8,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "cannot rewind to 7 rows: rows below 8 are sealed"
+        );
     }
 }
 
