@@ -33,12 +33,15 @@
 //! for a diagnostic every other architecture would have to ignore.
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::{Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape};
+use proxima_tensor::spec::{
+    AttentionScoreScale, EmbeddingScale, LayerAttentionConfig, LayerSchedule, ModelDescriptor, Qwen35LayerRoots,
+    build_forward, mistral_descriptor_from_shape,
+};
 
 use crate::architecture::{Architecture, BoundProgram};
 use crate::bind::{
     ModelArchitecture, architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm,
-    checkpoint_qkv_biases, metadata_u32_optional,
+    checkpoint_qkv_biases, metadata_f32_optional, metadata_u32_optional,
 };
 use crate::error::InteropError;
 use crate::profiles::family_profile;
@@ -109,6 +112,7 @@ impl Architecture for DenseArch {
             false,
             &profile,
         );
+        let descriptor = with_header_scales(descriptor, parsed, &architecture.family);
         let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
             build_forward(&descriptor, last_row_only)?;
         Ok(BoundProgram {
@@ -131,6 +135,37 @@ impl Architecture for DenseArch {
     }
 }
 
+fn header_scale(parsed: &ParsedGguf, family: &str, key: &str) -> Option<f32> {
+    let value = metadata_f32_optional(parsed, &format!("{family}.{key}"), 0.0);
+    (value != 0.0).then_some(value)
+}
+
+fn with_header_scales(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: &str) -> ModelDescriptor {
+    let layers = match header_scale(parsed, family, "attention.scale") {
+        Some(scale) => descriptor
+            .layers
+            .iter()
+            .map(|layer| LayerSchedule {
+                attention: LayerAttentionConfig {
+                    score_scale: AttentionScoreScale::Factor(scale),
+                    ..layer.attention
+                },
+                ..*layer
+            })
+            .collect(),
+        None => descriptor.layers.clone(),
+    };
+    ModelDescriptor {
+        embedding_scale: header_scale(parsed, family, "embedding_scale")
+            .map(EmbeddingScale::Factor)
+            .or(descriptor.embedding_scale),
+        logit_scale: header_scale(parsed, family, "logit_scale"),
+        residual_scale: header_scale(parsed, family, "residual_scale"),
+        layers,
+        ..descriptor
+    }
+}
+
 /// The single-range builder rotates `head_dim` channels. A header whose
 /// `<arch>.rope.dimension_count` says otherwise is partial rotary, which this
 /// program cannot lower; refuse it rather than rotate the wrong width.
@@ -144,5 +179,119 @@ fn require_full_rotary(parsed: &ParsedGguf, architecture: &ModelArchitecture) ->
             rope_dimension_count,
             head_dim: architecture.head_dim,
         }),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use proxima_gguf::{GgufModel, MetadataValue, parse_complete, write_complete};
+
+    fn header_bytes(family: &str, floats: &[(&str, f32)]) -> Vec<u8> {
+        let mut metadata = vec![("general.architecture".to_string(), MetadataValue::String(family.into()))];
+        metadata.extend(
+            floats
+                .iter()
+                .map(|(key, value)| (format!("{family}.{key}"), MetadataValue::F32(*value))),
+        );
+        let model = GgufModel {
+            version: 3,
+            metadata,
+            tensors: Vec::new(),
+        };
+        write_complete(&model).expect("a header with no tensors encodes")
+    }
+
+    fn granite_input() -> ModelDescriptor {
+        mistral_descriptor_from_shape(
+            49155,
+            1024,
+            512,
+            16,
+            8,
+            64,
+            24,
+            32,
+            8,
+            false,
+            false,
+            false,
+            false,
+            &family_profile("granitemoe").expect("profile embedded"),
+        )
+    }
+
+    fn llama_input() -> ModelDescriptor {
+        mistral_descriptor_from_shape(
+            32000,
+            4096,
+            14336,
+            32,
+            8,
+            128,
+            32,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            &family_profile("llama").expect("profile embedded"),
+        )
+    }
+
+    #[test]
+    fn header_scales_reach_the_descriptor_of_a_granite_shaped_header() {
+        let bytes = header_bytes(
+            "granitemoe",
+            &[
+                ("embedding_scale", 12.0),
+                ("residual_scale", 0.22),
+                ("logit_scale", 6.0),
+                ("attention.scale", 0.015625),
+            ],
+        );
+        let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+        let input = granite_input();
+
+        let result = with_header_scales(input.clone(), &parsed, "granitemoe");
+
+        assert_eq!(result.embedding_scale, Some(EmbeddingScale::Factor(12.0)));
+        assert_eq!(result.logit_scale, Some(6.0));
+        assert_eq!(result.residual_scale, Some(0.22));
+        assert_eq!(result.layers.len(), 24);
+        assert!(
+            result
+                .layers
+                .iter()
+                .all(|layer| layer.attention.score_scale == AttentionScoreScale::Factor(0.015625))
+        );
+        let restored = ModelDescriptor {
+            embedding_scale: input.embedding_scale,
+            logit_scale: None,
+            residual_scale: None,
+            layers: input.layers.clone(),
+            ..result.clone()
+        };
+        assert_eq!(restored, input);
+    }
+
+    #[test]
+    fn a_header_without_scale_keys_leaves_the_descriptor_unchanged() {
+        let bytes = header_bytes("llama", &[]);
+        let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+        let input = llama_input();
+
+        assert_eq!(with_header_scales(input.clone(), &parsed, "llama"), input);
+    }
+
+    #[test]
+    fn a_zero_scale_means_unset_like_llama_cpp() {
+        let bytes = header_bytes("llama", &[("residual_scale", 0.0), ("logit_scale", 0.0)]);
+        let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+        let input = llama_input();
+
+        assert_eq!(with_header_scales(input.clone(), &parsed, "llama"), input);
     }
 }

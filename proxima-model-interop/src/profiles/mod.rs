@@ -23,6 +23,7 @@ const FAMILY_PROFILES: &[(&str, &str)] = &[
     ("llama", include_str!("llama.toml")),
     ("mistral", include_str!("mistral.toml")),
     ("mixtral", include_str!("mixtral.toml")),
+    ("granitemoe", include_str!("granitemoe.toml")),
     ("qwen2", include_str!("qwen2.toml")),
     ("qwen3", include_str!("qwen3.toml")),
     ("qwen3moe", include_str!("qwen3moe.toml")),
@@ -54,11 +55,13 @@ pub fn family_profile(family: &str) -> Result<FamilyProfile, InteropError> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_tensor::spec::{Activation, AttentionScoreScale, EmbeddingScale, FfnCombination, RopePairing};
+    use proxima_tensor::spec::{
+        Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination, RopePairing,
+    };
 
     #[test]
     fn every_embedded_profile_parses() {
-        assert_eq!(FAMILY_PROFILES.len(), 8, "one row per embedded family string");
+        assert_eq!(FAMILY_PROFILES.len(), 9, "one row per embedded family string");
         for (family, _) in FAMILY_PROFILES {
             family_profile(family).unwrap_or_else(|error| panic!("{family}: {error}"));
         }
@@ -91,6 +94,17 @@ mod tests {
     }
 
     #[test]
+    fn granitemoe_profile_is_adjacent_rope_softmax_routed_and_silu() {
+        let profile = family_profile("granitemoe").expect("granitemoe profile embedded");
+
+        assert_eq!(profile.rope_pairing(64), RopePairing::Interleaved);
+        assert_eq!(profile.ffn.routed_gating, ExpertGatingFunc::Softmax);
+        assert_eq!(profile.ffn.activation, Activation::Silu);
+        assert_eq!(profile.ffn.combination, FfnCombination::Exclusive);
+        assert_eq!(profile.embedding_scale, None);
+    }
+
+    #[test]
     fn qwen2_profile_is_split_half_from_its_own_data() {
         let profile = family_profile("qwen2").expect("qwen2 profile embedded");
 
@@ -100,12 +114,14 @@ mod tests {
     /// llama.cpp `llama_model_rope_type` (`src/llama-model.cpp:2968-3140`, f1ea20621):
     /// LLAMA/MISTRAL3 are NORM (adjacent); QWEN2, QWEN3, QWEN3MOE, GEMMA4 are NEOX (split-half).
     /// mixtral GGUFs declare `general.architecture = llama`.
+    /// GRANITE_MOE is NORM (`src/llama-model.cpp:3019`, the group returns at :3039).
     #[test]
     fn every_profile_pairs_rope_as_llama_cpp_rope_type_says() {
         let table = [
             ("llama", false),
             ("mistral", false),
             ("mixtral", false),
+            ("granitemoe", false),
             ("qwen2", true),
             ("qwen3", true),
             ("qwen3moe", true),
@@ -149,6 +165,7 @@ mod tests {
             ("openchat", RopePairing::Interleaved),
             ("qwen2", RopePairing::SplitHalf { pairs: 64 }),
             ("qwen3", RopePairing::SplitHalf { pairs: 64 }),
+            ("granite_moe", RopePairing::Interleaved),
         ];
         for (fixture, expected) in cases {
             let kv = fixture_kv(fixture);
