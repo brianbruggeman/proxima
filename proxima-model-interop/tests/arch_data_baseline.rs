@@ -943,3 +943,9 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
 fn kv_in_caller_memory_gemma4_e2b() {
     kv_in_caller_memory(&GEMMA4_E2B, 15, true);
 }
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn kv_in_caller_memory_gemma4_26b() {
+    kv_in_caller_memory(&GEMMA4_26B, 30, true);
+}
