@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
 use crate::serving::{
-    ContextLength, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, ServingConfig, WeightPrecisionRule,
+    ContextLength, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, GdnPrefillBackend, NamePattern,
+    ServingConfig, WeightPrecisionRule,
 };
 
 fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
@@ -103,6 +104,17 @@ impl DispatchTypeName {
             Self::Concurrent => DispatchType::Concurrent,
         }
     }
+}
+
+/// one per-tensor recode rule as written in a config file: which tensor names
+/// it matches (`pattern_kind` selects exact, prefix or suffix) and the type
+/// those tensors are bound at. a target with no encoder is refused at bind time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "pattern_kind", rename_all = "snake_case")]
+pub enum WeightPrecisionRuleSettings {
+    Exact { pattern: String, target: CacheType },
+    Prefix { pattern: String, target: CacheType },
+    Suffix { pattern: String, target: CacheType },
 }
 
 /// the llama-flag surface of [`ServingConfig`], loadable from toml and env
@@ -236,6 +248,18 @@ pub struct ServingSettings {
     #[setting(resolve_with = "from_name", default_str = "serial")]
     #[builder(default = DispatchTypeName::Serial)]
     pub dispatch_type: DispatchTypeName,
+    /// `ServingConfig::weight_precision`: ordered per-tensor recode rules, first match wins.
+    #[setting(resolve_with = "from_json", default_str = "[]")]
+    #[builder(default)]
+    pub weight_precision: Vec<WeightPrecisionRuleSettings>,
+    /// `ServingConfig::gdn_prefill_backend`: where the gated delta net prefill runs.
+    #[setting(resolve_with = "from_name", default_str = "cpu")]
+    #[builder(default = GdnPrefillBackend::Cpu)]
+    pub gdn_prefill_backend: GdnPrefillBackend,
+    /// `ServingConfig::gpu_correctness_fallback`: run the CPU oracle even when the GPU is requested.
+    #[setting(default = false)]
+    #[builder(default = false)]
+    pub gpu_correctness_fallback: bool,
 }
 
 impl Default for ServingSettings {
@@ -245,6 +269,27 @@ impl Default for ServingSettings {
 }
 
 impl ServingSettings {
+    #[must_use]
+    pub fn weight_precision_rules(&self) -> Vec<WeightPrecisionRule<'_>> {
+        self.weight_precision
+            .iter()
+            .map(|rule| match rule {
+                WeightPrecisionRuleSettings::Exact { pattern, target } => WeightPrecisionRule {
+                    pattern: NamePattern::Exact(pattern),
+                    target: target.as_ggml(),
+                },
+                WeightPrecisionRuleSettings::Prefix { pattern, target } => WeightPrecisionRule {
+                    pattern: NamePattern::Prefix(pattern),
+                    target: target.as_ggml(),
+                },
+                WeightPrecisionRuleSettings::Suffix { pattern, target } => WeightPrecisionRule {
+                    pattern: NamePattern::Suffix(pattern),
+                    target: target.as_ggml(),
+                },
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn as_serving_config<'a>(
         &'a self,
@@ -283,6 +328,8 @@ impl ServingSettings {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: self.dispatch_type.as_dispatch_type(),
             weight_precision,
+            gdn_prefill_backend: self.gdn_prefill_backend,
+            gpu_correctness_fallback: self.gpu_correctness_fallback,
             ..ServingConfig::default()
         }
     }
@@ -584,5 +631,79 @@ epilogue_sources = true
         );
         let refused = conflaguration::from_toml_str::<ServingSettings>("dispatch_type = \"parallel\"");
         assert!(refused.is_err(), "an unknown dispatch type is refused");
+    }
+
+    #[test]
+    fn serving_scalars_weight_precision_and_fallbacks_lower_and_round_trip() {
+        const WEIGHT_PRECISION_TOML: &str = r#"
+gdn_prefill_backend = "mlx"
+gpu_correctness_fallback = true
+
+[[weight_precision]]
+pattern_kind = "suffix"
+pattern = "ffn_down_exps.weight"
+target = "q4_0"
+
+[[weight_precision]]
+pattern_kind = "exact"
+pattern = "token_embd.weight"
+target = "q8_0"
+"#;
+        const WEIGHT_PRECISION_JSON: &str = r#"[{"pattern_kind":"suffix","pattern":"ffn_down_exps.weight","target":"q4_0"},{"pattern_kind":"exact","pattern":"token_embd.weight","target":"q8_0"}]"#;
+
+        let from_toml: ServingSettings = conflaguration::from_toml_str(WEIGHT_PRECISION_TOML)
+            .expect("the weight precision toml parses");
+        let built = ServingSettings::builder()
+            .weight_precision(vec![
+                WeightPrecisionRuleSettings::Suffix {
+                    pattern: "ffn_down_exps.weight".to_owned(),
+                    target: CacheType::Q40,
+                },
+                WeightPrecisionRuleSettings::Exact {
+                    pattern: "token_embd.weight".to_owned(),
+                    target: CacheType::Q80,
+                },
+            ])
+            .gdn_prefill_backend(GdnPrefillBackend::Mlx)
+            .gpu_correctness_fallback(true)
+            .build();
+        let from_env = temp_env::with_vars(
+            [
+                ("PROXIMA_SERVING_WEIGHT_PRECISION", Some(WEIGHT_PRECISION_JSON)),
+                ("PROXIMA_SERVING_GDN_PREFILL_BACKEND", Some("mlx")),
+                ("PROXIMA_SERVING_GPU_CORRECTNESS_FALLBACK", Some("true")),
+            ],
+            || ServingSettings::from_env().expect("the weight precision env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+
+        let rules = built.weight_precision_rules();
+        let config = built.as_serving_config(&rules);
+        assert_eq!(
+            config.weight_precision,
+            [
+                WeightPrecisionRule {
+                    pattern: NamePattern::Suffix("ffn_down_exps.weight"),
+                    target: GgmlType::Q4_0,
+                },
+                WeightPrecisionRule {
+                    pattern: NamePattern::Exact("token_embd.weight"),
+                    target: GgmlType::Q8_0,
+                },
+            ]
+        );
+        assert_eq!(config.gdn_prefill_backend, GdnPrefillBackend::Mlx);
+        assert!(config.gpu_correctness_fallback);
+
+        let unknown_kind = conflaguration::from_toml_str::<ServingSettings>(
+            "[[weight_precision]]\npattern_kind = \"glob\"\npattern = \"blk.*\"\ntarget = \"q4_0\"",
+        );
+        assert!(unknown_kind.is_err(), "an unknown pattern kind is refused");
+        let missing_pattern = conflaguration::from_toml_str::<ServingSettings>(
+            "[[weight_precision]]\npattern_kind = \"exact\"\ntarget = \"q4_0\"",
+        );
+        assert!(missing_pattern.is_err(), "an exact rule without a pattern is refused");
     }
 }
