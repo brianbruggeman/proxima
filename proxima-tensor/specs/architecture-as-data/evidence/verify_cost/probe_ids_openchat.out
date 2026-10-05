@@ -1,0 +1,6 @@
+round=0 arm=on prompt_tokens=1104 tokens=128 ms_per_token=279.439 verify_steps=3 drafted=114 accepted=114
+round=0 arm=off prompt_tokens=1104 tokens=128 ms_per_token=24.329 verify_steps=0 drafted=0 accepted=0
+round=1 arm=on prompt_tokens=1104 tokens=128 ms_per_token=281.740 verify_steps=3 drafted=114 accepted=114
+round=1 arm=off prompt_tokens=1104 tokens=128 ms_per_token=24.361 verify_steps=0 drafted=0 accepted=0
+round=2 arm=on prompt_tokens=1104 tokens=128 ms_per_token=283.931 verify_steps=3 drafted=114 accepted=114
+round=2 arm=off prompt_tokens=1104 tokens=128 ms_per_token=24.217 verify_steps=0 drafted=0 accepted=0

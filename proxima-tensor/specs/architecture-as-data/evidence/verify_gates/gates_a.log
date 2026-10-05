@@ -1,0 +1,31 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.93s
+────────────
+ Nextest run ID de23a350-d6c6-40c6-8359-a196b3ad5b3c with nextest profile: default
+    Starting 19 tests across 35 binaries (791 tests skipped)
+        PASS [  13.353s] ( 1/19) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_26b
+        PASS [   0.917s] ( 2/19) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_e2b
+        PASS [   0.214s] ( 3/19) proxima-model-interop::arch_data_baseline arch_data_digest_granite_moe
+        PASS [   0.104s] ( 4/19) proxima-model-interop::arch_data_baseline arch_data_digest_openchat
+        PASS [   0.187s] ( 5/19) proxima-model-interop::arch_data_baseline arch_data_digest_qwen2
+        PASS [   0.234s] ( 6/19) proxima-model-interop::arch_data_baseline arch_data_digest_qwen3
+        PASS [   0.378s] ( 7/19) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35
+        PASS [   1.238s] ( 8/19) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35moe
+        PASS [  13.840s] ( 9/19) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [  27.708s] (10/19) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  80.416s] (11/19) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  17.935s] (12/19) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  73.979s] (13/19) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  33.795s] (14/19) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   9.678s] (15/19) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   9.751s] (16/19) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        PASS [  20.782s] (17/19) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   6.585s] (18/19) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  20.679s] (19/19) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+────────────
+     Summary [ 331.779s] 19 tests run: 19 passed (2 slow), 791 skipped

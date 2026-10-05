@@ -1,0 +1,89 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.74s
+────────────
+ Nextest run ID 2607923a-26b3-4485-8db3-b3f1a5cab07f with nextest profile: default
+    Starting 5 tests across 35 binaries (804 tests skipped)
+        PASS [  13.349s] (1/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        FAIL [  17.096s] (2/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+  stdout ───
+
+    running 1 test
+    test generic_verify_llama_parity_granite_moe ... FAILED
+
+    failures:
+
+    failures:
+        generic_verify_llama_parity_granite_moe
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 52 filtered out; finished in 17.08s
+
+  stderr ───
+
+    thread 'generic_verify_llama_parity_granite_moe' (59629477) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1011:5:
+    granite_moe: the verify program never ran across 3 prompts, so nothing was checked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [  37.985s] (3/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+  stdout ───
+
+    running 1 test
+    test generic_verify_llama_parity_openchat ... FAILED
+
+    failures:
+
+    failures:
+        generic_verify_llama_parity_openchat
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 52 filtered out; finished in 37.97s
+
+  stderr ───
+
+    thread 'generic_verify_llama_parity_openchat' (59629834) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1011:5:
+    openchat: the verify program never ran across 3 prompts, so nothing was checked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [  10.327s] (4/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+  stdout ───
+
+    running 1 test
+    test generic_verify_llama_parity_qwen2 ... FAILED
+
+    failures:
+
+    failures:
+        generic_verify_llama_parity_qwen2
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 52 filtered out; finished in 10.32s
+
+  stderr ───
+
+    thread 'generic_verify_llama_parity_qwen2' (59630676) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1011:5:
+    qwen2: the verify program never ran across 3 prompts, so nothing was checked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [  34.230s] (5/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+  stdout ───
+
+    running 1 test
+    test generic_verify_llama_parity_qwen3 ... FAILED
+
+    failures:
+
+    failures:
+        generic_verify_llama_parity_qwen3
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 52 filtered out; finished in 34.22s
+
+  stderr ───
+
+    thread 'generic_verify_llama_parity_qwen3' (59630858) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1011:5:
+    qwen3: the verify program never ran across 3 prompts, so nothing was checked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [ 112.995s] 5 tests run: 1 passed, 4 failed, 804 skipped
+        FAIL [  17.096s] (2/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        FAIL [  37.985s] (3/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        FAIL [  10.327s] (4/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        FAIL [  34.230s] (5/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+error: test run failed

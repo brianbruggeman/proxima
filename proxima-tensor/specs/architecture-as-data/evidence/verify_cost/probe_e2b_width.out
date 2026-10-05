@@ -1,0 +1,10 @@
+forced_width=0 tokens=64 ms_per_token=16.955 verify_steps=0 drafted=0 accepted=0
+forced_width=1 tokens=64 ms_per_token=27.937 verify_steps=62 drafted=62 accepted=0
+forced_width=2 tokens=64 ms_per_token=31.929 verify_steps=62 drafted=123 accepted=0
+forced_width=3 tokens=64 ms_per_token=31.127 verify_steps=62 drafted=183 accepted=0
+forced_width=4 tokens=64 ms_per_token=49.306 verify_steps=62 drafted=242 accepted=0
+forced_width=6 tokens=64 ms_per_token=50.434 verify_steps=62 drafted=357 accepted=0
+forced_width=8 tokens=64 ms_per_token=77.483 verify_steps=62 drafted=468 accepted=0
+forced_width=16 tokens=64 ms_per_token=115.076 verify_steps=62 drafted=872 accepted=0
+forced_width=32 tokens=64 ms_per_token=162.626 verify_steps=62 drafted=1488 accepted=0
+forced_width=48 tokens=64 ms_per_token=207.302 verify_steps=62 drafted=1848 accepted=0

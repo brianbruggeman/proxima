@@ -1,0 +1,18 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.17s
+────────────
+ Nextest run ID ae674a5d-72fb-4e61-abb5-5329d8b0a268 with nextest profile: default
+    Starting 11 tests across 1 binary (520 tests skipped)
+        PASS [   0.016s] ( 1/11) proxima-model-interop profiles::tests::a_family_with_no_profile_is_an_error_naming_it
+        PASS [   0.009s] ( 2/11) proxima-model-interop profiles::tests::dense_profile_scales_scores_and_pairs_rope_adjacent
+        PASS [   0.009s] ( 3/11) proxima-model-interop profiles::tests::every_embedded_profile_parses
+        PASS [   0.009s] ( 4/11) proxima-model-interop profiles::tests::every_profile_pairs_rope_as_llama_cpp_rope_type_says
+        PASS [   0.008s] ( 5/11) proxima-model-interop profiles::tests::gemma4_profile_carries_the_values_gguf_does_not
+        PASS [   0.008s] ( 6/11) proxima-model-interop profiles::tests::granitemoe_profile_is_adjacent_rope_softmax_routed_and_silu
+        PASS [   0.009s] ( 7/11) proxima-model-interop profiles::tests::hf_and_gguf_spellings_of_one_family_read_the_same_profile
+        PASS [   0.009s] ( 8/11) proxima-model-interop profiles::tests::only_the_family_whose_verify_step_was_measured_to_pay_arms_it_by_default
+        PASS [   0.008s] ( 9/11) proxima-model-interop profiles::tests::qwen2_profile_is_split_half_from_its_own_data
+        PASS [   0.008s] (10/11) proxima-model-interop profiles::tests::qwen35_headers_carry_the_partial_rotary_width_and_have_no_inferable_profile
+        PASS [   0.009s] (11/11) proxima-model-interop profiles::tests::real_header_metadata_selects_the_pairing_and_the_rotating_width
+────────────
+     Summary [   0.108s] 11 tests run: 11 passed, 520 skipped

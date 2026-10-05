@@ -88,7 +88,10 @@ Profile values GGUF does not carry are data in the profile file.
   - Which states are reachable comes from config fields. For example, Verify is reachable only
     when the descriptor's layers can rewind and the speculative config is non-empty. It never
     comes from a type that implements a trait.
-- R3. A speculative verify program is derived for every family whose layers can rewind.
+- R3. A speculative verify program is lowered for every family whose layers can rewind when the
+  descriptor arms it (`speculative_verify`). The family profile carries the default, off until that
+  family's verify step is measured to cost less than the drafts it checks (R10); a config layer
+  overrides it.
 - R4. A sliding window and KV ring apply to exactly the layers whose descriptor entry has a
   window.
 - R5. Weights bind by walking the lowered program's `Op::Input` leaf names against the GGUF
@@ -147,11 +150,11 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 |---|---|---|---|---|---|
 | AC0 | R7 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/arch_data_digest_/)'` | 8 passed (gemma4 26B 13314 ops, logits root NodeId(13313), gemma4 E2B, openchat, qwen2, qwen3, qwen35, qwen35moe, granite moe) | 8 passed |
 | AC1 | R1 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/swa_rope_from_metadata/)'` | 2 passed: E2B and 26B tables equal the `rope.freq_base_swa`/`rope.dimension_count_swa` in `gguf_kv.txt` | 2 passed only if the files hold 1e4/256 (the hard-coded values); slice 0 records which, and a file with other values makes the control FAIL |
-| AC2 | R3, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/generic_verify_llama_parity_/)'` | 3 passed: gemma4 E2B, openchat and qwen3 with speculation on equal their llama ids | 1 passed, 2 failed (openchat and qwen3 have no verify program) |
+| AC2 | R3, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/generic_verify_llama_parity_/)'` | 5 passed: gemma4 E2B, openchat, qwen2, qwen3 and granite moe, each loaded from its header descriptor with `speculative_verify` set, drafts forced at widths 1 and 3, at least one verify step run, equal their llama ids | the same tests with `speculative_verify` unset: 0 passed, 2 failed ("the verify program never ran"; measured on gemma4 E2B and qwen2). At the previous commit the openchat and qwen3 verify programs did not exist |
 | AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 7 passed: bound names and tensor-byte digest equal the incumbent's | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
 | AC4 | R6 | consistency | `git grep -nIiP '\b(gemma4\|qwen35moe\|qwen35\|qwen2\|lfm2\|mistral\|llama)\b' -- proxima-model-interop/src proxima-tensor/src omega/src proxima-tokenizer/src ':!*tests*' ':!*profiles*' \| wc -l` | 0 | 1214 |
 | AC5 | R2 | consistency | `git grep -nP '\b(trait\|impl\|struct\|enum)\b[^;{]*Architecture' -- proxima-model-interop/src proxima-tensor/src \| wc -l`, then `cargo nextest run -p proxima-model-interop --features std,conflaguration -E 'test(/descriptor_config_parity_\|serving_fsm_drives_/)'` | 0; then 9 passed: one descriptor config-vs-builder round trip per checkpoint (7), plus 2 FSM tests (a plain decode and a speculative verify-accept-rollback run that the live generate path routes through `ServingState`) | first command prints 17 (trait, registry, 4 family impls, the test fake, and the per-family `Architecture`/`*Architecture` hparams structs); second: tests absent |
-| AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/)'` | 7 passed, one per checkpoint; 8 passed from slice 9 (lfm2 added) | 3 passed, 4 failed at ac4eb2c7 (measured 2026-10-04); 4 passed (gemma4 e2b, openchat, qwen2, qwen3) once ids are compared through llama's first EOG (owner stop-set policy). Still failing: D2 gemma4 26b diverges at index 0 on 2 of 3 prompts; O1 qwen35 + qwen35moe have no oracle (llama f1ea20621 rejects the blobs: rope.dimension_sections length 3, expects 4) |
+| AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/) and not test(/generic_verify_/)'` | 7 passed, one per checkpoint; 8 passed from slice 9 (lfm2 added) | 3 passed, 4 failed at ac4eb2c7 (measured 2026-10-04); 4 passed (gemma4 e2b, openchat, qwen2, qwen3) once ids are compared through llama's first EOG (owner stop-set policy). Still failing: D2 gemma4 26b diverges at index 0 on 2 of 3 prompts; O1 qwen35 + qwen35moe have no oracle (llama f1ea20621 rejects the blobs: rope.dimension_sections length 3, expects 4) |
 | AC7 | R4 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/window_ring_layers_/)'` | 2 passed: (a) gemma4 E2B ring layers equal `swa_layers.txt`; (b) a synthetic descriptor with a window on one dense layer gets a ring on exactly that layer | 1 passed, 1 failed ((b) fails: dense layers ignore the window) |
 | AC8 | R8 | oracle | `cargo nextest run -p proxima-tokenizer --features gguf -E 'binary(gemma4_llama_oracle)'` | 20 passed, 0 failed | 20 passed |
 | AC9 | R9 | consistency | `cargo nextest run -p proxima-model-interop --features std,conflaguration -j 1 -E 'test(/model_config_roundtrip_/)'` | 6 passed: for each checkpoint that lowers through the descriptor (gemma4 26B and E2B including the verify program, openchat, qwen2, qwen3, granite moe), GGUF -> config -> TOML text -> config -> lowered program has the same op count, op digest and logits root as AC0's. qwen35 and qwen35moe lower through bespoke builders until slice 9 makes them descriptors; they join then (8 passed) | tests absent; at HEAD the descriptor has no serde, so it cannot round-trip |
@@ -222,3 +225,28 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
   - The two `llama_parity_qwen35` and `llama_parity_qwen35moe` cases were removed at 59cf72e6
     (owner excluded qwen from testing). The `llama_parity_` set lists 5: gemma4 26b, gemma4 e2b,
     openchat, qwen2, qwen3. Measured 2026-10-04: 5 passed, including gemma4 26b on confident chat prompts (D2 above).
+
+## findings from slice 6 (verify cost, 2026-10-05)
+
+- Lowering a verify program for a family does not make speculation pay for it. With the default
+  n-gram drafter (`ngram-simple`, up to 48 drafted rows) armed, measured on the 970 to 1000
+  token prompt, 128 new tokens, release std+metal, one model process at a time, Ollama quit
+  (`evidence/verify_cost/`):
+  - granite moe 1b, `decode_arms` 8 processes x 7 runs, tip vs 0c: ms/token 20.9740 (MAD 0.0810)
+    vs 14.6570 (MAD 0.0700), delta +6.3170 against limit 0.2931, within=false; peak footprint
+    +19923008 against 12157222, within=false.
+  - `generate_from_ids` with speculation on vs off, 3 alternating rounds each (ms/token on, off;
+    verify steps, drafted rows, accepted rows): granite moe 21.841/15.198 (4, 189, 49); qwen2
+    36.307/20.267 (7, 119, 16); qwen3 240.040/29.173 (7, 114, 69); openchat 279.439/24.329 (3,
+    114, 114); gemma4 E2B 13.039/11.696 (1, 2, 2). Round 0 of each model; rounds 1 and 2 are in
+    the evidence files.
+  - openchat with the verify program armed and a forced draft width, step gap in ms (plain decode
+    step 23): width 1 about 140, width 2 about 490, width 4 about 2050, width 8 about 4050, width
+    16 to 38 about 3800 to 6200.
+  - Not traced: why a multi-row step against a 1100-token cache costs this much on the dense
+    two-range path. Its kernels are out of scope (see "out of scope"); the numbers are the
+    reason the profile default is off, not a finding about the kernels.
+- Consequence for R3: the verify program is lowered when `ModelDescriptor::speculative_verify` is
+  set. The family profile supplies the default (`speculative_verify = true` only for gemma4,
+  whose verify step was measured to pay), and a config layer overrides it. With the default, the
+  granite moe decode program and its speed are the 0c baseline's.

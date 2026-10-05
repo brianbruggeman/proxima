@@ -1,0 +1,50 @@
+use core::ops::ControlFlow;
+use std::fs::File;
+
+
+use memmap2::Mmap;
+use proxima_gguf::parse_complete;
+use proxima_gguf::types::GgmlType;
+use proxima_model_interop::{
+    GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats,
+    TokenEvent,
+};
+
+fn main() {
+    let model_file = std::env::var("PROXIMA_DECODE_MODEL_GGUF").expect("model");
+    let prompt = std::fs::read_to_string(std::env::var("PROBE_PROMPT").expect("prompt")).expect("read prompt");
+    let file = File::open(&model_file).expect("open");
+    let bytes: Mmap = unsafe { Mmap::map(&file) }.expect("map");
+    let parsed = parse_complete(&bytes).expect("parse");
+    let model = LoadedModel::load(&parsed, &bytes).expect("load");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("vocab");
+    let wants_bos = vocab.add_bos_token().unwrap_or_else(|| vocab.bos_token_id().is_some());
+    let wants_eos = vocab.add_eos_token().unwrap_or(false);
+    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, wants_bos, wants_eos).expect("encode");
+    let config = ServingConfig {
+        gpu_layers: GPU_LAYERS_ALL,
+        kv_cache_key_quant: GgmlType::F32,
+        kv_cache_value_quant: GgmlType::F32,
+        flash_attention: false,
+        batch_size: 0,
+        ubatch_size: 0,
+        reasoning_budget: 0,
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    };
+    for width in [0u16, 1, 2, 4, 8, 16, 32, 38] {
+        let arm = if width == 0 { config.with_speculative(SpeculativeConfig::none()) } else { config };
+        let forced = (width != 0).then_some(width);
+        let mut stats = SpeculativeDecodeStats::default();
+        let mut stamps: Vec<u64> = Vec::new();
+        let mut on_token = |event: TokenEvent<'_>| {
+            stamps.push(event.elapsed_ms);
+            ControlFlow::Continue(())
+        };
+        let (out, _text, _eos) = model
+            .generate_from_ids_with_speculative_stats(&ids, 24, &arm, &mut on_token, &mut stats, forced)
+            .expect("generate");
+        let gaps: Vec<u64> = stamps.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        println!("width={width} tokens={} verify_steps={} step_gaps_ms={gaps:?}", out.len(), stats.verify_steps);
+    }
+}

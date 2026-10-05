@@ -1,0 +1,12 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.10s
+────────────
+ Nextest run ID b47d2fae-f6e2-48b0-9e39-defb777790c9 with nextest profile: default
+    Starting 5 tests across 8 binaries (759 tests skipped)
+        PASS [   0.011s] (1/5) proxima-tensor spec::tests::verify_descriptor::a_descriptor_that_is_not_armed_has_no_verify_program
+        PASS [   0.011s] (2/5) proxima-tensor spec::tests::verify_descriptor::a_descriptor_with_a_short_conv_layer_has_no_verify_program
+        PASS [   0.012s] (3/5) proxima-tensor spec::tests::verify_descriptor::a_pooled_embedding_descriptor_has_no_verify_program
+        PASS [   0.010s] (4/5) proxima-tensor spec::tests::verify_descriptor::an_armed_attention_descriptor_lowers_a_verify_that_keeps_every_row
+        PASS [   0.010s] (5/5) proxima-tensor spec::tests::verify_descriptor::validation_refuses_to_arm_verify_over_a_layer_that_cannot_rewind
+────────────
+     Summary [   0.061s] 5 tests run: 5 passed, 759 skipped
