@@ -1,3 +1,6 @@
+# qwen2.5 0.5b, written from the published architecture (hidden 896, 24 layers,
+# 14 query heads over 2 kv heads, head dim 64, ffn 4864, vocab 151936, rope
+# split-half, silu); a test compares it with the gguf header afterwards.
 vocab = 151936
 embedding = 896
 feed_forward = 4864
