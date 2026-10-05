@@ -14901,6 +14901,7 @@ mod gemma4_synthetic_parity {
             l_cache: 0,
             embedding_scale: Some(EmbeddingScale::Sqrt),
             logit_softcap: Some(SOFTCAP),
+            logit_scale: None,
             layers,
             cache_strategy: CacheStrategy::TwoRange,
             // no PLE entry in the fixture schedule above.
@@ -17481,7 +17482,7 @@ mod head_repeats {
             })
     }
 
-    fn descriptor(cache_strategy: CacheStrategy, head_repeats: u32) -> ModelDescriptor {
+    pub(super) fn descriptor(cache_strategy: CacheStrategy, head_repeats: u32) -> ModelDescriptor {
         let attention = LayerAttentionConfig {
             head_dim: 4,
             kv_heads: 1,
@@ -17516,6 +17517,7 @@ mod head_repeats {
             l_cache: 0,
             embedding_scale: Some(EmbeddingScale::Sqrt),
             logit_softcap: Some(30.0),
+            logit_scale: None,
             layers,
             cache_strategy,
             ple_dim: None,
@@ -17664,6 +17666,48 @@ mod forward_scales {
 
         assert_eq!(scaled.len(), base.len() + 2);
         assert_eq!(constants_equal(&scaled, 8.0_f32.sqrt()), 1);
+    }
+
+    #[test]
+    fn two_range_and_cacheless_refuse_a_logit_scale() {
+        for strategy in [CacheStrategy::TwoRange, CacheStrategy::Cacheless] {
+            let mut scaled = head_repeats::descriptor(strategy, 1);
+            scaled.logit_scale = Some(6.0);
+
+            let outcome = build_forward(&scaled, false);
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(TensorError::UnsupportedInBuilder {
+                        feature: "a logit scale",
+                        ..
+                    })
+                ),
+                "{strategy:?} must refuse a logit scale"
+            );
+        }
+    }
+
+    #[test]
+    fn single_range_refuses_a_logit_scale_until_it_lowers_one() {
+        let mut scaled = descriptor(0, 0);
+        scaled.logit_scale = Some(6.0);
+
+        let outcome = build_forward(&scaled, false);
+
+        assert!(matches!(
+            outcome,
+            Err(TensorError::UnsupportedInBuilder {
+                builder: "build_forward(CacheStrategy::SingleRange)",
+                feature: "a logit scale",
+            })
+        ));
+    }
+
+    #[test]
+    fn new_descriptors_default_to_no_logit_scale() {
+        assert_eq!(descriptor(0, 0).logit_scale, None);
     }
 
     #[test]
