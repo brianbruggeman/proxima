@@ -2597,6 +2597,7 @@ pub(super) mod memory_fit_gate_tests {
             rope_scaling: RopeScaling::None,
             kv_layers: vec![(2, 64, None); 2],
             ring_write_offset: 0,
+            block_summarizer: None,
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
                 expert_bytes: 0,
@@ -5077,5 +5078,71 @@ pub(super) mod memory_fit_gate_tests {
                 masked.len()
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod block_summarizer_tests {
+    use crate::PromptCacheConfig;
+    use crate::generate::chunked_prefill_tests::{config, gemma4_checkpoint, prefill_with, prompt_of};
+    use crate::generate::{LayerCacheState, LoadedModel, ServingConfig};
+
+    fn block_row_count(k_even: &[f32], _k_odd: &[f32], _value: &[f32], even_odd_row: usize) -> Vec<f32> {
+        vec![(k_even.len() / even_odd_row) as f32]
+    }
+
+    fn sealing_config() -> ServingConfig<'static> {
+        ServingConfig {
+            prompt_cache: PromptCacheConfig { block_tokens: 8, seal_horizon_rows: 4, ..PromptCacheConfig::standard() },
+            ..config(7)
+        }
+    }
+
+    fn full_and_ring_summaries(model: &LoadedModel<'_>) -> (usize, Vec<Vec<f32>>, Vec<usize>) {
+        let prefilled = prefill_with(model, &prompt_of(40, '3'), &sealing_config());
+        assert_eq!(prefilled.state.len(), 40, "the prompt is cached in full");
+        let (full, ring): (Vec<_>, Vec<_>) = prefilled
+            .state
+            .layer_caches
+            .iter()
+            .filter_map(|state| match state {
+                LayerCacheState::Attention(cache) => Some(cache),
+                _ => None,
+            })
+            .partition(|cache| cache.ring_geometry().is_none());
+        assert_eq!(full.len(), 1, "one full-attention layer");
+        let ring_counts = ring.iter().map(|cache| cache.block_summaries.len()).collect();
+        (full[0].sealed_end, full[0].block_summaries.clone(), ring_counts)
+    }
+
+    #[test]
+    fn decode_keeps_one_summary_record_per_sealed_block() {
+        let bytes = gemma4_checkpoint();
+        let parsed = proxima_gguf::pipe::parse_complete(&bytes).expect("parses the gemma4 fixture");
+        let plain = LoadedModel::load(&parsed, &bytes).expect("loads the gemma4 fixture");
+        let (control_sealed_end, control_summaries, _) = full_and_ring_summaries(&plain);
+        let model = LoadedModel::load(&parsed, &bytes).expect("loads the gemma4 fixture").with_block_summarizer(block_row_count);
+
+        let (sealed_end, summaries, ring_counts) = full_and_ring_summaries(&model);
+
+        assert_eq!(sealed_end, 32, "(40 - 4) / 8 * 8 rows seal");
+        assert_eq!(summaries, vec![vec![8.0f32]; 4], "four sealed blocks of eight rows, each record the block row count");
+        assert_eq!(ring_counts, vec![0, 0], "a ring layer never seals, so keeps no summaries");
+        assert_eq!(control_sealed_end, 32, "without a summarizer the same rows seal");
+        assert!(control_summaries.is_empty(), "without a summarizer no record is kept");
+    }
+
+    #[test]
+    fn with_block_summarizer_drops_entries_stored_before_it() {
+        let bytes = gemma4_checkpoint();
+        let parsed = proxima_gguf::pipe::parse_complete(&bytes).expect("parses the gemma4 fixture");
+        let model = LoadedModel::load(&parsed, &bytes).expect("loads the gemma4 fixture");
+        model.generate_with_serving_config(&prompt_of(40, '3'), 2, config(0)).expect("the synthetic checkpoint generates");
+        assert!(model.prompt_cache_bytes() > 0, "the default prompt cache stored the prompt");
+
+        let model = model.with_block_summarizer(block_row_count);
+
+        assert_eq!(model.prompt_cache_bytes(), 0, "entries stored before the summarizer carry no summaries");
     }
 }
