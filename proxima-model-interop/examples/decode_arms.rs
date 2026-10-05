@@ -343,18 +343,17 @@ fn print_memory(arm: &ArmRuns) {
     }
 }
 
-// bound: arm median <= reference median + max(reference MAD, 2% of reference median), outliers removed
+// bound: each arm against every earlier arm: median <= reference median + max(reference MAD, 2% of reference median), outliers removed
 fn print_bounds(arms: &[ArmRuns]) {
-    let Some(reference) = arms.first() else {
-        return;
-    };
-    for arm in arms.iter().skip(1) {
-        bound_line(arm, reference, "ms_per_token", |each| &each.runs);
-        bound_line(arm, reference, "prefill_ms", |each| &each.prefill_runs);
-        bound_line(arm, reference, "ttft_ms", |each| &each.ttft_runs);
-        memory_bound_line(arm, reference, "peak_rss_bytes", |each| &each.rss_by_process);
-        memory_bound_line(arm, reference, "peak_footprint_bytes", |each| &each.footprint_by_process);
-        memory_bound_line(arm, reference, "peak_gpu_bytes", |each| &each.gpu_peak_runs);
+    for (index, arm) in arms.iter().enumerate() {
+        for reference in &arms[..index] {
+            bound_line(arm, reference, "ms_per_token", |each| &each.runs);
+            bound_line(arm, reference, "prefill_ms", |each| &each.prefill_runs);
+            bound_line(arm, reference, "ttft_ms", |each| &each.ttft_runs);
+            memory_bound_line(arm, reference, "peak_rss_bytes", |each| &each.rss_by_process);
+            memory_bound_line(arm, reference, "peak_footprint_bytes", |each| &each.footprint_by_process);
+            memory_bound_line(arm, reference, "peak_gpu_bytes", |each| &each.gpu_peak_runs);
+        }
     }
 }
 
