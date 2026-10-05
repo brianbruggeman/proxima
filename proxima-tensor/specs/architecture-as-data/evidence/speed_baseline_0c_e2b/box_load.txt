@@ -1,0 +1,6 @@
+11:23  up 4 days, 21:27, 5 users, load averages: 4.82 5.70 6.26
+17029  58.7 a background daemon in ~/.local/bin
+18123  49.9 /System/Library/PrivateFrameworks/IntelligencePlatformCore.framework/Versions/A/knowledgeconstructiond
+  476  34.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  19.8 /Applications/iTerm.app/Contents/MacOS/iTerm2
+55233  13.2 /System/Applications/Messages.app/Contents/MacOS/Messages

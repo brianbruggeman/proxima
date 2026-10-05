@@ -1,0 +1,6 @@
+11:20  up 4 days, 21:24, 5 users, load averages: 5.77 6.21 6.52
+17029 112.1 a background daemon in ~/.local/bin
+ 1418  98.6 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  476  31.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+31461  14.2 claude
+55233  12.8 /System/Applications/Messages.app/Contents/MacOS/Messages

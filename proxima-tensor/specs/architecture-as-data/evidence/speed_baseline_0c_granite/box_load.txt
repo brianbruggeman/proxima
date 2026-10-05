@@ -1,0 +1,6 @@
+11:26  up 4 days, 21:31, 5 users, load averages: 5.36 5.49 6.03
+17029 125.6 a background daemon in ~/.local/bin
+  476  32.6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  14.4 /Applications/iTerm.app/Contents/MacOS/iTerm2
+55233  12.8 /System/Applications/Messages.app/Contents/MacOS/Messages
+31461  12.1 claude
