@@ -3954,6 +3954,7 @@ pub(super) fn decode_streamed_piece(
 /// [`LoadedModel::generate`] fixed (a loop with no termination condition
 /// besides the budget) -- is provable against a scripted token source,
 /// without paying for a real forward pass per test.
+#[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
 pub(super) fn decode_until_stop_or_budget(
     vocab: &Vocab,
     max_tokens: usize,
@@ -3969,59 +3970,99 @@ pub(super) fn decode_until_stop_or_budget(
     for step in 0..max_tokens {
         let token_id = produce_next_token(step)?;
         let elapsed_ms = u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let is_eos = vocab.eos_token_id() == Some(token_id);
-        // Control tokens (gemma4's `<turn|>`-shaped turn markers) are
-        // structural, not content -- they must never appear in decoded
-        // TEXT, but unlike eos they do not stop generation: the id still
-        // enters `generated_ids` below, only its visible piece is empty.
-        let is_control = vocab.token_type(token_id) == Some(TokenType::Control);
-        let mut text_piece = if is_eos || is_control {
-            String::new()
-        } else {
-            decode_streamed_piece(vocab, token_id, &mut pending_bytes)?
-        };
-        // Mirrors `proxima_tokenizer::pipe::decode`'s own one-time leading-
-        // space trim (SentencePiece's `escape` always prepends one), applied
-        // to the FIRST non-empty piece this whole call ever emits rather
-        // than every piece -- a later piece starting with the space marker
-        // is a real inter-word space, not that artifact.
-        if !unigram_leading_space_trimmed && vocab.is_unigram() && !text_piece.is_empty() {
-            unigram_leading_space_trimmed = true;
-            if text_piece.starts_with(' ') {
-                text_piece.remove(0);
-            }
-        }
-        if step == 0 {
-            let control = on_token(TokenEvent {
-                token_id,
-                text_piece: &text_piece,
-                phase: Phase::Prefill {
-                    prompt_tokens: prompt_token_count,
-                },
-                step,
-                elapsed_ms,
-            });
-            if control == ControlFlow::Break(()) {
-                break;
-            }
-        }
-        if is_eos {
-            stopped_by_eos = true;
-            break;
-        }
-        generated_ids.push(token_id);
-        let control = on_token(TokenEvent {
+        let delivery = deliver_token(
+            vocab,
             token_id,
-            text_piece: &text_piece,
-            phase: Phase::Token,
             step,
+            prompt_token_count,
             elapsed_ms,
-        });
-        if control == ControlFlow::Break(()) {
+            &mut pending_bytes,
+            &mut unigram_leading_space_trimmed,
+            &mut generated_ids,
+            on_token,
+        )?;
+        if let ControlFlow::Break(by_eos) = delivery {
+            stopped_by_eos = by_eos;
             break;
         }
     }
     Ok((generated_ids, stopped_by_eos))
+}
+
+/// One token's trip through the termination policy [`decode_until_stop_or_budget`]
+/// loops over, callable by a loop that settles several tokens per forward
+/// pass (the serving loop in `run_decode_loop_from_ids`): decodes the visible
+/// piece, reports the step-`0` [`Phase::Prefill`] event, stops on the
+/// vocab's end-of-sequence id without recording it, otherwise records the id
+/// and reports [`Phase::Token`]. `pending_bytes`, `unigram_leading_space_trimmed`
+/// and `generated_ids` are the policy's state, owned by the caller's loop and
+/// passed by reference so no carrier type exists.
+///
+/// [`ControlFlow::Break`] carries whether the stop was the model's own
+/// end-of-sequence (`true`) or the caller's `on_token` breaking (`false`).
+#[allow(clippy::too_many_arguments)] // the policy state is three caller-owned locals, not a type
+pub(super) fn deliver_token(
+    vocab: &Vocab,
+    token_id: u32,
+    step: usize,
+    prompt_token_count: usize,
+    elapsed_ms: u64,
+    pending_bytes: &mut Vec<u8>,
+    unigram_leading_space_trimmed: &mut bool,
+    generated_ids: &mut Vec<u32>,
+    on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+) -> Result<ControlFlow<bool, ()>, InteropError> {
+    let is_eos = vocab.eos_token_id() == Some(token_id);
+    // Control tokens (gemma4's `<turn|>`-shaped turn markers) are
+    // structural, not content -- they must never appear in decoded
+    // TEXT, but unlike eos they do not stop generation: the id still
+    // enters `generated_ids` below, only its visible piece is empty.
+    let is_control = vocab.token_type(token_id) == Some(TokenType::Control);
+    let mut text_piece = if is_eos || is_control {
+        String::new()
+    } else {
+        decode_streamed_piece(vocab, token_id, pending_bytes)?
+    };
+    // Mirrors `proxima_tokenizer::pipe::decode`'s own one-time leading-
+    // space trim (SentencePiece's `escape` always prepends one), applied
+    // to the FIRST non-empty piece this whole call ever emits rather
+    // than every piece -- a later piece starting with the space marker
+    // is a real inter-word space, not that artifact.
+    if !*unigram_leading_space_trimmed && vocab.is_unigram() && !text_piece.is_empty() {
+        *unigram_leading_space_trimmed = true;
+        if text_piece.starts_with(' ') {
+            text_piece.remove(0);
+        }
+    }
+    if step == 0 {
+        let control = on_token(TokenEvent {
+            token_id,
+            text_piece: &text_piece,
+            phase: Phase::Prefill {
+                prompt_tokens: prompt_token_count,
+            },
+            step,
+            elapsed_ms,
+        });
+        if control == ControlFlow::Break(()) {
+            return Ok(ControlFlow::Break(false));
+        }
+    }
+    if is_eos {
+        return Ok(ControlFlow::Break(true));
+    }
+    generated_ids.push(token_id);
+    let control = on_token(TokenEvent {
+        token_id,
+        text_piece: &text_piece,
+        phase: Phase::Token,
+        step,
+        elapsed_ms,
+    });
+    Ok(match control {
+        ControlFlow::Break(()) => ControlFlow::Break(false),
+        ControlFlow::Continue(()) => ControlFlow::Continue(()),
+    })
 }
 
 #[cfg(test)]
