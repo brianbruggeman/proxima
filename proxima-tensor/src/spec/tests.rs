@@ -14937,9 +14937,8 @@ mod gemma4_synthetic_parity {
             prefill_width: None,
         };
 
-        let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden, _head_repeats) =
-            build_forward(&descriptor)
-                .expect("build_forward's padded-mask path lowers the gemma4-shaped descriptor");
+        let ForwardProgram { program, logits, .. } = build_forward(&descriptor)
+            .expect("build_forward's padded-mask path lowers the gemma4-shaped descriptor");
 
         let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
         let ids_f32: Vec<f32> = ids_i32.iter().map(|&id| id as f32).collect();
@@ -15154,12 +15153,26 @@ mod gemma4_synthetic_parity {
         );
         assert_eq!((descriptor_b.cache_strategy, descriptor_b.cache_mask), (CacheStrategy::Cached, CacheMask::Bounded));
 
-        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b, _head_repeats_b) =
-            build_forward(&descriptor_b).expect("build_forward real qwen2-dims build");
+        let ForwardProgram {
+            program: program_b,
+            logits: logits_b,
+            layer_roots: layer_roots_b,
+            moe_sites: moe_b,
+            layer_residuals: layer_residuals_b,
+            hidden: hidden_b,
+            ..
+        } = build_forward(&descriptor_b).expect("build_forward real qwen2-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
         assert_eq!(roots_a.logits, logits_b, "root node id mismatch");
         assert_eq!(Some(roots_a.hidden), hidden_b, "hidden root mismatch");
+        let cache_roots_b: Vec<CachedLayerRoots> = layer_roots_b
+            .iter()
+            .map(|roots| match roots {
+                Qwen35LayerRoots::Attention(cached) => *cached,
+                other => panic!("a dense layer carries a plain cache root, got {other:?}"),
+            })
+            .collect();
         assert_eq!(cache_roots_a, cache_roots_b, "cache roots mismatch");
         assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
         assert_eq!(
@@ -17571,10 +17584,10 @@ mod head_repeats {
     }
 
     fn built(cache_strategy: CacheStrategy, cache_mask: CacheMask, head_repeats: u32) -> (Vec<Op>, Vec<NodeId>) {
-        let (program, _logits, _cache_roots, _moe_sites, _residuals, _hidden, duplicates) =
+        let ForwardProgram { program, duplicate_head_roots, .. } =
             build_forward(&descriptor(cache_strategy, cache_mask, head_repeats))
                 .expect("the two-layer dense descriptor lowers");
-        (program, duplicates)
+        (program, duplicate_head_roots)
     }
 
     #[test]
@@ -17657,7 +17670,7 @@ mod forward_scales {
     }
 
     fn built(descriptor: &ModelDescriptor) -> (Vec<Op>, NodeId) {
-        let (program, logits, ..) =
+        let ForwardProgram { program, logits, .. } =
             build_forward(descriptor).expect("the single-range descriptor lowers");
         (program, logits)
     }
@@ -17958,9 +17971,9 @@ mod descriptor_config {
             assert_eq!(restored, descriptor, "{label}: round trip changed the config:\n{text}");
             let original = build_forward(&descriptor).expect("the descriptor lowers");
             let lowered = build_forward(&restored).expect("the restored descriptor lowers");
-            assert!(!original.0.is_empty(), "{label}: lowered zero ops");
-            assert_eq!(original.0, lowered.0, "{label}: restored config lowers to a different program");
-            assert_eq!(original.1, lowered.1, "{label}: logits root differs");
+            assert!(!original.program.is_empty(), "{label}: lowered zero ops");
+            assert_eq!(original.program, lowered.program, "{label}: restored config lowers to a different program");
+            assert_eq!(original.logits, lowered.logits, "{label}: logits root differs");
         }
     }
 
@@ -17987,7 +18000,7 @@ mod descriptor_config {
             assert_ne!(flipped.last_row_only, descriptor.last_row_only, "{label}: the edit did not flip the field");
             let original = build_forward(&descriptor).expect("the descriptor lowers");
             let lowered = build_forward(&flipped).expect("the flipped descriptor lowers");
-            assert_ne!(original.0, lowered.0, "{label}: the verify shape must change the program");
+            assert_ne!(original.program, lowered.program, "{label}: the verify shape must change the program");
         }
     }
 
@@ -18167,7 +18180,7 @@ mod dense_windows {
     fn a_ring_binds_only_the_windowed_dense_layer_to_the_sliding_slot() {
         let descriptor = dense_descriptor(3, &[None, Some(WINDOW), None], true);
 
-        let (program, ..) = build_forward(&descriptor).expect("a dense schedule with one window lowers");
+        let ForwardProgram { program, .. } = build_forward(&descriptor).expect("a dense schedule with one window lowers");
 
         for (layer, expected) in [(0, Extent::Symbolic(1)), (1, Extent::Symbolic(SLIDING_KV_SYMBOL)), (2, Extent::Symbolic(1))] {
             for leaf in ["k_even", "k_odd", "v"] {
@@ -18185,7 +18198,7 @@ mod dense_windows {
     fn a_dense_window_without_a_ring_keeps_every_layer_on_the_full_cache() {
         let descriptor = dense_descriptor(3, &[None, Some(WINDOW), None], false);
 
-        let (program, ..) = build_forward(&descriptor).expect("a dense schedule with one window lowers");
+        let ForwardProgram { program, .. } = build_forward(&descriptor).expect("a dense schedule with one window lowers");
 
         for layer in 0..3 {
             assert_eq!(leading_extent(&program, &format!("kv_cache.{layer}.k_even")), Some(Extent::Symbolic(1)));
@@ -18199,8 +18212,8 @@ mod dense_windows {
         let plain = dense_descriptor(2, &[], true);
         let windowed_nowhere = dense_descriptor(2, &[None, None], true);
 
-        let (plain_program, ..) = build_forward(&plain).expect("lowers");
-        let (nowhere_program, ..) = build_forward(&windowed_nowhere).expect("lowers");
+        let ForwardProgram { program: plain_program, .. } = build_forward(&plain).expect("lowers");
+        let ForwardProgram { program: nowhere_program, .. } = build_forward(&windowed_nowhere).expect("lowers");
 
         assert_eq!(plain_program, nowhere_program);
         assert!(!has_input(&plain_program, SLIDING_CACHED_LEN_INPUT), "no window, no ring input");
@@ -18265,7 +18278,8 @@ mod dense_windows {
             let eps = alloc::vec![1e-5f32; new_count];
             let (cos, sin) = rope_angles(first_position, new_count, PAIRS, HEAD_DIM);
             let cached_len = [cache.rows as f32];
-            let (program, logits, cache_roots, ..) = build_forward(&self.descriptor).expect("the one-layer dense program lowers");
+            let ForwardProgram { program, logits, layer_roots, .. } =
+                build_forward(&self.descriptor).expect("the one-layer dense program lowers");
             let mut named: Vec<(&str, &[f32])> =
                 self.weights.iter().map(|(name, values)| (name.as_str(), values.as_slice())).collect();
             named.push(("ids", ids));
@@ -18280,7 +18294,9 @@ mod dense_windows {
             named.push(("kv_cache.0.k_even", cache.k_even.as_slice()));
             named.push(("kv_cache.0.k_odd", cache.k_odd.as_slice()));
             named.push(("kv_cache.0.v", cache.v.as_slice()));
-            let (even, odd, value) = cache_roots[0];
+            let Qwen35LayerRoots::Attention((even, odd, value)) = layer_roots[0] else {
+                panic!("the one dense layer owns a plain cache root");
+            };
             let evaluated = crate::cpu::evaluate_named(
                 &program,
                 &[new_count as u64, cache.rows as u64],
@@ -18447,7 +18463,8 @@ mod cache_mask {
 
     fn selects(cache_mask: CacheMask) -> usize {
         let descriptor = head_repeats::descriptor(CacheStrategy::Cached, cache_mask, 1);
-        let (program, ..) = build_forward(&descriptor).expect("the two-layer attention descriptor lowers under either mask");
+        let ForwardProgram { program, .. } =
+            build_forward(&descriptor).expect("the two-layer attention descriptor lowers under either mask");
         program
             .iter()
             .filter(|op| matches!(op, Op::Elementwise { body: ScalarOp::Select, .. }))
@@ -18575,5 +18592,69 @@ mod recurrence_fields {
         let loaded: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
 
         assert_eq!(loaded, descriptor);
+    }
+}
+
+mod layer_roots {
+    use super::*;
+
+    fn roots(seed: u32) -> CachedLayerRoots {
+        (NodeId(seed), NodeId(seed + 1), NodeId(seed + 2))
+    }
+
+    fn layers(key_sources: &[KeySourceKind]) -> Vec<LayerSchedule> {
+        let template = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1).layers[0].clone();
+        key_sources
+            .iter()
+            .map(|&key_source_kind| LayerSchedule {
+                attention: LayerAttentionConfig { key_source_kind, ..template.attention.clone() },
+                ..template.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shared_layers_sit_between_owning_layers_in_schedule_order() {
+        let schedule = layers(&[
+            KeySourceKind::ProjectedK,
+            KeySourceKind::ProjectedK,
+            KeySourceKind::SharedFromLayer(1),
+            KeySourceKind::SharedFromLayer(1),
+        ]);
+
+        let rebuilt = layer_roots_from_cache(&schedule, alloc::vec![roots(10), roots(20)])
+            .expect("two roots for two owning layers");
+
+        assert!(matches!(rebuilt[0], Qwen35LayerRoots::Attention((NodeId(10), _, _))));
+        assert!(matches!(rebuilt[1], Qwen35LayerRoots::Attention((NodeId(20), _, _))));
+        assert!(matches!(rebuilt[2], Qwen35LayerRoots::SharedFromLayer(1)));
+        assert_eq!(rebuilt.len(), 4);
+    }
+
+    #[test]
+    fn fewer_cache_roots_than_owning_layers_reports_both_counts() {
+        let schedule = layers(&[KeySourceKind::ProjectedK, KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)]);
+
+        let outcome = layer_roots_from_cache(&schedule, alloc::vec![roots(10)]);
+
+        assert!(matches!(outcome, Err(TensorError::CacheRootsCountMismatch { produced: 1, expected: 2 })));
+    }
+
+    #[test]
+    fn more_cache_roots_than_owning_layers_reports_both_counts() {
+        let schedule = layers(&[KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)]);
+
+        let outcome = layer_roots_from_cache(&schedule, alloc::vec![roots(10), roots(20)]);
+
+        assert!(matches!(outcome, Err(TensorError::CacheRootsCountMismatch { produced: 2, expected: 1 })));
+    }
+
+    #[test]
+    fn a_cacheless_descriptor_has_no_layer_roots_and_a_cached_one_has_one_per_layer() {
+        let cacheless = head_repeats::descriptor(CacheStrategy::Cacheless, CacheMask::Bounded, 1);
+        let cached = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1);
+
+        assert!(build_forward(&cacheless).expect("cacheless lowers").layer_roots.is_empty());
+        assert_eq!(build_forward(&cached).expect("cached lowers").layer_roots.len(), 2);
     }
 }
