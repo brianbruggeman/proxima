@@ -519,7 +519,8 @@ function; `opt-level` did not move it. Attribution table:
 
 - Landed as six commits: `95ad3fa8` (profile fields), `35494fe2` (the trait, its four impls and the registry),
   `9bdfa6c3` (header hparams type names), `bba7f356` (recurrent runtime type names), `292c2b96` (routed-expert
-  serving knob names), `48c57e9b` (three broken intra-doc links in `proxima-tensor`).
+  serving knob names), `48c57e9b` (three broken intra-doc links in `proxima-tensor`), `1337576d` (the two reduce-flag loads hold the
+  baseline ids on the synthetic checkpoint, with the op count as the control that the flag reaches the lowering).
 - What replaced the trait. `FamilyProfile` (`proxima-tensor/src/spec/descriptor.rs`) carries four more data fields,
   all in the profile TOML keyed by `general.architecture`: `schedule_source` (`uniform`, `sliding_pattern`,
   `recurrent_interval`, `recurrent_routed_interval`: which compiled header reader fills the descriptor),
@@ -566,7 +567,9 @@ function; `opt-level` did not move it. Attribution table:
   `qwen35moe-linked-suffix`, `qwen35moe-expert-prefetch` exit 0, the root package's `gguf_generate`,
   `stream_generate`, `write_qwen35_sidecar` and `openai_serve_gguf` examples check exit 0, tensor 779 passed 8
   skipped (7.8 s), interop slice-gate 697 passed 125 skipped (105.6 s; 709 at the previous slice, plus the profile
-  field test, minus 26 deleted tests, plus 11 `lowering` unit tests and 2 `capability_matrix` tests). At `292c2b96`
+  field test, minus 26 deleted tests, plus 11 `lowering` unit tests and 2 `capability_matrix` tests); at `1337576d`
+  (`evidence/family_profile/final/`) clippy, alloc check and no-default check exit 0, tensor 779 passed 8 skipped
+  (6.7 s), interop slice-gate 699 passed 125 skipped (96.1 s). At `292c2b96`
   (`evidence/family_profile/acs/`): AC0 8 passed (3.0 s), AC3 8 passed (71.7 s), AC6 7 passed (154.7 s), AC2 5 passed
   (164.9 s), AC5 second command 10 passed (8.2 s), AC10 2 passed, AC1 2 passed, AC7 2 passed.
 - Performance, decode loop touched (the step inputs and the routing and shape reads moved from a trait object to
