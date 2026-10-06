@@ -1,0 +1,10 @@
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 20.58s
+────────────
+ Nextest run ID 30f9e5cc-e987-479e-ac31-feb52984d824 with nextest profile: default
+    Starting 2 tests across 31 binaries (660 tests skipped)
+        PASS [   1.494s] (1/2) proxima-model-interop::swa_rope_from_metadata swa_rope_from_metadata_gemma4_26b
+        PASS [   0.193s] (2/2) proxima-model-interop::swa_rope_from_metadata swa_rope_from_metadata_gemma4_e2b
+────────────
+     Summary [   1.694s] 2 tests run: 2 passed, 660 skipped

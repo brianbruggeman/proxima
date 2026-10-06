@@ -1,0 +1,36 @@
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-core)
+    Checking tokio-util v0.7.19
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-http)
+    Checking h2 v0.4.15
+    Checking tower v0.5.3
+    Checking hyper v1.11.0
+    Checking pingora-core v0.8.1
+    Checking hyper-util v0.1.20
+    Checking hyper-timeout v0.5.2
+    Checking tonic v0.14.6
+    Checking tonic-prost v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-runtime)
+    Checking proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-config)
+    Checking proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-codec)
+    Checking proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-protocols)
+    Checking proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-primitives)
+    Checking proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-clock)
+    Checking proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-gguf)
+    Checking proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tls)
+    Checking proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-process)
+    Checking proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-telemetry)
+    Checking prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/prime)
+    Checking proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tokenizer)
+    Checking proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-patterns)
+    Checking proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-recording)
+    Checking proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-net)
+    Checking proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Checking proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-test)
+    Checking proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-listen)
+    Checking proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-quic)
+    Checking proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows)
+    Checking omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+    Checking proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.36s
