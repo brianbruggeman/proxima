@@ -181,8 +181,7 @@ impl MappedExpertWindow {
         #[cfg(not(unix))]
         {
             let _ = capacity;
-            return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
+            return Err(InteropError::ExpertWindowUnavailable {
                 reason: String::from("mapped expert windows require unix mmap"),
             });
         }
@@ -926,8 +925,7 @@ impl MappedExpertSidecar {
                         .checked_add(scratch.mapped_window_used[projection_index])
                         .ok_or(InteropError::SidecarSizeOverflow)?;
                     let source_file = self.source_file.as_ref().ok_or_else(|| {
-                        InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
+                        InteropError::ExpertWindowUnavailable {
                             reason: String::from("mapped expert window has no source file"),
                         }
                     })?;
@@ -1033,8 +1031,7 @@ impl MappedExpertSidecar {
                     let file_length = self
                         .checkpoint_file
                         .as_ref()
-                        .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
+                        .ok_or_else(|| InteropError::ExpertWindowUnavailable {
                             reason: String::from(
                                 "high expert staging needs a checkpoint file for bounded reads",
                             ),
@@ -1097,8 +1094,7 @@ impl MappedExpertSidecar {
                         target.copy_from_slice(&bytes[start..end]);
                     } else {
                         let checkpoint_file = self.checkpoint_file.as_ref().ok_or_else(|| {
-                            InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                            InteropError::ExpertWindowUnavailable {
                                 reason: String::from(
                                     "high expert staging needs a checkpoint file for bounded reads",
                                 ),
@@ -1203,8 +1199,7 @@ impl MappedExpertSidecar {
         ranges.dedup();
         for (start, end) in ranges {
             omega::discard_checkpoint_mmap_range_immediate(&checkpoint[start..end]).map_err(
-                |error| InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
+                |error| InteropError::ExpertWindowUnavailable {
                     reason: error.to_string(),
                 },
             )?;
@@ -1228,8 +1223,7 @@ impl MappedExpertSidecar {
                 descriptor.target_codec,
             )?;
             omega::discard_checkpoint_mmap_range_immediate(&self.mapping[range]).map_err(
-                |error| InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
+                |error| InteropError::ExpertWindowUnavailable {
                     reason: error.to_string(),
                 },
             )?;
@@ -1263,8 +1257,7 @@ impl MappedExpertSidecar {
 
     #[cfg(all(not(unix), any(feature = "moe-expert-prefetch", test)))]
     pub(crate) fn advise_expert_low(&self, _address: ExpertAddress) -> Result<u64, InteropError> {
-        Err(InteropError::PreGatherExecutionUnsupported {
-            architecture: String::from("qwen35moe"),
+        Err(InteropError::ExpertWindowUnavailable {
             reason: String::from("expert prefetch requires unix memory advice"),
         })
     }
@@ -1464,7 +1457,7 @@ impl MappedExpertSidecar {
                     .map(|descriptor| (descriptor.source_codec, descriptor.target_codec))
             });
             eprintln!(
-                "qwen35 sidecar action={action:?} layer={} expert={} codecs={codecs:?}",
+                "expert sidecar action={action:?} layer={} expert={} codecs={codecs:?}",
                 address.layer, address.expert,
             );
         }
@@ -1484,16 +1477,14 @@ impl MappedExpertSidecar {
                             descriptor.source_codec,
                         )?;
                         omega::discard_checkpoint_mmap_range(&checkpoint[range.clone()]).map_err(
-                            |error| InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                            |error| InteropError::ExpertWindowUnavailable {
                                 reason: error.to_string(),
                             },
                         )?;
                         if std::env::var_os("PROXIMA_EXPERT_CHECKPOINT_RESIDENCY").is_some() {
                             let resident_pages =
                                 omega::checkpoint_mmap_resident_pages(&checkpoint[range]).map_err(
-                                    |error| InteropError::PreGatherExecutionUnsupported {
-                                        architecture: String::from("qwen35moe"),
+                                    |error| InteropError::ExpertWindowUnavailable {
                                         reason: error.to_string(),
                                     },
                                 )?;
@@ -2249,7 +2240,7 @@ mod tests {
         #[cfg(not(unix))]
         assert!(matches!(
             sidecar.advise_expert_low(address),
-            Err(InteropError::PreGatherExecutionUnsupported { .. })
+            Err(InteropError::ExpertWindowUnavailable { .. })
         ));
 
         sidecar

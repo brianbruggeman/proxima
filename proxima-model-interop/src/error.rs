@@ -184,7 +184,7 @@ pub enum InteropError {
     /// `{architecture}.attention.head_count_kv`) stored as a per-layer
     /// [`proxima_gguf::value::MetadataArray`] whose `distinct_values` are not
     /// all equal -- confirmed against a real hybrid checkpoint
-    /// (LFM2.5-8B-A1B, whose convolution layers report `0` kv heads and
+    /// (the 8B-A1B short-conv checkpoint, whose convolution layers report `0` kv heads and
     /// whose attention layers report a real count in the SAME array).
     /// [`crate::bind::ModelHparams`]'s single `u32` field cannot
     /// represent genuine per-layer variation, so this surfaces as a typed,
@@ -362,6 +362,13 @@ pub enum InteropError {
         reason: String,
     },
 
+    /// An expert sidecar or slab window could not be mapped, advised or discarded.
+    /// These layers see byte ranges, never a family, so the error names the
+    /// operation that failed rather than an architecture.
+    #[cfg(feature = "std")]
+    #[error("expert window unavailable: {reason}")]
+    ExpertWindowUnavailable { reason: String },
+
     /// `crate::bind::transpose_expert_stack`'s decoded element count did
     /// not equal `expert_count * out_dim * in_dim` — the tensor directory's
     /// own declared shape for a stacked MoE weight disagrees with the
@@ -462,8 +469,8 @@ pub enum InteropError {
     /// `blk.{layer}.attn_qkv.weight` did not have exactly
     /// `embedding * (2 * key_dim + value_dim)` elements -- the real
     /// checkpoint's own declared shape disagrees with the row boundaries
-    /// this call derived from `qwen35.ssm.state_size` /
-    /// `qwen35.ssm.group_count` / `qwen35.ssm.inner_size`.
+    /// this call derived from `{architecture}.ssm.state_size` /
+    /// `{architecture}.ssm.group_count` / `{architecture}.ssm.inner_size`.
     #[error(
         "blk.{layer}.attn_qkv.weight has {elements} elements, but embedding={embedding}, key_dim={key_dim}, value_dim={value_dim} needs {expected} (embedding * (2 * key_dim + value_dim))"
     )]
