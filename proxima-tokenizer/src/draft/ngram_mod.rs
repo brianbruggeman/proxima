@@ -2,7 +2,7 @@
 //! `common/ngram-mod.cpp`) and its driver,
 //! `common_speculative_impl_ngram_mod` (`common/speculative.cpp:1849-2022`):
 //! a single shared hash table mapping a rolling `n_match`-token context to
-//! the ONE token last seen following it -- llama's own PR description names
+//! the ONE token last seen following it -- llama.cpp's own PR description names
 //! it "basic n-gram hasher" (`ngram-mod.h:9`, `ggml-org/llama.cpp#19164`).
 //! Unlike [`crate::draft::ngram_map`], there is no collision resolution at
 //! all: a hash collision silently overwrites whatever was there, so
@@ -14,7 +14,7 @@
 //!
 //! `NgramMod::add` (`common_ngram_mod::add`) takes a window of
 //! `n_match + 1` tokens: the leading `n_match` tokens hash to a table slot
-//! (llama's own multiplicative hash, `idx()`, `common/ngram-mod.cpp:15-25`
+//! (llama.cpp's own multiplicative hash, `idx()`, `common/ngram-mod.cpp:15-25`
 //! -- an LCG-style `res = res * 6364136223846793005 + token` folded over
 //! every context token, reduced mod the table size), and the trailing
 //! token overwrites whatever was stored there (last-write-wins, no probing).
@@ -25,7 +25,7 @@
 //! [`ngram_mod_begin`] (`common_speculative_impl_ngram_mod::begin`,
 //! `:1894-1920`) trains the table over the entire prompt in one pass, then
 //! checks OCCUPANCY: if the fraction of used slots exceeds
-//! [`OCCUPANCY_THRESHOLD`] (`0.25` -- llama's own hardcoded constant,
+//! [`OCCUPANCY_THRESHOLD`] (`0.25` -- llama.cpp's own hardcoded constant,
 //! `:1914`), the whole table is wiped. A saturated table degrades into pure
 //! noise (every lookup returns SOME token, usually the wrong one), so this
 //! is the only defense against unbounded false-positive drafting.
@@ -37,10 +37,10 @@
 //! the next lookup (`result.data() + i`, not `history.data() + i` -- the
 //! lookahead never re-reads real history past the seed, only its own
 //! guesses). A chain that runs dry before [`NgramModConfig::n_min`] tokens
-//! have been drafted returns NOTHING at all, not a short draft (llama's own
+//! have been drafted returns NOTHING at all, not a short draft (llama.cpp's own
 //! `if (i < params.n_min) { result.clear(); return; }`); a chain that runs
 //! dry AFTER `n_min` keeps what it has. The table is also extended here,
-//! in CHUNKS of 32 new tokens at a time (`:1940-1946` -- llama's own
+//! in CHUNKS of 32 new tokens at a time (`:1940-1946` -- llama.cpp's own
 //! incremental-add lag, preserved exactly: a call that hasn't advanced 32
 //! tokens past the last add does no training work at all this step) rather
 //! than every call, unlike [`ngram_mod_begin`]'s one-shot full-prompt pass.
@@ -49,7 +49,7 @@
 //! fraction of the just-drafted tokens; five consecutive rounds below
 //! [`LOW_ACCEPT_THRESHOLD`] (`0.25`) reset the table AND the incremental-add
 //! cursor (`sinfo.i_last = 0`, so the next draft call retrains from
-//! scratch) -- llama's own defense against a table that has drifted into
+//! scratch) -- llama.cpp's own defense against a table that has drifted into
 //! confidently-wrong territory.
 //!
 //! [`NgramMod::occupancy_resets`]/[`NgramMod::low_accept_resets`] are not
@@ -61,51 +61,51 @@
 
 use alloc::vec::Vec;
 
-/// llama's `common_ngram_mod` table size, hardcoded at the call site
+/// llama.cpp's `common_ngram_mod` table size, hardcoded at the call site
 /// (`common/speculative.cpp:1876`, `mod(params.ngram_mod.n_match,
 /// 4*1024*1024)`) rather than configurable.
 pub const TABLE_SIZE: usize = 4 * 1024 * 1024;
 
-/// llama's occupancy reset threshold (`common/speculative.cpp:1914`).
+/// llama.cpp's occupancy reset threshold (`common/speculative.cpp:1914`).
 pub const OCCUPANCY_THRESHOLD: f64 = 0.25;
 
-/// llama's low-acceptance reset threshold (`common/speculative.cpp:2006`).
+/// llama.cpp's low-acceptance reset threshold (`common/speculative.cpp:2006`).
 pub const LOW_ACCEPT_THRESHOLD: f64 = 0.25;
 
-/// llama's low-acceptance reset streak length (`common/speculative.cpp:2008`,
+/// llama.cpp's low-acceptance reset streak length (`common/speculative.cpp:2008`,
 /// `sinfo.n_low >= 5`).
 pub const LOW_ACCEPT_STREAK: u32 = 5;
 
-/// llama's `common_params_speculative_ngram_mod` default `n_match`
+/// llama.cpp's `common_params_speculative_ngram_mod` default `n_match`
 /// (`common/common.h:355`).
 pub const DEFAULT_N_MATCH: u16 = 24;
 
-/// llama's `common_params_speculative_ngram_mod` default `n_max`
+/// llama.cpp's `common_params_speculative_ngram_mod` default `n_max`
 /// (`common/common.h:356`).
 pub const DEFAULT_N_MAX: u16 = 64;
 
-/// llama's `common_params_speculative_ngram_mod` default `n_min`
+/// llama.cpp's `common_params_speculative_ngram_mod` default `n_min`
 /// (`common/common.h:357`).
 pub const DEFAULT_N_MIN: u16 = 48;
 
-/// llama's `common_ngram_mod::EMPTY` sentinel (`common/ngram-mod.h:16`):
+/// llama.cpp's `common_ngram_mod::EMPTY` sentinel (`common/ngram-mod.h:16`):
 /// a table slot that has never been written.
 const EMPTY: i32 = -1;
 
-/// llama's `idx()` multiplier (`common/ngram-mod.cpp:19`) -- the constant
+/// llama.cpp's `idx()` multiplier (`common/ngram-mod.cpp:19`) -- the constant
 /// `6364136223846793005` PCG/LCG families use, folded over every context
 /// token in turn.
 const HASH_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 
-/// llama's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
+/// llama.cpp's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NgramModConfig {
-    /// The context window size hashed into the table -- llama's `n_match`.
+    /// The context window size hashed into the table -- llama.cpp's `n_match`.
     pub n_match: u16,
-    /// The maximum chain length drafted after a hit -- llama's `n_max`.
+    /// The maximum chain length drafted after a hit -- llama.cpp's `n_max`.
     pub n_max: u16,
     /// The minimum chain length required before a partial chain is kept --
-    /// llama's `n_min`.
+    /// llama.cpp's `n_min`.
     pub n_min: u16,
 }
 
@@ -171,7 +171,7 @@ impl NgramMod {
         self.low_accept_resets
     }
 
-    /// llama's `common_ngram_mod::idx` (`common/ngram-mod.cpp:15-25`).
+    /// llama.cpp's `common_ngram_mod::idx` (`common/ngram-mod.cpp:15-25`).
     /// `context` is exactly `n_match` tokens.
     fn hash(&self, context: &[u32]) -> usize {
         let mut hash = 0u64;
@@ -183,7 +183,7 @@ impl NgramMod {
         (hash % self.table.len() as u64) as usize
     }
 
-    /// llama's `common_ngram_mod::add` (`common/ngram-mod.cpp:27-35`).
+    /// llama.cpp's `common_ngram_mod::add` (`common/ngram-mod.cpp:27-35`).
     /// `window` is `n_match + 1` tokens: the context, then the token that
     /// followed it.
     fn add(&mut self, window: &[u32]) {
@@ -197,14 +197,14 @@ impl NgramMod {
         self.table[index] = window[n_match] as i32;
     }
 
-    /// llama's `common_ngram_mod::get` (`common/ngram-mod.cpp:37-41`).
+    /// llama.cpp's `common_ngram_mod::get` (`common/ngram-mod.cpp:37-41`).
     /// `context` is exactly `n_match` tokens.
     fn get(&self, context: &[u32]) -> i32 {
         let index = self.hash(context);
         self.table[index]
     }
 
-    /// llama's `common_ngram_mod::reset` (`common/ngram-mod.cpp:43-46`) --
+    /// llama.cpp's `common_ngram_mod::reset` (`common/ngram-mod.cpp:43-46`) --
     /// does not touch either reset counter, matching the incumbent (which
     /// has none); [`ngram_mod_begin`]/[`ngram_mod_accept`] increment their
     /// own counter around the call.
@@ -216,7 +216,7 @@ impl NgramMod {
 
 /// A faithful port of `common_speculative_impl_ngram_mod::begin`
 /// (`common/speculative.cpp:1894-1920`) -- see this module's own doc.
-/// `prompt` is llama's `prompt` argument: every token this generation
+/// `prompt` is llama.cpp's `prompt` argument: every token this generation
 /// stream starts from.
 pub fn ngram_mod_begin(mod_: &mut NgramMod, prompt: &[u32]) {
     mod_.i_last = 0;
@@ -241,12 +241,12 @@ pub fn ngram_mod_begin(mod_: &mut NgramMod, prompt: &[u32]) {
 
 /// A faithful port of `common_speculative_impl_ngram_mod::draft_one`
 /// (`common/speculative.cpp:1922-1976`) -- see this module's own doc for
-/// the chained-lookahead algorithm. `history` is llama's `prompt` (every
+/// the chained-lookahead algorithm. `history` is llama.cpp's `prompt` (every
 /// token generated so far, NOT including `sampled`); `sampled` is the
 /// token the caller's own sampler just drew for the position immediately
 /// after `history`.
 ///
-/// `out` doubles as llama's own `result` scratch buffer (`draft_one`
+/// `out` doubles as llama.cpp's own `result` scratch buffer (`draft_one`
 /// reuses `result` for both the rolling lookahead window and the final
 /// draft, shifting the tail down before returning) -- a caller pre-sizing
 /// `out` to at least `n_match + n_max` up front pays no allocation on this
@@ -613,7 +613,7 @@ mod tests {
     }
 
     /// Sad path: a chain that runs dry before `n_min` tokens are drafted
-    /// must draft nothing, not a short chain -- llama's own
+    /// must draft nothing, not a short chain -- llama.cpp's own
     /// `if (i < params.n_min) { result.clear(); return; }`.
     #[test]
     fn chain_shorter_than_n_min_drafts_nothing() {

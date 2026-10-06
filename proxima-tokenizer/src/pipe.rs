@@ -80,7 +80,7 @@ fn encode_ordinary(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError
     Ok(ids)
 }
 
-/// gemma4's encoder: split only on newline runs, spell spaces `▁` (no
+/// The char-level encoder: split only on newline runs, spell spaces `▁` (no
 /// synthetic prefix), then char-level BPE per run ([`encode_char_pretoken`]).
 fn encode_char_level(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError> {
     let mut ids = Vec::new();
@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use crate::vocab::tests::{tiny_gemma4_vocab, tiny_unigram_vocab, tiny_vocab};
 
-    /// A [`TokenType::Control`] id (gemma4's `<turn|>`-shaped turn marker,
+    /// A [`TokenType::Control`] id (a char-level vocab's `<turn|>`-shaped turn marker,
     /// in production) is structural, not content: it must contribute zero
     /// characters to decoded text while an ordinary token on either side of
     /// it still decodes normally. Pre-fix, `decode` ignored `token_type`
@@ -247,7 +247,7 @@ mod tests {
         );
     }
 
-    /// gemma4 is merges-driven ([`crate::vocab::Vocab::is_unigram`] is
+    /// A char-level vocab is merges-driven ([`crate::vocab::Vocab::is_unigram`] is
     /// false) but SentencePiece-spelled -- decode must still unescape `▁`
     /// to a real space, the fix this task lands (previously gated on
     /// `is_unigram()`, which this vocab shape fails).

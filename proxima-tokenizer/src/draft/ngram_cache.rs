@@ -66,7 +66,7 @@
 //!
 //! [`ngram_cache_draft`]'s pure query path -- given caches already built --
 //! allocates nothing: n-gram keys are fixed-size `[Option<u32>;
-//! LLAMA_NGRAM_MAX]` arrays on the stack (llama's own `common_ngram` is the
+//! LLAMA_NGRAM_MAX]` arrays on the stack (llama.cpp's own `common_ngram` is the
 //! same fixed-`LLAMA_NGRAM_MAX`-slot struct, `common/ngram-cache.h:15-38`),
 //! and `out` is the caller-owned buffer every drafter in this crate writes
 //! into.
@@ -98,34 +98,34 @@
 
 use alloc::vec::Vec;
 
-/// llama's `LLAMA_NGRAM_MIN` (`common/ngram-cache.h:9`).
+/// llama.cpp's `LLAMA_NGRAM_MIN` (`common/ngram-cache.h:9`).
 pub const LLAMA_NGRAM_MIN: usize = 1;
 
-/// llama's `LLAMA_NGRAM_MAX` (`common/ngram-cache.h:10`).
+/// llama.cpp's `LLAMA_NGRAM_MAX` (`common/ngram-cache.h:10`).
 pub const LLAMA_NGRAM_MAX: usize = 4;
 
-/// llama's `LLAMA_NGRAM_STATIC` (`common/ngram-cache.h:11`).
+/// llama.cpp's `LLAMA_NGRAM_STATIC` (`common/ngram-cache.h:11`).
 pub const LLAMA_NGRAM_STATIC: usize = 2;
 
-/// llama's `create_state_ngram_cache`'s hardcoded `n_draft`
+/// llama.cpp's `create_state_ngram_cache`'s hardcoded `n_draft`
 /// (`common/speculative.cpp:2189-2203`, `README.md`'s own recorded default).
 pub const DEFAULT_N_DRAFT: u16 = 8;
 
-/// llama's `draft_min_sample_size_lax` (`common/ngram-cache.cpp:60`),
+/// llama.cpp's `draft_min_sample_size_lax` (`common/ngram-cache.cpp:60`),
 /// indexed by `ngram_size - 1`.
 const DRAFT_MIN_SAMPLE_SIZE_LAX: [u32; LLAMA_NGRAM_MAX] = [2, 2, 1, 1];
 
-/// llama's `draft_min_percent_lax` (`common/ngram-cache.cpp:61`).
+/// llama.cpp's `draft_min_percent_lax` (`common/ngram-cache.cpp:61`).
 const DRAFT_MIN_PERCENT_LAX: [u32; LLAMA_NGRAM_MAX] = [66, 50, 50, 50];
 
-/// llama's `draft_min_sample_size_strict` (`common/ngram-cache.cpp:62`).
+/// llama.cpp's `draft_min_sample_size_strict` (`common/ngram-cache.cpp:62`).
 const DRAFT_MIN_SAMPLE_SIZE_STRICT: [u32; LLAMA_NGRAM_MAX] = [4, 3, 2, 2];
 
-/// llama's `draft_min_percent_strict` (`common/ngram-cache.cpp:63`).
+/// llama.cpp's `draft_min_percent_strict` (`common/ngram-cache.cpp:63`).
 const DRAFT_MIN_PERCENT_STRICT: [u32; LLAMA_NGRAM_MAX] = [75, 66, 66, 66];
 
-/// llama's `common_ngram` (`common/ngram-cache.h:15-38`): up to
-/// [`LLAMA_NGRAM_MAX`] token ids, `None` in place of llama's own
+/// llama.cpp's `common_ngram` (`common/ngram-cache.h:15-38`): up to
+/// [`LLAMA_NGRAM_MAX`] token ids, `None` in place of llama.cpp's own
 /// `LLAMA_TOKEN_NULL` sentinel for the unused trailing slots of a
 /// shorter-than-`LLAMA_NGRAM_MAX` n-gram.
 pub type NgramKey = [Option<u32>; LLAMA_NGRAM_MAX];
@@ -135,7 +135,7 @@ const NONE_LINK: u32 = u32::MAX;
 /// One continuation-token/count pair, part of [`NgramCache`]'s own
 /// presized arena -- see [`NgramCache`]'s doc. `next` chains to another
 /// entry sharing the same n-gram key ([`NONE_LINK`] ends the chain), the
-/// flat-slab equivalent of llama's own `common_ngram_cache_part`
+/// flat-slab equivalent of llama.cpp's own `common_ngram_cache_part`
 /// (`common/ngram-cache.h:58`, an `unordered_map<token, count>` per key).
 #[derive(Debug, Clone, Copy)]
 struct PartEntry {
@@ -144,7 +144,7 @@ struct PartEntry {
     next: u32,
 }
 
-/// A read view over one n-gram's continuation-token distribution -- llama's
+/// A read view over one n-gram's continuation-token distribution -- llama.cpp's
 /// own `common_ngram_cache_part`, without materializing a map: walks
 /// [`NgramCache`]'s shared arena starting from one key's own chain head.
 #[derive(Debug, Clone, Copy)]
@@ -155,14 +155,14 @@ pub struct NgramCachePart<'a> {
 
 impl<'a> NgramCachePart<'a> {
     /// The recorded count for `token`, if this n-gram was ever observed
-    /// followed by it -- llama's own `part.find(token)`.
+    /// followed by it -- llama.cpp's own `part.find(token)`.
     #[must_use]
     pub fn get(&self, token: u32) -> Option<u32> {
         self.iter().find(|&(candidate, _)| candidate == token).map(|(_, count)| count)
     }
 
     /// Every `(token, count)` pair recorded for this n-gram, in the arena's
-    /// own chain order (newest-inserted first) -- distinct from llama's own
+    /// own chain order (newest-inserted first) -- distinct from llama.cpp's own
     /// `unordered_map` iteration order (hash-bucket order), but this
     /// module's own fixture tests are the oracle that no drafted output
     /// depends on the difference (`ngram_cache_matches_llama_fixture`
@@ -215,7 +215,7 @@ const EMPTY_SLOT: KeySlot = KeySlot { key: [None; LLAMA_NGRAM_MAX], occupied: fa
 
 fn hash_key(key: &NgramKey) -> u64 {
     // FNV-1a over the up to LLAMA_NGRAM_MAX slots -- an internal-only hash
-    // for this structure's OWN open addressing, never ported from llama
+    // for this structure's OWN open addressing, never ported from llama.cpp
     // (whose `common_ngram_cache`'s hasher is an implementation detail no
     // caller, and no fixture, can observe -- only content equality is part
     // of the contract).
@@ -231,12 +231,12 @@ fn hash_key(key: &NgramKey) -> u64 {
     hash
 }
 
-/// llama's `common_ngram_cache` (`common/ngram-cache.h:61`): n-gram ->
+/// llama.cpp's `common_ngram_cache` (`common/ngram-cache.h:61`): n-gram ->
 /// empirical distribution of following tokens. An open-addressed key table
 /// (linear probing) over a shared, presizable continuation-count arena --
 /// see this module's own doc, "Zero allocation" section, for why a bound
 /// exists and how [`NgramCache::with_capacity`] sizes against it -- rather
-/// than llama's own `unordered_map` + hand-written hasher (same lookup
+/// than llama.cpp's own `unordered_map` + hand-written hasher (same lookup
 /// contract, content equality; no hashing-fidelity surface to port) or a
 /// `BTreeMap` (whose per-entry tree-node allocation is exactly what this
 /// port replaces).
@@ -249,7 +249,7 @@ pub struct NgramCache {
 }
 
 impl NgramCache {
-    /// An empty, growable cache -- llama's own default-constructed
+    /// An empty, growable cache -- llama.cpp's own default-constructed
     /// `common_ngram_cache`. The right constructor for a static/dynamic
     /// cache loaded from a file ([`load_llama_ngram_cache_bytes`]) or built
     /// ad hoc, where allocating at load/build time is legitimate (this
@@ -280,7 +280,7 @@ impl NgramCache {
         }
     }
 
-    /// Number of distinct n-grams recorded -- llama's own `.size()`
+    /// Number of distinct n-grams recorded -- llama.cpp's own `.size()`
     /// (`common/ngram-cache.cpp:206`, used by the fixture generator's own
     /// `nc_for_save.size()` log line).
     #[must_use]
@@ -352,7 +352,7 @@ impl NgramCache {
     }
 
     /// Increments `key`'s count for `token` by one, creating either the key
-    /// or the token entry as needed -- llama's own
+    /// or the token entry as needed -- llama.cpp's own
     /// `map[key][token] += 1` (`common/ngram-cache.cpp:47`).
     fn bump(&mut self, key: NgramKey, token: u32) {
         let index = self.slot_index_for(key);
@@ -401,7 +401,7 @@ fn make_key(tokens: &[u32]) -> NgramKey {
 
 /// The shared index-walking core [`ngram_cache_update`] and
 /// [`ngram_cache_update_delta`] both drive (this module's own doc, "RISC
-/// reuse"): llama's own `common_ngram_cache_update` body
+/// reuse"): llama.cpp's own `common_ngram_cache_update` body
 /// (`common/ngram-cache.cpp:20-51`), parameterized over how a logical
 /// position maps to a token id so neither caller needs to materialize a
 /// concrete slice covering the whole dataset.
@@ -430,7 +430,7 @@ fn update_via_indexer(
 /// (`common/ngram-cache.cpp:12-52`), `ngram_min`/`ngram_max` fixed to
 /// [`LLAMA_NGRAM_MIN`]/[`LLAMA_NGRAM_MAX`] -- the only configuration any
 /// caller in the incumbent ever uses (`README.md`'s own recorded default).
-/// `inp_data` is llama's `inp_data`; `nnew` is llama's `nnew` (how many
+/// `inp_data` is llama.cpp's `inp_data`; `nnew` is llama.cpp's `nnew` (how many
 /// trailing positions of `inp_data` are new since the last call -- pass
 /// `inp_data.len()` to treat the whole slice as new, matching the
 /// fixture generator's own static-cache build,
@@ -457,9 +457,9 @@ fn ngram_cache_update_delta(cache: &mut NgramCache, history: &[u32], sampled: u3
     });
 }
 
-/// llama's `get_token` (`common/ngram-cache.cpp:55-57`): reads position
+/// llama.cpp's `get_token` (`common/ngram-cache.cpp:55-57`): reads position
 /// `index` of the logical sequence `history ++ [sampled] ++ out`, exactly
-/// the sequence llama's own `inp ++ draft[1..]` represents, without
+/// the sequence llama.cpp's own `inp ++ draft[1..]` represents, without
 /// concatenating any of the three into a new buffer.
 fn token_at(history: &[u32], sampled: u32, out: &[u32], index: usize) -> u32 {
     if index < history.len() {
@@ -471,7 +471,7 @@ fn token_at(history: &[u32], sampled: u32, out: &[u32], index: usize) -> u32 {
     }
 }
 
-/// llama's single-cache `try_draft` overload (`common/ngram-cache.cpp:66-95`):
+/// llama.cpp's single-cache `try_draft` overload (`common/ngram-cache.cpp:66-95`):
 /// the static-cache-only fallback, used when neither context nor dynamic
 /// answered.
 fn try_draft_static_only(static_cache: &NgramCache, ngram_static: &NgramKey) -> Option<u32> {
@@ -498,7 +498,7 @@ fn try_draft_static_only(static_cache: &NgramCache, ngram_static: &NgramKey) -> 
     max_token
 }
 
-/// llama's two-cache `try_draft` overload (`common/ngram-cache.cpp:97-144`):
+/// llama.cpp's two-cache `try_draft` overload (`common/ngram-cache.cpp:97-144`):
 /// the context/dynamic path, longest n-gram first, each candidate weighted
 /// by the static cache's own corroborating count.
 fn try_draft_primary(
@@ -542,11 +542,11 @@ fn try_draft_primary(
 
 /// A faithful port of `common_ngram_cache_draft`
 /// (`common/ngram-cache.cpp:146-198`) -- see this module's own doc for the
-/// three-cache, longest-n-gram-first algorithm. `history` is llama's `inp`
+/// three-cache, longest-n-gram-first algorithm. `history` is llama.cpp's `inp`
 /// minus its own trailing `id_last` (every token generated so far, NOT
 /// including `sampled`); `sampled` is the token the caller's own sampler
 /// just drew for the position immediately after `history`. `out` is
-/// llama's `draft` minus its own leading `id_last` sentinel entry -- this
+/// llama.cpp's `draft` minus its own leading `id_last` sentinel entry -- this
 /// port never stores `sampled` in `out` at all, so there is no leading
 /// entry to strip back out afterward.
 ///
@@ -636,7 +636,7 @@ pub struct NgramCacheState {
 }
 
 impl NgramCacheState {
-    /// Every cache starts empty -- llama's own default-constructed
+    /// Every cache starts empty -- llama.cpp's own default-constructed
     /// `seq_info` when no `--lookup-cache-*` path was given. `context` is
     /// presized via [`NgramCache::with_capacity`] from `max_context_len`
     /// (the caller's own model context window, the SAME bound
@@ -657,7 +657,7 @@ impl NgramCacheState {
 
     /// Seeds the dynamic and/or static caches from previously-built
     /// [`NgramCache`]s (e.g. loaded via [`load_llama_ngram_cache_bytes`]) --
-    /// llama's own `common_speculative_impl_ngram_cache` constructor
+    /// llama.cpp's own `common_speculative_impl_ngram_cache` constructor
     /// (`common/speculative.cpp:2064-2088`) cloning a loaded cache into
     /// every sequence's `sinfo`. `context` is presized the same way
     /// [`NgramCacheState::new`]'s own doc documents.
@@ -705,11 +705,11 @@ pub fn ngram_cache_state_draft(
 /// truncation is the only failure mode a reader can detect.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NgramCacheLoadError {
-    /// The file ended in the middle of a record -- llama's own loader
+    /// The file ended in the middle of a record -- llama.cpp's own loader
     /// (`common_ngram_cache_load`, `:222-258`) asserts on this rather than
     /// returning an error (`GGML_ASSERT(!hashmap_file.eof())`); this port
     /// reports it instead of aborting the process.
-    #[error("truncated llama ngram cache: expected {expected} more bytes at offset {offset}, found {found}")]
+    #[error("truncated llama.cpp ngram cache: expected {expected} more bytes at offset {offset}, found {found}")]
     Truncated {
         /// Bytes the next field needed.
         expected: usize,
@@ -740,9 +740,9 @@ fn read_i32_le(bytes: &[u8], offset: &mut usize) -> Result<i32, NgramCacheLoadEr
 /// in-memory buffer rather than a `std::ifstream` -- the file format itself
 /// has no IO dependency, only its acquisition does (kept in this same
 /// no_std+alloc module; [`load_llama_ngram_cache_file`] is the std-gated
-/// file-reading wrapper). Each record is llama's own raw struct layout,
+/// file-reading wrapper). Each record is llama.cpp's own raw struct layout,
 /// native (little-endian) byte order: [`LLAMA_NGRAM_MAX`] x `i32` ngram
-/// tokens (`-1` is llama's `LLAMA_TOKEN_NULL`, mapped to `None`), then one
+/// tokens (`-1` is llama.cpp's `LLAMA_TOKEN_NULL`, mapped to `None`), then one
 /// `i32` token count, then that many `(i32 token, i32 count)` pairs.
 pub fn load_llama_ngram_cache_bytes(bytes: &[u8]) -> Result<NgramCache, NgramCacheLoadError> {
     let mut cache = NgramCache::new();
@@ -767,7 +767,7 @@ pub fn load_llama_ngram_cache_bytes(bytes: &[u8]) -> Result<NgramCache, NgramCac
 }
 
 /// The std-gated file-reading wrapper around [`load_llama_ngram_cache_bytes`]
-/// -- llama's own `common_speculative_impl_ngram_cache` constructor loads
+/// -- llama.cpp's own `common_speculative_impl_ngram_cache` constructor loads
 /// static/dynamic caches from a path (`common/speculative.cpp:2064-2088`),
 /// and this is the equivalent entry point for a caller with a real
 /// filesystem.
@@ -784,7 +784,7 @@ pub fn load_llama_ngram_cache_file(path: &std::path::Path) -> Result<NgramCache,
 #[derive(Debug, thiserror::Error)]
 pub enum NgramCacheLoadIoError {
     /// The file could not be opened or read.
-    #[error("failed to read llama ngram cache file: {0}")]
+    #[error("failed to read llama.cpp ngram cache file: {0}")]
     Io(#[source] std::io::Error),
     /// The file opened, but its contents did not parse -- see
     /// [`NgramCacheLoadError`].
@@ -908,10 +908,10 @@ mod tests {
     /// cache files": [`load_llama_ngram_cache_bytes`] against the vendored
     /// `ngram_cache_static.bin` (`README.md`'s own recorded provenance: a
     /// real cache built from `streams[2]`, llama.cpp's own
-    /// `common/ngram-map.cpp`, via llama's own `common_ngram_cache_update` +
+    /// `common/ngram-map.cpp`, via llama.cpp's own `common_ngram_cache_update` +
     /// `common_ngram_cache_save`) proves the loaded contents drive drafts
     /// correctly by feeding the loaded cache in as the STATIC cache for a
-    /// context/dynamic-empty [`NgramCacheState`] over a real gemma4-tokenized
+    /// context/dynamic-empty [`NgramCacheState`] over a real char-level-tokenized
     /// stream from `streams.json` and confirming the static-only fallback
     /// path (`try_draft_static_only`) actually fires and drafts real,
     /// non-empty tokens sourced from the loaded cache.

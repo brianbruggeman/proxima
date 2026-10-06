@@ -1,0 +1,713 @@
+use std::path::Path;
+
+use super::*;
+
+#[test]
+fn missing_tokens_key_is_an_error() {
+    let metadata = ParsedGguf {
+        version: 3,
+        tensor_count: 0,
+        kv_count: 0,
+        metadata: Vec::new(),
+        tensors: Vec::new(),
+        data_offset: 0,
+        alignment: 32,
+    };
+    let error = vocab_from_metadata(&metadata).expect_err("no tokens key");
+    assert!(matches!(
+        error,
+        TokenizerError::MissingMetadataKey { key: TOKENS_KEY }
+    ));
+}
+
+/// A synthetic vocab whose `tokenizer.ggml.add_bos_token` is present but
+/// the wrong GGUF value type (`U32`, not `Bool`) is a typed error, not a
+/// panic or a silent `None`. Proves [`bool_scalar`] rejects a
+/// present-but-wrong-shaped key rather than treating it as absent.
+#[test]
+fn wrong_typed_add_bos_token_key_is_an_error() {
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(crate::byte_level::byte_to_char(byte)))
+        .collect();
+    let metadata = ParsedGguf {
+        version: 3,
+        tensor_count: 0,
+        kv_count: 0,
+        metadata: alloc::vec![
+            (
+                String::from(TOKENS_KEY),
+                MetadataValue::Array(MetadataArray::String(core::mem::take(&mut tokens)))
+            ),
+            (
+                String::from(MODEL_KEY),
+                MetadataValue::String(String::from("gpt2"))
+            ),
+            (
+                String::from(MERGES_KEY),
+                MetadataValue::Array(MetadataArray::String(Vec::new()))
+            ),
+            (String::from(ADD_BOS_KEY), MetadataValue::U32(1)),
+        ],
+        tensors: Vec::new(),
+        data_offset: 0,
+        alignment: 32,
+    };
+    let error =
+        vocab_from_metadata(&metadata).expect_err("add_bos_token present with the wrong type");
+    assert!(matches!(
+        error,
+        TokenizerError::WrongMetadataType { key: ADD_BOS_KEY }
+    ));
+}
+
+/// A synthetic vocab whose `tokenizer.ggml.add_bos_token`/`add_eos_token`
+/// are correctly typed carries them through to [`Vocab::add_bos_token`]/
+/// [`Vocab::add_eos_token`] -- proves the fast, no-real-file path end to
+/// end (the real-fixture tests below prove the same thing against
+/// genuine on-disk GGUF metadata).
+#[test]
+fn bool_add_bos_and_add_eos_keys_thread_through_to_the_vocab() {
+    let tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(crate::byte_level::byte_to_char(byte)))
+        .collect();
+    let metadata = ParsedGguf {
+        version: 3,
+        tensor_count: 0,
+        kv_count: 0,
+        metadata: alloc::vec![
+            (
+                String::from(TOKENS_KEY),
+                MetadataValue::Array(MetadataArray::String(tokens))
+            ),
+            (
+                String::from(MODEL_KEY),
+                MetadataValue::String(String::from("gpt2"))
+            ),
+            (
+                String::from(MERGES_KEY),
+                MetadataValue::Array(MetadataArray::String(Vec::new()))
+            ),
+            (
+                String::from(PRE_KEY),
+                MetadataValue::String(String::from("llama-bpe"))
+            ),
+            (String::from(ADD_BOS_KEY), MetadataValue::Bool(true)),
+            (String::from(ADD_EOS_KEY), MetadataValue::Bool(false)),
+        ],
+        tensors: Vec::new(),
+        data_offset: 0,
+        alignment: 32,
+    };
+    let vocab = vocab_from_metadata(&metadata).expect("well-typed metadata builds a vocab");
+    assert_eq!(vocab.add_bos_token(), Some(true));
+    assert_eq!(vocab.add_eos_token(), Some(false));
+}
+
+fn byte_level_metadata(pre: Option<&str>) -> ParsedGguf {
+    let tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(crate::byte_level::byte_to_char(byte)))
+        .collect();
+    let mut metadata = alloc::vec![
+        (
+            String::from(TOKENS_KEY),
+            MetadataValue::Array(MetadataArray::String(tokens))
+        ),
+        (
+            String::from(MODEL_KEY),
+            MetadataValue::String(String::from("gpt2"))
+        ),
+        (
+            String::from(MERGES_KEY),
+            MetadataValue::Array(MetadataArray::String(Vec::new()))
+        ),
+    ];
+    if let Some(pre) = pre {
+        metadata.push((String::from(PRE_KEY), MetadataValue::String(String::from(pre))));
+    }
+    ParsedGguf {
+        version: 3,
+        tensor_count: 0,
+        kv_count: 0,
+        metadata,
+        tensors: Vec::new(),
+        data_offset: 0,
+        alignment: 32,
+    }
+}
+
+#[test]
+fn pre_value_selects_the_pre_split_the_way_llama_cpp_maps_it() {
+    for (pre, expected) in [
+        ("llama-bpe", PreType::GroupedDigits),
+        ("lfm2", PreType::GroupedDigits),
+        ("qwen2", PreType::SingleDigit),
+        ("deepseek-r1-qwen", PreType::SingleDigit),
+        ("qwen35", PreType::SingleDigitMarks),
+        ("default", PreType::Default),
+    ] {
+        let vocab = vocab_from_metadata(&byte_level_metadata(Some(pre)))
+            .expect("a mapped pre value builds a vocab");
+        assert_eq!(vocab.pre_type(), expected, "pre value {pre:?}");
+    }
+}
+
+#[test]
+fn unmapped_pre_value_is_an_error_carrying_the_value() {
+    for pre in ["deepseek-coder", "jina-v1-en", "hunyuan-dense", "qwen3-unreleased"] {
+        let error = vocab_from_metadata(&byte_level_metadata(Some(pre)))
+            .expect_err("an unmapped pre value is rejected");
+        assert_eq!(
+            error,
+            TokenizerError::UnsupportedPreTokenizer { pre: String::from(pre) }
+        );
+    }
+}
+
+#[test]
+fn missing_pre_key_selects_the_default_pre_split_like_llama_cpp() {
+    let vocab = vocab_from_metadata(&byte_level_metadata(None))
+        .expect("a byte-level vocab with no pre key builds, as in llama.cpp");
+    assert_eq!(vocab.pre_type(), PreType::Default);
+}
+
+fn char_level_metadata(model: &str, pre: Option<&str>) -> ParsedGguf {
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| alloc::format!("<0x{byte:02X}>"))
+        .collect();
+    tokens.push(String::from("\u{2581}"));
+    tokens.push(String::from("hi"));
+    tokens.push(String::from("\u{2581}hi"));
+    let merges = alloc::vec![String::from("\u{2581} hi")];
+    let mut metadata = alloc::vec![
+        (
+            String::from(TOKENS_KEY),
+            MetadataValue::Array(MetadataArray::String(tokens))
+        ),
+        (
+            String::from(MODEL_KEY),
+            MetadataValue::String(String::from(model))
+        ),
+        (
+            String::from(MERGES_KEY),
+            MetadataValue::Array(MetadataArray::String(merges))
+        ),
+    ];
+    if let Some(pre) = pre {
+        metadata.push((String::from(PRE_KEY), MetadataValue::String(String::from(pre))));
+    }
+    ParsedGguf {
+        version: 3,
+        tensor_count: 0,
+        kv_count: 0,
+        metadata,
+        tensors: Vec::new(),
+        data_offset: 0,
+        alignment: 32,
+    }
+}
+
+#[test]
+fn char_level_vocab_builds_with_no_pre_key_whatever_its_model_string() {
+    for model in ["gemma4", "gpt2", "some-future-char-level-model"] {
+        let vocab = vocab_from_metadata(&char_level_metadata(model, None))
+            .expect("a char-level merges vocab builds without a pre key");
+        assert!(vocab.is_char_level_bpe(), "model {model:?}");
+    }
+}
+
+#[test]
+fn char_level_vocab_does_not_consult_the_pre_key() {
+    let vocab = vocab_from_metadata(&char_level_metadata("gemma4", Some("qwen3-unreleased")))
+        .expect("a char-level vocab carries its own splitting");
+    assert!(vocab.is_char_level_bpe());
+}
+
+#[test]
+fn unknown_model_without_merges_or_scores_is_unsupported() {
+    let mut metadata = char_level_metadata("bert", None);
+    metadata.metadata.retain(|(key, _)| key != MERGES_KEY);
+    let error = vocab_from_metadata(&metadata).expect_err("no engine to select");
+    assert_eq!(
+        error,
+        TokenizerError::UnsupportedTokenizerModel { model: String::from("bert") }
+    );
+}
+
+#[test]
+fn empty_pre_value_is_treated_as_missing() {
+    let vocab = vocab_from_metadata(&byte_level_metadata(Some("")))
+        .expect("an empty pre value builds, as in llama.cpp");
+    assert_eq!(vocab.pre_type(), PreType::Default);
+}
+
+/// Loads the real llama-bpe vocab fixture and confirms the exact
+/// metadata keys/types documented in this module's doc comment are
+/// what actually round-trips through `proxima-gguf`.
+/// `#[ignore]`d: depends on a sibling checkout that may not exist on
+/// every host.
+#[test]
+#[ignore = "depends on a real .gguf checkout outside this repo"]
+fn builds_a_vocab_from_the_real_llama_bpe_fixture() {
+    let candidate = Path::new(
+        "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
+    );
+    if !candidate.exists() {
+        eprintln!("no real .gguf found at {candidate:?}, skipping");
+        return;
+    }
+    let (parsed, _bytes) =
+        proxima_gguf::edge::read_file(candidate).expect("parse real gguf file");
+    let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real metadata");
+    assert_eq!(vocab.len(), 128_256);
+    assert_eq!(vocab.bos_token_id(), Some(128_000));
+    assert_eq!(vocab.eos_token_id(), Some(128_001));
+    println!("real fixture vocab: {} tokens", vocab.len());
+}
+
+/// The decode path end to end at the real openchat-3.5-1210 vocab
+/// scale (32002 tokens): a synthetic logits vector with a known peak
+/// runs through [`crate::sample::greedy_pick`], and the resulting id
+/// decodes ([`crate::decode`]) back to the exact expected string --
+/// including a multi-byte UTF-8 token, so the byte-level decode path
+/// is exercised, not just the id lookup. Only the metadata region is
+/// read (growing-buffer `parse_complete` loop, matching
+/// `proxima-gguf/src/restack.rs`'s `real_mixtral_file` module) -- the
+/// 3.9 GB tensor payload is never touched. `#[ignore]`d: depends on a
+/// host-local model cache outside this repo.
+const OPENCHAT_GGUF_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+
+/// Reads only the metadata region of the real openchat-3.5-1210 GGUF
+/// (growing-buffer `parse_complete` loop, matching
+/// `proxima-gguf/src/restack.rs`'s `real_mixtral_file` module) and
+/// builds a [`Vocab`] from it -- the 3.9 GB tensor payload is never
+/// touched. `None` if the host-local model cache this crate's real-vocab
+/// tests depend on is absent.
+fn load_real_openchat_vocab() -> Option<Vocab> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let candidate = Path::new(OPENCHAT_GGUF_PATH);
+    if !candidate.exists() {
+        eprintln!("no real openchat .gguf found at {candidate:?}, skipping");
+        return None;
+    }
+
+    let mut file =
+        std::fs::File::open(candidate).expect("open host-local openchat gguf fixture");
+    let mut header_buf = Vec::new();
+    let parsed = 'grow: {
+        for cap in [4usize << 20, 16 << 20, 64 << 20] {
+            header_buf.resize(cap, 0);
+            file.seek(SeekFrom::Start(0)).expect("seek to file start");
+            let read = file.read(&mut header_buf).expect("read gguf header region");
+            header_buf.truncate(read);
+            if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                break 'grow parsed;
+            }
+        }
+        panic!("gguf metadata region did not fit in 64 MiB");
+    };
+    Some(vocab_from_metadata(&parsed).expect("builds vocab from real openchat metadata"))
+}
+
+/// Confirms the real value [`gguf.rs`]'s own module doc names for
+/// openchat-3.5-1210: `tokenizer.ggml.add_bos_token = true`,
+/// `tokenizer.ggml.add_eos_token = false`, both genuinely present on
+/// this checkpoint's own GGUF metadata (not this crate's default).
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+fn real_openchat_vocab_carries_add_bos_true_add_eos_false() {
+    let Some(vocab) = load_real_openchat_vocab() else {
+        return;
+    };
+    assert_eq!(
+        vocab.add_bos_token(),
+        Some(true),
+        "openchat-3.5-1210's real gguf metadata says add_bos_token = true"
+    );
+    assert_eq!(
+        vocab.add_eos_token(),
+        Some(false),
+        "openchat-3.5-1210's real gguf metadata says add_eos_token = false"
+    );
+}
+
+/// The real deepseek-coder-33b-instruct fixture's own metadata carries
+/// no `tokenizer.ggml.add_bos_token`/`add_eos_token` key at all -- the
+/// genuine absence case this module's `Option<bool>` shape exists for,
+/// distinct from the explicit `Some(false)` a checkpoint like
+/// openchat-3.5-1210 carries. `#[ignore]`d: depends on a host-local
+/// model cache outside this repo.
+#[test]
+#[ignore = "depends on a host-local deepseek-coder gguf checkout outside this repo"]
+fn real_deepseek_coder_vocab_has_no_add_bos_eos_metadata_at_all() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let candidate = Path::new(
+        "/Users/brianbruggeman/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf",
+    );
+    if !candidate.exists() {
+        eprintln!("no real deepseek-coder .gguf found at {candidate:?}, skipping");
+        return;
+    }
+    let mut file =
+        std::fs::File::open(candidate).expect("open host-local deepseek-coder gguf fixture");
+    let mut header_buf = Vec::new();
+    let parsed = 'grow: {
+        for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20] {
+            header_buf.resize(cap, 0);
+            file.seek(SeekFrom::Start(0)).expect("seek to file start");
+            let read = file.read(&mut header_buf).expect("read gguf header region");
+            header_buf.truncate(read);
+            if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                break 'grow parsed;
+            }
+        }
+        panic!("deepseek-coder gguf metadata region did not fit in 128 MiB");
+    };
+    assert!(
+        parsed.metadata_value(ADD_BOS_KEY).is_none(),
+        "deepseek-coder's real gguf metadata carries no add_bos_token key"
+    );
+    assert!(
+        parsed.metadata_value(ADD_EOS_KEY).is_none(),
+        "deepseek-coder's real gguf metadata carries no add_eos_token key"
+    );
+    let vocab = vocab_from_metadata(&parsed)
+        .expect("builds vocab from real deepseek-coder metadata");
+    assert_eq!(
+        vocab.pre_type(),
+        PreType::Default,
+        "this deepseek-coder gguf predates tokenizer.ggml.pre"
+    );
+}
+
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+fn greedy_decode_at_real_openchat_vocab_scale() {
+    use crate::sample::greedy_pick;
+
+    let Some(vocab) = load_real_openchat_vocab() else {
+        return;
+    };
+    assert_eq!(
+        vocab.len(),
+        32_002,
+        "real openchat-3.5-1210 vocab must have exactly 32002 tokens"
+    );
+
+    // three distinct tokens, picked by inspecting the real vocab
+    // (`tokenizer.ggml.model = "llama"`, a SentencePiece/unigram
+    // vocab, confirmed via `tokenizer.ggml.scores` present and
+    // `tokenizer.ggml.merges` absent): the BOS control token, a
+    // plain ASCII subword, and a multi-byte UTF-8 katakana token.
+    let cases: [(u32, &str); 3] = [(1, ""), (450, "de"), (30_000, "ァ")];
+
+    for (token_id, expected_text) in cases {
+        let mut logits = alloc::vec![0.0f32; vocab.len()];
+        logits[token_id as usize] = 100.0;
+
+        let picked = greedy_pick(&logits).expect("logits are non-empty");
+        assert_eq!(
+            picked, token_id,
+            "greedy pick must recover the peaked token id"
+        );
+
+        let decoded = decode_ids_for_test(&vocab, &[picked]);
+        assert_eq!(
+            decoded, expected_text,
+            "decode must recover the exact expected text"
+        );
+    }
+
+    // degenerate control: a flat, constant logits vector carries no
+    // signal. it must NOT resolve to any of the peaked ids above --
+    // otherwise a broken argmax (e.g. one that always returns a fixed
+    // index) could pass the assertions above by coincidence.
+    let flat_logits = alloc::vec![1.0f32; vocab.len()];
+    let flat_pick = greedy_pick(&flat_logits).expect("flat logits are non-empty");
+    assert_eq!(
+        flat_pick, 0,
+        "ties resolve deterministically to the lowest id"
+    );
+    for (token_id, _) in cases {
+        assert_ne!(
+            flat_pick, token_id,
+            "a flat vector must not coincidentally hit a real peak's id"
+        );
+    }
+}
+
+#[cfg(test)]
+fn decode_ids_for_test(vocab: &Vocab, ids: &[u32]) -> String {
+    crate::decode(ids, vocab).expect("decodes real vocab ids")
+}
+
+/// The measured gap this module exists to close: the openchat-3.5-1210
+/// checkpoint (`tokenizer.ggml.model = "llama"`) declares no
+/// `tokenizer.ggml.merges`, so `crate::bpe::encode_pretoken`'s
+/// merges-driven path degenerated to one token per byte (25 tokens for
+/// a 24-char prompt). Asserts the exact id sequence -- ground truth
+/// obtained by looking up the real vocab's own scores/token-id table
+/// for each expected piece (`"\u{2581}The"`, `"\u{2581}capital"`, ...),
+/// dumped directly from this fixture, not guessed or taken from a
+/// second tokenizer implementation.
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+fn unigram_encode_the_capital_of_france_is_not_one_token_per_byte() {
+    let Some(vocab) = load_real_openchat_vocab() else {
+        return;
+    };
+    assert!(
+        vocab.is_unigram(),
+        "openchat-3.5-1210 declares tokenizer.ggml.model = \"llama\""
+    );
+
+    let prompt = "The capital of France is";
+    let ids = crate::encode(prompt, &vocab).expect("encodes against real vocab");
+    assert!(
+        ids.len() < 10,
+        "expected a handful of subword pieces, got {} ids (one-token-per-byte regression): {ids:?}",
+        ids.len()
+    );
+
+    let expected_piece_ids = [
+        "\u{2581}The",
+        "\u{2581}capital",
+        "\u{2581}of",
+        "\u{2581}France",
+        "\u{2581}is",
+    ]
+    .map(|piece| {
+        vocab
+            .token_id(piece)
+            .unwrap_or_else(|| panic!("{piece:?} must be in the real vocab"))
+    });
+    assert_eq!(
+        ids, expected_piece_ids,
+        "must segment into exactly the real vocab's subword pieces for this prompt"
+    );
+    assert_eq!(
+        ids.len(),
+        5,
+        "the sequence=25 bug produced one id per byte; this must be ~5, not 25"
+    );
+
+    let with_bos =
+        crate::encode_with_bos_eos(prompt, &vocab, true, false).expect("encodes with bos");
+    assert_eq!(
+        with_bos.len(),
+        6,
+        "add_bos_token = true on this checkpoint, so 5 pieces + 1 bos"
+    );
+    assert_eq!(with_bos.first().copied(), vocab.bos_token_id());
+
+    let decoded = crate::decode(&ids, &vocab).expect("decodes against real vocab");
+    assert_eq!(decoded, prompt, "round trip must recover the exact prompt");
+}
+
+/// Round-trip is the hard correctness gate (matching this crate's
+/// existing philosophy for the llama-bpe fixture,
+/// `round_trips_against_the_real_vocab` above): multi-byte UTF-8, and a
+/// raw byte with no multi-char vocab piece (only its `<0xXX>`
+/// byte-fallback token), both must survive encode-then-decode exactly.
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+fn unigram_round_trips_multibyte_utf8_and_byte_fallback() {
+    let Some(vocab) = load_real_openchat_vocab() else {
+        return;
+    };
+    for text in [
+        "The capital of France is Paris",
+        "нещо на Български",
+        "\u{1F680} (normal) \u{2705}",
+        " this is \u{1F999}.cpp",
+        "Cửa Việt",
+        "\u{0007}", // BEL control char: no multi-char piece, must fall back to <0x07>
+        "",
+    ] {
+        let ids = crate::encode(text, &vocab).expect("encodes against real vocab");
+        let decoded = crate::decode(&ids, &vocab).expect("decodes against real vocab");
+        assert_eq!(
+            decoded, text,
+            "round trip failed for {text:?} (ids: {ids:?})"
+        );
+    }
+}
+
+/// Degenerate control for the exact regression this module fixes: a
+/// merges-driven vocab's byte-level BPE encoder, run over a scores-only
+/// vocab's tokens by mistake, would produce one id per byte. Confirms
+/// the real fix path never does that for an ordinary ASCII sentence --
+/// this must be impossible to regress silently back to `sequence=25`.
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+fn unigram_encode_never_degenerates_to_one_token_per_byte() {
+    let Some(vocab) = load_real_openchat_vocab() else {
+        return;
+    };
+    let sentence = "The quick brown fox jumps over the lazy dog";
+    let ids = crate::encode(sentence, &vocab).expect("encodes against real vocab");
+    assert!(
+        ids.len() < sentence.len(),
+        "one-token-per-byte regression: {} ids for a {}-char sentence",
+        ids.len(),
+        sentence.len()
+    );
+    assert!(
+        ids.len() < 15,
+        "expected roughly word-scale segmentation, got {} ids: {ids:?}",
+        ids.len()
+    );
+}
+
+include!("../../tests/fixtures/llama_cpp_oracle_openchat.rs");
+
+/// The measurement this fixture exists to make possible: for every one
+/// of the 10 real-world prompts llama.cpp's own tokenizer + greedy
+/// decoder were run against (see `llama_cpp_oracle_openchat.rs` for the
+/// exact commands and provenance), `crate::encode_with_bos_eos` must
+/// reproduce llama.cpp's own prompt token ids exactly. This is a
+/// measurement, not a belief -- the parity debugging this fixture
+/// replaces was asserting a target token from intuition, and it was
+/// wrong.
+///
+/// Only `prompt_ids` is checked here. `generated_ids`/`generated_pieces`
+/// on each case are the target for a later forward-pass parity test
+/// (this crate's own logits-driven decode vs. llama.cpp's), not
+/// exercised by this test.
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+fn encode_with_bos_eos_matches_llama_cpp_oracle_prompt_ids() {
+    let Some(vocab) = load_real_openchat_vocab() else {
+        return;
+    };
+
+    for case in ORACLE_CASES {
+        let ids = crate::encode_with_bos_eos(case.prompt, &vocab, true, false).unwrap_or_else(
+            |error| panic!("{}: encode_with_bos_eos failed: {error}", case.name),
+        );
+        assert_eq!(
+            ids.as_slice(),
+            case.prompt_ids,
+            "{}: our encoder's ids for {:?} must match llama.cpp's own tokenization (got {ids:?})",
+            case.name,
+            case.prompt
+        );
+        // not asserted against our own decode yet (that is the
+        // forward-pass parity test this fixture exists to enable) --
+        // only shape-checked here, so the capture itself is internally
+        // consistent.
+        assert_eq!(
+            case.generated_ids.len(),
+            case.generated_pieces.len(),
+            "{}: captured generated_ids/generated_pieces must be parallel arrays",
+            case.name
+        );
+    }
+}
+
+/// The root-cause regression this module's added-token pre-pass fixes:
+/// the OpenChat-3.5 chat template embeds `<|end_of_turn|>` literally,
+/// a `tokenizer.ggml.token_type = 3` (`TokenType::Control`) entry at id
+/// 32000 in this fixture. Before the pre-pass, `crate::encode` shredded
+/// the marker into ordinary BPE pieces (38 ids instead of 31) because
+/// nothing consulted `token_type` -- see `vocab.rs`'s
+/// `Vocab::with_token_types`/`Vocab::longest_added_token_match`.
+///
+/// Reference ids captured directly from llama.cpp's own tokenizer
+/// (`llama-tokenize -m <fixture> -p '<prompt>'`, same provenance as
+/// `llama_cpp_oracle_openchat.rs`): BOS first, `<|end_of_turn|>`
+/// resolving to the single id 32000 mid-sequence, not eight text
+/// pieces.
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+fn encode_with_bos_eos_matches_llama_cpp_oracle_end_of_turn_marker() {
+    let Some(vocab) = load_real_openchat_vocab() else {
+        return;
+    };
+
+    let prompt = "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:";
+    let expected_ids: [u32; 31] = [
+        1, 420, 6316, 28781, 3198, 3123, 1247, 28747, 12018, 264, 21366, 908, 369, 5723, 272,
+        307, 362, 401, 593, 266, 28127, 1474, 28723, 32000, 420, 6316, 28781, 3198, 3123,
+        21631, 28747,
+    ];
+
+    let ids = crate::encode_with_bos_eos(prompt, &vocab, true, false)
+        .unwrap_or_else(|error| panic!("encode_with_bos_eos failed: {error}"));
+    assert_eq!(
+        ids.as_slice(),
+        expected_ids.as_slice(),
+        "our ids for the chat-template prompt must match llama.cpp's own tokenization exactly (got {ids:?})"
+    );
+    assert_eq!(
+        ids.iter().filter(|&&id| id == 32000).count(),
+        1,
+        "the literal <|end_of_turn|> marker must resolve to its own id (32000) exactly once, not be shredded into text pieces"
+    );
+}
+
+/// Regression for the phantom-separator bug: gemma4's real 262144-token
+/// vocab carries a literal `"Ġ"` (GPT-2's own space marker, U+0120) as
+/// an ordinary -- if merge-orphaned -- entry (id 245237), unrelated to
+/// space. Before the `Vocab::assemble` space-marker fix, every space
+/// byte in the input was seeded with that entry instead of the
+/// SentencePiece marker (`"▁"`, U+2581) gemma4's own merges are keyed
+/// on, so it could never merge into the following word and survived
+/// standalone between every pretoken: `"The capital of France is"` came
+/// out `[818, 245237, 41626, 245237, 1340, 245237, 31756, 245237,
+/// 511]` -- 9 ids for 5 words -- instead of one id per space-prefixed
+/// word. `#[ignore]`d: depends on a host-local gemma4 gguf checkout.
+#[test]
+#[ignore = "depends on a host-local gemma4 gguf checkout outside this repo"]
+fn real_gemma4_vocab_merges_space_into_the_following_word() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let candidate = Path::new(
+        "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129",
+    );
+    if !candidate.exists() {
+        eprintln!("no real gemma4 gguf found at {candidate:?}, skipping");
+        return;
+    }
+    let mut file = std::fs::File::open(candidate).expect("open host-local gemma4 fixture");
+    let mut header_buf = Vec::new();
+    let parsed = 'grow: {
+        for cap in [4usize << 20, 16 << 20, 64 << 20] {
+            header_buf.resize(cap, 0);
+            file.seek(SeekFrom::Start(0)).expect("seek to file start");
+            let read = file.read(&mut header_buf).expect("read gguf header region");
+            header_buf.truncate(read);
+            if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                break 'grow parsed;
+            }
+        }
+        panic!("gguf metadata region did not fit in 64 MiB");
+    };
+    let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real gemma4 metadata");
+
+    let prompt = "The capital of France is";
+    let ids = crate::encode(prompt, &vocab).expect("encode prompt");
+
+    let phantom_separator_id = vocab
+        .token_id("\u{0120}")
+        .expect("gemma4's real vocab carries a literal Ġ entry");
+    assert!(
+        !ids.contains(&phantom_separator_id),
+        "no phantom Ġ separator (id {phantom_separator_id}) between words, got {ids:?}"
+    );
+
+    let expected_words = ["The", "\u{2581}capital", "\u{2581}of", "\u{2581}France", "\u{2581}is"];
+    let expected_ids: Vec<u32> = expected_words
+        .iter()
+        .map(|word| {
+            vocab
+                .token_id(word)
+                .unwrap_or_else(|| panic!("{word:?} must be a real gemma4 vocab entry"))
+        })
+        .collect();
+    assert_eq!(
+        ids, expected_ids,
+        "space must merge into the following word as its ▁ prefix, one id per word"
+    );
+}

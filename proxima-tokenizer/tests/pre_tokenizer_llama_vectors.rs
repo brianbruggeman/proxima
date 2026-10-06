@@ -142,5 +142,5 @@ fn falcon_pre_split_tokenizes_llama_falcon_vectors_like_llama() {
 #[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-qwen2.gguf is 5.9 MB, not vendored"]
 fn qwen2_regex_tokenizes_llama_qwen2_vectors_like_llama() {
     let vocab = load_vocab(&host_local_gguf("qwen2"));
-    assert_vectors_match_llama(&vocab, "qwen2", PreType::Qwen2);
+    assert_vectors_match_llama(&vocab, "qwen2", PreType::SingleDigit);
 }

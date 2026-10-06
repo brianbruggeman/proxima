@@ -102,31 +102,31 @@ fn assert_family_matches_llama(vocab: &Vocab, expected_pre: PreType, cases: &[(&
 #[test]
 fn llama3_digits_group_in_threes_like_llama() {
     let vocab = load_vocab(&PathBuf::from(LLAMA_BPE_VOCAB));
-    assert_family_matches_llama(&vocab, PreType::Llama3, &family_cases!("llama3"));
+    assert_family_matches_llama(&vocab, PreType::GroupedDigits, &family_cases!("llama3"));
 }
 
 #[test]
 fn qwen2_digits_split_one_per_token_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN2_BLOB_SHA256));
-    assert_family_matches_llama(&vocab, PreType::Qwen2, &family_cases!("qwen2"));
+    assert_family_matches_llama(&vocab, PreType::SingleDigit, &family_cases!("qwen2"));
 }
 
 #[test]
 fn qwen3_digits_split_one_per_token_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN3_BLOB_SHA256));
-    assert_family_matches_llama(&vocab, PreType::Qwen2, &family_cases!("qwen3"));
+    assert_family_matches_llama(&vocab, PreType::SingleDigit, &family_cases!("qwen3"));
 }
 
 #[test]
 fn qwen35_digits_split_one_per_token_and_marks_join_words_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN35_BLOB_SHA256));
-    assert_family_matches_llama(&vocab, PreType::Qwen35, &family_cases!("qwen35"));
+    assert_family_matches_llama(&vocab, PreType::SingleDigitMarks, &family_cases!("qwen35"));
 }
 
 #[test]
 fn qwen35moe_digits_split_one_per_token_and_marks_join_words_like_llama() {
     let vocab = load_vocab(&ollama_blob(QWEN35MOE_BLOB_SHA256));
-    assert_family_matches_llama(&vocab, PreType::Qwen35, &family_cases!("qwen35moe"));
+    assert_family_matches_llama(&vocab, PreType::SingleDigitMarks, &family_cases!("qwen35moe"));
 }
 
 #[test]

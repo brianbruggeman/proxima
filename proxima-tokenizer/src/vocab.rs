@@ -64,7 +64,7 @@ struct MergeRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpaceMarker {
     /// SentencePiece's `▁` (U+2581), a real vocab entry outside the gpt2
-    /// byte-level alphabet -- llama (unigram) and gemma4 (merges) both
+    /// byte-level alphabet -- scores-driven (unigram) and char-level (merges) vocabs both
     /// spell space this way.
     SentencePiece,
     /// GPT-2 byte-level's `Ġ` (U+0120), inside `byte_to_char`'s own private
@@ -149,8 +149,8 @@ impl Vocab {
         )
     }
 
-    /// Builds a SentencePiece-unigram vocab (`tokenizer.ggml.model =
-    /// "llama"`) from its per-token unigram scores instead of an explicit
+    /// Builds a SentencePiece-unigram vocab (the scores-driven
+    /// `tokenizer.ggml.model`) from its per-token unigram scores instead of an explicit
     /// merge list -- hands to [`crate::unigram::encode_fragment`], which
     /// greedily merges the highest-`token_score` adjacent pair (both
     /// crate-private) (mirroring llama.cpp's `llm_tokenizer_spm_session`)
@@ -204,7 +204,7 @@ impl Vocab {
         // Probed once, here, against the vocab's own token list -- never the
         // model name or which constructor (`new`/`new_unigram`) built it.
         // `▁` resolving to a real entry means this vocab's merges/scores are
-        // keyed on it (llama, gemma4); otherwise it spells space the gpt2
+        // keyed on it (unigram, char-level); otherwise it spells space the gpt2
         // way (`Ġ`).
         let space_marker = {
             let mut marker = String::new();
@@ -216,7 +216,7 @@ impl Vocab {
             }
         };
 
-        // char-level BPE (gemma4): merges keyed on raw UTF-8 characters with
+        // char-level BPE: merges keyed on raw UTF-8 characters with
         // `▁` for space, and `<0xXX>` spelling the byte fallback. The same
         // shape probe as `space_marker`, read off the vocab's own tokens.
         let char_level_bpe = !merges.is_empty()
@@ -258,13 +258,13 @@ impl Vocab {
                     token_to_id.get(hex_fallback_token(byte).as_str()).copied();
                 continue;
             }
-            // A SentencePiece byte-BPE vocab (e.g. `gemma4`) spells the
+            // A SentencePiece byte-BPE vocab (e.g. a char-level vocab) spells the
             // space byte as `crate::unigram::SPACE_MARKER` (`▁`, U+2581),
             // never GPT-2's own private-alphabet marker (`Ġ`, U+0120,
             // `byte_to_char(b' ')` below) -- and its merges are keyed on
             // `▁`, not `Ġ`. Tried first, ahead of the GPT-2 candidate, so a
             // vocab that happens to also carry an unrelated literal `Ġ`
-            // entry (a real, if merge-orphaned, token in gemma4's actual
+            // entry (a real, if merge-orphaned, token in a char-level vocab's actual
             // 262144-token vocab, verified against the real checkpoint)
             // never shadows the marker the vocab's own merge rules
             // actually resolve through -- confirmed against
@@ -350,7 +350,7 @@ impl Vocab {
             add_eos_token: None,
             space_marker,
             char_level_bpe,
-            pre_type: PreType::Llama3,
+            pre_type: PreType::GroupedDigits,
         })
     }
 
@@ -388,7 +388,7 @@ impl Vocab {
     /// Sets the pre-split rule the byte-level path applies
     /// ([`crate::pretokenize::pretokenize`]). `gguf::vocab_from_metadata`
     /// always sets it from `tokenizer.ggml.pre`; a vocab built any other way
-    /// ([`Vocab::new`], HF `tokenizer.json`) keeps [`PreType::Llama3`] until
+    /// ([`Vocab::new`], HF `tokenizer.json`) keeps [`PreType::GroupedDigits`] until
     /// its caller says otherwise.
     #[must_use]
     pub fn with_pre_type(mut self, pre_type: PreType) -> Self {
@@ -397,7 +397,7 @@ impl Vocab {
     }
 
     /// The pre-split rule [`crate::pipe::encode`] applies to this vocab's
-    /// byte-level path. Not consulted by the char-level (gemma4) or unigram
+    /// byte-level path. Not consulted by the char-level or unigram
     /// paths, which carry their own splitting.
     #[must_use]
     pub fn pre_type(&self) -> PreType {
@@ -493,7 +493,7 @@ impl Vocab {
         self.base_byte_token_id[byte as usize].unwrap_or(0)
     }
 
-    /// Whether this vocab merges over raw UTF-8 characters (gemma4) rather
+    /// Whether this vocab merges over raw UTF-8 characters rather
     /// than GPT-2 remapped bytes: merges present, and both `▁` and `<0x0A>`
     /// are tokens. Derived once at construction from the vocab itself.
     /// [`crate::pipe::encode`] routes to [`crate::bpe::encode_char_pretoken`]
@@ -535,7 +535,7 @@ impl Vocab {
     /// reads this to decide whether to run [`crate::unigram::unescape`],
     /// replacing a gate on [`Vocab::is_unigram`] that conflated "which
     /// engine built this vocab" with "which alphabet it spells space in" --
-    /// gemma4 is merges-engine + SentencePiece-space, the cell that
+    /// A char-level vocab is merges-engine + SentencePiece-space, the cell that
     /// conflation could not represent.
     #[must_use]
     pub(crate) fn space_marker(&self) -> SpaceMarker {
@@ -586,7 +586,7 @@ impl Vocab {
 
 /// The SentencePiece byte-fallback token spelling for a raw byte
 /// (`"<0x1A>"`, uppercase hex, zero-padded) -- the convention llama.cpp's
-/// SentencePiece/unigram vocabs (`tokenizer.ggml.model = "llama"`) use for
+/// SentencePiece/unigram vocabs (the scores-driven `tokenizer.ggml.model`) use for
 /// their base byte alphabet instead of the GPT-2 display alphabet
 /// ([`byte_to_char`]). Checked as a fallback so [`Vocab::new`] accepts
 /// either family's base-byte spelling.
@@ -693,7 +693,7 @@ pub(crate) mod tests {
             .expect("tiny unigram vocab builds")
     }
 
-    /// A tiny gemma4-shaped vocab: merges-driven ([`Vocab::new`], no
+    /// A tiny char-level-shaped vocab: merges-driven ([`Vocab::new`], no
     /// scores) but SentencePiece-spelled (`▁` present, hex-fallback byte
     /// alphabet) -- the cell `is_unigram()` could not represent, since
     /// merges-engine + SentencePiece-space are independent axes.
@@ -704,13 +704,13 @@ pub(crate) mod tests {
         tokens.push(String::from("\u{2581}hi"));
 
         let merges = vec![String::from("\u{2581} hi")];
-        Vocab::new(tokens, &merges, None, None, None).expect("tiny gemma4 vocab builds")
+        Vocab::new(tokens, &merges, None, None, None).expect("tiny char-level vocab builds")
     }
 
     #[test]
     fn gemma4_shaped_vocab_derives_sentence_piece_space_marker() {
         let vocab = tiny_gemma4_vocab();
-        assert!(!vocab.is_unigram(), "gemma4 is merges-driven, not unigram");
+        assert!(!vocab.is_unigram(), "a char-level vocab is merges-driven, not unigram");
         assert_eq!(vocab.space_marker(), SpaceMarker::SentencePiece);
     }
 

@@ -2,7 +2,7 @@
 //! `common/ngram-map.cpp:121-536`): a stateful n-gram-to-m-gram drafter that,
 //! unlike [`crate::draft::ngram_simple`], carries an index across calls
 //! (`begin`/`draft`/`accept`) instead of rescanning the whole history every
-//! step. `key_only = true` gives llama's `ngram-map-k` speculation type;
+//! step. `key_only = true` gives llama.cpp's `ngram-map-k` speculation type;
 //! `key_only = false` gives `ngram-map-k4v` -- the SAME function in the
 //! incumbent (`common_ngram_map_draft`'s own `if (map.key_only) { .. return;
 //! }` branch), so this module keeps them one port rather than two, per
@@ -11,13 +11,13 @@
 //! # The algorithm, traced to the incumbent
 //!
 //! [`NgramMap`] mirrors `common_ngram_map` field for field: a growable
-//! `keys` list (llama's `std::vector<common_ngram_map_key>`), a fixed-size
-//! hash index `key_map` (llama's `COMMON_NGRAM_HASH_MAP_SIZE`-entry
+//! `keys` list (llama.cpp's `std::vector<common_ngram_map_key>`), a fixed-size
+//! hash index `key_map` (llama.cpp's `COMMON_NGRAM_HASH_MAP_SIZE`-entry
 //! `std::vector<uint32_t>`, allocated once at construction -- see
 //! [`NgramMap::new`]'s own doc for why that allocation is legitimate under
 //! this crate's zero-alloc discipline), and the incremental bookkeeping
 //! (`size_last_begin`, `idx_last_check`, `key_map_last_idx`,
-//! `last_draft_*`) llama's `common_ngram_map_draft` reads and writes every
+//! `last_draft_*`) llama.cpp's `common_ngram_map_draft` reads and writes every
 //! call.
 //!
 //! [`ngram_map_begin`] (`common_ngram_map_begin`) is called once per
@@ -40,13 +40,13 @@
 //! unconditional index-maintenance step.
 //!
 //! On a match, the matched key n-gram is looked up (or created) in `keys`
-//! by CONTENT, not by position -- llama's own linear scan over
+//! by CONTENT, not by position -- llama.cpp's own linear scan over
 //! `map.keys` comparing token content at each key's `key_idx`. `key_only`
 //! mode then drafts directly from `values[0]`'s length cap
 //! (`n_accepted`, set by [`ngram_map_accept`] after the PREVIOUS draft using
 //! this key). `key4v` mode instead tallies up to
 //! [`MAX_VALUES`] distinct m-gram continuations seen after this key since
-//! `stat_idx` (llama's own value-slot content comparison, not position
+//! `stat_idx` (llama.cpp's own value-slot content comparison, not position
 //! comparison), then applies the tie guard `sum_occur > 0 && max_occur < 2 *
 //! sum_occur` (`common/ngram-map.cpp:495-499`): if no single continuation
 //! clearly dominates, no draft at all -- this is the ONLY place `ngram-map-k`
@@ -57,26 +57,26 @@
 //!
 //! [`ngram_map_accept`] (`common_ngram_map_accept`) records how many of the
 //! just-drafted tokens the target model actually accepted, capping the NEXT
-//! draft from that same value slot to that length -- llama's own adaptive
+//! draft from that same value slot to that length -- llama.cpp's own adaptive
 //! shrink-on-miss behaviour.
 
 use alloc::vec::Vec;
 
-/// llama's `COMMON_NGRAM_MAX_VALUES` (`common/ngram-map.h:39`): the number of
+/// llama.cpp's `COMMON_NGRAM_MAX_VALUES` (`common/ngram-map.h:39`): the number of
 /// distinct m-gram continuations tracked per key n-gram in `key4v` mode.
 /// `key_only` mode only ever populates slot `0`.
 pub const MAX_VALUES: usize = 4;
 
-/// llama's `COMMON_NGRAM_HASH_MAP_SIZE` (`common/ngram-map.h:42`): the fixed
+/// llama.cpp's `COMMON_NGRAM_HASH_MAP_SIZE` (`common/ngram-map.h:42`): the fixed
 /// entry count of [`NgramMap`]'s hash index, allocated once at
 /// [`NgramMap::new`] and never resized.
 const HASH_MAP_SIZE: usize = 262_144;
 
-/// llama's `COMMON_NGRAM_MAX_VALUE_COUNT` (`common/ngram-map.cpp:119`): the
+/// llama.cpp's `COMMON_NGRAM_MAX_VALUE_COUNT` (`common/ngram-map.cpp:119`): the
 /// saturation cap on both a key's hit count and a value's occurrence count.
 const MAX_VALUE_COUNT: u16 = 16_380;
 
-/// llama's `LCG_FACTOR` (`common/ngram-map.cpp:11`): the 32-bit LCG
+/// llama.cpp's `LCG_FACTOR` (`common/ngram-map.cpp:11`): the 32-bit LCG
 /// multiplier `common_ngram_map_hash` folds every token through.
 const LCG_FACTOR: u32 = 2_654_435_761;
 
@@ -91,7 +91,7 @@ pub const DEFAULT_SIZE_VALUE: u16 = 48;
 pub const DEFAULT_MIN_HITS: u16 = 1;
 
 /// llama.cpp's `common_ngram_map` constructor arguments (`common/ngram-map.h:72-77`):
-/// `size_key`/`size_value` name the n-gram/m-gram sizes (llama's own
+/// `size_key`/`size_value` name the n-gram/m-gram sizes (llama.cpp's own
 /// `size_key`/`size_value` fields, not `size_ngram`/`size_mgram` --
 /// `ngram-map` and `ngram-simple` use different field names for the same
 /// role upstream), `key_only` selects `ngram-map-k` (`true`) vs
@@ -100,9 +100,9 @@ pub const DEFAULT_MIN_HITS: u16 = 1;
 /// (`key_only` mode ignores it entirely, matching the incumbent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NgramMapConfig {
-    /// Size of the key n-gram looked up in history -- llama's `size_key`.
+    /// Size of the key n-gram looked up in history -- llama.cpp's `size_key`.
     pub size_key: u16,
-    /// Size of the value m-gram drafted after a key match -- llama's `size_value`.
+    /// Size of the value m-gram drafted after a key match -- llama.cpp's `size_value`.
     pub size_value: u16,
     /// `true` for `ngram-map-k` (drafts from `values[0]` unconditionally on
     /// a key match), `false` for `ngram-map-k4v` (tallies up to
@@ -113,7 +113,7 @@ pub struct NgramMapConfig {
     pub min_hits: u16,
 }
 
-/// llama's `common_ngram_map_value` (`common/ngram-map.h:45-49`): one
+/// llama.cpp's `common_ngram_map_value` (`common/ngram-map.h:45-49`): one
 /// tracked continuation after a key n-gram. `value_idx == 0` is the
 /// incumbent's own sentinel for "unused slot" (position `0` in the token
 /// history can never be a legitimate match position either, since every
@@ -131,7 +131,7 @@ const EMPTY_VALUE: NgramMapValue = NgramMapValue {
     n_accepted: 0,
 };
 
-/// llama's `common_ngram_map_key` (`common/ngram-map.h:52-58`): one tracked
+/// llama.cpp's `common_ngram_map_key` (`common/ngram-map.h:52-58`): one tracked
 /// key n-gram, identified by content (compared against `history` at
 /// `key_idx` on every lookup, never by `key_idx` equality itself, since a
 /// key's first-seen position is not stable identity -- only its content is).
@@ -145,7 +145,7 @@ struct NgramMapKey {
 
 /// A faithful port of `common_ngram_map` (`common/ngram-map.h:61-95`).
 /// Constructed once per generation stream; [`ngram_map_begin`],
-/// [`ngram_map_draft`], and [`ngram_map_accept`] are llama's own
+/// [`ngram_map_draft`], and [`ngram_map_accept`] are llama.cpp's own
 /// `common_ngram_map_begin`/`_draft`/`_accept`, kept as free functions over
 /// `&mut NgramMap` rather than methods so the module reads the same shape as
 /// the incumbent's own three-function API.
@@ -164,7 +164,7 @@ pub struct NgramMap {
 
 impl NgramMap {
     /// Allocates both `key_map` (the fixed-size `HASH_MAP_SIZE`-entry hash
-    /// index, llama's own `key_map.resize(COMMON_NGRAM_HASH_MAP_SIZE)`) and
+    /// index, llama.cpp's own `key_map.resize(COMMON_NGRAM_HASH_MAP_SIZE)`) and
     /// `keys` up front, at construction, so [`ngram_map_draft`]'s hot path
     /// allocates nothing -- this crate's zero-per-call-allocation discipline
     /// ([`crate::draft::ngram_simple::ngram_simple_draft`]'s own doc).
@@ -216,7 +216,7 @@ fn hash_ngram(inp: &[u32], start: usize, len: usize) -> u32 {
 }
 
 /// A faithful port of `common_ngram_map_begin` (`common/ngram-map.cpp:121-219`)
-/// -- see this module's own doc for the algorithm. `tokens` is llama's
+/// -- see this module's own doc for the algorithm. `tokens` is llama.cpp's
 /// `tokens` argument: the prompt (or reasoning-trimmed history) this
 /// generation stream is starting from.
 pub fn ngram_map_begin(map: &mut NgramMap, tokens: &[u32]) {
@@ -264,7 +264,7 @@ pub fn ngram_map_begin(map: &mut NgramMap, tokens: &[u32]) {
     map.size_last_begin = size_begin;
 }
 
-/// llama's stale-value shift loop inside `common_ngram_map_begin`
+/// llama.cpp's stale-value shift loop inside `common_ngram_map_begin`
 /// (`common/ngram-map.cpp:189-203`): clears any value slot whose position
 /// fell in the pruned region, compacting the surviving slots to the front
 /// exactly as the incumbent's own hand-written array shift does.
@@ -282,7 +282,7 @@ fn prune_stale_values(key: &mut NgramMapKey, idx_begin_cleanup: usize) {
 
 /// A faithful port of `common_ngram_map_draft` (`common/ngram-map.cpp:221-516`)
 /// -- see this module's own doc for the algorithm, traced to the incumbent.
-/// `inp` is llama's `inp` (every token generated so far, NOT including
+/// `inp` is llama.cpp's `inp` (every token generated so far, NOT including
 /// `sampled`); `sampled` is the token the caller's own sampler just drew for
 /// the position immediately after `inp`. `out` follows this crate's
 /// caller-owned buffer discipline
@@ -291,7 +291,7 @@ fn prune_stale_values(key: &mut NgramMapKey, idx_begin_cleanup: usize) {
 /// already covers the draft length.
 ///
 /// Requires `map.config.size_key >= 1` (matching the incumbent, which never
-/// guards against `size_key == 0` either -- llama's own `ngram-map`
+/// guards against `size_key == 0` either -- llama.cpp's own `ngram-map`
 /// speculation type is never configured that way).
 pub fn ngram_map_draft(map: &mut NgramMap, inp: &[u32], sampled: u32, out: &mut Vec<u32>) {
     out.clear();
@@ -395,7 +395,7 @@ pub fn ngram_map_draft(map: &mut NgramMap, inp: &[u32], sampled: u32, out: &mut 
     draft_k4v(map, key_offset, inp, match_pos, size_key, size_value, out);
 }
 
-/// llama's key_map index-maintenance step (`common/ngram-map.cpp:318-340`):
+/// llama.cpp's key_map index-maintenance step (`common/ngram-map.cpp:318-340`):
 /// runs unconditionally, whether or not a match was found this call, over
 /// both the prompt region and the generated region -- see this module's own
 /// doc for why.
@@ -434,7 +434,7 @@ fn index_ngram_at(map: &mut NgramMap, inp: &[u32], position: usize, size_key: us
     }
 }
 
-/// llama's `key_only` draft branch (`common/ngram-map.cpp:382-398`): always
+/// llama.cpp's `key_only` draft branch (`common/ngram-map.cpp:382-398`): always
 /// drafts from `values[0]`, length-capped by that slot's own `n_accepted`
 /// from the PREVIOUS [`ngram_map_accept`] call.
 fn draft_key_only(
@@ -453,7 +453,7 @@ fn draft_key_only(
     map.last_draft_value_idx = 0;
 }
 
-/// llama's `key4v` draft branch (`common/ngram-map.cpp:408-515`): tallies up
+/// llama.cpp's `key4v` draft branch (`common/ngram-map.cpp:408-515`): tallies up
 /// to [`MAX_VALUES`] distinct continuations seen after this key since
 /// `stat_idx`, then drafts from the most frequent one UNLESS the dominance
 /// guard `sum_occur > 0 && max_occur < 2 * sum_occur` fires -- this module's
