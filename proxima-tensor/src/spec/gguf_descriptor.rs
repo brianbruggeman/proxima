@@ -125,7 +125,7 @@ pub fn gemma4_descriptor_from_gguf(
         .collect();
 
     let cache_strategy = if layers.iter().all(|entry| entry.kind == LayerKind::Attention) {
-        CacheStrategy::TwoRange
+        CacheStrategy::Cached
     } else {
         CacheStrategy::Cacheless
     };
@@ -149,6 +149,7 @@ pub fn gemma4_descriptor_from_gguf(
         residual_scale: None,
         layers,
         cache_strategy,
+        cache_mask: CacheMask::Padded,
         ple_dim: (ple_dim > 0).then_some(ple_dim),
         sliding_kv_ring,
         qk_norm: false,

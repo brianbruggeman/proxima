@@ -6,7 +6,7 @@
 //! binder for). Composes exactly what that `else` arm always called:
 //! [`crate::bind::architecture_from_metadata`],
 //! [`crate::bind::checkpoint_has_qk_norm`], and (routed through
-//! [`proxima_tensor::spec::build_forward`]'s `CacheStrategy::SingleRange`
+//! [`proxima_tensor::spec::build_forward`]'s `CacheStrategy::Cached`, `CacheMask::Bounded`
 //! arm, via [`proxima_tensor::spec::mistral_descriptor_from_shape`] built
 //! straight off this checkpoint's own parsed `architecture`, rather than a
 //! direct call)

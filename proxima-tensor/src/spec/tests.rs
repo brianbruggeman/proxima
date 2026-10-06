@@ -14772,7 +14772,7 @@ mod gemma4_synthetic_parity {
     /// but through the generic [`build_forward`] dispatch instead of a
     /// direct [`lfm2_two_range_cached_forward_program_with_experts`] call --
     /// proves `build_forward(&descriptor)` with
-    /// `descriptor.cache_strategy == CacheStrategy::TwoRange` lowers to the
+    /// `CacheStrategy::Cached` and `CacheMask::Padded` lowers to the
     /// SAME op graph that direct call already proves matches the prefill
     /// oracle, at this module's synthetic gemma4-shaped dims (2 layers, one
     /// sliding + one full, matching this suite's own SWA/full pairing). No
@@ -14913,11 +14913,12 @@ mod gemma4_synthetic_parity {
             logit_scale: None,
             residual_scale: None,
             layers,
-            cache_strategy: CacheStrategy::TwoRange,
+            cache_strategy: CacheStrategy::Cached,
+            cache_mask: CacheMask::Padded,
             // no PLE entry in the fixture schedule above.
             ple_dim: None,
             sliding_kv_ring: false,
-            // inert under `TwoRange` -- see `ModelDescriptor::qk_norm`'s own doc.
+            // inert under `CacheMask::Padded` -- see `ModelDescriptor::qk_norm`'s own doc.
             qk_norm: false,
             qkv_biases: false,
             paired_gate_up_reduce: false,
@@ -14929,7 +14930,7 @@ mod gemma4_synthetic_parity {
 
         let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden, _head_repeats) =
             build_forward(&descriptor)
-                .expect("build_forward's TwoRange path lowers the gemma4-shaped descriptor");
+                .expect("build_forward's padded-mask path lowers the gemma4-shaped descriptor");
 
         let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
         let ids_f32: Vec<f32> = ids_i32.iter().map(|&id| id as f32).collect();
@@ -15056,7 +15057,7 @@ mod gemma4_synthetic_parity {
 
         let symbols = [SEQ as u64, SEQ as u64];
         let evaluated = crate::cpu::evaluate_named(&program, &symbols, &named, &[logits])
-            .expect("build_forward's TwoRange program evaluates");
+            .expect("build_forward's padded-mask program evaluates");
         let engine_logits = evaluated.get(logits).expect("logits present").0.to_vec();
         let diff = max_abs_diff(&engine_logits, &reference_logits);
 
@@ -15067,13 +15068,13 @@ mod gemma4_synthetic_parity {
 
         assert!(
             diff < 1.0e-6,
-            "build_forward's TwoRange path must match the prefill oracle to the same precision \
+            "build_forward's padded-mask path must match the prefill oracle to the same precision \
              the direct builder call already does -- found {diff}"
         );
     }
 
     /// Proves [`mistral_descriptor_from_shape`]'s
-    /// split-half [`FamilyProfile`] plus [`CacheStrategy::SingleRange`]'s
+    /// split-half [`FamilyProfile`] plus [`CacheMask::Bounded`]'s
     /// [`build_forward`] arm reproduce the deleted
     /// `qwen2_cached_forward_program_with_experts_and_layer_taps` byte-for-byte
     /// at real Qwen2-7B dims: `qk_norm=false` (Qwen2 carries no per-head
@@ -15142,7 +15143,7 @@ mod gemma4_synthetic_parity {
             false,
             &profile,
         );
-        assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
+        assert_eq!((descriptor_b.cache_strategy, descriptor_b.cache_mask), (CacheStrategy::Cached, CacheMask::Bounded));
 
         let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b, _head_repeats_b) =
             build_forward(&descriptor_b).expect("build_forward real qwen2-dims build");
@@ -17499,7 +17500,7 @@ mod head_repeats {
             })
     }
 
-    pub(super) fn descriptor(cache_strategy: CacheStrategy, head_repeats: u32) -> ModelDescriptor {
+    pub(super) fn descriptor(cache_strategy: CacheStrategy, cache_mask: CacheMask, head_repeats: u32) -> ModelDescriptor {
         let attention = LayerAttentionConfig {
             head_dim: 4,
             kv_heads: 1,
@@ -17538,6 +17539,7 @@ mod head_repeats {
             residual_scale: None,
             layers,
             cache_strategy,
+            cache_mask,
             ple_dim: None,
             sliding_kv_ring: false,
             qk_norm: false,
@@ -17550,16 +17552,16 @@ mod head_repeats {
         }
     }
 
-    fn built(cache_strategy: CacheStrategy, head_repeats: u32) -> (Vec<Op>, Vec<NodeId>) {
+    fn built(cache_strategy: CacheStrategy, cache_mask: CacheMask, head_repeats: u32) -> (Vec<Op>, Vec<NodeId>) {
         let (program, _logits, _cache_roots, _moe_sites, _residuals, _hidden, duplicates) =
-            build_forward(&descriptor(cache_strategy, head_repeats))
+            build_forward(&descriptor(cache_strategy, cache_mask, head_repeats))
                 .expect("the two-layer dense descriptor lowers");
         (program, duplicates)
     }
 
     #[test]
     fn cacheless_default_graph_equals_the_pre_change_graph() {
-        let (program, duplicates) = built(CacheStrategy::Cacheless, 1);
+        let (program, duplicates) = built(CacheStrategy::Cacheless, CacheMask::Padded, 1);
 
         assert_eq!(program.len(), CACHELESS_PRE_CHANGE_NODES);
         assert_eq!(digest(&program), CACHELESS_PRE_CHANGE_DIGEST);
@@ -17568,7 +17570,7 @@ mod head_repeats {
 
     #[test]
     fn two_range_default_graph_equals_the_pre_change_graph() {
-        let (program, duplicates) = built(CacheStrategy::TwoRange, 1);
+        let (program, duplicates) = built(CacheStrategy::Cached, CacheMask::Padded, 1);
 
         assert_eq!(program.len(), TWO_RANGE_PRE_CHANGE_NODES);
         assert_eq!(digest(&program), TWO_RANGE_PRE_CHANGE_DIGEST);
@@ -17577,9 +17579,9 @@ mod head_repeats {
 
     #[test]
     fn extra_repeats_append_duplicate_heads_after_the_unchanged_prefix() {
-        for strategy in [CacheStrategy::Cacheless, CacheStrategy::TwoRange] {
-            let (single, _) = built(strategy, 1);
-            let (triple, duplicates) = built(strategy, 3);
+        for (strategy, mask) in [(CacheStrategy::Cacheless, CacheMask::Padded), (CacheStrategy::Cached, CacheMask::Padded)] {
+            let (single, _) = built(strategy, mask, 1);
+            let (triple, duplicates) = built(strategy, mask, 3);
 
             assert_eq!(duplicates.len(), 2);
             assert_eq!(&triple[..single.len()], single.as_slice());
@@ -17590,9 +17592,9 @@ mod head_repeats {
 
     #[test]
     fn repeat_counts_outside_one_to_three_clamp() {
-        let (_, zero) = built(CacheStrategy::Cacheless, 0);
-        let (clamped, nine) = built(CacheStrategy::Cacheless, 9);
-        let (triple, three) = built(CacheStrategy::Cacheless, 3);
+        let (_, zero) = built(CacheStrategy::Cacheless, CacheMask::Padded, 0);
+        let (clamped, nine) = built(CacheStrategy::Cacheless, CacheMask::Padded, 9);
+        let (triple, three) = built(CacheStrategy::Cacheless, CacheMask::Padded, 3);
 
         assert!(zero.is_empty());
         assert_eq!(nine, three);
@@ -17713,8 +17715,8 @@ mod forward_scales {
 
     #[test]
     fn two_range_and_cacheless_refuse_a_logit_scale() {
-        for strategy in [CacheStrategy::TwoRange, CacheStrategy::Cacheless] {
-            let mut scaled = head_repeats::descriptor(strategy, 1);
+        for (strategy, mask) in [(CacheStrategy::Cached, CacheMask::Padded), (CacheStrategy::Cacheless, CacheMask::Padded)] {
+            let mut scaled = head_repeats::descriptor(strategy, mask, 1);
             scaled.logit_scale = Some(6.0);
 
             let outcome = build_forward(&scaled);
@@ -17752,8 +17754,8 @@ mod forward_scales {
 
     #[test]
     fn two_range_and_cacheless_refuse_a_residual_scale() {
-        for strategy in [CacheStrategy::TwoRange, CacheStrategy::Cacheless] {
-            let mut descriptor = head_repeats::descriptor(strategy, 1);
+        for (strategy, mask) in [(CacheStrategy::Cached, CacheMask::Padded), (CacheStrategy::Cacheless, CacheMask::Padded)] {
+            let mut descriptor = head_repeats::descriptor(strategy, mask, 1);
             descriptor.residual_scale = Some(0.22);
 
             let outcome = build_forward(&descriptor);
@@ -17922,8 +17924,8 @@ mod descriptor_config {
         mixture.residual_scale = Some(0.22);
         mixture.embedding_scale = Some(EmbeddingScale::Factor(12.0));
         vec![
-            ("cacheless", head_repeats::descriptor(CacheStrategy::Cacheless, 1)),
-            ("two_range", head_repeats::descriptor(CacheStrategy::TwoRange, 1)),
+            ("cacheless", head_repeats::descriptor(CacheStrategy::Cacheless, CacheMask::Padded, 1)),
+            ("two_range", head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1)),
             ("single_range_dense", forward_scales::descriptor(0, 0)),
             ("single_range_moe", mixture),
         ]
@@ -17946,7 +17948,7 @@ mod descriptor_config {
 
     #[test]
     fn rope_table_names_are_data_in_the_toml() {
-        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::TwoRange, 1))
+        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1))
             .expect("a descriptor serializes to toml");
 
         assert!(text.contains("cos_name = \"rope_cos\""), "got:\n{text}");
@@ -17973,7 +17975,7 @@ mod descriptor_config {
 
     #[test]
     fn an_unknown_field_is_an_error_not_a_silent_default() {
-        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::TwoRange, 1))
+        let text = toml::to_string(&head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1))
             .expect("a descriptor serializes to toml");
 
         let error = toml::from_str::<ModelDescriptor>(&format!("block_cuont = 2\n{text}"))
@@ -18000,6 +18002,7 @@ mod descriptor_config {
             .maybe_residual_scale(source.residual_scale)
             .layers(source.layers.clone())
             .cache_strategy(source.cache_strategy)
+            .cache_mask(source.cache_mask)
             .maybe_ple_dim(source.ple_dim)
             .sliding_kv_ring(source.sliding_kv_ring)
             .qk_norm(source.qk_norm)
@@ -18024,7 +18027,7 @@ mod descriptor_config {
 
     #[test]
     fn env_then_an_explicit_toml_layer_override_a_seeded_descriptor_in_that_order() {
-        let seeded = head_repeats::descriptor(CacheStrategy::TwoRange, 1);
+        let seeded = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
         let variant: toml::Table = toml::from_str("vocab = 17\nlast_row_only = true\ncache_strategy = \"Cacheless\"\n")
             .expect("the variant layer parses");
         let environment = [
@@ -18054,7 +18057,7 @@ mod descriptor_config {
 
     #[test]
     fn validation_names_the_field_whose_count_disagrees() {
-        let mut descriptor = head_repeats::descriptor(CacheStrategy::TwoRange, 1);
+        let mut descriptor = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
         descriptor.layers.pop();
         descriptor.expert_used_count = 3;
 
@@ -18356,17 +18359,17 @@ mod verify_descriptor {
     use super::head_repeats;
     use super::*;
 
-    fn armed(cache_strategy: CacheStrategy) -> ModelDescriptor {
+    fn armed(cache_strategy: CacheStrategy, cache_mask: CacheMask) -> ModelDescriptor {
         ModelDescriptor {
             speculative_verify: true,
             last_row_only: true,
-            ..head_repeats::descriptor(cache_strategy, 1)
+            ..head_repeats::descriptor(cache_strategy, cache_mask, 1)
         }
     }
 
     #[test]
     fn an_armed_attention_descriptor_lowers_a_verify_that_keeps_every_row() {
-        let decode = armed(CacheStrategy::SingleRange);
+        let decode = armed(CacheStrategy::Cached, CacheMask::Bounded);
 
         let verify = decode.verify().expect("an armed attention-only descriptor has a verify program");
 
@@ -18376,21 +18379,21 @@ mod verify_descriptor {
 
     #[test]
     fn a_descriptor_that_is_not_armed_has_no_verify_program() {
-        let decode = ModelDescriptor { speculative_verify: false, ..armed(CacheStrategy::SingleRange) };
+        let decode = ModelDescriptor { speculative_verify: false, ..armed(CacheStrategy::Cached, CacheMask::Bounded) };
 
         assert_eq!(decode.verify(), None);
     }
 
     #[test]
     fn a_pooled_embedding_descriptor_has_no_verify_program() {
-        let pooled = ModelDescriptor { last_row_only: false, ..armed(CacheStrategy::SingleRange) };
+        let pooled = ModelDescriptor { last_row_only: false, ..armed(CacheStrategy::Cached, CacheMask::Bounded) };
 
         assert_eq!(pooled.verify(), None);
     }
 
     #[test]
     fn a_descriptor_with_a_short_conv_layer_has_no_verify_program() {
-        let mut hybrid = armed(CacheStrategy::TwoRange);
+        let mut hybrid = armed(CacheStrategy::Cached, CacheMask::Padded);
         hybrid.layers[0].kind = LayerKind::ShortConv;
 
         assert_eq!(hybrid.verify(), None);
@@ -18401,12 +18404,55 @@ mod verify_descriptor {
     fn validation_refuses_to_arm_verify_over_a_layer_that_cannot_rewind() {
         use conflaguration::Validate;
 
-        let mut hybrid = armed(CacheStrategy::TwoRange);
+        let mut hybrid = armed(CacheStrategy::Cached, CacheMask::Padded);
         hybrid.layers[0].kind = LayerKind::ShortConv;
 
         let refusal = hybrid.validate().expect_err("a short-conv layer cannot be armed for verify");
 
         assert!(refusal.to_string().contains("speculative_verify"), "{refusal}");
-        assert!(armed(CacheStrategy::TwoRange).validate().is_ok());
+        assert!(armed(CacheStrategy::Cached, CacheMask::Padded).validate().is_ok());
+    }
+}
+
+mod cache_mask {
+    use super::head_repeats;
+    use super::*;
+
+    fn selects(cache_mask: CacheMask) -> usize {
+        let descriptor = head_repeats::descriptor(CacheStrategy::Cached, cache_mask, 1);
+        let (program, ..) = build_forward(&descriptor).expect("the two-layer attention descriptor lowers under either mask");
+        program
+            .iter()
+            .filter(|op| matches!(op, Op::Elementwise { body: ScalarOp::Select, .. }))
+            .count()
+    }
+
+    #[test]
+    fn the_padded_mask_adds_one_cached_block_select_per_layer_over_the_bounded_mask() {
+        let layers = 2;
+
+        assert_eq!(selects(CacheMask::Padded), selects(CacheMask::Bounded) + layers);
+    }
+
+    #[test]
+    fn a_config_without_a_cache_mask_lowers_the_bounded_mask() {
+        let descriptor = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1);
+        let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+        let without_mask: String = text.lines().filter(|line| !line.starts_with("cache_mask")).collect::<Vec<_>>().join("\n");
+
+        let loaded: ModelDescriptor = toml::from_str(&without_mask).expect("a config from before the field still loads");
+
+        assert_eq!(loaded.cache_mask, CacheMask::Bounded);
+        assert_eq!(loaded, descriptor);
+    }
+
+    #[test]
+    fn the_mask_survives_a_toml_round_trip() {
+        let descriptor = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+        let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+
+        let loaded: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+
+        assert_eq!(loaded.cache_mask, CacheMask::Padded);
     }
 }

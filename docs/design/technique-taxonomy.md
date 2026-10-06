@@ -54,7 +54,7 @@ Legend: **variant** = the future config enum variant · *paper* = source ·
 | variant | source | idea |
 |---|---|---|
 | `CacheStrategy::Cacheless` | — | recompute the whole sequence each step (state ≡ ∅). the gemma4 default that made it 0.24 tok/s |
-| `CacheStrategy::TwoRange` | proxima-internal (Flash-style combine) | local block = this step's own K/V, cache block = history via online-softmax. **the general form** — cacheless and single-range are its degenerate cases |
+| `CacheStrategy::Cached` (`CacheMask::Padded` or `CacheMask::Bounded`) | proxima-internal (Flash-style combine) | local block = this step's own K/V, cache block = history via online-softmax. **the general form** — cacheless and single-range are its degenerate cases |
 
 *(single-range is a redundant third shape; it should not survive the collapse.)*
 

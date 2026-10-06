@@ -694,7 +694,7 @@ fn bind_gemma4_with_last_row_only<'file>(
     let architecture = from_metadata(parsed)?;
     let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
 
-    // every gemma4 shape routes through `TwoRange` (all layers are `LayerKind::Attention`);
+    // every gemma4 shape routes through the padded-mask cached engine (all layers are `LayerKind::Attention`);
     // the two-range engine, not single-range, because the first step processes the whole
     // prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own module doc)
     let descriptor = ModelDescriptor {
@@ -711,7 +711,7 @@ fn bind_gemma4_with_last_row_only<'file>(
         let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
             build_forward(&descriptor)?;
         let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
-            CacheStrategy::TwoRange => {
+            CacheStrategy::Cached => {
                 // `cache_roots` holds one entry per REAL cache-owning layer,
                 // in layer order (`lfm2_two_range_cached_forward_program_with_experts`'s
                 // own `stored_kv`/`cache_roots.push` doc: a
@@ -726,7 +726,7 @@ fn bind_gemma4_with_last_row_only<'file>(
                     cache_roots,
                 )?
             }
-            CacheStrategy::Cacheless | CacheStrategy::SingleRange => Vec::new(),
+            CacheStrategy::Cacheless => Vec::new(),
         };
 
         let tied_embeddings = find_tensor(parsed, "output.weight").is_err();
