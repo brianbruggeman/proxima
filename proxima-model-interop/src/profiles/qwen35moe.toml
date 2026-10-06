@@ -1,6 +1,9 @@
 score_scale_inverse_sqrt_head_dim = true
 value_norm = false
 rope_layout = "split_half"
+schedule_source = "recurrent_routed_interval"
+kv_cache_shape = "monolithic"
+ffn_routing = "routed"
 
 [ffn]
 post_attention_norm = false

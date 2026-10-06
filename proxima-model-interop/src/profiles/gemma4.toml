@@ -3,6 +3,9 @@ score_scale_inverse_sqrt_head_dim = false
 value_norm = true
 rope_layout = "split_half"
 speculative_verify = true
+schedule_source = "sliding_pattern"
+kv_cache_shape = "custom"
+command_buffer_chunks = 8
 
 [ffn]
 post_attention_norm = true
