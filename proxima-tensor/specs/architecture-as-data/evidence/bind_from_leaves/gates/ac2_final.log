@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+────────────
+ Nextest run ID b772bd3d-6c17-4db9-897e-e55d0d31224a with nextest profile: default
+    Starting 5 tests across 35 binaries (821 tests skipped)
+        PASS [  13.268s] (1/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [  27.499s] (2/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  79.008s] (3/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  17.952s] (4/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  71.659s] (5/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+────────────
+     Summary [ 209.390s] 5 tests run: 5 passed (2 slow), 821 skipped

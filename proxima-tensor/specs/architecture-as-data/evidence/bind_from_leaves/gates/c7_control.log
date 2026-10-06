@@ -1,0 +1,28 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.89s
+────────────
+ Nextest run ID b59c7e92-bdeb-48e8-9fc1-4f9efb17ebc9 with nextest profile: default
+    Starting 1 test across 1 binary (53 tests skipped)
+        FAIL [   0.079s] (1/1) proxima-model-interop::arch_data_baseline a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds
+  stdout ───
+
+    running 1 test
+    test a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds ... FAILED
+
+    failures:
+
+    failures:
+        a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.06s
+
+  stderr ───
+
+    thread 'a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds' (61886000) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1320:9:
+    layer 0 fused gate/up operand is bound
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.080s] 1 test run: 0 passed, 1 failed, 53 skipped
+        FAIL [   0.079s] (1/1) proxima-model-interop::arch_data_baseline a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds
+error: test run failed

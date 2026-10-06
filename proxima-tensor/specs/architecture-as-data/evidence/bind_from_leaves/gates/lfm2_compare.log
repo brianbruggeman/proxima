@@ -1,0 +1,16 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.96s
+────────────
+ Nextest run ID 280608a6-f9a3-4aef-a5bb-148ba301f048 with nextest profile: default
+    Starting 1 test across 1 binary (674 tests skipped)
+       START [         ] (1/1) proxima-model-interop lfm2::zz_temp_compare::leaf_binder_equals_the_lfm2_table_binder_on_the_real_checkpoint
+
+running 1 test
+old 293 new 293 only_old [] only_new [] differing []
+test lfm2::zz_temp_compare::leaf_binder_equals_the_lfm2_table_binder_on_the_real_checkpoint ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 674 filtered out; finished in 9.87s
+
+        PASS [   9.953s] (1/1) proxima-model-interop lfm2::zz_temp_compare::leaf_binder_equals_the_lfm2_table_binder_on_the_real_checkpoint
+────────────
+     Summary [   9.959s] 1 test run: 1 passed, 674 skipped

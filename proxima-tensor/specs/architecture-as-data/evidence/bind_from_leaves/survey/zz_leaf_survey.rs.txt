@@ -1,0 +1,139 @@
+#![cfg(feature = "std")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::fs::File;
+
+use proxima_gguf::parse_complete;
+use proxima_model_interop::{ArchitectureRegistry, KvLayout};
+use proxima_tensor::op::Op;
+
+fn survey(name: &str, path: &str) {
+    let file = File::open(path).unwrap();
+    let mapping = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+    let bytes: &[u8] = &mapping;
+    let parsed = parse_complete(bytes).unwrap();
+    let registry = ArchitectureRegistry::with_builtin();
+    let route = registry.resolve(&parsed).unwrap();
+    let bound = route
+        .bind_with_kv_layout(&parsed, bytes, KvLayout::SlidingRing)
+        .unwrap();
+    let mut consumers: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    for op in &bound.program {
+        for dependency in op.dependencies() {
+            let label = match op {
+                Op::Elementwise { body, operands, .. } => {
+                    let map = operands
+                        .iter()
+                        .find(|(node, _)| *node == dependency)
+                        .map(|(_, index_map)| format!("{index_map:?}"))
+                        .unwrap_or_default();
+                    let map: String = map.chars().take(70).collect();
+                    format!("ew:{body:?}:{map}")
+                }
+                Op::Reduce(reduce) => format!(
+                    "reduce:{:?}:in={}",
+                    reduce.body,
+                    format!("{:?}", reduce.in_map).chars().take(70).collect::<String>()
+                ),
+                _ => "other".to_string(),
+            };
+            consumers.entry(dependency.0).or_default().push(label);
+        }
+    }
+    let mut kinds: BTreeMap<String, &str> = BTreeMap::new();
+    for (tensor, _) in bound.weights.owned() {
+        kinds.insert(tensor.clone(), "owned");
+    }
+    for (tensor, _) in bound.weights.packed() {
+        kinds.insert(tensor.clone(), "packed");
+    }
+    for (tensor, _, _) in bound.weights.packed_owned() {
+        kinds.insert(tensor.clone(), "packed_owned");
+    }
+    let mut out = String::new();
+    let mut leaf_names = BTreeSet::new();
+    for (index, op) in bound.program.iter().enumerate() {
+        if let Op::Input { dtype, shape, name: leaf } = op {
+            let leaf = leaf.clone().unwrap_or_default();
+            leaf_names.insert(leaf.clone());
+            let tensor = parsed.tensors.iter().find(|candidate| candidate.name == leaf);
+            let consumer_text = consumers
+                .get(&(index as u32))
+                .map(|labels| {
+                    let mut labels = labels.clone();
+                    labels.sort();
+                    labels.dedup();
+                    labels.join(" | ")
+                })
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "LEAF\t{leaf}\t{dtype:?}\t{shape:?}\tgguf={}\tbound={}\t{consumer_text}",
+                tensor
+                    .map(|found| format!("{:?}/{:?}", found.dims.as_slice(), found.ggml_type))
+                    .unwrap_or_else(|| "-".into()),
+                kinds.get(&leaf).copied().unwrap_or("-")
+            )
+            .unwrap();
+        }
+    }
+    for (tensor, kind) in &kinds {
+        if !leaf_names.contains(tensor) {
+            writeln!(out, "BOUND_NOT_LEAF\t{tensor}\t{kind}").unwrap();
+        }
+    }
+    for tensor in &parsed.tensors {
+        if !kinds.contains_key(&tensor.name) {
+            writeln!(
+                out,
+                "GGUF_UNBOUND\t{}\t{:?}\t{:?}",
+                tensor.name,
+                tensor.dims.as_slice(),
+                tensor.ggml_type
+            )
+            .unwrap();
+        }
+    }
+    std::fs::write(
+        format!(
+            "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/slice_8/survey_{name}.tsv"
+        ),
+        out,
+    )
+    .unwrap();
+}
+
+#[test]
+fn survey_granite() {
+    survey("granite_moe", "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80");
+}
+#[test]
+fn survey_e2b() {
+    survey("gemma4_e2b", "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd");
+}
+#[test]
+fn survey_qwen2() {
+    survey("qwen2", "/Users/brianbruggeman/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515");
+}
+#[test]
+fn survey_qwen3() {
+    survey("qwen3", "/Users/brianbruggeman/.ollama/models/blobs/sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f");
+}
+#[test]
+fn survey_qwen35() {
+    survey("qwen35", "/Users/brianbruggeman/.ollama/models/blobs/sha256-afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5");
+}
+#[test]
+fn survey_openchat() {
+    survey("openchat", "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf");
+}
+#[test]
+fn survey_gemma4_26b() {
+    survey("gemma4_26b", "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129");
+}
+#[test]
+fn survey_qwen35moe() {
+    survey("qwen35moe", "/Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d");
+}
