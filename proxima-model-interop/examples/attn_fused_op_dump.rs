@@ -13,7 +13,7 @@ use std::fs;
 use memmap2::Mmap;
 use omega::PackedOperands;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{Architecture, GEMMA4, bind_symbols};
+use proxima_model_interop::{bind_checkpoint, bind_symbols};
 use proxima_tensor::bind::BoundOpKind;
 use proxima_tensor::{NumericPolicy, bind_with_fusion, infer, prune_dead};
 
@@ -41,8 +41,7 @@ fn main() {
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
 
-    let bound_program = GEMMA4
-        .bind(&parsed, bytes)
+    let bound_program = bind_checkpoint(&parsed, bytes)
         .expect("bind the real gemma4-E2B checkpoint's production decode program");
 
     let outputs = alloc_outputs(&bound_program);

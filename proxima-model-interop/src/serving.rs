@@ -1057,8 +1057,8 @@ pub struct ServingConfig<'model> {
     /// `PROXIMA_COMMAND_BUFFER_CHUNKS=K` still overrides this per-process
     /// when set -- the same A/B escape hatch this field now supplies a
     /// config-sourced default for, not a replacement for it. A checkpoint
-    /// whose loaded `architecture::Architecture` declares its own
-    /// non-default split count (`Architecture::command_buffer_chunks`'s own
+    /// whose family profile declares its own
+    /// non-default split count (`FamilyProfile::command_buffer_chunks`'s own
     /// doc -- gemma4's is `8`, the Intervention 6 measured decode
     /// configuration) uses that value instead of this field's own default,
     /// but never overrides a caller who set this field explicitly.

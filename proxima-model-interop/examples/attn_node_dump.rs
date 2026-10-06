@@ -24,7 +24,7 @@ use omega::PackedOperands;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::parse_complete;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_model_interop::{Architecture, GEMMA4, bind_symbols};
+use proxima_model_interop::{bind_checkpoint, bind_symbols};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::bind::BoundOp;
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -148,8 +148,7 @@ fn main() {
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
 
-    let bound_program = GEMMA4
-        .bind(&parsed, bytes)
+    let bound_program = bind_checkpoint(&parsed, bytes)
         .expect("bind the real gemma4-E2B checkpoint's production decode program");
 
     println!(

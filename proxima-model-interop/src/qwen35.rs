@@ -14,6 +14,7 @@
 
 use alloc::collections::BTreeSet;
 use alloc::format;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
@@ -25,11 +26,12 @@ use proxima_tensor::spec::{
 };
 
 use crate::bind::{
-    metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
+    ModelArchitecture, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
     vocab_from_token_embedding,
 };
 use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
+use crate::lowering::StepState;
 use crate::profiles::{binding_profile, family_profile};
 
 /// One layer's real tensor shape, derived from
@@ -319,8 +321,7 @@ pub fn qwen35_ssm_shape(architecture: &Qwen35Architecture) -> Qwen35SsmShape {
 /// for every non-qwen35 checkpoint, which never builds a [`Qwen35SsmShape`]
 /// at all. Plain arithmetic, no platform dependency -- unlike the field it
 /// used to feed directly, this function itself is not `metal`-gated, so
-/// [`crate::architecture::Architecture::step_state`] can call it on every
-/// build.
+/// [`crate::lowering::step_state`] can call it on every build.
 #[must_use]
 pub fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
     let per_layer_elements = (shape.conv_rows * shape.qkv_dim + shape.state_len) as u64;
@@ -427,120 +428,56 @@ pub fn qwen35_forward_program(
     Ok((program, logits, layer_roots))
 }
 
-/// The binding profile key and the registry name: the architecture that lowers this program
-/// is what names its leaves, so a delegating foreign architecture binds the same way.
+/// The family profile and binding profile this reader's descriptor and weights
+/// resolve through.
 const FAMILY: &str = "qwen35";
 
-/// The [`crate::architecture::Architecture`] registered under the name
-/// `"qwen35"` -- [`crate::architecture::ArchitectureRegistry::with_builtin`]'s
-/// hybrid-checkpoint arm, and the worked example that trait's own doc
-/// points a foreign architecture at. Named distinctly from
-/// [`Qwen35Architecture`] (the per-checkpoint metadata this arm derives
-/// inside [`crate::architecture::Architecture::bind`]) because the two are different kinds of
-/// value: `Qwen35Arch` is a stateless, `'static` marker one `bind` call
-/// derives fresh metadata against every load; `Qwen35Architecture` is that
-/// derived, per-checkpoint data.
-pub struct Qwen35Arch;
+/// The `recurrent_interval` header reader
+/// ([`proxima_tensor::spec::ScheduleSource::RecurrentInterval`]): this header's
+/// descriptor and hyperparameters, the two values [`crate::lowering`] lowers
+/// and binds from.
+///
+/// # Errors
+///
+/// Whatever [`qwen35_architecture_from_metadata`] and
+/// [`descriptor_from_architecture`] can fail with.
+pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelArchitecture), InteropError> {
+    let hparams = qwen35_architecture_from_metadata(parsed)?;
+    let descriptor = descriptor_from_architecture(&hparams)?;
+    let architecture = ModelArchitecture {
+        vocab: hparams.vocab,
+        embedding: hparams.embedding,
+        feed_forward: hparams.feed_forward,
+        query_heads: hparams.query_heads,
+        kv_heads: hparams.kv_heads,
+        kv_heads_by_layer: vec![hparams.kv_heads; hparams.block_count as usize],
+        head_dim: hparams.head_dim,
+        block_count: hparams.block_count,
+        expert_count: 0,
+        expert_used_count: 0,
+        rope_freq_base: hparams.rope_freq_base,
+        rms_epsilon: hparams.rms_epsilon,
+        tied_embeddings: false,
+        family: metadata_str(parsed, "general.architecture")?.into(),
+        sliding_rope: None,
+    };
+    Ok((descriptor, architecture))
+}
 
-/// The one registered [`Qwen35Arch`] value -- see
-/// [`crate::architecture::ArchitectureRegistry::with_builtin`]'s own doc
-/// for why a `'static` marker, not an owned value, is what a registry
-/// entry is.
-pub static QWEN35: Qwen35Arch = Qwen35Arch;
-
-impl crate::architecture::Architecture for Qwen35Arch {
-    fn name(&self) -> &'static str {
-        FAMILY
-    }
-
-    fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
-        crate::architecture::KvCacheShape::Custom
-    }
-
-    fn diagnostic_reduce_flags_apply(&self) -> bool {
-        false
-    }
-
-    fn bind<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-    ) -> Result<crate::architecture::BoundProgram<'file>, InteropError> {
-        let qwen_architecture = qwen35_architecture_from_metadata(parsed)?;
-        let (program, logits_root, layer_roots) = qwen35_forward_program(&qwen_architecture)?;
-        let weights = bind_program_leaves(
-            parsed,
-            file_bytes,
-            &program,
-            &binding_profile(FAMILY)?,
-            &[],
-        )?;
-        let architecture = crate::bind::ModelArchitecture {
-            vocab: qwen_architecture.vocab,
-            embedding: qwen_architecture.embedding,
-            feed_forward: qwen_architecture.feed_forward,
-            query_heads: qwen_architecture.query_heads,
-            kv_heads: qwen_architecture.kv_heads,
-            kv_heads_by_layer: vec![
-                qwen_architecture.kv_heads;
-                qwen_architecture.block_count as usize
-            ],
-            head_dim: qwen_architecture.head_dim,
-            block_count: qwen_architecture.block_count,
-            // Qwen3.5 never routes FFN through experts
-            // (`qwen35_forward_program`'s own doc, `qwen35.cpp:471`), so
-            // this checkpoint reads the same `expert_count == 0` dense-FFN
-            // branch every other checkpoint without a
-            // `{architecture}.expert_count` key does.
-            expert_count: 0,
-            expert_used_count: 0,
-            rope_freq_base: qwen_architecture.rope_freq_base,
-            rms_epsilon: qwen_architecture.rms_epsilon,
-            tied_embeddings: false,
-            family: metadata_str(parsed, "general.architecture")?.into(),
-            sliding_rope: None,
-        };
-        Ok(crate::architecture::BoundProgram {
-            weights,
-            architecture,
-            program,
-            logits_root,
-            hidden_root: None,
-            residual_roots: Vec::new(),
-            layer_roots,
-            qwen35moe_layer_diagnostics: Vec::new(),
-            router_roots: Vec::new(),
-            moe_sites: proxima_tensor::spec::MoeSites::default(),
-            duplicate_head_roots: Vec::new(),
-            // gated-DeltaNet's `s`-axis reduce sums positions instead of
-            // stepping through them (`BoundProgram::single_position_step`'s
-            // own doc). ROW 427: `run_decode_loop_observed_seeded` now
-            // splits its prefill into one `new_count == 1` evaluation per
-            // prompt position when this is set, through the same per-step
-            // evaluate + cache-append path a decode step already uses (see
-            // that method's own `step_batches` doc), so setting `true` here
-            // no longer turns a multi-token qwen35 prompt into a hard
-            // `bind_symbols` error -- it is the reason that split exists.
-            single_position_step: true,
-        })
-    }
-
-    fn step_state(
-        &self,
-        parsed: &ParsedGguf,
-    ) -> Result<Option<crate::architecture::StepState>, InteropError> {
-        // Re-derives `Qwen35Architecture` from `parsed`'s own metadata --
-        // the same pure, file-free read `Architecture::bind` just did --
-        // rather than threading it through `BoundProgram` for this one
-        // hook's sake (see the trait method's own doc).
-        let qwen_architecture = qwen35_architecture_from_metadata(parsed)?;
-        let shape = qwen35_ssm_shape(&qwen_architecture);
-        Ok(Some(crate::architecture::StepState {
-            ssm_shape: shape,
-            attn_head_dim: qwen_architecture.attn_head_dim,
-            ssm_state_bytes: qwen35_ssm_state_bytes(shape, qwen_architecture.block_count),
-        }))
-    }
+/// The per-decode-step recurrent scratch sizing, re-derived straight off the
+/// header: [`qwen35_ssm_shape`] and the resident bytes across every layer.
+///
+/// # Errors
+///
+/// Whatever [`qwen35_architecture_from_metadata`] can fail with.
+pub(crate) fn step_state(parsed: &ParsedGguf) -> Result<StepState, InteropError> {
+    let hparams = qwen35_architecture_from_metadata(parsed)?;
+    let shape = qwen35_ssm_shape(&hparams);
+    Ok(StepState {
+        ssm_shape: shape,
+        attn_head_dim: hparams.attn_head_dim,
+        ssm_state_bytes: qwen35_ssm_state_bytes(shape, hparams.block_count),
+    })
 }
 
 #[cfg(test)]

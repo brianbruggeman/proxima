@@ -1,17 +1,15 @@
-//! `#[ignore]`d, real-blob probe: does the BUILTIN registry
-//! (`ArchitectureRegistry::with_builtin`) know what to do with a real
-//! `qwen3.6:35b-a3b` (`general.architecture = qwen35moe`) checkpoint reaches
-//! its dedicated registry entry and preserves the header's per-layer KV-head
-//! configuration. This is intentionally header-only: parse_complete reads the
-//! directory while the mapping remains demand-paged, and resolve never asks
-//! the 22 GiB expert payload to become resident.
+//! `#[ignore]`d, real-blob probe: does a real `qwen3.6:35b-a3b`
+//! (`general.architecture = qwen35moe`) checkpoint key the recurrent routed
+//! family profile and preserve the header's per-layer KV-head configuration.
+//! This is intentionally header-only: parse_complete reads the directory while
+//! the mapping remains demand-paged, and the profile lookup never asks the
+//! 22 GiB expert payload to become resident.
 //!
 //! Gated on `PROXIMA_QWEN35MOE_GGUF` (absolute path to the real blob);
 //! skips with a clear message when unset, never a false pass. Mmaps the
-//! real file read-only -- resolve + bind only touch the metadata header and
-//! the (small, non-expert) tensors `DenseArch::bind` reads before its own
-//! typed rejection fires, so this never faults in the multi-GB expert
-//! tensor pages.
+//! real file read-only -- the profile lookup and the hparams read only touch
+//! the metadata header, so this never faults in the multi-GB expert tensor
+//! pages.
 
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -19,11 +17,13 @@
 use std::fs::File;
 
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{ArchitectureRegistry, LoadedModel, architecture_from_metadata};
+use proxima_model_interop::profiles::family_profile;
+use proxima_model_interop::{LoadedModel, architecture_from_metadata, bind_checkpoint, metadata_str};
+use proxima_tensor::spec::{FfnRouting, ScheduleSource};
 
 #[proxima::test]
 #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
-async fn builtin_registry_routes_real_qwen35moe_header_with_per_layer_kv_configuration() {
+async fn family_profile_routes_real_qwen35moe_header_with_per_layer_kv_configuration() {
     let Ok(path) = std::env::var("PROXIMA_QWEN35MOE_GGUF") else {
         eprintln!("skipping: PROXIMA_QWEN35MOE_GGUF not set");
         return;
@@ -44,11 +44,10 @@ async fn builtin_registry_routes_real_qwen35moe_header_with_per_layer_kv_configu
         }
     }
 
-    let registry = ArchitectureRegistry::with_builtin();
-    let route = registry
-        .resolve(&parsed)
-        .expect("builtin registry resolves the real header");
-    assert_eq!(route.name(), "qwen35moe");
+    let family = metadata_str(&parsed, "general.architecture").expect("the real header names its family");
+    let profile = family_profile(family).expect("the qwen35moe profile is embedded");
+    assert_eq!(profile.schedule_source, ScheduleSource::RecurrentRoutedInterval);
+    assert_eq!(profile.ffn_routing, FfnRouting::Routed);
 
     let architecture = architecture_from_metadata(&parsed)
         .expect("the real header's per-layer KV-head array is configuration, not a parse error");
@@ -70,8 +69,7 @@ async fn builtin_registry_routes_real_qwen35moe_header_with_per_layer_kv_configu
     assert_eq!(moe_architecture.layer_kinds.len(), 40);
     assert_eq!(moe_architecture.expert_count, 256);
 
-    let bound = route
-        .bind(&parsed, file_bytes)
+    let bound = bind_checkpoint(&parsed, file_bytes)
         .unwrap_or_else(|error| panic!("real qwen35moe bind failed: {error}"));
     assert_eq!(
         bound.router_roots.len(),
@@ -93,8 +91,8 @@ async fn builtin_registry_routes_real_qwen35moe_header_with_per_layer_kv_configu
     );
     drop(bound);
 
-    let loaded = LoadedModel::load_with_registry(&parsed, file_bytes, &registry)
-        .expect("the real qwen35moe checkpoint loads through the builtin registry");
+    let loaded = LoadedModel::load(&parsed, file_bytes)
+        .expect("the real qwen35moe checkpoint loads through its family profile");
     assert_eq!(
         loaded.qwen35moe_layer_diagnostics().len(),
         40,

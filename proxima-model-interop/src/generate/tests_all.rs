@@ -2525,6 +2525,9 @@ pub(super) mod memory_fit_gate_tests {
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use omega::allocate_placed_buffer;
 
+    use crate::lowering::FfnRouting;
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    use crate::lowering::KvCacheShape;
     use super::LoadedModel;
 
     const TRAINED_CONTEXT_LENGTH: u32 = 131_072;
@@ -2592,7 +2595,10 @@ pub(super) mod memory_fit_gate_tests {
                 precision: &[],
             },
             architecture: tiny_architecture(),
-            architecture_impl: None,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_cache_shape: KvCacheShape::Uniform,
+            ffn_routing: FfnRouting::Dense,
+            command_buffer_chunks: 1,
             trained_context_length: Some(TRAINED_CONTEXT_LENGTH),
             rope_scaling: RopeScaling::None,
             kv_layers: vec![(2, 64, None); 2],
@@ -3679,7 +3685,7 @@ pub(super) mod memory_fit_gate_tests {
             let hparams = model
                 .qwen35moe_hparams
                 .as_ref()
-                .expect("this checkpoint routes through the qwen35moe registry entry");
+                .expect("this checkpoint routes through the qwen35moe family profile");
             let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
                 prompt,
                 &model.vocab,
@@ -3823,7 +3829,7 @@ pub(super) mod memory_fit_gate_tests {
             let hparams = model
                 .qwen35moe_hparams
                 .as_ref()
-                .expect("this checkpoint routes through the qwen35moe registry entry");
+                .expect("this checkpoint routes through the qwen35moe family profile");
             let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
                 prompt,
                 &model.vocab,
@@ -3979,7 +3985,7 @@ pub(super) mod memory_fit_gate_tests {
             let hparams = model
                 .qwen35moe_hparams
                 .as_ref()
-                .expect("this checkpoint routes through the qwen35moe registry entry");
+                .expect("this checkpoint routes through the qwen35moe family profile");
             let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
                 prompt,
                 &model.vocab,
@@ -4198,7 +4204,7 @@ pub(super) mod memory_fit_gate_tests {
             let hparams = model
                 .qwen35moe_hparams
                 .as_ref()
-                .expect("this checkpoint routes through the qwen35moe registry entry");
+                .expect("this checkpoint routes through the qwen35moe family profile");
 
             let (program, roots, layer_roots, _moe_sites, _diagnostics) =
                 crate::qwen35moe::qwen35moe_forward_program_at_width(hparams, Some(13))
@@ -4529,7 +4535,7 @@ pub(super) mod memory_fit_gate_tests {
         use proxima_tensor::{NumericPolicy, bind_with_fusion, infer};
 
         use super::super::LoadedModel;
-        use crate::architecture::symbols;
+        use crate::lowering::symbols;
 
         const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 

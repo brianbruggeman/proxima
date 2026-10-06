@@ -15,7 +15,7 @@
 //! scorer counts the numbers found. `--control` inserts no needles.
 //!
 //! `kv_bytes` prices the checkpoint's own per-layer KV layout
-//! (`Architecture::kv_layers`, window included) at the arm's element size.
+//! (`kv_layers`, window included) at the arm's element size.
 //! `peak_metal_bytes` is the largest `MTLDevice.currentAllocatedSize` sampled
 //! after load, at the prefill boundary and at every generated token event.
 //! Speculation runs at the production default: a verify evaluation delivers
@@ -39,8 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use memmap2::Mmap;
 use proxima_gguf::{GgmlType, parse_complete};
 use proxima_model_interop::{
-    ArchitectureRegistry, ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel,
-    PromptCacheConfig, RopeScaling, ServingConfig,
+    ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, RopeScaling, ServingConfig, kv_layers,
 };
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, encode_with_bos_eos};
@@ -413,9 +412,7 @@ fn run() -> Result<usize, NiahError> {
         &mut count,
     )?;
     print_case(&options, seed, &case);
-    let layers = ArchitectureRegistry::with_builtin()
-        .resolve(&parsed)?
-        .kv_layers(&parsed)?;
+    let layers = kv_layers(&parsed)?;
     let model = LoadedModel::load(&parsed, &mapping)?;
     let mut failures = run_arms(&options, &model, &case, &layers);
     if let Err(error) = run_ollama_arm(&options, &case) {

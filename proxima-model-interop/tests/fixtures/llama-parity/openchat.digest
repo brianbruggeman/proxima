@@ -1,6 +1,5 @@
 checkpoint=openchat
 architecture=llama
-registry_entry=dense
 kv_layout=SlidingRing
 bind.ops=3069
 bind.ops_sha256=2e94740529857b332348b7ac989d6af15678b9f43de2ad9ec785c3bb2e5da1e7

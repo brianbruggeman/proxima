@@ -12,9 +12,8 @@ use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::spec::Qwen35LayerRoots;
 use proxima_tensor::{NodeId, NumericPolicy, Op, bind_with_fusion, infer};
 
-use crate::architecture::Architecture;
 use crate::bind::BoundWeights;
-use crate::GEMMA4;
+use crate::bind_checkpoint;
 
 /// One dispatch count per `(new rows, cached rows)` shape: how many of the
 /// real program's dispatches launch past a 32-bit thread index, and of those
@@ -130,7 +129,7 @@ fn every_dispatch_of_the_real_gemma4_e2b_prefill_fits_32_bits_or_takes_a_2d_form
     let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B header");
-    let bound = GEMMA4.bind(&parsed, bytes).expect("bind the real gemma4-E2B program");
+    let bound = bind_checkpoint(&parsed, bytes).expect("bind the real gemma4-E2B program");
     let codecs = packed_codecs(&bound.program, &bound.weights);
     assert!(!codecs.is_empty(), "no packed weight was attributed a codec: the census would emit dense kernels");
     let kv_inputs = bound.program.iter().filter(|op| op.name().is_some_and(|name| name.starts_with("kv_cache"))).count();

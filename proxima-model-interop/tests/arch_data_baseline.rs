@@ -1,7 +1,7 @@
 //! Consistency baseline for architecture-as-data (proxima-tensor/specs/architecture-as-data,
 //! slice 0): for each real checkpoint, the lowered op graph and the bound weight set the
 //! incumbent produces through the production path
-//! (`ArchitectureRegistry::with_builtin().resolve(..)` then `bind_with_kv_layout(SlidingRing)`
+//! (`bind_checkpoint_with_kv_layout(SlidingRing)`
 //! and the verify program where one exists). Expected values live in
 //! `tests/fixtures/llama-parity/<name>.digest` and `<name>.bound`; a refactor slice that changes
 //! the program or the bound bytes fails here. This is a CONSISTENCY check against the incumbent,
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
-    Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
+    BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel, bind_checkpoint_with_kv_layout, bind_speculative_verify,
     PromptCacheConfig, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
     metadata_f32_optional,
     metadata_str, metadata_u32, profiles::family_profile, qwen35_architecture_from_metadata,
@@ -210,16 +210,6 @@ fn describe_program(label: &str, bound: &BoundProgram<'_>) -> String {
     text
 }
 
-fn resolve(
-    checkpoint: &Checkpoint,
-    parsed: &proxima_gguf::pipe::ParsedGguf,
-) -> &'static dyn Architecture {
-    let registry = ArchitectureRegistry::with_builtin();
-    registry
-        .resolve(parsed)
-        .unwrap_or_else(|error| panic!("{}: registry resolve failed: {error:?}", checkpoint.name))
-}
-
 fn assert_architecture_key(checkpoint: &Checkpoint, parsed: &proxima_gguf::pipe::ParsedGguf) {
     let declared = proxima_model_interop::metadata_str(parsed, "general.architecture")
         .expect("checkpoint declares general.architecture");
@@ -235,21 +225,16 @@ fn digest_record(checkpoint: &Checkpoint) -> String {
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     assert_architecture_key(checkpoint, &parsed);
-    let route = resolve(checkpoint, &parsed);
-
-    let bound = route
-        .bind_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+    let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .unwrap_or_else(|error| {
-            panic!("{}: bind_with_kv_layout failed: {error:?}", checkpoint.name)
+            panic!("{}: bind_checkpoint_with_kv_layout failed: {error:?}", checkpoint.name)
         });
-    let verify = route
-        .speculative_verify_program_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+    let verify = bind_speculative_verify(&parsed, file_bytes, KvLayout::SlidingRing, None)
         .unwrap_or_else(|error| panic!("{}: verify bind failed: {error:?}", checkpoint.name));
 
     let mut record = String::new();
     writeln!(record, "checkpoint={}", checkpoint.name).unwrap();
     writeln!(record, "architecture={}", checkpoint.architecture).unwrap();
-    writeln!(record, "registry_entry={}", route.name()).unwrap();
     writeln!(record, "kv_layout=SlidingRing").unwrap();
     record.push_str(&describe_program("bind", &bound));
     match verify {
@@ -348,11 +333,9 @@ fn bound_record(checkpoint: &Checkpoint) -> String {
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     assert_architecture_key(checkpoint, &parsed);
-    let route = resolve(checkpoint, &parsed);
-    let bound = route
-        .bind_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+    let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .unwrap_or_else(|error| {
-            panic!("{}: bind_with_kv_layout failed: {error:?}", checkpoint.name)
+            panic!("{}: bind_checkpoint_with_kv_layout failed: {error:?}", checkpoint.name)
         });
 
     let lines = bound_lines(&bound.weights);
@@ -482,7 +465,6 @@ fn arch_data_digest_qwen35moe() {
 fn arch_data_digest_granite_moe() {
     let record = digest_record(&GRANITE_MOE);
     for expected in [
-        "\nregistry_entry=dense\n",
         "\nbind.residual_roots=24 sha256=",
         "\nbind.layer_roots=24 sha256=",
         "\nbind.router_roots=0 sha256=",
@@ -951,9 +933,7 @@ fn granite_moe_program_carries_the_header_scales() {
     let mapping = GRANITE_MOE.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("the real granite moe header parses");
-    let route = resolve(&GRANITE_MOE, &parsed);
-    let bound = route
-        .bind_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+    let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .expect("granite moe binds under the sliding ring layout");
 
     assert_eq!(constants_equal(&bound.program, 12.0), 1, "embedding scale");
@@ -1571,8 +1551,7 @@ fn a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds() {
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     let architecture = architecture_from_metadata(&parsed).expect("hparams parse from the header");
-    let bound = resolve(&OPENCHAT, &parsed)
-        .bind_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+    let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .expect("binds from the header descriptor");
     let fused_leaf = |layer: u32| format!("blk.{layer}.ffn_gate_up.weight");
     let holds = |weights: &BoundWeights<'_>, name: &str| {

@@ -172,7 +172,7 @@ pub(crate) fn gemma4_e2b_header() -> ParsedGguf {
 
 /// A header-only GGUF (no tensors) whose metadata is exactly `metadata`,
 /// written by the real encoder and parsed back by the real decoder -- the
-/// bytes a checkpoint's own header would hand `Architecture::kv_layers` and
+/// bytes a checkpoint's own header would hand `crate::lowering::kv_layers` and
 /// friends. The buffer is leaked because the parsed view borrows it; a test
 /// fixture, not a hot path.
 pub(crate) fn parsed_header(metadata: Vec<(&str, MetadataValue)>) -> ParsedGguf {

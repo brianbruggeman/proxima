@@ -22,7 +22,7 @@ use std::fs::File;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{Architecture, GEMMA4, KvLayout, bind_symbols, symbols};
+use proxima_model_interop::{KvLayout, bind_checkpoint_with_kv_layout, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOp, BoundOpKind};
 use proxima_tensor::spec::Qwen35LayerRoots;
 use proxima_tensor::{
@@ -74,8 +74,7 @@ async fn gemma4_bucket_crossing_is_local_to_cached_attention_and_refits_exactly(
     // SAFETY: the checkpoint is a read-only mapping no other process writes.
     let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
     let parsed = parse_complete(&mapping).expect("parse the real gemma4-E2B checkpoint header");
-    let bound_program = GEMMA4
-        .bind_with_kv_layout(&parsed, &mapping, KvLayout::SlidingRing)
+    let bound_program = bind_checkpoint_with_kv_layout(&parsed, &mapping, KvLayout::SlidingRing)
         .expect("bind the real gemma4-E2B decode program");
     let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
     let program = &bound_program.program;

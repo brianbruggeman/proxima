@@ -1,6 +1,5 @@
 checkpoint=qwen2
 architecture=qwen2
-registry_entry=dense
 kv_layout=SlidingRing
 bind.ops=2453
 bind.ops_sha256=a1ff813f115c1db000a1934542aaff11d3a101384b7e5446fe03d1ac291157bf

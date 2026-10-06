@@ -25,7 +25,7 @@
 extern crate alloc;
 
 #[cfg(feature = "std")]
-mod architecture;
+mod lowering;
 mod bind;
 #[cfg(feature = "std")]
 mod bind_leaves;
@@ -87,9 +87,10 @@ mod test_support;
 mod transform;
 
 #[cfg(feature = "std")]
-pub use architecture::{
-    Architecture, ArchitectureRegistry, BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput,
-    StepInputContext, StepState, bind_symbols, symbols,
+pub use lowering::{
+    BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
+    bind_checkpoint_with_kv_layout, bind_speculative_verify, bind_symbols, header_descriptor, kv_layers,
+    rope_freq_factors, sliding_rope_inputs, step_state, symbols, trained_context_length,
 };
 #[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;
@@ -104,7 +105,7 @@ pub use bind::{
 };
 pub use bind::{ModelArchitecture, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
-pub use dense::{DenseArch, descriptor_from_gguf as dense_descriptor_from_gguf};
+pub use dense::descriptor_from_gguf as dense_descriptor_from_gguf;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
@@ -116,8 +117,6 @@ pub use expert_sidecar::{
 pub use expert_slab::{
     ExpertSlab, ExpertSlabMemory, StepGuard, encode_expert_copy, recode_expert_into,
 };
-#[cfg(feature = "std")]
-pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
 pub use generate::{
     CachePath, CacheReport, ColdTier, DecodeMetrics, EvictionRule, LoadedModel, MissReason, Phase,
@@ -140,11 +139,9 @@ pub use quality::print_quality_report;
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
 #[cfg(feature = "std")]
 pub use qwen35::{
-    Qwen35Arch, Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
+    Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
     descriptor_from_architecture as qwen35_descriptor_from_architecture, qwen35_architecture_from_metadata,
 };
-#[cfg(feature = "std")]
-pub use qwen35moe::{QWEN35MOE, Qwen35MoeArch};
 #[cfg(feature = "std")]
 pub use residency::{
     ExpertAddress, ExpertPage, ExpertResidency, PrefetchCandidate, PrefetchCandidates,

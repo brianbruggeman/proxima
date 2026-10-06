@@ -4,7 +4,7 @@
 //! alternating sliding-window/full-attention schedule instead of Qwen 3.6's
 //! GDN/attention schedule. Layer kind (sliding vs full) lives entirely in
 //! `sliding_window_pattern` -- there is no bespoke `LayerKind` here, since
-//! [`crate::Architecture::bind`] reads that array directly to
+//! [`crate::lowering::bind_checkpoint`] reads that array directly to
 //! build [`proxima_tensor::spec::LayerAttentionConfig`] per layer for the
 //! generic [`proxima_tensor::spec::lfm2_forward_program_with_experts`]
 //! engine, and every gemma4 layer is
@@ -202,8 +202,6 @@ pub fn kv_layers_from_metadata(
 mod tests {
     use alloc::vec;
 
-    use crate::architecture::Architecture as _;
-    use crate::gemma4::GEMMA4;
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
     use crate::test_support::gemma4_e2b_header as e2b_header;
 
@@ -215,8 +213,7 @@ mod tests {
     #[test]
     fn memory_budget_gemma4_own_layers() {
         let parsed = e2b_header();
-        let layers = GEMMA4
-            .kv_layers(&parsed)
+        let layers = crate::lowering::kv_layers(&parsed)
             .expect("the e2b header carries every key kv_layers reads");
         let uncapped: alloc::vec::Vec<_> = layers
             .iter()
@@ -238,8 +235,7 @@ mod tests {
     #[test]
     fn memory_budget_gemma4_window_cap() {
         let parsed = e2b_header();
-        let layers = GEMMA4
-            .kv_layers(&parsed)
+        let layers = crate::lowering::kv_layers(&parsed)
             .expect("the e2b header carries every key kv_layers reads");
 
         let capped = MemoryBudget::derive(WeightClassBytes::default(), &layers, CONTEXT, 0, 0);

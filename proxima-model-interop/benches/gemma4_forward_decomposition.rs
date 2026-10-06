@@ -46,7 +46,7 @@
 //!    NOTE on this pairing below) — real isolation: `block_count=1` through
 //!    the REAL `lfm2_forward_program_with_experts` engine
 //!    (`proxima-tensor/src/spec/attention_forward.rs:1719`, the same
-//!    builder `Gemma4Arch::bind` calls, matching
+//!    builder `bind_checkpoint` lowers gemma4 through, matching
 //!    `gemma4_descriptor_from_gguf`'s own per-layer config
 //!    verbatim, real dims), `VOCAB` shrunk to keep the LM-head tail cheap
 //!    (component 2 already covers that cost in isolation) — a SLIDING

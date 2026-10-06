@@ -1,6 +1,5 @@
 checkpoint=granite_moe
 architecture=granitemoe
-registry_entry=dense
 kv_layout=SlidingRing
 bind.ops=6394
 bind.ops_sha256=3b38dc043ff3e81bbe22549c07371db0a89254bee4655e1856678f7bba1a4f96

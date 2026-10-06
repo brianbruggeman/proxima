@@ -117,7 +117,7 @@ impl MemoryBudget {
     /// charged nothing). `window` is `Some(rows)` for a sliding-window layer,
     /// whose stored rows are `min(rows, context_length)`, and `None` for a
     /// layer that stores every position. A tuple rather than a named type:
-    /// [`crate::architecture::Architecture::kv_layers`] is the one producer
+    /// [`crate::lowering::kv_layers`] is the one producer
     /// and this function the one consumer.
     ///
     /// `draft_slack` is the speculative-decode slack every sliding ring holds

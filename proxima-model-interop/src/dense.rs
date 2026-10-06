@@ -1,125 +1,49 @@
-//! The [`crate::architecture::Architecture`] registered as
-//! [`crate::architecture::ArchitectureRegistry::with_builtin`]'s fallback --
-//! every checkpoint `crate::generate::LoadedModel::load_inner`'s `else` arm
-//! has ever accepted (`llama`, `mistral`, `qwen2`, `qwen3`, `mixtral`, and
-//! any other `general.architecture` this crate has no dedicated hybrid
-//! binder for). Composes exactly what that `else` arm always called:
+//! The `uniform` header reader
+//! ([`proxima_tensor::spec::ScheduleSource::Uniform`]): every checkpoint whose
+//! scalar `{family}.*` keys describe every layer alike (`llama`, `mistral`,
+//! `qwen2`, `qwen3`, `mixtral`, `granitemoe`, and `lfm2`'s short-convolution
+//! hybrid, whose zero-KV-head layers the tensor directory resolves). Composes
 //! [`crate::bind::architecture_from_metadata`],
-//! [`crate::bind::checkpoint_has_qk_norm`], and (routed through
-//! [`proxima_tensor::spec::build_forward`]'s `CacheStrategy::Cached`, `CacheMask::Bounded`
-//! arm, via [`proxima_tensor::spec::mistral_descriptor_from_shape`] built
-//! straight off this checkpoint's own parsed `architecture`, rather than a
-//! direct call)
-//! [`proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps`] --
-//! `expert_count`/`expert_used_count` off the checkpoint's own metadata is
-//! what already selects a dense vs. mixture-of-experts program inside that
-//! one builder, so this one [`Architecture`] impl covers both without a
-//! separate MoE arm (`crate::architecture::Architecture`'s own doc on
-//! `DenseArch` being the un-registered-by-name fallback, not a name match).
+//! [`crate::bind::checkpoint_has_qk_norm`], and
+//! [`proxima_tensor::spec::mistral_descriptor_from_shape`] built straight off
+//! this checkpoint's own parsed hyperparameters; [`build_forward`]'s
+//! `CacheStrategy::Cached`, `CacheMask::Bounded` arm lowers the result
+//! (`expert_count`/`expert_used_count` off the checkpoint's own metadata is
+//! what already selects a dense vs. mixture-of-experts program inside that one
+//! builder).
 //!
 //! RoPE pairing is profile data (`rope_layout`), never inferred from QK-norm
-//! tensors. This binder compares no family name:
+//! tensors. This reader compares no family name:
 //! [`crate::bind::ModelArchitecture::family`] keys
 //! [`crate::profiles::family_profile`], and the profile's `rope_layout` rides
 //! into the one generic [`build_forward`] call every family takes. A family with
 //! no profile is an error, never a default.
-//!
-//! Does not carry `load_with_paired_gate_up_reduce`/`load_with_fused_qkv_reduce`'s
-//! diagnostic reduce flags -- those are per-call A/B knobs
-//! (`crate::generate::LoadedModel::load_with_paired_gate_up_reduce`'s own
-//! doc), not part of "which architecture is this checkpoint", so
-//! `load_inner` keeps its own narrow inline path for those two
-//! constructors rather than widening [`Architecture::bind`]'s signature
-//! for a diagnostic every other architecture would have to ignore.
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    AttentionScoreScale, CacheStrategy, EmbeddingScale, ForwardProgram, LayerAttentionConfig, LayerKind,
-    LayerSchedule, ModelDescriptor, build_forward, mistral_descriptor_from_shape,
+    AttentionScoreScale, CacheStrategy, EmbeddingScale, LayerAttentionConfig, LayerKind, LayerSchedule,
+    ModelDescriptor, mistral_descriptor_from_shape,
 };
 
-use crate::architecture::{Architecture, BoundProgram};
 use crate::bind::{
-    ModelArchitecture, architecture_from_metadata, checkpoint_has_qk_norm,
-    checkpoint_qkv_biases, metadata_f32_optional, metadata_u32_optional,
+    ModelArchitecture, architecture_from_metadata, checkpoint_has_qk_norm, checkpoint_qkv_biases,
+    metadata_f32_optional, metadata_u32_optional,
 };
-use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
-use crate::profiles::{binding_profile, family_profile};
+use crate::profiles::family_profile;
 use crate::task::{ModelTask, classify_task};
 
-/// The registered fallback architecture -- see [`Architecture::name`]'s own
-/// doc for why "dense" is a label, not a `general.architecture` value this
-/// type expects to match by name.
-pub struct DenseArch;
-
-/// The one registered [`DenseArch`] value.
-pub static DENSE: DenseArch = DenseArch;
-
-impl Architecture for DenseArch {
-    fn name(&self) -> &'static str {
-        "dense"
-    }
-
-    fn bind<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-    ) -> Result<BoundProgram<'file>, InteropError> {
-        let architecture = architecture_from_metadata(parsed)?;
-        let descriptor = descriptor_from_gguf(parsed, &architecture)?;
-        bind_descriptor(parsed, file_bytes, architecture, &descriptor)
-    }
-
-    /// The same weights and cache leaves as [`Self::bind`] with every new
-    /// position's logits row kept, when the family profile arms it
-    /// ([`ModelDescriptor::verify`]); every family's default is off until its
-    /// verify step is measured to pay for the drafts it checks.
-    fn speculative_verify_program<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
-        let architecture = architecture_from_metadata(parsed)?;
-        let descriptor = descriptor_from_gguf(parsed, &architecture)?;
-        descriptor
-            .verify()
-            .map(|verify| bind_descriptor(parsed, file_bytes, architecture, &verify))
-            .transpose()
-    }
-}
-
-fn bind_descriptor<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    architecture: ModelArchitecture,
-    descriptor: &ModelDescriptor,
-) -> Result<BoundProgram<'file>, InteropError> {
-    let ForwardProgram { program, logits, layer_roots, moe_sites, layer_residuals, hidden, .. } =
-        build_forward(descriptor)?;
-    // `&[]`: this entry point takes no `ServingConfig`, so there is no
-    // `weight_precision` rule set to thread here yet.
-    let weights = bind_program_leaves(
-        parsed,
-        file_bytes,
-        &program,
-        &binding_profile(&architecture.family)?,
-        &[],
-    )?;
-    Ok(BoundProgram {
-        weights,
-        architecture,
-        program,
-        logits_root: logits,
-        hidden_root: hidden,
-        residual_roots: layer_residuals,
-        layer_roots,
-        qwen35moe_layer_diagnostics: Vec::new(),
-        router_roots: Vec::new(),
-        moe_sites,
-        duplicate_head_roots: Vec::new(),
-        single_position_step: false,
-    })
+/// This header's descriptor and hyperparameters, the two values
+/// [`crate::lowering`] lowers and binds from.
+///
+/// # Errors
+///
+/// Whatever [`architecture_from_metadata`] and [`descriptor_from_gguf`] can
+/// fail with.
+pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelArchitecture), InteropError> {
+    let architecture = architecture_from_metadata(parsed)?;
+    let descriptor = descriptor_from_gguf(parsed, &architecture)?;
+    Ok((descriptor, architecture))
 }
 
 /// The dense checkpoint's whole pre-lowering program as one config:

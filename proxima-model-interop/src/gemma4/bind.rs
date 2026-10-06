@@ -1,44 +1,29 @@
-//! [`crate::architecture::Architecture`] registration for the `gemma4`
-//! checkpoint family. `Gemma4Arch::bind` is a DESCRIPTOR consumer: it hands the
-//! parsed header to [`proxima_tensor::spec::gemma4_descriptor_from_gguf`],
+//! The `sliding_pattern` header reader ([`proxima_tensor::spec::ScheduleSource::SlidingPattern`]):
+//! the parsed header goes to [`proxima_tensor::spec::gemma4_descriptor_from_gguf`],
 //! which builds the whole [`proxima_tensor::spec::ModelDescriptor`] (per-layer
 //! [`proxima_tensor::spec::LayerAttentionConfig`]/
-//! [`proxima_tensor::spec::LayerFfnConfig`] schedule included), lowers it
-//! through [`proxima_tensor::spec::build_forward`], and binds the weights that
-//! program's `Input` leaves name ([`crate::bind_leaves::bind_program_leaves`])
-//! -- there is no bespoke gemma4 forward-graph builder, no gemma4 schedule and
-//! no gemma4 tensor-name table in this crate.
+//! [`proxima_tensor::spec::LayerFfnConfig`] schedule included). The lowering
+//! and the weight bind are the generic ones in [`crate::lowering`]: there is no
+//! bespoke gemma4 forward-graph builder, no gemma4 schedule and no gemma4
+//! tensor-name table in this crate.
 //! Teaching pointer: read `proxima_tensor::spec::attention_forward`'s own doc
 //! on `lfm2_forward_program_with_experts` before touching this file -- every
 //! knob the descriptor sets is documented there, not here.
 
-use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, build_forward, gemma4_descriptor_from_gguf};
-use crate::architecture::{Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext};
-use crate::bind::{BoundWeights, ModelArchitecture, SlidingRope, find_tensor, metadata_str};
-use crate::bind_leaves::bind_program_leaves;
+use proxima_tensor::spec::{ModelDescriptor, gemma4_descriptor_from_gguf};
+
+use crate::bind::{ModelArchitecture, SlidingRope, find_tensor, metadata_str};
 use crate::error::InteropError;
-use crate::profiles::{binding_profile, family_profile};
+use crate::lowering::KvLayout;
+use crate::profiles::family_profile;
 
 use super::hparams::from_metadata;
-use super::program::gemma4_sliding_rope_table;
-
-/// The binding profile key and the registry name: the architecture that lowers this program
-/// is what names its leaves, so a delegating foreign architecture binds the same way.
-const FAMILY: &str = "gemma4";
-
-/// Marker registered for `general.architecture = "gemma4"`.
-pub struct Gemma4Arch;
-
-/// The builtin `gemma4` registration value.
-pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 
 /// The checkpoint's descriptor: [`gemma4_descriptor_from_gguf`] over the family
 /// profile `general.architecture` names, so the values GGUF does not carry come
 /// from `crate::profiles` and never from this module.
-#[cfg(feature = "std")]
 pub fn descriptor_from_gguf(
     parsed: &ParsedGguf,
     sliding_kv_ring: bool,
@@ -58,261 +43,45 @@ fn head_repeats_from_env() -> u32 {
         .unwrap_or(1)
 }
 
-/// [`Gemma4Arch::bind`]'s body, parameterized on `last_row_only`
-/// (`lfm2_two_range_cached_forward_program_with_experts`'s own trailing
-/// flag -- see its doc: `true` gathers the LM head to the last new
-/// position only, `false` leaves every new position's own row in
-/// `logits_root`, `[new_count, vocab]`). `Gemma4Arch::bind` above calls
-/// this with `true` unchanged, so the registered decode/prefill path is
-/// byte-for-byte what it was before this function existed.
-/// [`bind_gemma4_all_positions_logits`] is the only other caller, with
-/// `false` -- the additive SLICE 2a readout a speculative-decode verify
-/// step needs (per-position logits for every candidate token from ONE
-/// forward, not just the sampled last position).
-#[cfg(feature = "std")]
-fn bind_gemma4_with_last_row_only<'file>(
+/// This header's descriptor and hyperparameters, the two values
+/// [`crate::lowering`] lowers and binds from. Every layer is
+/// [`proxima_tensor::spec::LayerKind::Attention`] (this family has no
+/// `ShortConv` layers), routed through the padded-mask cached engine: the
+/// two-range one, not single-range, because the first step processes the whole
+/// prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own
+/// module doc).
+pub(crate) fn header(
     parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    last_row_only: bool,
     layout: KvLayout,
-) -> Result<BoundProgram<'file>, InteropError> {
-    let architecture = from_metadata(parsed)?;
-
-    // every gemma4 shape routes through the padded-mask cached engine (all layers are `LayerKind::Attention`);
-    // the two-range engine, not single-range, because the first step processes the whole
-    // prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own module doc)
-    let descriptor = ModelDescriptor {
-        last_row_only,
-        ..descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?
-    };
+) -> Result<(ModelDescriptor, ModelArchitecture), InteropError> {
+    let hparams = from_metadata(parsed)?;
+    let descriptor = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
     #[cfg(feature = "instrument")]
     let descriptor = ModelDescriptor {
         head_repeats: head_repeats_from_env(),
         ..descriptor
     };
-        let ForwardProgram { program, logits, layer_roots, moe_sites, duplicate_head_roots, .. } =
-            build_forward(&descriptor)?;
-        let weights = bind_program_leaves(
-            parsed,
-            file_bytes,
-            &program,
-            &binding_profile(FAMILY)?,
-            &[],
-        )?;
-
-        let tied_embeddings = find_tensor(parsed, "output.weight").is_err();
-        let full_head_dim = architecture.key_length;
-        let model_architecture = ModelArchitecture {
-            vocab: architecture.vocab,
-            embedding: architecture.embedding,
-            feed_forward: architecture.feed_forward,
-            query_heads: architecture.head_count,
-            kv_heads: *architecture.kv_heads_by_layer.last().unwrap_or(&0),
-            kv_heads_by_layer: architecture.kv_heads_by_layer.clone(),
-            head_dim: full_head_dim,
-            block_count: architecture.block_count,
-            expert_count: architecture.expert_count,
-            expert_used_count: architecture.expert_used_count,
-            rope_freq_base: architecture.rope_freq_base,
-            rms_epsilon: architecture.rms_epsilon,
-            tied_embeddings,
-            family: metadata_str(parsed, "general.architecture")?.into(),
-            sliding_rope: Some(SlidingRope {
-                freq_base: architecture.rope_freq_base_swa,
-                dimension_count: architecture.rope_dimension_count_swa,
-            }),
-        };
-
-        Ok(BoundProgram {
-            weights,
-            architecture: model_architecture,
-            program,
-            logits_root: logits,
-            hidden_root: None,
-            residual_roots: Vec::new(),
-            layer_roots,
-            qwen35moe_layer_diagnostics: Vec::new(),
-            router_roots: Vec::new(),
-            moe_sites,
-            duplicate_head_roots,
-            single_position_step: false,
-        })
-}
-
-/// SLICE 2a verify readout: the additive, opt-in counterpart to
-/// [`Gemma4Arch::bind`] (which always gathers `logits_root` to the last new
-/// position -- `bind_gemma4_with_last_row_only`'s own doc). Binds the exact
-/// same weights/program shape with `last_row_only: false`, so `logits_root`
-/// evaluates to every new position's own row, `[new_count, vocab]`, not
-/// just the last. A speculative-decode verify step feeds this a K-token
-/// candidate span (`context.new_start = cached_len`, one forward call) and
-/// reads back K rows of logits instead of K separate single-position
-/// decode steps -- `Gemma4Arch::bind`'s own program, decode loop, and
-/// `logits_root` shape are untouched by this function existing.
-#[cfg(feature = "std")]
-pub fn bind_gemma4_all_positions_logits<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-) -> Result<BoundProgram<'file>, InteropError> {
-    bind_gemma4_with_last_row_only(parsed, file_bytes, false, KvLayout::Full)
-}
-
-impl ArchitectureTrait for Gemma4Arch {
-    fn name(&self) -> &'static str {
-        FAMILY
-    }
-
-    fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
-        crate::architecture::KvCacheShape::Custom
-    }
-
-    fn kv_layers(&self, parsed: &ParsedGguf) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
-        super::hparams::kv_layers_from_metadata(parsed)
-    }
-
-    /// Intervention 6's measured decode configuration (RUN.md "Intervention
-    /// 6" / "INTEGRATION"): whole-token latency 18.83 -> 16.60 ms (-11.9%) at
-    /// K=8, bytes identical to K=1 on the six-prompt corpus, uninstrumented
-    /// rollout check confirming the same order of magnitude
-    /// (-1.98 ms/token). Scoped to gemma4 alone -- every other architecture
-    /// keeps [`ArchitectureTrait::command_buffer_chunks`]'s own default of `1`;
-    /// this measurement does not establish a universal placements-path
-    /// default (the owner's own integration recommendation).
-    fn command_buffer_chunks(&self) -> u32 {
-        8
-    }
-
-    #[cfg(feature = "std")]
-    fn bind<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-    ) -> Result<BoundProgram<'file>, InteropError> {
-        bind_gemma4_with_last_row_only(parsed, file_bytes, true, KvLayout::Full)
-    }
-
-    /// [`Self::bind`] with the sliding layers' cache laid out as the ring
-    /// [`KvLayout::SlidingRing`] names -- what
-    /// [`crate::generate::LoadedModel::load`] binds. [`Self::bind`] itself
-    /// stays the full-cache layout, so every caller that drives its own
-    /// `kv_cache.*` leaves against it is unchanged.
-    #[cfg(feature = "std")]
-    fn bind_with_kv_layout<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-        layout: KvLayout,
-    ) -> Result<BoundProgram<'file>, InteropError> {
-        bind_gemma4_with_last_row_only(parsed, file_bytes, true, layout)
-    }
-
-    #[cfg(not(feature = "std"))]
-    fn bind<'file>(
-        &self,
-        _parsed: &ParsedGguf,
-        _file_bytes: &'file [u8],
-    ) -> Result<BoundProgram<'file>, InteropError> {
-        Err(InteropError::HybridMoeProgramUnsupported {
-            name: self.name().into(),
-        })
-    }
-
-    /// [`bind_gemma4_all_positions_logits`]'s own trait-level entry point --
-    /// this crate's only [`ArchitectureTrait::speculative_verify_program`]
-    /// override (that method's own doc on why a capability method, never a
-    /// `name() == "gemma4"` check, is what gates speculative decode's
-    /// verify step).
-    #[cfg(feature = "std")]
-    fn speculative_verify_program<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
-        self.speculative_verify_program_with_kv_layout(parsed, file_bytes, KvLayout::Full)
-    }
-
-    #[cfg(feature = "std")]
-    fn speculative_verify_program_with_kv_layout<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-        layout: KvLayout,
-    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
-        let header = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
-        header
-            .verify()
-            .map(|_| bind_gemma4_with_last_row_only(parsed, file_bytes, false, layout))
-            .transpose()
-    }
-
-    /// Feeds the sliding-window RoPE table the `rope_cos_swa`/`rope_sin_swa`
-    /// leaves declare (`LayerAttentionConfig::rope_table`,
-    /// `gemma4_descriptor_from_gguf`) -- the decode loop's builtin
-    /// `rope_cos`/`rope_sin` blocks always carry the FULL-layer table
-    /// (`Gemma4Arch::bind`'s own `ModelArchitecture::head_dim`/
-    /// `rope_freq_base` are the full-layer values), so this is the one
-    /// extra leaf this architecture needs from
-    /// [`crate::architecture::Architecture::step_inputs`]'s own seam.
-    /// Positions are `context.new_start + offset` for
-    /// `offset in 0..context.new_count`, matching
-    /// `crate::generate::residency_caches::build_position_inputs`'s own
-    /// absolute-angle convention for the builtin table.
-    fn step_inputs(&self, context: &StepInputContext<'_>, out: &mut Vec<StepInput>) {
-        let positions: Vec<usize> = (0..context.new_count)
-            .map(|offset| context.new_start + offset)
-            .collect();
-        let Some(rope) = context.architecture.sliding_rope else {
-            return;
-        };
-        let (cos, sin) =
-            gemma4_sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
-        out.push(StepInput {
-            name: "rope_cos_swa",
-            values: cos,
-            symbol: None,
-        });
-        out.push(StepInput {
-            name: "rope_sin_swa",
-            values: sin,
-            symbol: None,
-        });
-    }
-
-    /// llama.cpp's authoritative gemma4 graph (`src/models/gemma4.cpp`)
-    /// applies `ggml_rope_ext` to full/global-attention layers with
-    /// `n_rot=head_dim` (matching this checkpoint's `rope.dimension_count`
-    /// metadata) but ALSO a per-pair `freq_factors` tensor
-    /// (`rope_freqs.weight`, GGUF `ROPE_FREQS`) that ggml divides each
-    /// pair's angle by -- `bind_rope_freqs` binds that tensor's own values
-    /// verbatim into [`BoundWeights::owned`] at bind time, and this method
-    /// hands the same slice straight back to
-    /// `crate::generate::build_position_inputs`, which does the dividing.
-    /// The real checkpoint's `rope_freqs.weight` holds `[1.0]*64 +
-    /// [1e30]*192` (confirmed shape: 256 = `head_dim/2` pair entries):
-    /// dividing by `1.0` is a no-op for the first 64 pairs, and dividing by
-    /// `1e30` collapses the remaining 192 pairs' `theta` far enough below
-    /// one radian that `cos` rounds to exactly `1.0f32` and `sin` rounds to
-    /// float noise -- the data-driven replacement for what this method used
-    /// to do by returning the literal `64` and letting
-    /// `build_position_inputs` truncate its loop there. `rope.
-    /// dimension_count=512` is `head_dim`, i.e. `n_rot`, NOT the rotary
-    /// count -- the earlier `head_dim / 2` (full rotation of every pair)
-    /// read that metadata field as the rotary width, which was the
-    /// original bug this checkpoint's own `rope_freqs.weight` now fixes
-    /// directly, with no hard-coded pair count anywhere in this crate. The
-    /// SWA table ([`Self::step_inputs`]/[`gemma4_sliding_rope_table`])
-    /// carries no `freq_factors` in the real graph and is untouched --
-    /// `rope_freqs.weight` is never bound into its own separate table.
-    fn rope_freq_factors<'weights>(
-        &self,
-        weights: &'weights BoundWeights<'_>,
-    ) -> Option<&'weights [f32]> {
-        weights
-            .owned
-            .iter()
-            .find(|(name, _)| name == "rope_freqs.weight")
-            .map(|(_, values)| values.as_slice())
-    }
+    let architecture = ModelArchitecture {
+        vocab: hparams.vocab,
+        embedding: hparams.embedding,
+        feed_forward: hparams.feed_forward,
+        query_heads: hparams.head_count,
+        kv_heads: *hparams.kv_heads_by_layer.last().unwrap_or(&0),
+        kv_heads_by_layer: hparams.kv_heads_by_layer.clone(),
+        head_dim: hparams.key_length,
+        block_count: hparams.block_count,
+        expert_count: hparams.expert_count,
+        expert_used_count: hparams.expert_used_count,
+        rope_freq_base: hparams.rope_freq_base,
+        rms_epsilon: hparams.rms_epsilon,
+        tied_embeddings: find_tensor(parsed, "output.weight").is_err(),
+        family: metadata_str(parsed, "general.architecture")?.into(),
+        sliding_rope: Some(SlidingRope {
+            freq_base: hparams.rope_freq_base_swa,
+            dimension_count: hparams.rope_dimension_count_swa,
+        }),
+    };
+    Ok((descriptor, architecture))
 }
 
 /// Regression coverage for the bug this crate shipped once: the binder and the
@@ -324,7 +93,7 @@ impl ArchitectureTrait for Gemma4Arch {
 /// alone, the MoE convention, while E2B/E4B's own-KV FULL layers (`blk.4`,
 /// `blk.9`, `blk.14` on the real `gemma4:e2b-it-qat` checkpoint) carry a
 /// real `attn_v.weight` regardless of sliding vs full. This test builds the
-/// ACTUAL forward program `Gemma4Arch::bind` builds (not a hand-simulated
+/// ACTUAL forward program `crate::lowering::bind_checkpoint` builds (not a hand-simulated
 /// stand-in) for a synthetic E2B-shaped [`Architecture`] whose
 /// `sliding_window_pattern`/`shared_kv_layers`/`block_count` are the real
 /// checkpoint's own measured values (a real header dump against
@@ -337,6 +106,7 @@ impl ArchitectureTrait for Gemma4Arch {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
+    use proxima_tensor::spec::{ForwardProgram, build_forward};
     use crate::gemma4::Architecture;
     use arrayvec::ArrayVec;
     use proxima_tensor::spec::{CacheStrategy, KeySourceKind};
@@ -430,7 +200,7 @@ mod declared_leaves_match_bound_leaves_tests {
             .collect()
     }
 
-    /// The name set the ACTUAL forward program `Gemma4Arch::bind` lowers --
+    /// The name set the ACTUAL forward program `crate::lowering::bind_checkpoint` lowers --
     /// `gemma4_descriptor_from_gguf`'s own output, built through the
     /// cacheless engine so the check is independent of which
     /// `CacheStrategy` bind picks -- declares as an `Input` leaf for `suffix`.

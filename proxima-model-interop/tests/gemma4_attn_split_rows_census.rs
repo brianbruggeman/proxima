@@ -20,7 +20,7 @@ use std::fs::File;
 use memmap2::Mmap;
 use omega::{Binding, PackedOperands};
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{Architecture, GEMMA4, KvLayout, bind_symbols, symbols};
+use proxima_model_interop::{KvLayout, bind_speculative_verify, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOpKind, prune_dead};
 use proxima_tensor::spec::Qwen35LayerRoots;
 use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer};
@@ -72,8 +72,7 @@ async fn gemma4_e2b_verify_binds_35_row_tiled_attention_ops_in_70_dispatches() {
     let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
-    let bound_program = GEMMA4
-        .speculative_verify_program_with_kv_layout(&parsed, bytes, KvLayout::SlidingRing)
+    let bound_program = bind_speculative_verify(&parsed, bytes, KvLayout::SlidingRing, None)
         .expect("bind the real gemma4-E2B checkpoint's speculative verify program")
         .expect("gemma4 binds a speculative verify program");
     let outputs = verify_step_outputs(bound_program.logits_root, &bound_program.layer_roots);

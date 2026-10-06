@@ -211,9 +211,7 @@ mod tests {
 
     use proxima_gguf::value::{MetadataArray, MetadataValue as Value};
 
-    use crate::architecture::Architecture as _;
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
-    use crate::qwen35moe::QWEN35MOE;
     use crate::test_support::parsed_header;
 
     /// `qwen3.6:35b-a3b`'s KV-relevant header (`ollama /api/show`,
@@ -238,8 +236,7 @@ mod tests {
             ("qwen35moe.attention.key_length", Value::U32(256)),
         ]);
 
-        let layers = QWEN35MOE
-            .kv_layers(&parsed)
+        let layers = crate::lowering::kv_layers(&parsed)
             .expect("the header carries every key kv_layers reads");
         let budget = MemoryBudget::derive(WeightClassBytes::default(), &layers, 262_144, 0, 0);
         let every_layer = vec![(2u32, 256u32, None); 40];

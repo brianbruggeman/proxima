@@ -117,15 +117,6 @@ pub enum InteropError {
     #[error("gguf metadata is missing required key {key:?}")]
     MissingMetadataKey { key: String },
 
-    /// `crate::architecture::ArchitectureRegistry::resolve` (`std`-gated) read
-    /// `general.architecture` as `name`, and no registered
-    /// `crate::architecture::Architecture` (`std`-gated) declares that name, nor is
-    /// the registry's own fallback architecture set to catch it -- a
-    /// foreign crate loading a checkpoint whose architecture it never
-    /// registered gets this instead of a panic or a silent misbind.
-    #[error("no registered architecture matches general.architecture = {name:?}")]
-    UnknownArchitecture { name: String },
-
     /// an in-flight rewind reached rows a seal made immutable
     #[error("cannot rewind to {keep_positions} rows: rows below {sealed_end} are sealed")]
     RewindIntoSealed {
@@ -176,7 +167,7 @@ pub enum InteropError {
         of: u32,
     },
 
-    /// [`crate::dense::DenseArch`]: the header's `<arch>.rope.dimension_count`
+    /// The uniform header reader: the header's `<arch>.rope.dimension_count`
     /// differs from the head width, so RoPE rotates only part of each head.
     #[error("{family:?} rotates {rope_dimension_count} of {head_dim} head dims; the single-range dense program rotates the full head")]
     PartialRotaryUnsupported { family: String, rope_dimension_count: u32, head_dim: u32 },
@@ -258,11 +249,11 @@ pub enum InteropError {
     EmptyLogits,
 
     /// [`crate::generate::LoadedModel`]'s decode loop read `logits_root` and
-    /// found more than one row of `vocab` -- the `Architecture` contract
-    /// (`crate::architecture`'s doc on `BoundProgram::logits_root`) requires
-    /// exactly one row, the `lm_head_row`-gathered last position; a foreign
-    /// `Architecture` that skips that gather would otherwise be silently
-    /// sampled at row 0 instead of the last token.
+    /// found more than one row of `vocab` -- the bound-program contract
+    /// (`crate::lowering`'s doc on `BoundProgram::logits_root`) requires
+    /// exactly one row, the `lm_head_row`-gathered last position; a program
+    /// that skips that gather would otherwise be silently sampled at row 0
+    /// instead of the last token.
     #[cfg(feature = "std")]
     #[error(
         "logits_root evaluated to {found_rows} row(s) of vocab {vocab}, expected exactly {expected_rows}"
@@ -554,66 +545,60 @@ pub enum InteropError {
     )]
     UnsupportedWeightPrecisionTarget { tensor: String, target: GgmlType },
 
-    /// `crate::Architecture::step_inputs` (feature-gated behind `std`) returned a
-    /// `crate::StepInput` (feature-gated behind `std`) whose name does not match any
-    /// [`proxima_tensor::Op::Input`] leaf in this checkpoint's own forward
-    /// program -- the architecture computed a leaf the program never
-    /// declared, a caller mistake surfaced as data rather than the value
-    /// silently sitting in `named_blocks` unread.
+    /// A `crate::StepInput` (feature-gated behind `std`) whose name does not
+    /// match any [`proxima_tensor::Op::Input`] leaf in this checkpoint's own
+    /// forward program -- the step computed a leaf the program never declared,
+    /// a mistake surfaced as data rather than the value silently sitting in
+    /// `named_blocks` unread.
     #[error(
-        "architecture step_inputs returned {name:?}, which this program declares no Op::Input leaf for"
+        "step input {name:?} named, which this program declares no Op::Input leaf for"
     )]
     UnknownStepInput { name: String },
 
     /// A forward program leaf beyond the decode loop's own builtin
     /// `ids`/`eps`/`rope_cos`/`rope_sin`/`cached_len`/`kv_cache.*` set was
-    /// left unbound after `crate::Architecture::step_inputs` (feature-gated
-    /// behind `std`) ran -- either the architecture's own
-    /// `crate::Architecture::bind` declared a leaf its
-    /// `crate::Architecture::step_inputs` never feeds, or
-    /// (the default, no-op override) an architecture with a custom leaf
-    /// never overrode `crate::Architecture::step_inputs` at
-    /// all.
+    /// left unbound after the step inputs ran -- the lowered program declared a
+    /// leaf that neither the builtin blocks nor `crate::sliding_rope_inputs`
+    /// feeds, so a config that adds such a leaf must also say where its values
+    /// come from.
     #[error(
-        "forward program leaf {name:?} is left unbound; no builtin block and no architecture step_inputs supplied it"
+        "forward program leaf {name:?} is left unbound; no builtin block and no step input supplied it"
     )]
     MissingStepInput { name: String },
 
-    /// `crate::Architecture::step_inputs` (feature-gated behind `std`) returned a
-    /// `crate::StepInput` (feature-gated behind `std`) whose `symbol` names a slot the
-    /// decode loop itself already binds
+    /// A `crate::StepInput` (feature-gated behind `std`) whose `symbol` names a
+    /// slot the decode loop itself already binds
     /// (`crate::symbols::NEW_COUNT`/`crate::symbols::KV_BOUND`)
-    /// -- a foreign architecture's own slot must start at
+    /// -- a step input's own slot must start at
     /// `crate::symbols::FIRST_FREE` (feature-gated behind `std`), never overwrite a
     /// builtin one out from under the loop.
     #[error(
-        "architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE"
+        "step input named reserved symbol slot {slot}; step input slots start at FIRST_FREE"
     )]
     ReservedSymbolSlot { slot: u16 },
 
-    /// `crate::architecture::BoundProgram::single_position_step` is set
-    /// (today: only `crate::qwen35::Qwen35Arch`'s own gated-DeltaNet mixer,
-    /// whose `s`-axis reduce sums across positions instead of stepping
+    /// `crate::lowering::BoundProgram::single_position_step` is set
+    /// (today: only a schedule with a gated-DeltaNet layer, whose `s`-axis reduce sums across positions instead of stepping
     /// through them -- `proxima_tensor::error::TensorError::SingleTokenStepOnly`'s
     /// own doc) but this call bound `new_count` (`crate::symbols::NEW_COUNT`)
     /// to more than one position -- a batched multi-token prefill, which
-    /// this architecture's program would evaluate wrong rather than raise
-    /// on its own, since `s` is `Extent::Symbolic` there and only resolved
-    /// here, at bind time. The decode loop must feed this architecture one
-    /// position per evaluation instead (prefill becomes `new_count`
+    /// this program would evaluate wrong rather than raise on its own, since
+    /// `s` is `Extent::Symbolic` there and only resolved here, at bind time.
+    /// The decode loop must feed this program one position per evaluation
+    /// instead (prefill becomes `new_count`
     /// sequential evaluations of `new_count == 1`, the same path decode
     /// already takes).
     #[error(
-        "architecture declares single_position_step but new_count = {new_count}; feed one position per evaluation"
+        "program declares single_position_step but new_count = {new_count}; feed one position per evaluation"
     )]
     MultiPositionStepUnsupported { new_count: usize },
 
-    /// `layer`'s `crate::architecture::BoundProgram::layer_roots` entry
+    /// `layer`'s `crate::lowering::BoundProgram::layer_roots` entry
     /// names a cache shape (`bound`) that disagrees with what the compiled
     /// program actually declares as `Op::Input` leaves for that layer
-    /// (`declared`) -- an `crate::architecture::Architecture::bind` that
-    /// tagged the wrong `proxima_tensor::spec::Qwen35LayerRoots` variant
-    /// for a layer it built correctly otherwise. Caught once, at decode-loop
+    /// (`declared`) -- a bound program whose layer roots tag the wrong
+    /// `proxima_tensor::spec::Qwen35LayerRoots` variant for a layer it built
+    /// correctly otherwise. Caught once, at decode-loop
     /// setup, instead of surfacing later as a confusing
     /// [`Self::MissingStepInput`] on a leaf the decode loop never even
     /// tried to feed under the bound (wrong) shape.
@@ -626,7 +611,7 @@ pub enum InteropError {
         bound: &'static str,
     },
 
-    /// `layer`'s `crate::architecture::BoundProgram::layer_roots` entry
+    /// `layer`'s `crate::lowering::BoundProgram::layer_roots` entry
     /// says `kind` (recurrent SSM state or attention KV state), but the
     /// compiled program declares NONE of `expected` as `Op::Input` leaves
     /// for that layer -- the architecture baked this layer's state as
@@ -706,7 +691,7 @@ pub enum InteropError {
     /// (and its `KvPadScratch` counterpart)'s own row widths are read back
     /// off `layer`'s `kv_cache.{layer}.*` `Op::Input` leaves as declared by
     /// the bound program, which is authoritative; this only fires if a
-    /// foreign `crate::architecture::Architecture::bind` compiled a program
+    /// lowering compiled a program
     /// whose declared cache-leaf shape is narrower than the cache rows it
     /// actually appends per step, a bind-time defect this scratch resize
     /// cannot self-heal from. Previously an unchecked `copy_from_slice`
