@@ -320,11 +320,12 @@ impl PipeFactory for HttpPipeFactory {
 // without pulling this hyper-backed module in.
 impl HttpConfig {
     /// Materialise the `http` upstream over a shared client pool.
-    pub fn into_upstream(self, mut client: SharedHttpClient) -> Result<HttpUpstream, ProximaError> {
+    pub fn into_upstream(self, client: SharedHttpClient) -> Result<HttpUpstream, ProximaError> {
         #[cfg(all(feature = "http1-stream-client", feature = "http1-tls"))]
-        if let Some(tls_config) = &self.tls_client {
-            client = client.with_client_tls_config(tls_config)?;
-        }
+        let client = match self.tls_client.as_ref() {
+            Some(tls_config) => client.with_client_tls_config(tls_config)?,
+            None => client,
+        };
         #[cfg(all(feature = "http1-stream-client", not(feature = "http1-tls")))]
         if self.tls_client.is_some() {
             return Err(ProximaError::Config(

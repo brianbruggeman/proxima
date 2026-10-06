@@ -24,6 +24,25 @@ cross-target check; none is native Windows runtime evidence.
 | AC11 Hyper feature Windows MSVC all-target check | `cargo xwin check -p proxima-http --all-targets --features http1-stream-client,http1-tls --target x86_64-pc-windows-msvc` finished with exit 0 in 1m51s | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-http-windows-xwin.stdout` |
 | AC11 universal Listener TLS forwarding | 1 test passed, 0 failed/skipped; `TlsListenProtocol` forwards `required_files` and `client-ca.pem` to the wrapped protocol spec | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-listener-facade.stdout` |
 
+## hyper alias and ALPN corrections
+
+The Windows alias had asymmetric cfgs: `AliasFactory` and its impl used `unix`
+at `src/load.rs` while the registration already allowed `any(unix, windows)`.
+The type therefore disappeared in the Windows both-wires feature set. The
+definition now shares the registration's platform predicate.
+
+The Hyper TLS path built a normal `TlsClientConfig`, whose default ALPN list is
+non-empty, then passed it to `HttpsConnectorBuilder`; Hyper owns ALPN based on
+`.enable_http1()` / `.enable_http2()`, and rejects a preset list. The connector
+now clears only `rustls_config.alpn_protocols` before handing it to Hyper.
+Root policy, verifier, and protocol versions remain the configured rustls values.
+
+| contract | observation | raw artifact |
+|---|---|---|
+| AC12a Windows `http-hyper` + Prime alias cfg | `cargo xwin check -p proxima --lib --features http-hyper --target x86_64-pc-windows-msvc` finished with exit 0; compiles the Windows alias registration and its factory type | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-alias-xwin.stdout` |
+| AC12b Hyper TLS ALPN ownership | 1 regression test passed; URL-aware TLS config starts with ALPN set and `with_client_tls_config` constructs `hyper-rustls` successfully after clearing it | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-hyper-alpn.stdout` |
+| AC12b Hyper without TLS feature | `cargo check -p proxima-http --lib --features http1` finished with exit 0, with no unused-field or unused-mut diagnostics | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-hyper-no-tls.stdout` |
+
 The universal facade acceptance commands are:
 
 ```text

@@ -73,7 +73,7 @@ use proxima_patterns::kv::KvHandle;
 /// default, so a `"wire":"tokio"` upstream resolves to hyper in a both-wires build.
 #[cfg(all(
     feature = "http-hyper",
-    unix,
+    any(unix, windows),
     feature = "http-prime-deps",
     feature = "runtime-prime"
 ))]
@@ -84,7 +84,7 @@ struct AliasFactory {
 
 #[cfg(all(
     feature = "http-hyper",
-    unix,
+    any(unix, windows),
     feature = "http-prime-deps",
     feature = "runtime-prime"
 ))]

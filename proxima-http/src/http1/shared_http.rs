@@ -74,6 +74,7 @@ pub type SharedHyperClient = Client<ConnectorImpl, StreamingHyperBody>;
 #[derive(Clone)]
 pub struct SharedHttpClient {
     inner: Arc<SharedHyperClient>,
+    #[cfg(all(feature = "http1-tls", feature = "http1-stream-client"))]
     pool_config: PoolConfig,
 }
 
@@ -96,7 +97,10 @@ impl SharedHttpClient {
         &self,
         tls_config: &proxima_tls::TlsClientConfig,
     ) -> Result<Self, ProximaError> {
-        let rustls_config = tls_config.build_rustls_config()?;
+        let mut rustls_config = tls_config.build_rustls_config()?;
+        // hyper-rustls selects ALPN from the protocols enabled below and
+        // rejects caller-supplied ALPN to avoid conflicting negotiation.
+        rustls_config.alpn_protocols.clear();
         let connector = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(rustls_config)
             .https_or_http()
@@ -141,6 +145,7 @@ impl SharedHttpClient {
         let client = builder.build(connector);
         Self {
             inner: Arc::new(client),
+            #[cfg(all(feature = "http1-tls", feature = "http1-stream-client"))]
             pool_config: config.clone(),
         }
     }
@@ -149,6 +154,7 @@ impl SharedHttpClient {
     pub fn from_client(client: SharedHyperClient) -> Self {
         Self {
             inner: Arc::new(client),
+            #[cfg(all(feature = "http1-tls", feature = "http1-stream-client"))]
             pool_config: PoolConfig::default(),
         }
     }
@@ -292,5 +298,20 @@ mod tests {
         assert_eq!(restored.http2_initial_stream_window_size, Some(2 << 20));
         assert_eq!(restored.http2_adaptive_window, Some(false));
         assert!(restored.http2_keep_alive_interval_ms.is_none());
+    }
+
+    #[cfg(all(feature = "http1-tls", feature = "http1-stream-client"))]
+    #[test]
+    fn configured_tls_client_clears_alpn_for_hyper_connector() {
+        let tls_config = proxima_tls::TlsClientConfig::layered()
+            .build_for_client()
+            .expect("URL-aware TLS client config");
+        assert!(!tls_config.alpn_protocols.is_empty());
+
+        let client = SharedHttpClient::new()
+            .with_client_tls_config(&tls_config)
+            .expect("hyper connector owns ALPN configuration");
+
+        assert_eq!(client.strong_count(), 1);
     }
 }
