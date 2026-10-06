@@ -6,6 +6,7 @@
 # global --test-threads=1 penalty. New heavy-runtime tests join by matching here.
 [test-groups]
 heavy-runtime = { max-threads = 1 }
+real-checkpoint = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'binary(windows_port) or binary(windows_fs) or binary(windows_process) or binary(windows_instrument) or binary(host_grounds) or test(windows_cli_) or test(prime::tests::upstream_) or test(tcp_dial::tests::) or test(prime::connect_tunnel::tests::) or test(connector::tests::) or test(stream_listener::tests::quic_upstream_and_listener_exchange_one_stream)'
@@ -69,3 +70,16 @@ slow-timeout = { period = "20s", terminate-after = 2 }
 [[profile.default.overrides]]
 filter = 'test(spread_blocking_handler_runs_off_executor_threads)'
 slow-timeout = { period = "10s", terminate-after = 2 }
+
+# real-checkpoint tests mmap multi-GB gguf files and run decode through the gpu; two at once
+# page-thrash the mapping and contend for the one device, so they serialize against each other.
+[[profile.default.overrides]]
+filter = 'package(proxima-model-interop) and kind(test)'
+test-group = 'real-checkpoint'
+
+# per-slice architecture-as-data gate: everything in the package except the tests that bind, decode or
+# hold the cache of the large checkpoints (gemma4 26b, openchat, qwen2, qwen3, qwen35, qwen35moe) and
+# every lfm2 test. the digests and descriptor round trips of every checkpoint stay in. the excluded
+# tests run once at the end of the run with the default profile. built with `--cargo-profile gate`.
+[profile.slice-gate]
+default-filter = 'not test(/lfm2/) and not test(/^(generic_binder|generic_verify_llama_parity|llama_parity|kv_in_caller_memory)_(gemma4_26b|openchat|qwen2|qwen3|qwen35|qwen35moe)$/)'
