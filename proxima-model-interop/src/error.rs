@@ -461,35 +461,6 @@ pub enum InteropError {
     )]
     HfMoeWeightsUnsupported { expert_count: u32 },
 
-    /// `crate::lfm2::bind_lfm2_shortconv_in_proj`'s fused `blk.{layer}.shortconv.in_proj.weight`
-    /// did not have exactly `3 * embedding * embedding` elements -- the
-    /// real checkpoint's own declared shape disagrees with the
-    /// `embedding` this call derived from `lfm2moe.embedding_length`.
-    #[error(
-        "blk.{layer}.shortconv.in_proj.weight has {elements} elements, but embedding={embedding} needs {expected} (3 * embedding * embedding)"
-    )]
-    ShortConvInProjShapeMismatch {
-        layer: u32,
-        elements: u64,
-        embedding: u32,
-        expected: u64,
-    },
-
-    /// `crate::lfm2::bind_lfm2_shortconv_in_proj`'s row-split precondition:
-    /// `embedding` (the row width, GGUF's `in_dim` axis) is not a whole
-    /// multiple of the fused tensor's own codec `block_elements` -- never
-    /// observed on the real checkpoint (`embedding = 2048 = 8 * 256`), but
-    /// a row-boundary split is only provably block-aligned when this holds,
-    /// so it is checked rather than assumed.
-    #[error(
-        "blk.{layer}.shortconv.in_proj.weight has ggml type {ggml_type:?}, whose block size does not evenly divide embedding={embedding}"
-    )]
-    ShortConvInProjNotBlockAligned {
-        layer: u32,
-        ggml_type: GgmlType,
-        embedding: u32,
-    },
-
     /// `crate::lfm2::lfm2_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
     /// nonzero entries (the real attention layers' own kv head count)
