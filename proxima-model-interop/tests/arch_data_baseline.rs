@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
-    PromptCacheConfig, ServingConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
+    PromptCacheConfig, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
     metadata_f32_optional,
     metadata_str, metadata_u32, profiles::family_profile, qwen35_architecture_from_metadata,
     qwen35_descriptor_from_architecture, qwen35moe,
@@ -1195,6 +1195,115 @@ fn generic_verify_llama_parity_qwen3() {
 #[test]
 fn generic_verify_llama_parity_granite_moe() {
     generic_verify_llama_parity(&GRANITE_MOE);
+}
+
+fn armed_e2b_model<'file>(parsed: &proxima_gguf::pipe::ParsedGguf, file_bytes: &'file [u8]) -> LoadedModel<'file> {
+    let armed = ModelDescriptor {
+        speculative_verify: true,
+        ..config_descriptors(&GEMMA4_E2B, parsed).remove(0).1
+    };
+    load_from_config(parsed, file_bytes, &armed)
+}
+
+#[test]
+fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
+    let mapping = GEMMA4_E2B.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = armed_e2b_model(&parsed, file_bytes);
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    }
+    .with_speculative(SpeculativeConfig::none());
+    let cases = llama_cases(&GEMMA4_E2B);
+
+    for case in &cases {
+        let mut stats = SpeculativeDecodeStats::default();
+        let (generated, _text, stopped_by_eos) = model
+            .generate_from_ids_with_speculative_stats(
+                &case.prompt_ids,
+                LLAMA_GENERATED_TOKENS,
+                &config,
+                &mut |_event| ControlFlow::Continue(()),
+                &mut stats,
+                None,
+            )
+            .expect("plain decode runs on the real checkpoint");
+
+        let compared = &generated[..generated.len().min(case.generated_ids.len())];
+        assert_eq!(
+            first_divergence(&case.generated_ids, compared),
+            None,
+            "prompt {:?}: ids differ from llama.cpp",
+            case.prompt
+        );
+        let evaluations = generated.len() + usize::from(stopped_by_eos);
+        assert_eq!(stats.prefill_steps, 1, "prompt {:?}: one prefill evaluation", case.prompt);
+        assert_eq!(
+            stats.decode_steps,
+            (evaluations - 1) as u64,
+            "prompt {:?}: every token after the first came from a Decode evaluation",
+            case.prompt
+        );
+        assert_eq!(
+            (stats.verify_steps, stats.accept_steps, stats.rollback_steps),
+            (0, 0, 0),
+            "prompt {:?}: no drafting, so the machine never left Prefill and Decode",
+            case.prompt
+        );
+    }
+}
+
+#[test]
+fn serving_fsm_drives_speculative_verify_through_accept_and_rollback() {
+    let mapping = GEMMA4_E2B.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = armed_e2b_model(&parsed, file_bytes);
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        temperature: 0.0,
+        repeat_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        ..ServingConfig::default()
+    };
+    let paragraph = "The quick brown fox jumps over the lazy dog while a curious cat watches quietly from the garden \
+                     wall. Pack my box with five dozen liquor jugs before the delivery truck arrives at noon. ";
+    let prompt = paragraph.repeat(4);
+    let run = |serving_config: ServingConfig<'_>, forced_draft_width: Option<u16>| {
+        let mut stats = SpeculativeDecodeStats::default();
+        let (generated, _text, _stopped) = model
+            .generate_streaming_with_speculative_stats(
+                &prompt,
+                48,
+                serving_config,
+                &mut |_event| ControlFlow::Continue(()),
+                &mut stats,
+                forced_draft_width,
+            )
+            .expect("speculative decode runs on the real checkpoint");
+        (generated, stats)
+    };
+
+    let (drafted_ids, drafted) = run(config, None);
+    let (forced_ids, forced) = run(config, Some(3));
+    let (plain_ids, plain) = run(config.with_speculative(SpeculativeConfig::none()), None);
+
+    assert_eq!(drafted_ids, plain_ids, "n-gram drafts must not change the greedy ids");
+    assert_eq!(forced_ids, plain_ids, "forced drafts must not change the greedy ids");
+    assert_eq!(plain.verify_steps, 0, "control: with drafting off the machine never verifies");
+    assert!(drafted.accept_steps > 0, "the repeated prompt must produce a fully accepted verify step: {drafted:?}");
+    assert!(forced.rollback_steps > 0, "a repeated-token draft must be rejected, rewinding the cache: {forced:?}");
+    for stats in [drafted, forced] {
+        assert_eq!(
+            stats.accept_steps + stats.rollback_steps,
+            stats.verify_steps,
+            "every verify step settles into exactly one of Accept and Rollback: {stats:?}"
+        );
+        assert_eq!(stats.prefill_steps, 1, "one prefill evaluation: {stats:?}");
+    }
 }
 
 fn load_from_config<'file>(
