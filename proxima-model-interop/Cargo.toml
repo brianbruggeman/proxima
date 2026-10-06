@@ -356,7 +356,7 @@ proxima = { workspace = true, features = ["test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
 tempfile.workspace = true
 temp-env.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, features = ["asm"] }
 proptest.workspace = true
 
 # Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
