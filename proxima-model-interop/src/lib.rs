@@ -28,6 +28,8 @@ extern crate alloc;
 mod architecture;
 mod bind;
 #[cfg(feature = "std")]
+mod bind_leaves;
+#[cfg(feature = "std")]
 pub mod block_file;
 pub mod capability;
 #[cfg(feature = "std")]
@@ -91,6 +93,8 @@ pub use architecture::{
 };
 #[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;
+#[cfg(feature = "std")]
+pub use bind_leaves::bind_program_leaves;
 #[cfg(feature = "std")]
 pub use bind::{
     BoundWeights, Codec, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,

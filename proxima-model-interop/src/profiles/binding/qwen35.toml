@@ -1,0 +1,14 @@
+[[alias]]
+kind = "rename"
+leaf = "ssm_in.weight"
+from = "attn_qkv.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "ssm_gate.weight"
+from = "attn_gate.weight"
+
+[[alias]]
+kind = "rename"
+leaf = "ssm_dt.bias"
+from = "ssm_dt"

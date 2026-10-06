@@ -1,0 +1,25 @@
+[[alias]]
+kind = "rename"
+leaf = "output_norm.weight"
+from = "token_embd_norm.weight"
+
+[[alias]]
+kind = "part"
+leaf = "shortconv.in_proj.weight.b"
+from = "shortconv.in_proj.weight"
+part = 0
+of = 3
+
+[[alias]]
+kind = "part"
+leaf = "shortconv.in_proj.weight.c"
+from = "shortconv.in_proj.weight"
+part = 1
+of = 3
+
+[[alias]]
+kind = "part"
+leaf = "shortconv.in_proj.weight.x"
+from = "shortconv.in_proj.weight"
+part = 2
+of = 3
