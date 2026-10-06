@@ -2701,7 +2701,7 @@ impl<'file> LoadedModel<'file> {
         {
             let bound = resolved.bind_with_kv_layout(parsed, file_bytes, kv_layout)?;
             let bound = match descriptor {
-                Some(config) => bound.lowered_from(config)?,
+                Some(config) => bound.lowered_from(config, parsed, file_bytes)?,
                 None => bound,
             };
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -2756,7 +2756,7 @@ impl<'file> LoadedModel<'file> {
                     .map(|verify| {
                         resolved
                             .bind_with_kv_layout(parsed, file_bytes, kv_layout)?
-                            .lowered_from(&verify)
+                            .lowered_from(&verify, parsed, file_bytes)
                     })
                     .transpose()?,
                 None => resolved.speculative_verify_program_with_kv_layout(parsed, file_bytes, kv_layout)?,
