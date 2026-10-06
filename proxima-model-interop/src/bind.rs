@@ -265,7 +265,7 @@ pub fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorI
 #[cfg(feature = "std")]
 pub(crate) fn checkpoint_qkv_biases(
     parsed: &ParsedGguf,
-    architecture: &ModelArchitecture,
+    architecture: &ModelHparams,
 ) -> Result<bool, InteropError> {
     let mut any = false;
     for layer in 0..architecture.block_count {
@@ -335,7 +335,7 @@ pub(crate) fn dequantize(
 /// GGUF never wrote.
 // f32 has no Eq impl, so rope_freq_base drops this struct to PartialEq only.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ModelArchitecture {
+pub struct ModelHparams {
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
@@ -390,8 +390,8 @@ pub struct ModelArchitecture {
     /// added under the square root before the reciprocal) --
     /// `RMS_EPSILON_DEFAULT` (llama.cpp's own default for a llama/mistral
     /// checkpoint, matching openchat-3.5's own declared value) when the key
-    /// is absent. `crate::qwen35::Qwen35Architecture::rms_epsilon`
-    /// (`std`-gated) and `crate::lfm2::Lfm2Architecture::rms_epsilon`
+    /// is absent. `crate::qwen35::Qwen35Hparams::rms_epsilon`
+    /// (`std`-gated) and `crate::lfm2::Lfm2Hparams::rms_epsilon`
     /// (`std`-gated) read the same metadata
     /// key with their own architecture-specific defaults (`1e-6`) --
     /// duplicated per architecture rather than shared because each
@@ -432,7 +432,7 @@ pub struct SlidingRope {
     pub dimension_count: u32,
 }
 
-impl ModelArchitecture {
+impl ModelHparams {
     /// Returns the shared KV-head count only when every layer declares the
     /// same value. A dense builder cannot legally substitute a representative
     /// value for a per-layer configuration.
@@ -482,7 +482,7 @@ impl ModelArchitecture {
     }
 }
 
-/// Reads [`ModelArchitecture`] out of `parsed`'s own metadata: looks up
+/// Reads [`ModelHparams`] out of `parsed`'s own metadata: looks up
 /// `general.architecture` first (`"llama"` for a Mistral-shaped checkpoint
 /// such as openchat-3.5), then every `{architecture}.*` dimension key
 /// under that name.
@@ -493,14 +493,14 @@ impl ModelArchitecture {
 /// dimension, so reading it directly avoids assuming the division holds
 /// for an architecture this crate has not seen. When the key is ABSENT
 /// (confirmed on a real checkpoint, LFM2.5-8B-A1B -- see
-/// [`ModelArchitecture::head_dim`]'s own doc), falls back to
+/// [`ModelHparams::head_dim`]'s own doc), falls back to
 /// `embedding / query_heads` instead of [`InteropError::MissingMetadataKey`].
 ///
 /// `kv_heads_by_layer` reads `{architecture}.attention.head_count_kv` as a
 /// scalar expanded across all layers or as the checkpoint's own per-layer
 /// array. `kv_heads` remains the uniform compatibility view; it is zero when
 /// that array varies, and uniform builders must call
-/// [`ModelArchitecture::uniform_kv_heads`] before using it.
+/// [`ModelHparams::uniform_kv_heads`] before using it.
 ///
 /// # Errors
 ///
@@ -510,7 +510,7 @@ impl ModelArchitecture {
 /// exactly one entry per block;
 /// [`InteropError::VocabShapeMismatch`] if `token_embd.weight`'s element
 /// count does not divide evenly by `embedding_length`.
-/// [`ModelArchitecture::head_dim`]'s three-way derivation, in priority
+/// [`ModelHparams::head_dim`]'s three-way derivation, in priority
 /// order: `{architecture}.attention.key_length` first (the real per-head
 /// projection width GGUF's own writer declares -- present and authoritative
 /// on Qwen3, whose `embedding / query_heads` quotient (1024/16 = 64)
@@ -519,7 +519,7 @@ impl ModelArchitecture {
 /// full-rotation architecture's rotary width already equals its head width,
 /// confirmed on openchat-3.5, which has neither key and falls through to the
 /// quotient); the derived quotient last, for a checkpoint with neither key
-/// (LFM2.5-8B-A1B, confirmed via [`ModelArchitecture::head_dim`]'s own
+/// (LFM2.5-8B-A1B, confirmed via [`ModelHparams::head_dim`]'s own
 /// original doc).
 fn head_dim_from_metadata(
     parsed: &ParsedGguf,
@@ -595,7 +595,7 @@ pub(crate) fn tensor_bytes_by_class(parsed: &ParsedGguf) -> (u64, u64, u64) {
     (dense_bytes, expert_bytes, table_bytes)
 }
 
-pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitecture, InteropError> {
+pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelHparams, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &alloc::format!("{architecture}.embedding_length"))?;
     let dense_feed_forward = metadata_u32(
@@ -652,7 +652,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         &alloc::format!("{architecture}.attention.layer_norm_rms_epsilon"),
         RMS_EPSILON_DEFAULT,
     );
-    Ok(ModelArchitecture {
+    Ok(ModelHparams {
         vocab,
         embedding,
         feed_forward,
@@ -2145,7 +2145,7 @@ fn quantized_block_as_owned_bytes(
 /// through to the plain contiguous-stack path unchanged.
 #[cfg(feature = "std")]
 pub(crate) fn build_expert_slab<'file>(
-    architecture: &ModelArchitecture,
+    architecture: &ModelHparams,
     program: &[Op],
     weights: &BoundWeights<'file>,
 ) -> crate::expert_slab::ExpertSlab<'file> {
@@ -2976,7 +2976,7 @@ mod tests {
             .expect("derive architecture from real metadata keys");
         assert_eq!(
             architecture,
-            ModelArchitecture {
+            ModelHparams {
                 vocab: 3,
                 embedding: 8,
                 feed_forward: 32,
@@ -3113,7 +3113,7 @@ mod tests {
 
     /// A checkpoint absent `{architecture}.rope.dimension_count` entirely
     /// (confirmed real on LFM2.5-8B-A1B, `bind.rs`'s own doc on
-    /// [`ModelArchitecture::head_dim`]) must derive `head_dim` as
+    /// [`ModelHparams::head_dim`]) must derive `head_dim` as
     /// `embedding / query_heads` rather than
     /// [`InteropError::MissingMetadataKey`] -- this fixture's own
     /// embedding=8, query_heads=2 implies head_dim=4, matching what this
@@ -3202,8 +3202,8 @@ mod tests {
 
     /// `{architecture}.attention.head_count_kv` stored as a per-layer array
     /// whose entries genuinely differ must remain configuration data in
-    /// [`ModelArchitecture`]. A uniform builder can still reject it through
-    /// [`ModelArchitecture::uniform_kv_heads`], but parsing must not erase
+    /// [`ModelHparams`]. A uniform builder can still reject it through
+    /// [`ModelHparams::uniform_kv_heads`], but parsing must not erase
     /// the locations or select a representative layer.
     #[test]
     fn architecture_from_metadata_preserves_a_heterogeneous_head_count_kv_array() {
@@ -3260,7 +3260,7 @@ mod tests {
     /// (Qwen3's real `1_000_000.0`, Llama 3's real `500_000.0`) must have
     /// `architecture_from_metadata` read that value, not silently fall back
     /// to a hardcoded default -- the exact defect this test is named for:
-    /// before `ModelArchitecture` carried a `rope_freq_base` field at all,
+    /// before `ModelHparams` carried a `rope_freq_base` field at all,
     /// this assertion could not even be written, let alone pass, and every
     /// production call site used a bare `10_000.0` constant regardless of
     /// what a checkpoint declared.
@@ -7487,7 +7487,7 @@ mod real_lfm2_hybrid_file {
     /// the array as `kv_heads_by_layer` and leaves the uniform `kv_heads` view
     /// at zero; a consumer that needs one scalar gets the NAMED error
     /// ([`InteropError::HeterogeneousMetadataArray`]) from
-    /// [`ModelArchitecture::uniform_kv_heads`], never a silently wrong scalar.
+    /// [`ModelHparams::uniform_kv_heads`], never a silently wrong scalar.
     #[test]
     #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
     fn architecture_from_metadata_names_the_heterogeneous_kv_heads_honestly() {

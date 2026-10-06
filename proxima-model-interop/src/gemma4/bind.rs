@@ -14,7 +14,7 @@
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{ModelDescriptor, gemma4_descriptor_from_gguf};
 
-use crate::bind::{ModelArchitecture, SlidingRope, find_tensor, metadata_str};
+use crate::bind::{ModelHparams, SlidingRope, find_tensor, metadata_str};
 use crate::error::InteropError;
 use crate::lowering::KvLayout;
 use crate::profiles::family_profile;
@@ -53,7 +53,7 @@ fn head_repeats_from_env() -> u32 {
 pub(crate) fn header(
     parsed: &ParsedGguf,
     layout: KvLayout,
-) -> Result<(ModelDescriptor, ModelArchitecture), InteropError> {
+) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
     let hparams = from_metadata(parsed)?;
     let descriptor = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
     #[cfg(feature = "instrument")]
@@ -61,7 +61,7 @@ pub(crate) fn header(
         head_repeats: head_repeats_from_env(),
         ..descriptor
     };
-    let architecture = ModelArchitecture {
+    let architecture = ModelHparams {
         vocab: hparams.vocab,
         embedding: hparams.embedding,
         feed_forward: hparams.feed_forward,
@@ -94,7 +94,7 @@ pub(crate) fn header(
 /// `blk.9`, `blk.14` on the real `gemma4:e2b-it-qat` checkpoint) carry a
 /// real `attn_v.weight` regardless of sliding vs full. This test builds the
 /// ACTUAL forward program `crate::lowering::bind_checkpoint` builds (not a hand-simulated
-/// stand-in) for a synthetic E2B-shaped [`Architecture`] whose
+/// stand-in) for a synthetic E2B-shaped [`Gemma4Hparams`] whose
 /// `sliding_window_pattern`/`shared_kv_layers`/`block_count` are the real
 /// checkpoint's own measured values (a real header dump against
 /// `~/.ollama/models/blobs/sha256-3646b4c...` on 2026-09-20), then asserts
@@ -107,7 +107,7 @@ pub(crate) fn header(
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
     use proxima_tensor::spec::{ForwardProgram, build_forward};
-    use crate::gemma4::Architecture;
+    use crate::gemma4::Gemma4Hparams;
     use arrayvec::ArrayVec;
     use proxima_tensor::spec::{CacheStrategy, KeySourceKind};
     use proxima_gguf::types::GgmlType;
@@ -122,7 +122,7 @@ mod declared_leaves_match_bound_leaves_tests {
     /// gate this test exercises. Written by the real GGUF encoder and
     /// parsed back by the real decoder; `token_embd.weight` is a 1-row
     /// table so vocab resolves.
-    fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, Architecture) {
+    fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, Gemma4Hparams) {
         let mut feed_forward = alloc::vec![6144u32; 15];
         feed_forward.extend(alloc::vec![12288u32; 20]);
         let u32_array = |values: Vec<u32>| MetadataValue::Array(MetadataArray::U32(values));
@@ -175,7 +175,7 @@ mod declared_leaves_match_bound_leaves_tests {
     /// tensor for: own-KV layers carry K and its norm, and V where the
     /// sliding pattern or a shared-KV header says so.
     fn stored_leaf_names(
-        architecture: &Architecture,
+        architecture: &Gemma4Hparams,
         suffix: &str,
     ) -> alloc::collections::BTreeSet<String> {
         let first_shared_idx = architecture

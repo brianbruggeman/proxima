@@ -8,7 +8,7 @@
 //! forward-program builder (`qwen35moe_forward_program_at_width`, never a
 //! second hand-rolled copy of its graph) over a small SYNTHETIC checkpoint --
 //! `hybrid_moe_program_builds_one_gdn_and_one_attention_layer`'s own
-//! `Architecture` literal, widened to 4 layers/8 experts so the graph still
+//! `Qwen35MoeHparams` literal, widened to 4 layers/8 experts so the graph still
 //! contains at least one GDN layer, one full-attention layer, and one MoE
 //! block -- and compares every layer's `block_output`
 //! (`Qwen35MoeLayerDiagnostics::block_output`) between the CPU reference and
@@ -18,7 +18,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-use proxima_model_interop::qwen35moe::hparams::{Architecture, LayerKind};
+use proxima_model_interop::qwen35moe::hparams::{Qwen35MoeHparams, LayerKind};
 use proxima_model_interop::qwen35moe::qwen35moe_forward_program_at_width;
 use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
@@ -37,7 +37,7 @@ const WIDTH: u32 = 13;
 /// `ffn_up_exps` row can be and still be one whole Q4_K block, keeping the
 /// MoE small per the brief while every quantized leaf's trailing axis stays
 /// `QK_K`-aligned (2048, 4096, 8192, 512, 256 are all multiples of 256).
-fn real_dims_architecture(layer_count: u32) -> Architecture {
+fn real_dims_architecture(layer_count: u32) -> Qwen35MoeHparams {
     let layer_kinds = (0..layer_count)
         .map(|layer| LayerKind::from_interval(layer, 4))
         .collect::<Vec<_>>();
@@ -48,7 +48,7 @@ fn real_dims_architecture(layer_count: u32) -> Architecture {
             LayerKind::Attention => 2,
         })
         .collect();
-    Architecture {
+    Qwen35MoeHparams {
         vocab: 32,
         embedding: 2048,
         query_heads: 16,
@@ -127,7 +127,7 @@ fn quantize_rows(values: &[f32], row_length: usize) -> Vec<u8> {
 /// `layer_count<4` every layer stays GDN, which is how the layer-count sweep
 /// below isolates whether the defect needs a full-attention layer present at
 /// all) and 8 experts top-2 so the MoE block's `top_k>1` branch is exercised.
-fn synthetic_architecture(layer_count: u32) -> Architecture {
+fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
     let layer_kinds = (0..layer_count)
         .map(|layer| LayerKind::from_interval(layer, 4))
         .collect::<Vec<_>>();
@@ -138,7 +138,7 @@ fn synthetic_architecture(layer_count: u32) -> Architecture {
             LayerKind::Attention => 1,
         })
         .collect();
-    Architecture {
+    Qwen35MoeHparams {
         vocab: 16,
         embedding: 8,
         query_heads: 2,

@@ -3,10 +3,10 @@
 //! same `(new_count, kv_bucket_extent, outputs)` plan key
 //! `residency_caches.rs:1878` (`Self::evaluate`'s own `shape` tuple)
 //! resolves against. Binds the exact program
-//! [`proxima_model_interop::Architecture::bind`] builds for gemma4
-//! (`Gemma4Arch::bind` -> `bind_gemma4_with_last_row_only(.., true)`,
-//! private to `proxima-model-interop`, so this test calls the trait method
-//! via the public [`GEMMA4`] static instead of reproducing its body), then
+//! [`proxima_model_interop::bind_checkpoint`] builds for gemma4 (the
+//! sliding-pattern header reader's descriptor, lowered and bound by the one
+//! generic pipeline, so this test calls the public function instead of
+//! reproducing its body), then
 //! runs [`proxima_tensor::bind_with_fusion`] TWICE over that SAME program:
 //! once with `fuse_cached_attention: false` (the PRODUCTION shape --
 //! `bind_cached_attention_fusion`'s own early return,

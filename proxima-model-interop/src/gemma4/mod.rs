@@ -11,4 +11,4 @@ pub mod program;
 
 pub use bind::descriptor_from_gguf;
 pub(crate) use bind::header;
-pub use hparams::{Architecture, from_metadata};
+pub use hparams::{Gemma4Hparams, from_metadata};

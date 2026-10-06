@@ -186,12 +186,12 @@ pub enum InteropError {
     /// all equal -- confirmed against a real hybrid checkpoint
     /// (LFM2.5-8B-A1B, whose convolution layers report `0` kv heads and
     /// whose attention layers report a real count in the SAME array).
-    /// [`crate::bind::ModelArchitecture`]'s single `u32` field cannot
+    /// [`crate::bind::ModelHparams`]'s single `u32` field cannot
     /// represent genuine per-layer variation, so this surfaces as a typed,
     /// named gap rather than silently picking one layer's value (the max,
     /// the first nonzero, ...) and presenting it as if it applied uniformly.
     #[error(
-        "gguf metadata key {key:?} has {distinct_values} distinct per-layer values; ModelArchitecture cannot represent per-layer variation"
+        "gguf metadata key {key:?} has {distinct_values} distinct per-layer values; ModelHparams cannot represent per-layer variation"
     )]
     HeterogeneousMetadataArray { key: String, distinct_values: usize },
 
@@ -433,7 +433,7 @@ pub enum InteropError {
     UndecodableSafetensorsDType { tensor: String, dtype: DType },
 
     /// `crate::hf_bind::bind_all_weights_from_safetensors` was asked to
-    /// bind a checkpoint whose [`crate::bind::ModelArchitecture::expert_count`]
+    /// bind a checkpoint whose [`crate::bind::ModelHparams::expert_count`]
     /// is nonzero -- HF's own mixture-of-experts tensor-naming convention
     /// (Mixtral's per-expert `block_sparse_moe.experts.{e}.*` vs. Qwen's
     /// `mlp.experts.{e}.*`, neither confirmed against a real on-disk
@@ -451,10 +451,10 @@ pub enum InteropError {
     /// nonzero entries (the real attention layers' own kv head count)
     /// disagree with each other -- the zero entries (convolution layers)
     /// are expected and skipped, but every attention layer must still
-    /// share one real kv head count for `crate::lfm2::Lfm2Architecture::kv_heads`
+    /// share one real kv head count for `crate::lfm2::Lfm2Hparams::kv_heads`
     /// to mean anything.
     #[error(
-        "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Architecture cannot represent per-layer variation"
+        "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Hparams cannot represent per-layer variation"
     )]
     HeterogeneousNonzeroMetadataArray { key: String, distinct_values: usize },
 

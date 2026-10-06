@@ -14,7 +14,7 @@
 //!
 //! RoPE pairing is profile data (`rope_layout`), never inferred from QK-norm
 //! tensors. This reader compares no family name:
-//! [`crate::bind::ModelArchitecture::family`] keys
+//! [`crate::bind::ModelHparams::family`] keys
 //! [`crate::profiles::family_profile`], and the profile's `rope_layout` rides
 //! into the one generic [`build_forward`] call every family takes. A family with
 //! no profile is an error, never a default.
@@ -26,7 +26,7 @@ use proxima_tensor::spec::{
 };
 
 use crate::bind::{
-    ModelArchitecture, architecture_from_metadata, checkpoint_has_qk_norm, checkpoint_qkv_biases,
+    ModelHparams, architecture_from_metadata, checkpoint_has_qk_norm, checkpoint_qkv_biases,
     metadata_f32_optional, metadata_u32_optional,
 };
 use crate::error::InteropError;
@@ -40,7 +40,7 @@ use crate::task::{ModelTask, classify_task};
 ///
 /// Whatever [`architecture_from_metadata`] and [`descriptor_from_gguf`] can
 /// fail with.
-pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelArchitecture), InteropError> {
+pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
     let architecture = architecture_from_metadata(parsed)?;
     let descriptor = descriptor_from_gguf(parsed, &architecture)?;
     Ok((descriptor, architecture))
@@ -59,12 +59,12 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelArchi
 /// per-layer KV head counts differ (this program has one cache shape).
 pub fn descriptor_from_gguf(
     parsed: &ParsedGguf,
-    architecture: &ModelArchitecture,
+    architecture: &ModelHparams,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(&architecture.family)?;
     require_full_rotary(parsed, architecture)?;
     // This builder has one KV cache shape for every attention layer. Preserve a
-    // checkpoint's per-layer configuration in `ModelArchitecture`, but
+    // checkpoint's per-layer configuration in `ModelHparams`, but
     // do not silently select a representative value for this uniform
     // program.
     let kv_heads = architecture.uniform_attention_kv_heads()?;
@@ -104,7 +104,7 @@ pub fn descriptor_from_gguf(
 fn with_conv_layers(
     descriptor: ModelDescriptor,
     parsed: &ParsedGguf,
-    architecture: &ModelArchitecture,
+    architecture: &ModelHparams,
 ) -> Result<ModelDescriptor, InteropError> {
     let kinds = layer_kinds(parsed, architecture)?;
     if kinds.iter().all(|kind| *kind == LayerKind::Attention) {
@@ -127,7 +127,7 @@ fn with_conv_layers(
     })
 }
 
-fn layer_kinds(parsed: &ParsedGguf, architecture: &ModelArchitecture) -> Result<Vec<LayerKind>, InteropError> {
+fn layer_kinds(parsed: &ParsedGguf, architecture: &ModelHparams) -> Result<Vec<LayerKind>, InteropError> {
     let names: Vec<&str> = parsed.tensors.iter().map(|tensor| tensor.name.as_str()).collect();
     architecture
         .kv_heads_by_layer
@@ -203,7 +203,7 @@ fn with_header_scales(descriptor: ModelDescriptor, parsed: &ParsedGguf, family: 
 /// The single-range builder rotates `head_dim` channels. A header whose
 /// `<arch>.rope.dimension_count` says otherwise is partial rotary, which this
 /// program cannot lower; refuse it rather than rotate the wrong width.
-fn require_full_rotary(parsed: &ParsedGguf, architecture: &ModelArchitecture) -> Result<(), InteropError> {
+fn require_full_rotary(parsed: &ParsedGguf, architecture: &ModelHparams) -> Result<(), InteropError> {
     let key = format!("{}.rope.dimension_count", architecture.family);
     match metadata_u32_optional(parsed, &key) {
         0 => Ok(()),
@@ -278,8 +278,8 @@ mod tests {
         )
     }
 
-    fn llama_architecture() -> ModelArchitecture {
-        ModelArchitecture {
+    fn llama_architecture() -> ModelHparams {
+        ModelHparams {
             vocab: 32000,
             embedding: 4096,
             feed_forward: 14336,

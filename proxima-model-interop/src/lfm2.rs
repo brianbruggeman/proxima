@@ -1,4 +1,4 @@
-//! LFM2.5-8B-A1B's hybrid checkpoint as data: [`Lfm2Architecture`] reads this
+//! LFM2.5-8B-A1B's hybrid checkpoint as data: [`Lfm2Hparams`] reads this
 //! architecture's own metadata shape -- a per-layer `head_count_kv` array whose
 //! zero entries mark short-convolution layers ([`crate::bind::architecture_from_metadata`]
 //! reads the array; the dense descriptor builder
@@ -35,12 +35,12 @@ use crate::rope_scaling::{RopeScaling, f32_from_u32};
 
 /// Every hparam [`build_forward`] needs, derived from a
 /// real `lfm2moe`-architecture checkpoint's own metadata --
-/// [`crate::bind::ModelArchitecture`]'s hybrid-checkpoint counterpart, not
+/// [`crate::bind::ModelHparams`]'s hybrid-checkpoint counterpart, not
 /// a variant of it: that struct's single `kv_heads: u32` and lack of a
 /// `layer_kinds`/`leading_dense_block_count`/`l_cache` field mean it cannot
 /// describe this architecture at all, not even partially.
 #[derive(Debug, Clone)]
-pub struct Lfm2Architecture {
+pub struct Lfm2Hparams {
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
@@ -77,7 +77,7 @@ pub struct Lfm2Architecture {
 /// present (`0.00001`), so this fallback is unexercised there.
 const LFM2_RMS_EPSILON_DEFAULT: f32 = 1e-5;
 
-/// Derives [`Lfm2Architecture`] from `parsed`'s own metadata --
+/// Derives [`Lfm2Hparams`] from `parsed`'s own metadata --
 /// [`crate::bind::architecture_from_metadata`]'s hybrid-checkpoint
 /// counterpart. Reads `general.architecture` itself (`lfm2moe` on the real
 /// checkpoint, not `lfm2`) rather than assuming it, the same "read the
@@ -95,7 +95,7 @@ const LFM2_RMS_EPSILON_DEFAULT: f32 = 1e-5;
 /// short-convolution marker.
 pub fn lfm2_architecture_from_metadata(
     parsed: &ParsedGguf,
-) -> Result<Lfm2Architecture, InteropError> {
+) -> Result<Lfm2Hparams, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &format!("{architecture}.embedding_length"))?;
     let feed_forward = metadata_u32(parsed, &format!("{architecture}.feed_forward_length"))?;
@@ -134,7 +134,7 @@ pub fn lfm2_architecture_from_metadata(
 
     let layers = lfm2_descriptor(parsed)?.layers;
 
-    Ok(Lfm2Architecture {
+    Ok(Lfm2Hparams {
         vocab,
         embedding,
         feed_forward,
@@ -298,7 +298,7 @@ fn lower_and_bind<'file>(
 pub fn lfm2_forward_values(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
-    architecture: &Lfm2Architecture,
+    architecture: &Lfm2Hparams,
     ids: &[u32],
     extra_node_ids: &[NodeId],
 ) -> Result<(Vec<f32>, Vec<Vec<f32>>), InteropError> {

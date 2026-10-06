@@ -1,6 +1,6 @@
 //! Census of what `NumericPolicy::epilogue_sources` changes in gemma4-E2B's
 //! single-token decode plan: binds the production decode program
-//! (`Architecture::bind` -> `bind_with_fusion` with `fuse_cached_attention:
+//! (`bind_checkpoint` -> `bind_with_fusion` with `fuse_cached_attention:
 //! false`, the same shape `gemma4_attention_chain_census.rs` binds) once with
 //! the switch off and once on, prunes dead nodes the way `omega`'s plan
 //! preparation does, and compares the resolved op counts and per-kind

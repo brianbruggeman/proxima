@@ -1475,7 +1475,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
 /// or [`ContextLength::Extrapolate`]), or for [`ContextLength::Native`] the
 /// limit `scaling` admits over `trained` ([`RopeScaling::limit`]). `trained` is the
 /// checkpoint's own `{arch}.context_length`
-/// (`Architecture::trained_context_length`), so a default request never
+/// ([`crate::lowering::trained_context_length`]), so a default request never
 /// silently runs past what the checkpoint was trained for.
 ///
 /// # Errors

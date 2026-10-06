@@ -7,7 +7,7 @@
 //! real weight file. Random weights of the RIGHT shape and quant mix are
 //! sufficient for both: neither depends on weight VALUES, only on tensor
 //! byte layout and the op graph [`proxima_tensor::spec::qwen35_forward_program`]
-//! builds from [`Qwen35Architecture`]'s hparams.
+//! builds from [`Qwen35Hparams`]'s hparams.
 //!
 //! Composes [`proxima_gguf::writer::write_complete`] (the existing sans-IO
 //! GGUF writer -- no new writer needed, `grep GgufWriter` found this one

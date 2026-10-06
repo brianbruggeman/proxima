@@ -39,7 +39,7 @@ use proxima_tensor::cpu::QuantizedBlock;
 
 use crate::Codec;
 use crate::bind::{
-    BoundWeights, ModelArchitecture, aligned_f32_view, dequantize, reinterpret_f32,
+    BoundWeights, ModelHparams, aligned_f32_view, dequantize, reinterpret_f32,
     transpose_out_in_to_in_out,
 };
 use crate::error::InteropError;
@@ -559,7 +559,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
     data_start: u64,
-    architecture: &ModelArchitecture,
+    architecture: &ModelHparams,
 ) -> Result<BoundWeights<'file>, InteropError> {
     if architecture.expert_count != 0 {
         return Err(InteropError::HfMoeWeightsUnsupported {
@@ -751,8 +751,8 @@ mod tests {
     /// (GQA), head_dim=2, vocab=3 -- every dimension distinct so a
     /// transposed or mis-shaped bind would produce a length mismatch, not
     /// silently pass.
-    fn tiny_dense_architecture() -> ModelArchitecture {
-        ModelArchitecture {
+    fn tiny_dense_architecture() -> ModelHparams {
+        ModelHparams {
             vocab: 3,
             embedding: 4,
             feed_forward: 8,
@@ -1027,7 +1027,7 @@ mod tests {
     /// without duplicating every other tensor
     /// [`bind_all_weights_from_safetensors`] looks up.
     fn dense_checkpoint_with_extra_tensors(
-        architecture: &ModelArchitecture,
+        architecture: &ModelHparams,
         extra: &[(String, usize)],
     ) -> Vec<u8> {
         let embedding = architecture.embedding as usize;
