@@ -1,7 +1,5 @@
 use core::ops::ControlFlow;
 
-use alloc::collections::VecDeque;
-
 use proxima_core::{ServingFsmError, ServingState};
 
 use super::*;
@@ -3028,8 +3026,75 @@ impl<'file> LoadedModel<'file> {
     /// [`Self::run_decode_loop_observed_seeded`]'s body from the tokenized
     /// `ids` on: `ids` are the tokens to prefill, continuing `seed`'s
     /// sequence when there is one.
+    ///
+    /// [`Self::drive_serving_loop`], then the monolithic expert-source
+    /// release a qwen35moe all-low run owes on every exit, the error ones
+    /// included: the serving loop's `?` returns leave no point after the loop
+    /// where the release could run.
     #[allow(clippy::too_many_arguments)] // the seeded loop's own parameter list, split at the tokenization
     pub(super) fn run_decode_loop_from_ids(
+        &self,
+        ids: Vec<u32>,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        token_override: Option<&[u32]>,
+        logits_sink: &mut LogitsSink,
+        node_values_sink: &mut NodeValuesSink,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        seed: Option<PrefixState>,
+        force_two_range: bool,
+        speculative_stats: Option<&mut SpeculativeDecodeStats>,
+        forced_draft_width: Option<u16>,
+    ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let outcome = self.drive_serving_loop(
+            ids,
+            max_tokens,
+            serving_config,
+            runtime,
+            token_override,
+            logits_sink,
+            node_values_sink,
+            on_token,
+            seed,
+            force_two_range,
+            speculative_stats,
+            forced_draft_width,
+        );
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if should_release_monolithic_sources(
+            self.monolithic_all_low_requested(serving_config, runtime),
+            runtime.retain_monolithic_prefill_sources,
+        ) {
+            clear_expert_source_cache();
+        }
+        outcome
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn monolithic_all_low_requested(
+        &self,
+        serving_config: &ServingConfig,
+        runtime: &BackendRuntime,
+    ) -> bool {
+        qwen35moe_monolithic_all_low_enabled(
+            qwen35moe_pre_gather_enabled(
+                serving_config.qwen35moe_pre_gather,
+                self.architecture_impl.is_some_and(|architecture| {
+                    architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
+                }),
+            ),
+            runtime.uses_gpu(),
+            serving_config.qwen35moe_monolithic_all_low,
+            0,
+        )
+    }
+
+    /// The serving loop: one [`ServingState`] driven step by step, each step's
+    /// evaluation settled into the state and each settled token delivered
+    /// through [`deliver_token`].
+    #[allow(clippy::too_many_arguments)] // the seeded loop's own parameter list, split at the tokenization
+    fn drive_serving_loop(
         &self,
         ids: Vec<u32>,
         max_tokens: usize,
@@ -3173,12 +3238,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(not(feature = "metal"))]
         let monolithic_high_mmap_requested = false;
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        let monolithic_all_low_requested = qwen35moe_monolithic_all_low_enabled(
-            qwen35_pre_gather_requested,
-            runtime.uses_gpu(),
-            serving_config.qwen35moe_monolithic_all_low,
-            0,
-        );
+        let monolithic_all_low_requested = self.monolithic_all_low_requested(serving_config, runtime);
         #[cfg(feature = "metal")]
         if qwen35_pre_gather_requested && !monolithic_high_mmap_requested {
             // A whole-checkpoint MTLBuffer makes mmap look cheap while still
@@ -3558,12 +3618,8 @@ impl<'file> LoadedModel<'file> {
         // Default-on speculative decode (ngram-simple; `SpeculativeConfig::none()`
         // turns it off) (gemma4-only -- see
         // [`Self::speculative_verify_program`]'s own doc): built once, here,
-        // outside the closure, matching [`prefill_one_evaluation_requested`]'s
-        // own config-gate shape. `pending` is the queue-draining FSM's own
-        // state -- popped from at the top of every closure call before any
-        // forward runs, and pushed onto by the speculative verify branch
-        // below whenever it accepts more than one token in a single pass.
-        // `DrafterSet` drives every enabled n-gram type in llama's own
+        // outside the decode loop, matching [`prefill_one_evaluation_requested`]'s
+        // own config-gate shape. `DrafterSet` drives every enabled n-gram type in llama's own
         // priority order (`drafter.rs`'s own doc); `apply_serving_config`
         // already rejects the unwired draft-model types before this call is
         // reached. `begin` trains `ngram-map`/`ngram-mod`'s own index over
@@ -3578,7 +3634,6 @@ impl<'file> LoadedModel<'file> {
         // speculation stays off for that call rather than rewinding inexactly.
         let speculative_enabled = (!drafter_set.is_empty() || forced_draft_width.is_some())
             && rings_cover_speculation(&layer_caches, draft_limit);
-        let mut pending: VecDeque<u32> = VecDeque::new();
         // One draft buffer, reused every step -- every drafter's own
         // `draft()` clears and refills it, never allocates, and never
         // appends onto a stale draft (the "else" branch below clears it
@@ -3640,17 +3695,18 @@ impl<'file> LoadedModel<'file> {
         let block_tokens = serving_config.prompt_cache.block_tokens as usize;
         let seal_horizon_rows = serving_config.prompt_cache.seal_horizon_rows as usize;
         let summarizer = self.block_summarizer;
-        let decode_result = decode_until_stop_or_budget(
-            &self.vocab,
-            max_tokens,
-            prompt_token_count,
-            |_step| {
+        let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
+        let mut stopped_by_eos = false;
+        let mut pending_bytes: Vec<u8> = Vec::new();
+        let mut unigram_leading_space_trimmed = false;
+        let mut settled_tokens: Vec<u32> = Vec::with_capacity(draft_limit + 1);
+        let loop_started = std::time::Instant::now();
+        let mut step = 0usize;
+        'decode: while step < max_tokens {
+            settled_tokens.clear();
+            'evaluate: {
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                omega::set_capture_step(_step as u64);
-                if let Some(queued) = pending.pop_front() {
-                    debug!(step = _step as u64, "speculative_pending_pop");
-                    return Ok(queued);
-                }
+                omega::set_capture_step(step as u64);
                 let mut state = serving.take().ok_or(ServingFsmError::IllegalTransition {
                     attempted: "evaluate_without_state",
                 })?;
@@ -3719,7 +3775,7 @@ impl<'file> LoadedModel<'file> {
                         drafter_context_length as usize,
                         cached_len,
                         max_tokens,
-                        _step,
+                        step,
                     );
                     if let Some(forced_width) = forced_draft_width {
                         speculative_draft.clear();
@@ -3834,7 +3890,7 @@ impl<'file> LoadedModel<'file> {
                     // (`one_evaluation_prefill_programs`, built once before
                     // this closure, one per distinct chunk width -- never
                     // per step, since `next_ids.len() > 1` is only ever true
-                    // on `_step == 0`) rather than a swap into `self`'s own
+                    // on `step == 0`) rather than a swap into `self`'s own
                     // fields: this closure only holds `&self`, and
                     // `self.resident_names()`'s own borrowed `BTreeSet<&str>`
                     // (computed once, above) is already live across every
@@ -4028,7 +4084,7 @@ impl<'file> LoadedModel<'file> {
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 cached_len = cached_len as u64,
                                 resident_layers = device_resident_flags
                                     .iter()
@@ -4038,7 +4094,7 @@ impl<'file> LoadedModel<'file> {
                             );
                         } else {
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 cached_len = cached_len as u64,
                                 "device_kv_declined: a host cache did not hold exactly the cached positions"
                             );
@@ -4099,7 +4155,7 @@ impl<'file> LoadedModel<'file> {
                             None => {
                                 greedy_declined = true;
                                 debug!(
-                                    step = _step as u64,
+                                    step = step as u64,
                                     "greedy_device_declined: the logits root does not take the argmax ops"
                                 );
                             }
@@ -4109,7 +4165,7 @@ impl<'file> LoadedModel<'file> {
                     let greedy_step = greedy_program.is_some()
                         && !speculative_step
                         && step_batch_needs_logits(split_prefill, is_last_step_batch)
-                        && token_override.is_none_or(|forced| forced.get(_step).is_none());
+                        && token_override.is_none_or(|forced| forced.get(step).is_none());
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let active_program: &[Op] = match &greedy_program {
                         Some((program, ..)) if greedy_step => program,
@@ -4182,7 +4238,7 @@ impl<'file> LoadedModel<'file> {
                             architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
                         }),
                     ) && runtime.uses_gpu()
-                        && _step == 0
+                        && step == 0
                         && serving_config.qwen35moe_monolithic_all_low;
                     if step_batch_needs_logits(split_prefill, is_last_step_batch) {
                         roots.push(active_logits_root);
@@ -4414,9 +4470,9 @@ impl<'file> LoadedModel<'file> {
                         feature = "metal-output-placement",
                         target_os = "macos"
                     ))]
-                    if attn_fuse_parity_target_steps().contains(&_step) {
+                    if attn_fuse_parity_target_steps().contains(&step) {
                         run_attn_fuse_parity_probe(
-                            _step,
+                            step,
                             active_program,
                             &symbols,
                             &named_blocks,
@@ -4586,7 +4642,7 @@ impl<'file> LoadedModel<'file> {
                         pre_gather,
                         runtime.uses_gpu(),
                         serving_config.qwen35moe_monolithic_all_low,
-                        _step,
+                        step,
                     );
                     #[cfg(not(feature = "metal"))]
                     let monolithic_all_low = false;
@@ -4810,7 +4866,7 @@ impl<'file> LoadedModel<'file> {
                     let monolithic_profile_target = std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
                         .ok()
                         .and_then(|value| value.parse::<usize>().ok())
-                        == Some(_step);
+                        == Some(step);
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     #[cfg(not(feature = "instrument"))]
                     let monolithic_profile_target = false;
@@ -4832,7 +4888,7 @@ impl<'file> LoadedModel<'file> {
                         std::env::var("PROXIMA_METAL_DISPATCH_PROFILE_STEP")
                             .ok()
                             .and_then(|value| value.parse::<usize>().ok())
-                            == Some(_step);
+                            == Some(step);
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     #[cfg(not(feature = "instrument"))]
                     let dispatch_profile_target = false;
@@ -4858,7 +4914,7 @@ impl<'file> LoadedModel<'file> {
                                         &resident_names,
                                         expert_sources,
                                     )?;
-                                report_op_timings(_step, &timings, active_program);
+                                report_op_timings(step, &timings, active_program);
                                 evaluated
                             } else {
                                 let (evaluated, timings, sampling_mode, _split_ns) = runtime
@@ -4872,10 +4928,10 @@ impl<'file> LoadedModel<'file> {
                                         &ssm_output_placements,
                                     )?;
                                 info!(
-                                    step = _step as u64,
+                                    step = step as u64,
                                     sampling_mode, "dispatch_profile: qwen35moe full graph"
                                 );
-                                report_op_timings(_step, &timings, active_program);
+                                report_op_timings(step, &timings, active_program);
                                 evaluated
                             }
                         }
@@ -4972,10 +5028,10 @@ impl<'file> LoadedModel<'file> {
                                     &[],
                                 )?;
                             info!(
-                                step = _step as u64,
+                                step = step as u64,
                                 sampling_mode, "dispatch_profile: two-range full graph"
                             );
-                            report_op_timings(_step, &timings, active_program);
+                            report_op_timings(step, &timings, active_program);
                             encoder_split_ns = split_ns;
                             evaluated
                         }
@@ -5050,7 +5106,7 @@ impl<'file> LoadedModel<'file> {
                             expert_source_substitutions,
                         )?
                     };
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && _step == 0 {
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in
                             self.qwen35moe_layer_diagnostics.iter().enumerate()
                         {
@@ -5090,7 +5146,7 @@ impl<'file> LoadedModel<'file> {
                             }
                         }
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_DIGEST").is_some() && _step == 0 {
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in
                             self.qwen35moe_layer_diagnostics.iter().enumerate()
                         {
@@ -5140,7 +5196,7 @@ impl<'file> LoadedModel<'file> {
                             }
                         }
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && _step == 0 {
+                    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in
                             self.qwen35moe_layer_diagnostics.iter().enumerate()
                         {
@@ -5254,12 +5310,12 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                     if let Some(split_ns) = encoder_split_ns {
                         report_encoder_split(
-                            _step,
+                            step,
                             split_ns,
                             ticks_to_nanos(metal_stage.gpu_exec_ticks),
                         );
                     }
-                    if _step == 0 && split_prefill {
+                    if step == 0 && split_prefill {
                         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                         debug!(
                             batch_index = batch_index as u64,
@@ -5290,10 +5346,10 @@ impl<'file> LoadedModel<'file> {
                             "prefill_batch"
                         );
                     }
-                    if !(_step == 0 && split_prefill) {
+                    if !(step == 0 && split_prefill) {
                         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                         debug!(
-                            step = _step as u64,
+                            step = step as u64,
                             cached_len = cached_len as u64,
                             evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
                             gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
@@ -5307,7 +5363,7 @@ impl<'file> LoadedModel<'file> {
                         );
                         #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
                         debug!(
-                            step = _step as u64,
+                            step = step as u64,
                             cached_len = cached_len as u64,
                             evaluate_ms = "unavailable",
                             "token_stages"
@@ -5384,7 +5440,7 @@ impl<'file> LoadedModel<'file> {
                     }
 
                     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-                        && _step == 0
+                        && step == 0
                         && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.first()
                         && let Some(taps) = diagnostic.ssm_taps.clone()
                     {
@@ -5457,7 +5513,7 @@ impl<'file> LoadedModel<'file> {
                             }
                         }
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_ROUTER_LAYERS").is_some() && _step == 0 {
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_ROUTER_LAYERS").is_some() && step == 0 {
                         for (layer, router_node) in self.router_roots.iter().copied().enumerate() {
                             let Some((values, shape)) = evaluated.get(router_node) else {
                                 continue;
@@ -5747,7 +5803,7 @@ impl<'file> LoadedModel<'file> {
                         let (layer3_after_len, layer3_after_checksum) =
                             layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
                         debug!(
-                            step = _step as u64,
+                            step = step as u64,
                             batch_index = batch_index as u64,
                             token_fed = ids_for_step[0],
                             cached_len_before = cached_len_before_step as u64,
@@ -5805,7 +5861,7 @@ impl<'file> LoadedModel<'file> {
                     //
                     // Sample-and-match (llama.cpp's own
                     // `common_sampler_sample_and_accept_n`): row `r`'s own
-                    // token comes from `select_decoded_token` at step `_step
+                    // token comes from `select_decoded_token` at step `step
                     // + r` -- the exact same selection the non-speculative
                     // branch below makes for one step, over `token_history`
                     // grown by every already-accepted draft earlier in this
@@ -5833,7 +5889,7 @@ impl<'file> LoadedModel<'file> {
                         let mut emitted: Vec<u32> = Vec::with_capacity(rows.len());
                         for (row_index, &row) in rows.iter().enumerate() {
                             let selected = select_decoded_token(
-                                _step + row_index,
+                                step + row_index,
                                 row,
                                 &token_history,
                                 repeat_window,
@@ -5857,7 +5913,7 @@ impl<'file> LoadedModel<'file> {
                         let accepted = emitted.len() - 1;
                         let drafting_type = drafter_set.active_type();
                         debug!(
-                            step = _step as u64,
+                            step = step as u64,
                             draft_len = speculative_draft.len() as u64,
                             accepted = accepted as u64,
                             emitted = emitted.len() as u64,
@@ -5924,11 +5980,9 @@ impl<'file> LoadedModel<'file> {
                             }
                         };
                         seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows, summarizer);
-                        for &extra in &emitted[1..] {
-                            pending.push_back(extra);
-                        }
+                        settled_tokens.extend_from_slice(&emitted);
                         serving = Some(resumed);
-                        return Ok(emitted[0]);
+                        break 'evaluate;
                     }
                     if is_last_step_batch {
                         // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
@@ -5987,7 +6041,7 @@ impl<'file> LoadedModel<'file> {
                         };
                         #[cfg(feature = "instrument")]
                         debug!(
-                            step = _step as u64,
+                            step = step as u64,
                             batch_index = batch_index as u64,
                             new_count = new_count as u64,
                             logits_len = logits.len() as u64,
@@ -6016,7 +6070,7 @@ impl<'file> LoadedModel<'file> {
                         #[cfg(feature = "instrument")]
                         if std::env::var_os("PROXIMA_HEAD_REPEATS_VERIFY").is_some() {
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 production_node = active_logits_root.0,
                                 "head_repeats_verify"
                             );
@@ -6045,7 +6099,7 @@ impl<'file> LoadedModel<'file> {
                                             .filter(|value| value.is_nan())
                                             .count();
                                         debug!(
-                                            step = _step as u64,
+                                            step = step as u64,
                                             duplicate_offset = offset as u64,
                                             node = duplicate_node.0,
                                             bytes_match = matches,
@@ -6059,7 +6113,7 @@ impl<'file> LoadedModel<'file> {
                                     }
                                     None => {
                                         debug!(
-                                            step = _step as u64,
+                                            step = step as u64,
                                             duplicate_offset = offset as u64,
                                             node = duplicate_node.0,
                                             missing_from_evaluated = true,
@@ -6079,7 +6133,7 @@ impl<'file> LoadedModel<'file> {
                                     .then_with(|| left.cmp(right))
                             });
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 batch_index = batch_index as u64,
                                 top = ?ranked
                                     .iter()
@@ -6109,7 +6163,7 @@ impl<'file> LoadedModel<'file> {
                             let scan_ticks = elapsed_ticks(argmax_started);
                             let debug_started = read_ticks();
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 batch_index = batch_index as u64,
                                 cached_len = cached_len as u64,
                                 argmax_token = argmax_token as u64,
@@ -6127,7 +6181,7 @@ impl<'file> LoadedModel<'file> {
                                 proxima_tensor::instrument::ticks_to_nanos(ticks) as f64 / 1e6
                             };
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 scan_ms = ms(scan_ticks),
                                 debug_ms = ms(debug_ticks),
                                 "token_breakdown_argmax_split"
@@ -6158,7 +6212,7 @@ impl<'file> LoadedModel<'file> {
                         #[cfg(feature = "metal")]
                         if logits_diag_enabled {
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 hash = %format!("0x{:016x}", logits_bits_hash(last_position)),
                                 "logits_hash"
                             );
@@ -6171,7 +6225,7 @@ impl<'file> LoadedModel<'file> {
                                 proxima_tensor::instrument::ticks_to_nanos(ticks) as f64 / 1e6
                             };
                             debug!(
-                                step = _step as u64,
+                                step = step as u64,
                                 root_select_ms = ms(root_select_ticks),
                                 post_evaluate_ms = ms(post_evaluate_ticks),
                                 pre_logits_ms = ms(pre_logits_ticks),
@@ -6188,7 +6242,7 @@ impl<'file> LoadedModel<'file> {
                         token_id = match greedy_device_token {
                             Some(picked) => picked,
                             None => select_decoded_token(
-                                _step,
+                                step,
                                 last_position,
                                 &token_history,
                                 repeat_window,
@@ -6202,7 +6256,7 @@ impl<'file> LoadedModel<'file> {
                         let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
                         #[cfg(feature = "instrument")]
                         debug!(
-                            step = _step as u64,
+                            step = step as u64,
                             cached_len_after = (cached_len_before_step + new_count) as u64,
                             token_sampled = token_id,
                             "decode_loop_step_trace: sampled token fed forward as next step's next_ids"
@@ -6210,7 +6264,7 @@ impl<'file> LoadedModel<'file> {
                         #[cfg(feature = "instrument")]
                         {
                             emit_token_breakdown(&TokenBreakdown {
-                                step: _step,
+                                step: step,
                                 new_count,
                                 cached_len_before: cached_len_before_step,
                                 step_wall_ticks: elapsed_ticks(step_started),
@@ -6250,7 +6304,7 @@ impl<'file> LoadedModel<'file> {
                             let residual_underflow = named_ns > evaluate_ns;
                             let residual_ns = evaluate_ns.saturating_sub(named_ns);
                             info!(
-                                step = _step as u64,
+                                step = step as u64,
                                 evaluate_ms = evaluate_ns as f64 / 1e6,
                                 kernel_ms = attribution.kernel_nanos as f64 / 1e6,
                                 dispatch_ms = attribution.dispatch_nanos as f64 / 1e6,
@@ -6272,7 +6326,7 @@ impl<'file> LoadedModel<'file> {
                             let quantize_cache_hits =
                                 proxima_tensor::instrument::QUANTIZE_ACTIVATION_CACHE_HITS.get();
                             info!(
-                                step = _step as u64,
+                                step = step as u64,
                                 total_calls = quantize_total_calls,
                                 distinct_nodes = quantize_distinct_nodes,
                                 cache_hits = quantize_cache_hits,
@@ -6280,7 +6334,7 @@ impl<'file> LoadedModel<'file> {
                             );
                             #[cfg(all(feature = "metal", target_os = "macos"))]
                             emit_token_breakdown_metal(
-                                _step,
+                                step,
                                 &metal_stage,
                                 RESOLVE_PLAN_TICKS.snapshot_and_reset(),
                                 runtime.plans_len(),
@@ -6296,9 +6350,9 @@ impl<'file> LoadedModel<'file> {
                             // doc), never a separately sized device allocation --
                             // `None` here is honest, not a placeholder.
                             #[cfg(all(feature = "metal", target_os = "macos"))]
-                            if _step == 0 {
+                            if step == 0 {
                                 emit_device_memory_by_class(
-                                    _step,
+                                    step,
                                     metal_stage.block_nocopy_bound_bytes,
                                     metal_stage.block_copied_bytes,
                                     metal_stage.block_offset_bound_bytes,
@@ -6350,21 +6404,37 @@ impl<'file> LoadedModel<'file> {
                     state.advance_decode(token_id, cached_len)?
                 };
                 serving = Some(settled);
+                settled_tokens.push(token_id);
+            }
 
-                Ok(token_id)
-            },
-            on_token,
-        );
-
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if should_release_monolithic_sources(
-            monolithic_all_low_requested,
-            runtime.retain_monolithic_prefill_sources,
-        ) {
-            clear_expert_source_cache();
+            for (offset, &token_id) in settled_tokens.iter().enumerate() {
+                if step >= max_tokens {
+                    break 'decode;
+                }
+                if offset > 0 {
+                    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                    omega::set_capture_step(step as u64);
+                    debug!(step = step as u64, "speculative_settled_token");
+                }
+                let elapsed_ms = u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let delivery = deliver_token(
+                    &self.vocab,
+                    token_id,
+                    step,
+                    prompt_token_count,
+                    elapsed_ms,
+                    &mut pending_bytes,
+                    &mut unigram_leading_space_trimmed,
+                    &mut generated_ids,
+                    on_token,
+                )?;
+                if let ControlFlow::Break(by_eos) = delivery {
+                    stopped_by_eos = by_eos;
+                    break 'decode;
+                }
+                step += 1;
+            }
         }
-
-        let (generated_ids, stopped_by_eos) = decode_result?;
 
         let Some(ServingState::Done { cache: cached_len }) = serving.take().map(ServingState::finish) else {
             return Err(ServingFsmError::IllegalTransition {
