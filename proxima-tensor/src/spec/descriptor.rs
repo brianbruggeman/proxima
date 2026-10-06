@@ -14,8 +14,8 @@ pub enum CacheStrategy {
 
 /// How a cached program excludes the cache bucket's zero padding from the
 /// cached block's softmax, as data on [`ModelDescriptor::cache_mask`]. Both arms
-/// score through [`append_cached_block_scores`](super::two_block_attention) and
-/// [`append_local_block_and_combine`](super::two_block_attention); they differ
+/// score through `append_cached_block_scores` and
+/// `append_local_block_and_combine` (`two_block_attention.rs`); they differ
 /// only in the mask node the cached block carries.
 ///
 /// A program with the same layers but the other mask is a different op graph
@@ -31,7 +31,7 @@ pub enum CacheMask {
     #[default]
     Bounded,
     /// Every cached block is masked in the graph
-    /// ([`causal_mask_cached_windowed`]): padding at or past `cached_len` is
+    /// (`causal_mask_cached_windowed`): padding at or past `cached_len` is
     /// excluded by a node, and a window composes onto the same mask. The
     /// lowering for a schedule with shared KV or per-layer widths
     /// ([`lfm2_two_range_cached_forward_program_with_experts`]).
