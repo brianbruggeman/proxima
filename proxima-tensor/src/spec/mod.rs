@@ -76,6 +76,7 @@ mod lfm2_qwen35_gdn;
 mod attention_forward;
 #[macro_use]
 mod lfm2_single_range_cached;
+mod two_block_attention;
 mod descriptor;
 mod layer_runs;
 #[cfg(feature = "config")]
@@ -94,6 +95,7 @@ pub use mistral_layer_moe::*;
 pub use program_spec::*;
 pub use primitives::*;
 pub use single_range_moe_cached::*;
+use two_block_attention::{append_cached_block_scores, append_local_block_and_combine, group_queries};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

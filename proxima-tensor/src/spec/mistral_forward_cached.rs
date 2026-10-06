@@ -730,290 +730,35 @@ pub fn append_mistral_cached_layer(
         }
     };
 
-    let group_map = alloc::format!("s,{group}*u+g,i->sugi");
-    let q_even_grouped = elementwise(
+    let (q_even_grouped, q_odd_grouped) =
+        group_queries(program, rotated_q_even, rotated_q_odd, group, group_ones)?;
+    let score_cached_scaled = append_cached_block_scores(
         program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (rotated_q_even, group_map.as_str()),
-            (group_ones, "ug->sugi"),
-        ],
+        q_even_grouped,
+        q_odd_grouped,
+        k_even_cache,
+        k_odd_cache,
+        inv_sqrt_head_dim,
+        cached_window_mask,
     )?;
-    let q_odd_grouped = elementwise(
+    let (attended, score_max_cached) = append_local_block_and_combine(
         program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (rotated_q_odd, group_map.as_str()),
-            (group_ones, "ug->sugi"),
-        ],
-    )?;
-
-    // cached block: query `s` against every already-rotated cached key `t`
-    // (symbol 1's extent, zero on the very first call) -- never masked, a
-    // cached position is always in the past of a new query.
-    let score_cached_even_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (q_even_grouped, "sugi->stugi"),
-            (k_even_cache, "tui->stugi"),
-        ],
-    )?;
-    let score_cached_even = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        score_cached_even_product,
-        "stugi->stugi",
-        "stug->stugi",
-    )?;
-    let score_cached_odd_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
-    )?;
-    let score_cached_odd = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        score_cached_odd_product,
-        "stugi->stugi",
-        "stug->stugi",
-    )?;
-    let score_cached = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[
-            (score_cached_even, "stug->stug"),
-            (score_cached_odd, "stug->stug"),
-        ],
-    )?;
-    let score_cached_scaled = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
-    )?;
-    let score_cached_scaled = match cached_window_mask {
-        Some((is_masked, neg_infinity_cached)) => elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Select,
-            &[
-                (is_masked, "st->stug"),
-                (neg_infinity_cached, "->stug"),
-                (score_cached_scaled, "stug->stug"),
-            ],
-        )?,
-        None => score_cached_scaled,
-    };
-    // new block: query `s` against this call's own freshly rotated key `w`
-    // (symbol 0's extent, same range as `s`) -- causal within the block,
-    // reusing `is_future` unchanged since it is already `[s, w]`-shaped.
-    let score_new_even_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (q_even_grouped, "sugi->swugi"),
-            (rotated_k_new_even, "wui->swugi"),
-        ],
-    )?;
-    let score_new_even = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        score_new_even_product,
-        "swugi->swugi",
-        "swug->swugi",
-    )?;
-    let score_new_odd_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (q_odd_grouped, "sugi->swugi"),
-            (rotated_k_new_odd, "wui->swugi"),
-        ],
-    )?;
-    let score_new_odd = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        score_new_odd_product,
-        "swugi->swugi",
-        "swug->swugi",
-    )?;
-    let score_new = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[
-            (score_new_even, "swug->swug"),
-            (score_new_odd, "swug->swug"),
-        ],
-    )?;
-    let score_new_scaled = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
-    )?;
-    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
-    let score_new_masked = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Select,
-        &[
-            (is_future, "sw->swug"),
-            (neg_infinity, "->swug"),
-            (score_new_scaled, "swug->swug"),
-        ],
-    )?;
-
-    // online-softmax combine: two disjoint key ranges, one shared max and
-    // one shared normalizer, no literal concatenation anywhere.
-    let score_max_cached = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Maximum,
-        ReduceInit::NegativeInfinity,
+        q_even_grouped,
+        q_odd_grouped,
+        rotated_k_new_even,
+        rotated_k_new_odd,
+        v_new,
+        v_cache,
+        inv_sqrt_head_dim,
         score_cached_scaled,
-        "stug->stug",
-        "sug->stug",
-    )?;
-    let score_max_new = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Maximum,
-        ReduceInit::NegativeInfinity,
-        score_new_masked,
-        "swug->swug",
-        "sug->swug",
-    )?;
-    let global_max = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Maximum,
-        &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
-    )?;
-
-    let shifted_cached = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[
-            (score_cached_scaled, "stug->stug"),
-            (global_max, "sug->stug"),
-        ],
-    )?;
-    let weights_cached = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Exponential,
-        &[(shifted_cached, "stug->stug")],
-    )?;
-    let shifted_new = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")],
-    )?;
-    let weights_new = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Exponential,
-        &[(shifted_new, "swug->swug")],
-    )?;
-
-    let sum_cached = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        weights_cached,
-        "stug->stug",
-        "sug->stug",
-    )?;
-    let sum_new = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        weights_new,
-        "swug->swug",
-        "sug->swug",
-    )?;
-    let weight_sum = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
-    )?;
-    let inv_weight_sum = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Reciprocal,
-        &[(weight_sum, "sug->sug")],
-    )?;
-
-    let attended_cached_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")],
-    )?;
-    let attended_cached = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        attended_cached_product,
-        "stugd->stugd",
-        "sugd->stugd",
-    )?;
-    let attended_new_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")],
-    )?;
-    let attended_new = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        attended_new_product,
-        "swugd->swugd",
-        "sugd->swugd",
-    )?;
-    let attended_sum = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[
-            (attended_cached, "sugd->sugd"),
-            (attended_new, "sugd->sugd"),
-        ],
-    )?;
-    let attended = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
+        is_future,
+        None,
     )?;
 
     #[cfg(feature = "instrument")]
     instrument::record_online_softmax_block_range(score_max_cached, attended);
+    #[cfg(not(feature = "instrument"))]
+    let _ = score_max_cached;
 
     let wo_product = elementwise(
         program,
