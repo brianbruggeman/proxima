@@ -555,7 +555,7 @@ pub fn select_grouped_round(
 
 /// `scale[route[s]]`: gathers one scalar per selected expert, the
 /// rank-one counterpart of [`gathered_expert_product`]'s weight-matrix
-/// gather. Used to fold a per-expert output scale (gemma4's
+/// gather. Used to fold a per-expert output scale (the sliding-pattern family's
 /// `blk.{layer}.ffn_down_exps.scale`, `[expert_count]`) into that expert's
 /// routing weight before combination.
 #[must_use]
@@ -590,7 +590,7 @@ fn gather_expert_scale(program: &mut Vec<Op>, scale: NodeId, route: NodeId) -> N
 /// key, so `append_mistral_moe_layer`/`append_mistral_cached_moe_layer`
 /// always pass `Softmax` unconditionally rather than reading a key that
 /// does not exist on that checkpoint. `Sigmoid` is `_TYPE_SIGMOID` (`2`),
-/// LFM2's own value (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:209`'s
+/// the short-conv family's own value (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:209`'s
 /// `router_logits.sigmoid()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ExpertGatingFunc {
@@ -633,17 +633,17 @@ pub struct MoeFfnSpec {
     pub expert_used_count: u32,
     pub ones: NodeId,
     pub gating: ExpertGatingFunc,
-    /// `blk.{layer}.exp_probs_b.bias` (`[expert_count]`) on a real LFM2
+    /// `blk.{layer}.exp_probs_b.bias` (`[expert_count]`) on a real short-conv
     /// checkpoint: added to the selection score ONLY for the argmax that
     /// picks `expert_used_count` experts, never for a selected expert's own
     /// combination weight. `None` for every checkpoint without such a bias
     /// (Mixtral, qwen3.6 MoE).
     pub expert_bias: Option<NodeId>,
     /// `blk.{layer}.ffn_down_exps.scale` (`[expert_count]`) on a real
-    /// gemma4 checkpoint: gathered by each round's own selected route and
+    /// sliding-pattern checkpoint: gathered by each round's own selected route and
     /// folded into that round's combination weight AFTER
     /// softmax-over-selected renormalization. `None` reproduces the
-    /// unscaled combination byte-for-byte (Mixtral, LFM2, qwen3.6 MoE).
+    /// unscaled combination byte-for-byte (Mixtral, short-conv, qwen3.6 MoE).
     pub expert_scale: Option<NodeId>,
     pub activation: Activation,
     /// Whether gate/up projections run per-route or grouped over the
@@ -700,7 +700,7 @@ pub struct MoeSites(pub Vec<MoeSite>);
 /// `ScalarOp` gained no `Sigmoid` variant for this, since the four ops
 /// already existed for a different consumer.
 ///
-/// `expert_bias` (`blk.{layer}.exp_probs_b.bias` on a real LFM2 checkpoint,
+/// `expert_bias` (`blk.{layer}.exp_probs_b.bias` on a real short-conv checkpoint,
 /// `[expert_count]`) is llama.cpp's own `ffn_exp_probs_b` /
 /// `route_tokens_to_experts`'s own `self.expert_bias`
 /// (`modeling_lfm2_moe.py:210-213`, `llama-graph.cpp`'s own

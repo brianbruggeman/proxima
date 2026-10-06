@@ -5008,7 +5008,7 @@ mod gated_delta_net_tests {
     /// `ssm.state_size 128`, `ssm.inner_size 4096`, `time_step_rank 32`
     /// -- `head_v_dim = 4096 / 32 = 128`, `group = 32 / 16 = 2`,
     /// `head_k_dim = ssm.state_size = 128`, from
-    /// `proxima-model-interop/src/qwen35.rs`'s own `qwen35_ssm_shape`).
+    /// `proxima-model-interop/src/recurrent_interval.rs`'s own `qwen35_ssm_shape`).
     fn synthetic_gated_delta_net_gqa_program(
         kv_heads: usize,
         group: usize,
@@ -6047,7 +6047,7 @@ mod moe_routing_census {
     const FEED_FORWARD: u32 = 8;
 
     /// One qwen35moe layer's routing block: [`ExpertGatingFunc::Softmax`],
-    /// `expert_bias = None` -- `proxima-model-interop/src/qwen35moe/program.rs`'s
+    /// `expert_bias = None` -- `proxima-model-interop/src/recurrent_routed_interval/program.rs`'s
     /// own `append_qwen35moe_ffn` call into `append_moe_ffn`
     /// (lines 122-135), NOT the `Sigmoid` gate this crate's Mixtral-style
     /// dense callers (`append_mistral_moe_layer`) use -- the two gating

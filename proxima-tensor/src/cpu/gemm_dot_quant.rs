@@ -263,12 +263,12 @@ pub(super) fn neon_tile_plan(
         return None;
     }
     // GEMM precondition this gate never checked (`docs/discipline.md` ROW
-    // 561, found by direct instrumentation on qwen35's own partial-rotary
+    // 561, found by direct instrumentation on the recurrent-interval family's own partial-rotary
     // "new key" score term): `b`'s address advance below is `column *
     // col_stride_b` ONLY -- `gemm_tile_neon` never adds a per-row term for
     // `b` at all, because a real GEMM's right-hand operand (`[k,n]`) never
     // varies with the left-hand operand's own row axis (`m`). A grouped
-    // broadcast like qwen35's `q_first_grouped`/`q_pass_grouped`
+    // broadcast like the recurrent-interval family's `q_first_grouped`/`q_pass_grouped`
     // (`spec.rs:4847-4872`, `[s,u,g,i]`, genuinely dependent on `u` AND `g`)
     // satisfies every OTHER gate here (both reduction strides `== 1`, exactly
     // one operand's width-dim stride `0`) while still varying along the

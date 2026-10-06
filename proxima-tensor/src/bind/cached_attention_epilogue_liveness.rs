@@ -25,7 +25,7 @@ pub(super) fn bind_cached_attention_fusion(
             return Ok(built);
         }
         // `false`: this discovery pass finds anchors `bind_plain` has already
-        // folded into their single consumer (qwen35's own `attended` tap,
+        // folded into their single consumer (the recurrent-interval family's own `attended` tap,
         // `bind.rs:993`'s `elementwise_operand_fuse`) precisely so their node
         // id can be pinned into `planning_outputs` below and survive the
         // rebuild -- requiring a resolved binding here would make discovery
@@ -50,7 +50,7 @@ pub(super) fn bind_cached_attention_fusion(
         for (fused, _) in &initial_candidates {
             match &fused.kind {
                 BoundOpKind::CachedAttention { operands, .. } => {
-                    // the anchor itself (qwen35's own `attended` tap, single-
+                    // the anchor itself (the recurrent-interval family's own `attended` tap, single-
                     // consumer into the per-head gate multiply) must be
                     // pinned alongside its sources -- `bind_plain`'s single-
                     // consumer elementwise fusion folds an unrequested

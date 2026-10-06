@@ -5,7 +5,7 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 
 use super::*;
 
-/// Builds a gemma4-family [`ModelDescriptor`] from a parsed GGUF header: the
+/// Builds a sliding-pattern-family [`ModelDescriptor`] from a parsed GGUF header: the
 /// per-layer sliding/full split, matformer dense-FFN widths, PLE, shared-KV
 /// and the dense-vs-MoE FFN shape all come from the checkpoint's own
 /// `{general.architecture}.*` keys and the `token_embd.weight` directory
@@ -14,7 +14,7 @@ use super::*;
 /// come from the [`FamilyProfile`] the caller loaded for
 /// `general.architecture`; only the table names stay structural.
 ///
-/// This is the one place a gemma4 descriptor is built; the bind in
+/// This is the one place a sliding-pattern descriptor is built; the bind in
 /// `proxima-model-interop` and the tests in `proxima-tensor` both feed it a
 /// real header and hand the result to [`build_forward`]. `sliding_kv_ring`
 /// is the caller's KV layout choice, not checkpoint data
@@ -174,7 +174,7 @@ pub fn gemma4_descriptor_from_gguf(
 
 /// The own-KV layer a trailing shared layer reads: the last layer before
 /// `first_shared_idx` with the same sliding-vs-full kind (ollama
-/// `gemma4.go:590-611`). Falls back to `first_shared_idx - 1` when no layer
+/// the reference Go source, lines 590-611). Falls back to `first_shared_idx - 1` when no layer
 /// of that kind precedes it, which no real checkpoint reaches.
 fn shared_kv_source_layer(sliding_window_pattern: &[bool], first_shared_idx: u32, layer: usize) -> u32 {
     let is_sliding = sliding_window_pattern[layer];

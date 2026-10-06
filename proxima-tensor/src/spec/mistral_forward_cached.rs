@@ -692,8 +692,8 @@ pub fn append_mistral_cached_layer(
     let v_new = v_new?;
 
     // The pairing is an architecture property, not a proxy for whether the
-    // checkpoint carries QK-norm weights: Qwen2 uses NEOX split-half RoPE
-    // without QK-norm, while ordinary LLaMA/Mistral checkpoints use the
+    // checkpoint carries QK-norm weights: a split-half checkpoint uses NEOX RoPE
+    // without QK-norm, while interleaved-pairing checkpoints use the
     // converter's interleaved layout.
     // `q`/`k_new` are real, fully materialized `[s,h,d]`/`[s,u,d]` nodes
     // under BOTH `QkvSource` variants (the `Multiply`-by-shape-constant

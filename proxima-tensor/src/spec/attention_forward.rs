@@ -13,7 +13,7 @@ pub enum ValueSource {
     Projected(NodeId),
     SharedWithKey,
     /// The source layer's own already-rmsnorm'd, un-roped `V` node --
-    /// gemma4 E2B's cross-layer shared-KV shape ([`ValueSourceKind::SharedFromLayer`]).
+    /// the E2B checkpoint's cross-layer shared-KV shape ([`ValueSourceKind::SharedFromLayer`]).
     /// No `attn_v.weight` leaf exists for this layer at all; the value comes
     /// from whatever layer computed it, verbatim (no re-projection, no
     /// re-norm).
@@ -22,7 +22,7 @@ pub enum ValueSource {
 
 /// Where [`append_attention_mixer`] reads its per-head `K` tensor from,
 /// mirroring [`ValueSource`] -- [`Self::Projected`] runs the existing
-/// `wk` projection + k-norm + RoPE chain; [`Self::Shared`] is gemma4 E2B's
+/// `wk` projection + k-norm + RoPE chain; [`Self::Shared`] is the E2B checkpoint's
 /// cross-layer shared-KV shape: the source layer's own POST-rope,
 /// POST-k-norm `K` halves, reused verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub enum KeySource {
 /// function's sole return value), plus this layer's post-rope `K` halves
 /// and post-norm `V` -- the exact nodes a LATER schedule entry's
 /// `KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`
-/// needs to reuse verbatim (gemma4 E2B). A caller with no shared-KV layers
+/// needs to reuse verbatim (the E2B checkpoint). A caller with no shared-KV layers
 /// downstream simply discards the two extra fields, so this is not a
 /// breaking change in spirit -- only in the tuple shape every existing
 /// call site already had to update.
@@ -71,13 +71,13 @@ pub enum ValueSourceKind {
 /// Where a [`LayerAttentionConfig`] layer's `K` weight leaf comes from,
 /// mirroring [`ValueSourceKind`] -- [`Self::ProjectedK`] is every existing
 /// caller's behaviour (a real `attn_k.weight`/`attn_k_norm.weight` pair on
-/// disk). [`Self::SharedFromLayer`] is gemma4 E2B's shared-KV shape: no
+/// disk). [`Self::SharedFromLayer`] is the E2B checkpoint's shared-KV shape: no
 /// `attn_k.weight`/`attn_k_norm.weight` leaves exist for this layer, so
 /// [`lfm2_forward_program_with_experts`] must not declare them -- the `K`
 /// this layer's attention math uses is the named source layer's own
 /// post-rope, post-k-norm `K` halves. Shared-KV shares BOTH `K` and `V` --
-/// ollama's `mlxrunner/model/gemma4/gemma4.go` `Attention.Forward` reads one
-/// donor's `sharedHistory` for both (`gemma4.go:1392-1449`: `kv := donor`,
+/// ollama's `the mlxrunner model Go source` `Attention.Forward` reads one
+/// donor's `sharedHistory` for both (the reference Go source, lines 1392-1449: `kv := donor`,
 /// then `k, v = kv.history.K(), kv.history.V()` or `kv.k, kv.v`), never K
 /// alone -- so a schedule entry with `key_source_kind: SharedFromLayer(n)`
 /// always pairs with `value_source_kind: SharedFromLayer(n)` for the same
@@ -355,7 +355,7 @@ pub struct LayerFfnConfig {
     /// Gating function `append_routed_expert_ffn` applies to the routed
     /// branch's router logits. `Sigmoid` (every caller in this crate today,
     /// [`FfnCombination::Exclusive`]'s own prior hardcoded choice) reproduces
-    /// LFM2's own MoE softmax-free routing; Gemma 4 uses `Softmax`.
+    /// the short-conv family's own MoE softmax-free routing; Gemma 4 uses `Softmax`.
     pub routed_gating: ExpertGatingFunc,
     /// `true` (every caller today) binds `blk.{layer}.exp_probs_b.bias` and
     /// adds it into the router logits before argmax selection, exactly
@@ -379,15 +379,15 @@ pub struct LayerFfnConfig {
     /// `true` builds `blk.{layer}.post_ffw_norm.weight` and applies it (a
     /// plain [`rmsnorm`]) to [`FfnCombination::Exclusive`]'s dense-branch
     /// output before the residual add -- Gemma 4 E2B/E4B's own dense-only
-    /// sandwich norm (`gemma4.go`'s `PostFFNorm`), the same role
+    /// sandwich norm (the reference Go source's `PostFFNorm`), the same role
     /// [`ParallelDenseMoeConfig::combined_post_norm`] plays for a MoE
     /// checkpoint's combined dense+routed output, reading the identical
     /// `blk.{layer}.post_ffw_norm.weight` tensor name. `false` (every
-    /// caller before Gemma 4 E2B, including LFM2) reproduces the prior
+    /// caller before Gemma 4 E2B, including short-conv) reproduces the prior
     /// unnormalized dense-branch residual add unchanged.
     pub exclusive_dense_post_norm: bool,
     /// `true` injects this layer's per-layer-embedding (PLE) contribution
-    /// (gemma4.go:1349-1361: gate/GeGLU/proj/`post_norm`, added into the
+    /// (the reference Go source, lines 1349-1361: gate/GeGLU/proj/`post_norm`, added into the
     /// residual right after the FFN residual add, BEFORE
     /// [`Self::output_scale`]'s own multiply) -- see
     /// [`lfm2_forward_program_with_experts`]'s own `ple_dim` parameter for
@@ -426,7 +426,7 @@ impl LayerFfnConfig {
 /// doc for which architecture uses which variant and why.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub enum AttentionScoreScale {
-    /// `1/sqrt(query_pre_attn_scalar)`, the Gemma 2/3 convention. LFM2 and
+    /// `1/sqrt(query_pre_attn_scalar)`, the Gemma 2/3 convention. short-conv and
     /// every other pre-existing caller passes its own `head_dim` here,
     /// reproducing the old always-`1/sqrt(head_dim)` behaviour.
     InverseSqrtQueryPreAttnScalar(u32),
@@ -482,7 +482,7 @@ pub struct LayerAttentionConfig {
     /// reproducing `1/sqrt(head_dim)` byte-for-byte. Gemma 4 has no
     /// `query_pre_attn_scalar` at all -- HF `Gemma4TextAttention` hard-codes
     /// `self.scaling = 1.0` for both sliding and full layers, relying on
-    /// QK-norm instead -- so gemma4's layers use
+    /// QK-norm instead -- so the sliding-pattern family's layers use
     /// [`AttentionScoreScale::Unscaled`].
     pub score_scale: AttentionScoreScale,
     /// Gemma 4's `v_norm` (`Gemma4TextAttention.forward`,
@@ -491,7 +491,7 @@ pub struct LayerAttentionConfig {
     /// NO learned scale (`Gemma4RMSNorm(head_dim, eps, with_scale=False)`) --
     /// there is no `attn_v_norm.weight` tensor on disk for it to read. `V`
     /// stays un-roped either way; this only changes whether it is
-    /// normalized. Every caller before this field existed (LFM2 and every
+    /// normalized. Every caller before this field existed (short-conv and every
     /// other architecture this crate serves) sets this `false`, reproducing
     /// the prior raw-`V` behaviour byte-for-byte; Gemma 4 sets it `true`.
     pub value_norm: bool,
@@ -603,7 +603,7 @@ pub(super) fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_
 /// [`append_lfm2_conv_mixer`] rather than always beside the same FFN choice
 /// [`append_mistral_layer`] bundles it with. Node-for-node the same attention
 /// graph [`append_mistral_layer`] runs before its own FFN call, extracted
-/// rather than shared by refactoring that function, so the dense Mistral/Llama
+/// rather than shared by refactoring that function, so the dense uniform-decoder
 /// path's own generated program bytes never change shape because this
 /// function exists next to it.
 ///
@@ -1029,7 +1029,7 @@ pub(crate) fn append_dense_swiglu_ffn(
 /// (below) then applies `Gemma4TextRouter.forward`'s own norm/scale/root
 /// transform to `router_input` before the router projection.
 /// `router_scale`/`expert_output_scale` bind and fold
-/// gemma4's `ffn_gate_inp.scale`/`ffn_down_exps.scale` (`false` for every
+/// the sliding-pattern family's `ffn_gate_inp.scale`/`ffn_down_exps.scale` (`false` for every
 /// other caller today, so those two `Input` leaves are never declared and
 /// the emitted program stays byte-for-byte the same).
 #[allow(clippy::too_many_arguments)]
@@ -1188,12 +1188,12 @@ pub(crate) fn append_routed_expert_ffn(
 /// (`Some` only when [`lfm2_forward_program_with_experts`]'s own `ple_dim`
 /// is `Some`, [`ple_layer_input`]'s own return value for this `layer`) is
 /// Stage B's own per-layer-embedding (PLE) injection input -- consumed only
-/// when `ffn_config.ple` is ALSO `true` (gemma4.go:1349-1361): gate/GeGLU
+/// when `ffn_config.ple` is ALSO `true` (the reference Go source, lines 1349-1361): gate/GeGLU
 /// (`inp_gate`/[`Activation::GeluTanh`]) against `ple_input`, `proj`, a
 /// plain [`rmsnorm`] via `post_norm`, added into the residual right after
 /// the FFN residual add above and BEFORE [`LayerFfnConfig::output_scale`]'s
 /// own whole-layer multiply -- `output_scale` already IS Stage B's own
-/// trailing `* layer_output_scale` (gemma4.go:1359-1361), reused here
+/// trailing `* layer_output_scale` (the reference Go source, lines 1359-1361), reused here
 /// rather than re-declared.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn append_lfm2_layer_ffn(
@@ -1303,7 +1303,7 @@ pub(crate) fn append_lfm2_layer_ffn(
                 normed2
             };
             // `routed_pre_norm` also marks the authoritative-graph case
-            // (gemma4) where the router's own input is the RAW
+            // (sliding-pattern) where the router's own input is the RAW
             // post-attention residual BEFORE `append_routed_expert_ffn`
             // applies its own `router_scale` norm/scale/root -- never
             // the routed branch's `pre_ffw_norm_2`-normed input; experts
@@ -1573,8 +1573,8 @@ where
 }
 
 /// The two whole-checkpoint tensors every layer's own per-layer-embedding
-/// (PLE) input slices out of -- gemma4.go's `computePLEInputs` preamble
-/// (`gemma4.go:1276-1301`), built ONCE regardless of `block_count` since
+/// (PLE) input slices out of -- the reference Go source's `computePLEInputs` preamble
+/// (the reference Go source, lines 1276-1301), built ONCE regardless of `block_count` since
 /// neither `proj_flat` nor `emb_flat` depends on `layer`. Kept as raw
 /// `[s, ple_total]` tensors (`ple_total = block_count * ple_dim`) rather
 /// than a materialized `[s, block_count, ple_dim]` reshape --
@@ -1586,7 +1586,7 @@ where
 pub(crate) struct PleSharedProjections {
     /// `per_layer_model_proj(h0) * (1/sqrt(embedding))`, unnormalized --
     /// [`ple_layer_input`] applies [`Self::proj_norm_weight`]'s RMSNorm
-    /// AFTER slicing, per gemma4.go:1297.
+    /// AFTER slicing, per the reference Go source, line 1297.
     pub(crate) proj_flat: NodeId,
     /// `per_layer_token_embd(ids) * sqrt(ple_dim)`.
     pub(crate) emb_flat: NodeId,
@@ -1595,14 +1595,14 @@ pub(crate) struct PleSharedProjections {
     pub(crate) inv_ple_dim: NodeId,
 }
 
-/// Stage A preamble (gemma4.go:1276-1297): the per-token matmul
+/// Stage A preamble (the reference Go source, lines 1276-1297): the per-token matmul
 /// (`per_layer_model_proj`) and gather (`per_layer_token_embd`) every
 /// layer's own [`ple_layer_input`] call slices from, computed once before
 /// the layer loop starts. `h0` is the caller's own post-embedding-scale
 /// hidden state (`x` at the top of [`lfm2_forward_program_with_experts`],
 /// BEFORE the layer loop reassigns it) -- Gemma 4's `per_layer_model_proj`
 /// input is always the model's initial embedding, never a later layer's
-/// hidden state (`gemma4.go:1291`, `h` there is the preamble's own `h0`).
+/// hidden state (the reference Go source, line 1291, `h` there is the preamble's own `h0`).
 pub(crate) fn append_ple_shared_projections(
     program: &mut Vec<Op>,
     ids: NodeId,
@@ -1672,7 +1672,7 @@ pub(crate) fn append_ple_shared_projections(
     })
 }
 
-/// Stage A per-layer slice + norm + combine (gemma4.go:1297-1301): this
+/// Stage A per-layer slice + norm + combine (the reference Go source, lines 1297-1301): this
 /// `layer`'s own `ple_dim`-wide window of [`PleSharedProjections::proj_flat`]
 /// (RMSNorm'd, no `+1` offset -- plain [`rmsnorm`], Gemma 4's
 /// `per_layer_proj_norm` carries the full effective gamma already) added to
@@ -1726,14 +1726,14 @@ pub(crate) fn ple_layer_input(
     )
 }
 
-/// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
+/// the 8B-A1B short-conv checkpoint's hybrid forward pass: `block_count` blocks, each either
 /// `append_attention_mixer` or `append_lfm2_conv_mixer` per its own
 /// `schedule[layer].kind` (derived by [`LayerKind::from_tensor_names`] from the
 /// real checkpoint's tensor directory, since `layer_types` is not a metadata
 /// key this architecture writes), then a shared RMSNorm and
 /// `append_moe_ffn`/dense-triple FFN exactly like
 /// [`mistral_forward_program`]'s own MoE branch --
-/// `leading_dense_block_count` (LFM2.5-8B-A1B: `2`) is threaded per layer
+/// `leading_dense_block_count` (the 8B-A1B short-conv checkpoint: `2`) is threaded per layer
 /// rather than a single crate-wide dense/MoE switch, since this checkpoint's
 /// first two blocks are dense and the rest are routed.
 ///
@@ -1741,7 +1741,7 @@ pub(crate) fn ple_layer_input(
 /// same scope [`mistral_forward_program`] has. A KV-cached incremental
 /// counterpart for a schedule of ONLY [`LayerKind::Attention`] entries
 /// exists (`spec::lfm2_single_range_cached::lfm2_single_range_cached_forward_program_with_experts`,
-/// behind the `gemma4-kv-cache` feature one level up in
+/// behind the `sliding-pattern-kv-cache` feature one level up in
 /// `proxima-model-interop`) -- it shares this function's own
 /// `build_attention_layer_resources` pre-pass and
 /// `append_lfm2_layer_ffn` post-attention/FFN composition, only the
@@ -1761,7 +1761,7 @@ pub(crate) fn ple_layer_input(
 /// residual behaviour node-for-node. `embedding_scale`
 /// ([`EmbeddingScale`]) and `logit_softcap` are `None` for every caller
 /// today, reproducing the prior unscaled embedding and untransformed
-/// final logits. `ple_dim` (`Some(256)` for gemma4 E2B, `None` for every
+/// final logits. `ple_dim` (`Some(256)` for the E2B checkpoint, `None` for every
 /// other caller) is the checkpoint-wide per-layer-embedding (PLE) toggle --
 /// `Some` builds `PleSharedProjections` once via
 /// `append_ple_shared_projections` and slices this loop's own
@@ -1861,7 +1861,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
 
-    // Stage A preamble (gemma4.go:1276-1301): `x` here is still `h0`, the
+    // Stage A preamble (the reference Go source, lines 1276-1301): `x` here is still `h0`, the
     // post-embedding-scale hidden state BEFORE the layer loop below
     // reassigns it -- [`append_ple_shared_projections`]'s own doc on why
     // that (not any later layer's hidden state) is `per_layer_model_proj`'s
@@ -1891,7 +1891,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
     // One slot per block, populated only for `LayerKind::Attention` entries
     // that own a real `K`/`V` projection -- a later
     // `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
-    // schedule entry (gemma4 E2B's cross-layer shared-KV) reads
+    // schedule entry (the E2B checkpoint's cross-layer shared-KV) reads
     // `stored_kv[source as usize]` rather than re-projecting.
     let mut stored_kv: Vec<Option<(NodeId, NodeId, NodeId)>> = alloc::vec![None; block_count as usize];
 
@@ -2270,7 +2270,7 @@ pub fn mistral_cached_forward_program(
 /// (Qwen3's own `q_norm`/`k_norm`, `modeling_qwen3.py`'s `Qwen3Attention`)
 /// applied to `q`/`k_new` before RoPE -- see
 /// `append_mistral_cached_layer`'s `qk_norm` parameter doc for the exact
-/// two ops this adds over the plain Mistral layer. Qwen3 has no
+/// two ops this adds over the plain dense layer. Qwen3 has no
 /// mixture-of-experts variant this crate has bound yet, so this takes no
 /// `expert_count`/`expert_used_count`, the same dense-only shape
 /// [`mistral_cached_forward_program`] itself uses.
@@ -2439,12 +2439,12 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     )
 }
 
-/// Qwen2 uses split-half (NEOX) RoPE even though it has no QK-norm weights,
-/// so its pairing is selected from the architecture name rather than
+/// A no-QK-norm checkpoint can still use split-half (NEOX) RoPE even so,
+/// so its pairing is the family profile's `rope_pairing` rather than
 /// inferred from the presence of norm tensors -- see
 /// [`crate::spec::mistral_descriptor_from_shape`]'s own `rope_pairing` parameter, which
 /// the `proxima-model-interop` dense-architecture binder feeds with
-/// `RopePairing::SplitHalf { pairs: head_dim / 2 }` for a `"qwen2"`
+/// `RopePairing::SplitHalf { pairs: head_dim / 2 }` for such a
 /// checkpoint instead of a dedicated builder.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
@@ -2998,7 +2998,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
 ///
 /// `Attention(CachedLayerRoots)` is [`mistral_cached_forward_program_with_experts`]'s
 /// own 3-wide shape, still constructed by that program's caller
-/// (`crate::generate::LoadedModel::load`) for every non-qwen35 checkpoint --
+/// (`crate::generate::LoadedModel::load`) for every non-recurrent-interval checkpoint --
 /// kept as its own variant rather than folded into `DenseAttention` so that
 /// caller's cache-threading loop, and its `LayerCache`, are unaffected by
 /// this checkpoint's own partial-rotary gap.
@@ -3010,7 +3010,7 @@ pub enum LayerCacheRoots {
         qkv_mixed: NodeId,
         state_out: NodeId,
     },
-    /// gemma4 E2B's cross-layer shared-KV layer
+    /// the E2B checkpoint's cross-layer shared-KV layer
     /// (`KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`,
     /// this crate's own [`lfm2_two_range_cached_forward_program_with_experts`]
     /// doc on `stored_kv`) -- this layer owns no `kv_cache.{layer}.*`
@@ -3030,16 +3030,16 @@ pub enum LayerCacheRoots {
 /// pattern [`mistral_cached_forward_program_with_experts`] already runs)
 /// interleaved with gated-DeltaNet layers (`append_qwen35_ssm_mixer`),
 /// following llama.cpp's own `hparams.is_recr_impl[i] = (i < n_layer) &&
-/// ((i + 1) % full_attention_interval != 0)` (`qwen35.cpp:19-20`) -- layer
+/// ((i + 1) % full_attention_interval != 0)` (llama.cpp's hybrid-model source, lines 19-20) -- layer
 /// `full_attention_interval - 1`, `2 * full_attention_interval - 1`, ... are
 /// dense attention, every other layer is SSM. Qwen3.5 never routes FFN
-/// through experts (`qwen35.cpp:471`, `GGML_ASSERT(model.layers[il].ffn_gate_inp
+/// through experts (llama.cpp's hybrid-model source, line 471, `GGML_ASSERT(model.layers[il].ffn_gate_inp
 /// == nullptr)`), so every layer's FFN is the plain dense triple
 /// [`mistral_cached_forward_program_with_experts`]'s own `expert_count == 0`
 /// branch already builds -- reused here rather than reconstructed.
 ///
 /// `ssm_d_state`/`ssm_dt_rank`/`ssm_n_group`/`ssm_d_inner`/`ssm_d_conv` name
-/// the same five hyperparameters `qwen35.cpp:335-343`'s own
+/// the same five hyperparameters llama.cpp's hybrid-model source, lines 335-343's own
 /// `build_layer_attn_linear` reads off `hparams`, unpacked into
 /// `append_qwen35_ssm_mixer`'s own `key_dim = ssm_d_state * ssm_n_group`,
 /// `value_dim = ssm_d_inner`, `kv_heads = ssm_n_group`, `group = ssm_dt_rank
@@ -3098,7 +3098,7 @@ pub fn qwen35_forward_program(
     )
 }
 
-/// Builds the Qwen35 program while optionally reducing the final vocabulary
+/// Builds the recurrent-interval program while optionally reducing the final vocabulary
 /// projection to a host-selected row before the packed weight is read.
 #[allow(clippy::too_many_arguments)]
 pub fn qwen35_forward_program_with_last_row(
@@ -3256,7 +3256,7 @@ mod activation_tests {
 
 /// Gemma 4's per-layer-embedding (PLE) Stage A construction --
 /// [`append_ple_shared_projections`]/[`ple_layer_input`] against the derived
-/// worked example (`gemma4.go:1276-1301`, `H=4` embedding, `P=2`
+/// worked example (the reference Go source, lines 1276-1301, `H=4` embedding, `P=2`
 /// `ple_dim`, one token, one layer), a fabricated fixture small enough to
 /// hand-verify but exercising the exact same gather/matmul/RMSNorm/combine
 /// composition the real 262144-vocab/8960-wide checkpoint runs.
@@ -3363,7 +3363,7 @@ mod ple_stage_a_tests {
 
 /// Gemma 4's per-layer-embedding (PLE) Stage B injection --
 /// [`append_lfm2_layer_ffn`]'s own `ffn_config.ple` branch against the
-/// derived worked example's `h_final` (`gemma4.go:1349-1361`), chained onto
+/// derived worked example's `h_final` (the reference Go source, lines 1349-1361), chained onto
 /// [`ple_stage_a_tests`]'s own Stage A machinery so this test exercises the
 /// SAME two-stage composition `lfm2_forward_program_with_experts` runs, not
 /// a hand-reconstructed shortcut.
@@ -3552,7 +3552,7 @@ mod ple_stage_b_tests {
 /// only `FfnCombination::Exclusive` branch needs its own
 /// `blk.{layer}.post_ffw_norm.weight` sandwich norm on the dense FFN output
 /// before the residual add (the un-normed FFN output growing the residual
-/// unboundedly every layer was gemma4-E2B's actual root cause: real-blob
+/// unboundedly every layer was the E2B checkpoint's actual root cause: real-blob
 /// diagnostic `mean_abs` grew to ~4700 by layer 4, then this crate's own
 /// `logit_softcap`-less first-token argmax landed on an unrelated vocab
 /// entry instead of "Paris" -- both symptoms of an undamped residual).

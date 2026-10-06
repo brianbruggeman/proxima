@@ -207,7 +207,7 @@ pub fn causal_conv1d(
     )
 }
 
-/// LFM2's gated short-convolution mixer, [`append_mistral_layer`]'s
+/// the short-conv family's gated short-convolution mixer, [`append_mistral_layer`]'s
 /// attention-block counterpart for a `LayerKind::ShortConv` block: three
 /// separate `embedding x embedding` projections (`b_proj`/`c_proj`/`x_proj`)
 /// stand in for the real checkpoint's single fused `blk.N.shortconv.in_proj.weight`
@@ -233,7 +233,7 @@ pub fn causal_conv1d(
 /// `b_proj` gates the ungated `x_proj` branch, [`causal_conv1d`] convolves
 /// the gated result causally over `l_cache` taps, `c_proj` gates the
 /// convolved result, and `out_proj` projects back to `embedding` width --
-/// LiquidAI's published LFM2 short-convolution block, `y = out_proj(C ⊙
+/// LiquidAI's published short-convolution block, `y = out_proj(C ⊙
 /// conv(B ⊙ x))`, no activation function inside the block itself, unlike the
 /// SwiGLU FFN every layer still runs after it. This branch assignment and
 /// tap direction are read directly off HuggingFace's own reference
@@ -557,7 +557,7 @@ pub fn softplus(
 
 /// [`rmsnorm`]'s L2-normalize variant: `x / sqrt(sum(x^2) + eps)`, no
 /// mean-divide and no learnable `gamma` -- `ggml_l2_norm`
-/// (`qwen35.cpp:428-429`, applied to `q_conv`/`k_conv` with no weight
+/// (llama.cpp's hybrid-model source, lines 428-429, applied to `q_conv`/`k_conv` with no weight
 /// tensor), unlike [`rmsnorm`]'s `mean_square = sum_squares / dim` and its
 /// trailing `gamma` multiply. `map`/`sum_map` follow [`rmsnorm_per_head`]'s
 /// own per-axis convention so the same function serves whichever axis (head
@@ -625,7 +625,7 @@ pub(super) fn l2norm_with_eps_map(
     )
 }
 
-/// `x * sigmoid(x)`, `ggml_silu`'s own contract (`qwen35.cpp:391-392`, run on
+/// `x * sigmoid(x)`, `ggml_silu`'s own contract (llama.cpp's hybrid-model source, lines 391-392, run on
 /// `conv_output_proper` before the q/k/v split) -- composed from
 /// [`ScalarOp::Negate`]/[`ScalarOp::Exponential`]/[`ScalarOp::Add`]/[`ScalarOp::Reciprocal`], the same
 /// `1/(1+e^-x)` chain [`ExpertGatingFunc::Sigmoid`] already builds, then one
@@ -855,7 +855,7 @@ pub fn per_head_channel_range(
 }
 
 /// Qwen3.5's `q|k|v` conv branch -- llama.cpp's own
-/// `build_layer_attn_linear` (`qwen35.cpp:385-431`): `causal_conv1d` over
+/// `build_layer_attn_linear` (llama.cpp's hybrid-model source, lines 385-431): `causal_conv1d` over
 /// the fused `qkv_mixed` (`conv_input`, `:385`), [`silu`] (`:391-392`), a
 /// three-way [`channel_slice`] split at `qkv_dim = 2*key_dim + value_dim`
 /// (`q` at offset `0`, `k` at `key_dim`, `v` at `2*key_dim` --
@@ -868,7 +868,7 @@ pub fn per_head_channel_range(
 // a prefill call but not a decode step against a persisted history cache,
 // so `append_qwen35_ssm_mixer` reimplements this function's own
 // silu/channel_slice/l2norm body against the additive cached-conv split its
-// own doc describes, rather than calling this. A prefill-only qwen35
+// own doc describes, rather than calling this. A prefill-only recurrent-interval
 // program (mirroring `lfm2_forward_program_with_experts`'s own prefill-only
 // scope) is this function's real caller, not built this session.
 #[allow(dead_code, clippy::too_many_arguments)]
@@ -920,7 +920,7 @@ pub(super) fn append_qwen35_conv_raw(
 }
 
 /// The GQA head repeat `q_conv`/`k_conv` need before
-/// [`append_qwen35_delta_net_step`] (`qwen35.cpp:437-440`,
+/// [`append_qwen35_delta_net_step`] (llama.cpp's hybrid-model source, lines 437-440,
 /// `ggml_repeat_4d(.., num_v_heads, ..)`): `num_k_heads` (16) real kv heads
 /// broadcast to `num_v_heads` (48) query/value heads, 3-wide groups.
 ///
@@ -1003,7 +1003,7 @@ pub fn sigmoid(
 
 /// Qwen3.5's gated-DeltaNet mixer, one decode step (`n_tokens == 1`, the same
 /// scope [`append_qwen35_delta_net_step`]'s own doc already commits to) --
-/// llama.cpp's own `build_layer_attn_linear` (`qwen35.cpp:335-466`) run
+/// llama.cpp's own `build_layer_attn_linear` (llama.cpp's hybrid-model source, lines 335-466) run
 /// op-for-op: `build_qkvz` (`:353-356`, `qkv_mixed`/`z`), `beta`/`gate`
 /// (`:358-376`, `sigmoid(ssm_beta @ x)` / `ssm_a * softplus(ssm_alpha @ x +
 /// ssm_dt)`), the causal conv + [`silu`] + channel split + [`l2norm`]
@@ -1013,7 +1013,7 @@ pub fn sigmoid(
 /// ([`repeat_kv_heads`], `:437-440`), the recurrence itself
 /// ([`append_qwen35_delta_net_step`], `build_delta_net_autoregressive`,
 /// `delta-net-base.cpp:289-370`), gated RMSNorm (`build_norm_gated`,
-/// `qwen35.cpp:243-250`: `rmsnorm(out) * silu(z)`), and the output
+/// llama.cpp's hybrid-model source, lines 243-250: `rmsnorm(out) * silu(z)`), and the output
 /// projection + residual (`:456-464`, folded into the block-level
 /// `ggml_add(cur, inpSA)` at `:180`) -- the pre-mixer `rmsnorm` and the
 /// post-mixer residual add both happen INSIDE this function, the same
@@ -1068,7 +1068,7 @@ pub fn sigmoid(
 /// [`GdnOutputGate::Silu`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GdnOutputGate {
-    /// `qwen35_forward_program`'s own GDN layers (`qwen35.cpp:243-250`).
+    /// `qwen35_forward_program`'s own GDN layers (llama.cpp's hybrid-model source, lines 243-250).
     Silu,
     /// qwen4exp's GDN layers (reference: PR 27742 line 2895-2897) -- no
     /// production call site in this crate (that forward-program assembly is
@@ -2129,8 +2129,8 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
 
         // gated RMSNorm over the per-head value axis `j`, `head_eps`/`inv_head_v_dim`
         // matched to the surviving `u,g` head space -- `build_norm_gated`
-        // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * output_gate(z)`,
-        // `output_gate` per [`GdnOutputGate`] (silu for qwen35, sigmoid for
+        // (llama.cpp's hybrid-model source, lines 243-250): `rmsnorm(out, weight) * output_gate(z)`,
+        // `output_gate` per [`GdnOutputGate`] (silu for recurrent-interval, sigmoid for
         // qwen4exp, reference: PR 27742 line 2896-2899).
         let squared = elementwise(
             program,

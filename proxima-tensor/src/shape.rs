@@ -2400,7 +2400,7 @@ mod tests {
     /// symbol from its own OUTPUT mask, and a downstream consumer of that
     /// fold's output must not inherit it either — the exact over-approximation
     /// `SLICE1.md` measured (179 changed positions inside a 1090-position
-    /// mask on the real gemma4-E2B checkpoint).
+    /// mask on the real E2B checkpoint).
     #[test]
     fn a_keep_reduce_fold_that_contracts_a_symbolic_axis_drops_it_from_the_output_mask() {
         let mut program = Vec::new();

@@ -10611,7 +10611,7 @@ fn qwen35_last_row_projection_has_one_output_row() {
 /// own `kv_heads = 2, group = 8 -> 16 query heads`), `attn_q.weight`
 /// packed `[Q | gate]` per head, Q4_K quantized, reshaped through the
 /// SAME broadcast-multiply-by-ones trick production uses
-/// (`proxima-model-interop/src/qwen35moe/program.rs`'s own `wq_flat` ->
+/// (`proxima-model-interop/src/recurrent_routed_interval/program.rs`'s own `wq_flat` ->
 /// `wq_gate`) -- the real production shape, not a shrunk stand-in.
 #[test]
 fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one_row_eval() {

@@ -54,7 +54,7 @@ pub(super) type BoundOperands = Vec<(NodeId, Layout, Option<Lookup>)>;
 
 /// [`attention_score_sources`]'s own return shape: the rotary even/odd
 /// query+key sources, plus `Some((query_pass_grouped, key_pass))` only when
-/// qwen35's partial-rotary chain matched.
+/// the recurrent-interval family's partial-rotary chain matched.
 #[cfg(feature = "cached-attention-streaming")]
 pub(super) type AttentionScoreSources = (NodeId, NodeId, NodeId, NodeId, Option<(NodeId, NodeId)>);
 
@@ -177,16 +177,16 @@ pub enum BoundOpKind {
     ///   single-range case's causal band.
     ///
     /// `rotary_dim` is the RoPE-rotated width per head (`head_dim` when
-    /// every column rotates — mistral/openchat/qwen3 today); when
+    /// every column rotates — every dense decoder today); when
     /// `rotary_dim < head_dim`, `operands` carries THREE more trailing
     /// entries beyond the base eight/nine described above — `pass_query`,
     /// `pass_cached_key`, `pass_new_key` — one un-rotated, non-split plane
     /// per side, laid out `[pass_query, pass_cached_key, pass_new_key]`
     /// immediately after the optional `cached_len` slot (so `operands.len()`
     /// is 8, 9, 11, or 12; the extra three are absent whenever `rotary_dim
-    /// == head_dim`, which is every existing caller — qwen35's partial-rotary
+    /// == head_dim`, which is every existing caller — the recurrent-interval family's partial-rotary
     /// dense attention (`rotary_dim` 64 of `head_dim` 256`,
-    /// `proxima-model-interop/src/qwen35.rs:37-38,142,179,182`) is the one
+    /// `proxima-model-interop/src/recurrent_interval.rs:37-38,142,179,182`) is the one
     /// caller that needs the wider shape, per `docs/discipline.md` ROW 556's
     /// residual). The pass plane contributes one extra additive term to the
     /// score (`score = rotary_dot * scale + pass_dot * scale`, `spec.rs`'s
@@ -233,7 +233,7 @@ pub enum BoundOpKind {
     /// assuming one. `n_tokens == 1` is this slice's only supported
     /// shape (decode); an `n_tokens > 1` bind is out of scope until the
     /// M-token prefill slice lands. `kv_heads` may be less than `num_v_heads`
-    /// (`num_v_heads = kv_heads * group`) -- the real qwen35moe GQA shape,
+    /// (`num_v_heads = kv_heads * group`) -- the real recurrent-routed GQA shape,
     /// `query`/`key` still bound at `kv_heads` and `value`/`gate`/`beta`/
     /// `state_in` at `num_v_heads`; `group` itself is not a separate field,
     /// it is exactly `num_v_heads / kv_heads`.
@@ -259,14 +259,14 @@ pub enum BoundOpKind {
         inv_sqrt_key_dim: f32,
         state_out: NodeId,
     },
-    /// One qwen35moe layer's whole top-k routing decision (ROW 569,
+    /// One recurrent-routed layer's whole top-k routing decision (ROW 569,
     /// `docs/discipline.md`), collapsing
     /// [`crate::spec::append_moe_ffn`]'s own `expert_used_count`
     /// unrolled argmax-with-exclusion rounds into one bound op: `operands`
     /// carries exactly one entry, `scores` (the gate logits under
     /// [`crate::spec::ExpertGatingFunc::Softmax`], `scores` aliased to
     /// `logits`, no `expert_bias` -- this slice's only matched shape, the one
-    /// `proxima-model-interop/src/qwen35moe/program.rs`'s own
+    /// `proxima-model-interop/src/recurrent_routed_interval/program.rs`'s own
     /// `append_qwen35moe_ffn` builds). `n_tokens == 1` is this slice's only
     /// supported shape (decode), the same restriction
     /// [`BoundOpKind::GatedDeltaNet`] carries for the same reason: an
@@ -474,7 +474,7 @@ pub enum BoundOpKind {
         /// did, unperturbed by whether this kind fired.
         round_outputs: Vec<NodeId>,
     },
-    /// One backend-neutral fused softmax-normalization step for gemma4's
+    /// One backend-neutral fused softmax-normalization step for the sliding-pattern family's
     /// decode-only, unity-scale cached attention (`docs/candidate_b`'s own
     /// integration design): absorbs the online-softmax combine's register/
     /// threadgroup-only stages (151 max, 152 cooperative max, 156 trivial

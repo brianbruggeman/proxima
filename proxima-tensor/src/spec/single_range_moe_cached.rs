@@ -1102,7 +1102,7 @@ pub fn append_mistral_cached_moe_layer(
     // (see that function's own doc): a checkpoint carrying `attn_q_norm.weight`
     // is NEOX-family (Qwen3), whose on-disk Q/K rows stay in HF's native
     // split-half layout, never llama.cpp's converter-permuted interleaved
-    // pairing a no-qk_norm (Mistral/LLaMA) checkpoint uses.
+    // pairing a no-qk_norm (interleaved-pairing) checkpoint uses.
     let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
         Some(_) => {
             let pairs = head_dim / 2;
@@ -1228,7 +1228,7 @@ pub fn append_mistral_cached_moe_layer(
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new), site))
 }
 
-/// Which mixer one transformer block runs. LFM2.5-8B-A1B (`general.architecture
+/// Which mixer one transformer block runs. The 8B-A1B short-conv checkpoint (`general.architecture
 /// = "lfm2moe"`) hybridizes short-convolution and attention blocks in the same
 /// 24-layer stack, and GGUF carries no `layer_types` metadata key for this
 /// architecture (confirmed absent on the real checkpoint's own metadata dump)
@@ -1244,7 +1244,7 @@ pub enum LayerKind {
 }
 
 impl LayerKind {
-    /// Derives one block's kind from its own tensor name set: LFM2.5-8B-A1B's
+    /// Derives one block's kind from its own tensor name set: the 8B-A1B short-conv checkpoint's
     /// real checkpoint shows every block owns exactly one of
     /// `blk.{layer}.attn_q.weight` or `blk.{layer}.shortconv.conv.weight`,
     /// never neither and never both, so this is a presence check, not a

@@ -42,12 +42,12 @@ pub struct NumericPolicy {
     /// Permits [`NumericRewrite::WidenedReduceEpilogueFusion`]: the
     /// reduce-epilogue pass considers every reduce operand of a consumer
     /// instead of only the first, which folds the RMSNorm apply into its
-    /// sum-of-squares reduce (170 dispatches per gemma4-E2B decode token).
+    /// sum-of-squares reduce (170 dispatches per the E2B checkpoint decode token).
     /// It changes the bound op count and dispatch shape. Measured on Metal
     /// (`omega/tests/rmsnorm_epilogue_bit_identity.rs`), the hidden-width and
     /// single-head norms keep every bit under [`Self::bit_exact`], the
     /// multi-head norms do not, and under [`Self::llama_relaxed`] 71 to 1333
-    /// elements per norm differ by at most 2.4e-7. The gemma4-E2B logits then
+    /// elements per norm differ by at most 2.4e-7. The E2B checkpoint logits then
     /// differ in about 85% of their bits with row-norm-relative error of at
     /// most 6.7e-8 and the same argmax at every step. Decode ms per token did
     /// not improve with it on (15.72 off, 15.93 on, median of 14 runs), which

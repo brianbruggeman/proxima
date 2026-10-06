@@ -176,7 +176,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
         // Named `post_attention_norm.weight` on disk, not `ffn_norm.weight`
         // -- this checkpoint's own GGUF writer names this tensor
         // differently from every other architecture this crate binds
-        // (`proxima_model_interop::qwen35`'s own module doc, confirmed via
+        // (`proxima_model_interop::recurrent_interval`'s own module doc, confirmed via
         // `strings` on the real file: no `blk.N.ffn_norm.weight` key
         // exists anywhere), on both layer kinds.
         let ffn_norm_weight = input_leaf(
@@ -552,7 +552,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
             // runs its own dense FFN pass here, matching
             // `mistral_cached_forward_program_with_experts`'s own
             // `expert_count == 0` FFN math exactly (Qwen3.5 never routes FFN
-            // through experts, `qwen35.cpp:471`).
+            // through experts, llama.cpp's hybrid-model source, line 471).
             let normed2 = rmsnorm(&mut program, mixer_out, ffn_norm_weight, inv_dim, eps)?;
             let w_gate = input_leaf(
                 &mut program,
@@ -817,7 +817,7 @@ fn append_qwen35moe_router(
 /// Runs `x`'s post-attention-norm hidden state through the routed
 /// [`append_moe_ffn`] plus the gated shared expert, and adds the result back
 /// onto `mixer_out` (the pre-FFN residual stream) -- the one FFN sub-block
-/// shape every `qwen35moe` layer shares, dense-attention or GDN alike.
+/// shape every `recurrent-routed` layer shares, dense-attention or GDN alike.
 #[allow(clippy::too_many_arguments)]
 fn append_qwen35moe_ffn(
     program: &mut Vec<Op>,
@@ -1068,7 +1068,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
 
                 // `attn_q.weight` carries `[Q | gate]` per head, doubled
                 // width -- the same fused Q-gate `proxima_tensor::spec`'s own
-                // real `qwen35` dense checkpoint reads off `attn_q.weight`
+                // real `recurrent-interval` dense checkpoint reads off `attn_q.weight`
                 // (`spec.rs:8908-8944`). Reshaped via the same lossless
                 // broadcast-multiply-by-ones trick `wk`/`wv` use below, NEVER
                 // a per-head WEIGHT-level slice -- splitting a packed

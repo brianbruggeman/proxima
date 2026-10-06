@@ -11,7 +11,7 @@
 //! shared-KV layer has no `attn_v.weight`), [`AttentionScoreScale`], and
 //! `value_norm`.
 //!
-//! Gated one level up (`proxima-model-interop`'s `gemma4-kv-cache`
+//! Gated one level up (`proxima-model-interop`'s `sliding-pattern-kv-cache`
 //! feature, default-off): the functions here always compile, like every
 //! other `spec::*_cached` module in this crate, since building a program
 //! spec has no execution cost until a caller actually runs it -- only
@@ -407,7 +407,7 @@ pub(super) fn causal_mask_cached_windowed(
 
 /// [`append_lfm2_single_range_cached_attention`]'s two-range counterpart:
 /// the merged single-softmax read this module's own header doc names as
-/// this crate's `gemma4-kv-cache` root cause (a single softmax has no
+/// this crate's `sliding-pattern-kv-cache` root cause (a single softmax has no
 /// self-consistent way to include this call's own new positions in
 /// `k_even_cache`/`k_odd_cache`/`v_cache` before they exist) is closed the
 /// way every OTHER production cached engine in this crate already closes
@@ -475,12 +475,12 @@ pub fn append_lfm2_two_range_cached_attention(
     )?;
     let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
 
-    // `KeySource::Shared` (gemma4 E2B's cross-layer shared-KV,
+    // `KeySource::Shared` (the E2B checkpoint's cross-layer shared-KV,
     // `KeySourceKind::SharedFromLayer(source)`): no `attn_k.weight`/
     // `attn_k_norm.weight` leaf exists for this layer at all, so its `K`
     // is the donor layer's own already-rotated, already-k-norm'd halves,
     // reused verbatim -- `k_new_raw` (unrotated K) is only meaningful for
-    // `ValueSource::SharedWithKey` below, which gemma4 E2B's shared layers
+    // `ValueSource::SharedWithKey` below, which the E2B checkpoint's shared layers
     // never combine with `KeySource::Shared` (`KeySourceKind`'s own doc:
     // shared-KV always shares BOTH K and V), so `k_new_raw` need not exist
     // in this arm.
@@ -939,7 +939,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
 
 /// [`lfm2_two_range_cached_forward_program_with_experts`]'s own per-layer
 /// `stored_kv` entry: a donor (real cache-owning) layer's post-rope `K`
-/// halves and post-norm `V` (the exact nodes gemma4 E2B's
+/// halves and post-norm `V` (the exact nodes the E2B checkpoint's
 /// `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
 /// needs to reuse verbatim), plus that SAME donor's own already-declared
 /// `k_even_cache`/`k_odd_cache`/`v_cache` `Op::Input` nodes -- a shared
@@ -997,7 +997,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     embedding_scale: Option<EmbeddingScale>,
     logit_softcap: Option<f32>,
     last_row_only: bool,
-    // gemma4 E2B/E4B's per-layer-embedding preamble
+    // the E2B/E4B checkpoint's per-layer-embedding preamble
     // (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc) --
     // `None` for every checkpoint with no PLE tensors (12B/26B/31B), so this
     // builder's prior callers (none of whom ever passed a PLE-bearing
@@ -1179,7 +1179,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     // One slot per block, populated only for a layer that owns a real
     // `K`/`V` projection and its own `kv_cache.{layer}.*` leaves -- a later
     // `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
-    // schedule entry (gemma4 E2B's cross-layer shared-KV) reads
+    // schedule entry (the E2B checkpoint's cross-layer shared-KV) reads
     // `stored_kv[source]` instead of declaring its own leaves at all, the
     // same "never re-project, never re-declare a leaf" contract
     // `lfm2_forward_program_with_experts`'s own `stored_kv` already uses for
@@ -1237,9 +1237,9 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
             ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
-        // gemma4 E2B shares BOTH `K` and `V` from the same donor layer
+        // the E2B checkpoint shares BOTH `K` and `V` from the same donor layer
         // (`KeySourceKind::SharedFromLayer`'s own doc: ollama's own
-        // `gemma4.go` reads one donor's `sharedHistory` for both, never `K`
+        // the reference Go source reads one donor's `sharedHistory` for both, never `K`
         // alone) -- this builder's own cache-leaf declarations below are
         // gated on `key_source_kind` alone, so a schedule entry naming
         // `SharedFromLayer` on one axis but not the other is rejected here
@@ -1468,7 +1468,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     // attn_parity followon (2026-09-22): the same factor-out
     // `lfm2_forward_program_with_experts` carries -- see that function's own
     // doc on `append_head`/`head_repeats`/`duplicate_head_roots`.
-    // This is the builder gemma4's real production decode path actually
+    // This is the builder the sliding-pattern family's real production decode path actually
     // calls (`CacheMask::Padded`, `bind_gemma4_with_last_row_only`),
     // so this copy, not the cacheless one, is what the measurement harness
     // needs live.
