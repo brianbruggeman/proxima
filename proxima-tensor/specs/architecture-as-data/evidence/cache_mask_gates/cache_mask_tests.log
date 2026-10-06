@@ -1,0 +1,10 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.09s
+────────────
+ Nextest run ID 7dfd0b0f-ed55-4642-a289-96b61cd62436 with nextest profile: default
+    Starting 3 tests across 8 binaries (764 tests skipped)
+        PASS [   0.018s] (1/3) proxima-tensor spec::tests::cache_mask::a_config_without_a_cache_mask_lowers_the_bounded_mask
+        PASS [   0.009s] (2/3) proxima-tensor spec::tests::cache_mask::the_mask_survives_a_toml_round_trip
+        PASS [   0.010s] (3/3) proxima-tensor spec::tests::cache_mask::the_padded_mask_adds_one_cached_block_select_per_layer_over_the_bounded_mask
+────────────
+     Summary [   0.043s] 3 tests run: 3 passed, 764 skipped
