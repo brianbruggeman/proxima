@@ -473,11 +473,20 @@ function; `opt-level` did not move it. Attribution table:
   snapshot would copy every KV layer per verify step).
 - `ServingState::accept_rows` requires `row_tokens` only through row `accepted` (the verifier stops sampling at the
   first differing row, so later rows do not exist); `row_caches` still has one entry per draft.
-- Open against R2: the `pending` queue and the evaluation closure remain. `pending` buffers the tokens a verify step
-  settles beyond the first, because `decode_until_stop_or_budget` pulls one token per call; the closure still owns
-  the device buffers, residency policy and scratch that the state machine must not carry. Neither holds control state
-  (which evaluation shape runs, the cursor, the rewind); both are plumbing between the state machine and the
-  termination policy.
+- Closed by `f7f40179`: the `pending` queue and the evaluation closure are gone from `run_decode_loop_from_ids`.
+  The serving loop (now `drive_serving_loop`) is a `'decode: while` over the state machine: one `'evaluate` block
+  per step reads the state, runs the evaluation and settles it, leaving the step's tokens in `settled_tokens` (one
+  token, or the accepted drafts plus the correction or bonus token after a verify); a `for` over `settled_tokens`
+  delivers each through `deliver_token`, which is the body `decode_until_stop_or_budget` used to hold, now shared
+  by both (its state is three caller-owned locals passed by reference, no carrier type). A step's tokens are
+  drained inside the iteration that produced them, so no queue crosses steps. Budget, eos and `on_token`
+  `Break` stop at the same token as before (AC5 FSM half asserts the step counts, AC6 and AC2 the ids).
+  `run_decode_loop_from_ids` is now a wrapper over `drive_serving_loop` that runs the monolithic expert-source
+  release on every exit, because the closure's old release sat between the loop and `decode_result?`, and the
+  inline loop's `?` returns leave no such point.
+- Still on `decode_until_stop_or_budget` with a closure: `run_decode_loop_placed_kv` (the single-range, device
+  resident KV arm, `metal-output-placement` on macOS only, never taken for MoE, seeded or two-range calls). It holds
+  `cached_len` and `next_ids` locals, not a `ServingState`; it is a second decode loop outside this slice's row.
 - Behavior change: drafting needs `Decode`, so a seeded call whose new range is one token no longer drafts at its
   prefill step. Ids are unchanged (AC2, AC6).
 - Gates at the slice tip, per-slice tier in the gate profile, logs in `evidence/serving_fsm/gates/`: clippy exit 0,
@@ -488,3 +497,17 @@ function; `opt-level` did not move it. Attribution table:
   and `perf_granite`): 12 of 12 bound lines within. gemma4 E2B ms/token 11.9500 vs 12.1605, prefill 2514.49 vs
   2494.48 ms; granite moe ms/token 14.8760 vs 14.8240, prefill 6519.96 vs 6515.96 ms. The full 8 x 7 arms run at the
   end of the run.
+- Gates at `f7f40179` (tree `3b87f73af10c55ded0fc0fcbfa52529bc7b20cf1`), logs in `evidence/serving_fsm_inline/gates/`:
+  clippy exit 0, tensor alloc check exit 0, interop no-default check exit 0, `--features std` all-targets check exit 0
+  (the one build where `decode_until_stop_or_budget` has no non-test caller; it is `cfg(any(test, placed-kv))`),
+  tensor 779 passed 8 skipped (6.7 s), interop slice-gate 709 passed 125 skipped (98.5 s), AC5 FSM half 2 passed
+  (7.3 s), AC6 7 passed (148.2 s), AC2 5 passed (164.0 s).
+- Performance arms for the inline loop (decode_arms, 2 processes x 3 runs, `evidence/serving_fsm_inline/perf_e2b`
+  and `perf_granite`), run on a release `decode_gbps_baseline` built from the staged tree whose id is the commit's
+  tree id above (sha256 `bdeb9143692378f74d440ff0063cf871641bd069bec70d0e822b46b7def0ffe8`, kept as
+  `perf/decode_gbps_baseline_slice10b_fix`), against the 0c binary, Ollama stopped by SIGTERM (`osascript` quit
+  returned "User canceled"; `/api/ps` refused the connection before each run; reopened after): 12 of 12 bound
+  lines within. gemma4 E2B ms/token 12.0565 vs 12.1745 (limit 0.2435), prefill 2516.04 vs 2516.51 ms, peak RSS
+  -16441344 B, footprint +7716928 B (limit 14120444), GPU bytes -1179648 B. granite moe ms/token 15.1290 vs
+  15.1245 (limit 0.3025), prefill 6518.54 vs 6516.96 ms, peak RSS +31776768 B (limit 49721344), footprint
+  -23101376 B, GPU bytes 0.

@@ -1,0 +1,2 @@
+four busiest processes at launch, percent CPU, names omitted: 89.4  26.5  5.7  2.7
+load average: 4.24 4.23 4.48 (14:01)
