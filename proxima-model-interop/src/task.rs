@@ -79,14 +79,21 @@ fn task_from_word(value: &str) -> Option<ModelTask> {
     }
 }
 
-fn architecture_task(architecture: &str) -> Option<ModelTask> {
-    let value = normalized(architecture);
-    if value.contains("reranker") || value.contains("crossencoder") {
-        Some(ModelTask::Reranker)
-    } else if value.contains("bert") || value.contains("encoder") {
-        Some(ModelTask::Embedding)
-    } else {
-        None
+// llama.h LLAMA_POOLING_TYPE_RANK: the pooling a reranking checkpoint declares
+// to attach its classification head
+const POOLING_TYPE_RANK: u32 = 4;
+
+fn encoder_task(parsed: &ParsedGguf, architecture: &str) -> Option<ModelTask> {
+    let key = |suffix: &str| format!("{architecture}.{suffix}");
+    let bidirectional = matches!(
+        parsed.metadata_value(&key("attention.causal")),
+        Some(MetadataValue::Bool(false))
+    );
+    match parsed.metadata_value(&key("pooling_type")) {
+        Some(pooling) if pooling.as_u32() == Some(POOLING_TYPE_RANK) => Some(ModelTask::Reranker),
+        Some(_) => Some(ModelTask::Embedding),
+        None if bidirectional => Some(ModelTask::Embedding),
+        None => None,
     }
 }
 
@@ -121,9 +128,12 @@ pub fn classify_task(parsed: &ParsedGguf) -> TaskProfile {
     } else if let Some(value) = model_identity(parsed).and_then(task_from_word) {
         evidence.push("model identity metadata".to_string());
         value
-    } else if let Some(value) = architecture.as_deref().and_then(architecture_task) {
+    } else if let Some(value) = architecture
+        .as_deref()
+        .and_then(|name| encoder_task(parsed, name))
+    {
         evidence.push(format!(
-            "architecture family: {}",
+            "encoder keys: {}",
             architecture.as_deref().unwrap_or("")
         ));
         value
