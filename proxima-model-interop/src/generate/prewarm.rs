@@ -110,7 +110,7 @@ pub(super) fn prewarm_stops(
 }
 
 /// The prefix the next turn's prompt shares with this one: `ids`, the
-/// answer, then `suffix`. The model ends a gemma4 answer with its end-of-turn
+/// answer, then `suffix`. The model ends a sliding-pattern answer with its end-of-turn
 /// token, and keeps sampling it until the end-of-sequence token (a real answer
 /// came back as `[.., 4443, 106, 106, 106, 106]`), while a client re-renders
 /// the turn with that token once, as the first token of the suffix. Counting
@@ -130,7 +130,7 @@ fn next_turn_prefix(ids: &[u32], generated: &[u32], suffix: &[u32]) -> Vec<u32> 
 
 impl LoadedModel<'_> {
     /// Registers the turn-boundary suffix -- the token ids that follow an
-    /// answer in the next request's prompt, for gemma4 its end-of-turn token
+    /// answer in the next request's prompt, for sliding-pattern its end-of-turn token
     /// and the next user turn's opener -- so that after every generation
     /// through the prompt cache proxima prefills the answer's trailing tokens
     /// plus this suffix with no further call. An empty suffix turns the
@@ -378,7 +378,7 @@ impl LoadedModel<'_> {
     /// most, and goes back to waiting; a request itself returns the moment its
     /// answer is stored. The worker keeps one `BackendRuntime` for every
     /// job: a fresh one costs the first forward it runs about 225 ms on
-    /// gemma4-E2B (317 ms against 93 ms for a 5-token prewarm).
+    /// the E2B checkpoint (317 ms against 93 ms for a 5-token prewarm).
     ///
     /// The thread is scoped, not owned by the model: a [`LoadedModel`] borrows
     /// the checkpoint bytes for `'file`, so no thread that outlives the

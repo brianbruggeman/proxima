@@ -7,7 +7,7 @@
 //! full history of every layer and each scratch became a fresh no-copy
 //! `MTLBuffer` wrapper. [`DeviceKv`] keeps those rows in
 //! [`PlacedBuffer`]s instead -- the same caller-owned-buffer mechanism the
-//! qwen35 dense-attention placement and the single-range KV path already use
+//! recurrent-interval dense-attention placement and the single-range KV path already use
 //! (`omega::execute_plan_named_with_placements`): the leaf the program reads
 //! is an input placement over the buffer, the freshly computed rows are an
 //! output placement written into the buffer's tail, and the host touches

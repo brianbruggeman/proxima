@@ -47,7 +47,7 @@
 //! locals threaded by layer index through one closure. It is deliberately
 //! inert: no allocation, no `omega::metal` call, no `ServingBackend` impl --
 //! wiring a real Metal backend means proving `evaluate` against the real
-//! `qwen35moe` program, which is exactly the live-loop migration this module
+//! `recurrent-routed` program, which is exactly the live-loop migration this module
 //! does not attempt.
 
 // not yet called from decode.rs's live loop; this module's own tests below are its only caller.
@@ -102,7 +102,7 @@ pub(super) trait ServingBackend {
 ///
 /// Deliberately unconstructed: no `allocate_placed_buffer`, no
 /// `omega::metal` call, no `ServingBackend` impl. Wiring this in means
-/// proving a real Metal `evaluate` against the `qwen35moe` program, out of
+/// proving a real Metal `evaluate` against the `recurrent-routed` program, out of
 /// scope for this module.
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub(super) struct MetalPlacementResources {

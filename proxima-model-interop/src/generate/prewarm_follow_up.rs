@@ -28,7 +28,7 @@ use super::*;
 
 impl LoadedModel<'_> {
     /// Registers the tokens that close a user turn and open the model's
-    /// reply -- for gemma4 the end-of-turn token, a newline and the model-turn
+    /// reply -- for sliding-pattern the end-of-turn token, a newline and the model-turn
     /// opener -- which every drafted follow-up branch ends with so that a real
     /// user turn the draft matches continues straight into the reply. An
     /// empty list turns follow-up drafting off, its default.

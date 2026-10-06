@@ -53,7 +53,7 @@ pub fn kv_row_bytes(kv_heads: u32, head_dim: u32) -> u64 {
 
 /// A checkpoint's own on-disk weight bytes, by class --
 /// [`crate::bind::tensor_bytes_by_class`]'s own three-way split
-/// (dense/experts/tables) plus the SSM recurrent-state bytes a qwen35
+/// (dense/experts/tables) plus the SSM recurrent-state bytes a recurrent-interval
 /// hybrid checkpoint's layers hold ([`crate::generate::SsmShape`]'s
 /// own doc; `0` for every other architecture). Never a context-dependent
 /// class -- these bytes are fixed once a checkpoint is chosen, unlike
@@ -68,7 +68,7 @@ pub struct WeightClassBytes {
     pub expert_bytes: u64,
     /// `token_embd.weight` + `output.weight`.
     pub table_bytes: u64,
-    /// A qwen35 hybrid checkpoint's per-layer SSM conv-history plus
+    /// A recurrent-interval hybrid checkpoint's per-layer SSM conv-history plus
     /// recurrent-state bytes, summed across every layer -- `0` for a
     /// non-hybrid (dense or MoE-dense) checkpoint.
     pub ssm_state_bytes: u64,

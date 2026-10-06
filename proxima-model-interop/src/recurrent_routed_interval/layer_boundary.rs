@@ -1,4 +1,4 @@
-//! Borrowed activation handoff for a single qwen35moe layer.
+//! Borrowed activation handoff for a single recurrent-routed layer.
 //!
 //! A routed layer must publish its hidden activation before its router and
 //! expert gather can be evaluated independently.  These phase values carry

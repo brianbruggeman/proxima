@@ -1,4 +1,4 @@
-//! Header configuration for the `gemma4` mixture-of-experts checkpoint
+//! Header configuration for the `sliding-pattern` mixture-of-experts checkpoint
 //! family -- `recurrent_routed_interval::hparams`'s own shape (family-prefixed metadata
 //! reads, a per-layer array read into `Vec`) applied to Gemma 4's own
 //! alternating sliding-window/full-attention schedule instead of Qwen 3.6's
@@ -7,7 +7,7 @@
 //! [`crate::lowering::bind_checkpoint`] reads that array directly to
 //! build [`proxima_tensor::spec::LayerAttentionConfig`] per layer for the
 //! generic [`proxima_tensor::spec::lfm2_forward_program_with_experts`]
-//! engine, and every gemma4 layer is
+//! engine, and every sliding-pattern layer is
 //! [`proxima_tensor::spec::LayerKind::Attention`] (this family has no
 //! `ShortConv` layers).
 
@@ -56,7 +56,7 @@ pub struct Gemma4Hparams {
     /// layers (`block_count - shared_kv_layers` through `block_count - 1`)
     /// that carry no `attn_k.weight`/`attn_v.weight`/`attn_k_norm.weight`
     /// tensors of their own at all (confirmed against the real
-    /// `gemma4:e2b-it-qat` header: an `UnknownTensor` load error on
+    /// `e2b-it-qat` header: an `UnknownTensor` load error on
     /// `blk.15.attn_k_norm.weight` when `block_count=35` and this key reads
     /// `20`). `0` (the default `metadata_u32_optional` returns when the key
     /// is absent, e.g. E4B/12B/26B/31B) means every layer owns its own
@@ -69,7 +69,7 @@ pub struct Gemma4Hparams {
     pub final_logit_softcapping: f32,
     /// `{family}.embedding_length_per_layer_input` -- Gemma 4 E2B/E4B's
     /// per-layer-embedding (PLE) width (`256` on the real E2B checkpoint,
-    /// gemma4.go's own `HiddenSizePerLayer`). `0` (the default
+    /// the reference Go source's own `HiddenSizePerLayer`). `0` (the default
     /// `metadata_u32_optional` returns when the key is absent, e.g.
     /// 12B/26B/31B) means this checkpoint carries no PLE tensors at all --
     /// `crate::gemma4_descriptor_from_gguf`'s own `ple_dim > 0`

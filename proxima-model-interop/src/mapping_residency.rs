@@ -227,7 +227,7 @@ fn forced_start_rung() -> ResidencyRung {
 /// Best-effort `mlock(2)` over the whole mapping -- the ladder's last rung
 /// before [`InteropError::MappingNotResident`]. llama.cpp's own `--mlock`
 /// flag takes the identical whole-mapping lock (measured 0.8 s on the
-/// qwen35moe checkpoint used in this module's own `#[ignore]`d test). A
+/// recurrent-routed checkpoint used in this module's own `#[ignore]`d test). A
 /// failed lock is not fatal here: [`probe_residency`] re-checks afterward
 /// and the ladder falls through to the existing error if pages are still
 /// missing, mirroring [`probe_residency`]'s own "a failed probe proves
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// ROW 535 forensics: `prove_resident` fails on the real 23,938,321,664
-    /// byte qwen35moe blob with 49% of pages missing after prefault + one
+    /// byte recurrent-routed blob with 49% of pages missing after prefault + one
     /// retry, at 82% memory free -- plenty of headroom for the whole mapping
     /// to stay resident. This test reproduces the probe against the real
     /// file and reports per-1-GiB-range resident/missing counts to stderr so
@@ -569,7 +569,7 @@ mod tests {
     }
 
     /// ROW 542 root-cause: stages a second immediate prefault, an
-    /// `MADV_WILLNEED`, and an `mlock` against the same real qwen35moe
+    /// `MADV_WILLNEED`, and an `mlock` against the same real recurrent-routed
     /// mapping in sequence, timing and `mincore`-checking each one, so the
     /// rung that actually resolves the holes ROW 535 hit is visible instead
     /// of guessed. A near-zero elapsed time for a stage over a 24 GB mapping

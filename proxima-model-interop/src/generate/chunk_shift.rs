@@ -14,7 +14,7 @@
 //! (`src/llama-kv-cache.cpp:1924-1964`, `:2003-2056`). Here the rows live
 //! host side, so the move is the same rotation applied to the rows
 //! ([`rotate_rows`]) and a write at the new position. The prompt pointer in
-//! llama only advances on a match, so a replaced span (a summary where the
+//! llama.cpp only advances on a match, so a replaced span (a summary where the
 //! middle turns were) hides every later run from it; [`plan_runs`] also steps
 //! the prompt pointer, so the kept turns after a summary are found.
 //!
@@ -98,7 +98,7 @@ fn window_hashes(ids: &[u32], window: usize) -> Vec<u64> {
 /// The runs of at least `min_len` tokens that `prompt[from..]` shares with
 /// `stored[from..]`, in prompt order, each at a stored position at or past
 /// where the previous one ended. A candidate is taken at the first stored
-/// position that matches (llama's walk takes the first too) and extended
+/// position that matches (llama.cpp's walk takes the first too) and extended
 /// while the ids keep matching; the last prompt token is never inside a run,
 /// because it has to be forwarded to produce logits. Windows are hashed with
 /// a rolling hash and every hit is verified against the ids, so a collision
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(runs[0].new_end(), 13);
     }
 
-    /// llama's own case: the middle is dropped with nothing in its place, so
+    /// llama.cpp's own case: the middle is dropped with nothing in its place, so
     /// the prompt pointer never has to step. A run shorter than `min_len`
     /// (the 2-token echo 5, 6) is not worth moving.
     #[test]
@@ -820,7 +820,7 @@ mod tests {
     }
 
     /// The table [`build_position_inputs`] builds for a delta, with
-    /// gemma4's full-layer frequency factors (`[1.0]*64 + [1e30]*192`),
+    /// the sliding-pattern family's full-layer frequency factors (`[1.0]*64 + [1e30]*192`),
     /// rotates a key from position 3000 to position 2500 to the same row a
     /// direct table at position 2500 gives, within f32.
     #[test]

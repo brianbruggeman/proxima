@@ -8,7 +8,7 @@
 //!
 //! `common_speculative_draft` (`common/speculative.cpp:2802-2885`) is the
 //! incumbent [`DrafterSet::draft`] reproduces: every enabled drafter's own
-//! `draft()` runs in llama's fixed priority order
+//! `draft()` runs in llama.cpp's fixed priority order
 //! ([`crate::serving::SpeculativeTypeSet::iter_priority_order`]) until one
 //! yields a non-empty draft; later drafters in the order are never called
 //! that step, matching `common_speculative_draft`'s own early `break` once
@@ -100,7 +100,7 @@ impl Drafter {
 /// `n_ctx - prompt.n_tokens() - 2`, then `min(.., n_remaining() - 1)`. The
 /// `- 2` leaves room for the sampled token and a context shift; the
 /// `- 1` is the sampled token itself, because a verify of `k` drafts emits
-/// up to `k + 1` tokens. `cached_len` excludes the sampled token (llama's
+/// up to `k + 1` tokens. `cached_len` excludes the sampled token (llama.cpp's
 /// "slot.prompt is not yet expanded with the `id`"); `generated` counts
 /// tokens already produced, the sampled one included (`n_remaining() =
 /// n_predict - n_gen`). Saturates at `0`, which means "do not speculate".
@@ -115,7 +115,7 @@ pub(crate) fn draft_limit_for_step(
     context_room.min(budget_room)
 }
 
-/// The set of [`Drafter`]s driven each generation, in llama's own fixed
+/// The set of [`Drafter`]s driven each generation, in llama.cpp's own fixed
 /// priority order -- built once per decode call from
 /// [`SpeculativeConfig::speculative_types`]
 /// ([`crate::serving::apply_serving_config`] already rejects every member

@@ -37,7 +37,7 @@ impl<'file> LoadedModel<'file> {
 
     /// This checkpoint's pre-`lm_head` hidden-state root
     /// (`proxima_tensor::spec::ForwardRoots::hidden`), when the load path
-    /// named one -- `None` on the qwen35 hybrid path
+    /// named one -- `None` on the recurrent-interval hybrid path
     /// (`crate::recurrent_interval::qwen35_forward_program` carries no named
     /// hidden-state root yet). A caller composes this with
     /// [`Self::forward_node_values`] to read that tensor's row out
@@ -58,7 +58,7 @@ impl<'file> LoadedModel<'file> {
         &self.router_roots
     }
 
-    /// Evaluates the bound qwen35moe router roots for one prompt position.
+    /// Evaluates the bound recurrent-routed router roots for one prompt position.
     /// The returned vectors are the graph's actual per-layer router logits in
     /// layer order, so DynaExq can make a residency decision from execution
     /// data rather than from a duplicated host-side router. This diagnostic
@@ -76,13 +76,13 @@ impl<'file> LoadedModel<'file> {
                 architecture: String::from(
                     self.family(),
                 ),
-                reason: String::from("the bound model does not expose qwen35moe router roots"),
+                reason: String::from("the bound model does not expose routed-expert router roots"),
             });
         }
         self.forward_node_values_on_backend(prompt, &self.router_roots, gpu_layers)
     }
 
-    /// Builds the graph cuts that surround each qwen35moe routed layer. The
+    /// Builds the graph cuts that surround each recurrent-routed routed layer. The
     /// cuts are plan-time data: callers evaluate one producer, apply the
     /// residency transition, then evaluate its consumer with the borrowed
     /// activation handoff. No cut is built for another architecture.
@@ -97,7 +97,7 @@ impl<'file> LoadedModel<'file> {
                 architecture: String::from(
                     self.family(),
                 ),
-                reason: String::from("the bound model has no qwen35moe layer diagnostics"),
+                reason: String::from("the bound model has no routed-expert layer diagnostics"),
             });
         }
         self.moe_layer_diagnostics
@@ -135,7 +135,7 @@ impl<'file> LoadedModel<'file> {
                 architecture: String::from(
                     self.family(),
                 ),
-                reason: String::from("the bound model has no qwen35moe layer diagnostics"),
+                reason: String::from("the bound model has no routed-expert layer diagnostics"),
             });
         }
         let mut segments = Vec::with_capacity(self.moe_layer_diagnostics.len());
@@ -415,7 +415,7 @@ impl<'file> LoadedModel<'file> {
                 .map(|segments| segments.router.0.len() + segments.gather.0.len())
                 .sum::<usize>()
                 + suffix.0.len()) as u64,
-            "qwen35moe pre-gather partitions built because the concrete shape changed"
+            "pre-gather partitions built because the concrete shape changed"
         );
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1963,7 +1963,7 @@ impl<'file> LoadedModel<'file> {
                         phase = if is_router { "router" } else { "gather" },
                         requested_nodes = requested_nodes.len() as u64,
                         readback_bytes,
-                        "qwen35moe segment returned requested payload bytes"
+                        "pre-gather segment returned requested payload bytes"
                     );
                     if std::env::var_os("PROXIMA_DEBUG_QWEN35_REQUEST_BYTES").is_some() {
                         let mut returned = requested
@@ -2274,7 +2274,7 @@ impl<'file> LoadedModel<'file> {
                 gather_elapsed_us,
                 router_readback_bytes,
                 gather_readback_bytes,
-                "qwen35moe pre-gather segment census recorded after requested outputs completed"
+                "pre-gather segment census recorded after requested outputs completed"
             );
             debug!(
                 position = position_offset as u64,
@@ -2316,8 +2316,8 @@ impl<'file> LoadedModel<'file> {
         ))
     }
 
-    /// Graph-level producer boundaries for every qwen35moe layer, in layer
-    /// order. Non-qwen35moe models return an empty slice.
+    /// Graph-level producer boundaries for every recurrent-routed layer, in layer
+    /// order. Non-recurrent-routed models return an empty slice.
     #[must_use]
     pub fn moe_layer_diagnostics(&self) -> &[crate::recurrent_routed_interval::MoeLayerDiagnostics] {
         &self.moe_layer_diagnostics
@@ -2350,7 +2350,7 @@ impl<'file> LoadedModel<'file> {
 
     /// One post-layer residual root per dense layer
     /// (`crate::lowering::BoundProgram::residual_roots`'s own doc) --
-    /// empty on the qwen35 hybrid path, which exposes no single per-layer
+    /// empty on the recurrent-interval hybrid path, which exposes no single per-layer
     /// residual node. `examples/compare_local.rs`/`examples/embed_local.rs`
     /// walk this to compare CPU/GPU at the first divergent layer instead of
     /// guessing [`NodeId`] arithmetic.
@@ -2477,7 +2477,7 @@ impl<'file> LoadedModel<'file> {
     /// `false` at [`Self::load`] reproduces this crate's forward program
     /// byte-for-byte; this constructor is the seam a caller (or a future
     /// [`crate::serving::ServingConfig`] field) flips to measure the other
-    /// side. No effect on a `qwen35` checkpoint (that branch never reads
+    /// side. No effect on a `recurrent-interval` checkpoint (that branch never reads
     /// this flag) or a mixture-of-experts checkpoint (routed FFN weights are
     /// untouched by this flag either way).
     ///
@@ -2503,7 +2503,7 @@ impl<'file> LoadedModel<'file> {
     /// extra cost (`append_mistral_cached_layer`'s `fused_qkv_reduce` doc
     /// traces the exact `shape::infer` limit this hits), so the measured
     /// effect, if any, is per-dispatch bandwidth on the one larger reduce,
-    /// not fewer kernel launches. No effect on a `qwen35` checkpoint or a
+    /// not fewer kernel launches. No effect on a `recurrent-interval` checkpoint or a
     /// mixture-of-experts checkpoint, same carve-outs as the paired flag.
     ///
     /// # Errors
@@ -2522,7 +2522,7 @@ impl<'file> LoadedModel<'file> {
     /// ([`Self::load_with_descriptor`]). Only a family whose header reader is
     /// the uniform one lowers through the engine that reads them; every other
     /// schedule source loads as [`Self::load`] does, which is the "no effect on
-    /// a `qwen35` checkpoint" the two constructors above document.
+    /// a `recurrent-interval` checkpoint" the two constructors above document.
     fn load_with_reduce_flags(
         parsed: &ParsedGguf,
         file_bytes: &'file [u8],
@@ -2622,7 +2622,7 @@ impl<'file> LoadedModel<'file> {
         omega::backend::register_checkpoint_mapping(file_bytes);
         // `crate::memory_fit`'s own load-time gate needs these three sums
         // long after `parsed` has gone out of scope -- computed once, here,
-        // before any weight is bound, shared by both the qwen35 and dense
+        // before any weight is bound, shared by both the recurrent-interval and dense
         // branches below.
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let (dense_weight_bytes, expert_weight_bytes, table_weight_bytes) =
@@ -2646,17 +2646,17 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let step_state = crate::lowering::step_state(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-        // The single-range program is dense-Mistral-only
+        // The single-range program is dense-uniform-only
         // (`SingleRangeProgram`'s own field doc): it has no concept of
         // recurrent layers, and `build_single_range_program` itself already
         // turns away any mixture-of-experts checkpoint. A family whose profile
         // names a cache shape other than `Uniform` is excluded for the same
-        // reason: gemma4 E2B/E4B (dense, `expert_count == 0`) declare shared-KV
+        // reason: the E2B/E4B checkpoint (dense, `expert_count == 0`) declare shared-KV
         // layers, and `mistral_single_range_cached_forward_program` declares a
         // uniform `attn_k.weight`/`attn_k_norm.weight`/`attn_v.weight`
         // `Op::Input` leaf for every layer 0..block_count with no concept of
         // `KeySourceKind::SharedFromLayer` -- it would declare
-        // `blk.15.attn_k.weight` for the real `gemma4:e2b-it-qat` checkpoint
+        // `blk.15.attn_k.weight` for the real `e2b-it-qat` checkpoint
         // even though that tensor never exists on disk and the leaf binder
         // correctly never binds it, so `run_decode_loop_placed_kv` would
         // execute a graph asking for a weight that was never bound
@@ -2872,7 +2872,7 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             // safetensors carries no GGUF `general.architecture` this crate
-            // reads as `"gemma4"` -- never eligible (same reasoning as
+            // maps to the sliding-pattern schedule source -- never eligible (same reasoning as
             // `Self::load`'s dense-path `None` above).
             speculative_verify_program: None,
             checkpoint_mapping: file_bytes,
@@ -2881,92 +2881,17 @@ impl<'file> LoadedModel<'file> {
     }
 }
 
-/// Regression coverage for the SECOND gemma4-E2B forward crash
+/// Regression coverage for the SECOND forward crash on the E2B checkpoint
 /// (`Metal(Tensor(UnboundInputName("blk.15.attn_k.weight")))`, measured
-/// against the real `gemma4:e2b-it-qat` checkpoint on Metal): `Self::load`'s
+/// against the real `e2b-it-qat` checkpoint on Metal): `Self::load`'s
 /// `profile.kv_cache_shape != KvCacheShape::Uniform` gate above
-/// (the gemma4 family profile's `kv_cache_shape` is
+/// (the sliding-pattern family profile's `kv_cache_shape` is
 /// `KvCacheShape::Custom`) is what stops
-/// `build_single_range_program` from ever running for gemma4, and this
+/// `build_single_range_program` from ever running for sliding-pattern, and this
 /// module proves both halves of why that gate is necessary, without
 /// loading any checkpoint.
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
-mod gemma4_single_range_exclusion_tests {
-    use super::*;
-
-    /// gemma4 E2B's own shape (`sliding_pattern::bind::declared_leaves_match_bound_leaves_tests::e2b_shaped_architecture`'s
-    /// own doc: 35 layers, `blk.15..=34` shared-KV) flattened into the
-    /// generic [`ModelHparams`] `build_single_range_program` actually
-    /// receives -- that type carries no sliding-window-pattern or
-    /// shared-KV-layer-count field at all, so this shape is
-    /// indistinguishable from an ordinary 35-layer dense Mistral checkpoint
-    /// at this builder's own boundary.
-    fn gemma4_e2b_shaped_model_architecture() -> ModelHparams {
-        ModelHparams {
-            vocab: 1,
-            embedding: 1536,
-            feed_forward: 6144,
-            query_heads: 8,
-            kv_heads: 1,
-            kv_heads_by_layer: alloc::vec![1; 35],
-            head_dim: 512,
-            block_count: 35,
-            expert_count: 0,
-            expert_used_count: 0,
-            rope_freq_base: 1_000_000.0,
-            rms_epsilon: 1e-6,
-            tied_embeddings: false,
-            family: String::from("gemma4"),
-            sliding_rope: None,
-        }
-    }
-
-    /// The hazard the `"gemma4"` exclusion exists to prevent, proven
-    /// directly: called on gemma4 E2B's own shape,
-    /// `build_single_range_program` (`mistral_single_range_cached_forward_program`'s
-    /// own doc: dense-Mistral-only, ONE uniform per-layer schedule, no
-    /// `KeySourceKind::SharedFromLayer` concept at all) still declares
-    /// `blk.15.attn_k.weight` -- the exact leaf name the real checkpoint's
-    /// own Metal run panicked on with `UnboundInputName` before this fix,
-    /// since the leaf binder never binds that tensor for a shared-KV
-    /// layer. Proves the exclusion at `Self::load` is load-bearing, not
-    /// dead code guarding against a case that could not occur anyway.
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn build_single_range_program_declares_blk15_attn_k_for_gemma4_shaped_architecture() {
-        let architecture = gemma4_e2b_shaped_model_architecture();
-        let single_range = build_single_range_program(&architecture, false)
-            .expect("mistral_single_range_cached_forward_program builds for a uniform 35-layer shape")
-            .expect("expert_count == 0 does not turn this builder away");
-        let declares_blk15_attn_k = single_range.program.iter().any(|operation| {
-            matches!(
-                operation,
-                proxima_tensor::op::Op::Input { name: Some(name), .. }
-                    if name == "blk.15.attn_k.weight"
-            )
-        });
-        assert!(
-            declares_blk15_attn_k,
-            "build_single_range_program has no gemma4 shared-KV awareness: it must still \
-             declare blk.15.attn_k.weight for a uniform 35-layer shape, proving \
-             Self::load's own gemma4 exclusion is load-bearing, not dead code"
-        );
-    }
-
-    /// The actual production gate reads the family profile's
-    /// [`proxima_tensor::spec::FamilyProfile::kv_cache_shape`] -- reproduced
-    /// here directly so flipping the gemma4 profile back to the default breaks
-    /// this test rather than silently reopening the panic this fix closed.
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn load_single_range_exclusion_covers_gemma4() {
-        assert_ne!(
-            family_profile("gemma4").expect("gemma4 profile embedded").kv_cache_shape,
-            KvCacheShape::Uniform,
-            "gemma4 must stay excluded from the placed-KV single-range program"
-        );
-    }
-}
+mod gemma4_single_range_exclusion_tests;
 
 pub(crate) enum LogitsSink<'sink> {
     Discard,

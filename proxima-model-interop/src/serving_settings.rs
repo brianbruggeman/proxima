@@ -28,8 +28,8 @@ fn from_name<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json:
     serde_json::from_value(serde_json::Value::String(raw.to_owned()))
 }
 
-/// the values llama accepts for `--cache-type-k` and `--cache-type-v`, spelled
-/// as llama spells them; `as_ggml` is the lowering to the type the serving
+/// the values llama.cpp accepts for `--cache-type-k` and `--cache-type-v`, spelled
+/// as llama.cpp spells them; `as_ggml` is the lowering to the type the serving
 /// config holds. mirrored rather than derived on `GgmlType` because that enum
 /// is foreign and `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,7 +505,7 @@ mod tests {
     }
 
     const FIRST_FIFTEEN_TOML: &str = r#"
-model_path = "/models/gemma4-e2b-it-qat.gguf"
+model_path = "/models/e2b-it-qat.gguf"
 context_length = 32768
 context_extrapolate = true
 parallel_sequences = 2
@@ -549,7 +549,7 @@ beta_slow = 1.0
         let from_toml: ServingSettings = conflaguration::from_toml_str(FIRST_FIFTEEN_TOML)
             .expect("the first-fifteen toml parses");
         let built = ServingSettings::builder()
-            .model_path("/models/gemma4-e2b-it-qat.gguf".to_owned())
+            .model_path("/models/e2b-it-qat.gguf".to_owned())
             .context_length(32768)
             .context_extrapolate(true)
             .rope_scaling(yarn())
@@ -568,7 +568,7 @@ beta_slow = 1.0
             .build();
         let from_env = temp_env::with_vars(
             [
-                ("PROXIMA_SERVING_MODEL_PATH", Some("/models/gemma4-e2b-it-qat.gguf")),
+                ("PROXIMA_SERVING_MODEL_PATH", Some("/models/e2b-it-qat.gguf")),
                 ("PROXIMA_SERVING_CONTEXT_LENGTH", Some("32768")),
                 ("PROXIMA_SERVING_CONTEXT_EXTRAPOLATE", Some("true")),
                 ("PROXIMA_SERVING_PARALLEL_SEQUENCES", Some("2")),
@@ -598,7 +598,7 @@ beta_slow = 1.0
         assert_eq!(lowered.gpu_layers, 99);
         assert_eq!(lowered.gpu_memory_limit_bytes, Some(17_179_869_184));
         assert_eq!(lowered.rope_scaling, Some(yarn()));
-        assert_eq!(lowered.model_path, "/models/gemma4-e2b-it-qat.gguf");
+        assert_eq!(lowered.model_path, "/models/e2b-it-qat.gguf");
 
         assert!(
             conflaguration::from_toml_str::<ServingSettings>(r#"kv_cache_key_quant = "q9_9""#)

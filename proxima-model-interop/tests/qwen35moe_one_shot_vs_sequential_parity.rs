@@ -31,7 +31,7 @@ const LAYERS: u32 = 4;
 const WIDTH: u32 = 13;
 
 /// `hybrid_moe_program_builds_one_gdn_and_one_attention_layer`'s own small
-/// dims (`proxima-model-interop/src/qwen35moe/program.rs`), widened to 4
+/// dims (`proxima-model-interop/src/recurrent_routed_interval/program.rs`), widened to 4
 /// layers/8 experts -- byte-identical to `qwen35moe_program_metal_cpu_layer_
 /// parity.rs`'s own `synthetic_architecture`, duplicated here rather than
 /// shared across files since this file carries no `metal`/`macos` gate.

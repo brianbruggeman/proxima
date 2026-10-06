@@ -1141,7 +1141,7 @@ pub(super) enum LayerCacheState {
     Attention(LayerCache),
     DenseAttention(DenseAttentionCache),
     Ssm(SsmLayerCache),
-    /// gemma4 E2B's cross-layer shared-KV layer
+    /// the E2B checkpoint's cross-layer shared-KV layer
     /// ([`LayerCacheRoots::SharedFromLayer`]'s own doc): no state of its
     /// own to grow, fill, or read back -- its `K`/`V` live entirely in the
     /// donor layer's own [`LayerCacheState`] entry.
@@ -1244,7 +1244,7 @@ pub(super) enum LayerCacheNames {
         conv_history: String,
         state: String,
     },
-    /// gemma4 E2B's cross-layer shared-KV layer -- declares no
+    /// the E2B checkpoint's cross-layer shared-KV layer -- declares no
     /// `Op::Input` leaf at all (`DeclaredCacheKind::SharedFromLayer`'s own
     /// doc), so this variant carries no names to feed at step time.
     SharedFromLayer,
@@ -1264,7 +1264,7 @@ pub(super) enum DeclaredCacheKind {
     Attention,
     DenseAttention,
     Ssm,
-    /// gemma4 E2B's cross-layer shared-KV layer
+    /// the E2B checkpoint's cross-layer shared-KV layer
     /// ([`LayerCacheRoots::SharedFromLayer`]'s own doc): this layer
     /// declares NO `kv_cache.{layer}.*`/`ssm_cache.{layer}.*` `Op::Input`
     /// leaves at all, by design -- its `K`/`V` are a donor layer's
@@ -1467,7 +1467,7 @@ pub(super) enum LayerPadRowWidths {
         conv_history_len: usize,
         state_len: usize,
     },
-    /// gemma4 E2B's cross-layer shared-KV layer -- no leaf, no row width.
+    /// the E2B checkpoint's cross-layer shared-KV layer -- no leaf, no row width.
     SharedFromLayer,
 }
 
@@ -1675,7 +1675,7 @@ pub(crate) struct PositionInputs {
 /// present, is the checkpoint's own per-pair frequency-scaling factor
 /// (GGUF `ROPE_FREQS`, [`crate::lowering::rope_freq_factors`])
 /// that ggml divides each pair's angle by before taking `cos`/`sin` --
-/// gemma4's full/global layers are the only architecture this crate binds
+/// the sliding-pattern family's full/global layers are the only architecture this crate binds
 /// one for (`[1.0]*64 + [1e30]*192]` on the real checkpoint: dividing by
 /// `1.0` is a no-op for the first 64 pairs, and dividing by `1e30` shrinks
 /// `theta` for the remaining 192 pairs to a value so far below one radian
@@ -1684,7 +1684,7 @@ pub(crate) struct PositionInputs {
 /// observable effect this function used to get by skipping those pairs
 /// outright (`rotary_pairs` truncation, since removed: this is the
 /// data-driven replacement, not an additional code path). `None` (every
-/// non-gemma4 architecture, and gemma4's own SWA layers via
+/// non-sliding-pattern architecture, and the sliding-pattern family's own SWA layers via
 /// `gemma4_sliding_rope_table`, which never calls this function) leaves
 /// every pair's angle undivided -- full rotation, this function's only
 /// behaviour before `rope_freqs` existed.
@@ -1754,7 +1754,7 @@ mod rope_freqs_tests {
     use super::build_position_inputs;
     use crate::rope_scaling::RopeScaling;
 
-    /// gemma4's real checkpoint shape: `head_dim=512` (256 pairs),
+    /// the sliding-pattern family's real checkpoint shape: `head_dim=512` (256 pairs),
     /// `rope_freq_base=1e6`, `rope_freqs.weight = [1.0]*64 + [1e30]*192`.
     /// Confirms the data-driven division path is numerically identical to
     /// the removed `rotary_pairs = 64` truncation this replaces: pairs
@@ -2521,7 +2521,7 @@ impl BackendRuntime {
             .map_err(InteropError::from);
         if host_timing {
             eprintln!(
-                "qwen35 segment host resolve_us={} execute_us={} plan_hits={} plan_misses={}",
+                "recurrent segment host resolve_us={} execute_us={} plan_hits={} plan_misses={}",
                 resolve_elapsed_us,
                 execute_started.elapsed().as_micros(),
                 self.plan_hits,
@@ -2531,7 +2531,7 @@ impl BackendRuntime {
             {
                 let stage = metal_stage_totals();
                 eprintln!(
-                    "qwen35 segment metal prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} op_setup_ms={:.3} gpu_exec_ms={:.3} encode_dispatch_ms={:.3} readback_ms={:.3} block_upload_ms={:.3} device_before={} device_after={} device_delta={}",
+                    "recurrent segment metal prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} op_setup_ms={:.3} gpu_exec_ms={:.3} encode_dispatch_ms={:.3} readback_ms={:.3} block_upload_ms={:.3} device_before={} device_after={} device_delta={}",
                     ticks_to_nanos(stage.prepare_ticks) as f64 / 1_000_000.0,
                     ticks_to_nanos(stage.emit_ticks) as f64 / 1_000_000.0,
                     ticks_to_nanos(stage.pipeline_lookup_ticks) as f64 / 1_000_000.0,
@@ -4012,7 +4012,7 @@ pub(super) fn deliver_token(
     on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
 ) -> Result<ControlFlow<bool, ()>, InteropError> {
     let is_eos = vocab.eos_token_id() == Some(token_id);
-    // Control tokens (gemma4's `<turn|>`-shaped turn markers) are
+    // Control tokens (the sliding-pattern family's `<turn|>`-shaped turn markers) are
     // structural, not content -- they must never appear in decoded
     // TEXT, but unlike eos they do not stop generation: the id still
     // enters `generated_ids` below, only its visible piece is empty.
@@ -4073,7 +4073,7 @@ mod decode_control_suppression_tests {
     use super::{Phase, TokenEvent, TokenType, Vocab, decode_until_stop_or_budget};
 
     /// A small vocab with one [`TokenType::Control`] entry (`"<turn|>"`,
-    /// gemma4's real turn-boundary marker) among ordinary text tokens --
+    /// the sliding-pattern family's real turn-boundary marker) among ordinary text tokens --
     /// built directly, no model or checkpoint needed
     /// (`decode_until_stop_or_budget`'s own doc: "provable against a
     /// scripted token source").
@@ -4289,7 +4289,7 @@ where
             let min = row.iter().copied().fold(f32::INFINITY, f32::min);
             let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             eprintln!(
-                "qwen35 router logits layer={} position={} min={} max={} nan_count={}",
+                "router logits layer={} position={} min={} max={} nan_count={}",
                 layer,
                 position_offset.saturating_add(local_position),
                 min,

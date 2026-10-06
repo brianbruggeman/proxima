@@ -159,7 +159,7 @@ const WIDTHS: [usize; 4] = [1, 2, 4, 8];
 /// `262144` (this dump run did not print `tokenizer.ggml.tokens`'s own
 /// length; the brief's figure is treated as the checkpoint's real vocab,
 /// consistent with `[new_count, vocab]`'s own doc at
-/// `proxima-model-interop/src/gemma4/bind.rs:1055`).
+/// `proxima-model-interop/src/sliding_pattern/bind.rs:1055`).
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const EMBEDDING: u32 = 1536;
 #[cfg(all(feature = "metal", target_os = "macos"))]
