@@ -14926,6 +14926,15 @@ mod gemma4_synthetic_parity {
             head_repeats: 1,
             last_row_only: false,
             speculative_verify: false,
+            ssm_conv_kernel: 0,
+            ssm_state_size: 0,
+            ssm_group_count: 0,
+            ssm_time_step_rank: 0,
+            ssm_inner_size: 0,
+            ssm_epsilon: 0.0,
+            v_head_reordered: false,
+            expert_shared_feed_forward: 0,
+            prefill_width: None,
         };
 
         let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden, _head_repeats) =
@@ -17549,6 +17558,15 @@ mod head_repeats {
             head_repeats,
             last_row_only: false,
             speculative_verify: false,
+            ssm_conv_kernel: 0,
+            ssm_state_size: 0,
+            ssm_group_count: 0,
+            ssm_time_step_rank: 0,
+            ssm_inner_size: 0,
+            ssm_epsilon: 0.0,
+            v_head_reordered: false,
+            expert_shared_feed_forward: 0,
+            prefill_width: None,
         }
     }
 
@@ -18012,6 +18030,15 @@ mod descriptor_config {
             .head_repeats(source.head_repeats)
             .last_row_only(source.last_row_only)
             .speculative_verify(source.speculative_verify)
+            .ssm_conv_kernel(source.ssm_conv_kernel)
+            .ssm_state_size(source.ssm_state_size)
+            .ssm_group_count(source.ssm_group_count)
+            .ssm_time_step_rank(source.ssm_time_step_rank)
+            .ssm_inner_size(source.ssm_inner_size)
+            .ssm_epsilon(source.ssm_epsilon)
+            .v_head_reordered(source.v_head_reordered)
+            .expert_shared_feed_forward(source.expert_shared_feed_forward)
+            .maybe_prefill_width(source.prefill_width)
             .build()
     }
 
@@ -18495,5 +18522,58 @@ mod gdn_layer_kind {
 
         assert_eq!(loaded.layers[1].kind, LayerKind::Gdn);
         assert_eq!(loaded.verify(), None, "a recurrent state is not truncated to reject a draft");
+    }
+}
+
+mod recurrence_fields {
+    use super::head_repeats;
+    use super::*;
+
+    const RECURRENCE_KEYS: [&str; 8] = [
+        "ssm_conv_kernel",
+        "ssm_state_size",
+        "ssm_group_count",
+        "ssm_time_step_rank",
+        "ssm_inner_size",
+        "ssm_epsilon",
+        "v_head_reordered",
+        "expert_shared_feed_forward",
+    ];
+
+    #[test]
+    fn a_config_from_before_the_recurrence_fields_still_loads_with_them_zeroed() {
+        let descriptor = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1);
+        let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+        let without: String = text
+            .lines()
+            .filter(|line| !RECURRENCE_KEYS.iter().any(|key| line.starts_with(key)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!without.contains("ssm_"), "the recurrence keys were stripped");
+
+        let loaded: ModelDescriptor = toml::from_str(&without).expect("a config from before the fields still loads");
+
+        assert_eq!(loaded, descriptor);
+    }
+
+    #[test]
+    fn the_recurrence_fields_survive_a_toml_round_trip() {
+        let descriptor = ModelDescriptor {
+            ssm_conv_kernel: 4,
+            ssm_state_size: 128,
+            ssm_group_count: 16,
+            ssm_time_step_rank: 16,
+            ssm_inner_size: 2048,
+            ssm_epsilon: 1.0e-6,
+            v_head_reordered: true,
+            expert_shared_feed_forward: 512,
+            prefill_width: Some(13),
+            ..head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1)
+        };
+        let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+
+        let loaded: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+
+        assert_eq!(loaded, descriptor);
     }
 }

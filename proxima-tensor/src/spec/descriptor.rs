@@ -173,6 +173,42 @@ pub struct ModelDescriptor {
     /// default and a config layer overrides it.
     #[serde(default)]
     pub speculative_verify: bool,
+    /// Gated-DeltaNet short convolution kernel width (`<family>.ssm.conv_kernel`),
+    /// consulted only by a [`LayerKind::Gdn`] entry; `0` when `layers` holds none.
+    #[serde(default)]
+    pub ssm_conv_kernel: u32,
+    /// Per-head key width of the recurrence (`<family>.ssm.state_size`).
+    #[serde(default)]
+    pub ssm_state_size: u32,
+    /// Key head count of the recurrence (`<family>.ssm.group_count`).
+    #[serde(default)]
+    pub ssm_group_count: u32,
+    /// Value head count of the recurrence (`<family>.ssm.time_step_rank`); a
+    /// multiple of [`Self::ssm_group_count`].
+    #[serde(default)]
+    pub ssm_time_step_rank: u32,
+    /// Total value width of the recurrence (`<family>.ssm.inner_size`).
+    #[serde(default)]
+    pub ssm_inner_size: u32,
+    /// Epsilon of the recurrence's per-head norm, baked into the program as a
+    /// constant (`<family>.attention.layer_norm_rms_epsilon`, `1e-6` for qwen3.5).
+    #[serde(default)]
+    pub ssm_epsilon: f32,
+    /// Whether the checkpoint stores the recurrence's value heads reordered
+    /// (`<family>.ssm.v_head_reordered`).
+    #[serde(default)]
+    pub v_head_reordered: bool,
+    /// Width of the shared expert a [`FfnCombination::RoutedWithSharedExpert`]
+    /// layer runs next to its routed experts
+    /// (`<family>.expert_shared_feed_forward_length`); `0` when no layer has one.
+    #[serde(default)]
+    pub expert_shared_feed_forward: u32,
+    /// `Some(width)` lowers the program for exactly `width` new positions
+    /// instead of a symbolic count. A recurrent layer unrolls its scan in Rust,
+    /// so a batched prefill needs the length at lowering time; `None` is the
+    /// per-step program every decode call resolves dynamically.
+    #[serde(default)]
+    pub prefill_width: Option<u32>,
 }
 
 impl ModelDescriptor {
@@ -424,6 +460,15 @@ pub fn mistral_descriptor_from_shape(
         head_repeats: 1,
         last_row_only: true,
         speculative_verify: profile.speculative_verify,
+        ssm_conv_kernel: 0,
+        ssm_state_size: 0,
+        ssm_group_count: 0,
+        ssm_time_step_rank: 0,
+        ssm_inner_size: 0,
+        ssm_epsilon: 0.0,
+        v_head_reordered: false,
+        expert_shared_feed_forward: 0,
+        prefill_width: None,
     }
 }
 
