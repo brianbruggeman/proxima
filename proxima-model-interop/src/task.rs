@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
+use proxima_gguf::MetadataValue;
 
 /// The model-level task family a serving harness must choose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +90,17 @@ fn architecture_task(architecture: &str) -> Option<ModelTask> {
     }
 }
 
+fn declares_causal_decoder(parsed: &ParsedGguf, architecture: &str) -> bool {
+    let key = |suffix: &str| format!("{architecture}.{suffix}");
+    let has_blocks = parsed.metadata_value(&key("block_count")).is_some();
+    let pools = parsed.metadata_value(&key("pooling_type")).is_some();
+    let bidirectional = matches!(
+        parsed.metadata_value(&key("attention.causal")),
+        Some(MetadataValue::Bool(false))
+    );
+    has_blocks && !pools && !bidirectional
+}
+
 /// Classifies a parsed checkpoint without reading tensor payload bytes.
 #[must_use]
 pub fn classify_task(parsed: &ParsedGguf) -> TaskProfile {
@@ -121,17 +133,12 @@ pub fn classify_task(parsed: &ParsedGguf) -> TaskProfile {
     }) {
         evidence.push("classification/reranking head tensor".to_string());
         ModelTask::SequenceClassification
-    } else if architecture.as_deref().is_some_and(|value| {
-        let value = normalized(value);
-        value.contains("llama")
-            || value.contains("mistral")
-            || value.contains("qwen")
-            || value.contains("mixtral")
-            || value.contains("lfm")
-            || value.contains("gemma")
-    }) {
+    } else if architecture
+        .as_deref()
+        .is_some_and(|value| declares_causal_decoder(parsed, value))
+    {
         evidence.push(format!(
-            "decoder architecture family: {}",
+            "causal decoder keys: {}",
             architecture.as_deref().unwrap_or("")
         ));
         ModelTask::CausalGeneration
@@ -156,10 +163,16 @@ mod tests {
     use proxima_gguf::{GgmlType, MetadataValue, TensorInfo};
 
     fn parsed(architecture: &str, task: Option<&str>, head: Option<&str>) -> ParsedGguf {
-        let mut metadata = vec![(
-            "general.architecture".to_string(),
-            MetadataValue::String(architecture.to_string()),
-        )];
+        let mut metadata = vec![
+            (
+                "general.architecture".to_string(),
+                MetadataValue::String(architecture.to_string()),
+            ),
+            (
+                format!("{architecture}.block_count"),
+                MetadataValue::U32(28),
+            ),
+        ];
         if let Some(task) = task {
             metadata.push((
                 "general.task".to_string(),
@@ -213,6 +226,39 @@ mod tests {
         let profile = classify_task(&parsed("qwen3", None, None));
         assert_eq!(profile.task, ModelTask::CausalGeneration);
         assert!(profile.generation_supported);
+    }
+
+    #[test]
+    fn a_future_family_with_block_keys_and_no_pooling_is_a_decoder() {
+        let profile = classify_task(&parsed("some_future_family", None, None));
+        assert_eq!(profile.task, ModelTask::CausalGeneration);
+    }
+
+    #[test]
+    fn pooling_type_key_marks_an_encoder_whatever_the_family_is_called() {
+        let mut checkpoint = parsed("qwen3", None, None);
+        checkpoint.metadata.push((
+            "qwen3.pooling_type".to_string(),
+            MetadataValue::U32(1),
+        ));
+        assert_ne!(classify_task(&checkpoint).task, ModelTask::CausalGeneration);
+    }
+
+    #[test]
+    fn non_causal_attention_key_is_not_a_decoder() {
+        let mut checkpoint = parsed("llama", None, None);
+        checkpoint.metadata.push((
+            "llama.attention.causal".to_string(),
+            MetadataValue::Bool(false),
+        ));
+        assert_ne!(classify_task(&checkpoint).task, ModelTask::CausalGeneration);
+    }
+
+    #[test]
+    fn a_checkpoint_with_no_block_keys_is_unknown() {
+        let mut checkpoint = parsed("llama", None, None);
+        checkpoint.metadata.retain(|(key, _)| key != "llama.block_count");
+        assert_eq!(classify_task(&checkpoint).task, ModelTask::Unknown);
     }
 
     #[test]
