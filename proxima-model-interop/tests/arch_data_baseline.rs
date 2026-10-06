@@ -103,6 +103,13 @@ const GRANITE_MOE: Checkpoint = Checkpoint {
     architecture: "granitemoe",
 };
 
+const LFM2: Checkpoint = Checkpoint {
+    name: "lfm2",
+    env: "PROXIMA_ARCH_LFM2_GGUF",
+    path: "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf",
+    architecture: "lfm2moe",
+};
+
 const ALL: [&Checkpoint; 8] = [
     &GEMMA4_26B,
     &GEMMA4_E2B,
@@ -1101,6 +1108,11 @@ fn llama_parity_qwen2() {
 }
 
 #[test]
+fn llama_parity_lfm2() {
+    llama_parity(&LFM2);
+}
+
+#[test]
 fn llama_parity_qwen3() {
     llama_parity(&QWEN3);
 }
@@ -1311,6 +1323,27 @@ fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescr
     first_divergence(&case.generated_ids, compared).is_some()
 }
 
+fn cases_diverging_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> usize {
+    let mapping = checkpoint.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = load_from_config(&parsed, file_bytes, config);
+    let serving = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        ..ServingConfig::default()
+    };
+    llama_cases(checkpoint)
+        .iter()
+        .filter(|case| {
+            let (generated, _text, _stopped) = model
+                .generate_from_ids(&case.prompt_ids, LLAMA_GENERATED_TOKENS, &serving, &mut |_event| ControlFlow::Continue(()))
+                .expect("the edited config runs");
+            let compared = &generated[..generated.len().min(case.generated_ids.len())];
+            first_divergence(&case.generated_ids, compared).is_some()
+        })
+        .count()
+}
+
 #[test]
 fn model_config_edit_to_qwen2_changes_the_generated_ids() {
     let edited = ModelDescriptor {
@@ -1321,6 +1354,69 @@ fn model_config_edit_to_qwen2_changes_the_generated_ids() {
     assert!(
         generated_ids_diverge_from_llama(&QWEN2, &edited),
         "an embedding scale of 3.0 left llama's ids unchanged, so the config is not what runs"
+    );
+}
+
+fn lfm2_header_descriptor() -> ModelDescriptor {
+    let mapping = LFM2.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let architecture = architecture_from_metadata(&parsed).expect("the lfm2 header reads");
+    dense_descriptor_from_gguf(&parsed, &architecture).expect("the lfm2 header describes itself")
+}
+
+#[test]
+fn lfm2_header_descriptor_describes_the_hybrid_stack_and_round_trips_through_toml() {
+    let descriptor = lfm2_header_descriptor();
+    let attention_layers: Vec<usize> = (0..24).filter(|layer| descriptor.layers[*layer].kind == LayerKind::Attention).collect();
+
+    assert_eq!(attention_layers, vec![2, 6, 10, 14, 18, 21], "the header's nonzero head_count_kv entries");
+    assert!(descriptor.layers.iter().filter(|layer| layer.kind == LayerKind::ShortConv).count() == 18);
+    assert_eq!((descriptor.cache_strategy, descriptor.l_cache, descriptor.leading_dense_block_count), (CacheStrategy::Cacheless, 3, 2));
+    assert_eq!((descriptor.feed_forward, descriptor.expert_feed_forward, descriptor.expert_count), (7168, 1792, 32));
+    let restored: ModelDescriptor = toml::from_str(&toml::to_string(&descriptor).expect("serializes")).expect("parses");
+    assert_eq!(restored, descriptor);
+    conflaguration::Validate::validate(&restored).expect("the real checkpoint's config validates");
+
+    let leaves = leaf_names(&build_forward(&restored).expect("the lfm2 config lowers").program);
+    for expected in ["blk.0.shortconv.in_proj.weight.b", "blk.0.ffn_gate.weight", "blk.2.attn_q.weight", "blk.2.ffn_gate_exps.weight"] {
+        assert!(leaves.iter().any(|leaf| leaf == expected), "{expected} is a leaf of the lowered program");
+    }
+    assert!(!leaves.iter().any(|leaf| leaf == "blk.0.attn_q.weight"), "a convolution layer owns no attention weights");
+}
+
+#[test]
+fn model_config_edit_to_the_lfm2_embedding_scale_changes_the_generated_ids() {
+    let edited = ModelDescriptor {
+        embedding_scale: Some(EmbeddingScale::Factor(3.0)),
+        ..lfm2_header_descriptor()
+    };
+
+    assert!(
+        generated_ids_diverge_from_llama(&LFM2, &edited),
+        "an embedding scale of 3.0 left llama's ids unchanged, so the config is not what runs"
+    );
+}
+
+#[test]
+fn model_config_edit_to_the_lfm2_rope_pairing_diverges_from_llama_on_at_least_one_prompt() {
+    let header = lfm2_header_descriptor();
+    let edited = ModelDescriptor {
+        layers: header
+            .layers
+            .iter()
+            .map(|layer| LayerSchedule {
+                attention: LayerAttentionConfig { rope_pairing: RopePairing::Interleaved, ..layer.attention.clone() },
+                ..layer.clone()
+            })
+            .collect(),
+        ..header
+    };
+
+    let diverging = cases_diverging_from_llama(&LFM2, &edited);
+
+    assert!(
+        diverging >= 1,
+        "interleaved rope pairing reproduced llama's ids on every prompt, so the oracle cannot tell the pairing the profile claims from the one llama.cpp's rope-type table says"
     );
 }
 

@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, uniform_lfm2_schedule,
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
 };
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
@@ -72,7 +72,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         // `lfm2_forward_program_with_experts`'s own opening three ops.
         return NodeId(2);
     }
-    let full_schedule = uniform_lfm2_schedule(architecture);
+    let full_schedule = &architecture.layers;
     let shallow_schedule = &full_schedule[..depth as usize];
     let (shallow, _, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
@@ -94,7 +94,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
     .expect("build shallow throwaway lfm2 program");
 
     let mut deep_schedule = shallow_schedule.to_vec();
-    deep_schedule.push(full_schedule[(depth - 1) as usize]);
+    deep_schedule.push(full_schedule[(depth - 1) as usize].clone());
     let (deep, _, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
@@ -123,7 +123,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
 }
 
 fn layer_kind_label(architecture: &Lfm2Architecture, layer: usize) -> &'static str {
-    match architecture.layer_kinds[layer] {
+    match architecture.layers[layer].kind {
         proxima_tensor::spec::LayerKind::Attention => "attention",
         proxima_tensor::spec::LayerKind::ShortConv => "shortconv",
         proxima_tensor::spec::LayerKind::Gdn => "gdn",
