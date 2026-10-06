@@ -180,6 +180,12 @@ impl<Entry: PartialEq + Clone, Cache> ServingState<Entry, Cache> {
         }
     }
 
+    /// [`Self::accept`] with the accepted count supplied by the caller (see
+    /// [`crate::accept_rule::AcceptRule::accepted_rows`]). A verifier that stops
+    /// sampling at the first row that differs passes only the tokens it chose:
+    /// `row_tokens` needs to reach row `accepted` (and nothing past it) unless
+    /// every draft row was accepted, while `row_caches` always holds one entry
+    /// per draft row.
     pub fn accept_rows(
         self,
         accepted: usize,
@@ -204,7 +210,7 @@ impl<Entry: PartialEq + Clone, Cache> ServingState<Entry, Cache> {
         attempted: &'static str,
     ) -> Result<Self, ServingFsmError> {
         if draft.is_empty()
-            || row_tokens.len() != draft.len()
+            || (accepted < draft.len() && row_tokens.len() <= accepted)
             || row_caches.len() != draft.len()
             || accepted > draft.len()
         {
@@ -671,6 +677,35 @@ mod tests {
         );
         assert_eq!(
             ServingState::start(alloc::vec![1_u32], FakeCache::empty()).accept_rows(0, &[3, 4], caches()),
+            Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
+        );
+    }
+
+    #[test]
+    fn accept_rows_needs_tokens_only_up_to_the_first_differing_row() {
+        let state = ServingState::start(alloc::vec![1_u32], FakeCache::empty())
+            .advance_prefill(2, FakeCache::empty().advanced_by(2))
+            .expect("prefill advances")
+            .enter_verify(alloc::vec![3, 4, 5])
+            .expect("verify enters");
+        let caches = || {
+            alloc::vec![
+                FakeCache::empty().advanced_by(1),
+                FakeCache::empty().advanced_by(2),
+                FakeCache::empty().advanced_by(3),
+            ]
+        };
+
+        assert_eq!(
+            state.clone().accept_rows(1, &[3, 9], caches()),
+            Ok(ServingState::Rollback { snapshot: FakeCache::empty().advanced_by(2), to: 9 })
+        );
+        assert_eq!(
+            state.clone().accept_rows(3, &[], caches()),
+            Ok(ServingState::Accept { n: 3, next: 5, cache: FakeCache::empty().advanced_by(3) })
+        );
+        assert_eq!(
+            state.accept_rows(1, &[3], caches()),
             Err(ServingFsmError::IllegalTransition { attempted: "accept_rows" })
         );
     }
