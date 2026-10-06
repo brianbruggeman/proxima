@@ -27,7 +27,8 @@ qkv_biases = false
 paired_gate_up_reduce = false
 fused_qkv_reduce = false
 sliding_kv_ring = false
-cache_strategy = "SingleRange"
+cache_strategy = "Cached"
+cache_mask = "Bounded"
 head_repeats = 1
 last_row_only = true
 

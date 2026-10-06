@@ -1,40 +1,41 @@
 use super::*;
 
-/// Which forward-program engine [`ModelDescriptor::cache_strategy`] selects
-/// for a (future) generic `build_forward` -- [`CacheStrategy::Cacheless`] is
-/// [`lfm2_forward_program_with_experts`], today's default path (full
-/// reprefill every call); [`CacheStrategy::TwoRange`] is
-/// [`lfm2_two_range_cached_forward_program_with_experts`], the WORKING
-/// gemma4 two-range kv-cache behind the default-off `gemma4-kv-cache`
-/// feature. Genuinely new: no existing type names which forward-program
-/// engine a schedule targets -- that choice lives today as a
-/// `#[cfg(feature = "gemma4-kv-cache")]` compile-time split
-/// (`proxima-model-interop::gemma4::bind::Gemma4Arch::bind`), not as data a
-/// caller can hold and branch on at runtime.
+/// Whether a forward program keeps a KV cache, as data on
+/// [`ModelDescriptor::cache_strategy`]. [`CacheStrategy::Cacheless`] is
+/// [`lfm2_forward_program_with_experts`] (full reprefill every call);
+/// [`CacheStrategy::Cached`] is the two-block cached engine, whose cached-block
+/// mask [`ModelDescriptor::cache_mask`] selects.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CacheStrategy {
     #[default]
     Cacheless,
-    TwoRange,
-    /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]'s own
-    /// single-continuous-range KV cache (`kv_cache.{layer}.k_even`/`k_odd`/
-    /// `v`) -- a genuinely different scoring algebra from both other
-    /// variants: the cached block is NEVER masked (a cached position is
-    /// definitionally in the past of every new query, per that function's
-    /// own doc on its `is_future` usage), where [`CacheStrategy::Cacheless`]'s block-local
-    /// mask has no cache to skip and [`CacheStrategy::TwoRange`]'s own single-range
-    /// counterpart -- [`lfm2_single_range_cached_forward_program_with_experts`],
-    /// the plausible reuse candidate this variant's own doc first
-    /// considered -- masks the cached block with a `cached_len`-aware
-    /// [`causal_mask_merged_windowed`] to exclude stale KV-bucket padding.
-    /// Mistral's cache carries no such padding, so no exclusion mask exists
-    /// in its program at all; threading that engine's own masking as a
-    /// descriptor knob would mean rewriting its cache algebra, not adding a
-    /// parameter. [`build_forward`]'s own arm therefore calls
-    /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]
-    /// directly -- the SAME "dispatch to an existing, unmodified builder"
-    /// shape [`CacheStrategy::TwoRange`]'s own arm already uses.
-    SingleRange,
+    Cached,
+}
+
+/// How a cached program excludes the cache bucket's zero padding from the
+/// cached block's softmax, as data on [`ModelDescriptor::cache_mask`]. Both arms
+/// score through [`append_cached_block_scores`](super::two_block_attention) and
+/// [`append_local_block_and_combine`](super::two_block_attention); they differ
+/// only in the mask node the cached block carries.
+///
+/// A program with the same layers but the other mask is a different op graph
+/// (a `Select` node per layer, a `cached_len`-aware compare per distinct
+/// window), which is why the choice is a field and not a rewrite.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum CacheMask {
+    /// The cached block is never masked in the graph: the executor's
+    /// `cached_len` operand bounds it, so a past position is always visible.
+    /// Only a windowed layer adds a mask, because a window is a distance the
+    /// bound cannot express. This is the dense and MoE families' lowering
+    /// ([`mistral_cached_forward_program_with_experts_and_layer_taps`]).
+    #[default]
+    Bounded,
+    /// Every cached block is masked in the graph
+    /// ([`causal_mask_cached_windowed`]): padding at or past `cached_len` is
+    /// excluded by a node, and a window composes onto the same mask. The
+    /// lowering for a schedule with shared KV or per-layer widths
+    /// ([`lfm2_two_range_cached_forward_program_with_experts`]).
+    Padded,
 }
 
 /// A whole model's build-time shape as DATA: the global hyperparameters
@@ -56,7 +57,7 @@ pub enum CacheStrategy {
 /// `Settings` reads the scalar fields from `PROXIMA_MODEL_*` env vars over a
 /// seeded value (`conflaguration::builder().value(base).env().file(path)`),
 /// and the `bon` builder constructs the same value fluently. The structured
-/// fields (`layers`, `embedding_scale`, `cache_strategy`) have no env
+/// fields (`layers`, `embedding_scale`, `cache_strategy`, `cache_mask`) have no env
 /// spelling; a TOML layer sets them.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "config", derive(bon::Builder, conflaguration::Settings))]
@@ -108,16 +109,21 @@ pub struct ModelDescriptor {
     pub layers: Vec<LayerSchedule>,
     #[cfg_attr(feature = "config", setting(skip))]
     pub cache_strategy: CacheStrategy,
+    /// Which mask a cached program's cached block carries; read only when
+    /// [`Self::cache_strategy`] is [`CacheStrategy::Cached`].
+    #[cfg_attr(feature = "config", setting(skip))]
+    #[serde(default)]
+    pub cache_mask: CacheMask,
     /// gemma4 E2B/E4B's per-layer-embedding preamble width
     /// (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc,
     /// `Some(256)` for E2B) -- consulted by [`CacheStrategy::Cacheless`] and
-    /// [`CacheStrategy::TwoRange`] alike (both route to a PLE-aware
+    /// [`CacheMask::Padded`] alike (both route to a PLE-aware
     /// builder); `None` for every checkpoint with no PLE tensors, and inert
-    /// under [`CacheStrategy::SingleRange`], which has no PLE concept at
+    /// under [`CacheMask::Bounded`], which has no PLE concept at
     /// all -- same "unused when the arm never reads it" precedent
     /// [`Self::qk_norm`]'s own doc already sets.
     pub ple_dim: Option<u32>,
-    /// [`CacheStrategy::TwoRange`] and [`CacheStrategy::SingleRange`]: lay every
+    /// [`CacheMask::Padded`] and [`CacheMask::Bounded`]: lay every
     /// windowed layer's KV cache out as a ring ([`SLIDING_KV_SYMBOL`],
     /// [`SLIDING_CACHED_LEN_INPUT`], and the builders' own `sliding_kv_ring`
     /// argument); a layer with no window keeps the full cache. Inert under
@@ -125,35 +131,35 @@ pub struct ModelDescriptor {
     /// it" precedent as [`Self::qk_norm`].
     pub sliding_kv_ring: bool,
     /// Qwen3-style per-head QK-norm, consulted ONLY by
-    /// [`CacheStrategy::SingleRange`]'s arm
+    /// [`CacheMask::Bounded`]'s arm
     /// (`mistral_cached_forward_program_with_experts_and_layer_taps`'s own
     /// `qk_norm` parameter) -- inert, safe at any value, under
-    /// [`CacheStrategy::Cacheless`]/[`CacheStrategy::TwoRange`], same
+    /// [`CacheStrategy::Cacheless`]/[`CacheMask::Padded`], same
     /// "unused when the arm never reads it" precedent [`Self::l_cache`]'s
     /// own doc already set. A model-global flag, not a per-layer
     /// [`LayerAttentionConfig`] field, because that builder's own signature
     /// takes it as one flat `bool` applied uniformly to every layer.
     pub qk_norm: bool,
     /// `attn_{q,k,v}.bias` presence, consulted ONLY by
-    /// [`CacheStrategy::SingleRange`]'s arm -- same inertness and
+    /// [`CacheMask::Bounded`]'s arm -- same inertness and
     /// model-global-not-per-layer reasoning as [`Self::qk_norm`].
     pub qkv_biases: bool,
     /// Single fused `[2, feed_forward, embedding]` gate+up weight leaf vs.
-    /// two separate leaves, consulted ONLY by [`CacheStrategy::SingleRange`]'s
+    /// two separate leaves, consulted ONLY by [`CacheMask::Bounded`]'s
     /// arm -- same inertness and model-global-not-per-layer reasoning as
     /// [`Self::qk_norm`].
     pub paired_gate_up_reduce: bool,
     /// Single fused `[query_heads + 2*kv_heads, head_dim, embedding]` QKV
     /// weight leaf vs. three separate leaves, consulted ONLY by
-    /// [`CacheStrategy::SingleRange`]'s arm -- same inertness and
+    /// [`CacheMask::Bounded`]'s arm -- same inertness and
     /// model-global-not-per-layer reasoning as [`Self::qk_norm`].
     pub fused_qkv_reduce: bool,
     /// LM-head repeat count for the head-cost measurement harness, consulted
-    /// by [`CacheStrategy::Cacheless`] and [`CacheStrategy::TwoRange`]: `1`
+    /// by [`CacheStrategy::Cacheless`] and [`CacheMask::Padded`]: `1`
     /// builds only the production head, `2` and `3` append that many minus one
     /// byte-identical duplicate head chains and return their roots as
     /// `duplicate_head_roots`. Values outside `1..=3` clamp. Inert under
-    /// [`CacheStrategy::SingleRange`], same "unused when the arm never reads it"
+    /// [`CacheMask::Bounded`], same "unused when the arm never reads it"
     /// precedent as [`Self::qk_norm`].
     pub head_repeats: u32,
     /// `true` gathers the LM head to the last new row, which is all decode and prefill sample;
@@ -328,7 +334,7 @@ impl FamilyProfile {
 /// interleaved or caller-chosen RoPE off one shared table, `1/sqrt(head_dim)`
 /// attention score scale, plain projected-V (no value-norm, no shared-KV),
 /// exclusive SwiGLU FFN, no embedding scale, no logit softcap.
-/// [`CacheStrategy::SingleRange`] makes [`build_forward`] dispatch straight to
+/// [`CacheMask::Bounded`] makes [`build_forward`] dispatch straight to
 /// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
 /// (see that variant's own doc). Every dimension is a parameter because
 /// `DenseArch` serves llama, mistral, qwen2, qwen3 and mixtral headers alike;
@@ -343,7 +349,7 @@ impl FamilyProfile {
 /// alone).
 ///
 /// [`DenseArch::bind`]: ../../../proxima_model_interop/dense/struct.DenseArch.html
-#[expect(clippy::too_many_arguments, reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's SingleRange arm, which reads every one of these fields straight back off the descriptor it builds")]
+#[expect(clippy::too_many_arguments, reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's Bounded arm, which reads every one of these fields straight back off the descriptor it builds")]
 #[must_use]
 pub fn mistral_descriptor_from_shape(
     vocab: u32,
@@ -396,7 +402,7 @@ pub fn mistral_descriptor_from_shape(
         expert_count,
         expert_used_count,
         leading_dense_block_count: block_count,
-        // no `LayerKind::ShortConv` layer ever appears in a SingleRange
+        // no `LayerKind::ShortConv` layer ever appears in a `CacheMask::Bounded`
         // schedule, and that arm's own builder never reads `l_cache` --
         // same inertness as `Self::l_cache`'s own doc.
         l_cache: 0,
@@ -405,8 +411,9 @@ pub fn mistral_descriptor_from_shape(
         logit_scale: None,
         residual_scale: None,
         layers,
-        cache_strategy: CacheStrategy::SingleRange,
-        // `CacheStrategy::SingleRange` has no PLE concept at all -- same
+        cache_strategy: CacheStrategy::Cached,
+        cache_mask: CacheMask::Bounded,
+        // `CacheMask::Bounded` has no PLE concept at all -- same
         // inertness as `Self::qk_norm`'s own doc.
         ple_dim: None,
         sliding_kv_ring: false,
@@ -424,15 +431,15 @@ pub fn mistral_descriptor_from_shape(
 /// root, one [`CachedLayerRoots`] per layer (empty under
 /// [`CacheStrategy::Cacheless`]), one [`MoeSite`] per MoE layer, one
 /// residual [`NodeId`] per layer (empty under
-/// [`CacheStrategy::Cacheless`]/[`CacheStrategy::TwoRange`], neither of
-/// which tracks it -- [`CacheStrategy::SingleRange`]'s own arm is the only
+/// [`CacheStrategy::Cacheless`]/[`CacheMask::Padded`], neither of
+/// which tracks it -- [`CacheMask::Bounded`]'s own arm is the only
 /// one that populates it, straight from
 /// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
 /// fourth return element), and the `hidden` root (`ForwardRoots::hidden` --
 /// the last-norm activation `logits` projects from, the node
 /// `proxima-model-interop`'s `LoadedModel::embed` pooling path needs and
 /// `DenseArch::bind`'s mistral arm carried before it routed through this
-/// function). `None` under [`CacheStrategy::Cacheless`]/[`CacheStrategy::TwoRange`]:
+/// function). `None` under [`CacheStrategy::Cacheless`]/[`CacheMask::Padded`]:
 /// neither `lfm2_forward_program_with_experts` nor
 /// `lfm2_two_range_cached_forward_program_with_experts` expose a hidden
 /// node at all, so there is no value here to forward, not merely one this
@@ -470,7 +477,7 @@ fn refuse_when(
 /// (the cacheless engine) behind one [`ModelDescriptor`]-shaped entry point:
 /// plain sync data->op-graph construction, no async/`Future`/`Box<dyn>`
 /// anywhere, dispatching purely on [`ModelDescriptor::cache_strategy`] and
-/// rewriting none of either engine's math. [`CacheStrategy::TwoRange`] calls
+/// rewriting none of either engine's math. [`CacheMask::Padded`] calls
 /// the two-range builder directly, unchanged. [`CacheStrategy::Cacheless`]
 /// is the degenerate case the two-range engine's own cache leaves
 /// (`kv_cache.{layer}.k_even`/`k_odd`/`v`) are elided for: it delegates to
@@ -481,7 +488,7 @@ fn refuse_when(
 /// [`ModelDescriptor`] field, so the verify shape is data: one config lowers
 /// the decode program or the verify program by flipping it.
 ///
-/// [`CacheStrategy::SingleRange`] dispatches to
+/// [`CacheMask::Bounded`] dispatches to
 /// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
 /// directly, passing this descriptor's own `attention.rope_pairing` rather
 /// than re-inferring it from `qk_norm` -- see that variant's own doc for why
@@ -489,7 +496,7 @@ fn refuse_when(
 /// engines can express).
 /// That builder's per-layer residual outputs are this function's own fifth
 /// return element, empty for [`CacheStrategy::Cacheless`]/
-/// [`CacheStrategy::TwoRange`] (neither engine tracks them) -- the same
+/// [`CacheMask::Padded`] (neither engine tracks them) -- the same
 /// "degenerate default for an engine that does not produce this value"
 /// precedent `cache_roots` itself already sets on the [`Cacheless`][CacheStrategy::Cacheless]
 /// arm above.
@@ -501,16 +508,16 @@ fn refuse_when(
 pub fn build_forward(
     descriptor: &ModelDescriptor,
 ) -> Result<BuildForwardProgram, TensorError> {
-    match descriptor.cache_strategy {
-        CacheStrategy::TwoRange => {
+    match (descriptor.cache_strategy, descriptor.cache_mask) {
+        (CacheStrategy::Cached, CacheMask::Padded) => {
             refuse_when(
                 descriptor.logit_scale.is_some(),
-                "build_forward(CacheStrategy::TwoRange)",
+                "build_forward(CacheMask::Padded)",
                 "a logit scale",
             )?;
             refuse_when(
                 descriptor.residual_scale.is_some(),
-                "build_forward(CacheStrategy::TwoRange)",
+                "build_forward(CacheMask::Padded)",
                 "a residual scale",
             )?;
             let (program, logits, cache_roots, moe_sites, duplicate_head_roots) =
@@ -542,7 +549,7 @@ pub fn build_forward(
                 duplicate_head_roots,
             ))
         }
-        CacheStrategy::Cacheless => {
+        (CacheStrategy::Cacheless, _) => {
             refuse_when(
                 descriptor.logit_scale.is_some(),
                 "build_forward(CacheStrategy::Cacheless)",
@@ -581,7 +588,7 @@ pub fn build_forward(
                 duplicate_head_roots,
             ))
         }
-        CacheStrategy::SingleRange => {
+        (CacheStrategy::Cached, CacheMask::Bounded) => {
             if descriptor.layers.len() != descriptor.block_count as usize {
                 return Err(TensorError::LayerScheduleCountMismatch {
                     expected: descriptor.block_count,
@@ -609,7 +616,7 @@ pub fn build_forward(
                 } != first.attention
             }) {
                 return Err(TensorError::UnsupportedInBuilder {
-                    builder: "build_forward(CacheStrategy::SingleRange)",
+                    builder: "build_forward(CacheMask::Bounded)",
                     feature: "non-uniform per-layer attention config",
                 });
             }
@@ -624,7 +631,7 @@ pub fn build_forward(
             refuse_when(
                 descriptor.expert_count > 0
                     && attention.rope_pairing != pairing_the_moe_layer_derives,
-                "build_forward(CacheStrategy::SingleRange)",
+                "build_forward(CacheMask::Bounded)",
                 "a rope pairing the moe layer cannot express",
             )?;
             // `attention.rope_pairing` is this descriptor's own data, not

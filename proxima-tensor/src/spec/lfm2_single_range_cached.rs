@@ -1469,7 +1469,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     // `lfm2_forward_program_with_experts` carries -- see that function's own
     // doc on `append_head`/`head_repeats`/`duplicate_head_roots`.
     // This is the builder gemma4's real production decode path actually
-    // calls (`CacheStrategy::TwoRange`, `bind_gemma4_with_last_row_only`),
+    // calls (`CacheMask::Padded`, `bind_gemma4_with_last_row_only`),
     // so this copy, not the cacheless one, is what the measurement harness
     // needs live.
     let append_head = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {

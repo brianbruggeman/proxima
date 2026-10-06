@@ -192,7 +192,7 @@ pub enum InteropError {
     #[error("architecture {name:?} needs its own hybrid MoE forward program")]
     HybridMoeProgramUnsupported { name: String },
 
-    /// `crate::gemma4::bind::Gemma4Arch::bind`'s own `CacheStrategy::TwoRange`
+    /// `crate::gemma4::bind::Gemma4Arch::bind`'s own `CacheStrategy::Cached` (padded mask)
     /// arm rebuilds a full, per-layer `proxima_tensor::spec::Qwen35LayerRoots`
     /// vec by zipping the SAME schedule it fed `build_forward` against that
     /// call's own returned `cache_roots` (one entry per

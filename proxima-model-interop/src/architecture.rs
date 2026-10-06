@@ -696,11 +696,10 @@ impl BoundProgram<'_> {
         let (program, logits_root, cache_roots, moe_sites, residual_roots, hidden_root, duplicate_head_roots) =
             build_forward(descriptor)?;
         let layer_roots = match descriptor.cache_strategy {
-            CacheStrategy::TwoRange => rebuild_layer_roots(
+            CacheStrategy::Cached => rebuild_layer_roots(
                 descriptor.layers.iter().map(|layer| layer.attention.key_source_kind),
                 cache_roots,
             )?,
-            CacheStrategy::SingleRange => cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
             CacheStrategy::Cacheless => Vec::new(),
         };
         Ok(Self {
