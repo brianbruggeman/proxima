@@ -907,7 +907,7 @@ fn append_qwen35moe_ffn(
 ///
 /// `mixer_output` is the mixer's own PRE-residual result (`taps.ssm_out_result`
 /// for a GDN layer, `taps.o_proj_out` for a dense-attention layer --
-/// [`proxima_tensor::spec::DenseAttentionTaps::o_proj_out`], the
+/// [`DenseAttentionTaps::o_proj_out`], the
 /// `o_proj` reduce before its own residual add); `post_mixer_residual` is
 /// that result added back onto this layer's `block_input` (what the mixer
 /// builders themselves call `mixer_out`/`x_next`/`residual1`).
