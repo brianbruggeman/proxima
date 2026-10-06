@@ -1,0 +1,8 @@
+    Finished `gate` profile [optimized] target(s) in 0.32s
+────────────
+ Nextest run ID 85008720-8903-41ff-88e7-98f4e2b22076 with nextest profile: default
+    Starting 2 tests across 35 binaries (832 tests skipped)
+        PASS [   2.362s] (1/2) proxima-model-interop::arch_data_baseline serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps
+        PASS [   4.982s] (2/2) proxima-model-interop::arch_data_baseline serving_fsm_drives_speculative_verify_through_accept_and_rollback
+────────────
+     Summary [   7.347s] 2 tests run: 2 passed, 832 skipped
