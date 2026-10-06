@@ -21,14 +21,14 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    ForwardProgram, LayerKind, ModelDescriptor, Qwen35LayerRoots, ScheduleSource, build_forward,
+    ForwardProgram, LayerKind, ModelDescriptor, LayerCacheRoots, ScheduleSource, build_forward,
 };
 
 use crate::bind::{BoundWeights, ModelHparams, metadata_str};
 use crate::bind_leaves::{bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
 use crate::profiles::{binding_profile, family_profile};
-use crate::qwen35moe::Qwen35MoeLayerDiagnostics;
+use crate::qwen35moe::MoeLayerDiagnostics;
 
 /// Names for every `Extent::Symbolic` slot the decode loop itself binds
 /// before it evaluates a step -- `crate::generate::LoadedModel`'s own
@@ -107,8 +107,8 @@ pub fn bind_symbols(
 /// single terminal node every decode step reads
 /// ([`crate::generate::LoadedModel`]'s own `logits_root` field), and
 /// `layer_roots` is one entry per forward-program layer in layer order --
-/// [`Qwen35LayerRoots::Attention`] for an attention layer and
-/// [`Qwen35LayerRoots::Ssm`] for a recurrent one, exactly as `layer_roots`'s
+/// [`LayerCacheRoots::Attention`] for an attention layer and
+/// [`LayerCacheRoots::Ssm`] for a recurrent one, exactly as `layer_roots`'s
 /// own field doc in `generate.rs` describes. Every root is the one
 /// [`proxima_tensor::spec::ForwardProgram`] names; a root the lowering engine
 /// does not produce is the empty value of its type.
@@ -136,10 +136,10 @@ pub struct BoundProgram<'file> {
     /// exposes them. This is a correctness seam for comparing CPU/CUDA/wgpu
     /// at the first divergent layer without guessing NodeId arithmetic.
     pub residual_roots: Vec<NodeId>,
-    pub layer_roots: Vec<Qwen35LayerRoots>,
+    pub layer_roots: Vec<LayerCacheRoots>,
     /// One graph-level diagnostic boundary per routed recurrent layer, in layer
     /// order. Empty for every other lowering.
-    pub qwen35moe_layer_diagnostics: Vec<Qwen35MoeLayerDiagnostics>,
+    pub qwen35moe_layer_diagnostics: Vec<MoeLayerDiagnostics>,
     /// Per-layer router-logit roots for a program that can expose a router
     /// prepass. Empty means the program has no routed layers or has not
     /// implemented the pre-gather execution contract.
@@ -175,12 +175,12 @@ pub struct BoundProgram<'file> {
     pub single_position_step: bool,
 }
 
-/// [`crate::qwen35::Qwen35SsmShape`]'s own fixed sizes -- see that type's
+/// [`crate::qwen35::SsmShape`]'s own fixed sizes -- see that type's
 /// doc for what each field measures. Lives here (not `generate.rs`) because
 /// [`step_state`] is the seam that hands it out; `generate.rs` re-exports it
 /// under its old name for the decode loop's own `SsmLayerCache::new` caller,
 /// unchanged.
-pub use crate::qwen35::Qwen35SsmShape;
+pub use crate::qwen35::SsmShape;
 
 /// Per-decode-step scratch shape only a schedule with recurrent layers needs
 /// to size ahead of the first decode step --
@@ -190,7 +190,7 @@ pub use crate::qwen35::Qwen35SsmShape;
 /// once, there, and `load_inner` does not special-case it.
 #[derive(Debug, Clone, Copy)]
 pub struct StepState {
-    pub ssm_shape: Qwen35SsmShape,
+    pub ssm_shape: SsmShape,
     pub attn_head_dim: u32,
     /// `crate::qwen35::qwen35_ssm_state_bytes`'s own resident-bytes
     /// total across every layer -- computed once, from the same header read

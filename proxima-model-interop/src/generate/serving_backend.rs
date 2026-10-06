@@ -8,7 +8,7 @@
 //! (`decode.rs`, roughly lines 1250-1650) has no such boundary: its one
 //! closure owns `layer_caches: Vec<LayerCacheState>` (logical, host-only
 //! `Vec<f32>` state -- already medium-independent) ALONGSIDE
-//! `dense_attention_buffers: Vec<Option<Qwen35DenseAttentionBuffers>>` and
+//! `dense_attention_buffers: Vec<Option<DenseAttentionBuffers>>` and
 //! `ssm_state_buffers: Vec<Option<(PlacedBuffer, PlacedBuffer)>>` (Metal
 //! device-resident, correctness depends on stable addresses -- `decode.rs`'s
 //! own doc on `ROW 531 invariant 2`), plus a stateful residency policy
@@ -26,7 +26,7 @@
 //! should be instantiated with: `Vec<LayerCacheState>`, the exact host-only
 //! per-layer state `decode.rs` already builds via
 //! [`LoadedModel::fresh_layer_caches`] and advances via
-//! [`LayerCache::append`]/[`Qwen35DenseAttentionCache::append`]/
+//! [`LayerCache::append`]/[`DenseAttentionCache::append`]/
 //! [`SsmLayerCache::advance`] -- no new type, because none is needed: this
 //! state was already medium-independent, just not yet named as the thing a
 //! `ServingState` carries.
@@ -89,7 +89,7 @@ pub(super) trait ServingBackend {
 
 /// Where `decode.rs`'s two Metal device-resident locals belong once a real
 /// Metal [`ServingBackend`] exists: `dense_attention` mirrors
-/// `dense_attention_buffers: Vec<Option<Qwen35DenseAttentionBuffers>>`
+/// `dense_attention_buffers: Vec<Option<DenseAttentionBuffers>>`
 /// (`decode.rs` line ~1355, allocated at ~1370-1403), `ssm_state` mirrors
 /// `ssm_state_buffers: Vec<Option<(PlacedBuffer, PlacedBuffer)>>`
 /// (`decode.rs` line ~1469, allocated at ~1476-1487) -- both indexed by
@@ -106,7 +106,7 @@ pub(super) trait ServingBackend {
 /// scope for this module.
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub(super) struct MetalPlacementResources {
-    pub(super) dense_attention: Vec<Option<Qwen35DenseAttentionBuffers>>,
+    pub(super) dense_attention: Vec<Option<DenseAttentionBuffers>>,
     pub(super) ssm_state: Vec<Option<(PlacedBuffer, PlacedBuffer)>>,
 }
 

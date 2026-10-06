@@ -356,9 +356,9 @@ impl CacheEntry {
 /// which names its table leaf (`fused_rope_pair`).
 fn rope_leaves_of<'program>(
     program: &'program [Op],
-    layer_roots: &Qwen35LayerRoots,
+    layer_roots: &LayerCacheRoots,
 ) -> Option<(&'program str, &'program str, usize)> {
-    let Qwen35LayerRoots::Attention((rotated_even, ..)) = layer_roots else {
+    let LayerCacheRoots::Attention((rotated_even, ..)) = layer_roots else {
         return None;
     };
     let operand = |node: NodeId, position: usize| match program.get(node.0 as usize)? {

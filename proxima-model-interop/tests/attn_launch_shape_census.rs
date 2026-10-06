@@ -21,7 +21,7 @@ use memmap2::Mmap;
 use omega::PackedOperands;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{bind_checkpoint, bind_symbols};
-use proxima_tensor::spec::Qwen35LayerRoots;
+use proxima_tensor::spec::LayerCacheRoots;
 use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer};
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
@@ -32,11 +32,11 @@ const ON_CSV_NAME: &str = "launch_shapes_on.csv";
 const NEW_COUNT: usize = 1;
 const KV_BUCKET_EXTENT: usize = 32;
 
-fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]) -> Vec<NodeId> {
+fn production_step_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots]) -> Vec<NodeId> {
     let mut outputs = Vec::with_capacity(1 + layer_roots.len() * 3);
     outputs.push(logits_root);
     for roots_for_layer in layer_roots {
-        if let Qwen35LayerRoots::Attention((even, odd, value)) = roots_for_layer {
+        if let LayerCacheRoots::Attention((even, odd, value)) = roots_for_layer {
             outputs.push(*even);
             outputs.push(*odd);
             outputs.push(*value);

@@ -28,7 +28,7 @@ use proxima_model_interop::{bind_checkpoint, bind_symbols};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::bind::BoundOp;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_tensor::spec::Qwen35LayerRoots;
+use proxima_tensor::spec::LayerCacheRoots;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
 
@@ -57,18 +57,18 @@ const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] = [
 ];
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]) -> Vec<NodeId> {
+fn production_step_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots]) -> Vec<NodeId> {
     let mut outputs = Vec::with_capacity(1 + layer_roots.len() * 3);
     outputs.push(logits_root);
     for roots_for_layer in layer_roots {
         match roots_for_layer {
-            Qwen35LayerRoots::Attention((even, odd, value)) => {
+            LayerCacheRoots::Attention((even, odd, value)) => {
                 outputs.push(*even);
                 outputs.push(*odd);
                 outputs.push(*value);
             }
-            Qwen35LayerRoots::SharedFromLayer(_) => {}
-            Qwen35LayerRoots::DenseAttention(_) | Qwen35LayerRoots::Ssm { .. } => {
+            LayerCacheRoots::SharedFromLayer(_) => {}
+            LayerCacheRoots::DenseAttention(_) | LayerCacheRoots::Ssm { .. } => {
                 panic!("gemma4 E2B's own layer schedule is Attention/SharedFromLayer only")
             }
         }

@@ -1461,7 +1461,7 @@ impl<'file> LoadedModel<'file> {
             })
             .collect();
         // Stays FULL LENGTH, one entry per `self.layer_roots` index --
-        // [`Qwen35LayerRoots`]'s own doc: the decode loop's growth step
+        // [`LayerCacheRoots`]'s own doc: the decode loop's growth step
         // (`LoadedModel::run_decode_loop_observed_seeded`'s own
         // `active_layer_roots.iter().enumerate()` / `layer_caches[layer]`)
         // indexes `layer_caches` by the REAL architecture layer number, in
@@ -1575,7 +1575,7 @@ impl<'file> LoadedModel<'file> {
                     Ok(LayerCacheState::Attention(LayerCache::new()))
                 }
                 (LayerCacheNames::DenseAttention { .. }, _) => {
-                    Ok(LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new()))
+                    Ok(LayerCacheState::DenseAttention(DenseAttentionCache::new()))
                 }
                 (
                     LayerCacheNames::Ssm {
@@ -1686,7 +1686,7 @@ impl<'file> LoadedModel<'file> {
         layer_row_widths: &[LayerPadRowWidths],
         kv_bound_extent: usize,
         kv_pad_scratch: &'call mut [KvPadScratch],
-        qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
+        qwen35_dense_pad_scratch: &'call mut [DenseAttentionPadScratch],
         step_input_scratch: &'call mut Vec<StepInput>,
         device_resident: &[bool],
         named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
@@ -3242,22 +3242,22 @@ impl<'file> LoadedModel<'file> {
         // One [`KvPadScratch`] per layer, reused across every step of this
         // call -- only ever filled for a [`LayerCacheState::Attention`]
         // layer (the only cache shape `mistral_cached_forward_program_with_experts`
-        // produces, `Qwen35LayerRoots`'s own doc), left empty and unread for
+        // produces, `LayerCacheRoots`'s own doc), left empty and unread for
         // every `DenseAttention`/`Ssm` layer a qwen35 checkpoint carries.
         let mut kv_pad_scratch: Vec<KvPadScratch> = self
             .layer_roots
             .iter()
             .map(|_| KvPadScratch::new())
             .collect();
-        // [`Qwen35DenseAttentionPadScratch`]'s own doc: the `Attention` arm's
+        // [`DenseAttentionPadScratch`]'s own doc: the `Attention` arm's
         // padding above is not enough on its own -- a `DenseAttention` layer
         // shares the identical `Extent::Symbolic(1)` slot, so it needs the
         // same treatment or a bucketed `symbols[1]` reads past a shorter,
         // unpadded buffer on every qwen35 checkpoint.
-        let mut qwen35_dense_pad_scratch: Vec<Qwen35DenseAttentionPadScratch> = self
+        let mut qwen35_dense_pad_scratch: Vec<DenseAttentionPadScratch> = self
             .layer_roots
             .iter()
-            .map(|_| Qwen35DenseAttentionPadScratch::new())
+            .map(|_| DenseAttentionPadScratch::new())
             .collect();
 
         // ROW 531 invariant 2: recurrent state, conv history and dense-attention
@@ -3302,7 +3302,7 @@ impl<'file> LoadedModel<'file> {
             serving_config.kv_bucket_tokens,
         );
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let dense_attention_buffers: Vec<Option<Qwen35DenseAttentionBuffers>> = layer_row_widths
+        let dense_attention_buffers: Vec<Option<DenseAttentionBuffers>> = layer_row_widths
             .iter()
             .enumerate()
             .map(|(layer, widths)| -> Result<_, InteropError> {
@@ -3338,7 +3338,7 @@ impl<'file> LoadedModel<'file> {
                     layer,
                     "value",
                 )?;
-                let buffers = Qwen35DenseAttentionBuffers {
+                let buffers = DenseAttentionBuffers {
                     k_first: allocate_placed_buffer(even_odd_byte_length)?,
                     k_second: allocate_placed_buffer(even_odd_byte_length)?,
                     k_pass: allocate_placed_buffer(pass_byte_length)?,
@@ -3472,10 +3472,10 @@ impl<'file> LoadedModel<'file> {
             .map(|layer| alloc::format!("gdn_prefill.{layer}.delta_out"))
             .collect();
         let mut gdn_prefill_zero_scratch: Vec<f32> = Vec::new();
-        let mut qwen35moe_pre_gather_plan: Option<Qwen35MoePreGatherPlan> = None;
+        let mut qwen35moe_pre_gather_plan: Option<PreGatherPlan> = None;
         #[cfg(feature = "qwen35moe-expert-prefetch")]
         let mut qwen35moe_route_history =
-            vec![Qwen35MoeRouteHistory::default(); self.architecture.block_count as usize];
+            vec![MoeRouteHistory::default(); self.architecture.block_count as usize];
         #[cfg(feature = "qwen35moe-expert-prefetch")]
         let qwen35moe_expert_prefetch_enabled =
             qwen35moe_expert_prefetch_requested(serving_config.qwen35moe_expert_prefetch);
@@ -3554,7 +3554,7 @@ impl<'file> LoadedModel<'file> {
             usize,
             Vec<Op>,
             NodeId,
-            Vec<Qwen35LayerRoots>,
+            Vec<LayerCacheRoots>,
         )> = Vec::new();
         if self.single_position_step
             && let Some(hparams) = self.qwen35moe_hparams.as_ref()
@@ -4248,12 +4248,12 @@ impl<'file> LoadedModel<'file> {
                     #[allow(clippy::unused_enumerate_index)]
                     for (_layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         match roots_for_layer {
-                            Qwen35LayerRoots::Attention((even, odd, value)) => {
+                            LayerCacheRoots::Attention((even, odd, value)) => {
                                 roots.push(*even);
                                 roots.push(*odd);
                                 roots.push(*value);
                             }
-                            Qwen35LayerRoots::DenseAttention((first, second, pass, value)) => {
+                            LayerCacheRoots::DenseAttention((first, second, pass, value)) => {
                                 #[cfg(all(
                                     feature = "metal-output-placement",
                                     target_os = "macos"
@@ -4272,7 +4272,7 @@ impl<'file> LoadedModel<'file> {
                                     roots.push(*value);
                                 }
                             }
-                            Qwen35LayerRoots::Ssm {
+                            LayerCacheRoots::Ssm {
                                 qkv_mixed,
                                 state_out,
                             } => {
@@ -4304,9 +4304,9 @@ impl<'file> LoadedModel<'file> {
                             // `K`/`V` root of its own to request -- its
                             // attention op already reads the donor layer's
                             // own already-requested nodes in-graph
-                            // (`Qwen35LayerRoots::SharedFromLayer`'s own
+                            // (`LayerCacheRoots::SharedFromLayer`'s own
                             // doc), so nothing is pushed here.
-                            Qwen35LayerRoots::SharedFromLayer(_) => {}
+                            LayerCacheRoots::SharedFromLayer(_) => {}
                         }
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
@@ -4500,7 +4500,7 @@ impl<'file> LoadedModel<'file> {
                         if ssm_placement_enabled
                             && ssm_placement_max_layer.is_none_or(|maximum| layer <= maximum)
                             && let (
-                                Qwen35LayerRoots::Ssm { state_out, .. },
+                                LayerCacheRoots::Ssm { state_out, .. },
                                 Some(state_input),
                                 Some((input_buffer, output_buffer)),
                             ) = (
@@ -4930,7 +4930,7 @@ impl<'file> LoadedModel<'file> {
                                     feature = "metal-output-placement",
                                     target_os = "macos"
                                 ))]
-                                ssm_placement: Some(&Qwen35SsmPlacement {
+                                ssm_placement: Some(&SsmPlacement {
                                     input_nodes: &ssm_state_input_nodes,
                                     buffers: &ssm_state_buffers,
                                     maximum_layer: ssm_placement_max_layer,
@@ -4940,7 +4940,7 @@ impl<'file> LoadedModel<'file> {
                                     feature = "metal-output-placement",
                                     target_os = "macos"
                                 ))]
-                                dense_attention_placement: Some(&Qwen35DenseAttentionPlacement {
+                                dense_attention_placement: Some(&DenseAttentionPlacement {
                                     input_nodes: &dense_attention_input_nodes,
                                     buffers: &dense_attention_buffers,
                                 }),
@@ -5588,7 +5588,7 @@ impl<'file> LoadedModel<'file> {
                     for (layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         match (roots_for_layer, &mut layer_caches[layer]) {
                             (
-                                Qwen35LayerRoots::Attention((even, odd, value)),
+                                LayerCacheRoots::Attention((even, odd, value)),
                                 LayerCacheState::Attention(cache),
                             ) => {
                                 if device_resident_view.get(layer).copied().unwrap_or(false) {
@@ -5612,7 +5612,7 @@ impl<'file> LoadedModel<'file> {
                                 cache.append_at(cached_len, even_data, odd_data, value_data);
                             }
                             (
-                                Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
+                                LayerCacheRoots::DenseAttention((first, second, pass, value)),
                                 LayerCacheState::DenseAttention(cache),
                             ) => {
                                 #[cfg(all(
@@ -5652,7 +5652,7 @@ impl<'file> LoadedModel<'file> {
                                 cache.append(first_data, second_data, pass_data, value_data);
                             }
                             (
-                                Qwen35LayerRoots::Ssm {
+                                LayerCacheRoots::Ssm {
                                     qkv_mixed,
                                     state_out,
                                 },
@@ -5729,7 +5729,7 @@ impl<'file> LoadedModel<'file> {
                             // `roots.extend` loop's own `SharedFromLayer`
                             // no-op arm), so there is nothing here to fold
                             // in either.
-                            (Qwen35LayerRoots::SharedFromLayer(_), LayerCacheState::SharedFromLayer) => {}
+                            (LayerCacheRoots::SharedFromLayer(_), LayerCacheState::SharedFromLayer) => {}
                             _ => unreachable!(
                                 "layer_roots/layer_caches built from the same layer_roots, in lockstep"
                             ),
@@ -7158,10 +7158,10 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|_| KvPadScratch::new())
             .collect();
-        let mut qwen35_dense_pad_scratch: Vec<Qwen35DenseAttentionPadScratch> = self
+        let mut qwen35_dense_pad_scratch: Vec<DenseAttentionPadScratch> = self
             .layer_roots
             .iter()
-            .map(|_| Qwen35DenseAttentionPadScratch::new())
+            .map(|_| DenseAttentionPadScratch::new())
             .collect();
         let mut step_input_scratch: Vec<StepInput> = Vec::new();
 

@@ -11,7 +11,7 @@
 //! `Qwen35MoeHparams` literal, widened to 4 layers/8 experts so the graph still
 //! contains at least one GDN layer, one full-attention layer, and one MoE
 //! block -- and compares every layer's `block_output`
-//! (`Qwen35MoeLayerDiagnostics::block_output`) between the CPU reference and
+//! (`MoeLayerDiagnostics::block_output`) between the CPU reference and
 //! Metal at M=13 positions.
 
 #![cfg(all(feature = "metal", target_os = "macos"))]

@@ -22,12 +22,12 @@
 
 use proxima_tensor::spec::{
     ForwardProgram, ForwardRoots, LayerAttentionConfig, LayerKind, LayerSchedule, ModelDescriptor,
-    Qwen35LayerRoots, MoeSites, build_forward, CacheMask, CacheStrategy, KeySourceKind, ValueSourceKind,
+    LayerCacheRoots, MoeSites, build_forward, CacheMask, CacheStrategy, KeySourceKind, ValueSourceKind,
     RopeTableSel,
 };
 use proxima_tensor::{Op, TensorError};
 
-pub use proxima_tensor::spec::Qwen35MoeLayerDiagnostics;
+pub use proxima_tensor::spec::MoeLayerDiagnostics;
 
 use super::hparams::{Qwen35MoeHparams, LayerKind as HeaderLayerKind};
 use crate::error::InteropError;
@@ -37,13 +37,13 @@ const FAMILY: &str = "qwen35moe";
 
 /// [`qwen35moe_forward_program`]'s own return shape: the built `Vec<Op>`,
 /// its logits/hidden roots, each layer's production cache-root tag, every
-/// routed site, and each layer's own [`Qwen35MoeLayerDiagnostics`] side table.
-pub type Qwen35MoeForwardProgram = (
+/// routed site, and each layer's own [`MoeLayerDiagnostics`] side table.
+pub type MoeForwardProgram = (
     Vec<Op>,
     ForwardRoots,
-    Vec<Qwen35LayerRoots>,
+    Vec<LayerCacheRoots>,
     MoeSites,
-    Vec<Qwen35MoeLayerDiagnostics>,
+    Vec<MoeLayerDiagnostics>,
 );
 
 /// The checkpoint's whole pre-lowering program as one config: the header's
@@ -135,7 +135,7 @@ pub fn descriptor_from_architecture(
 /// # Errors
 ///
 /// [`InteropError::Tensor`] if the descriptor does not lower.
-pub fn qwen35moe_forward_program(architecture: &Qwen35MoeHparams) -> Result<Qwen35MoeForwardProgram, InteropError> {
+pub fn qwen35moe_forward_program(architecture: &Qwen35MoeHparams) -> Result<MoeForwardProgram, InteropError> {
     qwen35moe_forward_program_at_width(architecture, None)
 }
 
@@ -151,7 +151,7 @@ pub fn qwen35moe_forward_program(architecture: &Qwen35MoeHparams) -> Result<Qwen
 pub fn qwen35moe_forward_program_at_width(
     architecture: &Qwen35MoeHparams,
     width: Option<u32>,
-) -> Result<Qwen35MoeForwardProgram, InteropError> {
+) -> Result<MoeForwardProgram, InteropError> {
     let ForwardProgram {
         program,
         logits,

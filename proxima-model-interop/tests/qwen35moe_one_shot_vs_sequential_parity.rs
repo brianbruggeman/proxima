@@ -7,7 +7,7 @@
 //! calls) even on a single CPU engine. This is that comparison: checkpoint-
 //! free, `f32`, small synthetic layers, CPU only. Every cache leaf threaded
 //! between sequential calls mirrors `proxima_model_interop::generate`'s own
-//! `SsmLayerCache::advance`/`Qwen35DenseAttentionCache::append` (read there
+//! `SsmLayerCache::advance`/`DenseAttentionCache::append` (read there
 //! for the exact rows/order this file reproduces without depending on
 //! anything private in that module).
 
@@ -16,9 +16,9 @@
 
 use proxima_model_interop::qwen35moe::hparams::{Qwen35MoeHparams, LayerKind};
 use proxima_model_interop::qwen35moe::{
-    Qwen35MoeLayerDiagnostics, qwen35moe_forward_program_at_width,
+    MoeLayerDiagnostics, qwen35moe_forward_program_at_width,
 };
-use proxima_tensor::spec::Qwen35LayerRoots;
+use proxima_tensor::spec::LayerCacheRoots;
 use proxima_tensor::test_support::Lcg;
 
 /// `(per_layer_block_output, logits, layer0_state_out, layer0_qkv_mixed,
@@ -188,7 +188,7 @@ fn named_f32(named: &[(String, Vec<f32>)]) -> Vec<(&str, &[f32])> {
 }
 
 /// Per-layer cache threaded between sequential single-step calls, one entry
-/// per layer matching `Qwen35LayerRoots`'s own per-layer discriminant.
+/// per layer matching `LayerCacheRoots`'s own per-layer discriminant.
 enum LayerCache {
     Ssm {
         conv_history: Vec<f32>,
@@ -248,7 +248,7 @@ fn run_one_shot() -> ParitySample {
 
     let mut outputs: Vec<_> = diagnostics
         .iter()
-        .map(|layer: &Qwen35MoeLayerDiagnostics| layer.block_output)
+        .map(|layer: &MoeLayerDiagnostics| layer.block_output)
         .collect();
     outputs.push(roots.logits);
     let layer0_ssm_taps = diagnostics[0]
@@ -323,7 +323,7 @@ fn run_one_shot() -> ParitySample {
 /// only `symbols`/cache leaves do -- a real decode loop would reuse one
 /// resolved plan, but this file is about the PROGRAM's own numbers, not
 /// plan-reuse), threads `LayerCache` between steps exactly as
-/// `SsmLayerCache::advance`/`Qwen35DenseAttentionCache::append` do, and
+/// `SsmLayerCache::advance`/`DenseAttentionCache::append` do, and
 /// returns the same four-tuple `run_one_shot` does, PLUS layer 0's final
 /// `state_out` and its 13th call's own `qkv_mixed` row for the coordinator's
 /// two extra root comparisons.
@@ -404,23 +404,23 @@ fn run_sequential() -> ParitySample {
         outputs.push(roots.logits);
         for (layer, layer_root) in layer_roots.iter().enumerate() {
             match layer_root {
-                Qwen35LayerRoots::Ssm {
+                LayerCacheRoots::Ssm {
                     qkv_mixed,
                     state_out,
                 } => {
                     outputs.push(*qkv_mixed);
                     outputs.push(*state_out);
                 }
-                Qwen35LayerRoots::DenseAttention((first, second, pass, value)) => {
+                LayerCacheRoots::DenseAttention((first, second, pass, value)) => {
                     outputs.push(*first);
                     outputs.push(*second);
                     outputs.push(*pass);
                     outputs.push(*value);
                 }
-                Qwen35LayerRoots::Attention(_) => {
+                LayerCacheRoots::Attention(_) => {
                     unreachable!("synthetic architecture never uses the even/odd shape")
                 }
-                Qwen35LayerRoots::SharedFromLayer(_) => {
+                LayerCacheRoots::SharedFromLayer(_) => {
                     unreachable!("qwen3.5 has no cross-layer shared-KV layers")
                 }
             }
@@ -446,7 +446,7 @@ fn run_sequential() -> ParitySample {
         for (layer, layer_root) in layer_roots.iter().enumerate() {
             match (layer_root, &mut caches[layer]) {
                 (
-                    Qwen35LayerRoots::Ssm {
+                    LayerCacheRoots::Ssm {
                         qkv_mixed,
                         state_out,
                     },
@@ -470,7 +470,7 @@ fn run_sequential() -> ParitySample {
                     }
                 }
                 (
-                    Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
+                    LayerCacheRoots::DenseAttention((first, second, pass, value)),
                     LayerCache::DenseAttention {
                         k_first,
                         k_second,

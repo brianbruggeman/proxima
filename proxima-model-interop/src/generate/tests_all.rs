@@ -1384,18 +1384,18 @@ pub(super) mod tests {
     }
 
     /// [`two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens`]'s
-    /// counterpart for a qwen35 [`Qwen35LayerRoots::DenseAttention`] layer --
+    /// counterpart for a qwen35 [`LayerCacheRoots::DenseAttention`] layer --
     /// this crate's fake-fixture fallback for that same claim, not the full
     /// 4-layer hybrid checkpoint `feat/synthetic-qwen38-fixture`'s own
     /// `examples/synth_qwen35_gguf.rs` builds (~918 MiB, out of this slice's
     /// time budget): one synthetic, `full_attention_interval: 1` layer (so
-    /// every layer is [`crate::qwen35::Qwen35LayerKind::Attention`], no
+    /// every layer is [`crate::qwen35::IntervalLayerKind::Attention`], no
     /// state-space mixer to also fixture), just wide enough
     /// (`query_heads = kv_heads = 1`, `attention.key_length = 4`,
     /// `rope.dimension_count = 2`, so `pass_dim = 2` is exercised alongside
     /// the rotated halves) to drive `qwen35_forward_program`'s
     /// `DenseAttention` cache path through
-    /// [`Qwen35DenseAttentionPadScratch`] the same way the MoE test above
+    /// [`DenseAttentionPadScratch`] the same way the MoE test above
     /// drives `mistral_cached_forward_program_with_experts`'s `Attention`
     /// path through [`KvPadScratch`]. Asserts `plan_hits`/`plan_misses`
     /// only, per this card's own fake-fixture allowance -- no
@@ -1655,7 +1655,7 @@ pub(super) mod tests {
     /// own fixture, driven through the raw-logit payload behind that test's
     /// argmax-only token-id comparison: that comparison alone cannot rule
     /// out a real but non-argmax-flipping corruption from
-    /// [`Qwen35DenseAttentionPadScratch`]'s zero-padding on this fixture's
+    /// [`DenseAttentionPadScratch`]'s zero-padding on this fixture's
     /// tiny, uniform (`0.05` everywhere) weights, where two distinct logit
     /// vectors can still share an argmax. Runs the SAME 8-step greedy decode
     /// twice with [`LoadedModel::run_decode_loop_observed`]'s own
@@ -3667,7 +3667,7 @@ pub(super) mod memory_fit_gate_tests {
 
         /// Diagnostic companion to the oracle above: when it fails, this
         /// names the first layer whose own `block_output` (post-residual,
-        /// after FFN -- [`crate::qwen35moe::Qwen35MoeLayerDiagnostics::block_output`])
+        /// after FFN -- [`crate::qwen35moe::MoeLayerDiagnostics::block_output`])
         /// disagrees between the one-evaluation and sequential prefill
         /// paths, at the prompt's own last position, relative to that
         /// row's own norm.
@@ -4185,7 +4185,7 @@ pub(super) mod memory_fit_gate_tests {
         /// `outputs` alone, never on tensor bytes"). Builds the SAME M=13
         /// one-evaluation program under the PRODUCTION output set (per-layer
         /// `{qkv_mixed, state_out}` for a GDN layer,
-        /// `generate.rs`'s own `Qwen35LayerRoots::Ssm` root-push, plus the
+        /// `generate.rs`'s own `LayerCacheRoots::Ssm` root-push, plus the
         /// final `logits_root` -- never the diagnostic taps
         /// `one_evaluation_prefill_layer_zero_tap_sweep_on_the_real_checkpoint`
         /// requests) and lists every node with 2+ live consumers that a
@@ -4213,12 +4213,12 @@ pub(super) mod memory_fit_gate_tests {
             let mut production_outputs = alloc::vec![roots.logits];
             for layer_root in &layer_roots {
                 match layer_root {
-                    proxima_tensor::spec::Qwen35LayerRoots::Attention((even, odd, value)) => {
+                    proxima_tensor::spec::LayerCacheRoots::Attention((even, odd, value)) => {
                         production_outputs.push(*even);
                         production_outputs.push(*odd);
                         production_outputs.push(*value);
                     }
-                    proxima_tensor::spec::Qwen35LayerRoots::DenseAttention((
+                    proxima_tensor::spec::LayerCacheRoots::DenseAttention((
                         first,
                         second,
                         pass,
@@ -4229,14 +4229,14 @@ pub(super) mod memory_fit_gate_tests {
                         production_outputs.push(*pass);
                         production_outputs.push(*value);
                     }
-                    proxima_tensor::spec::Qwen35LayerRoots::Ssm {
+                    proxima_tensor::spec::LayerCacheRoots::Ssm {
                         qkv_mixed,
                         state_out,
                     } => {
                         production_outputs.push(*qkv_mixed);
                         production_outputs.push(*state_out);
                     }
-                    proxima_tensor::spec::Qwen35LayerRoots::SharedFromLayer(_) => {
+                    proxima_tensor::spec::LayerCacheRoots::SharedFromLayer(_) => {
                         unreachable!("qwen3.5 has no cross-layer shared-KV layers")
                     }
                 }

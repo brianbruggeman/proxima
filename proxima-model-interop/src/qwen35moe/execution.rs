@@ -327,7 +327,7 @@ pub fn split_router_and_gather_segments(
 /// The ordinary decode path evaluates one graph and does not use the
 /// pre-gather protocol.  `PreGather` opts a caller into the phase seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Qwen35MoeExecutionMode {
+pub enum MoeExecutionMode {
     SinglePass,
     PreGather,
 }
@@ -476,7 +476,7 @@ mod tests {
     #[cfg(feature = "qwen35moe-linked-suffix")]
     use super::{MappedLayerSegment, split_gather_and_suffix_segment};
     use super::{
-        Qwen35MoeExecutionMode, execute_pre_gather, route_address,
+        MoeExecutionMode, execute_pre_gather, route_address,
         split_gather_and_next_router_segment, split_layer_program, split_layer_segment,
         split_mapped_layer_segment, split_mapped_router_and_gather_segments,
         split_router_and_gather_segments,
@@ -667,12 +667,12 @@ mod tests {
     #[test]
     fn default_mode_does_not_require_the_pre_gather_protocol() {
         assert_eq!(
-            Qwen35MoeExecutionMode::SinglePass,
-            Qwen35MoeExecutionMode::SinglePass
+            MoeExecutionMode::SinglePass,
+            MoeExecutionMode::SinglePass
         );
         assert_ne!(
-            Qwen35MoeExecutionMode::SinglePass,
-            Qwen35MoeExecutionMode::PreGather
+            MoeExecutionMode::SinglePass,
+            MoeExecutionMode::PreGather
         );
     }
 

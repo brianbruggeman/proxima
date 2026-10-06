@@ -164,7 +164,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
     // padded cached range (that function's own doc).
     let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
-    let mut layer_roots: Vec<Qwen35LayerRoots> = Vec::with_capacity(block_count as usize);
+    let mut layer_roots: Vec<LayerCacheRoots> = Vec::with_capacity(block_count as usize);
 
     for layer in 0..block_count {
         let attn_norm_weight = input_leaf(
@@ -441,7 +441,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
             )?;
             (
                 x_next,
-                Qwen35LayerRoots::DenseAttention(dense_attention_roots),
+                LayerCacheRoots::DenseAttention(dense_attention_roots),
             )
         } else {
             let qkv_dim = 2 * ssm_key_dim + ssm_d_inner;
@@ -633,7 +633,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
 
             (
                 x_after_ffn,
-                Qwen35LayerRoots::Ssm {
+                LayerCacheRoots::Ssm {
                     qkv_mixed,
                     state_out,
                 },
@@ -907,15 +907,15 @@ fn append_qwen35moe_ffn(
 ///
 /// `mixer_output` is the mixer's own PRE-residual result (`taps.ssm_out_result`
 /// for a GDN layer, `taps.o_proj_out` for a dense-attention layer --
-/// [`proxima_tensor::spec::Qwen35DenseAttentionTaps::o_proj_out`], the
+/// [`proxima_tensor::spec::DenseAttentionTaps::o_proj_out`], the
 /// `o_proj` reduce before its own residual add); `post_mixer_residual` is
 /// that result added back onto this layer's `block_input` (what the mixer
 /// builders themselves call `mixer_out`/`x_next`/`residual1`).
 #[derive(Debug, Clone)]
-pub struct Qwen35MoeLayerDiagnostics {
+pub struct MoeLayerDiagnostics {
     pub block_input: NodeId,
     pub ssm_taps: Option<SsmMixerTaps>,
-    pub dense_attention_taps: Option<Qwen35DenseAttentionTaps>,
+    pub dense_attention_taps: Option<DenseAttentionTaps>,
     pub mixer_output: NodeId,
     pub post_mixer_residual: NodeId,
     pub post_attention_norm_output: NodeId,
@@ -1021,9 +1021,9 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
     let (is_future, _neg_infinity) = causal_mask(&mut program)?;
     let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
-    let mut layer_roots: Vec<Qwen35LayerRoots> = Vec::with_capacity(descriptor.layers.len());
+    let mut layer_roots: Vec<LayerCacheRoots> = Vec::with_capacity(descriptor.layers.len());
     let mut moe_sites: Vec<MoeSite> = Vec::with_capacity(descriptor.layers.len());
-    let mut layer_diagnostics: Vec<Qwen35MoeLayerDiagnostics> =
+    let mut layer_diagnostics: Vec<MoeLayerDiagnostics> =
         Vec::with_capacity(descriptor.layers.len());
 
     for (layer, schedule) in descriptor.layers.iter().enumerate() {
@@ -1301,7 +1301,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                     k_pass_cache,
                     v_cache,
                 )?;
-                layer_roots.push(Qwen35LayerRoots::DenseAttention((
+                layer_roots.push(LayerCacheRoots::DenseAttention((
                     dense_taps.rotated_k_new_first,
                     dense_taps.rotated_k_new_second,
                     dense_taps.k_pass,
@@ -1443,7 +1443,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                     descriptor.v_head_reordered,
                     descriptor.prefill_width,
                 )?;
-                layer_roots.push(Qwen35LayerRoots::Ssm {
+                layer_roots.push(LayerCacheRoots::Ssm {
                     qkv_mixed: taps.qkv_mixed,
                     state_out: taps.state_out,
                 });
@@ -1542,7 +1542,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
             up_shexp,
             down_shexp,
         )?;
-        layer_diagnostics.push(Qwen35MoeLayerDiagnostics {
+        layer_diagnostics.push(MoeLayerDiagnostics {
             block_input,
             ssm_taps,
             dense_attention_taps,

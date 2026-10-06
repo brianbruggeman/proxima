@@ -9,7 +9,7 @@
 //!
 //! [`qwen35_forward_program`] compiles the whole
 //! hybrid forward program (`proxima_tensor::spec::qwen35_forward_program`),
-//! interleaving [`Qwen35LayerKind::Attention`]/[`Qwen35LayerKind::Ssm`]
+//! interleaving [`IntervalLayerKind::Attention`]/[`IntervalLayerKind::Ssm`]
 //! layers per that same per-layer marker.
 
 use alloc::collections::BTreeSet;
@@ -39,7 +39,7 @@ use crate::profiles::{binding_profile, family_profile};
 /// [`proxima_tensor::spec::LayerKind`]'s counterpart for a checkpoint whose hybrid
 /// marker is a scalar interval instead of a per-layer metadata array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Qwen35LayerKind {
+pub enum IntervalLayerKind {
     /// Dense self-attention: `attn_q`/`attn_k`/`attn_v`/`attn_output`, plus
     /// this checkpoint's own per-head `attn_q_norm`/`attn_k_norm`.
     Attention,
@@ -50,7 +50,7 @@ pub enum Qwen35LayerKind {
     Ssm,
 }
 
-impl Qwen35LayerKind {
+impl IntervalLayerKind {
     /// `layer` is dense attention iff it lands on `full_attention_interval`'s
     /// own 1-indexed boundary -- confirmed against the real checkpoint's own
     /// tensor names (`blk.3`/`blk.7`/`blk.11`/... carry `attn_q.weight`,
@@ -58,9 +58,9 @@ impl Qwen35LayerKind {
     /// `full_attention_interval = 4`).
     fn from_interval(layer: u32, full_attention_interval: u32) -> Self {
         if full_attention_interval != 0 && (layer + 1).is_multiple_of(full_attention_interval) {
-            Qwen35LayerKind::Attention
+            IntervalLayerKind::Attention
         } else {
-            Qwen35LayerKind::Ssm
+            IntervalLayerKind::Ssm
         }
     }
 }
@@ -95,7 +95,7 @@ pub struct Qwen35Hparams {
     pub ssm_group_count: u32,
     pub ssm_time_step_rank: u32,
     pub ssm_inner_size: u32,
-    pub layer_kinds: Vec<Qwen35LayerKind>,
+    pub layer_kinds: Vec<IntervalLayerKind>,
 }
 
 /// llama.cpp's own RMSNorm epsilon default, used only when
@@ -146,7 +146,7 @@ pub fn qwen35_architecture_from_metadata(
     let ssm_inner_size = metadata_u32(parsed, &format!("{architecture}.ssm.inner_size"))?;
 
     let layer_kinds = (0..block_count)
-        .map(|layer| Qwen35LayerKind::from_interval(layer, full_attention_interval))
+        .map(|layer| IntervalLayerKind::from_interval(layer, full_attention_interval))
         .collect();
 
     Ok(Qwen35Hparams {
@@ -253,8 +253,8 @@ pub fn bind_qwen35_checkpoint(
 /// The program this checkpoint needs, once that lands, is
 /// [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s shape with
 /// no MoE branch (the oracle asserts `ffn_gate_inp == nullptr` on every
-/// layer of this checkpoint): per [`Qwen35LayerKind::Attention`] layer,
-/// `append_attention_mixer`; per [`Qwen35LayerKind::Ssm`] layer, the
+/// layer of this checkpoint): per [`IntervalLayerKind::Attention`] layer,
+/// `append_attention_mixer`; per [`IntervalLayerKind::Ssm`] layer, the
 /// still-unwritten state-space mixer; both kinds then `attn_norm`/
 /// `post_attention_norm` and a dense SwiGLU FFN
 /// (`ffn_gate`/`ffn_up`/`ffn_down`), the same shape
@@ -275,7 +275,7 @@ pub fn bind_qwen35_checkpoint(
 /// `bind_qwen35_attn_qkv_split` already walks through for the fused
 /// `attn_qkv.weight` split.
 #[derive(Debug, Clone, Copy)]
-pub struct Qwen35SsmShape {
+pub struct SsmShape {
     /// `2 * ssm_key_dim + ssm_d_inner` -- one `qkv_mixed` row's width,
     /// matching `proxima_tensor::spec::qwen35_forward_program`'s own
     /// `ssm_cache.{layer}.conv_history` leaf shape's second axis.
@@ -290,7 +290,7 @@ pub struct Qwen35SsmShape {
     pub state_len: usize,
 }
 
-/// [`Qwen35SsmShape`]'s own derivation off a real checkpoint's ssm
+/// [`SsmShape`]'s own derivation off a real checkpoint's ssm
 /// hyperparameters -- `qwen35.cpp:57-60`'s same arithmetic
 /// [`Qwen35Hparams`]'s own `ssm_key_dim`/`ssm_value_dim` derivation
 /// already uses for the fused `attn_qkv.weight` row split, plus
@@ -299,11 +299,11 @@ pub struct Qwen35SsmShape {
 /// (`proxima_tensor::spec::qwen35_forward_program`'s own `head_v_dim`/
 /// `ssm_group` locals).
 #[must_use]
-pub fn qwen35_ssm_shape(architecture: &Qwen35Hparams) -> Qwen35SsmShape {
+pub fn qwen35_ssm_shape(architecture: &Qwen35Hparams) -> SsmShape {
     let ssm_key_dim = architecture.ssm_state_size * architecture.ssm_group_count;
     let head_v_dim = architecture.ssm_inner_size / architecture.ssm_time_step_rank;
     let ssm_group = architecture.ssm_time_step_rank / architecture.ssm_group_count;
-    Qwen35SsmShape {
+    SsmShape {
         qkv_dim: (2 * ssm_key_dim + architecture.ssm_inner_size) as usize,
         conv_rows: (architecture.ssm_conv_kernel.saturating_sub(1)) as usize,
         state_len: (architecture.ssm_state_size
@@ -313,17 +313,17 @@ pub fn qwen35_ssm_shape(architecture: &Qwen35Hparams) -> Qwen35SsmShape {
     }
 }
 
-/// [`Qwen35SsmShape`]'s own resident bytes across every layer -- one
+/// [`SsmShape`]'s own resident bytes across every layer -- one
 /// `SsmLayerCache::new`'s worth (`conv_rows * qkv_dim` conv-history
 /// elements plus `state_len` state elements, both `f32`) times
 /// `block_count` layers. `crate::memory_fit`'s own load-time gate reads
 /// this as the SSM class of `crate::memory_fit::WeightClassBytes` -- `0`
-/// for every non-qwen35 checkpoint, which never builds a [`Qwen35SsmShape`]
+/// for every non-qwen35 checkpoint, which never builds a [`SsmShape`]
 /// at all. Plain arithmetic, no platform dependency -- unlike the field it
 /// used to feed directly, this function itself is not `metal`-gated, so
 /// [`crate::lowering::step_state`] can call it on every build.
 #[must_use]
-pub fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
+pub fn qwen35_ssm_state_bytes(shape: SsmShape, block_count: u32) -> u64 {
     let per_layer_elements = (shape.conv_rows * shape.qkv_dim + shape.state_len) as u64;
     per_layer_elements * core::mem::size_of::<f32>() as u64 * u64::from(block_count)
 }
@@ -358,12 +358,12 @@ pub fn descriptor_from_architecture(architecture: &Qwen35Hparams) -> Result<Mode
         .layer_kinds
         .iter()
         .map(|kind| match kind {
-            Qwen35LayerKind::Attention => LayerSchedule {
+            IntervalLayerKind::Attention => LayerSchedule {
                 kind: LayerKind::Attention,
                 attention: attention.clone(),
                 ffn,
             },
-            Qwen35LayerKind::Ssm => LayerSchedule {
+            IntervalLayerKind::Ssm => LayerSchedule {
                 kind: LayerKind::Gdn,
                 attention: attention.clone(),
                 ffn,
@@ -418,7 +418,7 @@ pub fn descriptor_from_architecture(architecture: &Qwen35Hparams) -> Result<Mode
 /// The family has no profile, or the descriptor does not lower.
 pub fn qwen35_forward_program(
     architecture: &Qwen35Hparams,
-) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::Qwen35LayerRoots>), InteropError> {
+) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::LayerCacheRoots>), InteropError> {
     let ForwardProgram {
         program,
         logits,
@@ -492,24 +492,24 @@ mod tests {
     /// relies on, independent of any real file.
     #[test]
     fn from_interval_matches_the_real_checkpoints_layer_split() {
-        let kinds: Vec<Qwen35LayerKind> = (0..64)
-            .map(|layer| Qwen35LayerKind::from_interval(layer, 4))
+        let kinds: Vec<IntervalLayerKind> = (0..64)
+            .map(|layer| IntervalLayerKind::from_interval(layer, 4))
             .collect();
 
         let attention_count = kinds
             .iter()
-            .filter(|kind| **kind == Qwen35LayerKind::Attention)
+            .filter(|kind| **kind == IntervalLayerKind::Attention)
             .count();
         let ssm_count = kinds
             .iter()
-            .filter(|kind| **kind == Qwen35LayerKind::Ssm)
+            .filter(|kind| **kind == IntervalLayerKind::Ssm)
             .count();
 
         assert_eq!(attention_count, 16, "one dense layer every 4th layer");
         assert_eq!(ssm_count, 48, "every other layer stays state-space");
-        assert_eq!(kinds[3], Qwen35LayerKind::Attention);
-        assert_eq!(kinds[7], Qwen35LayerKind::Attention);
-        assert_eq!(kinds[0], Qwen35LayerKind::Ssm);
-        assert_eq!(kinds[63], Qwen35LayerKind::Attention);
+        assert_eq!(kinds[3], IntervalLayerKind::Attention);
+        assert_eq!(kinds[7], IntervalLayerKind::Attention);
+        assert_eq!(kinds[0], IntervalLayerKind::Ssm);
+        assert_eq!(kinds[63], IntervalLayerKind::Attention);
     }
 }

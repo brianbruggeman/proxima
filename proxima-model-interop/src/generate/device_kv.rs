@@ -284,7 +284,7 @@ impl DeviceKv {
         new_count: usize,
         sliding_bound: usize,
         leaves: &[Option<KvLeafNodes>],
-        layer_roots: &[Qwen35LayerRoots],
+        layer_roots: &[LayerCacheRoots],
     ) -> KvPlacements<'buffers> {
         for layer in self.layers.iter_mut().flatten() {
             layer.make_room(cached_len, new_count, sliding_bound);
@@ -292,7 +292,7 @@ impl DeviceKv {
         let mut inputs = Vec::with_capacity(self.layers.len() * 3);
         let mut outputs = Vec::with_capacity(self.layers.len() * 3);
         for (index, slot) in self.layers.iter().enumerate() {
-            let (Some(layer), Some(Some(leaf)), Some(Qwen35LayerRoots::Attention((even, odd, value)))) =
+            let (Some(layer), Some(Some(leaf)), Some(LayerCacheRoots::Attention((even, odd, value)))) =
                 (slot, leaves.get(index), layer_roots.get(index))
             else {
                 continue;

@@ -87,7 +87,7 @@ pub use attention_forward::*;
 pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};
 pub use descriptor::*;
 pub use gguf_descriptor::*;
-pub use hybrid_forward::{Qwen35MoeLayerDiagnostics, append_sigmoid_gated_shared_expert};
+pub use hybrid_forward::{MoeLayerDiagnostics, append_sigmoid_gated_shared_expert};
 use hybrid_forward::{hybrid_dense_forward, hybrid_routed_forward};
 pub use hyperconn_qwen35_dense::*;
 pub use lfm2_qwen35_gdn::*;

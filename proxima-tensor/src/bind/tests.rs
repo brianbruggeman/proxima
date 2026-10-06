@@ -940,7 +940,7 @@ const QWEN35_PARTIAL_ROTARY_CACHED_EXTENT: usize = 40;
 fn qwen35_partial_rotary_attention_fixture() -> (
     Vec<Op>,
     NodeId,
-    crate::spec::Qwen35DenseAttentionTaps,
+    crate::spec::DenseAttentionTaps,
     Vec<(NodeId, Vec<f32>)>,
     Shapes,
 ) {
@@ -1306,7 +1306,7 @@ fn qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap
 /// builds them -- the order this row's own per-tap divergence search
 /// walks.
 #[cfg(feature = "cached-attention-streaming")]
-struct Qwen35DenseAttentionF64Reference {
+struct DenseAttentionF64Reference {
     normed: Vec<f64>,
     q_split: Vec<f64>,
     gate_split: Vec<f64>,
@@ -1359,7 +1359,7 @@ struct Qwen35DenseAttentionF64Reference {
 #[allow(clippy::too_many_lines)]
 fn qwen35_dense_attention_f64_reference(
     inputs: &[(NodeId, Vec<f32>)],
-) -> Qwen35DenseAttentionF64Reference {
+) -> DenseAttentionF64Reference {
     const KV_HEADS: usize = QWEN35_PARTIAL_ROTARY_KV_HEADS;
     const GROUP: usize = QWEN35_PARTIAL_ROTARY_GROUP;
     const ATTN_HEAD_DIM: usize = QWEN35_PARTIAL_ROTARY_ATTN_HEAD_DIM;
@@ -1580,7 +1580,7 @@ fn qwen35_dense_attention_f64_reference(
     }
     let residual1 = o_proj_out + x[0];
 
-    Qwen35DenseAttentionF64Reference {
+    DenseAttentionF64Reference {
         normed: alloc::vec![normed],
         q_split,
         gate_split,

@@ -27,7 +27,7 @@
 //!
 //! `lfm2_forward_program_with_experts` has no per-layer-taps counterpart
 //! (unlike qwen35moe's `_at_width`, which returns
-//! `Qwen35MoeLayerDiagnostics::block_output` per layer, or `mistral_cached`'s
+//! `MoeLayerDiagnostics::block_output` per layer, or `mistral_cached`'s
 //! own `_and_layer_taps` twin) -- there is no way to request an
 //! intermediate layer's residual without hand-rolling a second copy of the
 //! graph up to that point, which this file deliberately does not do. Per-

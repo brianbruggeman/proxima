@@ -11,7 +11,7 @@
 //!
 //! Composes [`proxima_gguf::writer::write_complete`] (the existing sans-IO
 //! GGUF writer -- no new writer needed, `grep GgufWriter` found this one
-//! already shipping) with [`Qwen35LayerKind::from_interval`]'s own layer-kind
+//! already shipping) with [`IntervalLayerKind::from_interval`]'s own layer-kind
 //! arithmetic to emit exactly the tensor set [`proxima_model_interop::bind_program_leaves`]
 //! expects, at exactly the shapes
 //! [`proxima_tensor::spec::qwen35_forward_program`] compiles its op graph

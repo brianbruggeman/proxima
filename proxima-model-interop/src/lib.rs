@@ -139,7 +139,7 @@ pub use quality::print_quality_report;
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
 #[cfg(feature = "std")]
 pub use qwen35::{
-    Qwen35Hparams, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
+    Qwen35Hparams, IntervalLayerKind, SsmShape, bind_qwen35_checkpoint,
     descriptor_from_architecture as qwen35_descriptor_from_architecture, qwen35_architecture_from_metadata,
 };
 #[cfg(feature = "std")]

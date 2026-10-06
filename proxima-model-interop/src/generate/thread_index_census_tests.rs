@@ -9,7 +9,7 @@ use omega::msl::Grid2DForm;
 use proxima_gguf::parse_complete;
 use proxima_primitives::Codec;
 use proxima_tensor::cpu::QuantizedBlock;
-use proxima_tensor::spec::Qwen35LayerRoots;
+use proxima_tensor::spec::LayerCacheRoots;
 use proxima_tensor::{NodeId, NumericPolicy, Op, bind_with_fusion, infer};
 
 use crate::bind::BoundWeights;
@@ -136,7 +136,7 @@ fn every_dispatch_of_the_real_gemma4_e2b_prefill_fits_32_bits_or_takes_a_2d_form
     println!("program ops={} kv_cache inputs={kv_inputs} layer_roots={}", bound.program.len(), bound.layer_roots.len());
     let mut roots = vec![bound.logits_root];
     for layer in &bound.layer_roots {
-        if let Qwen35LayerRoots::Attention((even, odd, value)) = layer {
+        if let LayerCacheRoots::Attention((even, odd, value)) = layer {
             roots.extend([*even, *odd, *value]);
         }
     }
