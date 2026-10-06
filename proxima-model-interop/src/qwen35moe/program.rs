@@ -3,7 +3,7 @@
 //! hybrid stack of gated-DeltaNet and gated attention layers over a routed FFN
 //! plus a sigmoid-gated shared expert is the recurrent-hybrid engine's routed
 //! arm, so this file holds no graph construction -- only the map from the
-//! checkpoint's header ([`Architecture`]) and the family profile to that
+//! checkpoint's header ([`Qwen35MoeHparams`]) and the family profile to that
 //! descriptor.
 //!
 //! The real checkpoint also carries `{architecture}.rope.dimension_sections`/
@@ -29,7 +29,7 @@ use proxima_tensor::{Op, TensorError};
 
 pub use proxima_tensor::spec::Qwen35MoeLayerDiagnostics;
 
-use super::hparams::{Architecture, LayerKind as HeaderLayerKind};
+use super::hparams::{Qwen35MoeHparams, LayerKind as HeaderLayerKind};
 use crate::error::InteropError;
 use crate::profiles::family_profile;
 
@@ -55,7 +55,7 @@ pub type Qwen35MoeForwardProgram = (
 ///
 /// The family has no embedded profile.
 pub fn descriptor_from_architecture(
-    architecture: &Architecture,
+    architecture: &Qwen35MoeHparams,
     width: Option<u32>,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(FAMILY)?;
@@ -135,7 +135,7 @@ pub fn descriptor_from_architecture(
 /// # Errors
 ///
 /// [`InteropError::Tensor`] if the descriptor does not lower.
-pub fn qwen35moe_forward_program(architecture: &Architecture) -> Result<Qwen35MoeForwardProgram, InteropError> {
+pub fn qwen35moe_forward_program(architecture: &Qwen35MoeHparams) -> Result<Qwen35MoeForwardProgram, InteropError> {
     qwen35moe_forward_program_at_width(architecture, None)
 }
 
@@ -149,7 +149,7 @@ pub fn qwen35moe_forward_program(architecture: &Architecture) -> Result<Qwen35Mo
 /// Rust, so its length has to be known when the program is lowered), so this
 /// is the ONE seam that reaches it.
 pub fn qwen35moe_forward_program_at_width(
-    architecture: &Architecture,
+    architecture: &Qwen35MoeHparams,
     width: Option<u32>,
 ) -> Result<Qwen35MoeForwardProgram, InteropError> {
     let ForwardProgram {

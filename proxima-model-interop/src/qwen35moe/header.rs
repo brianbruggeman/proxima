@@ -9,7 +9,7 @@
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::ModelDescriptor;
 
-use crate::bind::{ModelArchitecture, metadata_str};
+use crate::bind::{ModelHparams, metadata_str};
 use crate::error::InteropError;
 
 use super::hparams::from_metadata;
@@ -17,10 +17,10 @@ use super::program::descriptor_from_architecture;
 
 /// This header's descriptor and hyperparameters, the two values
 /// [`crate::lowering`] lowers and binds from.
-pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelArchitecture), InteropError> {
+pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
     let hparams = from_metadata(parsed)?;
     let descriptor = descriptor_from_architecture(&hparams, None)?;
-    let architecture = ModelArchitecture {
+    let architecture = ModelHparams {
         vocab: hparams.vocab,
         embedding: hparams.embedding,
         feed_forward: hparams.expert_feed_forward,

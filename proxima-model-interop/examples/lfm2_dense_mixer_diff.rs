@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
+    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_forward_values,
 };
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::lfm2_forward_program_with_experts;
@@ -195,7 +195,7 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed)
+    let architecture: Lfm2Hparams = lfm2_architecture_from_metadata(&parsed)
         .expect("derive lfm2 architecture from gguf metadata");
     assert!(
         layer < architecture.leading_dense_block_count,

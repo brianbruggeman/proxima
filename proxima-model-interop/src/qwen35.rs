@@ -1,5 +1,5 @@
 //! Qwen3.8-27B's real hybrid checkpoint (`general.architecture = "qwen35"`):
-//! [`Qwen35Architecture`] derives this architecture's own metadata shape --
+//! [`Qwen35Hparams`] derives this architecture's own metadata shape --
 //! `{architecture}.full_attention_interval` marks every `interval`th layer
 //! (1-indexed) as dense attention, every other layer as a gated
 //! state-space mixer -- the same "read the checkpoint's own per-layer
@@ -26,7 +26,7 @@ use proxima_tensor::spec::{
 };
 
 use crate::bind::{
-    ModelArchitecture, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
+    ModelHparams, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
     vocab_from_token_embedding,
 };
 use crate::bind_leaves::bind_program_leaves;
@@ -67,10 +67,10 @@ impl Qwen35LayerKind {
 
 /// Every hparam this checkpoint's own metadata carries -- bind-scoped
 /// today, but the `ssm_*` fields are read now so a later forward-op session
-/// does not have to re-derive them: [`crate::lfm2::Lfm2Architecture`]'s own
+/// does not have to re-derive them: [`crate::lfm2::Lfm2Hparams`]'s own
 /// precedent for holding hparams a bind-only pass does not yet consume.
 #[derive(Debug, Clone)]
-pub struct Qwen35Architecture {
+pub struct Qwen35Hparams {
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
@@ -103,7 +103,7 @@ pub struct Qwen35Architecture {
 /// fallback shape [`crate::lfm2::LFM2_RMS_EPSILON_DEFAULT`] uses.
 const QWEN35_RMS_EPSILON_DEFAULT: f32 = 1e-6;
 
-/// Derives [`Qwen35Architecture`] from `parsed`'s own metadata --
+/// Derives [`Qwen35Hparams`] from `parsed`'s own metadata --
 /// [`crate::lfm2::lfm2_architecture_from_metadata`]'s scalar-interval
 /// counterpart.
 ///
@@ -112,7 +112,7 @@ const QWEN35_RMS_EPSILON_DEFAULT: f32 = 1e-6;
 /// [`InteropError::MissingMetadataKey`] if a required key is absent.
 pub fn qwen35_architecture_from_metadata(
     parsed: &ParsedGguf,
-) -> Result<Qwen35Architecture, InteropError> {
+) -> Result<Qwen35Hparams, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &format!("{architecture}.embedding_length"))?;
     let feed_forward = metadata_u32(parsed, &format!("{architecture}.feed_forward_length"))?;
@@ -149,7 +149,7 @@ pub fn qwen35_architecture_from_metadata(
         .map(|layer| Qwen35LayerKind::from_interval(layer, full_attention_interval))
         .collect();
 
-    Ok(Qwen35Architecture {
+    Ok(Qwen35Hparams {
         vocab,
         embedding,
         feed_forward,
@@ -218,7 +218,7 @@ fn metadata_u32_nonzero_uniform(parsed: &ParsedGguf, key: &str) -> Result<u32, I
 pub fn bind_qwen35_checkpoint(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
-) -> Result<(Qwen35Architecture, usize, usize, usize), InteropError> {
+) -> Result<(Qwen35Hparams, usize, usize, usize), InteropError> {
     let architecture = qwen35_architecture_from_metadata(parsed)?;
     let (program, _, _) = qwen35_forward_program(&architecture)?;
     let weights = bind_program_leaves(
@@ -266,11 +266,11 @@ pub fn bind_qwen35_checkpoint(
 /// Whatever [`proxima_tensor::spec::qwen35_forward_program`] can fail with
 /// (wrapped as [`InteropError::Tensor`]) -- most likely
 /// [`proxima_tensor::TensorError::InvalidFullAttentionInterval`] if a
-/// caller-constructed [`Qwen35Architecture`] carries `full_attention_interval
+/// caller-constructed [`Qwen35Hparams`] carries `full_attention_interval
 /// == 0` (the real checkpoint never does; `qwen35_architecture_from_metadata`
 /// reads it straight off `{architecture}.full_attention_interval`).
 /// [`crate::generate::LoadedModel`]'s own `SsmLayerCache::new` fixed sizes,
-/// all derived from [`Qwen35Architecture`]'s ssm hyperparameters at load
+/// all derived from [`Qwen35Hparams`]'s ssm hyperparameters at load
 /// time -- `qwen35.cpp:57-60`'s same derivation this module's
 /// `bind_qwen35_attn_qkv_split` already walks through for the fused
 /// `attn_qkv.weight` split.
@@ -292,14 +292,14 @@ pub struct Qwen35SsmShape {
 
 /// [`Qwen35SsmShape`]'s own derivation off a real checkpoint's ssm
 /// hyperparameters -- `qwen35.cpp:57-60`'s same arithmetic
-/// [`Qwen35Architecture`]'s own `ssm_key_dim`/`ssm_value_dim` derivation
+/// [`Qwen35Hparams`]'s own `ssm_key_dim`/`ssm_value_dim` derivation
 /// already uses for the fused `attn_qkv.weight` row split, plus
 /// `head_v_dim = ssm_inner_size / ssm_time_step_rank` and `ssm_group =
 /// ssm_time_step_rank / ssm_group_count`
 /// (`proxima_tensor::spec::qwen35_forward_program`'s own `head_v_dim`/
 /// `ssm_group` locals).
 #[must_use]
-pub fn qwen35_ssm_shape(architecture: &Qwen35Architecture) -> Qwen35SsmShape {
+pub fn qwen35_ssm_shape(architecture: &Qwen35Hparams) -> Qwen35SsmShape {
     let ssm_key_dim = architecture.ssm_state_size * architecture.ssm_group_count;
     let head_v_dim = architecture.ssm_inner_size / architecture.ssm_time_step_rank;
     let ssm_group = architecture.ssm_time_step_rank / architecture.ssm_group_count;
@@ -337,7 +337,7 @@ pub fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
 /// # Errors
 ///
 /// The family has no embedded profile.
-pub fn descriptor_from_architecture(architecture: &Qwen35Architecture) -> Result<ModelDescriptor, InteropError> {
+pub fn descriptor_from_architecture(architecture: &Qwen35Hparams) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(FAMILY)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
@@ -417,7 +417,7 @@ pub fn descriptor_from_architecture(architecture: &Qwen35Architecture) -> Result
 ///
 /// The family has no profile, or the descriptor does not lower.
 pub fn qwen35_forward_program(
-    architecture: &Qwen35Architecture,
+    architecture: &Qwen35Hparams,
 ) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::Qwen35LayerRoots>), InteropError> {
     let ForwardProgram {
         program,
@@ -441,10 +441,10 @@ const FAMILY: &str = "qwen35";
 ///
 /// Whatever [`qwen35_architecture_from_metadata`] and
 /// [`descriptor_from_architecture`] can fail with.
-pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelArchitecture), InteropError> {
+pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
     let hparams = qwen35_architecture_from_metadata(parsed)?;
     let descriptor = descriptor_from_architecture(&hparams)?;
-    let architecture = ModelArchitecture {
+    let architecture = ModelHparams {
         vocab: hparams.vocab,
         embedding: hparams.embedding,
         feed_forward: hparams.feed_forward,

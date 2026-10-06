@@ -805,7 +805,7 @@ pub(super) fn strip_layer_index(name: &str) -> String {
 /// `LoadedModel` borrowed from it.
 pub struct LoadedModel<'file> {
     pub(super) weights: BoundWeights<'file>,
-    pub(super) architecture: ModelArchitecture,
+    pub(super) architecture: ModelHparams,
     /// The decode-time cache shape this checkpoint's family profile names
     /// ([`proxima_tensor::spec::FamilyProfile::kv_cache_shape`]); `Uniform` for
     /// a load that resolves no family profile (safetensors, synthetic
@@ -946,7 +946,7 @@ pub struct LoadedModel<'file> {
     /// branch -- and swaps it into `program`/`logits_root`/`layer_roots`/
     /// `single_position_step` for exactly that one evaluation, restoring
     /// the ordinary `Extent::Symbolic(0)` decode program right after.
-    pub(super) qwen35moe_hparams: Option<crate::qwen35moe::hparams::Architecture>,
+    pub(super) qwen35moe_hparams: Option<crate::qwen35moe::hparams::Qwen35MoeHparams>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -1302,7 +1302,7 @@ pub(super) fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, Inte
 /// the program builder and this lookup have drifted out of sync).
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub(super) fn build_single_range_program(
-    architecture: &ModelArchitecture,
+    architecture: &ModelHparams,
     qk_norm: bool,
 ) -> Result<Option<SingleRangeProgram>, InteropError> {
     if architecture.expert_count != 0 {

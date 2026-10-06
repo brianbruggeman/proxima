@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 /// since the FULL-layer table those leaves' own `rope_cos`/`rope_sin`
 /// siblings read comes from the decode loop's builtin per-position table at
 /// the checkpoint's own full-layer base/dimension instead
-/// (the header reader's own `ModelArchitecture::head_dim`/
+/// (the header reader's own `ModelHparams::head_dim`/
 /// `rope_freq_base`).
 #[must_use]
 pub fn gemma4_sliding_rope_table(

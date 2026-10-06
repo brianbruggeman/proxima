@@ -5,7 +5,7 @@
 // friends carry the identical allow for the identical reason).
 #![allow(clippy::expect_used)]
 
-//! Prints the real Mixtral checkpoint's derived [`ModelArchitecture`] and
+//! Prints the real Mixtral checkpoint's derived [`ModelHparams`] and
 //! flags whether `blk.0.ffn_gate_exps.weight` (the native stacked layout
 //! [`bind::bind_moe_stacked_experts`] can bind zero-copy) exists, or only
 //! the per-expert-tensor layout does -- the shape that decides whether the

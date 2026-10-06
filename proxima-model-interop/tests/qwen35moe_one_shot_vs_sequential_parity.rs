@@ -14,7 +14,7 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::qwen35moe::hparams::{Architecture, LayerKind};
+use proxima_model_interop::qwen35moe::hparams::{Qwen35MoeHparams, LayerKind};
 use proxima_model_interop::qwen35moe::{
     Qwen35MoeLayerDiagnostics, qwen35moe_forward_program_at_width,
 };
@@ -35,7 +35,7 @@ const WIDTH: u32 = 13;
 /// layers/8 experts -- byte-identical to `qwen35moe_program_metal_cpu_layer_
 /// parity.rs`'s own `synthetic_architecture`, duplicated here rather than
 /// shared across files since this file carries no `metal`/`macos` gate.
-fn synthetic_architecture(layer_count: u32) -> Architecture {
+fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
     let layer_kinds = (0..layer_count)
         .map(|layer| LayerKind::from_interval(layer, 4))
         .collect::<Vec<_>>();
@@ -46,7 +46,7 @@ fn synthetic_architecture(layer_count: u32) -> Architecture {
             LayerKind::Attention => 1,
         })
         .collect();
-    Architecture {
+    Qwen35MoeHparams {
         vocab: 16,
         embedding: 8,
         query_heads: 2,

@@ -24,7 +24,7 @@ use crate::bind::{
 use crate::error::InteropError;
 
 #[derive(Debug, Clone)]
-pub struct Architecture {
+pub struct Gemma4Hparams {
     pub vocab: u32,
     pub embedding: u32,
     pub block_count: u32,
@@ -78,7 +78,7 @@ pub struct Architecture {
     pub ple_dim: u32,
 }
 
-pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> {
+pub fn from_metadata(parsed: &ParsedGguf) -> Result<Gemma4Hparams, InteropError> {
     let family = metadata_str(parsed, "general.architecture")?;
     let prefix = |name: &str| format!("{family}.{name}");
 
@@ -101,7 +101,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
         metadata_u32_per_layer(parsed, &prefix("feed_forward_length"), block_count)?;
     let feed_forward = *feed_forward_by_layer.first().unwrap_or(&0);
 
-    Ok(Architecture {
+    Ok(Gemma4Hparams {
         vocab: vocab_from_token_embedding(parsed, embedding)?,
         embedding,
         block_count,

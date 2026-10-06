@@ -2517,7 +2517,7 @@ pub(super) mod memory_fit_gate_tests {
     use proxima_primitives::sync::blocking::Mutex;
     use proxima_tokenizer::Vocab;
 
-    use crate::bind::{BoundWeights, ModelArchitecture};
+    use crate::bind::{BoundWeights, ModelHparams};
     use crate::rope_scaling::RopeScaling;
     use crate::serving::ContextLength;
     use crate::serving::ServingConfig;
@@ -2541,8 +2541,8 @@ pub(super) mod memory_fit_gate_tests {
         Vocab::new(tokens, &[], None, None, None).expect("minimal vocab builds")
     }
 
-    fn tiny_architecture() -> ModelArchitecture {
-        ModelArchitecture {
+    fn tiny_architecture() -> ModelHparams {
+        ModelHparams {
             vocab: 1,
             embedding: 1,
             feed_forward: 1,

@@ -2324,7 +2324,7 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// This checkpoint's own transformer block count
-    /// (`{architecture}.block_count`, [`ModelArchitecture::block_count`]).
+    /// (`{architecture}.block_count`, [`ModelHparams::block_count`]).
     #[must_use]
     pub fn layer_count(&self) -> u32 {
         self.architecture.block_count
@@ -2401,7 +2401,7 @@ impl<'file> LoadedModel<'file> {
 
     /// Binds every weight the cached forward program needs out of
     /// `parsed`/`file_bytes` (`crate::bind_leaves::bind_program_leaves`), derives
-    /// [`ModelArchitecture`] from `parsed`'s own metadata
+    /// [`ModelHparams`] from `parsed`'s own metadata
     /// ([`crate::bind::architecture_from_metadata`]), builds the vocab
     /// from the same metadata, and compiles the cached forward program
     /// once. Pays the whole load cost; every [`Pipe::call`] after reuses
@@ -2767,7 +2767,7 @@ impl<'file> LoadedModel<'file> {
         manifest: &proxima_safetensors::Manifest,
         file_bytes: &'file [u8],
         data_start: u64,
-        architecture: ModelArchitecture,
+        architecture: ModelHparams,
         vocab: Vocab,
     ) -> Result<Self, InteropError> {
         let weights =
@@ -2896,13 +2896,13 @@ mod gemma4_single_range_exclusion_tests {
 
     /// gemma4 E2B's own shape (`gemma4::bind::declared_leaves_match_bound_leaves_tests::e2b_shaped_architecture`'s
     /// own doc: 35 layers, `blk.15..=34` shared-KV) flattened into the
-    /// generic [`ModelArchitecture`] `build_single_range_program` actually
+    /// generic [`ModelHparams`] `build_single_range_program` actually
     /// receives -- that type carries no sliding-window-pattern or
     /// shared-KV-layer-count field at all, so this shape is
     /// indistinguishable from an ordinary 35-layer dense Mistral checkpoint
     /// at this builder's own boundary.
-    fn gemma4_e2b_shaped_model_architecture() -> ModelArchitecture {
-        ModelArchitecture {
+    fn gemma4_e2b_shaped_model_architecture() -> ModelHparams {
+        ModelHparams {
             vocab: 1,
             embedding: 1536,
             feed_forward: 6144,

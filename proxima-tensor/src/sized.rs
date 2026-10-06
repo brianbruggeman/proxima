@@ -326,7 +326,7 @@ pub const STAGED_BATCH_MIN_LEN: usize = generated::STAGED_BATCH_MIN_LEN;
 /// program uses when the checkpoint's own `{architecture}.rope.freq_base`
 /// GGUF metadata key is absent -- `proxima-model-interop`'s
 /// `bind::architecture_from_metadata` is the one production reader
-/// (`ModelArchitecture::rope_freq_base` carries whatever it finds, this
+/// (`ModelHparams::rope_freq_base` carries whatever it finds, this
 /// constant only when the key is missing). Not execution policy in the
 /// `generated` family's sense
 /// (nothing here is swept against a real forward pass's timing) but still

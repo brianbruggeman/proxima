@@ -833,7 +833,7 @@ impl KvPadScratch {
 /// one reference says what was already true by convention. `even_odd_row`/
 /// `v_row` are each `kv_heads * width` for their own leaf, read back off
 /// this layer's declared `Op::Input` shape by [`cache_leaf_row_elements`]
-/// -- never derived from `ModelArchitecture` scalars a bind may
+/// -- never derived from `ModelHparams` scalars a bind may
 /// leave zero/unset (that doc's own paragraph on why).
 pub(super) struct KvPadShape {
     pub(super) bound_extent: usize,
@@ -1357,7 +1357,7 @@ pub(super) fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
 /// need is the PRODUCT of every extent after the leading symbolic
 /// bound-extent slot, not a single dimension. This is the single source of
 /// truth those two shapes size their scratch buffers from -- never
-/// `ModelArchitecture`/[`crate::lowering::step_state`]
+/// `ModelHparams`/[`crate::lowering::step_state`]
 /// scalars a bind may leave zero or unset -- the real defect this
 /// function replaces: `LoadedModel` used to carry a single model-wide
 /// `qwen35_attn_head_dim: Option<u32>`, read from a hook whose

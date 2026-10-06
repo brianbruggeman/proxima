@@ -1,5 +1,5 @@
 //! Real, on-disk `LiquidAI/LFM2.5-8B-A1B-GGUF` (`LFM2.5-8B-A1B-Q4_K_M.gguf`,
-//! 5,155,564,768 bytes, verified): the header facts [`proxima_model_interop::Lfm2Architecture`]
+//! 5,155,564,768 bytes, verified): the header facts [`proxima_model_interop::Lfm2Hparams`]
 //! reads, checked against `llama.cpp`'s own metadata dump. Generation against
 //! llama.cpp's ids is `llama_parity_lfm2` in `arch_data_baseline.rs`.
 //! `#[ignore]`d and skips cleanly when the host-local download is absent,
@@ -35,7 +35,7 @@ fn lfm2_architecture_from_metadata_matches_the_real_checkpoints_own_llama_cli_du
         .expect("parse the real lfm2 gguf checkpoint");
 
     let architecture = lfm2_architecture_from_metadata(&parsed)
-        .expect("derive Lfm2Architecture from the real checkpoint");
+        .expect("derive Lfm2Hparams from the real checkpoint");
     std::println!("real_lfm2 architecture={architecture:?}");
 
     assert_eq!(architecture.block_count, 24);

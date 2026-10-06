@@ -36,7 +36,7 @@ impl LayerKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct Architecture {
+pub struct Qwen35MoeHparams {
     pub vocab: u32,
     pub embedding: u32,
     pub query_heads: u32,
@@ -92,7 +92,7 @@ fn per_layer_kv(
     }
 }
 
-pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> {
+pub fn from_metadata(parsed: &ParsedGguf) -> Result<Qwen35MoeHparams, InteropError> {
     let family = metadata_str(parsed, "general.architecture")?;
     let prefix = |name: &str| format!("{family}.{name}");
     let embedding = metadata_u32(parsed, &prefix("embedding_length"))?;
@@ -136,7 +136,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
         parsed.metadata_value(&prefix("rope.mrope_interleaved")),
         Some(MetadataValue::Bool(true))
     );
-    Ok(Architecture {
+    Ok(Qwen35MoeHparams {
         vocab: crate::bind::vocab_from_token_embedding(parsed, embedding)?,
         embedding,
         query_heads: metadata_u32(parsed, &prefix("attention.head_count"))?,

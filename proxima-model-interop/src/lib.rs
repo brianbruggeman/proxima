@@ -103,7 +103,7 @@ pub use bind::{
     metadata_f32_optional, metadata_str, metadata_str_opt, metadata_u32, metadata_u32_optional_or,
     vocab_from_token_embedding,
 };
-pub use bind::{ModelArchitecture, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
+pub use bind::{ModelHparams, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
 pub use dense::descriptor_from_gguf as dense_descriptor_from_gguf;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
@@ -129,7 +129,7 @@ pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_r
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
 pub use lfm2::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_descriptor, lfm2_forward_values,
+    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_descriptor, lfm2_forward_values,
 };
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
@@ -139,7 +139,7 @@ pub use quality::print_quality_report;
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
 #[cfg(feature = "std")]
 pub use qwen35::{
-    Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
+    Qwen35Hparams, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
     descriptor_from_architecture as qwen35_descriptor_from_architecture, qwen35_architecture_from_metadata,
 };
 #[cfg(feature = "std")]

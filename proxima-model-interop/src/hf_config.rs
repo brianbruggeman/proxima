@@ -1,4 +1,4 @@
-//! `config.json` -> [`ModelArchitecture`], the HuggingFace counterpart to
+//! `config.json` -> [`ModelHparams`], the HuggingFace counterpart to
 //! [`crate::bind::architecture_from_metadata`]'s GGUF-metadata reader. Same
 //! output type, same four hyperparameter groups (embedding/attention/
 //! feed-forward/MoE), different wire container: GGUF keys every dimension
@@ -15,7 +15,7 @@
 //! [`architecture_from_hf_config`]'s own doc for why that one is NOT the
 //! same field as `intermediate_size`).
 //!
-//! Alloc-tier, like [`crate::bind::ModelArchitecture`] itself: parsing JSON
+//! Alloc-tier, like [`crate::bind::ModelHparams`] itself: parsing JSON
 //! text into a struct needs an allocator (`String`/`Vec` for the
 //! deserialized fields) but nothing from the platform, so this module never
 //! gates on `std` -- `serde`/`serde_json` are both built here with
@@ -28,24 +28,24 @@ use alloc::vec::Vec;
 
 use serde::Deserialize;
 
-use crate::bind::ModelArchitecture;
+use crate::bind::ModelHparams;
 use crate::error::InteropError;
 
 /// A HuggingFace `config.json`, exactly the fields
 /// [`architecture_from_hf_config`] needs -- not a full mirror of every key
 /// a real `config.json` carries (tokenizer/generation knobs like
 /// `bos_token_id`, `torch_dtype`, `rope_scaling`, ... have no
-/// [`ModelArchitecture`] field to land in, and `serde`'s default "ignore
+/// [`ModelHparams`] field to land in, and `serde`'s default "ignore
 /// unknown fields" behavior means this struct is forward-compatible with
 /// them rather than needing to enumerate them).
 ///
-/// `model_type` is stored on [`ModelArchitecture::family`], the key of the
+/// `model_type` is stored on [`ModelHparams::family`], the key of the
 /// family profile the HF path reads (see [`architecture_from_hf_config`]);
 /// `architectures` is read for diagnostics only.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HfConfig {
     /// e.g. `"qwen3_moe"`, `"llama"`, `"mistral"` -- the family profile key,
-    /// carried to [`ModelArchitecture::family`] by [`architecture_from_hf_config`].
+    /// carried to [`ModelHparams::family`] by [`architecture_from_hf_config`].
     #[serde(default)]
     pub model_type: String,
     /// e.g. `["Qwen3MoeForCausalLM"]` -- same status as `model_type`.
@@ -122,7 +122,7 @@ pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
     })
 }
 
-/// Reads [`ModelArchitecture`] out of `config` -- the HF counterpart to
+/// Reads [`ModelHparams`] out of `config` -- the HF counterpart to
 /// [`crate::bind::architecture_from_metadata`]'s GGUF read. Every field maps
 /// straight across except two, both because HF's schema does not carry
 /// GGUF's exact shape:
@@ -147,12 +147,12 @@ pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
 ///   llama.cpp's own GGUF writer already folds a MoE checkpoint's per-expert
 ///   width into the one `{architecture}.feed_forward_length` key.
 ///
-/// `model_type` becomes [`ModelArchitecture::family`], so the HF path keys the
+/// `model_type` becomes [`ModelHparams::family`], so the HF path keys the
 /// same family profile the GGUF path keys by `general.architecture`; a family
 /// with no profile is an error at bind time, not a default. `architectures` is
 /// read by [`parse_hf_config`] for diagnostics and not consulted here.
 #[must_use]
-pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
+pub fn architecture_from_hf_config(config: &HfConfig) -> ModelHparams {
     let kv_heads = config
         .num_key_value_heads
         .unwrap_or(config.num_attention_heads);
@@ -173,7 +173,7 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
             .unwrap_or(config.intermediate_size)
     };
 
-    ModelArchitecture {
+    ModelHparams {
         vocab: config.vocab_size,
         embedding: config.hidden_size,
         feed_forward,
@@ -275,7 +275,7 @@ mod tests {
 
         assert_eq!(
             architecture,
-            ModelArchitecture {
+            ModelHparams {
                 vocab: 151_936,
                 embedding: 2048,
                 feed_forward: 768,
@@ -316,7 +316,7 @@ mod tests {
 
         assert_eq!(
             architecture,
-            ModelArchitecture {
+            ModelHparams {
                 vocab: 100,
                 embedding: 8,
                 feed_forward: 32,
@@ -369,7 +369,7 @@ mod tests {
     /// `~/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct/config.json`,
     /// copied verbatim -- a dense, tied-embedding Llama-family checkpoint:
     /// the fixture that proves `tie_word_embeddings` is read into
-    /// [`ModelArchitecture::tied_embeddings`], not just the MoE fields the
+    /// [`ModelHparams::tied_embeddings`], not just the MoE fields the
     /// Qwen3 fixture above exercises.
     const REAL_SMOLLM2_CONFIG_JSON: &str = r#"{
         "architectures": ["LlamaForCausalLM"],
@@ -404,7 +404,7 @@ mod tests {
         let architecture = architecture_from_hf_config(&config);
         assert_eq!(
             architecture,
-            ModelArchitecture {
+            ModelHparams {
                 vocab: 49_152,
                 embedding: 576,
                 feed_forward: 1536,

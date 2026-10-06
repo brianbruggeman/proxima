@@ -24,7 +24,7 @@ use proxima_tensor::spec::{
     ForwardProgram, LayerKind, ModelDescriptor, Qwen35LayerRoots, ScheduleSource, build_forward,
 };
 
-use crate::bind::{BoundWeights, ModelArchitecture, metadata_str};
+use crate::bind::{BoundWeights, ModelHparams, metadata_str};
 use crate::bind_leaves::{bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
 use crate::profiles::{binding_profile, family_profile};
@@ -114,7 +114,7 @@ pub fn bind_symbols(
 /// does not produce is the empty value of its type.
 pub struct BoundProgram<'file> {
     pub weights: BoundWeights<'file>,
-    pub architecture: ModelArchitecture,
+    pub architecture: ModelHparams,
     pub program: Vec<Op>,
     /// Evaluates to exactly ONE row of `vocab` logits -- `[1, vocab]` or a bare
     /// `[vocab]` -- the last new position, never the full `[new_count, vocab]`
@@ -253,7 +253,7 @@ impl StepInput {
 
 /// One header reader's output: the descriptor [`build_forward`] lowers and the
 /// hyperparameters the decode loop sizes its caches and tables from.
-type Header = (ModelDescriptor, ModelArchitecture);
+type Header = (ModelDescriptor, ModelHparams);
 
 /// `general.architecture`, the key every family profile is looked up by.
 fn family(parsed: &ParsedGguf) -> Result<&str, InteropError> {
@@ -321,7 +321,7 @@ pub fn bind_checkpoint_with_kv_layout<'file>(
 fn bind_descriptor<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
-    architecture: ModelArchitecture,
+    architecture: ModelHparams,
     descriptor: &ModelDescriptor,
 ) -> Result<BoundProgram<'file>, InteropError> {
     let ForwardProgram {
@@ -447,11 +447,11 @@ pub fn rope_freq_factors<'weights>(weights: &'weights BoundWeights<'_>) -> Optio
 /// Feeds the sliding-window RoPE table the `rope_cos_swa`/`rope_sin_swa`
 /// leaves declare (`LayerAttentionConfig::rope_table`): the decode loop's
 /// builtin `rope_cos`/`rope_sin` blocks carry the full-layer table, so a model
-/// whose [`ModelArchitecture::sliding_rope`] is set needs these two extra
+/// whose [`ModelHparams::sliding_rope`] is set needs these two extra
 /// leaves, one row per position `new_start..new_start + new_count`. Pushes
 /// nothing when the header carries no sliding table.
 pub fn sliding_rope_inputs(
-    architecture: &ModelArchitecture,
+    architecture: &ModelHparams,
     new_start: usize,
     new_count: usize,
     out: &mut Vec<StepInput>,
@@ -537,8 +537,8 @@ mod tests {
     use super::*;
     use crate::bind::SlidingRope;
 
-    fn gemma4_shaped_hparams(sliding_rope: Option<SlidingRope>) -> ModelArchitecture {
-        ModelArchitecture {
+    fn gemma4_shaped_hparams(sliding_rope: Option<SlidingRope>) -> ModelHparams {
+        ModelHparams {
             vocab: 262_144,
             embedding: 1536,
             feed_forward: 6144,

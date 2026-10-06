@@ -46,7 +46,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 /// budget). This reproduces the exact same `(Vec<Op>, NodeId, MoeSites)`
 /// `LoadedModel::load` built internally, so its `NodeId`s are the same ones
 /// `LoadedModel::forward_node_values` evaluates against the real blob.
-fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) -> (Vec<Op>, NodeId) {
+fn gemma4_program(architecture: &proxima_model_interop::gemma4::Gemma4Hparams) -> (Vec<Op>, NodeId) {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
         combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {

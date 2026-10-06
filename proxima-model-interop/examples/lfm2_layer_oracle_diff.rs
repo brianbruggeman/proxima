@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
+    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_forward_values,
 };
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
@@ -65,7 +65,7 @@ fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
 /// safe here even though this checkpoint has no real `block_count + 1`th
 /// layer to slice: the "deep" build's extra layer is a structural stand-in,
 /// its weight names are never bound or evaluated.
-fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId {
+fn layer_boundary_node_id(architecture: &Lfm2Hparams, depth: u32) -> NodeId {
     if depth == 0 {
         // `ids`, `token_embd.weight`, then the embedding gather itself --
         // always the 3rd op any depth of this program appends, matching
@@ -122,7 +122,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
     NodeId((first_diff - 1) as u32)
 }
 
-fn layer_kind_label(architecture: &Lfm2Architecture, layer: usize) -> &'static str {
+fn layer_kind_label(architecture: &Lfm2Hparams, layer: usize) -> &'static str {
     match architecture.layers[layer].kind {
         proxima_tensor::spec::LayerKind::Attention => "attention",
         proxima_tensor::spec::LayerKind::ShortConv => "shortconv",
@@ -183,7 +183,7 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed)
+    let architecture: Lfm2Hparams = lfm2_architecture_from_metadata(&parsed)
         .expect("derive lfm2 architecture from gguf metadata");
 
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)

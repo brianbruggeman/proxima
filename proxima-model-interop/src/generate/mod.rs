@@ -183,7 +183,7 @@ use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
-use crate::bind::{BoundWeights, Codec, ModelArchitecture, metadata_str};
+use crate::bind::{BoundWeights, Codec, ModelHparams, metadata_str};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use crate::lowering::KvCacheShape;
 use crate::lowering::{
