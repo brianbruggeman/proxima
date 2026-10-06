@@ -3584,11 +3584,11 @@ mod tests {
     #[case::gated_delta_net_fusion(|config| ServingConfig { gated_delta_net_fusion: !config.gated_delta_net_fusion, ..config })]
     #[case::moe_topk_fusion(|config| ServingConfig { moe_topk_fusion: !config.moe_topk_fusion, ..config })]
     #[case::gdn_prefill_backend(|config| ServingConfig { gdn_prefill_backend: GdnPrefillBackend::Mlx, ..config })]
-    #[case::qwen35moe_pre_gather(|config| ServingConfig { qwen35moe_pre_gather: !config.qwen35moe_pre_gather, ..config })]
-    #[case::qwen35moe_monolithic_all_low(|config| ServingConfig { qwen35moe_monolithic_all_low: !config.qwen35moe_monolithic_all_low, ..config })]
-    #[case::qwen35moe_monolithic_high_mmap(|config| ServingConfig { qwen35moe_monolithic_high_mmap: !config.qwen35moe_monolithic_high_mmap, ..config })]
-    #[case::qwen35moe_layer_window(|config| ServingConfig { qwen35moe_layer_window: config.qwen35moe_layer_window + 1, ..config })]
-    #[case::qwen35moe_residency_budget(|config| ServingConfig { qwen35moe_residency_budget_bytes: config.qwen35moe_residency_budget_bytes + (1 << 30), ..config })]
+    #[case::moe_pre_gather(|config| ServingConfig { moe_pre_gather: !config.moe_pre_gather, ..config })]
+    #[case::moe_monolithic_all_low(|config| ServingConfig { moe_monolithic_all_low: !config.moe_monolithic_all_low, ..config })]
+    #[case::moe_monolithic_high_mmap(|config| ServingConfig { moe_monolithic_high_mmap: !config.moe_monolithic_high_mmap, ..config })]
+    #[case::moe_layer_window(|config| ServingConfig { moe_layer_window: config.moe_layer_window + 1, ..config })]
+    #[case::qwen35moe_residency_budget(|config| ServingConfig { moe_residency_budget_bytes: config.moe_residency_budget_bytes + (1 << 30), ..config })]
     async fn a_request_differing_in_a_row_affecting_config_field_misses(
         #[case] change: fn(ServingConfig<'static>) -> ServingConfig<'static>,
     ) {

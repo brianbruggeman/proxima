@@ -182,8 +182,8 @@ fn qwen35_hybrid_synthetic_fixture_metal_decode_row549_diagnostic() {
     }
 }
 
-/// ROW 531 fix: the full-graph decode arm (`qwen35moe_pre_gather: false`,
-/// `PROXIMA_QWEN35MOE_PRE_GATHER=false`) now places recurrent state, conv
+/// ROW 531 fix: the full-graph decode arm (`moe_pre_gather: false`,
+/// `PROXIMA_MOE_PRE_GATHER=false`) now places recurrent state, conv
 /// history and dense-attention KV roots the same way the pre-gather arm
 /// already did (`ssm_placement_enabled`/`dense_attention_placement_enabled`,
 /// `generate.rs`), so device residency is a Metal-backend property, not a
@@ -200,7 +200,7 @@ fn qwen35_full_graph_metal_places_state_and_bounds_readback() {
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
 
     let mut config = supported_config(GPU_LAYERS_ALL);
-    config.qwen35moe_pre_gather = false;
+    config.moe_pre_gather = false;
     let token_count = 8;
 
     let loaded_first =

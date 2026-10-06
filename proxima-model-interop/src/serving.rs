@@ -663,7 +663,7 @@ impl Default for PhaseSchedule {
 }
 
 /// I11's per-layer expert-residency level, distinct from
-/// [`ServingConfig::qwen35moe_residency_budget_bytes`]'s single pool shared
+/// [`ServingConfig::moe_residency_budget_bytes`]'s single pool shared
 /// across every qwen35moe layer. Consulted at exactly one site,
 /// `generate/decode.rs`'s residency-pool construction, independent of
 /// [`AdmissionSchedule`] and [`PhaseSchedule`].
@@ -934,13 +934,13 @@ pub struct ServingConfig<'model> {
     /// residency transition, and expert gather as separate phases. The Metal
     /// path binds only the selected expert sources at the gather boundary;
     /// the full graph remains the explicit monolithic arm.
-    pub qwen35moe_pre_gather: bool,
+    pub moe_pre_gather: bool,
     /// Keeps router cut tensors in caller-owned Metal buffers across the
     /// router/gather boundary instead of reading them back to the host.
-    pub qwen35moe_persistent_cuts: bool,
+    pub moe_persistent_cuts: bool,
     pub gdn_prefill_backend: GdnPrefillBackend,
     /// Byte budget for the DynaExq high-precision expert residency pool.
-    pub qwen35moe_residency_budget_bytes: u64,
+    pub moe_residency_budget_bytes: u64,
     /// Load-time refusal cap for `crate::memory_fit::WeightClassBytes::dense_bytes`
     /// (`crate::generate::LoadedModel::apply_memory_fit_gate`'s per-class
     /// gate; ROW 501/I2 -- "separate budgets and placement owners for
@@ -949,7 +949,7 @@ pub struct ServingConfig<'model> {
     /// unbounded, matching today's behavior byte-for-byte.
     pub dense_weights_budget_bytes: u64,
     /// Load-time refusal cap for `crate::memory_fit::WeightClassBytes::expert_bytes`,
-    /// checked independently of [`Self::qwen35moe_residency_budget_bytes`]
+    /// checked independently of [`Self::moe_residency_budget_bytes`]
     /// (that field sizes the DynaExq high-precision pool at decode time;
     /// this one is the load-time admission cap on the checkpoint's own
     /// on-disk expert weight bytes). `0` is unbounded.
@@ -962,18 +962,18 @@ pub struct ServingConfig<'model> {
     /// at the requested context length. `0` is unbounded.
     pub kv_cache_budget_bytes: u64,
     /// Enables route-history advice for HOBBIT prefetching.
-    pub qwen35moe_expert_prefetch: bool,
+    pub moe_expert_prefetch: bool,
     /// Allows the all-low monolithic pre-gather diagnostic path.
-    pub qwen35moe_monolithic_all_low: bool,
+    pub moe_monolithic_all_low: bool,
     /// Number of adjacent qwen35moe layers to execute in one exact
     /// sidecar-backed pre-gather window. `1` is the existing router/gather
     /// boundary; `2` admits the bounded pair window, which exposes both
     /// router outputs only after the pair has completed.
-    pub qwen35moe_layer_window: usize,
+    pub moe_layer_window: usize,
     /// Uses the original mmap-backed expert stacks in one Metal graph. The
     /// device performs the routed descriptor lookup; no low-precision copy is
     /// substituted, so this arm is an exactness/per-submission baseline.
-    pub qwen35moe_monolithic_high_mmap: bool,
+    pub moe_monolithic_high_mmap: bool,
     /// When enabled in a build with the WGPU/Vulkan driver, run the serving
     /// graph through the CPU oracle even when `gpu_layers` requests the GPU.
     /// This is an explicit correctness escape hatch for models whose GPU
@@ -1203,18 +1203,18 @@ impl Default for ServingConfig<'static> {
             // escape, never the implicit behavior.
             exact_activations: true,
             weight_precision: &[],
-            qwen35moe_pre_gather: false,
-            qwen35moe_persistent_cuts: false,
+            moe_pre_gather: false,
+            moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
-            qwen35moe_residency_budget_bytes: 0,
+            moe_residency_budget_bytes: 0,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
             kv_cache_budget_bytes: 0,
-            qwen35moe_expert_prefetch: false,
-            qwen35moe_layer_window: 1,
-            qwen35moe_monolithic_all_low: false,
-            qwen35moe_monolithic_high_mmap: false,
+            moe_expert_prefetch: false,
+            moe_layer_window: 1,
+            moe_monolithic_all_low: false,
+            moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             // default flipped false: main's default path regressed on the
             // France checkpoint (garbage tokens / EmptyLogits) somewhere in
@@ -1423,20 +1423,20 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
-    if !matches!(config.qwen35moe_layer_window, 1 | 2) {
+    if !matches!(config.moe_layer_window, 1 | 2) {
         return Err(InteropError::UnsupportedServingConfig(format!(
-            "qwen35moe_layer_window={}: only 1 (the existing boundary) or 2 (the bounded exact sidecar window) is supported",
-            config.qwen35moe_layer_window
+            "moe_layer_window={}: only 1 (the existing boundary) or 2 (the bounded exact sidecar window) is supported",
+            config.moe_layer_window
         )));
     }
-    if config.qwen35moe_layer_window == 2 && !config.qwen35moe_pre_gather {
+    if config.moe_layer_window == 2 && !config.moe_pre_gather {
         return Err(InteropError::UnsupportedServingConfig(
-            "qwen35moe_layer_window=2 requires qwen35moe_pre_gather=true".into(),
+            "moe_layer_window=2 requires moe_pre_gather=true".into(),
         ));
     }
-    if config.qwen35moe_layer_window == 2 && config.qwen35moe_persistent_cuts {
+    if config.moe_layer_window == 2 && config.moe_persistent_cuts {
         return Err(InteropError::UnsupportedServingConfig(
-            "qwen35moe_layer_window=2 currently requires qwen35moe_persistent_cuts=false because the pair window returns both router roots after one command buffer".into(),
+            "moe_layer_window=2 currently requires moe_persistent_cuts=false because the pair window returns both router roots after one command buffer".into(),
         ));
     }
 
@@ -1642,17 +1642,17 @@ mod tests {
             exact_activations: true,
             weight_precision: &[],
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
-            qwen35moe_pre_gather: false,
-            qwen35moe_persistent_cuts: false,
-            qwen35moe_residency_budget_bytes: 0,
+            moe_pre_gather: false,
+            moe_persistent_cuts: false,
+            moe_residency_budget_bytes: 0,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
             kv_cache_budget_bytes: 0,
-            qwen35moe_expert_prefetch: false,
-            qwen35moe_layer_window: 1,
-            qwen35moe_monolithic_all_low: false,
-            qwen35moe_monolithic_high_mmap: false,
+            moe_expert_prefetch: false,
+            moe_layer_window: 1,
+            moe_monolithic_all_low: false,
+            moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
@@ -1818,17 +1818,17 @@ mod tests {
             exact_activations: true,
             weight_precision: &[],
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
-            qwen35moe_pre_gather: false,
-            qwen35moe_persistent_cuts: false,
-            qwen35moe_residency_budget_bytes: 0,
+            moe_pre_gather: false,
+            moe_persistent_cuts: false,
+            moe_residency_budget_bytes: 0,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
             kv_cache_budget_bytes: 0,
-            qwen35moe_expert_prefetch: false,
-            qwen35moe_layer_window: 1,
-            qwen35moe_monolithic_all_low: false,
-            qwen35moe_monolithic_high_mmap: false,
+            moe_expert_prefetch: false,
+            moe_layer_window: 1,
+            moe_monolithic_all_low: false,
+            moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
@@ -1922,17 +1922,17 @@ mod tests {
             exact_activations: true,
             weight_precision: &[],
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
-            qwen35moe_pre_gather: false,
-            qwen35moe_persistent_cuts: false,
-            qwen35moe_residency_budget_bytes: 0,
+            moe_pre_gather: false,
+            moe_persistent_cuts: false,
+            moe_residency_budget_bytes: 0,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
             kv_cache_budget_bytes: 0,
-            qwen35moe_expert_prefetch: false,
-            qwen35moe_layer_window: 1,
-            qwen35moe_monolithic_all_low: false,
-            qwen35moe_monolithic_high_mmap: false,
+            moe_expert_prefetch: false,
+            moe_layer_window: 1,
+            moe_monolithic_all_low: false,
+            moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
@@ -2015,18 +2015,18 @@ mod tests {
             dispatch_type: DispatchType::Serial,
             exact_activations: true,
             weight_precision: &[],
-            qwen35moe_pre_gather: false,
-            qwen35moe_persistent_cuts: false,
+            moe_pre_gather: false,
+            moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
-            qwen35moe_residency_budget_bytes: 0,
+            moe_residency_budget_bytes: 0,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
             kv_cache_budget_bytes: 0,
-            qwen35moe_expert_prefetch: false,
-            qwen35moe_layer_window: 1,
-            qwen35moe_monolithic_all_low: false,
-            qwen35moe_monolithic_high_mmap: false,
+            moe_expert_prefetch: false,
+            moe_layer_window: 1,
+            moe_monolithic_all_low: false,
+            moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
@@ -2099,18 +2099,18 @@ mod tests {
             dispatch_type: DispatchType::Serial,
             exact_activations: true,
             weight_precision: &[],
-            qwen35moe_pre_gather: false,
-            qwen35moe_persistent_cuts: false,
+            moe_pre_gather: false,
+            moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
-            qwen35moe_residency_budget_bytes: 0,
+            moe_residency_budget_bytes: 0,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
             kv_cache_budget_bytes: 0,
-            qwen35moe_expert_prefetch: false,
-            qwen35moe_layer_window: 1,
-            qwen35moe_monolithic_all_low: false,
-            qwen35moe_monolithic_high_mmap: false,
+            moe_expert_prefetch: false,
+            moe_layer_window: 1,
+            moe_monolithic_all_low: false,
+            moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: true,
             prefill_chunk_positions: 0,

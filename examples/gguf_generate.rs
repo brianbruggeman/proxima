@@ -35,7 +35,7 @@
 //! Set `PROXIMA_GPU_MEMORY_LIMIT_BYTES` to make the load-time device budget
 //! explicit; an over-budget GPU request is rejected before Metal allocates
 //! the checkpoint (for example, `4294967296` for a 4 GiB ceiling).
-//! `PROXIMA_QWEN35MOE_PRE_GATHER=1` enables the per-layer router/residency
+//! `PROXIMA_MOE_PRE_GATHER=1` enables the per-layer router/residency
 //! boundary when an expert sidecar is attached; without it the ordinary
 //! monolithic decode path is used.
 //! `PROXIMA_SPECULATIVE_TYPES` selects the speculative drafters (llama `--spec-type`
@@ -74,7 +74,7 @@ struct GenerateConfig {
     #[setting(default = 0)]
     gpu_memory_limit_bytes: u64,
     #[setting(default = 0)]
-    qwen35moe_residency_budget_bytes: u64,
+    moe_residency_budget_bytes: u64,
     #[setting(default = 0)]
     dense_weights_budget_bytes: u64,
     #[setting(default = 0)]
@@ -84,17 +84,17 @@ struct GenerateConfig {
     #[setting(default = 0)]
     kv_cache_budget_bytes: u64,
     #[setting(default = false)]
-    qwen35moe_pre_gather: bool,
+    moe_pre_gather: bool,
     #[setting(default = false)]
-    qwen35moe_persistent_cuts: bool,
+    moe_persistent_cuts: bool,
     #[setting(default = false)]
-    qwen35moe_expert_prefetch: bool,
+    moe_expert_prefetch: bool,
     #[setting(default = 1)]
-    qwen35moe_layer_window: usize,
+    moe_layer_window: usize,
     #[setting(default = false)]
-    qwen35moe_monolithic_all_low: bool,
+    moe_monolithic_all_low: bool,
     #[setting(default = false)]
-    qwen35moe_monolithic_high_mmap: bool,
+    moe_monolithic_high_mmap: bool,
     #[setting(default = 0.8)]
     temperature: f32,
     #[setting(default = 40)]
@@ -195,10 +195,10 @@ fn generation_prompt(parsed: &proxima_gguf::pipe::ParsedGguf, prompt: &str) -> S
 
 fn should_attach_expert_sidecar(
     sidecar_configured: bool,
-    qwen35moe_pre_gather: bool,
-    qwen35moe_monolithic_all_low: bool,
+    moe_pre_gather: bool,
+    moe_monolithic_all_low: bool,
 ) -> bool {
-    sidecar_configured && (qwen35moe_pre_gather || qwen35moe_monolithic_all_low)
+    sidecar_configured && (moe_pre_gather || moe_monolithic_all_low)
 }
 
 fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
@@ -385,9 +385,9 @@ fn supported_serving_config<'model>(
     // the execution mode is explicit; sidecar and budget configure resources,
     // but must not silently switch the model from the full graph to segmented
     // pre-gather because that would make the control arm impossible to run.
-    let qwen35moe_pre_gather = settings.qwen35moe_pre_gather;
+    let moe_pre_gather = settings.moe_pre_gather;
     #[cfg(target_os = "macos")]
-    let qwen35moe_monolithic_all_low = settings.qwen35moe_monolithic_all_low;
+    let moe_monolithic_all_low = settings.moe_monolithic_all_low;
     let kv_bucket_tokens = (settings.kv_bucket_tokens > 0).then_some(settings.kv_bucket_tokens);
     #[cfg(target_os = "macos")]
     let requested_dispatch_type = match settings.dispatch.as_str() {
@@ -399,7 +399,7 @@ fn supported_serving_config<'model>(
     // concurrent encoder: serial is the correctness-preserving boundary until
     // the missing source-table hazard edge is proven in omega.
     #[cfg(target_os = "macos")]
-    let dispatch_type = if qwen35moe_monolithic_all_low {
+    let dispatch_type = if moe_monolithic_all_low {
         omega::DispatchType::Serial
     } else {
         requested_dispatch_type
@@ -416,18 +416,18 @@ fn supported_serving_config<'model>(
         // `generate.rs:856`'s `select_backend` reads this exact sentinel).
         gpu_layers,
         gpu_memory_limit_bytes,
-        qwen35moe_pre_gather,
-        qwen35moe_persistent_cuts: settings.qwen35moe_persistent_cuts,
+        moe_pre_gather,
+        moe_persistent_cuts: settings.moe_persistent_cuts,
         gdn_prefill_backend: gdn_prefill_backend(&settings.gdn_prefill_backend),
-        qwen35moe_residency_budget_bytes: settings.qwen35moe_residency_budget_bytes,
+        moe_residency_budget_bytes: settings.moe_residency_budget_bytes,
         dense_weights_budget_bytes: settings.dense_weights_budget_bytes,
         expert_weights_budget_bytes: settings.expert_weights_budget_bytes,
         activations_budget_bytes: settings.activations_budget_bytes,
         kv_cache_budget_bytes: settings.kv_cache_budget_bytes,
-        qwen35moe_expert_prefetch: settings.qwen35moe_expert_prefetch,
-        qwen35moe_layer_window: settings.qwen35moe_layer_window,
-        qwen35moe_monolithic_all_low: settings.qwen35moe_monolithic_all_low,
-        qwen35moe_monolithic_high_mmap: settings.qwen35moe_monolithic_high_mmap,
+        moe_expert_prefetch: settings.moe_expert_prefetch,
+        moe_layer_window: settings.moe_layer_window,
+        moe_monolithic_all_low: settings.moe_monolithic_all_low,
+        moe_monolithic_high_mmap: settings.moe_monolithic_high_mmap,
         #[cfg(target_os = "macos")]
         dispatch_type,
         reasoning_budget: 0,
@@ -645,8 +645,8 @@ fn main() {
 
     if should_attach_expert_sidecar(
         !settings.expert_sidecar.is_empty(),
-        settings.qwen35moe_pre_gather,
-        settings.qwen35moe_monolithic_all_low,
+        settings.moe_pre_gather,
+        settings.moe_monolithic_all_low,
     ) {
         let sidecar_path = std::ffi::OsString::from(&settings.expert_sidecar);
         let sidecar_file = match std::fs::File::open(&sidecar_path) {
@@ -743,11 +743,11 @@ fn main() {
         "serving_mode pre_gather={} persistent_cuts={} layer_window={} dispatch={} \
          residency_budget_bytes={} gpu_memory_limit_bytes={} sidecar_configured={} \
          sidecar_source={} monolithic_all_low={} monolithic_high_mmap={}",
-        settings.qwen35moe_pre_gather,
-        settings.qwen35moe_persistent_cuts,
-        settings.qwen35moe_layer_window,
+        settings.moe_pre_gather,
+        settings.moe_persistent_cuts,
+        settings.moe_layer_window,
         settings.dispatch,
-        settings.qwen35moe_residency_budget_bytes,
+        settings.moe_residency_budget_bytes,
         settings.gpu_memory_limit_bytes,
         !settings.expert_sidecar.is_empty(),
         if settings.expert_sidecar_source.is_empty() {
@@ -755,8 +755,8 @@ fn main() {
         } else {
             settings.expert_sidecar_source.as_str()
         },
-        settings.qwen35moe_monolithic_all_low,
-        settings.qwen35moe_monolithic_high_mmap,
+        settings.moe_monolithic_all_low,
+        settings.moe_monolithic_high_mmap,
     );
 
     // A standalone logits probe is a full forward pass.  Running it before

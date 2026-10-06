@@ -77,7 +77,7 @@ async fn family_profile_routes_real_qwen35moe_header_with_per_layer_kv_configura
         "each real qwen35moe layer exposes the router node already used by its gather"
     );
     assert_eq!(
-        bound.qwen35moe_layer_diagnostics.len(),
+        bound.moe_layer_diagnostics.len(),
         40,
         "the bound program exposes every qwen35moe layer boundary"
     );
@@ -94,7 +94,7 @@ async fn family_profile_routes_real_qwen35moe_header_with_per_layer_kv_configura
     let loaded = LoadedModel::load(&parsed, file_bytes)
         .expect("the real qwen35moe checkpoint loads through its family profile");
     assert_eq!(
-        loaded.qwen35moe_layer_diagnostics().len(),
+        loaded.moe_layer_diagnostics().len(),
         40,
         "LoadedModel preserves every bound qwen35moe layer boundary"
     );

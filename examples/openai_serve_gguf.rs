@@ -118,7 +118,7 @@ fn render_prompt(messages: &[ChatMessage]) -> String {
     prompt
 }
 
-fn supported_serving_config(model_path: &str, qwen35moe_pre_gather: bool) -> ServingConfig<'_> {
+fn supported_serving_config(model_path: &str, moe_pre_gather: bool) -> ServingConfig<'_> {
     ServingConfig {
         model_path,
         kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
@@ -128,7 +128,7 @@ fn supported_serving_config(model_path: &str, qwen35moe_pre_gather: bool) -> Ser
         ubatch_size: 0,
         gpu_layers: 0,
         reasoning_budget: 0,
-        qwen35moe_pre_gather,
+        moe_pre_gather,
         ..ServingConfig::default()
     }
 }

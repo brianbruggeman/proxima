@@ -12,7 +12,7 @@
 //! `ssm_state_buffers: Vec<Option<(PlacedBuffer, PlacedBuffer)>>` (Metal
 //! device-resident, correctness depends on stable addresses -- `decode.rs`'s
 //! own doc on `ROW 531 invariant 2`), plus a stateful residency policy
-//! (`qwen35moe_residency`), all threaded through the same 14-local closure
+//! (`moe_residency`), all threaded through the same 14-local closure
 //! with no line between "logical state a `ServingState` transition may
 //! carry" and "device resource a backend must own privately". This module
 //! draws that line, as real, compiling, tested types -- not wired into

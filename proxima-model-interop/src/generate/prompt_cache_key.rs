@@ -55,16 +55,16 @@ pub(super) struct CacheKey {
     /// Which backend runs the gated-delta-net prefill (recurrent state bytes).
     pub(super) gdn_prefill_backend: GdnPrefillBackend,
     /// Router / residency / gather as separate phases instead of one graph.
-    pub(super) qwen35moe_pre_gather: bool,
+    pub(super) moe_pre_gather: bool,
     /// All experts at the low codec.
-    pub(super) qwen35moe_monolithic_all_low: bool,
+    pub(super) moe_monolithic_all_low: bool,
     /// Original mmap-backed expert stacks in one graph.
-    pub(super) qwen35moe_monolithic_high_mmap: bool,
+    pub(super) moe_monolithic_high_mmap: bool,
     /// Adjacent layers executed in one sidecar window.
-    pub(super) qwen35moe_layer_window: usize,
+    pub(super) moe_layer_window: usize,
     /// Size of the high-precision expert pool, which decides which experts
     /// run at the low codec.
-    pub(super) qwen35moe_residency_budget_bytes: u64,
+    pub(super) moe_residency_budget_bytes: u64,
     /// Rows each sliding ring keeps past its window: a ring built with less
     /// slack than a request's speculative verify writes would evict rows the
     /// verify step needs.
@@ -149,16 +149,16 @@ impl CacheKey {
             // bind-time recode is applied once at load; the decode path
             // never reads this field
             weight_precision: _,
-            qwen35moe_pre_gather,
+            moe_pre_gather,
             // keeps cut tensors in device buffers: placement, same values
-            qwen35moe_persistent_cuts: _,
+            moe_persistent_cuts: _,
             gdn_prefill_backend,
-            qwen35moe_residency_budget_bytes,
+            moe_residency_budget_bytes,
             // route-history advice for prefetching: timing only
-            qwen35moe_expert_prefetch: _,
-            qwen35moe_monolithic_all_low,
-            qwen35moe_layer_window,
-            qwen35moe_monolithic_high_mmap,
+            moe_expert_prefetch: _,
+            moe_monolithic_all_low,
+            moe_layer_window,
+            moe_monolithic_high_mmap,
             // only read under the wgpu driver, which this crate never links
             gpu_correctness_fallback: _,
             cached_attention_fusion,
@@ -196,11 +196,11 @@ impl CacheKey {
             gated_delta_net_fusion,
             moe_topk_fusion,
             gdn_prefill_backend,
-            qwen35moe_pre_gather,
-            qwen35moe_monolithic_all_low,
-            qwen35moe_monolithic_high_mmap,
-            qwen35moe_layer_window,
-            qwen35moe_residency_budget_bytes,
+            moe_pre_gather,
+            moe_monolithic_all_low,
+            moe_monolithic_high_mmap,
+            moe_layer_window,
+            moe_residency_budget_bytes,
             ring_slack_rows,
             ring_write_offset,
             read,
