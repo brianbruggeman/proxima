@@ -1,0 +1,48 @@
+2026-10-06T04:12:32Z LAUNCH decode_arms proxima arm=base0b process=0 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:13:08Z EXIT decode_arms proxima arm=base0b process=0 status=exit status: 0
+2026-10-06T04:13:08Z LAUNCH decode_arms proxima arm=base0c process=0 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:13:42Z EXIT decode_arms proxima arm=base0c process=0 status=exit status: 0
+2026-10-06T04:13:42Z LAUNCH decode_arms proxima arm=tip process=0 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:14:16Z EXIT decode_arms proxima arm=tip process=0 status=exit status: 0
+2026-10-06T04:14:17Z LAUNCH decode_arms proxima arm=base0c process=1 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:14:51Z EXIT decode_arms proxima arm=base0c process=1 status=exit status: 0
+2026-10-06T04:14:51Z LAUNCH decode_arms proxima arm=tip process=1 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:15:25Z EXIT decode_arms proxima arm=tip process=1 status=exit status: 0
+2026-10-06T04:15:25Z LAUNCH decode_arms proxima arm=base0b process=1 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:15:59Z EXIT decode_arms proxima arm=base0b process=1 status=exit status: 0
+2026-10-06T04:15:59Z LAUNCH decode_arms proxima arm=tip process=2 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:16:34Z EXIT decode_arms proxima arm=tip process=2 status=exit status: 0
+2026-10-06T04:16:34Z LAUNCH decode_arms proxima arm=base0b process=2 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:17:08Z EXIT decode_arms proxima arm=base0b process=2 status=exit status: 0
+2026-10-06T04:17:08Z LAUNCH decode_arms proxima arm=base0c process=2 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:17:42Z EXIT decode_arms proxima arm=base0c process=2 status=exit status: 0
+2026-10-06T04:17:42Z LAUNCH decode_arms proxima arm=base0b process=3 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:18:16Z EXIT decode_arms proxima arm=base0b process=3 status=exit status: 0
+2026-10-06T04:18:17Z LAUNCH decode_arms proxima arm=base0c process=3 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:18:51Z EXIT decode_arms proxima arm=base0c process=3 status=exit status: 0
+2026-10-06T04:18:51Z LAUNCH decode_arms proxima arm=tip process=3 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:19:25Z EXIT decode_arms proxima arm=tip process=3 status=exit status: 0
+2026-10-06T04:19:25Z LAUNCH decode_arms proxima arm=base0c process=4 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:20:00Z EXIT decode_arms proxima arm=base0c process=4 status=exit status: 0
+2026-10-06T04:20:00Z LAUNCH decode_arms proxima arm=tip process=4 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:20:34Z EXIT decode_arms proxima arm=tip process=4 status=exit status: 0
+2026-10-06T04:20:34Z LAUNCH decode_arms proxima arm=base0b process=4 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:21:08Z EXIT decode_arms proxima arm=base0b process=4 status=exit status: 0
+2026-10-06T04:21:08Z LAUNCH decode_arms proxima arm=tip process=5 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:21:43Z EXIT decode_arms proxima arm=tip process=5 status=exit status: 0
+2026-10-06T04:21:43Z LAUNCH decode_arms proxima arm=base0b process=5 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:22:17Z EXIT decode_arms proxima arm=base0b process=5 status=exit status: 0
+2026-10-06T04:22:17Z LAUNCH decode_arms proxima arm=base0c process=5 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:22:51Z EXIT decode_arms proxima arm=base0c process=5 status=exit status: 0
+2026-10-06T04:22:51Z LAUNCH decode_arms proxima arm=base0b process=6 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:23:26Z EXIT decode_arms proxima arm=base0b process=6 status=exit status: 0
+2026-10-06T04:23:26Z LAUNCH decode_arms proxima arm=base0c process=6 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:23:59Z EXIT decode_arms proxima arm=base0c process=6 status=exit status: 0
+2026-10-06T04:23:59Z LAUNCH decode_arms proxima arm=tip process=6 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:24:34Z EXIT decode_arms proxima arm=tip process=6 status=exit status: 0
+2026-10-06T04:24:34Z LAUNCH decode_arms proxima arm=base0c process=7 bin=/private/tmp/claude-501/s7/arms/base0c
+2026-10-06T04:25:08Z EXIT decode_arms proxima arm=base0c process=7 status=exit status: 0
+2026-10-06T04:25:08Z LAUNCH decode_arms proxima arm=tip process=7 bin=/private/tmp/claude-501/s7/arms/tip_verify
+2026-10-06T04:25:42Z EXIT decode_arms proxima arm=tip process=7 status=exit status: 0
+2026-10-06T04:25:42Z LAUNCH decode_arms proxima arm=base0b process=7 bin=/private/tmp/claude-501/s7/arms/base0b
+2026-10-06T04:26:17Z EXIT decode_arms proxima arm=base0b process=7 status=exit status: 0
