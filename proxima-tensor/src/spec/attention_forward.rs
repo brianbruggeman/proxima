@@ -2097,6 +2097,12 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
                     l_cache,
                 )?
             }
+            LayerKind::Gdn => {
+                return Err(TensorError::UnsupportedInBuilder {
+                    builder: "lfm2_forward_program_with_experts",
+                    feature: "LayerKind::Gdn (lowered by the hybrid engine)",
+                });
+            }
         };
 
         x = append_lfm2_layer_ffn(

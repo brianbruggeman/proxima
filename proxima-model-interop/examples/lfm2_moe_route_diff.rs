@@ -434,6 +434,7 @@ fn main() {
     let mixer_out_suffix = match architecture.layer_kinds[layer as usize] {
         proxima_tensor::spec::LayerKind::Attention => "self_attn.out_proj",
         proxima_tensor::spec::LayerKind::ShortConv => "conv.out_proj",
+        proxima_tensor::spec::LayerKind::Gdn => "linear_attn.out_proj",
     };
     let mixer_out_path =
         oracle_intra_dir.join(format!("model.layers.{{}}.{mixer_out_suffix}-{layer}.f32"));

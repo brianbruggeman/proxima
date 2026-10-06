@@ -126,6 +126,7 @@ fn layer_kind_label(architecture: &Lfm2Architecture, layer: usize) -> &'static s
     match architecture.layer_kinds[layer] {
         proxima_tensor::spec::LayerKind::Attention => "attention",
         proxima_tensor::spec::LayerKind::ShortConv => "shortconv",
+        proxima_tensor::spec::LayerKind::Gdn => "gdn",
     }
 }
 
