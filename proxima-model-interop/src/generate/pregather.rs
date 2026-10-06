@@ -64,7 +64,7 @@ impl<'file> LoadedModel<'file> {
     /// data rather than from a duplicated host-side router. This diagnostic
     /// does not claim a memory reduction: it uses the ordinary evaluator
     /// until the production per-layer pre-gather path is enabled.
-    pub fn qwen35moe_router_logits(
+    pub fn moe_router_logits(
         &self,
         prompt: &str,
         gpu_layers: i32,
@@ -86,11 +86,11 @@ impl<'file> LoadedModel<'file> {
     /// cuts are plan-time data: callers evaluate one producer, apply the
     /// residency transition, then evaluate its consumer with the borrowed
     /// activation handoff. No cut is built for another architecture.
-    pub fn qwen35moe_layer_boundaries(
+    pub fn moe_layer_boundaries(
         &self,
         symbols: &[u64],
     ) -> Result<Vec<crate::qwen35moe::execution::LayerProgramBoundary>, InteropError> {
-        if self.qwen35moe_layer_diagnostics.is_empty()
+        if self.moe_layer_diagnostics.is_empty()
             || self.ffn_routing != FfnRouting::Routed
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
@@ -100,7 +100,7 @@ impl<'file> LoadedModel<'file> {
                 reason: String::from("the bound model has no qwen35moe layer diagnostics"),
             });
         }
-        self.qwen35moe_layer_diagnostics
+        self.moe_layer_diagnostics
             .iter()
             .map(|diagnostic| {
                 crate::qwen35moe::execution::split_layer_program(
@@ -118,7 +118,7 @@ impl<'file> LoadedModel<'file> {
     /// execution order. Each layer starts from the prior layer's block output,
     /// so callers can evaluate one layer, change resident expert sources, and
     /// continue without retaining a full-program suffix.
-    pub fn qwen35moe_layer_segments(
+    pub fn moe_layer_segments(
         &self,
         symbols: &[u64],
     ) -> Result<
@@ -128,7 +128,7 @@ impl<'file> LoadedModel<'file> {
         )>,
         InteropError,
     > {
-        if self.qwen35moe_layer_diagnostics.is_empty()
+        if self.moe_layer_diagnostics.is_empty()
             || self.ffn_routing != FfnRouting::Routed
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
@@ -138,9 +138,9 @@ impl<'file> LoadedModel<'file> {
                 reason: String::from("the bound model has no qwen35moe layer diagnostics"),
             });
         }
-        let mut segments = Vec::with_capacity(self.qwen35moe_layer_diagnostics.len());
+        let mut segments = Vec::with_capacity(self.moe_layer_diagnostics.len());
         let mut previous_output = None;
-        for diagnostic in &self.qwen35moe_layer_diagnostics {
+        for diagnostic in &self.moe_layer_diagnostics {
             let pair = crate::qwen35moe::execution::split_router_and_gather_segments(
                 &self.program,
                 symbols,
@@ -158,7 +158,7 @@ impl<'file> LoadedModel<'file> {
     /// Builds one routed layer's segments on demand. The caller can drop the
     /// pair after the layer gather, keeping graph metadata bounded by one
     /// layer instead of materializing all 40 layer segments at once.
-    pub fn qwen35moe_layer_segment(
+    pub fn moe_layer_segment(
         &self,
         layer: usize,
         symbols: &[u64],
@@ -170,7 +170,7 @@ impl<'file> LoadedModel<'file> {
         ),
         InteropError,
     > {
-        let diagnostic = self.qwen35moe_layer_diagnostics.get(layer).ok_or_else(|| {
+        let diagnostic = self.moe_layer_diagnostics.get(layer).ok_or_else(|| {
             InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(self.family()),
                 reason: String::from("requested routed layer is outside the bound diagnostics"),
@@ -186,14 +186,14 @@ impl<'file> LoadedModel<'file> {
         .map_err(InteropError::from)
     }
 
-    pub(super) fn qwen35moe_pre_gather_plan(
+    pub(super) fn moe_pre_gather_plan(
         &self,
         symbols: &[u64],
         gdn_backend: GdnPrefillBackend,
         persistent_cuts: bool,
     ) -> Result<PreGatherPlan, InteropError> {
         let last_layer_output = self
-            .qwen35moe_layer_diagnostics
+            .moe_layer_diagnostics
             .last()
             .map(|diagnostic| diagnostic.block_output)
             .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
@@ -208,10 +208,10 @@ impl<'file> LoadedModel<'file> {
         )
         .map_err(InteropError::from)?;
 
-        let mut layer_parts = Vec::with_capacity(self.qwen35moe_layer_diagnostics.len());
+        let mut layer_parts = Vec::with_capacity(self.moe_layer_diagnostics.len());
         let mut prefix_required_nodes = BTreeSet::new();
         let mut previous_output = None;
-        for diagnostic in &self.qwen35moe_layer_diagnostics {
+        for diagnostic in &self.moe_layer_diagnostics {
             let router = crate::qwen35moe::execution::split_mapped_layer_segment(
                 &self.program,
                 symbols,
@@ -227,7 +227,7 @@ impl<'file> LoadedModel<'file> {
             )
             .map_err(InteropError::from)?;
             let gather_next_router = self
-                .qwen35moe_layer_diagnostics
+                .moe_layer_diagnostics
                 .get(layer_parts.len() + 1)
                 .map(|next| {
                     crate::qwen35moe::execution::split_gather_and_next_router_segment(
@@ -313,15 +313,15 @@ impl<'file> LoadedModel<'file> {
             router_future_cuts.sort_by_key(|(node, _)| *node);
             router_future_cuts.dedup_by_key(|(node, _)| *node);
             let layer_window = if layer % 2 == 0 {
-                self.qwen35moe_layer_diagnostics
+                self.moe_layer_diagnostics
                     .get(layer + 1)
                     .map(|next| {
                         crate::qwen35moe::execution::split_two_layer_window_segment(
                             &self.program,
                             symbols,
                             (layer > 0)
-                                .then(|| self.qwen35moe_layer_diagnostics[layer - 1].block_output),
-                            self.qwen35moe_layer_diagnostics[layer].router_logits,
+                                .then(|| self.moe_layer_diagnostics[layer - 1].block_output),
+                            self.moe_layer_diagnostics[layer].router_logits,
                             next.router_logits,
                             next.block_output,
                         )
@@ -428,7 +428,7 @@ impl<'file> LoadedModel<'file> {
             })?;
             let mut boundary_nodes = BTreeSet::new();
             for (layer, segments) in layers.iter().enumerate() {
-                let diagnostic = &self.qwen35moe_layer_diagnostics[layer];
+                let diagnostic = &self.moe_layer_diagnostics[layer];
                 boundary_nodes.insert(diagnostic.router_logits);
                 boundary_nodes.insert(diagnostic.block_output);
                 boundary_nodes.extend(segments.router.1.iter().map(|(node, _)| *node));
@@ -611,7 +611,7 @@ impl<'file> LoadedModel<'file> {
                 .iter()
                 .any(|segments| segments.layer_window.is_some());
         let mut layer = 0usize;
-        while layer < self.qwen35moe_layer_diagnostics.len() {
+        while layer < self.moe_layer_diagnostics.len() {
             let debug_layer = std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_LAYER")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -623,20 +623,20 @@ impl<'file> LoadedModel<'file> {
             #[cfg(feature = "metal")]
             if pair_window_enabled
                 && layer.is_multiple_of(2)
-                && layer + 1 < self.qwen35moe_layer_diagnostics.len()
+                && layer + 1 < self.moe_layer_diagnostics.len()
             {
                 let sidecar =
                     sidecar.ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
                         architecture: String::from(self.family()),
                         reason: String::from(
-                            "qwen35moe_layer_window=2 requires an attached exact sidecar",
+                            "moe_layer_window=2 requires an attached exact sidecar",
                         ),
                     })?;
                 if !sidecar.preserves_source_codecs() {
                     return Err(InteropError::PreGatherExecutionUnsupported {
                         architecture: String::from(self.family()),
                         reason: String::from(
-                            "qwen35moe_layer_window=2 requires byte-preserving sidecar codecs",
+                            "moe_layer_window=2 requires byte-preserving sidecar codecs",
                         ),
                     });
                 }
@@ -689,9 +689,9 @@ impl<'file> LoadedModel<'file> {
                     })?;
                     segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
                 }
-                let first_router = self.qwen35moe_layer_diagnostics[layer].router_logits;
-                let second_router = self.qwen35moe_layer_diagnostics[layer + 1].router_logits;
-                let second_output = self.qwen35moe_layer_diagnostics[layer + 1].block_output;
+                let first_router = self.moe_layer_diagnostics[layer].router_logits;
+                let second_router = self.moe_layer_diagnostics[layer + 1].router_logits;
+                let second_output = self.moe_layer_diagnostics[layer + 1].block_output;
                 let first_router_mapped = window
                     .2
                     .get(&first_router)
@@ -847,9 +847,9 @@ impl<'file> LoadedModel<'file> {
                 }
                 let fused_gather = fused_boundary_mode
                     && !is_router
-                    && layer + 1 < self.qwen35moe_layer_diagnostics.len();
+                    && layer + 1 < self.moe_layer_diagnostics.len();
                 let phase_layer = if fused_gather { layer + 1 } else { layer };
-                let diagnostic = self.qwen35moe_layer_diagnostics[phase_layer].clone();
+                let diagnostic = self.moe_layer_diagnostics[phase_layer].clone();
                 let (program, cuts, mapping, future_cuts, segment_output) = if fused_gather {
                     let fused = segments.gather_next_router.as_ref().ok_or_else(|| {
                         InteropError::PreGatherExecutionUnsupported {
@@ -942,7 +942,7 @@ impl<'file> LoadedModel<'file> {
                     && is_router
                     && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
                     && let Some(Op::Reduce(reduce)) = self.program.get(
-                        self.qwen35moe_layer_diagnostics[layer]
+                        self.moe_layer_diagnostics[layer]
                             .dense_attention_taps
                             .map_or(NodeId(u32::MAX), |taps| taps.q_split)
                             .0 as usize,
@@ -1217,7 +1217,7 @@ impl<'file> LoadedModel<'file> {
                     && is_router
                     && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
                     && let Some(Op::Reduce(reduce)) = self.program.get(
-                        self.qwen35moe_layer_diagnostics[layer]
+                        self.moe_layer_diagnostics[layer]
                             .dense_attention_taps
                             .map_or(NodeId(u32::MAX), |taps| taps.q_split)
                             .0 as usize,
@@ -1381,7 +1381,7 @@ impl<'file> LoadedModel<'file> {
                     if layer == 3
                         && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
                         && let Some(Op::Reduce(reduce)) = self.program.get(
-                            self.qwen35moe_layer_diagnostics[layer]
+                            self.moe_layer_diagnostics[layer]
                                 .dense_attention_taps
                                 .map_or(NodeId(u32::MAX), |taps| taps.q_split)
                                 .0 as usize,
@@ -1489,7 +1489,7 @@ impl<'file> LoadedModel<'file> {
                             &crate::expert_sidecar::CheckpointAdmission {
                                 checkpoint_mapping: Some(self.checkpoint_mapping),
                                 current_decisions: current_sources.borrow().as_slice(),
-                                admit_low_copy: qwen35moe_admit_low_copy,
+                                admit_low_copy: moe_admit_low_copy,
                             },
                         )?;
                         {
@@ -1642,7 +1642,7 @@ impl<'file> LoadedModel<'file> {
                         && is_router
                         && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
                         && let Some(Op::Reduce(reduce)) = self.program.get(
-                            self.qwen35moe_layer_diagnostics[layer]
+                            self.moe_layer_diagnostics[layer]
                                 .dense_attention_taps
                                 .map_or(NodeId(u32::MAX), |taps| taps.q_split)
                                 .0 as usize,
@@ -1923,7 +1923,7 @@ impl<'file> LoadedModel<'file> {
                     && is_router
                     && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
                     && let Some(Op::Reduce(reduce)) = self.program.get(
-                        self.qwen35moe_layer_diagnostics[layer]
+                        self.moe_layer_diagnostics[layer]
                             .dense_attention_taps
                             .map_or(NodeId(u32::MAX), |taps| taps.q_split)
                             .0 as usize,
@@ -2319,8 +2319,8 @@ impl<'file> LoadedModel<'file> {
     /// Graph-level producer boundaries for every qwen35moe layer, in layer
     /// order. Non-qwen35moe models return an empty slice.
     #[must_use]
-    pub fn qwen35moe_layer_diagnostics(&self) -> &[crate::qwen35moe::MoeLayerDiagnostics] {
-        &self.qwen35moe_layer_diagnostics
+    pub fn moe_layer_diagnostics(&self) -> &[crate::qwen35moe::MoeLayerDiagnostics] {
+        &self.moe_layer_diagnostics
     }
 
     /// This checkpoint's own transformer block count
@@ -2720,7 +2720,7 @@ impl<'file> LoadedModel<'file> {
             hidden_root: bound.hidden_root,
             layer_roots: bound.layer_roots,
             residual_roots: bound.residual_roots,
-            qwen35moe_layer_diagnostics: bound.qwen35moe_layer_diagnostics,
+            moe_layer_diagnostics: bound.moe_layer_diagnostics,
             router_roots: bound.router_roots,
             moe_sites: bound.moe_sites,
             duplicate_head_roots: bound.duplicate_head_roots,
@@ -2859,7 +2859,7 @@ impl<'file> LoadedModel<'file> {
             hidden_root,
             layer_roots,
             residual_roots: layer_residuals,
-            qwen35moe_layer_diagnostics: Vec::new(),
+            moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
             duplicate_head_roots: Vec::new(),

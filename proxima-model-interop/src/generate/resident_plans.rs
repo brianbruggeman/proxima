@@ -65,15 +65,15 @@ pub(super) struct PlanIdentity {
     /// Backend running the gated-delta-net prefill.
     gdn_prefill_backend: GdnPrefillBackend,
     /// Router / residency / gather as separate phases instead of one graph.
-    qwen35moe_pre_gather: bool,
+    moe_pre_gather: bool,
     /// All experts at the low codec.
-    qwen35moe_monolithic_all_low: bool,
+    moe_monolithic_all_low: bool,
     /// Original mmap-backed expert stacks in one graph.
-    qwen35moe_monolithic_high_mmap: bool,
+    moe_monolithic_high_mmap: bool,
     /// Adjacent layers executed in one sidecar window.
-    qwen35moe_layer_window: usize,
+    moe_layer_window: usize,
     /// Size of the high-precision expert pool.
-    qwen35moe_residency_budget_bytes: u64,
+    moe_residency_budget_bytes: u64,
 }
 
 impl PlanIdentity {
@@ -121,16 +121,16 @@ impl PlanIdentity {
             exact_activations: _,
             // bind-time recode applied once at load
             weight_precision: _,
-            qwen35moe_pre_gather,
+            moe_pre_gather,
             // keeps cut tensors in device buffers: placement, same values
-            qwen35moe_persistent_cuts: _,
+            moe_persistent_cuts: _,
             gdn_prefill_backend,
-            qwen35moe_residency_budget_bytes,
+            moe_residency_budget_bytes,
             // route-history advice for prefetching: timing only
-            qwen35moe_expert_prefetch: _,
-            qwen35moe_monolithic_all_low,
-            qwen35moe_layer_window,
-            qwen35moe_monolithic_high_mmap,
+            moe_expert_prefetch: _,
+            moe_monolithic_all_low,
+            moe_layer_window,
+            moe_monolithic_high_mmap,
             gpu_correctness_fallback: _,
             cached_attention_fusion,
             gated_delta_net_fusion,
@@ -162,11 +162,11 @@ impl PlanIdentity {
             gated_delta_net_fusion,
             moe_topk_fusion,
             gdn_prefill_backend,
-            qwen35moe_pre_gather,
-            qwen35moe_monolithic_all_low,
-            qwen35moe_monolithic_high_mmap,
-            qwen35moe_layer_window,
-            qwen35moe_residency_budget_bytes,
+            moe_pre_gather,
+            moe_monolithic_all_low,
+            moe_monolithic_high_mmap,
+            moe_layer_window,
+            moe_residency_budget_bytes,
         }
     }
 }

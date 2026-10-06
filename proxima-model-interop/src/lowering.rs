@@ -139,7 +139,7 @@ pub struct BoundProgram<'file> {
     pub layer_roots: Vec<LayerCacheRoots>,
     /// One graph-level diagnostic boundary per routed recurrent layer, in layer
     /// order. Empty for every other lowering.
-    pub qwen35moe_layer_diagnostics: Vec<MoeLayerDiagnostics>,
+    pub moe_layer_diagnostics: Vec<MoeLayerDiagnostics>,
     /// Per-layer router-logit roots for a program that can expose a router
     /// prepass. Empty means the program has no routed layers or has not
     /// implemented the pre-gather execution contract.
@@ -353,7 +353,7 @@ fn bind_descriptor<'file>(
             .iter()
             .map(|diagnostic| diagnostic.router_logits)
             .collect(),
-        qwen35moe_layer_diagnostics: layer_diagnostics,
+        moe_layer_diagnostics: layer_diagnostics,
         moe_sites,
         duplicate_head_roots,
         single_position_step: descriptor.layers.iter().any(|layer| layer.kind == LayerKind::Gdn),
@@ -520,7 +520,7 @@ impl<'file> BoundProgram<'file> {
             } else {
                 layer_diagnostics.iter().map(|diagnostic| diagnostic.router_logits).collect()
             },
-            qwen35moe_layer_diagnostics: layer_diagnostics,
+            moe_layer_diagnostics: layer_diagnostics,
             ..self
         })
     }

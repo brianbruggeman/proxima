@@ -16,8 +16,8 @@ use core::ops::ControlFlow;
 use super::{
     DecodeMetrics, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache, TokenEvent,
     build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
-    first_nonfinite_node_value, kv_extent, qwen35moe_admit_low_copy,
-    qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
+    first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
+    moe_monolithic_all_low_enabled, moe_pre_gather_enabled,
     should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
     visit_qwen35moe_router_selections,
 };
@@ -46,11 +46,11 @@ use super::PlanNumerics;
 pub(super) mod tests {
     use proxima_primitives::sync::blocking::Mutex;
     #[cfg(feature = "qwen35moe-expert-prefetch")]
-    use super::super::qwen35moe_expert_prefetch_requested;
+    use super::super::moe_expert_prefetch_requested;
     use super::{
         RouterExpertCounts, RouterLogits, SsmLayerCache, collect_future_gather_cuts,
-        first_nonfinite_node_value, kv_extent, qwen35moe_admit_low_copy,
-        qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
+        first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
+        moe_monolithic_all_low_enabled, moe_pre_gather_enabled,
         should_release_monolithic_sources, step_batch_needs_logits,
         visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
     };
@@ -80,8 +80,8 @@ pub(super) mod tests {
     #[cfg(feature = "qwen35moe-expert-prefetch")]
     #[test]
     fn expert_prefetch_gate_requires_an_explicit_truthy_value() {
-        assert!(!qwen35moe_expert_prefetch_requested(false));
-        assert!(qwen35moe_expert_prefetch_requested(true));
+        assert!(!moe_expert_prefetch_requested(false));
+        assert!(moe_expert_prefetch_requested(true));
     }
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::cpu::{ExpertEntry, ExpertSource, QuantizedBlock};
@@ -111,17 +111,17 @@ pub(super) mod tests {
 
     #[test]
     fn qwen35moe_pre_gather_admission_depends_only_on_config_and_architecture() {
-        assert!(qwen35moe_pre_gather_enabled(true, true));
-        assert!(!qwen35moe_pre_gather_enabled(false, true));
-        assert!(!qwen35moe_pre_gather_enabled(true, false));
+        assert!(moe_pre_gather_enabled(true, true));
+        assert!(!moe_pre_gather_enabled(false, true));
+        assert!(!moe_pre_gather_enabled(true, false));
     }
 
     #[test]
     fn qwen35moe_low_copy_admission_requires_byte_preserving_codec() {
-        assert!(qwen35moe_admit_low_copy(Codec::Q4K, Codec::Q4K));
-        assert!(qwen35moe_admit_low_copy(Codec::Q6K, Codec::Q6K));
-        assert!(!qwen35moe_admit_low_copy(Codec::Q4K, Codec::Q3K));
-        assert!(!qwen35moe_admit_low_copy(Codec::Q6K, Codec::Q2K));
+        assert!(moe_admit_low_copy(Codec::Q4K, Codec::Q4K));
+        assert!(moe_admit_low_copy(Codec::Q6K, Codec::Q6K));
+        assert!(!moe_admit_low_copy(Codec::Q4K, Codec::Q3K));
+        assert!(!moe_admit_low_copy(Codec::Q6K, Codec::Q2K));
     }
 
     #[test]
@@ -143,11 +143,11 @@ pub(super) mod tests {
 
     #[test]
     fn qwen35moe_monolithic_all_low_is_default_off_and_gpu_only() {
-        assert!(!qwen35moe_monolithic_all_low_enabled(true, true, false, 0));
-        assert!(!qwen35moe_monolithic_all_low_enabled(false, true, true, 0));
-        assert!(!qwen35moe_monolithic_all_low_enabled(true, false, true, 0));
-        assert!(qwen35moe_monolithic_all_low_enabled(true, true, true, 0));
-        assert!(qwen35moe_monolithic_all_low_enabled(true, true, true, 1));
+        assert!(!moe_monolithic_all_low_enabled(true, true, false, 0));
+        assert!(!moe_monolithic_all_low_enabled(false, true, true, 0));
+        assert!(!moe_monolithic_all_low_enabled(true, false, true, 0));
+        assert!(moe_monolithic_all_low_enabled(true, true, true, 0));
+        assert!(moe_monolithic_all_low_enabled(true, true, true, 1));
     }
 
     #[test]
@@ -2620,7 +2620,7 @@ pub(super) mod memory_fit_gate_tests {
             hidden_root: None,
             layer_roots: Vec::new(),
             residual_roots: Vec::new(),
-            qwen35moe_layer_diagnostics: Vec::new(),
+            moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             duplicate_head_roots: Vec::new(),
@@ -3708,7 +3708,7 @@ pub(super) mod memory_fit_gate_tests {
                 .map(|diagnostic| diagnostic.block_output)
                 .collect();
             let sequential_nodes: Vec<NodeId> = model
-                .qwen35moe_layer_diagnostics
+                .moe_layer_diagnostics
                 .iter()
                 .map(|diagnostic| diagnostic.block_output)
                 .collect();
@@ -3846,7 +3846,7 @@ pub(super) mod memory_fit_gate_tests {
                 )
                 .expect("static-width program builds");
             let layer0_static = &static_diagnostics[0];
-            let layer0_decode = &model.qwen35moe_layer_diagnostics[0];
+            let layer0_decode = &model.moe_layer_diagnostics[0];
             let static_ssm_taps = layer0_static
                 .ssm_taps
                 .clone()
@@ -4002,7 +4002,7 @@ pub(super) mod memory_fit_gate_tests {
                 )
                 .expect("static-width program builds");
             let layer0_static = &static_diagnostics[0];
-            let layer0_decode = &model.qwen35moe_layer_diagnostics[0];
+            let layer0_decode = &model.moe_layer_diagnostics[0];
             let static_ssm_taps = layer0_static
                 .ssm_taps
                 .clone()

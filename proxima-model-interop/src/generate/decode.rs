@@ -3054,13 +3054,13 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         runtime: &BackendRuntime,
     ) -> bool {
-        qwen35moe_monolithic_all_low_enabled(
-            qwen35moe_pre_gather_enabled(
-                serving_config.qwen35moe_pre_gather,
+        moe_monolithic_all_low_enabled(
+            moe_pre_gather_enabled(
+                serving_config.moe_pre_gather,
                 self.ffn_routing == FfnRouting::Routed,
             ),
             runtime.uses_gpu(),
-            serving_config.qwen35moe_monolithic_all_low,
+            serving_config.moe_monolithic_all_low,
             0,
         )
     }
@@ -3200,14 +3200,14 @@ impl<'file> LoadedModel<'file> {
         // cache leaf names are never hard-coded twice.
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         #[cfg(feature = "metal")]
-        let qwen35_pre_gather_requested = qwen35moe_pre_gather_enabled(
-            serving_config.qwen35moe_pre_gather,
+        let qwen35_pre_gather_requested = moe_pre_gather_enabled(
+            serving_config.moe_pre_gather,
             self.ffn_routing == FfnRouting::Routed,
         );
         #[cfg(feature = "metal")]
         let monolithic_high_mmap_requested = qwen35_pre_gather_requested
             && runtime.uses_gpu()
-            && serving_config.qwen35moe_monolithic_high_mmap;
+            && serving_config.moe_monolithic_high_mmap;
         #[cfg(not(feature = "metal"))]
         let monolithic_high_mmap_requested = false;
         #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -3365,7 +3365,7 @@ impl<'file> LoadedModel<'file> {
         if per_layer_residency_budget != 0 {
             return Err(InteropError::UnsupportedServingConfig(format!(
                 "expert_residency_schedule.per_layer_budget_bytes={per_layer_residency_budget}: \
-                 a per-layer residency pool separate from qwen35moe_residency_budget_bytes is \
+                 a per-layer residency pool separate from moe_residency_budget_bytes is \
                  not implemented yet"
             )));
         }
@@ -3374,8 +3374,8 @@ impl<'file> LoadedModel<'file> {
         // The fixed matrix keeps policy state bounded and is enabled only
         // when the model owns a low-codec sidecar and the caller supplies a
         // high-precision residency budget.
-        let residency_budget = serving_config.qwen35moe_residency_budget_bytes;
-        let mut qwen35moe_residency = if self.ffn_routing == FfnRouting::Routed
+        let residency_budget = serving_config.moe_residency_budget_bytes;
+        let mut moe_residency = if self.ffn_routing == FfnRouting::Routed
             && self.expert_sidecar.is_some()
             && residency_budget > 0
         {
@@ -3472,23 +3472,23 @@ impl<'file> LoadedModel<'file> {
             .map(|layer| alloc::format!("gdn_prefill.{layer}.delta_out"))
             .collect();
         let mut gdn_prefill_zero_scratch: Vec<f32> = Vec::new();
-        let mut qwen35moe_pre_gather_plan: Option<PreGatherPlan> = None;
+        let mut moe_pre_gather_plan: Option<PreGatherPlan> = None;
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        let mut qwen35moe_route_history =
+        let mut moe_route_history =
             vec![MoeRouteHistory::default(); self.architecture.block_count as usize];
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        let qwen35moe_expert_prefetch_enabled =
-            qwen35moe_expert_prefetch_requested(serving_config.qwen35moe_expert_prefetch);
+        let moe_expert_prefetch_enabled =
+            moe_expert_prefetch_requested(serving_config.moe_expert_prefetch);
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        let mut qwen35moe_prefetch_prediction_count = 0usize;
+        let mut moe_prefetch_prediction_count = 0usize;
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        let mut qwen35moe_prefetch_hit_count = 0usize;
+        let mut moe_prefetch_hit_count = 0usize;
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        let mut qwen35moe_prefetch_overfetch_count = 0usize;
+        let mut moe_prefetch_overfetch_count = 0usize;
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        let mut qwen35moe_prefetch_advice_events = 0usize;
+        let mut moe_prefetch_advice_events = 0usize;
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        let mut qwen35moe_prefetch_advised_bytes = 0u64;
+        let mut moe_prefetch_advised_bytes = 0u64;
         let mapped_window_capacity = self.expert_sidecar.as_ref().map_or([0; 3], |sidecar| {
             sidecar.mapped_window_capacity(self.architecture.expert_used_count as usize)
         });
@@ -4197,12 +4197,12 @@ impl<'file> LoadedModel<'file> {
 
                     let mut roots: Vec<NodeId> =
                         Vec::with_capacity(1 + active_layer_roots.len() * 3);
-                    let monolithic_prefill_requested = qwen35moe_pre_gather_enabled(
-                        serving_config.qwen35moe_pre_gather,
+                    let monolithic_prefill_requested = moe_pre_gather_enabled(
+                        serving_config.moe_pre_gather,
                         self.ffn_routing == FfnRouting::Routed,
                     ) && runtime.uses_gpu()
                         && step == 0
-                        && serving_config.qwen35moe_monolithic_all_low;
+                        && serving_config.moe_monolithic_all_low;
                     if step_batch_needs_logits(split_prefill, is_last_step_batch) {
                         roots.push(active_logits_root);
                     }
@@ -4313,12 +4313,12 @@ impl<'file> LoadedModel<'file> {
                         && let Some(target_layer) = std::env::var("PROXIMA_DEBUG_GDN_LAYER")
                             .ok()
                             .and_then(|value| value.parse::<usize>().ok())
-                        && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.get(target_layer)
+                        && let Some(diagnostic) = self.moe_layer_diagnostics.get(target_layer)
                     {
                         roots.push(diagnostic.block_output);
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-                        && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.first()
+                        && let Some(diagnostic) = self.moe_layer_diagnostics.first()
                         && let Some(taps) = diagnostic.ssm_taps.clone()
                     {
                         roots.extend([
@@ -4338,14 +4338,14 @@ impl<'file> LoadedModel<'file> {
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_BLOCKS").is_some() {
                         roots.extend(
-                            self.qwen35moe_layer_diagnostics
+                            self.moe_layer_diagnostics
                                 .iter()
                                 .map(|diagnostic| diagnostic.block_output),
                         );
                     }
                     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() {
                         for (layer, diagnostic) in
-                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                            self.moe_layer_diagnostics.iter().enumerate()
                         {
                             if let Some(taps) = diagnostic.dense_attention_taps {
                                 if let Some(operation) = active_program.get(taps.q_split.0 as usize)
@@ -4473,8 +4473,8 @@ impl<'file> LoadedModel<'file> {
                     if validated_programs.insert(active_program.as_ptr() as usize)
                         && let Some(name) =
                             missing_program_input(active_program, &named_blocks).filter(|name| {
-                                !(qwen35moe_pre_gather_enabled(
-                                    serving_config.qwen35moe_pre_gather,
+                                !(moe_pre_gather_enabled(
+                                    serving_config.moe_pre_gather,
                                     self.ffn_routing == FfnRouting::Routed,
                                 ) && (name.contains("_exps.weight")
                                     || name.starts_with("gdn_prefill.")))
@@ -4582,24 +4582,24 @@ impl<'file> LoadedModel<'file> {
                     let mut expert_slab_guard = self.expert_slab.lock();
                     let mut expert_slab_guard = expert_slab_guard.begin_step();
 
-                    // the routed segment plan `qwen35moe_pre_gather_plan` builds
+                    // the routed segment plan `moe_pre_gather_plan` builds
                     // is sliced from `self.program`'s own node ids
-                    // (`self.qwen35moe_layer_diagnostics`, `self.logits_root`);
+                    // (`self.moe_layer_diagnostics`, `self.logits_root`);
                     // `active_program` is a DIFFERENT graph during the
                     // one-evaluation prefill batch, so those node ids do not
                     // resolve against it -- ROW 591/592's `NodeId(6540)`
                     // "operand buffer missing" (a real weight input leaf
                     // reachable only in `active_program`'s own numbering).
-                    let pre_gather = qwen35moe_pre_gather_enabled(
-                        serving_config.qwen35moe_pre_gather,
+                    let pre_gather = moe_pre_gather_enabled(
+                        serving_config.moe_pre_gather,
                         self.ffn_routing == FfnRouting::Routed,
                     ) && !monolithic_high_mmap_requested
                         && !one_evaluation_prefill;
                     #[cfg(feature = "metal")]
-                    let monolithic_all_low = qwen35moe_monolithic_all_low_enabled(
+                    let monolithic_all_low = moe_monolithic_all_low_enabled(
                         pre_gather,
                         runtime.uses_gpu(),
-                        serving_config.qwen35moe_monolithic_all_low,
+                        serving_config.moe_monolithic_all_low,
                         step,
                     );
                     #[cfg(not(feature = "metal"))]
@@ -4673,16 +4673,16 @@ impl<'file> LoadedModel<'file> {
                     );
                     if pre_gather
                         && !monolithic_all_low
-                        && qwen35moe_pre_gather_plan.as_ref().is_none_or(|plan| {
+                        && moe_pre_gather_plan.as_ref().is_none_or(|plan| {
                             plan.symbols != symbols
                                 || plan.gdn_backend != serving_config.gdn_prefill_backend
-                                || plan.persistent_cuts != serving_config.qwen35moe_persistent_cuts
+                                || plan.persistent_cuts != serving_config.moe_persistent_cuts
                         })
                     {
-                        qwen35moe_pre_gather_plan = Some(self.qwen35moe_pre_gather_plan(
+                        moe_pre_gather_plan = Some(self.moe_pre_gather_plan(
                             &symbols,
                             serving_config.gdn_prefill_backend,
-                            serving_config.qwen35moe_persistent_cuts,
+                            serving_config.moe_persistent_cuts,
                         )?);
                     }
                     // Ordinary Metal full-graph execution keeps the named
@@ -4731,27 +4731,27 @@ impl<'file> LoadedModel<'file> {
                                 "qwen35_route"
                             );
                             #[cfg(feature = "qwen35moe-expert-prefetch")]
-                            if qwen35moe_expert_prefetch_enabled {
-                                if let Some(previous_history) = qwen35moe_route_history.get(layer) {
+                            if moe_expert_prefetch_enabled {
+                                if let Some(previous_history) = moe_route_history.get(layer) {
                                     for predicted in
                                         &previous_history.routes[..previous_history.len]
                                     {
-                                        qwen35moe_prefetch_prediction_count += 1;
+                                        moe_prefetch_prediction_count += 1;
                                         if routes
                                             .iter()
                                             .any(|route| route.expert == predicted.expert)
                                         {
-                                            qwen35moe_prefetch_hit_count += 1;
+                                            moe_prefetch_hit_count += 1;
                                         } else {
-                                            qwen35moe_prefetch_overfetch_count += 1;
+                                            moe_prefetch_overfetch_count += 1;
                                         }
                                     }
                                 }
                                 if let (Some(policy), Some(sidecar)) = (
-                                    qwen35moe_residency.as_ref(),
+                                    moe_residency.as_ref(),
                                     expert_sidecar_for_gather.as_ref(),
                                 ) && let Some(next_history) =
-                                    qwen35moe_route_history.get(layer.saturating_add(1))
+                                    moe_route_history.get(layer.saturating_add(1))
                                 {
                                     let candidates = policy
                                         .prefetch_candidates::<16>(
@@ -4771,11 +4771,11 @@ impl<'file> LoadedModel<'file> {
                                             sidecar.advise_expert_low(candidate.address)?;
                                         advised_bytes =
                                             advised_bytes.saturating_add(candidate_bytes);
-                                        qwen35moe_prefetch_advised_bytes =
-                                            qwen35moe_prefetch_advised_bytes
+                                        moe_prefetch_advised_bytes =
+                                            moe_prefetch_advised_bytes
                                                 .saturating_add(candidate_bytes);
                                     }
-                                    qwen35moe_prefetch_advice_events += 1;
+                                    moe_prefetch_advice_events += 1;
                                     if advised_bytes > 0 {
                                         trace!(
                                             layer = layer as u64,
@@ -4790,13 +4790,13 @@ impl<'file> LoadedModel<'file> {
                             expert_slab
                                 .add_selected_experts(layer, &selected_experts[..routes.len()]);
                             #[cfg(feature = "qwen35moe-expert-prefetch")]
-                            if qwen35moe_expert_prefetch_enabled
-                                && let Some(history) = qwen35moe_route_history.get_mut(layer)
+                            if moe_expert_prefetch_enabled
+                                && let Some(history) = moe_route_history.get_mut(layer)
                             {
                                 history.len = routes.len();
                                 history.routes[..routes.len()].copy_from_slice(routes);
                             }
-                            if let Some(policy) = qwen35moe_residency.as_mut() {
+                            if let Some(policy) = moe_residency.as_mut() {
                                 // Capture the precision decision before the
                                 // gather. Retained-set reconciliation happens
                                 // once after the whole token, never between
@@ -4897,7 +4897,7 @@ impl<'file> LoadedModel<'file> {
                         unreachable!("the profiler is compiled out without instrumentation")
                     } else if pre_gather && !monolithic_all_low {
                         let pre_gather_plan =
-                            qwen35moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                            moe_pre_gather_plan.as_ref().ok_or_else(|| {
                                 InteropError::PreGatherExecutionUnsupported {
                                     architecture: String::from(self.family()),
                                     reason: String::from(
@@ -4920,7 +4920,7 @@ impl<'file> LoadedModel<'file> {
                                 sidecar_read_scratch: &mut sidecar_read_scratch,
                                 current_sources: &current_sources,
                                 position_offset: cached_len,
-                                layer_window: serving_config.qwen35moe_layer_window,
+                                layer_window: serving_config.moe_layer_window,
                                 marker: PhantomData,
                                 #[cfg(feature = "metal")]
                                 sidecar: self.expert_sidecar.as_ref(),
@@ -5023,7 +5023,7 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let evaluated = if pre_gather && !monolithic_all_low {
                         let pre_gather_plan =
-                            qwen35moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                            moe_pre_gather_plan.as_ref().ok_or_else(|| {
                                 InteropError::PreGatherExecutionUnsupported {
                                     architecture: String::from(self.family()),
                                     reason: String::from(
@@ -5045,7 +5045,7 @@ impl<'file> LoadedModel<'file> {
                                 sidecar_read_scratch: &mut sidecar_read_scratch,
                                 current_sources: &current_sources,
                                 position_offset: cached_len,
-                                layer_window: serving_config.qwen35moe_layer_window,
+                                layer_window: serving_config.moe_layer_window,
                                 marker: PhantomData,
                                 #[cfg(feature = "metal")]
                                 sidecar: self.expert_sidecar.as_ref(),
@@ -5066,7 +5066,7 @@ impl<'file> LoadedModel<'file> {
                     };
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in
-                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                            self.moe_layer_diagnostics.iter().enumerate()
                         {
                             let mut digest_nodes = vec![
                                 ("post_mixer", diagnostic.post_mixer_residual),
@@ -5106,7 +5106,7 @@ impl<'file> LoadedModel<'file> {
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in
-                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                            self.moe_layer_diagnostics.iter().enumerate()
                         {
                             let Some((values, shape)) = evaluated.get(diagnostic.block_output)
                             else {
@@ -5156,7 +5156,7 @@ impl<'file> LoadedModel<'file> {
                     }
                     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in
-                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                            self.moe_layer_diagnostics.iter().enumerate()
                         {
                             let Some(taps) = diagnostic.dense_attention_taps else {
                                 continue;
@@ -5351,7 +5351,7 @@ impl<'file> LoadedModel<'file> {
                                 },
                                 &mut router_scratch,
                                 &mut |layer, position, routes| {
-                                    if let Some(policy) = qwen35moe_residency.as_mut() {
+                                    if let Some(policy) = moe_residency.as_mut() {
                                         for route in routes {
                                             policy.observe(position, layer, [*route]).map_err(
                                                 |error| {
@@ -5373,7 +5373,7 @@ impl<'file> LoadedModel<'file> {
                         && let Some(target_layer) = std::env::var("PROXIMA_DEBUG_GDN_LAYER")
                             .ok()
                             .and_then(|value| value.parse::<usize>().ok())
-                        && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.get(target_layer)
+                        && let Some(diagnostic) = self.moe_layer_diagnostics.get(target_layer)
                         && std::env::var("PROXIMA_DEBUG_GDN_POSITION")
                             .ok()
                             .and_then(|value| value.parse::<usize>().ok())
@@ -5399,7 +5399,7 @@ impl<'file> LoadedModel<'file> {
 
                     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
                         && step == 0
-                        && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.first()
+                        && let Some(diagnostic) = self.moe_layer_diagnostics.first()
                         && let Some(taps) = diagnostic.ssm_taps.clone()
                     {
                         for (label, node) in [
@@ -6322,14 +6322,14 @@ impl<'file> LoadedModel<'file> {
                     }
                 }
 
-                let residency_boundary_requested = qwen35moe_residency.is_some()
-                    && qwen35moe_pre_gather_enabled(
-                        serving_config.qwen35moe_pre_gather,
+                let residency_boundary_requested = moe_residency.is_some()
+                    && moe_pre_gather_enabled(
+                        serving_config.moe_pre_gather,
                         self.ffn_routing == FfnRouting::Routed,
                     )
                     && runtime.uses_gpu()
                     && !monolithic_high_mmap_requested;
-                if residency_boundary_requested && let Some(policy) = qwen35moe_residency.as_mut() {
+                if residency_boundary_requested && let Some(policy) = moe_residency.as_mut() {
                     // Current routes were served from fixed decisions captured
                     // before each gather. Reconcile once after the whole token,
                     // so retained residency actions cannot churn later layers
@@ -6404,13 +6404,13 @@ impl<'file> LoadedModel<'file> {
         }
 
         #[cfg(feature = "qwen35moe-expert-prefetch")]
-        if qwen35moe_expert_prefetch_enabled {
+        if moe_expert_prefetch_enabled {
             debug!(
-                predictions = qwen35moe_prefetch_prediction_count,
-                hits = qwen35moe_prefetch_hit_count,
-                overfetch = qwen35moe_prefetch_overfetch_count,
-                advice_events = qwen35moe_prefetch_advice_events,
-                advised_bytes = qwen35moe_prefetch_advised_bytes,
+                predictions = moe_prefetch_prediction_count,
+                hits = moe_prefetch_hit_count,
+                overfetch = moe_prefetch_overfetch_count,
+                advice_events = moe_prefetch_advice_events,
+                advised_bytes = moe_prefetch_advised_bytes,
                 "qwen35_expert_prefetch_stats"
             );
         }
@@ -7385,16 +7385,16 @@ pub(super) fn use_metal_output_placements(
     monolithic_all_low || has_recurrent_state
 }
 
-pub(super) fn qwen35moe_pre_gather_enabled(configured: bool, routed_experts: bool) -> bool {
+pub(super) fn moe_pre_gather_enabled(configured: bool, routed_experts: bool) -> bool {
     configured && routed_experts
 }
 
-pub(super) fn qwen35moe_admit_low_copy(source: Codec, target: Codec) -> bool {
+pub(super) fn moe_admit_low_copy(source: Codec, target: Codec) -> bool {
     source == target
 }
 
 #[cfg(any(test, feature = "metal"))]
-pub(super) fn qwen35moe_monolithic_all_low_enabled(
+pub(super) fn moe_monolithic_all_low_enabled(
     pre_gather: bool,
     uses_gpu: bool,
     requested: bool,

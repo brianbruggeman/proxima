@@ -908,7 +908,7 @@ pub struct LoadedModel<'file> {
     /// per-layer residual node. See [`Self::layer_residual_roots`].
     pub(super) residual_roots: Vec<NodeId>,
     /// Graph-level producer boundaries for each qwen35moe layer.
-    pub(super) qwen35moe_layer_diagnostics: Vec<crate::qwen35moe::MoeLayerDiagnostics>,
+    pub(super) moe_layer_diagnostics: Vec<crate::qwen35moe::MoeLayerDiagnostics>,
     /// Router-logit roots aligned with routed layers.  Qwen35MoE fills this
     /// from the same graph nodes used by its gather; other architectures leave
     /// it empty.  These roots are the concrete input to a future per-layer
@@ -1074,7 +1074,7 @@ impl Default for MoeRouteHistory {
 }
 
 #[cfg(feature = "qwen35moe-expert-prefetch")]
-pub(super) fn qwen35moe_expert_prefetch_requested(value: bool) -> bool {
+pub(super) fn moe_expert_prefetch_requested(value: bool) -> bool {
     value
 }
 
@@ -1161,7 +1161,7 @@ pub(super) struct MoeLayerSegments {
     /// placement or a final suffix prevents boundary batching.
     pub(super) gather_next_router: Option<crate::qwen35moe::execution::MappedLayerSegment>,
     /// Exact two-layer window, present on the first layer of each pair when
-    /// the caller requests `qwen35moe_layer_window=2`.
+    /// the caller requests `moe_layer_window=2`.
     pub(super) layer_window: Option<crate::qwen35moe::execution::MappedLayerSegment>,
     pub(super) router_future_cuts: Vec<(NodeId, String)>,
     pub(super) next_cuts: Vec<(NodeId, String)>,

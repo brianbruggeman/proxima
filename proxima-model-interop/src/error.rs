@@ -742,7 +742,7 @@ pub enum InteropError {
     /// [`Self::MemoryBudgetExceeded`] already reads). Unlike that error,
     /// there is no reduced value to retry -- a whole-mapping no-copy buffer
     /// is either entirely resident or it is not, so the bounded alternative
-    /// is a caller-configured `ServingConfig::qwen35moe_residency_budget_bytes`
+    /// is a caller-configured `ServingConfig::moe_residency_budget_bytes`
     /// pre-gather instead of the whole-mapping registration this gate
     /// refused. Set `PROXIMA_MAPPING_FIT_OVERRIDE=1` to skip this gate for a
     /// measurement run; never for a served request.
@@ -753,7 +753,7 @@ pub enum InteropError {
     #[cfg(any(test, all(feature = "std", feature = "metal")))]
     #[error(
         "checkpoint mapping of {mapped_bytes} bytes exceeds the {available_bytes}-byte resident \
-         budget; pre-gather into qwen35moe_residency_budget_bytes instead of a whole-mapping \
+         budget; pre-gather into moe_residency_budget_bytes instead of a whole-mapping \
          no-copy buffer, or set PROXIMA_MAPPING_FIT_OVERRIDE=1 for a measurement run"
     )]
     MappingExceedsResidentBudget {
