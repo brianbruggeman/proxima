@@ -446,19 +446,19 @@ pub enum InteropError {
     )]
     HfMoeWeightsUnsupported { expert_count: u32 },
 
-    /// `crate::lfm2::lfm2_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
+    /// `crate::short_conv::lfm2_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
     /// nonzero entries (the real attention layers' own kv head count)
     /// disagree with each other -- the zero entries (convolution layers)
     /// are expected and skipped, but every attention layer must still
-    /// share one real kv head count for `crate::lfm2::Lfm2Hparams::kv_heads`
+    /// share one real kv head count for `crate::short_conv::Lfm2Hparams::kv_heads`
     /// to mean anything.
     #[error(
         "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Hparams cannot represent per-layer variation"
     )]
     HeterogeneousNonzeroMetadataArray { key: String, distinct_values: usize },
 
-    /// `crate::qwen35::bind_qwen35_attn_qkv_split`'s fused
+    /// `crate::recurrent_interval::bind_qwen35_attn_qkv_split`'s fused
     /// `blk.{layer}.attn_qkv.weight` did not have exactly
     /// `embedding * (2 * key_dim + value_dim)` elements -- the real
     /// checkpoint's own declared shape disagrees with the row boundaries
@@ -476,7 +476,7 @@ pub enum InteropError {
         expected: u64,
     },
 
-    /// `crate::qwen35::bind_qwen35_attn_qkv_split`'s row-split precondition:
+    /// `crate::recurrent_interval::bind_qwen35_attn_qkv_split`'s row-split precondition:
     /// `embedding` (the row width, GGUF's `in_dim` axis) is not a whole
     /// multiple of the fused tensor's own codec `block_elements` -- a
     /// row-boundary split is only provably block-aligned when this holds.

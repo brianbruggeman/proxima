@@ -14,8 +14,8 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::qwen35moe::hparams::{Qwen35MoeHparams, LayerKind};
-use proxima_model_interop::qwen35moe::{
+use proxima_model_interop::recurrent_routed_interval::hparams::{Qwen35MoeHparams, LayerKind};
+use proxima_model_interop::recurrent_routed_interval::{
     MoeLayerDiagnostics, qwen35moe_forward_program_at_width,
 };
 use proxima_tensor::spec::LayerCacheRoots;
@@ -47,6 +47,7 @@ fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
         })
         .collect();
     Qwen35MoeHparams {
+        family: String::from("qwen35moe"),
         vocab: 16,
         embedding: 8,
         query_heads: 2,

@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::Path;
 
 use proxima_gguf::parse_complete;
-use proxima_model_interop::gemma4::program::gemma4_sliding_rope_table;
+use proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table;
 use proxima_model_interop::{KvLayout, StepInput, bind_checkpoint_with_kv_layout, sliding_rope_inputs};
 
 const POSITIONS: usize = 1500;

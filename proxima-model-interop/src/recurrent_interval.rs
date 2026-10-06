@@ -67,10 +67,12 @@ impl IntervalLayerKind {
 
 /// Every hparam this checkpoint's own metadata carries -- bind-scoped
 /// today, but the `ssm_*` fields are read now so a later forward-op session
-/// does not have to re-derive them: [`crate::lfm2::Lfm2Hparams`]'s own
+/// does not have to re-derive them: [`crate::short_conv::Lfm2Hparams`]'s own
 /// precedent for holding hparams a bind-only pass does not yet consume.
 #[derive(Debug, Clone)]
 pub struct Qwen35Hparams {
+    /// `general.architecture` as the file declares it, the key the family and binding profiles resolve through.
+    pub family: String,
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
@@ -100,11 +102,11 @@ pub struct Qwen35Hparams {
 
 /// llama.cpp's own RMSNorm epsilon default, used only when
 /// `{architecture}.attention.layer_norm_rms_epsilon` is absent -- the same
-/// fallback shape [`crate::lfm2::LFM2_RMS_EPSILON_DEFAULT`] uses.
+/// fallback shape [`crate::short_conv::LFM2_RMS_EPSILON_DEFAULT`] uses.
 const QWEN35_RMS_EPSILON_DEFAULT: f32 = 1e-6;
 
 /// Derives [`Qwen35Hparams`] from `parsed`'s own metadata --
-/// [`crate::lfm2::lfm2_architecture_from_metadata`]'s scalar-interval
+/// [`crate::short_conv::lfm2_architecture_from_metadata`]'s scalar-interval
 /// counterpart.
 ///
 /// # Errors
@@ -150,6 +152,7 @@ pub fn qwen35_architecture_from_metadata(
         .collect();
 
     Ok(Qwen35Hparams {
+        family: architecture.to_owned(),
         vocab,
         embedding,
         feed_forward,
@@ -207,7 +210,7 @@ fn metadata_u32_nonzero_uniform(parsed: &ParsedGguf, key: &str) -> Result<u32, I
 
 /// One bind attempt's report for a caller that never sees [`BoundWeights`]
 /// (`pub(crate)`, `crate::generate::LoadedModel`'s own field type) --
-/// [`crate::lfm2::run_lfm2_prefill`]'s bind-only counterpart, minus the
+/// [`crate::short_conv::run_lfm2_prefill`]'s bind-only counterpart, minus the
 /// forward-program compile and generation loop this checkpoint has no
 /// state-space kernel for yet.
 ///
@@ -225,7 +228,7 @@ pub fn bind_qwen35_checkpoint(
         parsed,
         file_bytes,
         &program,
-        &binding_profile(FAMILY)?,
+        &binding_profile(&architecture.family)?,
         &[],
     )?;
     Ok((
@@ -236,7 +239,7 @@ pub fn bind_qwen35_checkpoint(
     ))
 }
 
-/// This checkpoint's forward-program seam -- [`crate::lfm2::run_lfm2_prefill`]'s
+/// This checkpoint's forward-program seam -- [`crate::short_conv::run_lfm2_prefill`]'s
 /// call into [`proxima_tensor::spec::lfm2_forward_program_with_experts`]
 /// counterpart, minus the builder itself: every op-graph primitive that
 /// builder composes (`append_attention_mixer`, `rmsnorm`, `elementwise`,
@@ -338,7 +341,7 @@ pub fn qwen35_ssm_state_bytes(shape: SsmShape, block_count: u32) -> u64 {
 ///
 /// The family has no embedded profile.
 pub fn descriptor_from_architecture(architecture: &Qwen35Hparams) -> Result<ModelDescriptor, InteropError> {
-    let profile = family_profile(FAMILY)?;
+    let profile = family_profile(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
         kv_heads: architecture.kv_heads,
@@ -428,10 +431,6 @@ pub fn qwen35_forward_program(
     Ok((program, logits, layer_roots))
 }
 
-/// The family profile and binding profile this reader's descriptor and weights
-/// resolve through.
-const FAMILY: &str = "qwen35";
-
 /// The `recurrent_interval` header reader
 /// ([`proxima_tensor::spec::ScheduleSource::RecurrentInterval`]): this header's
 /// descriptor and hyperparameters, the two values [`crate::lowering`] lowers
@@ -458,7 +457,7 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHpara
         rope_freq_base: hparams.rope_freq_base,
         rms_epsilon: hparams.rms_epsilon,
         tied_embeddings: false,
-        family: metadata_str(parsed, "general.architecture")?.into(),
+        family: hparams.family.clone(),
         sliding_rope: None,
     };
     Ok((descriptor, architecture))

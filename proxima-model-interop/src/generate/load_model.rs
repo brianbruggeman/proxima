@@ -882,7 +882,7 @@ pub struct LoadedModel<'file> {
     /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
     /// (`Self::load`/`Self::load_from_safetensors`, both wrapping
     /// `mistral_cached_forward_program_with_experts`) -- `None` on the
-    /// qwen35 hybrid path (`crate::qwen35::qwen35_forward_program` returns
+    /// qwen35 hybrid path (`crate::recurrent_interval::qwen35_forward_program` returns
     /// a bare `logits` root with no named hidden-state counterpart yet).
     pub(super) hidden_root: Option<NodeId>,
     /// `general.name` off the checkpoint's own metadata ([`Self::load`]/
@@ -900,7 +900,7 @@ pub struct LoadedModel<'file> {
     /// [`CachedLayerRoots`] in that variant so both checkpoint families
     /// share one cache-threading loop, [`Self::run_decode_loop`]), and a mix
     /// of [`LayerCacheRoots::Attention`]/[`LayerCacheRoots::Ssm`] on the
-    /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
+    /// qwen35 path (`crate::recurrent_interval::qwen35_forward_program`'s own return).
     pub(super) layer_roots: Vec<LayerCacheRoots>,
     /// One post-layer residual root per dense layer, when the forward
     /// builder exposes them (`crate::lowering::BoundProgram::residual_roots`'s
@@ -908,7 +908,7 @@ pub struct LoadedModel<'file> {
     /// per-layer residual node. See [`Self::layer_residual_roots`].
     pub(super) residual_roots: Vec<NodeId>,
     /// Graph-level producer boundaries for each qwen35moe layer.
-    pub(super) moe_layer_diagnostics: Vec<crate::qwen35moe::MoeLayerDiagnostics>,
+    pub(super) moe_layer_diagnostics: Vec<crate::recurrent_routed_interval::MoeLayerDiagnostics>,
     /// Router-logit roots aligned with routed layers.  Qwen35MoE fills this
     /// from the same graph nodes used by its gather; other architectures leave
     /// it empty.  These roots are the concrete input to a future per-layer
@@ -935,18 +935,18 @@ pub struct LoadedModel<'file> {
     /// position at a time.
     pub(super) single_position_step: bool,
     /// This checkpoint's own qwen35moe hparams, re-derived from `parsed`'s
-    /// metadata alone (no weight bytes -- `crate::qwen35moe::hparams::from_metadata`'s
+    /// metadata alone (no weight bytes -- `crate::recurrent_routed_interval::hparams::from_metadata`'s
     /// own doc) at the same bind site that already called it once
-    /// inside `crate::qwen35moe::qwen35moe_forward_program`. `None` for
+    /// inside `crate::recurrent_routed_interval::qwen35moe_forward_program`. `None` for
     /// every family whose profile does not route the FFN. [`Self::run_decode_loop_observed_seeded`]'s
     /// own prefill batch reads this to build a SECOND, `Extent::Static`-width
-    /// program via `crate::qwen35moe::qwen35moe_forward_program_at_width`
+    /// program via `crate::recurrent_routed_interval::qwen35moe_forward_program_at_width`
     /// on demand -- see `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
     /// own doc on why only a literal static width ever reaches its M>1
     /// branch -- and swaps it into `program`/`logits_root`/`layer_roots`/
     /// `single_position_step` for exactly that one evaluation, restoring
     /// the ordinary `Extent::Symbolic(0)` decode program right after.
-    pub(super) qwen35moe_hparams: Option<crate::qwen35moe::hparams::Qwen35MoeHparams>,
+    pub(super) qwen35moe_hparams: Option<crate::recurrent_routed_interval::hparams::Qwen35MoeHparams>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -1046,7 +1046,7 @@ pub(super) struct PreGatherPlan {
     pub(super) gdn_backend: GdnPrefillBackend,
     pub(super) persistent_cuts: bool,
     pub(super) layers: Vec<MoeLayerSegments>,
-    pub(super) suffix: crate::qwen35moe::execution::MappedLayerSegment,
+    pub(super) suffix: crate::recurrent_routed_interval::execution::MappedLayerSegment,
     pub(super) prefix_carried_nodes: BTreeSet<NodeId>,
     pub(super) global_cut_nodes: BTreeSet<NodeId>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1152,17 +1152,17 @@ pub(super) fn retain_qwen35_segment_readbacks<RouterPlacement>(
 }
 
 pub(super) struct MoeLayerSegments {
-    pub(super) router: crate::qwen35moe::execution::MappedLayerSegment,
-    pub(super) gather: crate::qwen35moe::execution::MappedLayerSegment,
+    pub(super) router: crate::recurrent_routed_interval::execution::MappedLayerSegment,
+    pub(super) gather: crate::recurrent_routed_interval::execution::MappedLayerSegment,
     /// The graph segment from this layer's router through its gather and the
     /// next layer's router.  It is kept separate from `gather`: the former
     /// makes the layer boundary explicit for a future double-buffered
     /// working set, while the latter remains the fallback when a recurrent
     /// placement or a final suffix prevents boundary batching.
-    pub(super) gather_next_router: Option<crate::qwen35moe::execution::MappedLayerSegment>,
+    pub(super) gather_next_router: Option<crate::recurrent_routed_interval::execution::MappedLayerSegment>,
     /// Exact two-layer window, present on the first layer of each pair when
     /// the caller requests `moe_layer_window=2`.
-    pub(super) layer_window: Option<crate::qwen35moe::execution::MappedLayerSegment>,
+    pub(super) layer_window: Option<crate::recurrent_routed_interval::execution::MappedLayerSegment>,
     pub(super) router_future_cuts: Vec<(NodeId, String)>,
     pub(super) next_cuts: Vec<(NodeId, String)>,
     /// Original gather cuts owned by later layers.  This is part of the
@@ -1186,7 +1186,7 @@ pub(super) fn collect_future_gather_cuts(
 }
 
 pub(super) fn fused_segment_experts_are_current_layer(
-    segment: &crate::qwen35moe::execution::MappedLayerSegment,
+    segment: &crate::recurrent_routed_interval::execution::MappedLayerSegment,
     layer: usize,
 ) -> bool {
     segment

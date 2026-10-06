@@ -38,7 +38,7 @@ impl<'file> LoadedModel<'file> {
     /// This checkpoint's pre-`lm_head` hidden-state root
     /// (`proxima_tensor::spec::ForwardRoots::hidden`), when the load path
     /// named one -- `None` on the qwen35 hybrid path
-    /// (`crate::qwen35::qwen35_forward_program` carries no named
+    /// (`crate::recurrent_interval::qwen35_forward_program` carries no named
     /// hidden-state root yet). A caller composes this with
     /// [`Self::forward_node_values`] to read that tensor's row out
     /// directly; proxima names the node, it does not decide how a caller
@@ -89,7 +89,7 @@ impl<'file> LoadedModel<'file> {
     pub fn moe_layer_boundaries(
         &self,
         symbols: &[u64],
-    ) -> Result<Vec<crate::qwen35moe::execution::LayerProgramBoundary>, InteropError> {
+    ) -> Result<Vec<crate::recurrent_routed_interval::execution::LayerProgramBoundary>, InteropError> {
         if self.moe_layer_diagnostics.is_empty()
             || self.ffn_routing != FfnRouting::Routed
         {
@@ -103,7 +103,7 @@ impl<'file> LoadedModel<'file> {
         self.moe_layer_diagnostics
             .iter()
             .map(|diagnostic| {
-                crate::qwen35moe::execution::split_layer_program(
+                crate::recurrent_routed_interval::execution::split_layer_program(
                     &self.program,
                     symbols,
                     diagnostic.router_logits,
@@ -123,8 +123,8 @@ impl<'file> LoadedModel<'file> {
         symbols: &[u64],
     ) -> Result<
         Vec<(
-            crate::qwen35moe::execution::ProgramSegment,
-            crate::qwen35moe::execution::ProgramSegment,
+            crate::recurrent_routed_interval::execution::ProgramSegment,
+            crate::recurrent_routed_interval::execution::ProgramSegment,
         )>,
         InteropError,
     > {
@@ -141,7 +141,7 @@ impl<'file> LoadedModel<'file> {
         let mut segments = Vec::with_capacity(self.moe_layer_diagnostics.len());
         let mut previous_output = None;
         for diagnostic in &self.moe_layer_diagnostics {
-            let pair = crate::qwen35moe::execution::split_router_and_gather_segments(
+            let pair = crate::recurrent_routed_interval::execution::split_router_and_gather_segments(
                 &self.program,
                 symbols,
                 previous_output,
@@ -165,8 +165,8 @@ impl<'file> LoadedModel<'file> {
         previous_layer_output: Option<NodeId>,
     ) -> Result<
         (
-            crate::qwen35moe::execution::ProgramSegment,
-            crate::qwen35moe::execution::ProgramSegment,
+            crate::recurrent_routed_interval::execution::ProgramSegment,
+            crate::recurrent_routed_interval::execution::ProgramSegment,
         ),
         InteropError,
     > {
@@ -176,7 +176,7 @@ impl<'file> LoadedModel<'file> {
                 reason: String::from("requested routed layer is outside the bound diagnostics"),
             }
         })?;
-        crate::qwen35moe::execution::split_router_and_gather_segments(
+        crate::recurrent_routed_interval::execution::split_router_and_gather_segments(
             &self.program,
             symbols,
             previous_layer_output,
@@ -200,7 +200,7 @@ impl<'file> LoadedModel<'file> {
                 architecture: String::from(self.family()),
                 reason: String::from("the bound graph has no routed layer boundary"),
             })?;
-        let suffix = crate::qwen35moe::execution::split_mapped_layer_segment(
+        let suffix = crate::recurrent_routed_interval::execution::split_mapped_layer_segment(
             &self.program,
             symbols,
             Some(last_layer_output),
@@ -212,14 +212,14 @@ impl<'file> LoadedModel<'file> {
         let mut prefix_required_nodes = BTreeSet::new();
         let mut previous_output = None;
         for diagnostic in &self.moe_layer_diagnostics {
-            let router = crate::qwen35moe::execution::split_mapped_layer_segment(
+            let router = crate::recurrent_routed_interval::execution::split_mapped_layer_segment(
                 &self.program,
                 symbols,
                 previous_output,
                 diagnostic.router_logits,
             )
             .map_err(InteropError::from)?;
-            let gather = crate::qwen35moe::execution::split_mapped_layer_segment(
+            let gather = crate::recurrent_routed_interval::execution::split_mapped_layer_segment(
                 &self.program,
                 symbols,
                 Some(diagnostic.router_logits),
@@ -230,7 +230,7 @@ impl<'file> LoadedModel<'file> {
                 .moe_layer_diagnostics
                 .get(layer_parts.len() + 1)
                 .map(|next| {
-                    crate::qwen35moe::execution::split_gather_and_next_router_segment(
+                    crate::recurrent_routed_interval::execution::split_gather_and_next_router_segment(
                         &self.program,
                         symbols,
                         diagnostic.router_logits,
@@ -242,7 +242,7 @@ impl<'file> LoadedModel<'file> {
                 .map_err(InteropError::from)?;
             #[cfg(feature = "moe-linked-suffix")]
             let gather = if diagnostic.block_output == last_layer_output {
-                crate::qwen35moe::execution::split_gather_and_suffix_segment(
+                crate::recurrent_routed_interval::execution::split_gather_and_suffix_segment(
                     &self.program,
                     symbols,
                     diagnostic.router_logits,
@@ -316,7 +316,7 @@ impl<'file> LoadedModel<'file> {
                 self.moe_layer_diagnostics
                     .get(layer + 1)
                     .map(|next| {
-                        crate::qwen35moe::execution::split_two_layer_window_segment(
+                        crate::recurrent_routed_interval::execution::split_two_layer_window_segment(
                             &self.program,
                             symbols,
                             (layer > 0)
@@ -2319,7 +2319,7 @@ impl<'file> LoadedModel<'file> {
     /// Graph-level producer boundaries for every qwen35moe layer, in layer
     /// order. Non-qwen35moe models return an empty slice.
     #[must_use]
-    pub fn moe_layer_diagnostics(&self) -> &[crate::qwen35moe::MoeLayerDiagnostics] {
+    pub fn moe_layer_diagnostics(&self) -> &[crate::recurrent_routed_interval::MoeLayerDiagnostics] {
         &self.moe_layer_diagnostics
     }
 
@@ -2551,7 +2551,7 @@ impl<'file> LoadedModel<'file> {
     /// Teaching pointer: build the descriptor with
     /// `conflaguration::builder().value(base).env().file(path).validate()`
     /// over a header-derived base (`dense_descriptor_from_gguf`,
-    /// `gemma4::descriptor_from_gguf`), or load a whole hand-written TOML with
+    /// `sliding_pattern::descriptor_from_gguf`), or load a whole hand-written TOML with
     /// `conflaguration::from_file`; a variant model is a config edit.
     ///
     /// # Errors
@@ -2726,7 +2726,7 @@ impl<'file> LoadedModel<'file> {
             duplicate_head_roots: bound.duplicate_head_roots,
             single_position_step: bound.single_position_step,
             qwen35moe_hparams: (profile.ffn_routing == FfnRouting::Routed)
-                .then(|| crate::qwen35moe::hparams::from_metadata(parsed).ok())
+                .then(|| crate::recurrent_routed_interval::hparams::from_metadata(parsed).ok())
                 .flatten(),
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
@@ -2894,7 +2894,7 @@ impl<'file> LoadedModel<'file> {
 mod gemma4_single_range_exclusion_tests {
     use super::*;
 
-    /// gemma4 E2B's own shape (`gemma4::bind::declared_leaves_match_bound_leaves_tests::e2b_shaped_architecture`'s
+    /// gemma4 E2B's own shape (`sliding_pattern::bind::declared_leaves_match_bound_leaves_tests::e2b_shaped_architecture`'s
     /// own doc: 35 layers, `blk.15..=34` shared-KV) flattened into the
     /// generic [`ModelHparams`] `build_single_range_program` actually
     /// receives -- that type carries no sliding-window-pattern or

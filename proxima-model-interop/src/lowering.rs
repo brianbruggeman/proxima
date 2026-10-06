@@ -28,7 +28,7 @@ use crate::bind::{BoundWeights, ModelHparams, metadata_str};
 use crate::bind_leaves::{bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
 use crate::profiles::{binding_profile, family_profile};
-use crate::qwen35moe::MoeLayerDiagnostics;
+use crate::recurrent_routed_interval::MoeLayerDiagnostics;
 
 /// Names for every `Extent::Symbolic` slot the decode loop itself binds
 /// before it evaluates a step -- `crate::generate::LoadedModel`'s own
@@ -175,12 +175,12 @@ pub struct BoundProgram<'file> {
     pub single_position_step: bool,
 }
 
-/// [`crate::qwen35::SsmShape`]'s own fixed sizes -- see that type's
+/// [`crate::recurrent_interval::SsmShape`]'s own fixed sizes -- see that type's
 /// doc for what each field measures. Lives here (not `generate.rs`) because
 /// [`step_state`] is the seam that hands it out; `generate.rs` re-exports it
 /// under its old name for the decode loop's own `SsmLayerCache::new` caller,
 /// unchanged.
-pub use crate::qwen35::SsmShape;
+pub use crate::recurrent_interval::SsmShape;
 
 /// Per-decode-step scratch shape only a schedule with recurrent layers needs
 /// to size ahead of the first decode step --
@@ -192,7 +192,7 @@ pub use crate::qwen35::SsmShape;
 pub struct StepState {
     pub ssm_shape: SsmShape,
     pub attn_head_dim: u32,
-    /// `crate::qwen35::qwen35_ssm_state_bytes`'s own resident-bytes
+    /// `crate::recurrent_interval::qwen35_ssm_state_bytes`'s own resident-bytes
     /// total across every layer -- computed once, from the same header read
     /// that derived `ssm_shape`.
     pub ssm_state_bytes: u64,
@@ -264,9 +264,9 @@ fn family(parsed: &ParsedGguf) -> Result<&str, InteropError> {
 fn header(parsed: &ParsedGguf, layout: KvLayout) -> Result<Header, InteropError> {
     match family_profile(family(parsed)?)?.schedule_source {
         ScheduleSource::Uniform => crate::dense::header(parsed),
-        ScheduleSource::SlidingPattern => crate::gemma4::header(parsed, layout),
-        ScheduleSource::RecurrentInterval => crate::qwen35::header(parsed),
-        ScheduleSource::RecurrentRoutedInterval => crate::qwen35moe::header(parsed),
+        ScheduleSource::SlidingPattern => crate::sliding_pattern::header(parsed, layout),
+        ScheduleSource::RecurrentInterval => crate::recurrent_interval::header(parsed),
+        ScheduleSource::RecurrentRoutedInterval => crate::recurrent_routed_interval::header(parsed),
     }
 }
 
@@ -396,7 +396,7 @@ pub fn bind_speculative_verify<'file>(
 /// Whatever the family's header reader can fail with.
 pub fn step_state(parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError> {
     match family_profile(family(parsed)?)?.schedule_source {
-        ScheduleSource::RecurrentInterval => crate::qwen35::step_state(parsed).map(Some),
+        ScheduleSource::RecurrentInterval => crate::recurrent_interval::step_state(parsed).map(Some),
         _ => Ok(None),
     }
 }
@@ -410,8 +410,8 @@ pub fn step_state(parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError
 /// Whatever the family's metadata reads can fail with.
 pub fn kv_layers(parsed: &ParsedGguf) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
     match family_profile(family(parsed)?)?.schedule_source {
-        ScheduleSource::SlidingPattern => crate::gemma4::hparams::kv_layers_from_metadata(parsed),
-        ScheduleSource::RecurrentRoutedInterval => crate::qwen35moe::hparams::kv_layers_from_metadata(parsed),
+        ScheduleSource::SlidingPattern => crate::sliding_pattern::hparams::kv_layers_from_metadata(parsed),
+        ScheduleSource::RecurrentRoutedInterval => crate::recurrent_routed_interval::hparams::kv_layers_from_metadata(parsed),
         ScheduleSource::Uniform | ScheduleSource::RecurrentInterval => {
             crate::bind::kv_layers_from_metadata(parsed)
         }
@@ -460,7 +460,7 @@ pub fn sliding_rope_inputs(
         return;
     };
     let positions: Vec<usize> = (new_start..new_start + new_count).collect();
-    let (cos, sin) = crate::gemma4::program::gemma4_sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
+    let (cos, sin) = crate::sliding_pattern::program::gemma4_sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
     out.push(StepInput { name: "rope_cos_swa", values: cos, symbol: None });
     out.push(StepInput { name: "rope_sin_swa", values: sin, symbol: None });
 }

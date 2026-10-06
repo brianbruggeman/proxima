@@ -193,7 +193,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
             // `attn_head_dim` param) rather than `embedding / query_heads`
             // -- the latter is not even an integer on the 27B checkpoint
             // (`5120 / 24 = 213.33`), confirmed wrong against the real file
-            // by [`crate::qwen35::qwen35_architecture_from_metadata`]'s own
+            // by [`crate::recurrent_interval::qwen35_architecture_from_metadata`]'s own
             // caller-side doc.
             let wq_flat = input_leaf(
                 &mut program,

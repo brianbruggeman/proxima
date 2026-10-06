@@ -2016,9 +2016,9 @@ impl<'file> LoadedModel<'file> {
         Routes: AsRef<[crate::residency::ServeDecision]>,
         Router: FnOnce() -> Result<Routes, InteropError>,
         Boundary:
-            FnOnce(crate::qwen35moe::execution::RouterResult<'_>) -> Result<Source, InteropError>,
+            FnOnce(crate::recurrent_routed_interval::execution::RouterResult<'_>) -> Result<Source, InteropError>,
         Gather: FnOnce(
-            crate::qwen35moe::execution::GatherPhase<'_, Source>,
+            crate::recurrent_routed_interval::execution::GatherPhase<'_, Source>,
         ) -> Result<Output, InteropError>,
     {
         let architecture = self.architecture.family.as_str();
@@ -2035,7 +2035,7 @@ impl<'file> LoadedModel<'file> {
                 reason: String::from("the bound qwen35moe graph exposes no router roots"),
             });
         }
-        crate::qwen35moe::execution::execute_pre_gather(router, boundary, gather)
+        crate::recurrent_routed_interval::execution::execute_pre_gather(router, boundary, gather)
     }
 
     /// Reports the active expert payloads retained by this model's slab.
@@ -3567,7 +3567,7 @@ impl<'file> LoadedModel<'file> {
                     continue;
                 }
                 let (program, roots, layer_roots, _moe_sites, _diagnostics) =
-                    crate::qwen35moe::qwen35moe_forward_program_at_width(
+                    crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
                         hparams,
                         Some(width as u32),
                     )

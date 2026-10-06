@@ -16,7 +16,7 @@ use std::fs::File;
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::LoadedModel;
-use proxima_model_interop::gemma4::from_metadata;
+use proxima_model_interop::sliding_pattern::from_metadata;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
@@ -46,7 +46,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 /// budget). This reproduces the exact same `(Vec<Op>, NodeId, MoeSites)`
 /// `LoadedModel::load` built internally, so its `NodeId`s are the same ones
 /// `LoadedModel::forward_node_values` evaluates against the real blob.
-fn gemma4_program(architecture: &proxima_model_interop::gemma4::Gemma4Hparams) -> (Vec<Op>, NodeId) {
+fn gemma4_program(architecture: &proxima_model_interop::sliding_pattern::Gemma4Hparams) -> (Vec<Op>, NodeId) {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
         combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {

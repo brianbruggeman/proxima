@@ -122,7 +122,7 @@ use proxima_gguf::parse_complete;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::types::GgmlType;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_model_interop::gemma4::program::gemma4_sliding_rope_table;
+use proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::{ContextLength, LoadedModel, ServingConfig, SpeculativeConfig};
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -516,7 +516,7 @@ fn bench_one_layer(c: &mut Criterion) {
             0,
             0,
             // `leading_dense_block_count = block_count` -- the real E2B call
-            // site's own convention (`gemma4::bind::bind_gemma4_with_last_row_only`,
+            // site's own convention (`sliding_pattern::bind::bind_gemma4_with_last_row_only`,
             // `architecture.block_count` for a `expert_count == 0` checkpoint):
             // every layer is dense-only `FfnCombination::Exclusive`, so this
             // one-layer program must mark its single layer dense too, or the

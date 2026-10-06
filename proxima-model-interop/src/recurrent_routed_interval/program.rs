@@ -33,8 +33,6 @@ use super::hparams::{Qwen35MoeHparams, LayerKind as HeaderLayerKind};
 use crate::error::InteropError;
 use crate::profiles::family_profile;
 
-const FAMILY: &str = "qwen35moe";
-
 /// [`qwen35moe_forward_program`]'s own return shape: the built `Vec<Op>`,
 /// its logits/hidden roots, each layer's production cache-root tag, every
 /// routed site, and each layer's own [`MoeLayerDiagnostics`] side table.
@@ -58,7 +56,7 @@ pub fn descriptor_from_architecture(
     architecture: &Qwen35MoeHparams,
     width: Option<u32>,
 ) -> Result<ModelDescriptor, InteropError> {
-    let profile = family_profile(FAMILY)?;
+    let profile = family_profile(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
         kv_heads: 0,

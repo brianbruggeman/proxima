@@ -15,7 +15,7 @@
 //! feature, default-off): the functions here always compile, like every
 //! other `spec::*_cached` module in this crate, since building a program
 //! spec has no execution cost until a caller actually runs it -- only
-//! `crate::gemma4::bind::Gemma4Arch::bind`'s own choice of which builder
+//! `crate::sliding_pattern::bind::Gemma4Arch::bind`'s own choice of which builder
 //! to call is feature-gated.
 
 use super::*;
