@@ -139,7 +139,7 @@ pub struct SplitAttentionRange<'buffer> {
 }
 
 /// Computes the same streaming attention while consuming the split even/odd
-/// RoPE operands used by the cached Mistral/Qwen3 graph. The key/value rows
+/// RoPE operands used by the cached dense-decoder graph. The key/value rows
 /// remain contiguous in `head_dim`; the query/key halves are contiguous in
 /// `head_dim / 2`. This is the zero-copy form the physical-plan matcher must
 /// select for the real graph.
@@ -281,7 +281,7 @@ pub fn stream_cached_attention_split(
 
 /// One un-rotated, non-split key/query plane
 /// (`proxima_tensor::bind::BoundOpKind::CachedAttention`'s own doc): a
-/// partial-rotary head (`rotary_dim < head_dim`, qwen35's dense attention)
+/// partial-rotary head (`rotary_dim < head_dim`, the recurrent-interval family's dense attention)
 /// contributes this extra additive term to the score alongside the rotary
 /// planes `stream_cached_attention_split_gqa` already scores. Row-major
 /// `[rows, pass_dim]`, same row count as the matching rotary plane; no
@@ -319,7 +319,7 @@ pub struct CachedAttentionScore {
 /// when every caller today rotates the full head (`rotary_dim ==
 /// extents.head_dim`, byte-identical to this function's pre-partial-rotary
 /// behavior); `rotary.pass` carries the extra `extents.head_dim -
-/// rotary_dim` un-rotated columns a partial-rotary caller (qwen35) scores
+/// rotary_dim` un-rotated columns a partial-rotary caller (recurrent-interval) scores
 /// alongside the rotary planes, and is `None` in every existing caller.
 #[must_use]
 pub fn stream_cached_attention_split_gqa(
@@ -714,7 +714,7 @@ mod tests {
     /// ROW 559 bisection: [`cached_attention_bound_step_scores_the_partial_rotary_pass_plane`]
     /// (`cpu.rs`) only ever exercises `kv_heads: 1, query_groups: 1` -- no
     /// existing test scores the pass plane across MULTIPLE `kv_heads`, the
-    /// one axis qwen35's real shape (`kv_heads: 2`) adds. The rotary planes
+    /// one axis the recurrent-interval family's real shape (`kv_heads: 2`) adds. The rotary planes
     /// are zeroed out here so the score is PURELY the pass term, isolating
     /// whether `pass_key_start`'s own `(key_row * kv_heads + kv_head) *
     /// pass_dim` addressing (`physical.rs:484`) reads the SAME per-head slice
@@ -797,7 +797,7 @@ mod tests {
     /// GQA axis at a time -- this crosses BOTH (`kv_heads: 2, query_groups:
     /// 2`, four query heads total) to catch a bug that only appears when
     /// `query_head = kv_head * query_groups + query_group`'s own two terms
-    /// are BOTH non-trivial, the exact shape ROW 559's own real qwen35
+    /// are BOTH non-trivial, the exact shape ROW 559's own real recurrent-interval
     /// divergence needs (`docs/discipline.md`).
     #[test]
     fn pass_plane_scores_cross_product_of_kv_heads_and_query_groups() {

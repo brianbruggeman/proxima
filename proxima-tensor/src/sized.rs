@@ -74,7 +74,7 @@ pub const MAX_INLINE_RANK: usize = 4;
 /// Capacity for one [`crate::bind::BoundOpBuilder::push`] call's ready
 /// batch. Sizes an `ArrayVec` const generic
 /// ([`crate::bind::ReadyBatch`]) -- cannot be runtime config at any tier.
-/// Raised from 3 to 32: the multi-position qwen35 mixer at real dims
+/// Raised from 3 to 32: the multi-position recurrent-interval mixer at real dims
 /// (M=13/16, `omega/tests/qwen35_mixer_multi_position_metal_parity.rs`)
 /// readies more `BoundOp`s per push than 3 allows once a program carries
 /// several fused positions, and every write into the batch already returns
@@ -337,7 +337,7 @@ pub const STAGED_BATCH_MIN_LEN: usize = generated::STAGED_BATCH_MIN_LEN;
 ///
 /// `10_000.0`: the value every checkpoint this crate has evaluated so far
 /// (the real openchat-3.5-1210 fixture) declares explicitly via its own
-/// `llama.rope.freq_base` key, so this fallback path has never yet been
+/// `{arch}.rope.freq_base` key, so this fallback path has never yet been
 /// exercised against a real load -- only against the synthetic
 /// non-10000 fixture `proxima-model-interop`'s own capability-matrix test
 /// constructs to prove the metadata key, not this fallback, wins when

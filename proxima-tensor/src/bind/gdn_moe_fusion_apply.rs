@@ -650,7 +650,7 @@ pub(super) fn gated_delta_net_candidates(
         let state_shape = shapes.of(found.state_in);
         // This slice's supported shapes: `append_qwen35_delta_net_step`'s own
         // `head` split, either the single-letter axis (`[heads, dim]`, no GQA
-        // broadcast) or the real qwen35moe two-letter `head = "ug"` split --
+        // broadcast) or the real recurrent-routed two-letter `head = "ug"` split --
         // `u` = kv group (query/key's own trailing axis, PRE-`repeat_kv_heads`,
         // `gdn_unwrap_repeat_kv_heads`'s own doc), `g` = query heads per group
         // (value/gate/beta/state's own extra trailing axis, since
@@ -944,8 +944,8 @@ pub(super) fn match_moe_topk(
     }
     // Round 0's own live-score tensor is never itself the exclusion
     // `Select`'s output -- [`crate::spec::ExpertGatingFunc::Softmax`] with no
-    // `expert_bias`, the ONLY shape `proxima-model-interop`'s own qwen35moe
-    // builder produces (`qwen35moe/program.rs:122-135`). Any bias/Sigmoid
+    // `expert_bias`, the ONLY shape `proxima-model-interop`'s own recurrent-routed
+    // builder produces (`recurrent_routed_interval/program.rs:122-135`). Any bias/Sigmoid
     // program builds a DIFFERENT node here (an `Add`/`Reciprocal` chain, not
     // this reduce's own direct source), so this also implicitly declines
     // both of those, exactly as designed.
@@ -1243,7 +1243,7 @@ pub(super) fn apply_gated_delta_net_fusion(
     // `bind_plain` here used to drop every `BoundOpKind::CachedAttention`
     // `bind_cached_attention_fusion` above already spliced into `built` --
     // this rebind must carry that SAME fusion forward, or a hybrid
-    // full-attention/gated-delta-net model (qwen35moe) loses all of its
+    // full-attention/gated-delta-net model (recurrent-routed) loses all of its
     // cached-attention fusion the moment this feature is compiled in
     // (row 565: `built` measured 9-10 `CachedAttention` ops, `rebuilt` measured 0).
     let rebuilt = bind_cached_attention_fusion(

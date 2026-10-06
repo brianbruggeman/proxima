@@ -366,7 +366,7 @@ pub(super) mod hyper_connection_tests {
 /// [`append_mistral_cached_layer`]'s Qwen3.5 dense-attention counterpart --
 /// same cached-attention/online-softmax shape, three real differences from
 /// the oracle (`modeling_qwen3_next.py`'s `Qwen3NextAttention.forward`,
-/// `apply_rotary_pos_emb`; cross-checked against `qwen35.cpp`'s own
+/// `apply_rotary_pos_emb`; cross-checked against llama.cpp's hybrid-model source's own
 /// `build_layer_attn`) `append_mistral_cached_layer` has no room for:
 ///
 /// 1. Q/K carry a real per-head width (`attn_head_dim`, this checkpoint's
@@ -405,7 +405,7 @@ pub(super) mod hyper_connection_tests {
 ///    LAST axis of each head's own block, `:295-298`), applied to the
 ///    attention output right before `o_proj`
 ///    (`attn_output = attn_output * torch.sigmoid(gate)`,
-///    `:325-328`; `qwen35.cpp:322-328` runs the identical
+///    `:325-328`; llama.cpp's hybrid-model source, lines 322-328 runs the identical
 ///    `ggml_mul(cur, ggml_sigmoid(gate))` before `wo`).
 ///
 /// The full-attention layer [`qwen35_forward_program`] calls once per
@@ -415,7 +415,7 @@ pub(super) mod hyper_connection_tests {
 /// Attention block only -- everything up to and including the residual add
 /// after `o_proj`, no FFN. [`append_qwen35_dense_attention_layer`] is a thin
 /// wrapper adding the dense-FFN tail on top of this; a caller whose FFN is
-/// NOT dense (a routed-MoE checkpoint such as `qwen35moe`, which carries no
+/// NOT dense (a routed-MoE checkpoint such as `recurrent-routed`, which carries no
 /// `blk.N.ffn_{gate,up,down}.weight` on its attention layers at all) calls
 /// this directly and appends its own FFN + residual against the returned
 /// node, the same "per-layer builders are pub so a foreign crate can
@@ -577,7 +577,7 @@ pub struct DenseAttentionTaps {
 /// every [`DenseAttentionTaps`] intermediate alongside the residual
 /// output for a caller that needs to bisect the attention block (q/gate
 /// split, qk-norm, rotary, scores, gate, `o_proj`) against an independent
-/// reference -- a downstream `qwen35moe`-shaped consumer's own layer-3
+/// reference -- a downstream `recurrent-routed`-shaped consumer's own layer-3
 /// position-0 divergence investigation is exactly that caller.
 #[allow(clippy::too_many_arguments)]
 pub fn append_qwen35_dense_attention_only_with_taps(
@@ -687,7 +687,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     // `q_norm`/`k_norm` run on the FULL `attn_head_dim` width, before RoPE
     // ever splits it (`modeling_qwen3_next.py:300-301`,
     // `self.q_norm(query_states.view(hidden_shape))` where `hidden_shape`'s
-    // last dim is `self.head_dim` = `attn_head_dim`; `qwen35.cpp:308-317`
+    // last dim is `self.head_dim` = `attn_head_dim`; llama.cpp's hybrid-model source, lines 308-317
     // normalizes `Qcur`/`Kcur` before `ggml_rope_multi` runs).
     let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_attn_head_dim, eps, "h")?;
     let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_attn_head_dim, eps, "u")?;
@@ -1076,7 +1076,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     )?;
 
     // per-head sigmoid gate, applied to the attention output before `o_proj`
-    // (`modeling_qwen3_next.py:325-328`, `qwen35.cpp:322-328`).
+    // (`modeling_qwen3_next.py:325-328`, llama.cpp's hybrid-model source, lines 322-328).
     let group_map_d = alloc::format!("s,{group}*u+g,d->sugd");
     let gate_grouped = elementwise(
         program,
@@ -1166,7 +1166,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
 /// FFN tail `qwen35_forward_program`'s own non-routed checkpoints carry on
 /// every layer -- see that function for the worked example of wiring this
 /// builder's cache inputs and outputs. A caller whose FFN is routed
-/// (`qwen35moe`-shaped) calls [`append_qwen35_dense_attention_only`]
+/// (`recurrent-routed`-shaped) calls [`append_qwen35_dense_attention_only`]
 /// directly instead of this wrapper.
 #[allow(clippy::too_many_arguments)]
 pub fn append_qwen35_dense_attention_layer(

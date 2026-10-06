@@ -209,9 +209,9 @@ pub fn reduce(
 }
 
 /// Which pairing a checkpoint's RoPE uses to split one head's channel axis
-/// into rotation pairs -- interleaved (`(2*i, 2*i+1)`, llama's
+/// into rotation pairs -- interleaved (`(2*i, 2*i+1)`, llama.cpp's
 /// `kernel_rope_norm`) for a checkpoint with no QK-norm, split-half
-/// (`(i, i+pairs)`, llama's `kernel_rope_neox`,
+/// (`(i, i+pairs)`, llama.cpp's `kernel_rope_neox`,
 /// `ggml-metal.metal:2795-2845`) for one with it -- mirroring the
 /// `qk_norm.is_some()` match a few call sites below this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -261,7 +261,7 @@ impl RopePairing {
 /// broadcast / cache dot product, unchanged.
 ///
 /// A genuinely single-dispatch form (both halves from one
-/// [`Op::Elementwise`], mirroring llama's `kernel_rope_neox`/
+/// [`Op::Elementwise`], mirroring llama.cpp's `kernel_rope_neox`/
 /// `kernel_rope_norm` writing both destinations from one pair read) was
 /// tried and reverted: packing a parity axis into the source's own
 /// `IndexMap` leaves that axis with no operand anywhere in the node that

@@ -316,7 +316,7 @@ pub enum TensorError {
     CacheRootsCountMismatch { produced: usize, expected: usize },
 
     /// [`crate::spec::qwen35_forward_program`]'s own dense/SSM layer split
-    /// (`(layer + 1) % full_attention_interval != 0`, `qwen35.cpp`'s own
+    /// (`(layer + 1) % full_attention_interval != 0`, llama.cpp's hybrid-model source's own
     /// `load_arch_hparams` default) divides by this value; zero has no
     /// meaningful modulus.
     #[error("full_attention_interval must be >= 1, got {full_attention_interval}")]

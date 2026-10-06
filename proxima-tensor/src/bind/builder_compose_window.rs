@@ -576,7 +576,7 @@ impl BoundOpBuilder {
 }
 
 /// Appends one ready [`BoundOp`] to a [`ReadyBatch`], turning an overflow
-/// into a [`TensorError`] instead of a panic -- the multi-position qwen35
+/// into a [`TensorError`] instead of a panic -- the multi-position recurrent-interval
 /// mixer at real dims (M=13/16) did observe one at the old capacity of 3;
 /// see [`READY_BATCH_CAPACITY`]'s own doc.
 pub(super) fn push_ready(

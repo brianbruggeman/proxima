@@ -344,7 +344,7 @@ pub(super) fn collapsed_operand_layout(
 /// axes, `[row, key, group]` / `[row, new key, group]` / `[new key, group,
 /// dim]`. Axis 2 (the kv head) is not collapsed in, as at K=1: the row is
 /// addressed by the group stride alone, which is exact for the one-kv-head
-/// shape gemma4-E2B binds.
+/// shape the E2B checkpoint binds.
 #[cfg(feature = "metal-fuse-attn-decode")]
 pub(super) const fn softmax_weights_axes(
     query_rows: u64,
@@ -373,7 +373,7 @@ pub(super) fn decode_rotary_terms(
     ))
 }
 
-/// One un-rotated pass-plane term (qwen35's `score_cached_pass`/
+/// One un-rotated pass-plane term (the recurrent-interval family's `score_cached_pass`/
 /// `score_new_pass`, `spec.rs:4910-4927,5035-5049`): a bare
 /// `reduced(query_pass_grouped * key_pass)`, no even/odd split because the
 /// pass plane is never rotated. Returns `(query_pass_grouped, key_pass)`.
@@ -385,7 +385,7 @@ pub(super) fn decode_pass_term(program: &[Op], node: NodeId) -> Option<(NodeId, 
 }
 
 /// `score = Multiply(Add(rotary_sum, pass_sum), scale)` when a partial-rotary
-/// pass plane is present (qwen35's chain, `spec.rs`'s own `score_cached`/
+/// pass plane is present (the recurrent-interval family's chain, `spec.rs`'s own `score_cached`/
 /// `score_new`), `score = Multiply(Add(even, odd), scale)` otherwise (every
 /// other caller today, `rotary_dim == head_dim`). Both shapes share the outer
 /// `Multiply`-by-`scale`; only the sum operand's own shape differs, so this
@@ -425,7 +425,7 @@ pub(super) fn is_iota(program: &[Op], node: NodeId) -> bool {
 
 /// The `cached_len` bound a padding predicate excludes rows at-or-past, when
 /// `node` is exactly `Greater(Iota, Subtract(cached_len, one))` -- `x > n - 1`
-/// excludes exactly `x >= n`, and qwen35's own builder (`spec.rs:4973-4987`,
+/// excludes exactly `x >= n`, and the recurrent-interval family's own builder (`spec.rs:4973-4987`,
 /// `is_cached_padding`) emits precisely this shape. Anything else returns
 /// `None` -- the caller declines the fusion rather than guessing at an
 /// unfamiliar predicate.
@@ -439,7 +439,7 @@ pub(super) fn cached_len_padding_bound(program: &[Op], node: NodeId) -> Option<N
     (constant_value(program, shifted[1]) == Some(1.0)).then_some(shifted[0])
 }
 
-/// Walks past qwen35's own padding mask (`spec.rs:4979-4997`,
+/// Walks past the recurrent-interval family's own padding mask (`spec.rs:4979-4997`,
 /// `is_cached_padding` selecting `-inf` for `key_index >= cached_len`) to the
 /// unmasked scaled score underneath, returning `None` (decline the fusion)
 /// unless `node` is exactly `Select(padding_predicate, -inf, inner)` AND the
@@ -563,7 +563,7 @@ fn cached_len_padding_template(program: &[Op], node: NodeId) -> Option<(NodeId, 
     Some((query_absolute[1], cached_len_row[0], key_index))
 }
 
-/// [`unwrap_cached_padding_select`]'s gemma4-shaped counterpart: walks past
+/// [`unwrap_cached_padding_select`]'s sliding-pattern-shaped counterpart: walks past
 /// `Select(pred, -inf, inner)` where `pred` is either
 /// [`cached_len_padding_template`]'s bare `is_padding` (unwindowed --
 /// `cached_lower_inclusive = i64::MIN`) or `Maximum(is_padding, too_old)`
@@ -571,7 +571,7 @@ fn cached_len_padding_template(program: &[Op], node: NodeId) -> Option<(NodeId, 
 /// `cached_lower_inclusive = 1 - W`), and `too_old`'s `Subtract` reads the
 /// SAME `query_absolute`/key-index [`NodeId`]s `is_padding` walked.
 /// [`unwrap_cached_padding_select`] is tried FIRST and unconditionally, so
-/// qwen35's own bare shape is untouched by this function's existence.
+/// the recurrent-interval family's own bare shape is untouched by this function's existence.
 #[cfg(feature = "metal-fuse-attn-decode")]
 pub(super) fn cached_padding_mask_lower_bound(
     program: &[Op],
@@ -868,7 +868,7 @@ pub(super) fn cached_attention_candidates(
         };
         #[cfg(not(feature = "metal-fuse-attn-decode"))]
         let _ = local_row_bound;
-        // qwen35's own chain masks cached-range padding with a `Select`
+        // the recurrent-interval family's own chain masks cached-range padding with a `Select`
         // right here (`spec.rs:4979-4997`, `is_cached_padding`) before the
         // online-softmax subtract this matcher already walked past above --
         // the fused op's own runtime `cached_key_rows` clip
@@ -948,7 +948,7 @@ pub(super) fn cached_attention_candidates(
             debug!(
                 node = output.0,
                 stage = "cached_score_sources",
-                "cached_attention decline -- cached score does not decompose into the qwen35 q.k score-source shape"
+                "cached_attention decline -- cached score does not decompose into the hybrid-attention q.k score-source shape"
             );
             continue;
         };
@@ -964,7 +964,7 @@ pub(super) fn cached_attention_candidates(
             debug!(
                 node = output.0,
                 stage = "new_score_sources",
-                "cached_attention decline -- new score does not decompose into the qwen35 q.k score-source shape"
+                "cached_attention decline -- new score does not decompose into the hybrid-attention q.k score-source shape"
             );
             continue;
         };
@@ -1013,7 +1013,7 @@ pub(super) fn cached_attention_candidates(
         let query_even = query_even_parts[0];
         let query_odd = query_odd_parts[0];
         // A pass plane must appear on BOTH the cached and new score, or not
-        // at all -- qwen35's own builder always emits it on both sides
+        // at all -- the recurrent-interval family's own builder always emits it on both sides
         // (`spec.rs:4910-4927,5035-5049`), so a mismatch here means this
         // program is not that shape.
         if cached_pass.is_some() != new_pass.is_some() {
@@ -1181,12 +1181,12 @@ pub(super) fn cached_attention_candidates(
         let new_key_shape = shapes.of(new_key_even);
         let cached_value_shape = shapes.of(cached_value);
         let new_value_shape = shapes.of(new_value);
-        // Eligibility guards for the gemma4-shaped windowed/padded masks
+        // Eligibility guards for the sliding-pattern-shaped windowed/padded masks
         // `local_row_bound`/`cached_lower_inclusive` above may have matched.
         // Every guard here is a no-op off this feature: `local_row_bound` is
         // always `u64::MAX` and `cached_padding_matched` always came from
         // [`unwrap_cached_padding_select`]'s unwindowed bare shape, so none
-        // of qwen35's existing accepted candidates can be reached by them.
+        // of the recurrent-interval family's existing accepted candidates can be reached by them.
         #[cfg(feature = "metal-fuse-attn-decode")]
         let softmax_weights_eligible;
         // unread off this feature: the sole reader below is itself
@@ -1255,7 +1255,7 @@ pub(super) fn cached_attention_candidates(
                     continue;
                 }
             }
-            // gemma4 arm only (`via_gemma_template`, the THIRD element
+            // sliding-pattern arm only (`via_gemma_template`, the THIRD element
             // `cached_padding_mask_lower_bound` now returns -- `true` only
             // when the gemma-shaped `cached_len_padding_template` matched,
             // `false` when `unwrap_cached_padding_select`'s qwen bare-Select
@@ -1271,8 +1271,8 @@ pub(super) fn cached_attention_candidates(
             // surrounding ops stay fully unfused, byte-exact by
             // construction), rather than falling back to the online-
             // softmax kernel, which was never re-verified against this
-            // mask/window shape. `via_gemma_template` being `false` (qwen,
-            // mistral, or no match at all) skips both declines entirely --
+            // mask/window shape. `via_gemma_template` being `false` (a dense or hybrid
+            // builder, or no match at all) skips both declines entirely --
             // those candidates are untouched by this feature, exactly as
             // before. With `metal-attn-split-rows` the one-row restriction is
             // lifted: a K-row candidate binds `CachedSoftmaxWeights` (byte-exact
@@ -1313,7 +1313,7 @@ pub(super) fn cached_attention_candidates(
             continue;
         };
         // `total_head_dim` is `rotary_width` whenever no pass plane is
-        // present (every non-qwen35 caller today) -- V is never rotated, so
+        // present (every non-recurrent-interval caller today) -- V is never rotated, so
         // its own width is the one place the pass plane's extra columns
         // surface even when the rotary planes alone would say `rotary_width`
         // (`BoundOpKind::CachedAttention`'s own doc).
@@ -1411,7 +1411,7 @@ pub(super) fn cached_attention_candidates(
         // sections): on this SAME gemma decode-only, unity-scale arm, push
         // the partial-fusion pair instead of the monolithic online-softmax
         // `CachedAttention` the code below this branch still builds for
-        // every OTHER arm (qwen35/mistral/prefill/non-unity-scale gemma).
+        // every OTHER arm (recurrent-interval/dense/prefill/non-unity-scale sliding-pattern).
         // Reuses every local this walk already validated above -- no
         // separate re-derivation of the mask/scale/shape checks, so this
         // branch shares 100% of the existing matcher's own correctness
@@ -1794,8 +1794,8 @@ pub(super) fn cached_attention_candidates(
         // branch above that sets it `true` also `continue`s, accepted or
         // declined, before falling through here) -- this is the plain
         // online-softmax `CachedAttention` kernel, unconditionally, for
-        // every caller the softmax-weights arm does not claim (qwen35,
-        // mistral, prefill, non-unity-scale gemma).
+        // every caller the softmax-weights arm does not claim (recurrent-interval,
+        // dense, prefill, non-unity-scale sliding-pattern).
         let fused = BoundOp {
             node: output,
             dtype: DType::Float32,
@@ -1809,8 +1809,8 @@ pub(super) fn cached_attention_candidates(
                 query_groups: query_shape[2],
                 head_dim: total_head_dim,
                 // `rotary_width` whenever no pass plane matched (every
-                // non-qwen35 caller, `total_head_dim == rotary_width`);
-                // qwen35's own partial-rotary chain sets this strictly
+                // non-recurrent-interval caller, `total_head_dim == rotary_width`);
+                // the recurrent-interval family's own partial-rotary chain sets this strictly
                 // below `head_dim` (`attention_score_sources`'s own doc).
                 rotary_dim: rotary_width,
                 scale: scale_value,
@@ -1925,7 +1925,7 @@ pub(super) fn cached_attention_single_range_candidates(
             continue;
         };
         let scale = scaled_operands[1];
-        // mistral's single-range chain never carries a pass plane -- this
+        // the dense single-range chain never carries a pass plane -- this
         // matcher's own shape is full-rotary only, per its module doc.
         let Some((query_even_grouped, query_odd_grouped, key_even, key_odd, None)) =
             attention_score_sources(program, *scores_scaled, scale)

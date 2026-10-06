@@ -1075,7 +1075,7 @@ pub(super) fn run_cached_softmax_weights<B: Deref<Target = [f32]> + Sync>(
 /// shape into [`gdn::GdnPrefillShape`]/[`gdn::GdnPrefillScan`] and call
 /// [`gdn::run_gdn_prefill_scan`] directly — no reimplementation
 /// (`BoundOpKind::GatedDeltaNet`'s own doc, and the design's own §2/§4). This
-/// slice's matched shape (single physical head axis OR the real qwen35moe
+/// slice's matched shape (single physical head axis OR the real recurrent-routed
 /// `kv_heads`/`group` split, `heads` innermost — [`gated_delta_net_candidates`]'s
 /// own doc states the scope) happens to already match [`gdn::run_gdn_prefill_scan`]'s own
 /// operand layout convention exactly, so every operand is read as a plain

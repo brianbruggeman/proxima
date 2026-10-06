@@ -72,7 +72,7 @@ pub struct ModelDescriptor {
     /// this, same as `expert_feed_forward` does for the routed branch.
     pub feed_forward: u32,
     /// Routed-expert FFN hidden width, distinct from `feed_forward` because
-    /// gemma4's dense and routed branches run at different widths
+    /// the sliding-pattern family's dense and routed branches run at different widths
     /// (`append_lfm2_layer_ffn`'s own `expert_feed_forward` parameter).
     pub expert_feed_forward: u32,
     /// Query head count, shared by every layer's attention sub-block
@@ -87,7 +87,7 @@ pub struct ModelDescriptor {
     /// entry's `append_lfm2_conv_mixer` call
     /// (`proxima-tensor/src/spec/attention_forward.rs`'s own `l_cache`
     /// parameter doc) -- unused and safe to leave at any value when
-    /// `layers` holds no `ShortConv` entry, as every gemma4 layer is
+    /// `layers` holds no `ShortConv` entry, as every sliding-pattern layer is
     /// [`LayerKind::Attention`].
     pub l_cache: u32,
     #[cfg_attr(feature = "config", setting(skip))]
@@ -102,7 +102,7 @@ pub struct ModelDescriptor {
     pub residual_scale: Option<f32>,
     /// One entry per block. In a config file an entry may carry `repeat = N`
     /// ("this layer, N times"), or hold a `pattern` of entries that `repeat`s
-    /// (gemma4's four sliding layers then a full one, three times); it expands
+    /// (the sliding-pattern family's four sliding layers then a full one, three times); it expands
     /// to one [`LayerSchedule`] per block on load and serializes expanded.
     #[cfg_attr(feature = "config", setting(skip))]
     #[serde(deserialize_with = "layer_runs::deserialize")]
@@ -114,7 +114,7 @@ pub struct ModelDescriptor {
     #[cfg_attr(feature = "config", setting(skip))]
     #[serde(default)]
     pub cache_mask: CacheMask,
-    /// gemma4 E2B/E4B's per-layer-embedding preamble width
+    /// the E2B/E4B checkpoint's per-layer-embedding preamble width
     /// (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc,
     /// `Some(256)` for E2B) -- consulted by [`CacheStrategy::Cacheless`] and
     /// [`CacheMask::Padded`] alike (both route to a PLE-aware
@@ -457,7 +457,7 @@ impl FamilyProfile {
 /// [`CacheMask::Bounded`] makes [`build_forward`] dispatch straight to
 /// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
 /// (see that variant's own doc). Every dimension is a parameter because
-/// `DenseArch` serves llama, mistral, qwen2, qwen3 and mixtral headers alike;
+/// `DenseArch` serves every dense decoder header alike;
 /// `expert_feed_forward` is `feed_forward` because that builder sizes the
 /// routed branch off the same width as the dense one, and
 /// `leading_dense_block_count` is `block_count` because the dense-vs-MoE
@@ -567,7 +567,7 @@ pub struct ForwardProgram {
     pub logits: NodeId,
     /// One entry per layer that carries or reads a cache, in layer order:
     /// [`LayerCacheRoots::Attention`] for a layer that owns a KV cache,
-    /// [`LayerCacheRoots::SharedFromLayer`] for a gemma4 shared-KV layer that
+    /// [`LayerCacheRoots::SharedFromLayer`] for a sliding-pattern shared-KV layer that
     /// reads another layer's. Empty under [`CacheStrategy::Cacheless`], which
     /// keeps no cache.
     pub layer_roots: Vec<LayerCacheRoots>,
@@ -632,8 +632,8 @@ pub(super) fn refuse_when(
 }
 
 /// Generalizes [`lfm2_two_range_cached_forward_program_with_experts`] (the
-/// working gemma4 two-range engine, already schedule-driven rather than
-/// gemma4-hardcoded internally) and [`lfm2_forward_program_with_experts`]
+/// working sliding-pattern two-range engine, already schedule-driven rather than
+/// sliding-pattern-hardcoded internally) and [`lfm2_forward_program_with_experts`]
 /// (the cacheless engine) behind one [`ModelDescriptor`]-shaped entry point:
 /// plain sync data->op-graph construction, no async/`Future`/`Box<dyn>`
 /// anywhere, dispatching purely on [`ModelDescriptor::cache_strategy`] and
@@ -810,7 +810,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 "a rope pairing the moe layer cannot express",
             )?;
             // `attention.rope_pairing` is this descriptor's own data, not
-            // re-inferred from `qk_norm` here -- Qwen2 needs split-half RoPE
+            // re-inferred from `qk_norm` here -- a split-half checkpoint needs split-half RoPE
             // with `qk_norm` still `false` (no QK-norm tensors at all), a
             // combination the qk_norm-inferring wrapper cannot express (its
             // own doc on that limitation, `mistral_descriptor_from_shape`'s
