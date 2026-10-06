@@ -25,17 +25,17 @@
 //!
 //! Byte-level BPE over the GPT-2 alphabet ([`byte_level`]), with the
 //! pre-split selected by [`pretokenize::PreType`], which a GGUF names in
-//! `tokenizer.ggml.pre` (`"llama-bpe"` is the LLAMA3 rule, `"qwen2"` and
-//! `"qwen35"` split digits one per pretoken); `tokenizer.ggml.model = "gpt2"`
+//! `tokenizer.ggml.pre` (`"llama-bpe"` is the grouped-digits rule; the
+//! single-digit rules split digits one per pretoken); `tokenizer.ggml.model = "gpt2"`
 //! identifies the byte-level family itself.
 //!
-//! Char-level BPE for `tokenizer.ggml.model = "gemma4"`: merges keyed on raw
+//! Char-level BPE (a merges vocab whose own tokens are char-level): merges keyed on raw
 //! UTF-8 characters with `▁` for space, split only on newline runs
 //! ([`pretokenize::pretokenize_newline_runs`]) and merged by
 //! [`bpe::encode_char_pretoken`]. [`vocab::Vocab::is_char_level_bpe`] is
 //! probed from the vocab's own tokens; the GPT-2 path above is untouched.
 //!
-//! SentencePiece/SPM ([`unigram`]) for `tokenizer.ggml.model = "llama"`
+//! SentencePiece/SPM ([`unigram`]) for scores-driven
 //! vocabs (`tokenizer.ggml.scores` present, no `tokenizer.ggml.merges`),
 //! confirmed against a real openchat-3.5-1210 fixture. [`pipe::encode`]/
 //! [`pipe::decode`] pick the encoder from [`vocab::Vocab::is_unigram`] --
@@ -58,6 +58,7 @@ pub mod pipe;
 pub mod pretokenize;
 pub mod sample;
 pub mod sized;
+mod gguf_names;
 mod pretokenize_passes;
 mod unicode_tables;
 pub mod unigram;

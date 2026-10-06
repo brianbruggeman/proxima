@@ -1,7 +1,7 @@
-//! SentencePiece-family segmentation for `tokenizer.ggml.model = "llama"`
+//! SentencePiece-family segmentation for scores-driven
 //! vocabs. Despite the "unigram" name this crate's module doc-comments used
 //! before this was read against source, the encoder here is NOT the
-//! literature unigram-Viterbi lattice: `tokenizer.ggml.model == "llama"`
+//! literature unigram-Viterbi lattice: a scores-driven model
 //! dispatches to `LLAMA_VOCAB_TYPE_SPM` in llama.cpp
 //! (`llama-vocab.cpp:1405-1406`), whose tokenizer
 //! (`llm_tokenizer_spm_session::tokenize`, `llama-vocab.cpp:116-172`)
@@ -24,7 +24,7 @@ use crate::error::TokenizerError;
 use crate::vocab::Vocab;
 
 /// SentencePiece's escape marker for a literal space (`▁`, U+2581).
-/// `tokenizer.ggml.model = "llama"` vocabs store every space-containing
+/// scores-driven (SPM) vocabs store every space-containing
 /// piece with spaces already substituted for this codepoint
 /// (`llama_escape_whitespace`, `llama-vocab.cpp:2372-2374`).
 pub(crate) const SPACE_MARKER: char = '\u{2581}';
@@ -54,7 +54,7 @@ pub fn escape(text: &str) -> String {
 }
 
 /// Every literal space to `SPACE_MARKER` (crate-private), with no synthetic
-/// prefix -- the gemma4 half of [`escape`] (char-level BPE adds no leading
+/// prefix -- the char-level half of [`escape`] (char-level BPE adds no leading
 /// space).
 #[must_use]
 pub fn replace_spaces_with_markers(text: &str) -> String {

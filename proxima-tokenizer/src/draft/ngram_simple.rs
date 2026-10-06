@@ -37,17 +37,17 @@ use alloc::vec::Vec;
 
 /// llama.cpp's `common_ngram_simple_config` (`common/ngram-map.h:24`),
 /// renamed to the field names `speculative-decode-llama-parity/SPEC.md`
-/// (requirement R4) uses: `size_n` is llama's `size_ngram` (the n-gram
-/// looked up in the token history), `size_m` is llama's `size_mgram` (how
+/// (requirement R4) uses: `size_n` is llama.cpp's `size_ngram` (the n-gram
+/// looked up in the token history), `size_m` is llama.cpp's `size_mgram` (how
 /// many tokens after a match are drafted). llama.cpp's own default for
 /// `ngram-simple` is `size_n = 12, size_m = 48`
 /// (`common_params_speculative_ngram_map`, `common/common.h:361-365`, this
 /// crate's own copy at [`DEFAULT_SIZE_N`]/[`DEFAULT_SIZE_M`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NgramSimpleConfig {
-    /// Size of the n-gram looked up in `history` -- llama's `size_ngram`.
+    /// Size of the n-gram looked up in `history` -- llama.cpp's `size_ngram`.
     pub size_n: u16,
-    /// Size of the m-gram drafted after a match -- llama's `size_mgram`.
+    /// Size of the m-gram drafted after a match -- llama.cpp's `size_mgram`.
     pub size_m: u16,
 }
 

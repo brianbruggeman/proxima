@@ -82,7 +82,7 @@ fn push_bigram(
     }
 }
 
-/// Char-level BPE over one pre-token of gemma4's `[^\n]+|[\n]+` split, with
+/// Char-level BPE over one pre-token of the char-level `[^\n]+|[\n]+` split, with
 /// spaces already spelled `▁`. Seeds one symbol per UTF-8 character, then
 /// merges by rank (lowest first, leftmost on ties) using a min-heap over a
 /// linked list of symbols -- `O(n log n)`, since a pre-token is a whole
