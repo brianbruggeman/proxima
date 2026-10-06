@@ -22,7 +22,6 @@
 //! snapshot.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -891,7 +890,7 @@ impl<'file> ExpertSlab<'file> {
             .collect())
     }
 
-    /// Snapshots exactly one layer's expert tables. Segment-local Qwen35
+    /// Snapshots exactly one layer's expert tables. Segment-local recurrent-interval
     /// programs reuse small node IDs across layers, so a whole-model map
     /// would overwrite one layer's source with another's.
     #[cfg(test)]
@@ -1036,8 +1035,7 @@ impl<'file> ExpertSlab<'file> {
                             spans,
                         )
                         .map_err(|error| {
-                            InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
+                            InteropError::ExpertWindowUnavailable {
                                 reason: error.to_string(),
                             }
                         })?
@@ -1139,8 +1137,7 @@ impl<'file> ExpertSlab<'file> {
                     spans,
                 )
                 .map(|source| (*weight_node, source))
-                .map_err(|error| InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
+                .map_err(|error| InteropError::ExpertWindowUnavailable {
                     reason: error.to_string(),
                 })
             })
