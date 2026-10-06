@@ -209,6 +209,15 @@ pub struct ModelDescriptor {
     /// per-step program every decode call resolves dynamically.
     #[serde(default)]
     pub prefill_width: Option<u32>,
+    /// Lowers attention layers as the gated variant a recurrent-hybrid stack
+    /// pairs with its recurrent layers: `attn_q` projects `[Q | gate]` per head,
+    /// the gate multiplies the attention output through a sigmoid, per-head
+    /// QK-norm applies, and only the leading rotary width of each head rotates.
+    /// A schedule holding a [`LayerKind::Gdn`] layer needs it; an all-attention
+    /// stack of the same family sets it too, which is why it is a field and not
+    /// inferred from the layer kinds.
+    #[serde(default)]
+    pub gated_attention: bool,
 }
 
 impl ModelDescriptor {
@@ -469,6 +478,7 @@ pub fn mistral_descriptor_from_shape(
         v_head_reordered: false,
         expert_shared_feed_forward: 0,
         prefill_width: None,
+        gated_attention: false,
     }
 }
 
@@ -497,6 +507,9 @@ pub struct ForwardProgram {
     /// `PROXIMA_HEAD_REPEATS`'s scratch output
     /// ([`ModelDescriptor::head_repeats`]): the duplicate head chains' roots.
     pub duplicate_head_roots: Vec<NodeId>,
+    /// One diagnostic boundary per layer, populated only by the recurrent
+    /// hybrid engine's routed arm; empty for every other engine.
+    pub layer_diagnostics: Vec<Qwen35MoeLayerDiagnostics>,
 }
 
 /// One [`Qwen35LayerRoots`] per layer for a cached program: the engine returns
@@ -573,8 +586,21 @@ pub(super) fn refuse_when(
 /// precedent `cache_roots` itself already sets on the [`Cacheless`][CacheStrategy::Cacheless]
 /// arm above.
 ///
+/// A descriptor that sets [`ModelDescriptor::gated_attention`] or holds a
+/// [`LayerKind::Gdn`] layer is the recurrent-hybrid engine's: the layer kinds
+/// come from `layers[i].kind` and the recurrence shape from the descriptor's
+/// `ssm_*` fields, and it keeps its own state cache beside the KV cache, so [`ModelDescriptor::cache_strategy`] and
+/// [`ModelDescriptor::cache_mask`] do not select it.
+///
 /// [`ForwardProgram`]'s own doc names each root and which engine fills it.
 pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
+    if descriptor.gated_attention || descriptor.layers.iter().any(|layer| layer.kind == LayerKind::Gdn) {
+        return if descriptor.layers.iter().any(|layer| layer.ffn.combination == FfnCombination::RoutedWithSharedExpert) {
+            hybrid_routed_forward(descriptor)
+        } else {
+            hybrid_dense_forward(descriptor)
+        };
+    }
     match (descriptor.cache_strategy, descriptor.cache_mask) {
         (CacheStrategy::Cached, CacheMask::Padded) => {
             refuse_when(
@@ -614,6 +640,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 layer_residuals: Vec::new(),
                 hidden: None,
                 duplicate_head_roots,
+                layer_diagnostics: Vec::new(),
             })
         }
         (CacheStrategy::Cacheless, _) => {
@@ -653,6 +680,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 layer_residuals: Vec::new(),
                 hidden: None,
                 duplicate_head_roots,
+                layer_diagnostics: Vec::new(),
             })
         }
         (CacheStrategy::Cached, CacheMask::Bounded) => {
@@ -744,6 +772,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 layer_residuals,
                 hidden: Some(roots.hidden),
                 duplicate_head_roots: Vec::new(),
+                layer_diagnostics: Vec::new(),
             })
         }
     }

@@ -312,6 +312,13 @@ pub struct ParallelDenseMoeConfig {
 pub enum FfnCombination {
     Exclusive,
     ParallelDenseMoe(ParallelDenseMoeConfig),
+    /// A routed expert FFN plus a shared expert every token also runs, summed
+    /// into the residual: the shared expert is a SwiGLU of width
+    /// [`ModelDescriptor::expert_shared_feed_forward`], scaled per token by
+    /// `sigmoid(x @ ffn_gate_inp_shexp)`. Lowered only by the recurrent-hybrid
+    /// engine ([`build_forward`] over a schedule holding a [`LayerKind::Gdn`]
+    /// layer), which has no dense FFN branch to select between.
+    RoutedWithSharedExpert,
 }
 
 /// Technique: gated FFN activation (Shazeer 2020, GLU Variants -- SwiGLU/GeGLU) -- see `docs/design/technique-taxonomy.md#ffn--experts`.
@@ -576,7 +583,7 @@ where
 ///
 /// this function has always built -- no new node, no new required
 /// binding, every existing per-position-logits caller unaffected.
-fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_row_only: bool) -> NodeId {
+pub(super) fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_row_only: bool) -> NodeId {
     if last_row_only {
         let lm_head_row = input_leaf(
             program,
@@ -1255,6 +1262,12 @@ pub(crate) fn append_lfm2_layer_ffn(
                     moe_sites,
                 )?
             }
+        }
+        FfnCombination::RoutedWithSharedExpert => {
+            return Err(TensorError::UnsupportedInBuilder {
+                builder: "append_lfm2_layer_ffn",
+                feature: "FfnCombination::RoutedWithSharedExpert (lowered by the hybrid engine)",
+            });
         }
         FfnCombination::ParallelDenseMoe(parallel_config) => {
             let dense_out = append_dense_swiglu_ffn(
@@ -3112,595 +3125,70 @@ pub fn qwen35_forward_program_with_last_row(
         });
     }
 
-    let group = query_heads / kv_heads;
-    let pairs = head_dim / 2;
-    let ssm_group = ssm_dt_rank / ssm_n_group;
-    let ssm_key_dim = ssm_d_state * ssm_n_group;
-
-    let mut program = Vec::new();
-
-    let ids = input_leaf(
-        &mut program,
-        DType::Int32,
-        alloc::vec![Extent::Symbolic(0)],
-        "ids",
-    );
-    let table = input_leaf(
-        &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
-        "token_embd.weight",
-    );
-    let mut x = embedding_lookup(&mut program, table, ids);
-
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
-    let ones = scalar_constant(&mut program, 1.0);
-    let one = ones;
-    // `head_dim` here is `rope.dimension_count` -- this checkpoint's
-    // PARTIAL-rotary width (`rotary_dim`), never the real per-head width.
-    // Dense attention's own score scale is `attn_head_dim`-based
-    // (`self.scaling = self.head_dim**-0.5` where `self.head_dim` is the
-    // real width, `modeling_qwen3_next.py:262,264`), not
-    // `rotary_dim`-based.
-    let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(attn_head_dim as f32));
-    let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / attn_head_dim as f32);
-    let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(ssm_d_state as f32));
-    let head_v_dim = ssm_d_inner / ssm_dt_rank;
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
-    let cos_new = input_leaf(
-        &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-        "rope_cos",
-    );
-    let sin_new = input_leaf(
-        &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-        "rope_sin",
-    );
-    let group_ones = op::append(
-        &mut program,
-        Op::Constant {
-            dtype: DType::Float32,
-            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
-            value: 1.0,
+    let attention = LayerAttentionConfig {
+        head_dim: attn_head_dim,
+        kv_heads,
+        mask_window: None,
+        value_source_kind: ValueSourceKind::ProjectedV,
+        key_source_kind: KeySourceKind::ProjectedK,
+        rope_table: RopeTableSel {
+            cos_name: "rope_cos".into(),
+            sin_name: "rope_sin".into(),
         },
-    );
-    let head_eps = op::append(
-        &mut program,
-        Op::Constant {
-            dtype: DType::Float32,
-            shape: alloc::vec![Extent::Static(ssm_n_group), Extent::Static(ssm_group)],
-            value: rms_eps,
-        },
-    );
-    let (is_future, _neg_infinity) = causal_mask(&mut program)?;
-    // Same rank-0 leaf [`mistral_cached_forward_program_with_experts`] adds
-    // right after its own `causal_mask` call, and for the same reason: named
-    // "cached_len" so `bind::cached_attention_candidates`'s `find_named_input`
-    // picks it up by NAME on the `Attention` arm's fused `CachedAttention`
-    // op. The `DenseAttention` arm has no equivalent fusion, so this same
-    // node is ALSO threaded directly into every
-    // [`append_qwen35_dense_attention_layer`] call below to mask its own
-    // padded cached range (that function's own doc).
-    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
-
-    let mut layer_roots: Vec<Qwen35LayerRoots> = Vec::with_capacity(block_count as usize);
-
-    for layer in 0..block_count {
-        let attn_norm_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(embedding)],
-            &alloc::format!("blk.{layer}.attn_norm.weight"),
-        );
-        // Named `post_attention_norm.weight` on disk, not `ffn_norm.weight`
-        // -- this checkpoint's own GGUF writer names this tensor
-        // differently from every other architecture this crate binds
-        // (`proxima_model_interop::qwen35`'s own module doc, confirmed via
-        // `strings` on the real file: no `blk.N.ffn_norm.weight` key
-        // exists anywhere), on both layer kinds.
-        let ffn_norm_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(embedding)],
-            &alloc::format!("blk.{layer}.post_attention_norm.weight"),
-        );
-
-        // `hparams.is_recr_impl[i] = (i + 1) % full_attention_interval != 0`
-        // (`qwen35.cpp:19-20`) is TRUE for SSM layers -- dense attention is
-        // its negation, `(i + 1) % full_attention_interval == 0`.
-        let is_dense_attention = (layer + 1) % full_attention_interval == 0;
-
-        let (x_next, roots) = if is_dense_attention {
-            // real per-head width read off metadata (`attention.key_length`,
-            // `attn_head_dim` param) rather than `embedding / query_heads`
-            // -- the latter is not even an integer on the 27B checkpoint
-            // (`5120 / 24 = 213.33`), confirmed wrong against the real file
-            // by [`crate::qwen35::qwen35_architecture_from_metadata`]'s own
-            // caller-side doc.
-            let wq_flat = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(embedding),
-                    Extent::Static(query_heads * attn_head_dim * 2)
-                ],
-                &alloc::format!("blk.{layer}.attn_q.weight"),
-            );
-            // A pure reshape (multiply by a broadcast-ones constant), the
-            // same lossless-reshape donor trick `wk`/`wv` already use below
-            // -- NEVER `per_head_channel_slice` on this packed leaf. That
-            // per-head WEIGHT-level slice inserted a select-then-reduce
-            // between `wq_flat` and the real contraction, which
-            // `is_quantized_matmul_operand`/`run_reduce_quantized` (`cpu.rs`)
-            // then misidentifies as the whole quantized matmul shape and
-            // derives `rows`/`k` from the wrong axis pair -- `q`/`gate` now
-            // split on the ACTIVATION side instead, inside
-            // [`append_qwen35_dense_attention_only_with_taps`], via
-            // [`per_head_channel_range`].
-            let qg_head_ones = op::append(
-                &mut program,
-                Op::Constant {
-                    dtype: DType::Float32,
-                    shape: alloc::vec![
-                        Extent::Static(query_heads),
-                        Extent::Static(attn_head_dim * 2)
-                    ],
-                    value: 1.0,
-                },
-            );
-            let wq_gate = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[
-                    (
-                        wq_flat,
-                        alloc::format!("i,{}*h+c->ihc", attn_head_dim * 2).as_str(),
-                    ),
-                    (qg_head_ones, "hc->ihc"),
-                ],
-            )?;
-            let wk_flat = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(embedding),
-                    Extent::Static(kv_heads * attn_head_dim)
-                ],
-                &alloc::format!("blk.{layer}.attn_k.weight"),
-            );
-            // `k` carries no gate and no partial-rotary truncation at the
-            // weight level (the split into rotated/pass halves happens on
-            // the ACTIVATION inside [`append_qwen35_dense_attention_layer`]
-            // now that `q_norm`/`k_norm` need the full width first) -- the
-            // same lossless-reshape donor trick `v`/`o` already use below.
-            let k_head_ones = op::append(
-                &mut program,
-                Op::Constant {
-                    dtype: DType::Float32,
-                    shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
-                    value: 1.0,
-                },
-            );
-            let wk = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[
-                    (
-                        wk_flat,
-                        alloc::format!("i,{attn_head_dim}*u+d->iud").as_str(),
-                    ),
-                    (k_head_ones, "ud->iud"),
-                ],
-            )?;
-            let v_head_ones = op::append(
-                &mut program,
-                Op::Constant {
-                    dtype: DType::Float32,
-                    shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
-                    value: 1.0,
-                },
-            );
-            let o_head_ones = op::append(
-                &mut program,
-                Op::Constant {
-                    dtype: DType::Float32,
-                    shape: alloc::vec![
-                        Extent::Static(kv_heads),
-                        Extent::Static(group),
-                        Extent::Static(attn_head_dim)
-                    ],
-                    value: 1.0,
-                },
-            );
-            let wv_flat = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(embedding),
-                    Extent::Static(kv_heads * attn_head_dim)
-                ],
-                &alloc::format!("blk.{layer}.attn_v.weight"),
-            );
-            let wv = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[
-                    (
-                        wv_flat,
-                        alloc::format!("i,{attn_head_dim}*u+d->iud").as_str(),
-                    ),
-                    (v_head_ones, "ud->iud"),
-                ],
-            )?;
-            let wo_flat = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(query_heads * attn_head_dim),
-                    Extent::Static(embedding)
-                ],
-                &alloc::format!("blk.{layer}.attn_output.weight"),
-            );
-            let wo = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[
-                    (
-                        wo_flat,
-                        alloc::format!("{}*u+{attn_head_dim}*g+d,e->ugde", attn_head_dim * group)
-                            .as_str(),
-                    ),
-                    (o_head_ones, "ugd->ugde"),
-                ],
-            )?;
-            let w_gate = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_gate.weight"),
-            );
-            let w_up = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_up.weight"),
-            );
-            let w_down = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
-                &alloc::format!("blk.{layer}.ffn_down.weight"),
-            );
-            let q_norm_weight = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(attn_head_dim)],
-                &alloc::format!("blk.{layer}.attn_q_norm.weight"),
-            );
-            let k_norm_weight = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(attn_head_dim)],
-                &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-            );
-            let pass_dim = attn_head_dim - head_dim;
-            let k_first_cache = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Symbolic(1),
-                    Extent::Static(kv_heads),
-                    Extent::Static(pairs)
-                ],
-                &alloc::format!("kv_cache.{layer}.k_first"),
-            );
-            let k_second_cache = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Symbolic(1),
-                    Extent::Static(kv_heads),
-                    Extent::Static(pairs)
-                ],
-                &alloc::format!("kv_cache.{layer}.k_second"),
-            );
-            let k_pass_cache = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Symbolic(1),
-                    Extent::Static(kv_heads),
-                    Extent::Static(pass_dim)
-                ],
-                &alloc::format!("kv_cache.{layer}.k_pass"),
-            );
-            let v_cache = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Symbolic(1),
-                    Extent::Static(kv_heads),
-                    Extent::Static(attn_head_dim)
-                ],
-                &alloc::format!("kv_cache.{layer}.v"),
-            );
-
-            let (x_next, dense_attention_roots) = append_qwen35_dense_attention_layer(
-                &mut program,
-                x,
-                inv_dim,
-                eps,
-                ones,
-                inv_sqrt_attn_head_dim,
-                inv_attn_head_dim,
-                cos_new,
-                sin_new,
-                group_ones,
-                is_future,
-                cached_len,
-                group,
-                head_dim,
-                attn_head_dim,
-                attn_norm_weight,
-                ffn_norm_weight,
-                q_norm_weight,
-                k_norm_weight,
-                wq_gate,
-                wk,
-                wv,
-                wo,
-                w_gate,
-                w_up,
-                w_down,
-                k_first_cache,
-                k_second_cache,
-                k_pass_cache,
-                v_cache,
-            )?;
-            (
-                x_next,
-                Qwen35LayerRoots::DenseAttention(dense_attention_roots),
-            )
-        } else {
-            let qkv_dim = 2 * ssm_key_dim + ssm_d_inner;
-            let wqkv = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)],
-                &alloc::format!("blk.{layer}.ssm_in.weight"),
-            );
-            let wqkv_gate = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(ssm_d_inner)],
-                &alloc::format!("blk.{layer}.ssm_gate.weight"),
-            );
-            let conv_weight = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(qkv_dim), Extent::Static(ssm_d_conv)],
-                &alloc::format!("blk.{layer}.ssm_conv1d.weight"),
-            );
-            let conv_history_in = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(ssm_d_conv - 1), Extent::Static(qkv_dim)],
-                &alloc::format!("ssm_cache.{layer}.conv_history"),
-            );
-            let ssm_beta = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(ssm_dt_rank)],
-                &alloc::format!("blk.{layer}.ssm_beta.weight"),
-            );
-            let ssm_alpha = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(ssm_dt_rank)],
-                &alloc::format!("blk.{layer}.ssm_alpha.weight"),
-            );
-            let ssm_dt_bias = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(ssm_dt_rank)],
-                &alloc::format!("blk.{layer}.ssm_dt.bias"),
-            );
-            let ssm_a = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(ssm_dt_rank)],
-                &alloc::format!("blk.{layer}.ssm_a"),
-            );
-            let ssm_norm_weight = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(head_v_dim)],
-                &alloc::format!("blk.{layer}.ssm_norm.weight"),
-            );
-            let ssm_out = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(ssm_d_inner), Extent::Static(embedding)],
-                &alloc::format!("blk.{layer}.ssm_out.weight"),
-            );
-            let state_in = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(ssm_d_state),
-                    Extent::Static(head_v_dim),
-                    Extent::Static(ssm_n_group),
-                    Extent::Static(ssm_group)
-                ],
-                &alloc::format!("ssm_cache.{layer}.state"),
-            );
-
-            let (mixer_out, qkv_mixed, state_out) = append_qwen35_ssm_mixer(
-                &mut program,
-                x,
-                inv_dim,
-                eps,
-                head_eps,
-                one,
-                inv_sqrt_key_dim,
-                inv_head_v_dim,
-                Some(attn_norm_weight),
-                wqkv,
-                wqkv_gate,
-                conv_weight,
-                conv_history_in,
-                ssm_beta,
-                ssm_alpha,
-                ssm_dt_bias,
-                ssm_a,
-                ssm_norm_weight,
-                ssm_out,
-                state_in,
-                ssm_key_dim,
-                ssm_d_inner,
-                ssm_n_group,
-                ssm_group,
-                ssm_d_conv,
-                GdnOutputGate::Silu,
-            )?;
-
-            // Unlike `append_mistral_cached_layer` (bundles FFN internally),
-            // `append_qwen35_ssm_mixer` is mixer-plus-residual only -- the
-            // same scope `append_lfm2_conv_mixer` has -- so the SSM branch
-            // runs its own dense FFN pass here, matching
-            // `mistral_cached_forward_program_with_experts`'s own
-            // `expert_count == 0` FFN math exactly (Qwen3.5 never routes FFN
-            // through experts, `qwen35.cpp:471`).
-            let normed2 = rmsnorm(&mut program, mixer_out, ffn_norm_weight, inv_dim, eps)?;
-            let w_gate = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_gate.weight"),
-            );
-            let w_up = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_up.weight"),
-            );
-            let w_down = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
-                &alloc::format!("blk.{layer}.ffn_down.weight"),
-            );
-            let gate_product = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
-            )?;
-            let gate = reduce(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                gate_product,
-                "sdg->sdg",
-                "sg->sdg",
-            )?;
-            let up_product = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
-            )?;
-            let up = reduce(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                up_product,
-                "sdg->sdg",
-                "sg->sdg",
-            )?;
-            let silu_gate = silu(&mut program, gate, one, "sg->sg")?;
-            let ffn_hidden = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(silu_gate, "sg->sg"), (up, "sg->sg")],
-            )?;
-            let down_product = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
-            )?;
-            let ffn_out = reduce(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                down_product,
-                "sgd->sgd",
-                "sd->sgd",
-            )?;
-            let x_after_ffn = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                &[(ffn_out, "sd->sd"), (mixer_out, "sd->sd")],
-            )?;
-
-            (
-                x_after_ffn,
-                Qwen35LayerRoots::Ssm {
-                    qkv_mixed,
-                    state_out,
-                },
-            )
-        };
-
-        x = x_next;
-        layer_roots.push(roots);
-    }
-
-    let output_norm_weight = input_leaf(
-        &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Static(embedding)],
-        "output_norm.weight",
-    );
-    let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
-
-    let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
-    let lm_head = input_leaf(
-        &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
-        "output.weight",
-    );
-    let logits_product = elementwise(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
-    )?;
-    let logits = reduce(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        logits_product,
-        "sdv->sdv",
-        "sv->sdv",
-    )?;
-
+        rope_pairing: RopePairing::SplitHalf { pairs: head_dim / 2 },
+        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(attn_head_dim),
+        value_norm: false,
+    };
+    let layers = (0..block_count)
+        .map(|layer| LayerSchedule {
+            kind: if (layer + 1) % full_attention_interval == 0 {
+                LayerKind::Attention
+            } else {
+                LayerKind::Gdn
+            },
+            attention: attention.clone(),
+            ffn: LayerFfnConfig::exclusive(),
+        })
+        .collect();
+    let descriptor = ModelDescriptor {
+        vocab,
+        embedding,
+        feed_forward,
+        expert_feed_forward: feed_forward,
+        query_heads,
+        block_count,
+        expert_count: 0,
+        expert_used_count: 0,
+        leading_dense_block_count: block_count,
+        l_cache: 0,
+        embedding_scale: None,
+        logit_softcap: None,
+        logit_scale: None,
+        residual_scale: None,
+        layers,
+        cache_strategy: CacheStrategy::Cached,
+        cache_mask: CacheMask::Bounded,
+        ple_dim: None,
+        sliding_kv_ring: false,
+        qk_norm: false,
+        qkv_biases: false,
+        paired_gate_up_reduce: false,
+        fused_qkv_reduce: false,
+        head_repeats: 1,
+        last_row_only,
+        speculative_verify: false,
+        ssm_conv_kernel: ssm_d_conv,
+        ssm_state_size: ssm_d_state,
+        ssm_group_count: ssm_n_group,
+        ssm_time_step_rank: ssm_dt_rank,
+        ssm_inner_size: ssm_d_inner,
+        ssm_epsilon: rms_eps,
+        v_head_reordered: false,
+        expert_shared_feed_forward: 0,
+        prefill_width: None,
+        gated_attention: true,
+    };
+    let ForwardProgram { program, logits, layer_roots, .. } = hybrid_dense_forward(&descriptor)?;
     Ok((program, logits, layer_roots))
 }
 

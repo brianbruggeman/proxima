@@ -707,6 +707,7 @@ impl<'file> BoundProgram<'file> {
             layer_residuals,
             hidden,
             duplicate_head_roots,
+            layer_diagnostics,
         } = build_forward(descriptor)?;
         bind_missing_leaves(
             parsed,
@@ -724,6 +725,12 @@ impl<'file> BoundProgram<'file> {
             layer_roots,
             moe_sites,
             duplicate_head_roots,
+            router_roots: if self.router_roots.is_empty() {
+                Vec::new()
+            } else {
+                layer_diagnostics.iter().map(|diagnostic| diagnostic.router_logits).collect()
+            },
+            qwen35moe_layer_diagnostics: layer_diagnostics,
             ..self
         })
     }

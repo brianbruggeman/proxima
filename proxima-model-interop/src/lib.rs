@@ -142,6 +142,7 @@ pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, qua
 #[cfg(feature = "std")]
 pub use qwen35::{
     Qwen35Arch, Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
+    descriptor_from_architecture as qwen35_descriptor_from_architecture, qwen35_architecture_from_metadata,
 };
 #[cfg(feature = "std")]
 pub use qwen35moe::{QWEN35MOE, Qwen35MoeArch};

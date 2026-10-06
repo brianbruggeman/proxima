@@ -168,6 +168,7 @@ pub fn gemma4_descriptor_from_gguf(
         v_head_reordered: false,
         expert_shared_feed_forward: 0,
         prefill_width: None,
+        gated_attention: false,
     })
 }
 
