@@ -423,3 +423,35 @@ async fn the_header_descriptor_decodes_through_the_same_one_row_check() {
 
     assert!(!ids.is_empty() && ids.len() <= 2, "decodes within the budget, got {ids:?}");
 }
+
+/// The two diagnostic reduce flags are descriptor fields: a load that sets one
+/// is a config load over the header descriptor, and the fused operand it adds
+/// binds from the same tensors, so the decoded ids equal the two-matvec
+/// baseline's.
+#[proxima::test]
+#[case::paired_gate_up(true, false)]
+#[case::fused_qkv(false, true)]
+async fn a_reduce_flag_load_decodes_the_same_ids_as_the_baseline(
+    #[case] paired_gate_up_reduce: bool,
+    #[case] fused_qkv_reduce: bool,
+) {
+    let file_bytes = support::checkpoint_bytes(GgmlType::Q8_0);
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let baseline = LoadedModel::load(&parsed, &file_bytes).expect("loads the baseline");
+    let (expected, _, _) = Pipe::call(&baseline, (PROMPT.to_string(), 3)).await.expect("the baseline decodes");
+
+    let flagged = if paired_gate_up_reduce {
+        LoadedModel::load_with_paired_gate_up_reduce(&parsed, &file_bytes, true)
+    } else {
+        LoadedModel::load_with_fused_qkv_reduce(&parsed, &file_bytes, fused_qkv_reduce)
+    }
+    .expect("loads with the reduce flag set");
+    let (ids, _, _) = Pipe::call(&flagged, (PROMPT.to_string(), 3)).await.expect("the flagged load decodes");
+
+    assert_ne!(
+        flagged.op_count(),
+        baseline.op_count(),
+        "the flag must reach the lowering: the flagged program differs from the baseline"
+    );
+    assert_eq!(ids, expected, "the reduce flag must not change the decoded ids");
+}
