@@ -1,0 +1,19 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 12.94s
+────────────
+ Nextest run ID 603f98d2-e56d-4ead-877b-12bb498c7889 with nextest profile: default
+    Starting 12 tests across 31 binaries (660 tests skipped)
+        PASS [   0.013s] ( 1/12) proxima-model-interop task::tests::a_checkpoint_with_no_block_keys_is_unknown
+        PASS [   0.012s] ( 2/12) proxima-model-interop task::tests::non_causal_attention_key_is_an_embedding_encoder
+        PASS [   0.014s] ( 3/12) proxima-model-interop task::tests::explicit_reranker_wins
+        PASS [   0.014s] ( 4/12) proxima-model-interop task::tests::an_architecture_named_like_an_encoder_with_decoder_keys_is_a_decoder
+        PASS [   0.015s] ( 5/12) proxima-model-interop task::tests::a_nomic_bert_header_with_mean_pooling_is_an_embedding_model
+        PASS [   0.016s] ( 6/12) proxima-model-interop task::tests::classifier_head_is_not_a_decoder
+        PASS [   0.016s] ( 7/12) proxima-model-interop task::tests::model_name_distinguishes_qwen_embedding_from_decoder
+        PASS [   0.015s] ( 8/12) proxima-model-interop task::tests::decoder_family_is_generation
+        PASS [   0.016s] ( 9/12) proxima-model-interop task::tests::a_bert_header_with_mean_pooling_is_an_embedding_model
+        PASS [   0.017s] (10/12) proxima-model-interop task::tests::a_future_family_with_block_keys_and_no_pooling_is_a_decoder
+        PASS [   0.009s] (11/12) proxima-model-interop task::tests::rank_pooling_marks_a_reranker_whatever_the_family_is_called
+        PASS [   0.009s] (12/12) proxima-model-interop task::tests::pooling_type_key_marks_an_encoder_whatever_the_family_is_called
+────────────
+     Summary [   0.029s] 12 tests run: 12 passed, 660 skipped

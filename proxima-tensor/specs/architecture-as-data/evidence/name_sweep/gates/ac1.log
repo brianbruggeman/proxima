@@ -1,0 +1,9 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 10.28s
+────────────
+ Nextest run ID 010c1b66-0f80-41d0-884e-dab3b57371a7 with nextest profile: default
+    Starting 2 tests across 31 binaries (670 tests skipped)
+        PASS [   1.410s] (1/2) proxima-model-interop::swa_rope_from_metadata swa_rope_from_metadata_gemma4_26b
+        PASS [   0.185s] (2/2) proxima-model-interop::swa_rope_from_metadata swa_rope_from_metadata_gemma4_e2b
+────────────
+     Summary [   1.598s] 2 tests run: 2 passed, 670 skipped

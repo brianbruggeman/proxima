@@ -1,0 +1,26 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+────────────
+ Nextest run ID b3dab3b7-bfc5-4615-9b36-de37273a0fd0 with nextest profile: default
+    Starting 20 tests across 1 binary (4 binaries skipped)
+        PASS [   3.778s] ( 1/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_emoji
+        PASS [   3.800s] ( 2/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_ascii_single_spaces
+        PASS [   3.829s] ( 3/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_latin1_tab_crlf
+        PASS [   3.841s] ( 4/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_ascii_single_space_ids_equal_the_pre_fix_gpt2_path
+        PASS [   3.843s] ( 5/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_cjk
+        PASS [   3.882s] ( 6/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_chat_template_user_turn
+        PASS [   3.885s] ( 7/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_curly_quotes
+        PASS [   3.891s] ( 8/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_decodes_byte_fallback_tokens_to_utf8
+        PASS [   3.908s] ( 9/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_curly_quote_leading_space
+        PASS [   4.198s] (10/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_legacy_byte_level_path_still_splits_newlines_into_gpt2_remap_tokens
+        PASS [   3.804s] (11/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_mixed_paragraphs
+        PASS [   3.803s] (12/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_triple_only
+        PASS [   3.877s] (13/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_double
+        PASS [   3.797s] (14/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_space_runs_inner
+        PASS [   3.844s] (15/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_space_runs_edges
+        PASS [   3.823s] (16/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_war_and_peace_2000
+        PASS [   3.896s] (17/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_single
+        PASS [   3.823s] (18/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_round_trips_real_text_shapes
+        PASS [   3.948s] (19/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_war_and_peace_30000
+        PASS [   3.734s] (20/20) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_vocab_lookups_by_string
+────────────
+     Summary [   7.932s] 20 tests run: 20 passed, 0 skipped

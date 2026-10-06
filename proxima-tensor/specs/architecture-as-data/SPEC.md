@@ -158,7 +158,7 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC1 | R1 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/swa_rope_from_metadata/)'` | 2 passed: E2B and 26B tables equal the `rope.freq_base_swa`/`rope.dimension_count_swa` in `gguf_kv.txt` | 2 passed only if the files hold 1e4/256 (the hard-coded values); slice 0 records which, and a file with other values makes the control FAIL |
 | AC2 | R3, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/generic_verify_llama_parity_/)'` | 5 passed: gemma4 E2B, openchat, qwen2, qwen3 and granite moe, each loaded from its header descriptor with `speculative_verify` set, drafts forced at widths 1 and 3, at least one verify step run, equal their llama ids | the same tests with `speculative_verify` unset: 0 passed, 2 failed ("the verify program never ran"; measured on gemma4 E2B and qwen2). At the previous commit the openchat and qwen3 verify programs did not exist |
 | AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 8 passed (the seven checkpoints of the original count plus granite moe): bound names, codec, byte length and sha256 equal the incumbent's; the storage class of an f32 tensor (borrowed from the mapping or owned) is not compared, because the incumbent's gemma4 binder held its norms owned and its layer output scale borrowed, a split no property of the program decides; the f32 bytes and sha256 are compared | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
-| AC4 | R6 | consistency | `git grep -nIiP '\b(gemma4\|qwen35moe\|qwen35\|qwen2\|lfm2\|mistral\|llama)\b' -- proxima-model-interop/src proxima-tensor/src omega/src proxima-tokenizer/src ':!*tests*' ':!*profiles*' \| wc -l` | 0 | 1214 |
+| AC4 | R6 | consistency | `git grep -nIiP '\b(gemma4\|qwen35moe\|qwen35\|qwen2\|lfm2\|mistral)\b\|\bllama\b(?!\.(?:cpp\|h)\b\|-[a-z])' -- proxima-model-interop/src proxima-tensor/src omega/src proxima-tokenizer/src ':!*tests*' ':!*profiles*' ':!*test_support*' ':!*gguf_names*' \| wc -l` | 0. The pattern counts a family name, and `llama` only when it is the family: `llama.cpp`, `llama.h` and `llama-*` (`llama-server`, `llama-vocab.cpp`, `llama-bpe`, the `speculative-decode-llama-parity` spec path) name the incumbent oracle and the pre type it defines, and attribution to a port's upstream travels in-tree (principle 10). Excluded paths: `*tests*` (test source, including the `tests.rs` files inline test modules were moved into), `*test_support*` (a module compiled only under `cfg(test)`), `*profiles*` (family profile data), `*gguf_names*` (the strings the GGUF format itself defines for `tokenizer.ggml.model` and `tokenizer.ggml.pre`: file-format values read from a file, never a branch on which checkpoint is loaded) | 1214 at 9dd9deef under the original pattern; 846 at c7d45e8d under this pattern (control: the pattern measures something) |
 | AC5 | R2 | consistency | `git grep -nP '\b(trait\|impl\|struct\|enum)\b[^;{]*Architecture' -- proxima-model-interop/src proxima-tensor/src \| wc -l`, then `cargo nextest run -p proxima-model-interop --features std,metal,conflaguration -E 'test(/model_config_roundtrip_/) or test(/serving_fsm_drives_/)'` | 0; then 10 passed: one descriptor config round trip per checkpoint that lowers through the descriptor (8: gemma4 26B and E2B, openchat, qwen2, qwen3, granite moe, qwen35, qwen35moe), plus 2 FSM tests (a plain decode and a speculative verify-accept-rollback run that the live generate path routes through `ServingState`) | first command prints 17 (trait, registry, 4 family impls, the test fake, and the per-family `Architecture`/`*Architecture` hparams structs); second: tests absent |
 | AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/) and not test(/generic_verify_/)'` | 7 passed, one per checkpoint with an oracle: gemma4 26b, gemma4 e2b, granite moe, openchat, qwen2, qwen3 (6 at slice 8; qwen35 and qwen35moe have none, O1) and lfm2 from slice 9 | 3 passed, 4 failed at ac4eb2c7 (measured 2026-10-04); 4 passed (gemma4 e2b, openchat, qwen2, qwen3) once ids are compared through llama's first EOG (owner stop-set policy). Still failing: D2 gemma4 26b diverges at index 0 on 2 of 3 prompts; O1 qwen35 + qwen35moe have no oracle (llama f1ea20621 rejects the blobs: rope.dimension_sections length 3, expects 4) |
 | AC7 | R4 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/window_ring_layers_/)'` | 2 passed: (a) gemma4 E2B ring layers equal `swa_layers.txt`; (b) a synthetic descriptor with a window on one dense layer gets a ring on exactly that layer | 1 passed, 1 failed ((b) fails: dense layers ignore the window) |
@@ -555,8 +555,8 @@ function; `opt-level` did not move it. Attribution table:
   `Qwen35MoeLayerSegments` lose the model name; the seven serving knobs `qwen35moe_pre_gather`,
   `_persistent_cuts`, `_residency_budget_bytes`, `_expert_prefetch`, `_monolithic_all_low`, `_layer_window`,
   `_monolithic_high_mmap` are `moe_*` (the `examples/gguf_generate.rs` env spelling follows:
-  `PROXIMA_MOE_PRE_GATHER`). Test function names and the `qwen35moe-*` cargo feature names keep the checkpoint
-  name.
+  `PROXIMA_MOE_PRE_GATHER`). Test function names keep the checkpoint name; the `qwen35moe-*` cargo features were
+  renamed `moe-*` by slice 12.
 - Measured, AC5 first command: 17 at 91280669, 0 at `292c2b96` (`evidence/family_profile/acs/ac5_grep.txt` is
   empty). AC4 (the name search, not this row's AC): 1190 at 91280669, 1113 at `292c2b96`.
 - Spec correction: the AC5 second command named `descriptor_config_parity_` tests that no commit ever held; the
@@ -592,3 +592,100 @@ function; `opt-level` did not move it. Attribution table:
   carries the same value, so the loop can rebuild that program from the descriptor in force and drop the family
   reader from the loop; AC4 counts that name and the `qwen35moe`, `gemma4` and `lfm2` module and profile-key
   literals still in non-test source.
+
+## findings from slice 12 (the name sweep, 2026-10-06)
+
+- Landed as eight commits: `2033ce4c` (the moe cargo features), `595a6cf0` (header-reader modules named by
+  schedule source), `c3c5d121` (omega), `4fa6acca` (tensor), `9faa10f6` (tokenizer), `69ad046b` (expert window
+  errors), `301c96a8` (interop), `b67b7297` (task classifier).
+- AC4, measured: 1110 under the original pattern at `c7d45e8d` (1214 at 9dd9deef); 0 under the pattern in the AC4
+  row at `b67b7297`, 846 under that pattern at `c7d45e8d` (the control: the pattern measures something).
+  Under the original pattern the tip still prints 463 lines, all accounted for (`evidence/name_sweep/ac4/`): 442
+  name the incumbent (`llama.cpp`, `llama.h`, `llama-*`), 13 are the file-format names in `gguf_names.rs`, 8 are
+  in `test_support.rs`, 0 are anything else.
+- What the pattern excludes, and why each is not a family branch. (1) The incumbent oracle: llama.cpp is the
+  project the vendored parity ids come from and the upstream the tokenizer drafters, samplers and pre-split
+  scanners are ports of; principle 10 puts the attribution in-tree, so those 442 lines stay. (2) `gguf_names.rs`
+  in `proxima-tokenizer`: the `tokenizer.ggml.model` values (`"llama"` selects the scores-driven SentencePiece
+  engine, `"gpt2"` the merges-driven byte-level one) and the `tokenizer.ggml.pre` names (`"qwen2"`, `"qwen35"`,
+  `"lfm2"`, `"llama-bpe"` and the rest of llama.cpp's `LLAMA_VOCAB_PRE_TYPE_*` spelled as strings) are values a
+  GGUF file carries, mapped once to a `PreType` or an engine; nothing else in the crate branches on them. The
+  `PreType` variants that carried a model name are named by the rule they apply: `Llama3` is `GroupedDigits`,
+  `Qwen2` is `SingleDigit`, `Qwen35` is `SingleDigitMarks`. (3) `test_support.rs`: a module compiled only under
+  `cfg(test)`. (4) `*tests*` paths: the inline test modules of `bind`, `dense`, `hf_config`, `lowering`,
+  `task`, `transform`, `recurrent_routed_interval::hparams`, `sliding_pattern::bind`, the pre-gather exclusion
+  tests and the tokenizer's `gguf` module moved to `tests.rs`-style files beside their host (the `include!`
+  path in the tokenizer's moved module gained one `../`), because their fixtures are real GGUF headers whose
+  `general.architecture` value is the family name.
+- Designs abandoned. (a) Rewriting every test header to a neutral architecture string: the headers are the real
+  key names of real files (`llama.rope.freq_base`, `gemma4.attention.sliding_window_pattern`), and a neutral name
+  would have broken the profile lookup the tests exist to exercise. (b) A `family` argument threaded through
+  `descriptor_from_architecture` and `bind_qwen35_checkpoint`: the hparams already read `general.architecture`, so
+  `Qwen35Hparams` and `Qwen35MoeHparams` carry it as a `family` field and the two `const FAMILY` literals are gone.
+  (c) Keeping `PreGatherExecutionUnsupported { architecture: "qwen35moe" }` at the expert sidecar and slab sites:
+  those layers see byte ranges and never a family, so the literal was an invented value; they return the new
+  `InteropError::ExpertWindowUnavailable { reason }`. (d) Deleting the tokenizer name table: the strings are what
+  the file says, so the table stays and moves into the one excluded module.
+- Renames. Modules `gemma4`, `qwen35moe`, `qwen35`, `lfm2` of `proxima-model-interop` are `sliding_pattern`,
+  `recurrent_routed_interval`, `recurrent_interval`, `short_conv` (the `ScheduleSource` names, plus the one
+  reader that has no source of its own). Cargo features `qwen35moe-linked-suffix` and `qwen35moe-expert-prefetch`
+  are `moe-linked-suffix` and `moe-expert-prefetch`. Log and error strings that named a family
+  (`"qwen35 sidecar action"`, `"dispatch_profile: qwen35moe full graph"`, the pre-gather `reason` strings, the
+  cached-attention decline messages) name the shape instead; no consumer outside the crate reads them (one
+  `git grep` over the workspace, docs and specs excluded). Comments that named a family say `sliding-pattern`,
+  `recurrent-interval`, `recurrent-routed`, `short-conv` or the E2B checkpoint; a comment that cited a key of a
+  real file says `{architecture}.<key>`.
+- The task classifier (leftover 1). `architecture_task` matched `bert`, `encoder`, `reranker` and `crossencoder`
+  inside the architecture name. `encoder_task` reads the header: a `{architecture}.pooling_type` key means an
+  encoder (value 4, `LLAMA_POOLING_TYPE_RANK` at `include/llama.h:182` of llama.cpp f1ea20621, is a reranker; any
+  other value is an embedding model), and `{architecture}.attention.causal = false` with no pooling key is an
+  embedding model. Real headers read with `task_probe` and a key dump (`evidence/name_sweep/task/`): all-minilm
+  (`bert`: `attention.causal = false`, `pooling_type = 1`) and nomic-embed-text (`nomic-bert`: the same two
+  values) classify as embedding; granite3.1-moe and gemma4 E2B classify as causal generation. No local
+  checkpoint declares `pooling_type = 4`, so the reranker branch rests on the llama.h constant and a synthetic
+  header test, not on a real file. Control: with the previous `task.rs` the new tests fail 5 of 12
+  (`task_control_old_code.log`), among them a decoder whose architecture is called `bert_style_decoder`; with the
+  new one 12 pass. What stays name-shaped in `task.rs`: the explicit `general.task`/`general.pipeline_tag` words
+  and the `general.name` words (`rerank`, `embedding`, `classification`), which read what a file says about its
+  task, not an architecture.
+- The tokenizer model strings (leftover 2) are file-format values read from `tokenizer.ggml.model`, kept in
+  `gguf_names.rs` as `MODEL_UNIGRAM` and `MODEL_BYTE_LEVEL_BPE`; `vocab_from_metadata` still selects its engine
+  from the arrays the file carries.
+- Not counted by AC4 and not renamed here: AC4's pattern is word-bounded, so an identifier that embeds a name is
+  invisible to it. 315 non-comment lines of the four crates' non-test source contain one (`Qwen35Hparams`,
+  `Qwen35MoeHparams`, `Lfm2Hparams`, `Gemma4Hparams`, `qwen35_forward_program`, `qwen35moe_forward_program_at_width`,
+  `lfm2_forward_program_with_experts`, the `mistral_*` builders, `PROXIMA_QWEN35MOE_GGUF`, and the file names
+  `proxima-tensor/src/spec/{lfm2_qwen35_gdn,lfm2_single_range_cached,mistral_forward_cached,mistral_layer_moe,
+  hyperconn_qwen35_dense}.rs`). R6 as written ("no architecture name in non-test source") covers them; AC4 does
+  not. Measured: `git grep -nIiP '(gemma4|qwen35moe|qwen35|qwen2|lfm2|mistral)'` over the AC4 paths and
+  exclusions, comment lines removed, prints 315.
+- Gates, per-slice tier at `b67b7297` (`evidence/name_sweep/gates/`): clippy exit 0, tensor alloc check exit 0,
+  interop no-default check exit 0, tensor 779 passed 8 skipped (6.5 s), interop slice-gate 708 passed 124 skipped
+  (97.2 s: 703 at the previous slice, 1 `short_conv` unit test that the `lfm2` name filter no longer excludes, and
+  4 new `task` tests; the set of test names equals the previous slice's after mapping the four module names, plus
+  those five), tokenizer 203 passed 21 skipped (18.3 s), tokenizer alloc+gguf check exit 0. AC0 8 passed (2.7 s),
+  AC1 2, AC2 5 passed (163.7 s), AC3 8 passed (71.5 s), AC5 first command 0 and second 10 passed, AC6 7 passed
+  (158.9 s), AC7 2, AC8 20 passed (7.9 s), AC9 8 passed, AC10 2 passed, AC11 0 and exit 0. Doc tests: tokenizer 1,
+  tensor 1, interop 0 (the crate has none). No digest fixture changed.
+- Performance. Digests byte-identical, but the decode loop's source changed (log and error strings, comments), so
+  the quick arms ran: decode_arms 2 processes x 3 runs, tip (release `decode_gbps_baseline` built at `301c96a8`,
+  sha256 `8a994d9a48b7c9eefd7f50cefc84d39a3005e8016f64cad5c8559baee18e3ded`; the one later commit changes only
+  `classify_task`, which no arm exercises) against the 0c binary and its copy, Ollama stopped by SIGTERM
+  (`osascript` quit returned "User canceled") and reopened after, no cargo process running; box load 3.95 at the
+  E2B launch, with the two busiest background processes at 86.1% and 84.6% CPU (`box_load.txt` in each evidence directory). gemma4 E2B, 18 of 18 bound lines
+  within: ms/token tip 12.1970 vs 0c 12.2610 (limit 0.2452), prefill 2515.4690 vs 2513.5185 ms (limit 50.2704),
+  TTFT +2.0 ms, peak RSS -51740672 B (limit 78140867), footprint -5529888 B, GPU bytes -1179648 B (the delta every
+  slice since 8 reports, not traced). granite moe, three runs because the first one missed the memory bound:
+  run 1 (2 processes x 3 runs, arms 0c / 0c_ctl / tip): ms/token 15.0265 vs 15.0470 (limit 0.3009), prefill
+  6514.9575 vs 6511.5165 ms, TTFT +3.5 ms, GPU bytes 0, peak RSS tip 2567536640 vs 0c 2443403264 (+124133376; the
+  bound is max(2% = 48868065, |ctl - base| = 65290240) = 65290240, so a miss) and peak footprint 680868000 vs
+  639342848 (+41525152; bound max(12786857, 6381856) = 12786857, a miss). Re-runs with a same-binary copy of the
+  tip added (`tip_ctl`): run 2 (4 processes): ms/token 14.9595 vs 14.9590, prefill +4.5 ms, RSS +23617536 (bound
+  max(49100063, 43565056)), footprint +7331744 (bound max(12010256, 34701248)); run 3 (6 processes): ms/token
+  15.0435 vs 15.0270, prefill +4.0 ms, RSS -16547840, footprint -29015904, GPU bytes 0 in every arm of every run.
+  The tip against its own copy in the same runs: RSS -74522624 and footprint +21069632 (run 2), RSS +66805760 and
+  footprint +31874912 (run 3). The first run's two misses did not reproduce in runs 2 and 3; the sign of the
+  tip-vs-0c memory delta follows the run (+124133376, +23617536, -16547840 B RSS), as it did at slices 8 and 11,
+  and per-process RSS of one binary spans 2.34 to 2.68 GB in these runs. Reading the diff (not measured), nothing in the slice adds memory at
+  load (a `String` per hparams struct, a closed error variant, strings); the cause of the run-1 delta is not
+  traced. Evidence: `evidence/name_sweep/perf_e2b`, `perf_granite`, `perf_granite_run2`, `perf_granite_run3`.

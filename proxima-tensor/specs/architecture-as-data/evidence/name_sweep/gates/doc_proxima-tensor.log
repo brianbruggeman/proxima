@@ -1,0 +1,19 @@
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-protocols)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-patterns)
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tokenizer)
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-net)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-process)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-recording)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-listen)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-quic)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-http)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.82s
+   Doc-tests proxima_tensor
+
+running 1 test
+test proxima-tensor/src/lib.rs - (line 124) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.83s; merged doctests compilation took 0.67s

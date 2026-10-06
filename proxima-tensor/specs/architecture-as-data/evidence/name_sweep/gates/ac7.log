@@ -1,0 +1,8 @@
+    Finished `gate` profile [optimized] target(s) in 0.28s
+────────────
+ Nextest run ID 0f04a64f-06ef-467d-a16a-3ede54e5c377 with nextest profile: default
+    Starting 2 tests across 31 binaries (670 tests skipped)
+        PASS [   0.346s] (1/2) proxima-model-interop::arch_data_baseline window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints
+        PASS [   0.043s] (2/2) proxima-model-interop::arch_data_baseline window_ring_layers_follow_a_window_on_one_dense_layer
+────────────
+     Summary [   0.391s] 2 tests run: 2 passed, 670 skipped

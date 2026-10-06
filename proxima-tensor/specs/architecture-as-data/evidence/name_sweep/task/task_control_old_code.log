@@ -1,0 +1,125 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 10.74s
+────────────
+ Nextest run ID 8fef20ca-c0ac-47ac-a0db-9d657ca5d19d with nextest profile: default
+    Starting 12 tests across 31 binaries (660 tests skipped)
+        PASS [   0.010s] ( 1/12) proxima-model-interop task::tests::model_name_distinguishes_qwen_embedding_from_decoder
+        PASS [   0.011s] ( 2/12) proxima-model-interop task::tests::a_nomic_bert_header_with_mean_pooling_is_an_embedding_model
+        PASS [   0.011s] ( 3/12) proxima-model-interop task::tests::a_future_family_with_block_keys_and_no_pooling_is_a_decoder
+        PASS [   0.011s] ( 4/12) proxima-model-interop task::tests::a_checkpoint_with_no_block_keys_is_unknown
+        FAIL [   0.011s] ( 5/12) proxima-model-interop task::tests::non_causal_attention_key_is_an_embedding_encoder
+  stdout ───
+
+    running 1 test
+    test task::tests::non_causal_attention_key_is_an_embedding_encoder ... FAILED
+
+    failures:
+
+    failures:
+        task::tests::non_causal_attention_key_is_an_embedding_encoder
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 556 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'task::tests::non_causal_attention_key_is_an_embedding_encoder' (65167646) panicked at proxima-model-interop/src/task/tests.rs:95:5:
+    assertion `left == right` failed
+      left: Unknown
+     right: Embedding
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.012s] ( 6/12) proxima-model-interop task::tests::a_bert_header_with_mean_pooling_is_an_embedding_model
+  stdout ───
+
+    running 1 test
+    test task::tests::a_bert_header_with_mean_pooling_is_an_embedding_model ... FAILED
+
+    failures:
+
+    failures:
+        task::tests::a_bert_header_with_mean_pooling_is_an_embedding_model
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 556 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'task::tests::a_bert_header_with_mean_pooling_is_an_embedding_model' (65167648) panicked at proxima-model-interop/src/task/tests.rs:136:5:
+    assertion `left == right` failed
+      left: ["architecture family: bert"]
+     right: ["encoder keys: bert"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.011s] ( 7/12) proxima-model-interop task::tests::classifier_head_is_not_a_decoder
+        PASS [   0.011s] ( 8/12) proxima-model-interop task::tests::decoder_family_is_generation
+        PASS [   0.012s] ( 9/12) proxima-model-interop task::tests::explicit_reranker_wins
+        FAIL [   0.012s] (10/12) proxima-model-interop task::tests::an_architecture_named_like_an_encoder_with_decoder_keys_is_a_decoder
+  stdout ───
+
+    running 1 test
+    test task::tests::an_architecture_named_like_an_encoder_with_decoder_keys_is_a_decoder ... FAILED
+
+    failures:
+
+    failures:
+        task::tests::an_architecture_named_like_an_encoder_with_decoder_keys_is_a_decoder
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 556 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'task::tests::an_architecture_named_like_an_encoder_with_decoder_keys_is_a_decoder' (65167655) panicked at proxima-model-interop/src/task/tests.rs:153:5:
+    assertion `left == right` failed
+      left: Embedding
+     right: CausalGeneration
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.009s] (11/12) proxima-model-interop task::tests::rank_pooling_marks_a_reranker_whatever_the_family_is_called
+  stdout ───
+
+    running 1 test
+    test task::tests::rank_pooling_marks_a_reranker_whatever_the_family_is_called ... FAILED
+
+    failures:
+
+    failures:
+        task::tests::rank_pooling_marks_a_reranker_whatever_the_family_is_called
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 556 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'task::tests::rank_pooling_marks_a_reranker_whatever_the_family_is_called' (65167659) panicked at proxima-model-interop/src/task/tests.rs:146:5:
+    assertion `left == right` failed
+      left: Embedding
+     right: Reranker
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.009s] (12/12) proxima-model-interop task::tests::pooling_type_key_marks_an_encoder_whatever_the_family_is_called
+  stdout ───
+
+    running 1 test
+    test task::tests::pooling_type_key_marks_an_encoder_whatever_the_family_is_called ... FAILED
+
+    failures:
+
+    failures:
+        task::tests::pooling_type_key_marks_an_encoder_whatever_the_family_is_called
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 556 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'task::tests::pooling_type_key_marks_an_encoder_whatever_the_family_is_called' (65167658) panicked at proxima-model-interop/src/task/tests.rs:85:5:
+    assertion `left == right` failed
+      left: Unknown
+     right: Embedding
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.024s] 12 tests run: 7 passed, 5 failed, 660 skipped
+        FAIL [   0.011s] ( 5/12) proxima-model-interop task::tests::non_causal_attention_key_is_an_embedding_encoder
+        FAIL [   0.012s] ( 6/12) proxima-model-interop task::tests::a_bert_header_with_mean_pooling_is_an_embedding_model
+        FAIL [   0.012s] (10/12) proxima-model-interop task::tests::an_architecture_named_like_an_encoder_with_decoder_keys_is_a_decoder
+        FAIL [   0.009s] (11/12) proxima-model-interop task::tests::rank_pooling_marks_a_reranker_whatever_the_family_is_called
+        FAIL [   0.009s] (12/12) proxima-model-interop task::tests::pooling_type_key_marks_an_encoder_whatever_the_family_is_called
+error: test run failed

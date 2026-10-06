@@ -1,0 +1,209 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+────────────
+ Nextest run ID 28148812-0a8f-4ef6-b2a6-83eb5f059092 with nextest profile: default
+    Starting 203 tests across 5 binaries (21 tests skipped)
+        PASS [   0.013s] (  1/203) proxima-tokenizer bpe::tests::decode_out_of_range_id_is_an_error
+        PASS [   0.014s] (  2/203) proxima-tokenizer bpe::tests::char_level_literal_latin1_token_decodes_as_utf8_not_the_gpt2_inverse_remap
+        PASS [   0.014s] (  3/203) proxima-tokenizer bpe::tests::encode_pretoken_prefers_the_lowest_rank_merge_first
+        PASS [   0.014s] (  4/203) proxima-tokenizer bpe::tests::encode_pretoken_leaves_unmergeable_bytes_as_base_tokens
+        PASS [   0.014s] (  5/203) proxima-tokenizer bpe::tests::encode_pretoken_merges_h_and_i_into_hi
+        PASS [   0.014s] (  6/203) proxima-tokenizer bpe::tests::char_level_probe_fires_on_merges_marker_and_hex_newline
+        PASS [   0.016s] (  7/203) proxima-tokenizer bpe::tests::char_level_all_newline_run_maps_to_its_whole_token
+        PASS [   0.017s] (  8/203) proxima-tokenizer bpe::tests::char_level_merges_chain_across_the_space_marker
+        PASS [   0.017s] (  9/203) proxima-tokenizer bpe::tests::char_level_unknown_character_falls_back_to_hex_byte_tokens
+        PASS [   0.017s] ( 10/203) proxima-tokenizer bpe::tests::encode_pretoken_handles_empty_input
+        PASS [   0.009s] ( 11/203) proxima-tokenizer bpe::tests::encode_then_decode_round_trips
+        PASS [   0.009s] ( 12/203) proxima-tokenizer byte_level::tests::every_byte_round_trips_through_the_display_alphabet
+        PASS [   0.009s] ( 13/203) proxima-tokenizer bpe::tests::gpt2_byte_level_path_is_unchanged_by_the_char_level_probe
+        PASS [   0.009s] ( 14/203) proxima-tokenizer byte_level::tests::newline_maps_to_the_known_gpt2_marker
+        PASS [   0.010s] ( 15/203) proxima-tokenizer byte_level::tests::char_to_byte_rejects_a_codepoint_outside_the_alphabet
+        PASS [   0.011s] ( 16/203) proxima-tokenizer byte_level::tests::printable_ascii_maps_to_itself
+        PASS [   0.010s] ( 17/203) proxima-tokenizer byte_level::tests::space_maps_to_the_known_gpt2_marker
+        PASS [   0.009s] ( 18/203) proxima-tokenizer config::tests::default_tracks_the_sized_floor
+        PASS [   0.010s] ( 19/203) proxima-tokenizer config::tests::default_config_validates
+        PASS [   0.012s] ( 20/203) proxima-tokenizer config::tests::env_override_takes_effect_and_does_not_leak
+        PASS [   0.011s] ( 21/203) proxima-tokenizer draft::ngram_cache::tests::a_reused_buffer_holding_a_stale_draft_is_fully_overwritten
+        PASS [   0.011s] ( 22/203) proxima-tokenizer config::tests::zero_max_input_bytes_rejected
+        PASS [   0.010s] ( 23/203) proxima-tokenizer draft::ngram_cache::tests::happy_path_drafts_a_deterministically_repeating_continuation
+        PASS [   0.012s] ( 24/203) proxima-tokenizer draft::ngram_cache::tests::history_too_short_drafts_nothing
+        PASS [   0.011s] ( 25/203) proxima-tokenizer draft::ngram_cache::tests::truncated_cache_file_is_a_typed_error
+        PASS [   0.010s] ( 26/203) proxima-tokenizer draft::ngram_cache::tests::untrained_cache_drafts_nothing_on_first_call
+        PASS [   0.012s] ( 27/203) proxima-tokenizer draft::ngram_cache::tests::update_with_a_single_new_token_delta_learns_nothing
+        PASS [   0.011s] ( 28/203) proxima-tokenizer draft::ngram_map::tests::a_reused_buffer_holding_a_stale_draft_is_fully_overwritten
+        PASS [   0.011s] ( 29/203) proxima-tokenizer draft::ngram_map::tests::happy_path_key_only_drafts_the_earlier_occurrences_continuation
+        PASS [   0.011s] ( 30/203) proxima-tokenizer draft::ngram_map::tests::k4v_ties_between_continuations_draft_nothing
+        PASS [   0.012s] ( 31/203) proxima-tokenizer draft::ngram_map::tests::history_too_short_drafts_nothing
+        PASS [   0.010s] ( 32/203) proxima-tokenizer draft::ngram_mod::tests::diagnostic_line_names_all_four_fields
+        PASS [   0.030s] ( 33/203) proxima-tokenizer draft::ngram_cache::tests::ngram_cache_loads_llama_file
+        PASS [   0.028s] ( 34/203) proxima-tokenizer draft::ngram_mod::tests::a_reused_buffer_holding_a_stale_draft_is_fully_overwritten
+        PASS [   0.023s] ( 35/203) proxima-tokenizer draft::ngram_mod::tests::happy_path_chains_forward_past_the_seed
+        PASS [   0.028s] ( 36/203) proxima-tokenizer draft::ngram_mod::tests::chain_shorter_than_n_min_drafts_nothing
+        PASS [   0.046s] ( 37/203) proxima-tokenizer draft::ngram_cache::tests::ngram_cache_matches_llama_fixture
+        PASS [   0.034s] ( 38/203) proxima-tokenizer draft::ngram_map::tests::ngram_map_k_matches_llama_fixture
+        PASS [   0.027s] ( 39/203) proxima-tokenizer draft::ngram_mod::tests::history_shorter_than_n_match_drafts_nothing
+        PASS [   0.010s] ( 40/203) proxima-tokenizer draft::ngram_simple::tests::a_reused_buffer_holding_a_stale_draft_is_fully_overwritten
+        PASS [   0.009s] ( 41/203) proxima-tokenizer draft::ngram_simple::tests::happy_path_drafts_the_earlier_occurrences_continuation
+        PASS [   0.031s] ( 42/203) proxima-tokenizer draft::ngram_mod::tests::low_acceptance_streak_resets_after_five_rounds
+        PASS [   0.042s] ( 43/203) proxima-tokenizer draft::ngram_map::tests::ngram_map_k4v_matches_llama_fixture
+        PASS [   0.010s] ( 44/203) proxima-tokenizer draft::ngram_simple::tests::history_too_short_drafts_nothing
+        PASS [   0.010s] ( 45/203) proxima-tokenizer draft::ngram_simple::tests::no_matching_pattern_drafts_nothing
+        PASS [   0.008s] ( 46/203) proxima-tokenizer draft::tests::empty_logit_rows_is_none
+        PASS [   0.010s] ( 47/203) proxima-tokenizer draft::tests::all_drafts_accepted_yields_the_bonus_token
+        PASS [   0.010s] ( 48/203) proxima-tokenizer draft::tests::first_row_reject_ends_acceptance_immediately
+        PASS [   0.010s] ( 49/203) proxima-tokenizer draft::tests::greedy_accept_is_zero_when_the_first_token_disagrees
+        PASS [   0.008s] ( 50/203) proxima-tokenizer draft::tests::greedy_accept_of_empty_drafts_is_zero
+        PASS [   0.020s] ( 51/203) proxima-tokenizer draft::tests::accepted_never_exceeds_drafts_and_next_is_the_accepted_rows_argmax
+        PASS [   0.009s] ( 52/203) proxima-tokenizer draft::tests::greedy_accept_stops_at_the_first_disagreement
+        PASS [   0.008s] ( 53/203) proxima-tokenizer draft::tests::greedy_accept_stops_at_the_shorter_target_argmax_without_panicking
+        PASS [   0.009s] ( 54/203) proxima-tokenizer draft::tests::greedy_accept_takes_the_whole_prefix_when_every_draft_matches
+        PASS [   0.014s] ( 55/203) proxima-tokenizer draft::tests::greedy_accept_reproduces_one_at_a_time_greedy_decode_exactly
+        PASS [   0.009s] ( 56/203) proxima-tokenizer draft::tests::identical_distributions_residual_falls_back_to_target_argmax_without_panicking
+        PASS [   0.008s] ( 57/203) proxima-tokenizer draft::tests::no_bonus_row_after_full_acceptance_is_none
+        PASS [   0.015s] ( 58/203) proxima-tokenizer draft::tests::greedy_accept_stops_exactly_at_a_planted_divergence
+        PASS [   0.010s] ( 59/203) proxima-tokenizer draft::tests::middle_row_reject_accepts_the_matching_prefix_only
+        PASS [   0.008s] ( 60/203) proxima-tokenizer draft::tests::zero_length_draft_uses_only_the_bonus_row
+        PASS [   0.010s] ( 61/203) proxima-tokenizer draft::tests::zero_draft_probability_guard_never_panics_and_always_corrects
+        PASS [   0.011s] ( 62/203) proxima-tokenizer draft::tests::point_mass_reject_never_redraws_the_rejected_token
+        PASS [   0.010s] ( 63/203) proxima-tokenizer gguf::tests::bool_add_bos_and_add_eos_keys_thread_through_to_the_vocab
+        PASS [   0.011s] ( 64/203) proxima-tokenizer gguf::tests::char_level_vocab_builds_with_no_pre_key_whatever_its_model_string
+        PASS [   0.010s] ( 65/203) proxima-tokenizer gguf::tests::char_level_vocab_does_not_consult_the_pre_key
+        PASS [   0.009s] ( 66/203) proxima-tokenizer gguf::tests::empty_pre_value_is_treated_as_missing
+        PASS [   0.010s] ( 67/203) proxima-tokenizer gguf::tests::missing_pre_key_selects_the_default_pre_split_like_llama_cpp
+        PASS [   0.010s] ( 68/203) proxima-tokenizer gguf::tests::missing_tokens_key_is_an_error
+        PASS [   0.050s] ( 69/203) proxima-tokenizer draft::ngram_simple::tests::ngram_simple_matches_llama_fixture
+        PASS [   0.008s] ( 70/203) proxima-tokenizer gguf::tests::unknown_model_without_merges_or_scores_is_unsupported
+        PASS [   0.010s] ( 71/203) proxima-tokenizer gguf::tests::pre_value_selects_the_pre_split_the_way_llama_cpp_maps_it
+        PASS [   0.010s] ( 72/203) proxima-tokenizer gguf::tests::unmapped_pre_value_is_an_error_carrying_the_value
+        PASS [   0.010s] ( 73/203) proxima-tokenizer gguf::tests::wrong_typed_add_bos_token_key_is_an_error
+        PASS [   0.008s] ( 74/203) proxima-tokenizer gguf_names::tests::gguf_pre_names_map_like_llama_cpp
+        PASS [   0.008s] ( 75/203) proxima-tokenizer pipe::tests::encode_with_bos_eos_prepends_and_appends
+        PASS [   0.008s] ( 76/203) proxima-tokenizer pipe::tests::gemma4_shaped_decode_unescapes_space_marker_to_a_real_space
+        PASS [   0.009s] ( 77/203) proxima-tokenizer pipe::tests::decode_suppresses_control_tokens_from_decoded_text
+        PASS [   0.012s] ( 78/203) proxima-tokenizer gguf_names::tests::gpt2_family_names_map_to_the_pass_pipelines_like_llama_cpp
+        PASS [   0.009s] ( 79/203) proxima-tokenizer pipe::tests::round_trip_arbitrary_ascii_and_multibyte_utf8
+        PASS [   0.010s] ( 80/203) proxima-tokenizer pipe::tests::unigram_round_trip_arbitrary_ascii_and_multibyte_utf8
+        PASS [   0.010s] ( 81/203) proxima-tokenizer pipe::tests::unigram_vocab_dispatches_to_the_unigram_encoder_not_bpe
+        PASS [   0.009s] ( 82/203) proxima-tokenizer pretokenize::tests::contraction_is_its_own_pretoken
+        PASS [   0.009s] ( 83/203) proxima-tokenizer pretokenize::tests::default_pre_split_covers_the_input_contiguously
+        PASS [   0.008s] ( 84/203) proxima-tokenizer pretokenize::tests::default_pre_split_isolates_the_apostrophe_before_contractions_can_match
+        PASS [   0.010s] ( 85/203) proxima-tokenizer pretokenize::tests::default_pre_split_cuts_digit_runs_into_ascii_triples_after_punctuation_runs
+        PASS [   0.008s] ( 86/203) proxima-tokenizer pretokenize::tests::digit_isolated_gpt2_pre_split_cuts_every_digit_out_of_words
+        PASS [   0.008s] ( 87/203) proxima-tokenizer pretokenize::tests::empty_input_has_no_pretokens
+        PASS [   0.009s] ( 88/203) proxima-tokenizer pretokenize::tests::digit_runs_cap_at_three
+        PASS [   0.009s] ( 89/203) proxima-tokenizer pretokenize::tests::every_span_concatenates_back_to_the_original_text
+        PASS [   0.009s] ( 90/203) proxima-tokenizer pretokenize::tests::falcon_pre_split_isolates_backticks_and_cuts_ascii_digit_triples
+        PASS [   0.008s] ( 91/203) proxima-tokenizer pretokenize::tests::llama3_digits_still_group_in_threes_where_qwen_splits_singly
+        PASS [   0.010s] ( 92/203) proxima-tokenizer pretokenize::tests::gpt2_pre_split_keeps_digit_runs_whole_and_attaches_the_space
+        PASS [   0.008s] ( 93/203) proxima-tokenizer pretokenize::tests::multi_space_run_leaves_last_space_for_the_word
+        PASS [   0.008s] ( 94/203) proxima-tokenizer pretokenize::tests::newline_runs_cover_the_input_contiguously
+        PASS [   0.009s] ( 95/203) proxima-tokenizer pretokenize::tests::newline_run_is_its_own_pretoken
+        PASS [   0.008s] ( 96/203) proxima-tokenizer pretokenize::tests::newline_runs_of_empty_text_is_empty
+        PASS [   0.009s] ( 97/203) proxima-tokenizer pretokenize::tests::newline_runs_keep_spaces_carriage_returns_and_multibyte_inside_a_line
+        PASS [   0.008s] ( 98/203) proxima-tokenizer pretokenize::tests::newline_runs_split_only_on_newline_boundaries
+        PASS [   0.010s] ( 99/203) proxima-tokenizer pretokenize::tests::punctuation_run_with_leading_space
+        PASS [   0.010s] (100/203) proxima-tokenizer pretokenize::tests::qwen35_keeps_combining_marks_inside_the_word
+        PASS [   0.010s] (101/203) proxima-tokenizer pretokenize::tests::qwen_digits_split_one_per_pretoken
+        PASS [   0.008s] (102/203) proxima-tokenizer sample::tests::all_nan_config_dispatches_to_general_path_exactly
+        PASS [   0.010s] (103/203) proxima-tokenizer pretokenize::tests::splits_hello_world_with_leading_space_attached
+        PASS [   0.009s] (104/203) proxima-tokenizer pretokenize::tests::trailing_whitespace_run_is_swallowed_whole
+        PASS [   0.010s] (105/203) proxima-tokenizer sample::tests::a_skipped_recent_id_does_not_block_a_later_non_recent_id_with_the_same_value
+        PASS [   0.009s] (106/203) proxima-tokenizer sample::tests::all_nan_logits_general_path_picks_the_last_index_not_the_first
+        PASS [   0.011s] (107/203) proxima-tokenizer sample::tests::apply_top_k_matches_the_reference_stable_sort_over_random_ties
+        PASS [   0.009s] (108/203) proxima-tokenizer sample::tests::constant_logits_do_not_leak_a_wrong_peak
+        PASS [   0.008s] (109/203) proxima-tokenizer sample::tests::empty_logits_sample_nothing
+        PASS [   0.009s] (110/203) proxima-tokenizer sample::tests::default_config_matches_greedy_pick_exactly
+        PASS [   0.009s] (111/203) proxima-tokenizer sample::tests::empty_logits_pick_nothing
+        PASS [   0.009s] (112/203) proxima-tokenizer sample::tests::greedy_fast_path_counts_duplicate_recent_tokens_correctly
+        PASS [   0.009s] (113/203) proxima-tokenizer sample::tests::greedy_fast_path_is_safe_at_the_recent_window_capacity_boundary
+        PASS [   0.008s] (114/203) proxima-tokenizer sample::tests::greedy_fast_path_on_constant_logits_returns_index_zero
+        PASS [   0.007s] (115/203) proxima-tokenizer sample::tests::min_p_drops_candidates_below_the_relative_probability_threshold
+        PASS [   0.009s] (116/203) proxima-tokenizer sample::tests::min_p_above_one_config_dispatches_to_general_path_exactly
+        PASS [   0.011s] (117/203) proxima-tokenizer sample::tests::one_nan_config_dispatches_to_general_path_exactly
+        PASS [   0.008s] (118/203) proxima-tokenizer sample::tests::picks_the_single_peak
+        PASS [   0.011s] (119/203) proxima-tokenizer sample::tests::raw_scan_ties_resolve_to_the_first_index_not_a_later_equal_value
+        PASS [   0.012s] (120/203) proxima-tokenizer sample::tests::repetition_penalty_leaves_unseen_tokens_untouched
+        PASS [   0.015s] (121/203) proxima-tokenizer sample::tests::repetition_penalty_before_temperature_differs_from_after
+        PASS [   0.013s] (122/203) proxima-tokenizer sample::tests::repetition_penalty_matches_llama_cpp_formula_by_hand
+        PASS [   0.013s] (123/203) proxima-tokenizer sample::tests::same_seed_and_logits_always_pick_the_same_token_across_100_draws
+        PASS [   0.009s] (124/203) proxima-tokenizer sample::tests::temperature_zero_converges_to_argmax_matching_greedy_pick
+        PASS [   0.011s] (125/203) proxima-tokenizer sample::tests::top_k_keeps_exactly_the_k_highest_logits_sorted_descending
+        PASS [   0.013s] (126/203) proxima-tokenizer sample::tests::ties_resolve_to_the_lowest_index
+        PASS [   0.029s] (127/203) proxima-tokenizer sample::tests::temperature_softmax_distribution_matches_known_probabilities
+        PASS [   0.011s] (128/203) proxima-tokenizer sample::tests::top_k_zero_or_negative_disables_the_filter
+        PASS [   0.011s] (129/203) proxima-tokenizer sample::tests::top_p_keeps_the_smallest_prefix_reaching_the_cumulative_threshold
+        PASS [   0.010s] (130/203) proxima-tokenizer sample::tests::top_p_of_one_disables_the_filter
+        PASS [   0.174s] (131/203) proxima-tokenizer draft::tests::emitted_token_distribution_matches_target_distribution_exactly_regardless_of_draft
+        PASS [   0.011s] (132/203) proxima-tokenizer tests::a_string_of_only_special_tokens_round_trips
+        PASS [   0.012s] (133/203) proxima-tokenizer tests::added_token_marker_at_string_start_is_emitted_as_its_own_id
+        PASS [   0.015s] (134/203) proxima-tokenizer tests::added_token_marker_at_string_end_is_emitted_as_its_own_id
+        PASS [   0.009s] (135/203) proxima-tokenizer tests::angle_brackets_and_pipes_outside_a_registered_marker_are_ordinary_text
+        PASS [   0.011s] (136/203) proxima-tokenizer tests::back_to_back_added_token_markers_produce_no_text_between_them
+        PASS [   0.010s] (137/203) proxima-tokenizer tests::decoding_an_invalid_byte_run_mid_buffer_flushes_one_replacement_char_and_resumes
+        PASS [   0.013s] (138/203) proxima-tokenizer tests::decoding_a_truncated_multibyte_character_at_the_end_recovers_the_valid_prefix
+        PASS [   0.011s] (139/203) proxima-tokenizer tests::decoding_an_unknown_token_id_is_a_typed_error_not_a_panic
+        PASS [   0.011s] (140/203) proxima-tokenizer tests::empty_input_encodes_to_no_tokens
+        PASS [   0.011s] (141/203) proxima-tokenizer tests::longest_added_token_match_wins_over_its_own_prefix_marker
+        PASS [   0.014s] (142/203) proxima-tokenizer tests::special_tokens_are_explicit_not_silently_dropped
+        PASS [   0.017s] (143/203) proxima-tokenizer tests::round_trip_covers_multi_step_merges_and_plain_bytes
+        PASS [   0.016s] (144/203) proxima-tokenizer unigram::tests::encode_fragment_chains_merges_to_the_highest_scoring_piece
+        PASS [   0.136s] (145/203) proxima-tokenizer sample::tests::greedy_fast_path_matches_general_path_over_random_inputs
+        PASS [   0.015s] (146/203) proxima-tokenizer unigram::tests::encode_fragment_falls_back_to_bytes_for_unmatched_symbols
+        PASS [   0.009s] (147/203) proxima-tokenizer unigram::tests::encode_fragment_of_empty_text_is_empty
+        PASS [   0.009s] (148/203) proxima-tokenizer unigram::tests::escape_prepends_and_substitutes_spaces
+        PASS [   0.010s] (149/203) proxima-tokenizer unigram::tests::escape_of_empty_text_stays_empty
+        PASS [   0.010s] (150/203) proxima-tokenizer unigram::tests::unescape_reverses_escape_for_a_plain_word
+        PASS [   0.011s] (151/203) proxima-tokenizer vocab::tests::a_vocab_that_never_sets_bos_eos_policy_reports_none
+        PASS [   0.019s] (152/203) proxima-tokenizer vocab::tests::gemma4_shaped_vocab_derives_sentence_piece_space_marker
+        PASS [   0.011s] (153/203) proxima-tokenizer vocab::tests::gpt2_shaped_vocab_derives_gpt2_byte_level_space_marker
+        PASS [   0.166s] (154/203) proxima-tokenizer sample::tests::oversized_recent_window_dispatches_to_general_path_over_random_inputs
+        PASS [   0.024s] (155/203) proxima-tokenizer vocab::tests::llama_shaped_vocab_derives_sentence_piece_space_marker
+        PASS [   0.016s] (156/203) proxima-tokenizer vocab::tests::malformed_merge_rule_is_an_error
+        PASS [   0.016s] (157/203) proxima-tokenizer vocab::tests::merges_driven_vocab_is_not_unigram
+        PASS [   0.011s] (158/203) proxima-tokenizer vocab::tests::missing_base_byte_token_builds_with_a_fallback_not_an_error
+        PASS [   0.009s] (159/203) proxima-tokenizer vocab::tests::score_array_length_mismatch_is_an_error
+        PASS [   0.012s] (160/203) proxima-tokenizer vocab::tests::scores_driven_vocab_is_unigram
+        PASS [   0.016s] (161/203) proxima-tokenizer vocab::tests::tiny_vocab_resolves_its_merges
+        PASS [   0.009s] (162/203) proxima-tokenizer vocab::tests::unresolved_merge_is_an_error
+        PASS [   0.011s] (163/203) proxima-tokenizer vocab::tests::unresolved_merge_result_is_an_error
+        PASS [   0.009s] (164/203) proxima-tokenizer::drafter_zero_alloc drafter_zero_alloc_control_detects_a_deliberate_allocation
+        PASS [   0.015s] (165/203) proxima-tokenizer vocab::tests::with_bos_eos_policy_preserves_some_false_distinctly_from_none
+        PASS [   0.065s] (166/203) proxima-tokenizer::drafter_zero_alloc drafter_zero_alloc_ngram_map_key_only
+        PASS [   0.083s] (167/203) proxima-tokenizer::drafter_zero_alloc drafter_zero_alloc_ngram_map_four_value
+        PASS [   0.126s] (168/203) proxima-tokenizer::drafter_zero_alloc drafter_zero_alloc_ngram_cache
+        PASS [   0.064s] (169/203) proxima-tokenizer::drafter_zero_alloc drafter_zero_alloc_ngram_simple
+        PASS [   0.462s] (170/203) proxima-tokenizer draft::ngram_mod::tests::occupancy_reset_fires_over_threshold
+        PASS [   0.557s] (171/203) proxima-tokenizer draft::ngram_mod::tests::ngram_mod_matches_llama_fixture
+        PASS [   0.679s] (172/203) proxima-tokenizer sample::tests::greedy_path_ns_per_op_at_full_vocab_size
+        PASS [   1.077s] (173/203) proxima-tokenizer::drafter_zero_alloc drafter_zero_alloc_ngram_mod
+        PASS [   1.561s] (174/203) proxima-tokenizer tests::real_fixture::round_trips_against_the_real_vocab
+        PASS [   1.584s] (175/203) proxima-tokenizer tests::real_fixture::llama3_token_ids_match_llama_cpp_oracle_table
+        PASS [   3.746s] (176/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_ascii_single_spaces
+        PASS [   3.831s] (177/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_ascii_single_space_ids_equal_the_pre_fix_gpt2_path
+        PASS [   3.794s] (178/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_decodes_byte_fallback_tokens_to_utf8
+        PASS [   3.766s] (179/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_chat_template_user_turn
+        PASS [   4.075s] (180/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_legacy_byte_level_path_still_splits_newlines_into_gpt2_remap_tokens
+        PASS [   3.799s] (181/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_cjk
+        PASS [   3.752s] (182/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_curly_quote_leading_space
+        PASS [   3.748s] (183/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_curly_quotes
+        PASS [   3.766s] (184/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_emoji
+        PASS [   3.771s] (185/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_latin1_tab_crlf
+        PASS [   3.777s] (186/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_double
+        PASS [   3.794s] (187/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_mixed_paragraphs
+        PASS [   3.744s] (188/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_single
+        PASS [   0.209s] (189/203) proxima-tokenizer::pre_tokenizer_llama_oracle deepseek_coder_without_a_pre_key_uses_the_default_split_like_llama
+        PASS [   3.766s] (190/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_newline_triple_only
+        PASS [   0.296s] (191/203) proxima-tokenizer::pre_tokenizer_llama_oracle granite_refact_vocabulary_isolates_digits_like_llama
+        PASS [   3.774s] (192/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_space_runs_edges
+        PASS [   3.738s] (193/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_space_runs_inner
+        PASS [   3.838s] (194/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_war_and_peace_2000
+        PASS [   1.110s] (195/203) proxima-tokenizer::pre_tokenizer_llama_oracle qwen2_digits_split_one_per_token_like_llama
+        PASS [   3.847s] (196/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_matches_llama_war_and_peace_30000
+        PASS [   1.017s] (197/203) proxima-tokenizer::pre_tokenizer_llama_oracle qwen3_digits_split_one_per_token_like_llama
+        PASS [   1.705s] (198/203) proxima-tokenizer::pre_tokenizer_llama_oracle llama3_digits_group_in_threes_like_llama
+        PASS [   1.836s] (199/203) proxima-tokenizer::pre_tokenizer_llama_oracle qwen35_digits_split_one_per_token_and_marks_join_words_like_llama
+        PASS [   1.843s] (200/203) proxima-tokenizer::pre_tokenizer_llama_oracle qwen35moe_digits_split_one_per_token_and_marks_join_words_like_llama
+        PASS [   3.185s] (201/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_vocab_lookups_by_string
+        PASS [   3.228s] (202/203) proxima-tokenizer::gemma4_llama_oracle gemma4_tokenizer_round_trips_real_text_shapes
+        PASS [  18.134s] (203/203) proxima-tokenizer sample::tests::greedy_path_ns_per_op_with_repetition_penalty_active
+────────────
+     Summary [  18.310s] 203 tests run: 203 passed, 21 skipped

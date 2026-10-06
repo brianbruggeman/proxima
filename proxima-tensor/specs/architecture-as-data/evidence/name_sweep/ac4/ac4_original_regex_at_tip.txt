@@ -1,0 +1,463 @@
+omega/src/cuda.rs:2214:/// `crate::msl::Q4_0_UNPACK_MSL`'s `q4_0_element` exactly: llama.cpp's
+omega/src/metal/device_buffers_arena_plan.rs:509:    /// 9.44 MB one, against llama.cpp's 17.62 ms for an entire 7B token.
+omega/src/metal/device_buffers_arena_plan.rs:748:/// ms per forward of overhead against llama.cpp Metal's 17.62 ms for the
+omega/src/metal/mod.rs:68://! llama.cpp's `ggml-metal.m` at its default `n_cb=1` uses the identical
+omega/src/metal/pipeline_buffers_upload.rs:140:/// ROW 311 (`proxima-tensor/docs/discipline.md`): llama.cpp encodes its whole
+omega/src/metal/pipeline_buffers_upload.rs:150:    /// One dispatch completes before the next begins -- llama.cpp's own
+omega/src/msl/cached_attention_decode_split.rs:5:/// llama.cpp's `kernel_flash_attn_ext_vec` grid (`(iq1, iq2, iwg)` at
+omega/src/msl/cached_attention_decode_split.rs:13:/// The lane layout is llama.cpp's `NE`/`NL` split of a simdgroup
+omega/src/msl/cached_attention_render.rs:11:/// register-resident shape as llama.cpp's `kernel_flash_attn_ext_vec`
+omega/src/msl/cached_attention_render.rs:191:    // one pipeline serves every bucket, matching llama.cpp's own `ne11`-as-
+omega/src/msl/cached_attention_render.rs:299:    // "idle simdgroup, identity partial" shape llama.cpp's own dispatch-time
+omega/src/msl/cached_attention_render.rs:407:        // it. `block_width > 1` renders §4b's block-staged walk: llama.cpp's
+omega/src/msl/cached_attention_render.rs:416:        // the V accumulate -- llama.cpp's own `ss[]` reuse
+omega/src/msl/cached_attention_render.rs:427:            // The float4/ty-group V accumulate (llama.cpp's `kernel_flash_attn_
+omega/src/msl/cached_attention_render.rs:492:        // into registers, llama.cpp's `kernel_flash_attn_ext_vec` shape
+omega/src/msl/cached_attention_render.rs:511:        // total; key += context_chunks`), llama.cpp's own context-stride
+omega/src/msl/cached_attention_render.rs:531:        // `l`, sum `o`, exactly llama.cpp's `kernel_flash_attn_ext_vec`
+omega/src/msl/cached_attention_render.rs:547:/// SAME online-softmax rescale llama.cpp's own
+omega/src/msl/cached_attention_render.rs:553:/// simdgroup's shuffle network, the same reason llama.cpp's own reduce needs no
+omega/src/msl/cached_attention_render.rs:606:/// transcribed from llama.cpp's `kernel_flash_attn_ext_vec_reduce`
+omega/src/msl/cached_attention_render.rs:622:/// Whether the split writers and the merge kernel use llama.cpp's interleaved
+omega/src/msl/cached_attention_render.rs:672:/// with a simdgroup per potential split (llama.cpp's `32 * nwg` threads,
+omega/src/msl/cached_attention_row_tiled.rs:26:/// Composes `simdgroup_matrix` MMA (Metal), llama.cpp's non-vec flash
+omega/src/msl/kernel_types_identity.rs:514:/// traffic. Measured on an M1 Max, llama.cpp's Metal backend runs this same
+omega/src/msl/kernel_types_identity.rs:1110:/// mirroring llama.cpp's own `kernel_mul_mv_q5_K_f32_impl`
+omega/src/msl/kernel_types_identity.rs:1255:/// `Q4_0`: llama.cpp's simplest and most widely distributed 4-bit legacy
+omega/src/msl/packed_row_blocked_ggml.rs:962:/// `"128u * ip + l0"` (llama.cpp's `y_offset`, `ggml-metal.metal:5383`) in place
+omega/src/msl/packed_row_blocked_ggml.rs:983:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1204:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1342:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1541:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1555:/// Lane variable mapping, llama.cpp -> this function (`ggml-metal.metal:5376-5385`):
+omega/src/msl/signature_tokens_prelude.rs:1111:/// registers across the whole `n_tokens` loop, mirroring llama.cpp's own
+omega/src/msl/signature_tokens_prelude.rs:1373:/// `(query_row, kv_head, group)` triple's key range across -- llama.cpp's
+omega/src/msl/signature_tokens_prelude.rs:1441:/// Q·K/softmax/V staging width -- llama.cpp's `kernel_flash_attn_ext_vec`
+omega/src/msl/signature_tokens_prelude.rs:1464:/// (threadgroups sharing one dispatch), llama.cpp's `nwg`
+omega/src/msl/signature_tokens_prelude.rs:1466:/// count rather than llama.cpp's fixed 32, because this backend's threadgroup is
+omega/src/msl/signature_tokens_prelude.rs:1468:/// simdgroups) than llama.cpp's per-Q-head one.
+omega/src/msl/signature_tokens_prelude.rs:1816:/// keys, capped at `[attention_splits].max`. llama.cpp's fixed `nwg = 32`
+omega/src/msl/signature_tokens_prelude.rs:1831:/// of them shorten every simdgroup's serial K-then-V memory chain; llama.cpp's
+omega/src/msl/signature_tokens_prelude.rs:1983:/// `[attention_rows].head_dims_per_simdgroup`, within 1 to 8 -- llama.cpp's
+omega/src/msl/tiled_gemm_cooperative_scan.rs:1969:    // of it: the probe measured 1.6 GB/s against llama.cpp Metal's 214.7.
+omega/src/msl/tiled_gemm_cooperative_scan.rs:1976:        // elem/s against llama.cpp Metal's 381 G elem/s, while the f32 kernel on
+omega/src/msl/tiled_gemm_cooperative_scan.rs:2381:        // barrier before every lane reads it, matching llama.cpp's own
+omega/src/msl/tiled_gemm_cooperative_scan.rs:2447:/// reading one. Same shape llama.cpp's `kernel_rms_norm` takes (`ggml-metal.
+proxima-model-interop/src/bind.rs:98:        // llama.cpp-produced checkpoint (this module's own doc, "no GGUF
+proxima-model-interop/src/bind.rs:366:    /// `{architecture}.expert_count` (llama.cpp's own key for a sparse
+proxima-model-interop/src/bind.rs:384:    /// when the key is absent, matching llama.cpp's own default -- every
+proxima-model-interop/src/bind.rs:391:    /// `RMS_EPSILON_DEFAULT` (llama.cpp's own default for a dense
+proxima-model-interop/src/bind.rs:405:    /// ([`architecture_from_metadata`]): llama.cpp's own writer always
+proxima-model-interop/src/bind.rs:559:/// experts `blk.{layer}.{proj}_exps.weight` stacks, llama.cpp's own
+proxima-model-interop/src/bind.rs:709:/// llama.cpp's own RMSNorm epsilon default for a dense-decoder checkpoint
+proxima-model-interop/src/bind.rs:885:/// rather than assuming one wire type: llama.cpp's own GGUF writer emits
+proxima-model-interop/src/bind.rs:1119:/// The GGUF/llama.cpp lowercase codec name [`recode_tensor`] appends to
+proxima-model-interop/src/bind.rs:3429:        // llama.cpp's own captured greedy answer for this exact prompt and
+proxima-model-interop/src/bind.rs:3433:            "greedy token id drifted off llama.cpp's captured answer"
+proxima-model-interop/src/bind.rs:3437:            "greedy token text drifted off llama.cpp's captured answer"
+proxima-model-interop/src/bind.rs:3738:    /// compares against `llama-cli -ngl 0 --temp 0 -n 8`'s own generated
+proxima-model-interop/src/bind.rs:5248:    /// now over llama.cpp's own `common_ngram_simple_config` shape instead
+proxima-model-interop/src/bind.rs:5249:    /// (`speculative-decode-llama-parity/SPEC.md` R4/R8).
+proxima-model-interop/src/dense.rs:152:/// causal mask, the same reading llama.cpp's `n_swa` gets.
+proxima-model-interop/src/generate/chunk_shift.rs:4://! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R5, llama-server's
+proxima-model-interop/src/generate/chunk_shift.rs:7://! llama-server walks the cache pointer forward from the common prefix and,
+proxima-model-interop/src/generate/chunk_shift.rs:14://! (`src/llama-kv-cache.cpp:1924-1964`, `:2003-2056`). Here the rows live
+proxima-model-interop/src/generate/chunk_shift.rs:17://! llama.cpp only advances on a match, so a replaced span (a summary where the
+proxima-model-interop/src/generate/chunk_shift.rs:34://! by what that context contributed; llama-server's reuse has the same
+proxima-model-interop/src/generate/chunk_shift.rs:101:/// position that matches (llama.cpp's walk takes the first too) and extended
+proxima-model-interop/src/generate/chunk_shift.rs:583:    /// llama-server's loop (`server-context.cpp:3217-3264`) with the prompt
+proxima-model-interop/src/generate/chunk_shift.rs:661:    /// llama.cpp's own case: the middle is dropped with nothing in its place, so
+proxima-model-interop/src/generate/decode.rs:2786:    /// event carrying `draft_n`/`draft_n_accepted` -- llama-server's own
+proxima-model-interop/src/generate/decode.rs:2792:    /// never drafted emits nothing, matching llama-server's own gate.
+proxima-model-interop/src/generate/decode.rs:3591:        // own config-gate shape. `DrafterSet` drives every enabled n-gram type in llama.cpp's own
+proxima-model-interop/src/generate/decode.rs:3696:                // `DrafterSet`, a faithful port of llama.cpp's own
+proxima-model-interop/src/generate/decode.rs:5819:                    // Sample-and-match (llama.cpp's own
+proxima-model-interop/src/generate/drafter.rs:2://! for every llama.cpp n-gram speculation type enabled in a
+proxima-model-interop/src/generate/drafter.rs:4://! five sans-IO drafters (`speculative-decode-llama-parity/TASKS.md` slice 9)
+proxima-model-interop/src/generate/drafter.rs:11://! `draft()` runs in llama.cpp's fixed priority order
+proxima-model-interop/src/generate/drafter.rs:39:/// One llama.cpp n-gram speculation implementation, own state included.
+proxima-model-interop/src/generate/drafter.rs:103:/// up to `k + 1` tokens. `cached_len` excludes the sampled token (llama.cpp's
+proxima-model-interop/src/generate/drafter.rs:118:/// The set of [`Drafter`]s driven each generation, in llama.cpp's own fixed
+proxima-model-interop/src/generate/load_model.rs:1412:/// micro-batches of `ubatch` rows (`ServingConfig::ubatch_size`, llama.cpp's
+proxima-model-interop/src/generate/prompt_cache.rs:16://! Matching is on token ids, never text. llama-server (`tools/server/
+proxima-model-interop/src/generate/prompt_cache.rs:56:/// thousandths of the prompt, llama-server's `f_sim_cur > slot_prompt_similarity`
+proxima-model-interop/src/generate/prompt_cache.rs:647:    /// and are dropped (llama-server erases `pos_max > pos_next`,
+proxima-model-interop/src/generate/prompt_cache.rs:808:    /// llama-server's `slot_prompt_similarity` rule
+proxima-model-interop/src/generate/prompt_cache.rs:3004:    /// llama-server's rule (`server-context.cpp:1571`): the prefix must
+proxima-model-interop/src/generate/ring_checkpoint.rs:10://! layer is exactly as it was at that position. llama-server does the same for
+proxima-model-interop/src/generate/ring_checkpoint.rs:149:/// the oldest are evicted first, the way llama-server drops the front of
+proxima-model-interop/src/hf_bind.rs:222:/// per-head row permutation `llama.cpp`'s own `convert_hf_to_gguf.py`
+proxima-model-interop/src/hf_bind.rs:243:/// `llama.cpp`'s bit-for-bit at RoPE position 0 (where every pair's angle
+proxima-model-interop/src/hf_bind.rs:282:/// `llama.cpp`'s own GGUF converter leaves in HF's native split-half RoPE
+proxima-model-interop/src/hf_config.rs:60:    /// because llama.cpp's own GGUF writer always emits it; HF's own
+proxima-model-interop/src/hf_config.rs:147:///   llama.cpp's own GGUF writer already folds a MoE checkpoint's per-expert
+proxima-model-interop/src/mapping_residency.rs:76:/// llama.cpp's own `--mlock` flag takes) is the rung of last resort before
+proxima-model-interop/src/mapping_residency.rs:228:/// before [`InteropError::MappingNotResident`]. llama.cpp's own `--mlock`
+proxima-model-interop/src/memory_fit.rs:66:    /// `blk.{layer}.{proj}_exps.weight` stacks (llama.cpp's own naming) --
+proxima-model-interop/src/quality.rs:950:    /// (`openchat-3.5-1210.Q3_K_M.gguf`, llama-quantize output) has no
+proxima-model-interop/src/quality.rs:955:                "PROXIMA_OPENCHAT_GGUF_VARIANT is required: path to openchat-3.5-1210.Q3_K_M.gguf (llama-quantize Q3_K_M output)"
+proxima-model-interop/src/recurrent_interval.rs:103:/// llama.cpp's own RMSNorm epsilon default, used only when
+proxima-model-interop/src/recurrent_interval.rs:277:/// time -- llama.cpp's hybrid-model source, lines 57-60's same derivation this module's
+proxima-model-interop/src/recurrent_interval.rs:297:/// hyperparameters -- llama.cpp's hybrid-model source, lines 57-60's same arithmetic
+proxima-model-interop/src/rope_scaling.rs:57:        /// Multiplier on the extrapolation share of the blend (llama.cpp's
+proxima-model-interop/src/rope_scaling.rs:129:    /// Reads `{arch}.rope.scaling.*` off `parsed`, using llama.cpp's key
+proxima-model-interop/src/serving.rs:2://! mirroring llama-server's CLI surface (`-c`, `-np`, `-ctk`, `-ctv`, `-fa`,
+proxima-model-interop/src/serving.rs:31://! enum -- llama.cpp's own `--cache-type-k`/`-ctv` accept exactly this
+proxima-model-interop/src/serving.rs:34://! `gpu_layers` reuses llama.cpp's own `n_gpu_layers` convention -- a plain
+proxima-model-interop/src/serving.rs:164:/// llama.cpp's `common_speculative_type` (`common/common.h:173-186`), named
+proxima-model-interop/src/serving.rs:165:/// identically so this crate's config round-trips llama.cpp's own `--spec-type`
+proxima-model-interop/src/serving.rs:172:/// `speculative-decode-llama-parity` sub-specs (R11a-d) own the draft-model
+proxima-model-interop/src/serving.rs:191:    /// llama.cpp's own `--spec-type` string for this variant
+proxima-model-interop/src/serving.rs:211:    /// llama.cpp's own `--spec-type` strings.
+proxima-model-interop/src/serving.rs:231:/// llama.cpp's fixed speculator priority order (`common/speculative.cpp:2617-2629`,
+proxima-model-interop/src/serving.rs:233:/// priority first. Registration order in llama.cpp's own `--spec-type` list
+proxima-model-interop/src/serving.rs:238:/// absent: llama.cpp's own `switch` in `common_speculative_init` treats that
+proxima-model-interop/src/serving.rs:254:/// llama.cpp's `std::vector<common_speculative_type> types`
+proxima-model-interop/src/serving.rs:261:/// llama.cpp runs every enabled speculator per step in priority order until one
+proxima-model-interop/src/serving.rs:273:/// what lets a config round-trip any of llama.cpp's `--spec-type` combinations
+proxima-model-interop/src/serving.rs:280:    /// llama.cpp's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+proxima-model-interop/src/serving.rs:293:    /// This set with `type_id` added, llama.cpp's own `types.push_back`.
+proxima-model-interop/src/serving.rs:305:    /// No speculator enabled -- llama.cpp's own default, and this crate's
+proxima-model-interop/src/serving.rs:312:    /// This set's members in llama.cpp's own fixed priority order
+proxima-model-interop/src/serving.rs:323:/// llama.cpp's `common_params_speculative_ngram_map` (`common/common.h:361-365`),
+proxima-model-interop/src/serving.rs:324:/// shared verbatim by llama.cpp's own `ngram_simple`/`ngram_map_k`/
+proxima-model-interop/src/serving.rs:328:    /// llama.cpp's `size_n`: the n-gram size looked up in history.
+proxima-model-interop/src/serving.rs:330:    /// llama.cpp's `size_m`: the m-gram size drafted after a match.
+proxima-model-interop/src/serving.rs:332:    /// llama.cpp's `min_hits`: minimum hits before a match is proposed.
+proxima-model-interop/src/serving.rs:337:    /// llama.cpp's own default for all three of `ngram_simple`/`ngram_map_k`/
+proxima-model-interop/src/serving.rs:348:/// llama.cpp's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
+proxima-model-interop/src/serving.rs:366:/// [`ServingConfig::speculative`]'s own data: llama.cpp's `common_params_speculative`
+proxima-model-interop/src/serving.rs:368:/// `types`, llama.cpp's own `Vec<common_speculative_type>` SET of
+proxima-model-interop/src/serving.rs:378:/// `speculative-decode-llama-parity/TASKS.md` slice 9 adds wires the rest) --
+proxima-model-interop/src/serving.rs:386:    /// llama.cpp's `types` (`common/common.h:373`) -- the enabled-speculator set.
+proxima-model-interop/src/serving.rs:388:    /// llama.cpp's `common_params_speculative_draft::n_max` (`common/common.h:328`):
+proxima-model-interop/src/serving.rs:391:    /// llama.cpp's `common_params_speculative_draft::n_min` (`common/common.h:329`):
+proxima-model-interop/src/serving.rs:394:    /// llama.cpp's `common_params_speculative_draft::p_min` (`common/common.h:332`):
+proxima-model-interop/src/serving.rs:401:    /// llama.cpp's `common_params_speculative_ngram_cache::lookup_cache_static`.
+proxima-model-interop/src/serving.rs:403:    /// llama.cpp's `common_params_speculative_ngram_cache::lookup_cache_dynamic`.
+proxima-model-interop/src/serving.rs:408:    /// Speculation OFF: llama.cpp's own default `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+proxima-model-interop/src/serving.rs:412:    /// param defaults still hold llama.cpp's own values so enabling any single
+proxima-model-interop/src/serving.rs:413:    /// member of [`Self::speculative_types`] alone reproduces llama.cpp's
+proxima-model-interop/src/serving.rs:447:    /// Speculation on with the single `ngram-simple` drafter at llama.cpp's own
+proxima-model-interop/src/serving.rs:509:    /// llama.cpp's `n_cache_reuse`): a run of at least this many tokens that the
+proxima-model-interop/src/serving.rs:516:    /// from them can differ too, as they do under llama-server; an entry built
+proxima-model-interop/src/serving.rs:520:    /// chunk reuse off like llama.cpp's `n_cache_reuse`.
+proxima-model-interop/src/serving.rs:545:    /// llama-server's `--slot-prompt-similarity` default, 0.1, and its strict
+proxima-model-interop/src/serving.rs:693:    /// Serve exactly `n` tokens even past the limit -- llama.cpp's silent
+proxima-model-interop/src/serving.rs:739:/// One field per llama-server flag the repo owner's invocation sets,
+proxima-model-interop/src/serving.rs:744:    /// GGUF checkpoint path. Not one of llama-server's flags in the task's
+proxima-model-interop/src/serving.rs:853:    /// Not an upstream llama-server flag -- a plan-cache key rounding
+proxima-model-interop/src/serving.rs:865:    /// Not an upstream llama-server flag -- `omega::metal::MathMode` for
+proxima-model-interop/src/serving.rs:876:    /// Not an upstream llama-server flag -- `proxima_tensor::NumericPolicy`,
+proxima-model-interop/src/serving.rs:897:    /// Not an upstream llama-server flag -- `omega::metal::DispatchType` for
+proxima-model-interop/src/serving.rs:908:    /// Not an upstream llama-server flag -- routes the CPU forward's
+proxima-model-interop/src/serving.rs:919:    /// Not an upstream llama-server flag -- per-tensor bind-time recode
+proxima-model-interop/src/serving.rs:983:    /// Not an upstream llama-server flag -- runtime switch for the
+proxima-model-interop/src/serving.rs:994:    /// Not an upstream llama-server flag -- caps how many prompt positions
+proxima-model-interop/src/serving.rs:1008:    /// Not an upstream llama-server flag -- runtime toggle for
+proxima-model-interop/src/serving.rs:1015:    /// Not an upstream llama-server flag -- runtime toggle for
+proxima-model-interop/src/serving.rs:1022:    /// Not an upstream llama-server flag -- runtime toggle for
+proxima-model-interop/src/serving.rs:1029:    /// Not an upstream llama-server flag -- marks every plan's own
+proxima-model-interop/src/serving.rs:1041:    /// Not an upstream llama-server flag -- whether a plan-cache miss that
+proxima-model-interop/src/serving.rs:1049:    /// Not an upstream llama-server flag -- how many `MTLCommandBuffer`s
+proxima-model-interop/src/serving.rs:1066:    /// Not an upstream llama-server flag -- a hard ceiling on
+proxima-model-interop/src/serving.rs:1094:    /// llama.cpp's `common_params_speculative` (`common/common.h:372-389`). See
+proxima-model-interop/src/serving.rs:1096:    /// from llama.cpp's own `Vec<type>`. Consulted by `generate/decode.rs`'s
+proxima-model-interop/src/serving_settings.rs:31:/// the values llama.cpp accepts for `--cache-type-k` and `--cache-type-v`, spelled
+proxima-model-interop/src/serving_settings.rs:32:/// as llama.cpp spells them; `as_ggml` is the lowering to the type the serving
+proxima-model-interop/src/serving_settings.rs:128:/// the llama-flag surface of [`ServingConfig`], loadable from toml and env
+proxima-model-interop/src/speculative_settings.rs:30:/// llama.cpp's `common_speculative_type`, serde/`FromStr`-facing mirror of
+proxima-model-interop/src/speculative_settings.rs:32:/// `serving.rs` never derives `serde`). Variant names round-trip llama.cpp's own
+proxima-model-interop/src/speculative_settings.rs:86:/// `value` was not one of llama.cpp's own `--spec-type` strings.
+proxima-model-interop/src/speculative_settings.rs:116:/// `Display` a deterministic member order; llama.cpp's own set semantics never
+proxima-model-interop/src/speculative_settings.rs:131:/// llama.cpp's `std::vector<common_speculative_type> types` (`common/common.h:373`),
+proxima-model-interop/src/speculative_settings.rs:135:/// [`SpeculativeType`]). Round-trips llama.cpp's own `--spec-type`
+proxima-model-interop/src/speculative_settings.rs:143:/// shape. The empty set displays as llama.cpp's own default string, `"none"`.
+proxima-model-interop/src/speculative_settings.rs:148:    /// llama.cpp's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }` --
+proxima-model-interop/src/speculative_settings.rs:155:    /// This set with `name` added, llama.cpp's own `types.push_back` --
+proxima-model-interop/src/speculative_settings.rs:156:    /// `SpeculativeTypeName::None` is a no-op (llama.cpp's own `switch` in
+proxima-model-interop/src/speculative_settings.rs:191:    /// This set's members in llama.cpp's own fixed priority order
+proxima-model-interop/src/speculative_settings.rs:249:/// llama.cpp's `common_params_speculative` (`common/common.h:372-389`), env/TOML
+proxima-model-interop/src/speculative_settings.rs:257:    /// llama.cpp's `types` -- see [`crate::SpeculativeConfig::speculative_types`]'s
+proxima-model-interop/src/speculative_settings.rs:266:    /// llama.cpp's `common_params_speculative_draft::n_max`.
+proxima-model-interop/src/speculative_settings.rs:270:    /// llama.cpp's `common_params_speculative_draft::n_min`.
+proxima-model-interop/src/speculative_settings.rs:274:    /// llama.cpp's `common_params_speculative_draft::p_min`.
+proxima-model-interop/src/speculative_settings.rs:279:    /// llama.cpp's `ngram_simple.size_n`.
+proxima-model-interop/src/speculative_settings.rs:283:    /// llama.cpp's `ngram_simple.size_m`.
+proxima-model-interop/src/speculative_settings.rs:287:    /// llama.cpp's `ngram_simple.min_hits`.
+proxima-model-interop/src/speculative_settings.rs:292:    /// llama.cpp's `ngram_map_k.size_n`.
+proxima-model-interop/src/speculative_settings.rs:296:    /// llama.cpp's `ngram_map_k.size_m`.
+proxima-model-interop/src/speculative_settings.rs:300:    /// llama.cpp's `ngram_map_k.min_hits`.
+proxima-model-interop/src/speculative_settings.rs:305:    /// llama.cpp's `ngram_map_k4v.size_n`.
+proxima-model-interop/src/speculative_settings.rs:309:    /// llama.cpp's `ngram_map_k4v.size_m`.
+proxima-model-interop/src/speculative_settings.rs:313:    /// llama.cpp's `ngram_map_k4v.min_hits`.
+proxima-model-interop/src/speculative_settings.rs:318:    /// llama.cpp's `ngram_mod.n_match`.
+proxima-model-interop/src/speculative_settings.rs:322:    /// llama.cpp's `ngram_mod.n_max`.
+proxima-model-interop/src/speculative_settings.rs:326:    /// llama.cpp's `ngram_mod.n_min`.
+proxima-model-interop/src/speculative_settings.rs:331:    /// llama.cpp's `ngram_cache.lookup_cache_static` -- empty string means unset,
+proxima-model-interop/src/speculative_settings.rs:335:    /// llama.cpp's `ngram_cache.lookup_cache_dynamic`.
+proxima-model-interop/src/speculative_settings.rs:458:    /// llama.cpp's `common_params_speculative` (`common/common.h:372-389`).
+proxima-model-interop/src/speculative_settings.rs:666:    /// R9: llama.cpp's own `--spec-type` strings round-trip through
+proxima-model-interop/src/speculative_settings.rs:697:    /// R9: llama.cpp's own multi-type `--spec-type` string form
+proxima-model-interop/src/speculative_settings.rs:711:        // llama.cpp's own priority order (`common/speculative.cpp:2617-2629`),
+proxima-model-interop/src/test_support.rs:153:            MetadataValue::String("gemma4".to_string()),
+proxima-model-interop/src/test_support.rs:155:        ("gemma4.block_count", MetadataValue::U32(35)),
+proxima-model-interop/src/test_support.rs:157:            "gemma4.attention.head_count_kv",
+proxima-model-interop/src/test_support.rs:161:            "gemma4.attention.sliding_window_pattern",
+proxima-model-interop/src/test_support.rs:166:        ("gemma4.attention.shared_kv_layers", MetadataValue::U32(20)),
+proxima-model-interop/src/test_support.rs:167:        ("gemma4.attention.key_length", MetadataValue::U32(512)),
+proxima-model-interop/src/test_support.rs:168:        ("gemma4.attention.key_length_swa", MetadataValue::U32(256)),
+proxima-model-interop/src/test_support.rs:169:        ("gemma4.attention.sliding_window", MetadataValue::U32(512)),
+proxima-tensor/src/bind/gdn_moe_fusion_apply.rs:304:/// own physical operand and instead binds what llama.cpp's fused Metal kernel
+proxima-tensor/src/bind/types_layout_boundop.rs:222:    /// `key_index % kv_heads` itself, exactly llama.cpp's own fused Metal
+proxima-tensor/src/error.rs:319:    /// (`(layer + 1) % full_attention_interval != 0`, llama.cpp's hybrid-model source's own
+proxima-tensor/src/gdn.rs:114:            // llama.cpp's own fused Metal kernel mod-broadcasts a flat query
+proxima-tensor/src/spec/attention_forward.rs:3032:/// following llama.cpp's own `hparams.is_recr_impl[i] = (i < n_layer) &&
+proxima-tensor/src/spec/attention_forward.rs:3033:/// ((i + 1) % full_attention_interval != 0)` (llama.cpp's hybrid-model source, lines 19-20) -- layer
+proxima-tensor/src/spec/attention_forward.rs:3036:/// through experts (llama.cpp's hybrid-model source, line 471, `GGML_ASSERT(model.layers[il].ffn_gate_inp
+proxima-tensor/src/spec/attention_forward.rs:3042:/// the same five hyperparameters llama.cpp's hybrid-model source, lines 335-343's own
+proxima-tensor/src/spec/descriptor.rs:318:    /// How this family pairs RoPE channels, per llama.cpp's
+proxima-tensor/src/spec/descriptor.rs:319:    /// `llama_model_rope_type` (`src/llama-model.cpp`): NEOX/MROPE/IMROPE
+proxima-tensor/src/spec/hybrid_forward.rs:555:            // through experts, llama.cpp's hybrid-model source, line 471).
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:369:/// `apply_rotary_pos_emb`; cross-checked against llama.cpp's hybrid-model source's own
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:394:///    tracks are initialized from the SAME position (`llama-graph.cpp`'s
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:408:///    `:325-328`; llama.cpp's hybrid-model source, lines 322-328 runs the identical
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:690:    // last dim is `self.head_dim` = `attn_head_dim`; llama.cpp's hybrid-model source, lines 308-317
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:1079:    // (`modeling_qwen3_next.py:325-328`, llama.cpp's hybrid-model source, lines 322-328).
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:177:    // `llama.cpp`'s own `create_tensor(.., {n_shortconv_l_cache, n_embd},
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:357:/// attention (SSM) layers run -- llama.cpp's own reference,
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:372:/// (`llama.cpp:305-306`, `sk = sum_rows(state * k)`), `delta[j] = beta *
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:376:/// = q / sqrt(key_dim)` is applied by the caller (`llama.cpp:295`,
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:381:/// token (`llama.cpp`'s own `softplus(alpha + dt_bias) * ssm_a` and
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:529:/// (`llama.cpp:370`, `ggml_softplus`) -- not a [`ScalarOp`] primitive, so
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:560:/// (llama.cpp's hybrid-model source, lines 428-429, applied to `q_conv`/`k_conv` with no weight
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:628:/// `x * sigmoid(x)`, `ggml_silu`'s own contract (llama.cpp's hybrid-model source, lines 391-392, run on
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:857:/// Qwen3.5's `q|k|v` conv branch -- llama.cpp's own
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:858:/// `build_layer_attn_linear` (llama.cpp's hybrid-model source, lines 385-431): `causal_conv1d` over
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:923:/// [`append_qwen35_delta_net_step`] (llama.cpp's hybrid-model source, lines 437-440,
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:1006:/// llama.cpp's own `build_layer_attn_linear` (llama.cpp's hybrid-model source, lines 335-466) run
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:1016:/// llama.cpp's hybrid-model source, lines 243-250: `rmsnorm(out) * silu(z)`), and the output
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:1071:    /// `qwen35_forward_program`'s own GDN layers (llama.cpp's hybrid-model source, lines 243-250).
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:2132:        // (llama.cpp's hybrid-model source, lines 243-250): `rmsnorm(out, weight) * output_gate(z)`,
+proxima-tensor/src/spec/mistral_layer_moe.rs:584:/// scores -- llama.cpp's own `llama_expert_gating_func_type`
+proxima-tensor/src/spec/mistral_layer_moe.rs:585:/// (`llama-hparams.h:11-14`), read from a checkpoint's own
+proxima-tensor/src/spec/mistral_layer_moe.rs:587:/// `Softmax` is llama.cpp's own fallback when that key is absent
+proxima-tensor/src/spec/mistral_layer_moe.rs:588:/// (`llama-model.cpp:1237-1240`, "existing models that have no
+proxima-tensor/src/spec/mistral_layer_moe.rs:704:/// `[expert_count]`) is llama.cpp's own `ffn_exp_probs_b` /
+proxima-tensor/src/spec/mistral_layer_moe.rs:706:/// (`modeling_lfm2_moe.py:210-213`, `llama-graph.cpp`'s own
+proxima-tensor/src/spec/primitives.rs:212:/// into rotation pairs -- interleaved (`(2*i, 2*i+1)`, llama.cpp's
+proxima-tensor/src/spec/primitives.rs:214:/// (`(i, i+pairs)`, llama.cpp's `kernel_rope_neox`,
+proxima-tensor/src/spec/primitives.rs:264:/// [`Op::Elementwise`], mirroring llama.cpp's `kernel_rope_neox`/
+proxima-tensor/src/spec/single_range_moe_cached.rs:1104:    // split-half layout, never llama.cpp's converter-permuted interleaved
+proxima-tokenizer/src/bpe.rs:64:/// (leftmost on ties), matching llama.cpp's `llm_bigram_bpe` comparator.
+proxima-tokenizer/src/byte_level.rs:2://! `encoder.py`, reused verbatim by every llama-family BPE vocab this crate
+proxima-tokenizer/src/byte_level.rs:121:        // private range. GPT-2/llama.cpp's well-known marker for it is
+proxima-tokenizer/src/draft/mod.rs:3://! continuation tokens with no second model (llama.cpp's own
+proxima-tokenizer/src/draft/ngram_cache.rs:1://! A faithful port of llama.cpp's `common_ngram_cache` machinery
+proxima-tokenizer/src/draft/ngram_cache.rs:69://! LLAMA_NGRAM_MAX]` arrays on the stack (llama.cpp's own `common_ngram` is the
+proxima-tokenizer/src/draft/ngram_cache.rs:101:/// llama.cpp's `LLAMA_NGRAM_MIN` (`common/ngram-cache.h:9`).
+proxima-tokenizer/src/draft/ngram_cache.rs:104:/// llama.cpp's `LLAMA_NGRAM_MAX` (`common/ngram-cache.h:10`).
+proxima-tokenizer/src/draft/ngram_cache.rs:107:/// llama.cpp's `LLAMA_NGRAM_STATIC` (`common/ngram-cache.h:11`).
+proxima-tokenizer/src/draft/ngram_cache.rs:110:/// llama.cpp's `create_state_ngram_cache`'s hardcoded `n_draft`
+proxima-tokenizer/src/draft/ngram_cache.rs:114:/// llama.cpp's `draft_min_sample_size_lax` (`common/ngram-cache.cpp:60`),
+proxima-tokenizer/src/draft/ngram_cache.rs:118:/// llama.cpp's `draft_min_percent_lax` (`common/ngram-cache.cpp:61`).
+proxima-tokenizer/src/draft/ngram_cache.rs:121:/// llama.cpp's `draft_min_sample_size_strict` (`common/ngram-cache.cpp:62`).
+proxima-tokenizer/src/draft/ngram_cache.rs:124:/// llama.cpp's `draft_min_percent_strict` (`common/ngram-cache.cpp:63`).
+proxima-tokenizer/src/draft/ngram_cache.rs:127:/// llama.cpp's `common_ngram` (`common/ngram-cache.h:15-38`): up to
+proxima-tokenizer/src/draft/ngram_cache.rs:128:/// [`LLAMA_NGRAM_MAX`] token ids, `None` in place of llama.cpp's own
+proxima-tokenizer/src/draft/ngram_cache.rs:138:/// flat-slab equivalent of llama.cpp's own `common_ngram_cache_part`
+proxima-tokenizer/src/draft/ngram_cache.rs:147:/// A read view over one n-gram's continuation-token distribution -- llama.cpp's
+proxima-tokenizer/src/draft/ngram_cache.rs:158:    /// followed by it -- llama.cpp's own `part.find(token)`.
+proxima-tokenizer/src/draft/ngram_cache.rs:165:    /// own chain order (newest-inserted first) -- distinct from llama.cpp's own
+proxima-tokenizer/src/draft/ngram_cache.rs:169:    /// replays 200+ real llama.cpp cases; a tie-breaking divergence would
+proxima-tokenizer/src/draft/ngram_cache.rs:218:    // for this structure's OWN open addressing, never ported from llama.cpp
+proxima-tokenizer/src/draft/ngram_cache.rs:234:/// llama.cpp's `common_ngram_cache` (`common/ngram-cache.h:61`): n-gram ->
+proxima-tokenizer/src/draft/ngram_cache.rs:239:/// than llama.cpp's own `unordered_map` + hand-written hasher (same lookup
+proxima-tokenizer/src/draft/ngram_cache.rs:252:    /// An empty, growable cache -- llama.cpp's own default-constructed
+proxima-tokenizer/src/draft/ngram_cache.rs:283:    /// Number of distinct n-grams recorded -- llama.cpp's own `.size()`
+proxima-tokenizer/src/draft/ngram_cache.rs:355:    /// or the token entry as needed -- llama.cpp's own
+proxima-tokenizer/src/draft/ngram_cache.rs:404:/// reuse"): llama.cpp's own `common_ngram_cache_update` body
+proxima-tokenizer/src/draft/ngram_cache.rs:433:/// `inp_data` is llama.cpp's `inp_data`; `nnew` is llama.cpp's `nnew` (how many
+proxima-tokenizer/src/draft/ngram_cache.rs:460:/// llama.cpp's `get_token` (`common/ngram-cache.cpp:55-57`): reads position
+proxima-tokenizer/src/draft/ngram_cache.rs:462:/// the sequence llama.cpp's own `inp ++ draft[1..]` represents, without
+proxima-tokenizer/src/draft/ngram_cache.rs:474:/// llama.cpp's single-cache `try_draft` overload (`common/ngram-cache.cpp:66-95`):
+proxima-tokenizer/src/draft/ngram_cache.rs:501:/// llama.cpp's two-cache `try_draft` overload (`common/ngram-cache.cpp:97-144`):
+proxima-tokenizer/src/draft/ngram_cache.rs:545:/// three-cache, longest-n-gram-first algorithm. `history` is llama.cpp's `inp`
+proxima-tokenizer/src/draft/ngram_cache.rs:549:/// llama.cpp's `draft` minus its own leading `id_last` sentinel entry -- this
+proxima-tokenizer/src/draft/ngram_cache.rs:639:    /// Every cache starts empty -- llama.cpp's own default-constructed
+proxima-tokenizer/src/draft/ngram_cache.rs:660:    /// llama.cpp's own `common_speculative_impl_ngram_cache` constructor
+proxima-tokenizer/src/draft/ngram_cache.rs:708:    /// The file ended in the middle of a record -- llama.cpp's own loader
+proxima-tokenizer/src/draft/ngram_cache.rs:712:    #[error("truncated llama.cpp ngram cache: expected {expected} more bytes at offset {offset}, found {found}")]
+proxima-tokenizer/src/draft/ngram_cache.rs:743:/// file-reading wrapper). Each record is llama.cpp's own raw struct layout,
+proxima-tokenizer/src/draft/ngram_cache.rs:745:/// tokens (`-1` is llama.cpp's `LLAMA_TOKEN_NULL`, mapped to `None`), then one
+proxima-tokenizer/src/draft/ngram_cache.rs:770:/// -- llama.cpp's own `common_speculative_impl_ngram_cache` constructor loads
+proxima-tokenizer/src/draft/ngram_cache.rs:787:    #[error("failed to read llama.cpp ngram cache file: {0}")]
+proxima-tokenizer/src/draft/ngram_cache.rs:842:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_cache.rs:846:        "/tests/fixtures/llama-ngram/fixtures/ngram_cache.json"
+proxima-tokenizer/src/draft/ngram_cache.rs:850:        "/tests/fixtures/llama-ngram/fixtures/ngram_cache_static.bin"
+proxima-tokenizer/src/draft/ngram_cache.rs:854:    /// `tests/fixtures/llama-ngram/fixtures/ngram_cache.json` (SPEC.md
+proxima-tokenizer/src/draft/ngram_cache.rs:907:    /// SPEC.md AC9's second half, R7's own "loads llama.cpp static/dynamic
+proxima-tokenizer/src/draft/ngram_cache.rs:910:    /// real cache built from `streams[2]`, llama.cpp's own
+proxima-tokenizer/src/draft/ngram_cache.rs:911:    /// `common/ngram-map.cpp`, via llama.cpp's own `common_ngram_cache_update` +
+proxima-tokenizer/src/draft/ngram_map.rs:1://! A faithful port of llama.cpp's `common_ngram_map` (`common/ngram-map.h`,
+proxima-tokenizer/src/draft/ngram_map.rs:5://! step. `key_only = true` gives llama.cpp's `ngram-map-k` speculation type;
+proxima-tokenizer/src/draft/ngram_map.rs:14://! `keys` list (llama.cpp's `std::vector<common_ngram_map_key>`), a fixed-size
+proxima-tokenizer/src/draft/ngram_map.rs:15://! hash index `key_map` (llama.cpp's `COMMON_NGRAM_HASH_MAP_SIZE`-entry
+proxima-tokenizer/src/draft/ngram_map.rs:20://! `last_draft_*`) llama.cpp's `common_ngram_map_draft` reads and writes every
+proxima-tokenizer/src/draft/ngram_map.rs:43://! by CONTENT, not by position -- llama.cpp's own linear scan over
+proxima-tokenizer/src/draft/ngram_map.rs:49://! `stat_idx` (llama.cpp's own value-slot content comparison, not position
+proxima-tokenizer/src/draft/ngram_map.rs:60://! draft from that same value slot to that length -- llama.cpp's own adaptive
+proxima-tokenizer/src/draft/ngram_map.rs:65:/// llama.cpp's `COMMON_NGRAM_MAX_VALUES` (`common/ngram-map.h:39`): the number of
+proxima-tokenizer/src/draft/ngram_map.rs:70:/// llama.cpp's `COMMON_NGRAM_HASH_MAP_SIZE` (`common/ngram-map.h:42`): the fixed
+proxima-tokenizer/src/draft/ngram_map.rs:75:/// llama.cpp's `COMMON_NGRAM_MAX_VALUE_COUNT` (`common/ngram-map.cpp:119`): the
+proxima-tokenizer/src/draft/ngram_map.rs:79:/// llama.cpp's `LCG_FACTOR` (`common/ngram-map.cpp:11`): the 32-bit LCG
+proxima-tokenizer/src/draft/ngram_map.rs:83:/// llama.cpp's `ngram-map` default `size_key` (`README.md`'s own recorded
+proxima-tokenizer/src/draft/ngram_map.rs:87:/// llama.cpp's `ngram-map` default `size_value`.
+proxima-tokenizer/src/draft/ngram_map.rs:90:/// llama.cpp's `ngram-map` default `min_hits`.
+proxima-tokenizer/src/draft/ngram_map.rs:93:/// llama.cpp's `common_ngram_map` constructor arguments (`common/ngram-map.h:72-77`):
+proxima-tokenizer/src/draft/ngram_map.rs:94:/// `size_key`/`size_value` name the n-gram/m-gram sizes (llama.cpp's own
+proxima-tokenizer/src/draft/ngram_map.rs:103:    /// Size of the key n-gram looked up in history -- llama.cpp's `size_key`.
+proxima-tokenizer/src/draft/ngram_map.rs:105:    /// Size of the value m-gram drafted after a key match -- llama.cpp's `size_value`.
+proxima-tokenizer/src/draft/ngram_map.rs:116:/// llama.cpp's `common_ngram_map_value` (`common/ngram-map.h:45-49`): one
+proxima-tokenizer/src/draft/ngram_map.rs:134:/// llama.cpp's `common_ngram_map_key` (`common/ngram-map.h:52-58`): one tracked
+proxima-tokenizer/src/draft/ngram_map.rs:148:/// [`ngram_map_draft`], and [`ngram_map_accept`] are llama.cpp's own
+proxima-tokenizer/src/draft/ngram_map.rs:167:    /// index, llama.cpp's own `key_map.resize(COMMON_NGRAM_HASH_MAP_SIZE)`) and
+proxima-tokenizer/src/draft/ngram_map.rs:219:/// -- see this module's own doc for the algorithm. `tokens` is llama.cpp's
+proxima-tokenizer/src/draft/ngram_map.rs:267:/// llama.cpp's stale-value shift loop inside `common_ngram_map_begin`
+proxima-tokenizer/src/draft/ngram_map.rs:285:/// `inp` is llama.cpp's `inp` (every token generated so far, NOT including
+proxima-tokenizer/src/draft/ngram_map.rs:294:/// guards against `size_key == 0` either -- llama.cpp's own `ngram-map`
+proxima-tokenizer/src/draft/ngram_map.rs:306:    // llama.cpp: `if (cur_len < 2 * n + m) return;`
+proxima-tokenizer/src/draft/ngram_map.rs:398:/// llama.cpp's key_map index-maintenance step (`common/ngram-map.cpp:318-340`):
+proxima-tokenizer/src/draft/ngram_map.rs:437:/// llama.cpp's `key_only` draft branch (`common/ngram-map.cpp:382-398`): always
+proxima-tokenizer/src/draft/ngram_map.rs:456:/// llama.cpp's `key4v` draft branch (`common/ngram-map.cpp:408-515`): tallies up
+proxima-tokenizer/src/draft/ngram_map.rs:594:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_map.rs:598:        "/tests/fixtures/llama-ngram/fixtures/ngram_map_k.json"
+proxima-tokenizer/src/draft/ngram_map.rs:602:        "/tests/fixtures/llama-ngram/fixtures/ngram_map_k4v.json"
+proxima-tokenizer/src/draft/ngram_map.rs:607:    /// (`tests/fixtures/llama-ngram/generator/main.cpp`'s `replay_ngram_map`,
+proxima-tokenizer/src/draft/ngram_map.rs:667:    /// `tests/fixtures/llama-ngram/fixtures/ngram_map_k.json`
+proxima-tokenizer/src/draft/ngram_map.rs:668:    /// (SPEC.md AC6), produced by calling llama.cpp's own
+proxima-tokenizer/src/draft/ngram_map.rs:679:    /// `tests/fixtures/llama-ngram/fixtures/ngram_map_k4v.json`
+proxima-tokenizer/src/draft/ngram_mod.rs:1://! A faithful port of llama.cpp's `common_ngram_mod` (`common/ngram-mod.h`,
+proxima-tokenizer/src/draft/ngram_mod.rs:5://! the ONE token last seen following it -- llama.cpp's own PR description names
+proxima-tokenizer/src/draft/ngram_mod.rs:6://! it "basic n-gram hasher" (`ngram-mod.h:9`, `ggml-org/llama.cpp#19164`).
+proxima-tokenizer/src/draft/ngram_mod.rs:17://! (llama.cpp's own multiplicative hash, `idx()`, `common/ngram-mod.cpp:15-25`
+proxima-tokenizer/src/draft/ngram_mod.rs:28://! [`OCCUPANCY_THRESHOLD`] (`0.25` -- llama.cpp's own hardcoded constant,
+proxima-tokenizer/src/draft/ngram_mod.rs:40://! have been drafted returns NOTHING at all, not a short draft (llama.cpp's own
+proxima-tokenizer/src/draft/ngram_mod.rs:43://! in CHUNKS of 32 new tokens at a time (`:1940-1946` -- llama.cpp's own
+proxima-tokenizer/src/draft/ngram_mod.rs:52://! scratch) -- llama.cpp's own defense against a table that has drifted into
+proxima-tokenizer/src/draft/ngram_mod.rs:59://! for the `draft_n`/telemetry counters `speculative-decode-llama-parity`
+proxima-tokenizer/src/draft/ngram_mod.rs:64:/// llama.cpp's `common_ngram_mod` table size, hardcoded at the call site
+proxima-tokenizer/src/draft/ngram_mod.rs:69:/// llama.cpp's occupancy reset threshold (`common/speculative.cpp:1914`).
+proxima-tokenizer/src/draft/ngram_mod.rs:72:/// llama.cpp's low-acceptance reset threshold (`common/speculative.cpp:2006`).
+proxima-tokenizer/src/draft/ngram_mod.rs:75:/// llama.cpp's low-acceptance reset streak length (`common/speculative.cpp:2008`,
+proxima-tokenizer/src/draft/ngram_mod.rs:79:/// llama.cpp's `common_params_speculative_ngram_mod` default `n_match`
+proxima-tokenizer/src/draft/ngram_mod.rs:83:/// llama.cpp's `common_params_speculative_ngram_mod` default `n_max`
+proxima-tokenizer/src/draft/ngram_mod.rs:87:/// llama.cpp's `common_params_speculative_ngram_mod` default `n_min`
+proxima-tokenizer/src/draft/ngram_mod.rs:91:/// llama.cpp's `common_ngram_mod::EMPTY` sentinel (`common/ngram-mod.h:16`):
+proxima-tokenizer/src/draft/ngram_mod.rs:95:/// llama.cpp's `idx()` multiplier (`common/ngram-mod.cpp:19`) -- the constant
+proxima-tokenizer/src/draft/ngram_mod.rs:100:/// llama.cpp's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
+proxima-tokenizer/src/draft/ngram_mod.rs:103:    /// The context window size hashed into the table -- llama.cpp's `n_match`.
+proxima-tokenizer/src/draft/ngram_mod.rs:105:    /// The maximum chain length drafted after a hit -- llama.cpp's `n_max`.
+proxima-tokenizer/src/draft/ngram_mod.rs:108:    /// llama.cpp's `n_min`.
+proxima-tokenizer/src/draft/ngram_mod.rs:174:    /// llama.cpp's `common_ngram_mod::idx` (`common/ngram-mod.cpp:15-25`).
+proxima-tokenizer/src/draft/ngram_mod.rs:186:    /// llama.cpp's `common_ngram_mod::add` (`common/ngram-mod.cpp:27-35`).
+proxima-tokenizer/src/draft/ngram_mod.rs:195:        // llama.cpp's own storage is `int32_t`; real vocab ids never
+proxima-tokenizer/src/draft/ngram_mod.rs:200:    /// llama.cpp's `common_ngram_mod::get` (`common/ngram-mod.cpp:37-41`).
+proxima-tokenizer/src/draft/ngram_mod.rs:207:    /// llama.cpp's `common_ngram_mod::reset` (`common/ngram-mod.cpp:43-46`) --
+proxima-tokenizer/src/draft/ngram_mod.rs:219:/// `prompt` is llama.cpp's `prompt` argument: every token this generation
+proxima-tokenizer/src/draft/ngram_mod.rs:244:/// the chained-lookahead algorithm. `history` is llama.cpp's `prompt` (every
+proxima-tokenizer/src/draft/ngram_mod.rs:249:/// `out` doubles as llama.cpp's own `result` scratch buffer (`draft_one`
+proxima-tokenizer/src/draft/ngram_mod.rs:269:    // llama.cpp: `if (sinfo.i_last + 32 < cur_len) { ... }` -- chunked
+proxima-tokenizer/src/draft/ngram_mod.rs:294:        // llama.cpp's own storage is `int32_t`; see `NgramMod::add`'s doc.
+proxima-tokenizer/src/draft/ngram_mod.rs:403:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_mod.rs:407:        "/tests/fixtures/llama-ngram/fixtures/ngram_mod.json"
+proxima-tokenizer/src/draft/ngram_mod.rs:411:    /// every case in `tests/fixtures/llama-ngram/fixtures/ngram_mod.json`
+proxima-tokenizer/src/draft/ngram_mod.rs:433:    /// so both sides produce the same stream. llama.cpp's own `begin()`
+proxima-tokenizer/src/draft/ngram_mod.rs:472:            "llama.cpp's own recorded occupancy warmup must reset the table exactly once before replay"
+proxima-tokenizer/src/draft/ngram_mod.rs:521:            "the synthetic occupancy warmup replayed against llama.cpp must fire at least one reset"
+proxima-tokenizer/src/draft/ngram_mod.rs:533:    /// mechanism against llama.cpp's own recorded 2.2-million-token
+proxima-tokenizer/src/draft/ngram_mod.rs:616:    /// must draft nothing, not a short chain -- llama.cpp's own
+proxima-tokenizer/src/draft/ngram_simple.rs:1://! A faithful port of llama.cpp's `common_ngram_simple_draft`
+proxima-tokenizer/src/draft/ngram_simple.rs:3://! self-speculative n-gram drafter every llama.cpp speculation type traces
+proxima-tokenizer/src/draft/ngram_simple.rs:24://! llama.cpp's own loop counts down, so a later match always wins over an
+proxima-tokenizer/src/draft/ngram_simple.rs:33://! 1` -- llama.cpp's own guard, preserved exactly (a strict `>`, not
+proxima-tokenizer/src/draft/ngram_simple.rs:38:/// llama.cpp's `common_ngram_simple_config` (`common/ngram-map.h:24`),
+proxima-tokenizer/src/draft/ngram_simple.rs:39:/// renamed to the field names `speculative-decode-llama-parity/SPEC.md`
+proxima-tokenizer/src/draft/ngram_simple.rs:40:/// (requirement R4) uses: `size_n` is llama.cpp's `size_ngram` (the n-gram
+proxima-tokenizer/src/draft/ngram_simple.rs:41:/// looked up in the token history), `size_m` is llama.cpp's `size_mgram` (how
+proxima-tokenizer/src/draft/ngram_simple.rs:42:/// many tokens after a match are drafted). llama.cpp's own default for
+proxima-tokenizer/src/draft/ngram_simple.rs:48:    /// Size of the n-gram looked up in `history` -- llama.cpp's `size_ngram`.
+proxima-tokenizer/src/draft/ngram_simple.rs:50:    /// Size of the m-gram drafted after a match -- llama.cpp's `size_mgram`.
+proxima-tokenizer/src/draft/ngram_simple.rs:54:/// llama.cpp's `ngram-simple` default `size_n`
+proxima-tokenizer/src/draft/ngram_simple.rs:58:/// llama.cpp's `ngram-simple` default `size_m`
+proxima-tokenizer/src/draft/ngram_simple.rs:139:    // llama.cpp: `if (cur_len <= n_draft_min + n_draft_max + 1) return {};`
+proxima-tokenizer/src/draft/ngram_simple.rs:144:    // llama.cpp builds `pattern` as `tokens[cur_len - n_draft_min + 1 ..
+proxima-tokenizer/src/draft/ngram_simple.rs:156:    // llama.cpp: `for (j = cur_len - n_draft_min - 1; j > 0; --j)` -- scans
+proxima-tokenizer/src/draft/ngram_simple.rs:170:    // llama.cpp: `copy_max = min(n_draft_max, cur_len - (match_pos +
+proxima-tokenizer/src/draft/ngram_simple.rs:225:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_simple.rs:229:        "/tests/fixtures/llama-ngram/fixtures/ngram_simple.json"
+proxima-tokenizer/src/draft/ngram_simple.rs:233:    /// `tests/fixtures/llama-ngram/fixtures/ngram_simple.json`, whose
+proxima-tokenizer/src/draft/ngram_simple.rs:234:    /// `draft` field was produced by calling llama.cpp's own
+proxima-tokenizer/src/draft/ngram_simple.rs:236:    /// `speculative-decode-llama-parity/SPEC.md` AC5) -- never by
+proxima-tokenizer/src/gguf.rs:10://! `~/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf` (a
+proxima-tokenizer/src/gguf.rs:16://! | `tokenizer.ggml.model` | string | `"gpt2"` (byte-level BPE) on the llama-bpe fixture; the SentencePiece/SPM value (`MODEL_UNIGRAM`) on the openchat-3.5-1210 fixture below -- this is the key [`vocab_from_metadata`] dispatches the encoder on |
+proxima-tokenizer/src/gguf.rs:17://! | `tokenizer.ggml.pre` | string | `"llama-bpe"` on the llama-bpe fixture, the digit-per-pretoken names on the Qwen checkpoints (see [`PreType::from_gguf_name`]); [`vocab_from_metadata`] maps it to a [`PreType`] exactly as llama.cpp does (`llama-vocab.cpp:2168-2271`), and a `"gpt2"` vocab with a missing value uses the default pre-split with a warning, and an unmapped value is an error |
+proxima-tokenizer/src/gguf.rs:24://! | `tokenizer.ggml.add_bos_token` | bool | present (`true`) on the real openchat-3.5-1210 and Nous-Hermes-2-Mixtral fixtures; **absent** on the real deepseek-coder-33b-instruct and 8B-A1B short-conv fixtures -- this is llama.cpp's own conversion-time heuristic, not guaranteed present, so [`vocab_from_metadata`] threads it through as `Option<bool>` ([`crate::vocab::Vocab::with_bos_eos_policy`]) rather than defaulting it |
+proxima-tokenizer/src/gguf.rs:28://! are read too, but absent on the llama-bpe fixture -- byte-level BPE has
+proxima-tokenizer/src/gguf.rs:29://! no OOV case (every byte has a base token), so llama.cpp's own gguf
+proxima-tokenizer/src/gguf.rs:125:/// llama.cpp maps it ([`PreType::from_gguf_name`]).
+proxima-tokenizer/src/gguf.rs:127:/// A missing or empty value is llama.cpp's `default` pre type with a warning
+proxima-tokenizer/src/gguf.rs:128:/// (`llama-vocab.cpp:2159-2167`), so it is [`PreType::Default`] here with the
+proxima-tokenizer/src/gguf.rs:130:/// is an error carrying that value: llama.cpp throws on a name it does not
+proxima-tokenizer/src/gguf.rs:131:/// know (`llama-vocab.cpp:2423`), and for the names it does know but this
+proxima-tokenizer/src/gguf_names.rs:4://! enumerations (llama.cpp's `LLAMA_VOCAB_TYPE_*` and `LLAMA_VOCAB_PRE_TYPE_*`
+proxima-tokenizer/src/gguf_names.rs:14:pub(crate) const MODEL_UNIGRAM: &str = "llama";
+proxima-tokenizer/src/gguf_names.rs:21:    /// Maps a `tokenizer.ggml.pre` value exactly as llama.cpp's
+proxima-tokenizer/src/gguf_names.rs:22:    /// `llama_vocab::impl::load` does (`llama-vocab.cpp:2168-2425`), for the
+proxima-tokenizer/src/gguf_names.rs:24:    /// value, including ones llama.cpp itself accepts. Names whose branch also
+proxima-tokenizer/src/gguf_names.rs:30:            "llama3" | "llama-v3" | "llama-bpe" | "falcon3" | "falcon-h1" | "pixtral"
+proxima-tokenizer/src/gguf_names.rs:31:            | "midm-2.0" | "lfm2" | "jina-v5-nano" | "dbrx" | "smaug-bpe" | "glm4"
+proxima-tokenizer/src/gguf_names.rs:33:            "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2" | "megrez" | "stablelm2"
+proxima-tokenizer/src/gguf_names.rs:35:            "qwen35" => Some(Self::SingleDigitMarks),
+proxima-tokenizer/src/gguf_names.rs:66:        assert_eq!(PreType::from_gguf_name("llama-bpe"), Some(PreType::GroupedDigits));
+proxima-tokenizer/src/gguf_names.rs:67:        assert_eq!(PreType::from_gguf_name("lfm2"), Some(PreType::GroupedDigits));
+proxima-tokenizer/src/gguf_names.rs:68:        assert_eq!(PreType::from_gguf_name("qwen2"), Some(PreType::SingleDigit));
+proxima-tokenizer/src/gguf_names.rs:71:        assert_eq!(PreType::from_gguf_name("qwen35"), Some(PreType::SingleDigitMarks));
+proxima-tokenizer/src/hf.rs:149:/// **no `add_bos_token` key at all**. That absence is llama.cpp's own GGUF
+proxima-tokenizer/src/lib.rs:28://! `tokenizer.ggml.pre` (`"llama-bpe"` is the grouped-digits rule; the
+proxima-tokenizer/src/pretokenize.rs:4://! each variant mirrors one `LLAMA_VOCAB_PRE_TYPE_*` of llama.cpp f1ea20621
+proxima-tokenizer/src/pretokenize.rs:5://! (`src/llama-vocab.cpp` regexes, `src/unicode.cpp` matchers):
+proxima-tokenizer/src/pretokenize.rs:19://! tables llama.cpp's own matchers read, so the class boundaries agree with
+proxima-tokenizer/src/pretokenize.rs:42:    /// [`crate::pretokenize_passes`]. What llama.cpp uses for `tokenizer.ggml.pre =
+proxima-tokenizer/src/pretokenize.rs:157:/// `llama-vocab.cpp:528-536`): alternating runs of non-newline and newline
+proxima-tokenizer/src/pretokenize_passes.rs:1://! The multi-pass pre-splits: llama.cpp pre types whose regex list is several
+proxima-tokenizer/src/pretokenize_passes.rs:14://! (`unicode_regex_split_stl`); the gpt2 pass is llama.cpp's hand-written
+proxima-tokenizer/src/sample.rs:23://! upstream llama.cpp's own default chain order
+proxima-tokenizer/src/sample.rs:32://! penalties (`src/llama-sampling.cpp:1650-1681`), top-k
+proxima-tokenizer/src/sample.rs:33://! (`src/llama-sampling.cpp:228-267`), top-p (`:708-733`), min-p
+proxima-tokenizer/src/sample.rs:52://! (`src/llama-sampling.cpp:617-627`) rather than reseeding per token.
+proxima-tokenizer/src/sample.rs:88:/// `top_k <= 0` disables the filter (`src/llama-sampling.cpp:234-236`);
+proxima-tokenizer/src/sample.rs:553:    /// (`src/llama-sampling.cpp:234-236`) -- a no-op, not an error.
+proxima-tokenizer/src/sample.rs:618:    /// first two survive (`src/llama-sampling.cpp:708-733`).
+proxima-tokenizer/src/sample.rs:637:    /// (`src/llama-sampling.cpp:711-713`).
+proxima-tokenizer/src/sample.rs:648:    /// `-1.0` are both below it (`src/llama-sampling.cpp:775-806`).
+proxima-tokenizer/src/sample.rs:656:    /// Hand-computed against `src/llama-sampling.cpp:1650-1681`'s own
+proxima-tokenizer/src/sample.rs:735:            "swapping penalty/temperature order changes id 0's logit -- llama.cpp applies \
+proxima-tokenizer/src/sample.rs:1186:    /// (`repeat_penalty: 1.1`, the upstream llama.cpp default) with a full
+proxima-tokenizer/src/unicode_tables.rs:1://! Generated from llama.cpp f1ea206218210afb913ae2f5d2c51faed35915da `src/unicode-data.cpp` by
+proxima-tokenizer/src/unicode_tables.rs:3://! `\p{N}` / `\p{L}` / `\p{M}` / `\p{P}` / `\s` tables llama.cpp's
+proxima-tokenizer/src/unigram.rs:5://! dispatches to `LLAMA_VOCAB_TYPE_SPM` in llama.cpp
+proxima-tokenizer/src/unigram.rs:6://! (`llama-vocab.cpp:1405-1406`), whose tokenizer
+proxima-tokenizer/src/unigram.rs:7://! (`llm_tokenizer_spm_session::tokenize`, `llama-vocab.cpp:116-172`)
+proxima-tokenizer/src/unigram.rs:29:/// (`llama_escape_whitespace`, `llama-vocab.cpp:2372-2374`).
+proxima-tokenizer/src/unigram.rs:32:/// Normalizes raw text the way llama.cpp's SPM path does before segmenting:
+proxima-tokenizer/src/unigram.rs:34:/// `LLAMA_VOCAB_TYPE_SPM`, `llama-vocab.cpp:1664`, unless overridden by
+proxima-tokenizer/src/unigram.rs:37:/// `SPACE_MARKER` (crate-private). `""` stays `""`: llama.cpp only ever
+proxima-tokenizer/src/unigram.rs:38:/// tokenizes a non-empty fragment (`llama-vocab.cpp:2409`).
+proxima-tokenizer/src/unigram.rs:95:/// `llama-vocab.cpp:2684-2685`).
+proxima-tokenizer/src/unigram.rs:108:/// split into pretokens first (`llama-vocab.cpp:2430-2446` calls
+proxima-tokenizer/src/unigram.rs:115:/// priority-queue comparator at `llama-vocab.cpp:96-100`) until no pair
+proxima-tokenizer/src/vocab.rs:15:/// Mirrors llama.cpp's `llama_token_type` (`include/llama.h:131-137`) --
+proxima-tokenizer/src/vocab.rs:156:    /// crate-private) (mirroring llama.cpp's `llm_tokenizer_spm_session`)
+proxima-tokenizer/src/vocab.rs:588:/// (`"<0x1A>"`, uppercase hex, zero-padded) -- the convention llama.cpp's
+proxima-tokenizer/src/vocab.rs:632:/// through as its own UTF-8 encoding — the same fallback llama.cpp's

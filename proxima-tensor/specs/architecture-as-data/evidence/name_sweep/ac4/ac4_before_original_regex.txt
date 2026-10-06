@@ -1,0 +1,1110 @@
+omega/src/cuda.rs:2214:/// `crate::msl::Q4_0_UNPACK_MSL`'s `q4_0_element` exactly: llama.cpp's
+omega/src/error.rs:128:    /// pre-partial-rotary shape) -- a partial-rotary bind (qwen35's dense
+omega/src/identity.rs:623:                // `rotary_dim == head_dim` (every caller before qwen35's
+omega/src/metal/arena_encode_dispatch_finish.rs:99:/// regardless of a bind's op shapes: gemma4-E2B's own bound graph on a
+omega/src/metal/arena_encode_dispatch_finish.rs:2104:        // qwen35moe's routed-expert + GDN decode step, discarding state
+omega/src/metal/arena_encode_dispatch_finish.rs:2780:    /// qwen35moe-shaped grouped gate/up dispatch's `operand_bytes` by
+omega/src/metal/arena_encode_dispatch_finish.rs:4429:    /// One gemma4-E2B attention op as speculative verify binds it: eight query
+omega/src/metal/arena_encode_dispatch_finish.rs:4595:    /// `speculative_decode_parity --gpu-layers all` against gemma4-E2B on
+omega/src/metal/arena_encode_dispatch_finish.rs:4597:    /// data/speculative_corpus.jsonl`). gemma4-E2B's attention lowers to a
+omega/src/metal/arena_encode_dispatch_finish.rs:4698:    /// weight `Constant` (qwen35moe-style MoE layers carry both shapes;
+omega/src/metal/device_buffers_arena_plan.rs:509:    /// 9.44 MB one, against llama.cpp's 17.62 ms for an entire 7B token.
+omega/src/metal/device_buffers_arena_plan.rs:748:/// ms per forward of overhead against llama.cpp Metal's 17.62 ms for the
+omega/src/metal/device_buffers_arena_plan.rs:1034:/// admission this replaces) refused 100% of the real qwen35moe decode
+omega/src/metal/device_buffers_arena_plan.rs:1286:    // real qwen35moe decode graph's own second-and-later decode step).
+omega/src/metal/dispatch_timed_and_classify.rs:1599:    /// (`m=1`, `packed_row_block_token_total(block, ..) == 1`) for gemma4-E2B's
+omega/src/metal/dispatch_timed_and_classify.rs:1692:    /// gemma4-E2B's width-2 verify matmul: a 2-token `Q4_0` reduce whose
+omega/src/metal/dispatch_timed_and_classify.rs:1767:    /// ROW 538: the real qwen35moe decode shape (256 experts, top-8, hidden
+omega/src/metal/dispatch_timed_and_classify.rs:1976:        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped grouped ffn infers");
+omega/src/metal/dispatch_timed_and_classify.rs:1979:                .expect("the qwen35moe-shaped grouped ffn binds");
+omega/src/metal/dispatch_timed_and_classify.rs:2149:            .expect("append_moe_ffn with GroupedGateUp lowers at the real qwen35moe shape");
+omega/src/metal/dispatch_timed_and_classify.rs:2152:        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped ffn infers");
+omega/src/metal/dispatch_timed_and_classify.rs:2155:                .expect("the qwen35moe-shaped ffn binds");
+omega/src/metal/mod.rs:68://! llama.cpp's `ggml-metal.m` at its default `n_cb=1` uses the identical
+omega/src/metal/pipeline_buffers_upload.rs:140:/// ROW 311 (`proxima-tensor/docs/discipline.md`): llama.cpp encodes its whole
+omega/src/metal/pipeline_buffers_upload.rs:150:    /// One dispatch completes before the next begins -- llama.cpp's own
+omega/src/metal/prepare_uniforms_pack.rs:478:/// qwen35moe-shaped grouped gate/up dispatch's own `operand_bytes` by two
+omega/src/msl/cached_attention_decode_split.rs:5:/// llama.cpp's `kernel_flash_attn_ext_vec` grid (`(iq1, iq2, iwg)` at
+omega/src/msl/cached_attention_decode_split.rs:13:/// The lane layout is llama's `NE`/`NL` split of a simdgroup
+omega/src/msl/cached_attention_render.rs:11:/// register-resident shape as llama.cpp's `kernel_flash_attn_ext_vec`
+omega/src/msl/cached_attention_render.rs:77:    // qwen35's partial-rotary shape: the trailing `pass_query`/
+omega/src/msl/cached_attention_render.rs:191:    // one pipeline serves every bucket, matching llama's own `ne11`-as-
+omega/src/msl/cached_attention_render.rs:299:    // "idle simdgroup, identity partial" shape llama's own dispatch-time
+omega/src/msl/cached_attention_render.rs:407:        // it. `block_width > 1` renders §4b's block-staged walk: llama's
+omega/src/msl/cached_attention_render.rs:416:        // the V accumulate -- llama's own `ss[]` reuse
+omega/src/msl/cached_attention_render.rs:427:            // The float4/ty-group V accumulate (llama's `kernel_flash_attn_
+omega/src/msl/cached_attention_render.rs:492:        // into registers, llama.cpp's `kernel_flash_attn_ext_vec` shape
+omega/src/msl/cached_attention_render.rs:511:        // total; key += context_chunks`), llama.cpp's own context-stride
+omega/src/msl/cached_attention_render.rs:531:        // `l`, sum `o`, exactly llama.cpp's `kernel_flash_attn_ext_vec`
+omega/src/msl/cached_attention_render.rs:547:/// SAME online-softmax rescale llama.cpp's own
+omega/src/msl/cached_attention_render.rs:553:/// simdgroup's shuffle network, the same reason llama's own reduce needs no
+omega/src/msl/cached_attention_render.rs:606:/// transcribed from llama.cpp's `kernel_flash_attn_ext_vec_reduce`
+omega/src/msl/cached_attention_render.rs:622:/// Whether the split writers and the merge kernel use llama.cpp's interleaved
+omega/src/msl/cached_attention_render.rs:672:/// with a simdgroup per potential split (llama.cpp's `32 * nwg` threads,
+omega/src/msl/cached_attention_row_tiled.rs:26:/// Composes `simdgroup_matrix` MMA (Metal), llama.cpp's non-vec flash
+omega/src/msl/elementwise_reduce_core.rs:2235:    // `op_profile_kind` count for gemma4-E2B's ~275 Q4_0 dispatches fell
+omega/src/msl/emit_and_classify.rs:3439:/// clamped duplicates -- gemma4-E2B width 2 measured 97.8 ms/step at cap 8
+omega/src/msl/emit_and_classify.rs:3530:/// reads stride `0` (a genuine broadcast, gemma4's GQA head-group axis:
+omega/src/msl/emit_and_classify.rs:3641:        // gemma4's GQA head axis (`heads`) shares ownership with the real
+omega/src/msl/emit_and_classify.rs:3710:        // real gemma4 attention product (a real captured attention
+omega/src/msl/kernel_types_identity.rs:514:/// traffic. Measured on an M1 Max, llama.cpp's Metal backend runs this same
+omega/src/msl/kernel_types_identity.rs:1110:/// mirroring llama.cpp's own `kernel_mul_mv_q5_K_f32_impl`
+omega/src/msl/kernel_types_identity.rs:1255:/// `Q4_0`: llama.cpp's simplest and most widely distributed 4-bit legacy
+omega/src/msl/kernel_types_identity.rs:1307:/// add: `reduce-packed-row-blocked` is the #1 GPU-time bucket in gemma4-E2B
+omega/src/msl/kernel_types_identity.rs:2007:/// batched matmul -- gemma4's GQA attention score (`Q.K^T`) and value
+omega/src/msl/packed_row_blocked_ggml.rs:644:                    // BATCHED ARM -- the #1 GPU-time bucket in gemma4-E2B
+omega/src/msl/packed_row_blocked_ggml.rs:962:/// `"128u * ip + l0"` (llama's `y_offset`, `ggml-metal.metal:5383`) in place
+omega/src/msl/packed_row_blocked_ggml.rs:983:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1204:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1227:/// on real gemma4-E2B `Q4_0` weights.
+omega/src/msl/packed_row_blocked_ggml.rs:1342:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1541:// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+omega/src/msl/packed_row_blocked_ggml.rs:1555:/// Lane variable mapping, llama -> this function (`ggml-metal.metal:5376-5385`):
+omega/src/msl/signature_tokens_prelude.rs:1111:/// registers across the whole `n_tokens` loop, mirroring llama.cpp's own
+omega/src/msl/signature_tokens_prelude.rs:1373:/// `(query_row, kv_head, group)` triple's key range across -- llama.cpp's
+omega/src/msl/signature_tokens_prelude.rs:1441:/// Q·K/softmax/V staging width -- llama.cpp's `kernel_flash_attn_ext_vec`
+omega/src/msl/signature_tokens_prelude.rs:1464:/// (threadgroups sharing one dispatch), llama.cpp's `nwg`
+omega/src/msl/signature_tokens_prelude.rs:1466:/// count rather than llama's fixed 32, because this backend's threadgroup is
+omega/src/msl/signature_tokens_prelude.rs:1468:/// simdgroups) than llama's per-Q-head one.
+omega/src/msl/signature_tokens_prelude.rs:1816:/// keys, capped at `[attention_splits].max`. llama.cpp's fixed `nwg = 32`
+omega/src/msl/signature_tokens_prelude.rs:1831:/// of them shorten every simdgroup's serial K-then-V memory chain; llama.cpp's
+omega/src/msl/signature_tokens_prelude.rs:1983:/// `[attention_rows].head_dims_per_simdgroup`, within 1 to 8 -- llama.cpp's
+omega/src/msl/tiled_gemm_cooperative_scan.rs:1040:/// build `simdgroup_float8x8` fragments) -- gemma4's GQA attention score
+omega/src/msl/tiled_gemm_cooperative_scan.rs:1969:    // of it: the probe measured 1.6 GB/s against llama.cpp Metal's 214.7.
+omega/src/msl/tiled_gemm_cooperative_scan.rs:1976:        // elem/s against llama.cpp Metal's 381 G elem/s, while the f32 kernel on
+omega/src/msl/tiled_gemm_cooperative_scan.rs:2381:        // barrier before every lane reads it, matching llama.cpp's own
+omega/src/msl/tiled_gemm_cooperative_scan.rs:2447:/// reading one. Same shape llama.cpp's `kernel_rms_norm` takes (`ggml-metal.
+omega/src/wgpu_driver.rs:1054:        // Qwen2.5 output head reaches 151,936 groups), so spill whole
+proxima-model-interop/src/bind.rs:98:        // llama.cpp-produced checkpoint (this module's own doc, "no GGUF
+proxima-model-interop/src/bind.rs:366:    /// `{architecture}.expert_count` (llama.cpp's own key for a sparse
+proxima-model-interop/src/bind.rs:381:    /// Qwen3 declares `1_000_000.0`, Llama 3 `500_000.0`, Mistral/openchat
+proxima-model-interop/src/bind.rs:384:    /// when the key is absent, matching llama.cpp's own default -- every
+proxima-model-interop/src/bind.rs:391:    /// `RMS_EPSILON_DEFAULT` (llama.cpp's own default for a llama/mistral
+proxima-model-interop/src/bind.rs:393:    /// is absent. `crate::qwen35::Qwen35Hparams::rms_epsilon`
+proxima-model-interop/src/bind.rs:394:    /// (`std`-gated) and `crate::lfm2::Lfm2Hparams::rms_epsilon`
+proxima-model-interop/src/bind.rs:405:    /// ([`architecture_from_metadata`]): llama.cpp's own writer always
+proxima-model-interop/src/bind.rs:486:/// `general.architecture` first (`"llama"` for a Mistral-shaped checkpoint
+proxima-model-interop/src/bind.rs:495:/// (confirmed on a real checkpoint, LFM2.5-8B-A1B -- see
+proxima-model-interop/src/bind.rs:522:/// (LFM2.5-8B-A1B, confirmed via [`ModelHparams::head_dim`]'s own
+proxima-model-interop/src/bind.rs:559:/// experts `blk.{layer}.{proj}_exps.weight` stacks, llama.cpp's own
+proxima-model-interop/src/bind.rs:709:/// llama.cpp's own RMSNorm epsilon default for a llama/mistral checkpoint
+proxima-model-interop/src/bind.rs:712:/// checkpoint's own metadata. [`crate::qwen35::QWEN35_RMS_EPSILON_DEFAULT`]/
+proxima-model-interop/src/bind.rs:713:/// [`crate::lfm2::LFM2_RMS_EPSILON_DEFAULT`] are the same fallback shape for
+proxima-model-interop/src/bind.rs:811:/// [`MetadataArray::Bool`] key (e.g. `gemma4.attention.sliding_window_pattern`) --
+proxima-model-interop/src/bind.rs:822:/// `std`-gated: its only caller, `gemma4::hparams::from_metadata`, lives
+proxima-model-interop/src/bind.rs:885:/// rather than assuming one wire type: llama.cpp's own GGUF writer emits
+proxima-model-interop/src/bind.rs:1119:/// The GGUF/llama.cpp lowercase codec name [`recode_tensor`] appends to
+proxima-model-interop/src/bind.rs:1246:/// `Input` (`crate::lfm2`'s tied-embedding output projection and
+proxima-model-interop/src/bind.rs:1247:/// differently-named final norm, both confirmed on the real LFM2.5-8B-A1B
+proxima-model-interop/src/bind.rs:1363:/// `QuantizedBlock` view (the Qwen35 router is `[expert, embedding]` on disk
+proxima-model-interop/src/bind.rs:1402:/// forward program's own `Input` name disagree (`crate::lfm2`'s tied
+proxima-model-interop/src/bind.rs:2955:                    Value::String("llama".to_string()),
+proxima-model-interop/src/bind.rs:2957:                ("llama.embedding_length".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:2958:                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+proxima-model-interop/src/bind.rs:2959:                ("llama.attention.head_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:2960:                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+proxima-model-interop/src/bind.rs:2961:                ("llama.block_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:2962:                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:2993:                family: "llama".to_string(),
+proxima-model-interop/src/bind.rs:3016:                    Value::String("llama".to_string()),
+proxima-model-interop/src/bind.rs:3018:                ("llama.embedding_length".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:3019:                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+proxima-model-interop/src/bind.rs:3020:                ("llama.attention.head_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:3021:                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+proxima-model-interop/src/bind.rs:3022:                ("llama.block_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3023:                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3024:                ("llama.expert_count".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:3025:                ("llama.expert_used_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:3115:    /// (confirmed real on LFM2.5-8B-A1B, `bind.rs`'s own doc on
+proxima-model-interop/src/bind.rs:3131:                    Value::String("llama".to_string()),
+proxima-model-interop/src/bind.rs:3133:                ("llama.embedding_length".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:3134:                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+proxima-model-interop/src/bind.rs:3135:                ("llama.attention.head_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:3136:                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+proxima-model-interop/src/bind.rs:3137:                ("llama.block_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3138:                // deliberately no llama.rope.dimension_count key
+proxima-model-interop/src/bind.rs:3174:                    Value::String("llama".to_string()),
+proxima-model-interop/src/bind.rs:3176:                ("llama.embedding_length".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:3177:                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+proxima-model-interop/src/bind.rs:3178:                ("llama.attention.head_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:3180:                    "llama.attention.head_count_kv".to_string(),
+proxima-model-interop/src/bind.rs:3183:                ("llama.block_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3184:                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3219:                    Value::String("lfm2".to_string()),
+proxima-model-interop/src/bind.rs:3221:                ("lfm2.embedding_length".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:3222:                ("lfm2.feed_forward_length".to_string(), Value::U32(32)),
+proxima-model-interop/src/bind.rs:3223:                ("lfm2.attention.head_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:3225:                    "lfm2.attention.head_count_kv".to_string(),
+proxima-model-interop/src/bind.rs:3228:                ("lfm2.block_count".to_string(), Value::U32(6)),
+proxima-model-interop/src/bind.rs:3229:                ("lfm2.rope.dimension_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3260:    /// (Qwen3's real `1_000_000.0`, Llama 3's real `500_000.0`) must have
+proxima-model-interop/src/bind.rs:3279:                    Value::String("llama".to_string()),
+proxima-model-interop/src/bind.rs:3281:                ("llama.embedding_length".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:3282:                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+proxima-model-interop/src/bind.rs:3283:                ("llama.attention.head_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:3284:                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+proxima-model-interop/src/bind.rs:3285:                ("llama.block_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3286:                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3287:                ("llama.rope.freq_base".to_string(), Value::F32(freq_base)),
+proxima-model-interop/src/bind.rs:3330:                    Value::String("llama".to_string()),
+proxima-model-interop/src/bind.rs:3332:                ("llama.embedding_length".to_string(), Value::U32(8)),
+proxima-model-interop/src/bind.rs:3333:                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+proxima-model-interop/src/bind.rs:3334:                ("llama.attention.head_count".to_string(), Value::U32(2)),
+proxima-model-interop/src/bind.rs:3335:                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+proxima-model-interop/src/bind.rs:3336:                ("llama.block_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3337:                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+proxima-model-interop/src/bind.rs:3338:                ("llama.rope.freq_base".to_string(), Value::F64(1_000_000.0)),
+proxima-model-interop/src/bind.rs:4925:    /// One real greedy-decoded token out of the real openchat-3.5 (Mistral
+proxima-model-interop/src/bind.rs:4961:        // llama.cpp's own captured greedy answer for this exact prompt and
+proxima-model-interop/src/bind.rs:4965:            "greedy token id drifted off llama.cpp's captured answer"
+proxima-model-interop/src/bind.rs:4969:            "greedy token text drifted off llama.cpp's captured answer"
+proxima-model-interop/src/bind.rs:5270:    /// compares against `llama-cli -ngl 0 --temp 0 -n 8`'s own generated
+proxima-model-interop/src/bind.rs:6780:    /// now over llama.cpp's own `common_ngram_simple_config` shape instead
+proxima-model-interop/src/bind.rs:6781:    /// (`speculative-decode-llama-parity/SPEC.md` R4/R8).
+proxima-model-interop/src/bind.rs:6990:    /// [`architecture_from_metadata`] must read `llama.expert_count`/
+proxima-model-interop/src/bind.rs:6991:    /// `llama.expert_used_count` off this real checkpoint (Mixtral-8x7B's
+proxima-model-interop/src/bind.rs:7438:// hybrid checkpoint (LFM2.5-8B-A1B: 18 short-convolution layers, 6 attention
+proxima-model-interop/src/bind.rs:7441:// Mistral/Llama-family checkpoint this crate had evaluated before now), and
+proxima-model-interop/src/bind.rs:7446:// crate's forward program cannot express LFM2's convolution layers at all
+proxima-model-interop/src/bind.rs:7459:    const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf";
+proxima-model-interop/src/bind.rs:7492:    #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
+proxima-model-interop/src/bind.rs:7497:        let mut file = std::fs::File::open(path).expect("open host-local lfm2 gguf fixture");
+proxima-model-interop/src/bind.rs:7504:            "LFM2's real per-layer-varying head_count_kv must parse (never MissingMetadataKey)",
+proxima-model-interop/src/bind.rs:7535:    #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
+proxima-model-interop/src/bind.rs:7540:        let mut file = std::fs::File::open(path).expect("open host-local lfm2 gguf fixture");
+proxima-model-interop/src/bind.rs:7575:            "LFM2.5-8B-A1B's real per-head dimension is 64 (independently confirmed via \
+proxima-model-interop/src/dense.rs:3://! scalar `{family}.*` keys describe every layer alike (`llama`, `mistral`,
+proxima-model-interop/src/dense.rs:4://! `qwen2`, `qwen3`, `mixtral`, `granitemoe`, and `lfm2`'s short-convolution
+proxima-model-interop/src/dense.rs:152:/// causal mask, the same reading llama.cpp's `n_swa` gets.
+proxima-model-interop/src/dense.rs:277:            &family_profile("llama").expect("profile embedded"),
+proxima-model-interop/src/dense.rs:296:            family: "llama".to_string(),
+proxima-model-interop/src/dense.rs:370:        let bytes = header_bytes("llama", &[]);
+proxima-model-interop/src/dense.rs:374:        assert_eq!(with_header_scales(input.clone(), &parsed, "llama"), input);
+proxima-model-interop/src/dense.rs:391:        let bytes = header_with_window("llama", 4096);
+proxima-model-interop/src/dense.rs:395:        let result = with_header_window(input.clone(), &parsed, "llama");
+proxima-model-interop/src/dense.rs:408:        let bytes = header_bytes("llama", &[]);
+proxima-model-interop/src/dense.rs:412:        assert_eq!(with_header_window(input.clone(), &parsed, "llama"), input);
+proxima-model-interop/src/dense.rs:413:        let zero = header_with_window("llama", 0);
+proxima-model-interop/src/dense.rs:415:        assert_eq!(with_header_window(input.clone(), &parsed_zero, "llama"), input);
+proxima-model-interop/src/dense.rs:501:        let bytes = header_bytes("llama", &[("residual_scale", 0.0), ("logit_scale", 0.0)]);
+proxima-model-interop/src/dense.rs:505:        assert_eq!(with_header_scales(input.clone(), &parsed, "llama"), input);
+proxima-model-interop/src/error.rs:187:    /// (LFM2.5-8B-A1B, whose convolution layers report `0` kv heads and
+proxima-model-interop/src/error.rs:449:    /// `crate::lfm2::lfm2_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
+proxima-model-interop/src/error.rs:454:    /// share one real kv head count for `crate::lfm2::Lfm2Hparams::kv_heads`
+proxima-model-interop/src/error.rs:461:    /// `crate::qwen35::bind_qwen35_attn_qkv_split`'s fused
+proxima-model-interop/src/error.rs:465:    /// this call derived from `qwen35.ssm.state_size` /
+proxima-model-interop/src/error.rs:466:    /// `qwen35.ssm.group_count` / `qwen35.ssm.inner_size`.
+proxima-model-interop/src/error.rs:479:    /// `crate::qwen35::bind_qwen35_attn_qkv_split`'s row-split precondition:
+proxima-model-interop/src/expert_sidecar.rs:185:                architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:930:                            architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:1037:                            architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:1101:                                architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:1207:                    architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:1232:                    architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:1243:    #[cfg(all(unix, any(feature = "qwen35moe-expert-prefetch", test)))]
+proxima-model-interop/src/expert_sidecar.rs:1264:    #[cfg(all(not(unix), any(feature = "qwen35moe-expert-prefetch", test)))]
+proxima-model-interop/src/expert_sidecar.rs:1267:            architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:1467:                "qwen35 sidecar action={action:?} layer={} expert={} codecs={codecs:?}",
+proxima-model-interop/src/expert_sidecar.rs:1488:                                architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_sidecar.rs:1496:                                        architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_slab.rs:894:    /// Snapshots exactly one layer's expert tables. Segment-local Qwen35
+proxima-model-interop/src/expert_slab.rs:1040:                                architecture: String::from("qwen35moe"),
+proxima-model-interop/src/expert_slab.rs:1143:                    architecture: String::from("qwen35moe"),
+proxima-model-interop/src/gemma4/bind.rs:7://! bespoke gemma4 forward-graph builder, no gemma4 schedule and no gemma4
+proxima-model-interop/src/gemma4/bind.rs:94:/// `blk.9`, `blk.14` on the real `gemma4:e2b-it-qat` checkpoint) carry a
+proxima-model-interop/src/gemma4/bind.rs:110:    use crate::gemma4::Gemma4Hparams;
+proxima-model-interop/src/gemma4/bind.rs:118:    /// The real `gemma4:e2b-it-qat` checkpoint's own measured
+proxima-model-interop/src/gemma4/bind.rs:130:            ("general.architecture", MetadataValue::String("gemma4".into())),
+proxima-model-interop/src/gemma4/bind.rs:131:            ("gemma4.embedding_length", MetadataValue::U32(1536)),
+proxima-model-interop/src/gemma4/bind.rs:132:            ("gemma4.block_count", MetadataValue::U32(35)),
+proxima-model-interop/src/gemma4/bind.rs:133:            ("gemma4.attention.head_count", MetadataValue::U32(8)),
+proxima-model-interop/src/gemma4/bind.rs:134:            ("gemma4.attention.head_count_kv", u32_array(alloc::vec![1; 35])),
+proxima-model-interop/src/gemma4/bind.rs:136:                "gemma4.attention.sliding_window_pattern",
+proxima-model-interop/src/gemma4/bind.rs:139:            ("gemma4.attention.shared_kv_layers", MetadataValue::U32(shared_kv_layers)),
+proxima-model-interop/src/gemma4/bind.rs:140:            ("gemma4.attention.key_length", MetadataValue::U32(512)),
+proxima-model-interop/src/gemma4/bind.rs:141:            ("gemma4.attention.value_length", MetadataValue::U32(512)),
+proxima-model-interop/src/gemma4/bind.rs:142:            ("gemma4.attention.key_length_swa", MetadataValue::U32(256)),
+proxima-model-interop/src/gemma4/bind.rs:143:            ("gemma4.attention.value_length_swa", MetadataValue::U32(256)),
+proxima-model-interop/src/gemma4/bind.rs:144:            ("gemma4.attention.sliding_window", MetadataValue::U32(512)),
+proxima-model-interop/src/gemma4/bind.rs:145:            ("gemma4.attention.layer_norm_rms_epsilon", MetadataValue::F32(1e-6)),
+proxima-model-interop/src/gemma4/bind.rs:146:            ("gemma4.feed_forward_length", u32_array(feed_forward)),
+proxima-model-interop/src/gemma4/bind.rs:147:            ("gemma4.rope.freq_base", MetadataValue::F32(1_000_000.0)),
+proxima-model-interop/src/gemma4/bind.rs:148:            ("gemma4.rope.freq_base_swa", MetadataValue::F32(10_000.0)),
+proxima-model-interop/src/gemma4/bind.rs:149:            ("gemma4.rope.dimension_count", MetadataValue::U32(512)),
+proxima-model-interop/src/gemma4/bind.rs:150:            ("gemma4.rope.dimension_count_swa", MetadataValue::U32(256)),
+proxima-model-interop/src/gemma4/bind.rs:151:            ("gemma4.final_logit_softcapping", MetadataValue::F32(30.0)),
+proxima-model-interop/src/gemma4/bind.rs:152:            ("gemma4.embedding_length_per_layer_input", MetadataValue::U32(256)),
+proxima-model-interop/src/gemma4/bind.rs:170:        let architecture = from_metadata(&parsed).expect("gemma4 hparams parse from the e2b-shaped header");
+proxima-model-interop/src/gemma4/bind.rs:214:        let ForwardProgram { program, .. } = build_forward(&descriptor).expect("gemma4 e2b-shaped forward program lowers");
+proxima-model-interop/src/gemma4/bind.rs:278:    /// Hand-derived from ollama's `mlxrunner/model/gemma4/gemma4.go`
+proxima-model-interop/src/gemma4/bind.rs:279:    /// `TextConfig` KV-sharing-map build (`gemma4.go:590-611`: a shared layer
+proxima-model-interop/src/gemma4/hparams.rs:1://! Header configuration for the `gemma4` mixture-of-experts checkpoint
+proxima-model-interop/src/gemma4/hparams.rs:2://! family -- `qwen35moe::hparams`'s own shape (family-prefixed metadata
+proxima-model-interop/src/gemma4/hparams.rs:10://! engine, and every gemma4 layer is
+proxima-model-interop/src/gemma4/hparams.rs:59:    /// `gemma4:e2b-it-qat` header: an `UnknownTensor` load error on
+proxima-model-interop/src/gemma4/hparams.rs:72:    /// gemma4.go's own `HiddenSizePerLayer`). `0` (the default
+proxima-model-interop/src/gemma4/mod.rs:2://! = "gemma4"`), the reader the `sliding_pattern` schedule source names
+proxima-model-interop/src/gemma4/mod.rs:6://! no bespoke gemma4 forward-graph module here.
+proxima-model-interop/src/gemma4/program.rs:6://! [`crate::gemma4::descriptor_from_gguf`] hands that engine directly --
+proxima-model-interop/src/generate/chunk_shift.rs:4://! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R5, llama-server's
+proxima-model-interop/src/generate/chunk_shift.rs:7://! llama-server walks the cache pointer forward from the common prefix and,
+proxima-model-interop/src/generate/chunk_shift.rs:14://! (`src/llama-kv-cache.cpp:1924-1964`, `:2003-2056`). Here the rows live
+proxima-model-interop/src/generate/chunk_shift.rs:17://! llama only advances on a match, so a replaced span (a summary where the
+proxima-model-interop/src/generate/chunk_shift.rs:34://! by what that context contributed; llama-server's reuse has the same
+proxima-model-interop/src/generate/chunk_shift.rs:101:/// position that matches (llama's walk takes the first too) and extended
+proxima-model-interop/src/generate/chunk_shift.rs:583:    /// llama-server's loop (`server-context.cpp:3217-3264`) with the prompt
+proxima-model-interop/src/generate/chunk_shift.rs:661:    /// llama's own case: the middle is dropped with nothing in its place, so
+proxima-model-interop/src/generate/chunk_shift.rs:823:    /// gemma4's full-layer frequency factors (`[1.0]*64 + [1e30]*192`),
+proxima-model-interop/src/generate/decode.rs:1102:/// `ABSORBED` blocks show every gemma4 layer (0, 1, 2, 4, 10 checked
+proxima-model-interop/src/generate/decode.rs:1344:/// gemma4's MoE graph, `docs/model-interop/discipline.md` C3: `Concurrent`'s
+proxima-model-interop/src/generate/decode.rs:1874:                reason: String::from("expert sidecars require a qwen35moe expert graph"),
+proxima-model-interop/src/generate/decode.rs:1997:    /// qwen35moe runtime integration.  The current forward graph exposes the
+proxima-model-interop/src/generate/decode.rs:2019:            FnOnce(crate::qwen35moe::execution::RouterResult<'_>) -> Result<Source, InteropError>,
+proxima-model-interop/src/generate/decode.rs:2021:            crate::qwen35moe::execution::GatherPhase<'_, Source>,
+proxima-model-interop/src/generate/decode.rs:2029:                reason: String::from("the bound model is not a routed qwen35moe graph"),
+proxima-model-interop/src/generate/decode.rs:2035:                reason: String::from("the bound qwen35moe graph exposes no router roots"),
+proxima-model-interop/src/generate/decode.rs:2038:        crate::qwen35moe::execution::execute_pre_gather(router, boundary, gather)
+proxima-model-interop/src/generate/decode.rs:2786:    /// event carrying `draft_n`/`draft_n_accepted` -- llama-server's own
+proxima-model-interop/src/generate/decode.rs:2792:    /// never drafted emits nothing, matching llama-server's own gate.
+proxima-model-interop/src/generate/decode.rs:3008:    /// release a qwen35moe all-low run owes on every exit, the error ones
+proxima-model-interop/src/generate/decode.rs:3128:        // `None` for any mixture-of-experts or qwen35 checkpoint), this
+proxima-model-interop/src/generate/decode.rs:3138:        // unaffected: CPU decode, any MoE checkpoint, and the qwen35 hybrid
+proxima-model-interop/src/generate/decode.rs:3246:        // every `DenseAttention`/`Ssm` layer a qwen35 checkpoint carries.
+proxima-model-interop/src/generate/decode.rs:3256:        // unpadded buffer on every qwen35 checkpoint.
+proxima-model-interop/src/generate/decode.rs:3476:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:3479:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:3482:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:3484:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:3486:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:3488:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:3490:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:3570:                    crate::qwen35moe::qwen35moe_forward_program_at_width(
+proxima-model-interop/src/generate/decode.rs:3588:        // turns it off) (gemma4-only -- see
+proxima-model-interop/src/generate/decode.rs:3591:        // own config-gate shape. `DrafterSet` drives every enabled n-gram type in llama's own
+proxima-model-interop/src/generate/decode.rs:3618:        // gemma4's attention layers keep their KV on the device once decode starts
+proxima-model-interop/src/generate/decode.rs:3696:                // `DrafterSet`, a faithful port of llama.cpp's own
+proxima-model-interop/src/generate/decode.rs:3702:                // gemma4-only verify program bound at load time
+proxima-model-interop/src/generate/decode.rs:3725:                // gemma4-E2B run measured `speculative_verify_steps == 0`
+proxima-model-interop/src/generate/decode.rs:4212:                    // (the builder gemma4's `CacheMask::Padded` production
+proxima-model-interop/src/generate/decode.rs:4303:                            // gemma4 E2B's cross-layer shared-KV layer: no
+proxima-model-interop/src/generate/decode.rs:4421:                    // gemma4's `KvCacheShape::Custom` excludes it from
+proxima-model-interop/src/generate/decode.rs:4706:                    #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:4733:                            #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:4792:                            #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:4832:                    // THIS step's two-range/non-placed-KV shape -- gemma4-E2B's
+proxima-model-interop/src/generate/decode.rs:4835:                    // placed-KV branch above, and it is not qwen35moe so it
+proxima-model-interop/src/generate/decode.rs:4890:                                    sampling_mode, "dispatch_profile: qwen35moe full graph"
+proxima-model-interop/src/generate/decode.rs:4976:                            // shape gemma4's two-range path actually runs, never a
+proxima-model-interop/src/generate/decode.rs:5567:                    // History-carry bisection step 3 (diag/qwen35moe-history-carry):
+proxima-model-interop/src/generate/decode.rs:5725:                            // gemma4 E2B's cross-layer shared-KV layer: no
+proxima-model-interop/src/generate/decode.rs:5819:                    // Sample-and-match (llama.cpp's own
+proxima-model-interop/src/generate/decode.rs:6406:        #[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/decode.rs:7232:        // The qwen35moe diagnostic can request an interior routed node, so
+proxima-model-interop/src/generate/decode.rs:7379:    // routed-expert steps here (ROW 549) used to send every qwen35moe
+proxima-model-interop/src/generate/device_kv.rs:10://! qwen35 dense-attention placement and the single-range KV path already use
+proxima-model-interop/src/generate/drafter.rs:2://! for every llama.cpp n-gram speculation type enabled in a
+proxima-model-interop/src/generate/drafter.rs:4://! five sans-IO drafters (`speculative-decode-llama-parity/TASKS.md` slice 9)
+proxima-model-interop/src/generate/drafter.rs:11://! `draft()` runs in llama's fixed priority order
+proxima-model-interop/src/generate/drafter.rs:39:/// One llama.cpp n-gram speculation implementation, own state included.
+proxima-model-interop/src/generate/drafter.rs:103:/// up to `k + 1` tokens. `cached_len` excludes the sampled token (llama's
+proxima-model-interop/src/generate/drafter.rs:118:/// The set of [`Drafter`]s driven each generation, in llama's own fixed
+proxima-model-interop/src/generate/greedy_device.rs:81:    /// A softcapped row shaped like gemma4's real logits: every entry inside
+proxima-model-interop/src/generate/kv_ring.rs:482:    /// gemma4 E2B at 2,048 positions: the 12 sliding layers hold the
+proxima-model-interop/src/generate/load_model.rs:851:    /// split, plus the SSM state bytes a qwen35 checkpoint's layers hold)
+proxima-model-interop/src/generate/load_model.rs:885:    /// qwen35 hybrid path (`crate::qwen35::qwen35_forward_program` returns
+proxima-model-interop/src/generate/load_model.rs:903:    /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
+proxima-model-interop/src/generate/load_model.rs:907:    /// own doc) -- empty on the qwen35 hybrid path, which has no single
+proxima-model-interop/src/generate/load_model.rs:910:    /// Graph-level producer boundaries for each qwen35moe layer.
+proxima-model-interop/src/generate/load_model.rs:911:    pub(super) moe_layer_diagnostics: Vec<crate::qwen35moe::MoeLayerDiagnostics>,
+proxima-model-interop/src/generate/load_model.rs:912:    /// Router-logit roots aligned with routed layers.  Qwen35MoE fills this
+proxima-model-interop/src/generate/load_model.rs:937:    /// This checkpoint's own qwen35moe hparams, re-derived from `parsed`'s
+proxima-model-interop/src/generate/load_model.rs:938:    /// metadata alone (no weight bytes -- `crate::qwen35moe::hparams::from_metadata`'s
+proxima-model-interop/src/generate/load_model.rs:940:    /// inside `crate::qwen35moe::qwen35moe_forward_program`. `None` for
+proxima-model-interop/src/generate/load_model.rs:943:    /// program via `crate::qwen35moe::qwen35moe_forward_program_at_width`
+proxima-model-interop/src/generate/load_model.rs:949:    pub(super) qwen35moe_hparams: Option<crate::qwen35moe::hparams::Qwen35MoeHparams>,
+proxima-model-interop/src/generate/load_model.rs:953:    /// dense, non-qwen35, non-MoE path (the single-range program is
+proxima-model-interop/src/generate/load_model.rs:955:    /// own doc). CPU decode, any MoE checkpoint, and the qwen35 hybrid path
+proxima-model-interop/src/generate/load_model.rs:1037:/// Concrete qwen35moe router/gather partitions for one KV shape bucket.
+proxima-model-interop/src/generate/load_model.rs:1049:    pub(super) suffix: crate::qwen35moe::execution::MappedLayerSegment,
+proxima-model-interop/src/generate/load_model.rs:1056:#[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/load_model.rs:1063:#[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/load_model.rs:1076:#[cfg(feature = "qwen35moe-expert-prefetch")]
+proxima-model-interop/src/generate/load_model.rs:1155:    pub(super) router: crate::qwen35moe::execution::MappedLayerSegment,
+proxima-model-interop/src/generate/load_model.rs:1156:    pub(super) gather: crate::qwen35moe::execution::MappedLayerSegment,
+proxima-model-interop/src/generate/load_model.rs:1162:    pub(super) gather_next_router: Option<crate::qwen35moe::execution::MappedLayerSegment>,
+proxima-model-interop/src/generate/load_model.rs:1165:    pub(super) layer_window: Option<crate::qwen35moe::execution::MappedLayerSegment>,
+proxima-model-interop/src/generate/load_model.rs:1189:    segment: &crate::qwen35moe::execution::MappedLayerSegment,
+proxima-model-interop/src/generate/load_model.rs:1294:/// dense-only (that function's own doc). Never called for a qwen35
+proxima-model-interop/src/generate/load_model.rs:1295:/// checkpoint: [`LoadedModel::load`]'s qwen35 branch returns before this
+proxima-model-interop/src/generate/load_model.rs:1412:/// micro-batches of `ubatch` rows (`ServingConfig::ubatch_size`, llama.cpp's
+proxima-model-interop/src/generate/load_model.rs:1441:/// The per-call evaluation inputs for one qwen35moe pre-gather pass, grouped
+proxima-model-interop/src/generate/pregather.rs:40:    /// named one -- `None` on the qwen35 hybrid path
+proxima-model-interop/src/generate/pregather.rs:41:    /// (`crate::qwen35::qwen35_forward_program` carries no named
+proxima-model-interop/src/generate/pregather.rs:61:    /// Evaluates the bound qwen35moe router roots for one prompt position.
+proxima-model-interop/src/generate/pregather.rs:79:                reason: String::from("the bound model does not expose qwen35moe router roots"),
+proxima-model-interop/src/generate/pregather.rs:85:    /// Builds the graph cuts that surround each qwen35moe routed layer. The
+proxima-model-interop/src/generate/pregather.rs:92:    ) -> Result<Vec<crate::qwen35moe::execution::LayerProgramBoundary>, InteropError> {
+proxima-model-interop/src/generate/pregather.rs:100:                reason: String::from("the bound model has no qwen35moe layer diagnostics"),
+proxima-model-interop/src/generate/pregather.rs:106:                crate::qwen35moe::execution::split_layer_program(
+proxima-model-interop/src/generate/pregather.rs:126:            crate::qwen35moe::execution::ProgramSegment,
+proxima-model-interop/src/generate/pregather.rs:127:            crate::qwen35moe::execution::ProgramSegment,
+proxima-model-interop/src/generate/pregather.rs:138:                reason: String::from("the bound model has no qwen35moe layer diagnostics"),
+proxima-model-interop/src/generate/pregather.rs:144:            let pair = crate::qwen35moe::execution::split_router_and_gather_segments(
+proxima-model-interop/src/generate/pregather.rs:168:            crate::qwen35moe::execution::ProgramSegment,
+proxima-model-interop/src/generate/pregather.rs:169:            crate::qwen35moe::execution::ProgramSegment,
+proxima-model-interop/src/generate/pregather.rs:179:        crate::qwen35moe::execution::split_router_and_gather_segments(
+proxima-model-interop/src/generate/pregather.rs:203:        let suffix = crate::qwen35moe::execution::split_mapped_layer_segment(
+proxima-model-interop/src/generate/pregather.rs:215:            let router = crate::qwen35moe::execution::split_mapped_layer_segment(
+proxima-model-interop/src/generate/pregather.rs:222:            let gather = crate::qwen35moe::execution::split_mapped_layer_segment(
+proxima-model-interop/src/generate/pregather.rs:233:                    crate::qwen35moe::execution::split_gather_and_next_router_segment(
+proxima-model-interop/src/generate/pregather.rs:243:            #[cfg(feature = "qwen35moe-linked-suffix")]
+proxima-model-interop/src/generate/pregather.rs:245:                crate::qwen35moe::execution::split_gather_and_suffix_segment(
+proxima-model-interop/src/generate/pregather.rs:319:                        crate::qwen35moe::execution::split_two_layer_window_segment(
+proxima-model-interop/src/generate/pregather.rs:418:            "qwen35moe pre-gather partitions built because the concrete shape changed"
+proxima-model-interop/src/generate/pregather.rs:1966:                        "qwen35moe segment returned requested payload bytes"
+proxima-model-interop/src/generate/pregather.rs:2277:                "qwen35moe pre-gather segment census recorded after requested outputs completed"
+proxima-model-interop/src/generate/pregather.rs:2319:    /// Graph-level producer boundaries for every qwen35moe layer, in layer
+proxima-model-interop/src/generate/pregather.rs:2320:    /// order. Non-qwen35moe models return an empty slice.
+proxima-model-interop/src/generate/pregather.rs:2322:    pub fn moe_layer_diagnostics(&self) -> &[crate::qwen35moe::MoeLayerDiagnostics] {
+proxima-model-interop/src/generate/pregather.rs:2353:    /// empty on the qwen35 hybrid path, which exposes no single per-layer
+proxima-model-interop/src/generate/pregather.rs:2480:    /// side. No effect on a `qwen35` checkpoint (that branch never reads
+proxima-model-interop/src/generate/pregather.rs:2506:    /// not fewer kernel launches. No effect on a `qwen35` checkpoint or a
+proxima-model-interop/src/generate/pregather.rs:2525:    /// a `qwen35` checkpoint" the two constructors above document.
+proxima-model-interop/src/generate/pregather.rs:2554:    /// `gemma4::descriptor_from_gguf`), or load a whole hand-written TOML with
+proxima-model-interop/src/generate/pregather.rs:2625:        // before any weight is bound, shared by both the qwen35 and dense
+proxima-model-interop/src/generate/pregather.rs:2649:        // The single-range program is dense-Mistral-only
+proxima-model-interop/src/generate/pregather.rs:2654:        // reason: gemma4 E2B/E4B (dense, `expert_count == 0`) declare shared-KV
+proxima-model-interop/src/generate/pregather.rs:2659:        // `blk.15.attn_k.weight` for the real `gemma4:e2b-it-qat` checkpoint
+proxima-model-interop/src/generate/pregather.rs:2729:                .then(|| crate::qwen35moe::hparams::from_metadata(parsed).ok())
+proxima-model-interop/src/generate/pregather.rs:2875:            // reads as `"gemma4"` -- never eligible (same reasoning as
+proxima-model-interop/src/generate/pregather.rs:2884:/// Regression coverage for the SECOND gemma4-E2B forward crash
+proxima-model-interop/src/generate/pregather.rs:2886:/// against the real `gemma4:e2b-it-qat` checkpoint on Metal): `Self::load`'s
+proxima-model-interop/src/generate/pregather.rs:2888:/// (the gemma4 family profile's `kv_cache_shape` is
+proxima-model-interop/src/generate/pregather.rs:2890:/// `build_single_range_program` from ever running for gemma4, and this
+proxima-model-interop/src/generate/pregather.rs:2897:    /// gemma4 E2B's own shape (`gemma4::bind::declared_leaves_match_bound_leaves_tests::e2b_shaped_architecture`'s
+proxima-model-interop/src/generate/pregather.rs:2902:    /// indistinguishable from an ordinary 35-layer dense Mistral checkpoint
+proxima-model-interop/src/generate/pregather.rs:2919:            family: String::from("gemma4"),
+proxima-model-interop/src/generate/pregather.rs:2924:    /// The hazard the `"gemma4"` exclusion exists to prevent, proven
+proxima-model-interop/src/generate/pregather.rs:2925:    /// directly: called on gemma4 E2B's own shape,
+proxima-model-interop/src/generate/pregather.rs:2927:    /// own doc: dense-Mistral-only, ONE uniform per-layer schedule, no
+proxima-model-interop/src/generate/pregather.rs:2950:            "build_single_range_program has no gemma4 shared-KV awareness: it must still \
+proxima-model-interop/src/generate/pregather.rs:2952:             Self::load's own gemma4 exclusion is load-bearing, not dead code"
+proxima-model-interop/src/generate/pregather.rs:2958:    /// here directly so flipping the gemma4 profile back to the default breaks
+proxima-model-interop/src/generate/pregather.rs:2964:            family_profile("gemma4").expect("gemma4 profile embedded").kv_cache_shape,
+proxima-model-interop/src/generate/pregather.rs:2966:            "gemma4 must stay excluded from the placed-KV single-range program"
+proxima-model-interop/src/generate/prewarm.rs:113:/// answer, then `suffix`. The model ends a gemma4 answer with its end-of-turn
+proxima-model-interop/src/generate/prewarm.rs:133:    /// answer in the next request's prompt, for gemma4 its end-of-turn token
+proxima-model-interop/src/generate/prewarm.rs:381:    /// gemma4-E2B (317 ms against 93 ms for a 5-token prewarm).
+proxima-model-interop/src/generate/prewarm_follow_up.rs:31:    /// reply -- for gemma4 the end-of-turn token, a newline and the model-turn
+proxima-model-interop/src/generate/prompt_cache.rs:16://! Matching is on token ids, never text. llama-server (`tools/server/
+proxima-model-interop/src/generate/prompt_cache.rs:56:/// thousandths of the prompt, llama-server's `f_sim_cur > slot_prompt_similarity`
+proxima-model-interop/src/generate/prompt_cache.rs:647:    /// and are dropped (llama-server erases `pos_max > pos_next`,
+proxima-model-interop/src/generate/prompt_cache.rs:808:    /// llama-server's `slot_prompt_similarity` rule
+proxima-model-interop/src/generate/prompt_cache.rs:3004:    /// llama-server's rule (`server-context.cpp:1571`): the prefix must
+proxima-model-interop/src/generate/residency_caches.rs:1144:    /// gemma4 E2B's cross-layer shared-KV layer
+proxima-model-interop/src/generate/residency_caches.rs:1247:    /// gemma4 E2B's cross-layer shared-KV layer -- declares no
+proxima-model-interop/src/generate/residency_caches.rs:1267:    /// gemma4 E2B's cross-layer shared-KV layer
+proxima-model-interop/src/generate/residency_caches.rs:1470:    /// gemma4 E2B's cross-layer shared-KV layer -- no leaf, no row width.
+proxima-model-interop/src/generate/residency_caches.rs:1678:/// gemma4's full/global layers are the only architecture this crate binds
+proxima-model-interop/src/generate/residency_caches.rs:1687:/// non-gemma4 architecture, and gemma4's own SWA layers via
+proxima-model-interop/src/generate/residency_caches.rs:1757:    /// gemma4's real checkpoint shape: `head_dim=512` (256 pairs),
+proxima-model-interop/src/generate/residency_caches.rs:2524:                "qwen35 segment host resolve_us={} execute_us={} plan_hits={} plan_misses={}",
+proxima-model-interop/src/generate/residency_caches.rs:2534:                    "qwen35 segment metal prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} op_setup_ms={:.3} gpu_exec_ms={:.3} encode_dispatch_ms={:.3} readback_ms={:.3} block_upload_ms={:.3} device_before={} device_after={} device_delta={}",
+proxima-model-interop/src/generate/residency_caches.rs:4015:    // Control tokens (gemma4's `<turn|>`-shaped turn markers) are
+proxima-model-interop/src/generate/residency_caches.rs:4076:    /// gemma4's real turn-boundary marker) among ordinary text tokens --
+proxima-model-interop/src/generate/residency_caches.rs:4292:                "qwen35 router logits layer={} position={} min={} max={} nan_count={}",
+proxima-model-interop/src/generate/ring_checkpoint.rs:10://! layer is exactly as it was at that position. llama-server does the same for
+proxima-model-interop/src/generate/ring_checkpoint.rs:149:/// the oldest are evicted first, the way llama-server drops the front of
+proxima-model-interop/src/generate/serving_backend.rs:50://! `qwen35moe` program, which is exactly the live-loop migration this module
+proxima-model-interop/src/generate/serving_backend.rs:105:/// proving a real Metal `evaluate` against the `qwen35moe` program, out of
+proxima-model-interop/src/hf_bind.rs:222:/// per-head row permutation `llama.cpp`'s own `convert_hf_to_gguf.py`
+proxima-model-interop/src/hf_bind.rs:243:/// `llama.cpp`'s bit-for-bit at RoPE position 0 (where every pair's angle
+proxima-model-interop/src/hf_bind.rs:282:/// `llama.cpp`'s own GGUF converter leaves in HF's native split-half RoPE
+proxima-model-interop/src/hf_bind.rs:289:/// QK-norm nor the split-half convention (llama/mistral) still needs
+proxima-model-interop/src/hf_bind.rs:405:/// GGUF loop binds, HF's own naming instead -- the standard Llama/Mistral/
+proxima-model-interop/src/hf_bind.rs:936:    /// identical checkpoint minus that tensor (llama/mistral's `rotate_half`
+proxima-model-interop/src/hf_bind.rs:988:        // transposed, by hand, after (Qwen3) or before (llama) permuting
+proxima-model-interop/src/hf_bind.rs:1003:            "a rotate_half family (llama/mistral) must still permute attn_q rows before transposing"
+proxima-model-interop/src/hf_config.rs:47:    /// e.g. `"qwen3_moe"`, `"llama"`, `"mistral"` -- the family profile key,
+proxima-model-interop/src/hf_config.rs:60:    /// because llama.cpp's own GGUF writer always emits it; HF's own
+proxima-model-interop/src/hf_config.rs:147:///   llama.cpp's own GGUF writer already folds a MoE checkpoint's per-expert
+proxima-model-interop/src/hf_config.rs:307:            "model_type": "llama",
+proxima-model-interop/src/hf_config.rs:333:                family: String::from("llama"),
+proxima-model-interop/src/hf_config.rs:370:    /// copied verbatim -- a dense, tied-embedding Llama-family checkpoint:
+proxima-model-interop/src/hf_config.rs:376:        "model_type": "llama",
+proxima-model-interop/src/hf_config.rs:421:                family: String::from("llama"),
+proxima-model-interop/src/hf_config.rs:429:    /// Qwen2-7B's `config.json` scalars (hidden 3584, 28 heads, 4 kv heads,
+proxima-model-interop/src/hf_config.rs:431:    /// from `model_type`, so it reads the same qwen2 profile the GGUF path
+proxima-model-interop/src/hf_config.rs:438:            "model_type": "qwen2",
+proxima-model-interop/src/hf_config.rs:449:        let config = parse_hf_config(json.as_bytes()).expect("qwen2-7b config.json parses");
+proxima-model-interop/src/hf_config.rs:453:            .expect("qwen2 profile embedded");
+proxima-model-interop/src/hf_config.rs:455:        assert_eq!(architecture.family, "qwen2");
+proxima-model-interop/src/lfm2.rs:1://! LFM2.5-8B-A1B's hybrid checkpoint as data: [`Lfm2Hparams`] reads this
+proxima-model-interop/src/lfm2.rs:83:/// checkpoint, not `lfm2`) rather than assuming it, the same "read the
+proxima-model-interop/src/lib.rs:44:pub mod gemma4;
+proxima-model-interop/src/lib.rs:51:mod lfm2;
+proxima-model-interop/src/lib.rs:57:pub mod qwen35moe;
+proxima-model-interop/src/lib.rs:72:mod qwen35;
+proxima-model-interop/src/lib.rs:131:pub use lfm2::{
+proxima-model-interop/src/lib.rs:141:pub use qwen35::{
+proxima-model-interop/src/lowering.rs:31:use crate::qwen35moe::MoeLayerDiagnostics;
+proxima-model-interop/src/lowering.rs:178:/// [`crate::qwen35::SsmShape`]'s own fixed sizes -- see that type's
+proxima-model-interop/src/lowering.rs:183:pub use crate::qwen35::SsmShape;
+proxima-model-interop/src/lowering.rs:195:    /// `crate::qwen35::qwen35_ssm_state_bytes`'s own resident-bytes
+proxima-model-interop/src/lowering.rs:267:        ScheduleSource::SlidingPattern => crate::gemma4::header(parsed, layout),
+proxima-model-interop/src/lowering.rs:268:        ScheduleSource::RecurrentInterval => crate::qwen35::header(parsed),
+proxima-model-interop/src/lowering.rs:269:        ScheduleSource::RecurrentRoutedInterval => crate::qwen35moe::header(parsed),
+proxima-model-interop/src/lowering.rs:399:        ScheduleSource::RecurrentInterval => crate::qwen35::step_state(parsed).map(Some),
+proxima-model-interop/src/lowering.rs:413:        ScheduleSource::SlidingPattern => crate::gemma4::hparams::kv_layers_from_metadata(parsed),
+proxima-model-interop/src/lowering.rs:414:        ScheduleSource::RecurrentRoutedInterval => crate::qwen35moe::hparams::kv_layers_from_metadata(parsed),
+proxima-model-interop/src/lowering.rs:463:    let (cos, sin) = crate::gemma4::program::gemma4_sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
+proxima-model-interop/src/lowering.rs:555:            family: "gemma4".to_string(),
+proxima-model-interop/src/lowering.rs:635:    #[case::gemma4_e2b_reads_131072("gemma4", 131_072)]
+proxima-model-interop/src/lowering.rs:636:    #[case::qwen35moe_a3b_reads_262144("qwen35moe", 262_144)]
+proxima-model-interop/src/mapping_residency.rs:76:/// llama.cpp's own `--mlock` flag takes) is the rung of last resort before
+proxima-model-interop/src/mapping_residency.rs:228:/// before [`InteropError::MappingNotResident`]. llama.cpp's own `--mlock`
+proxima-model-interop/src/mapping_residency.rs:230:/// qwen35moe checkpoint used in this module's own `#[ignore]`d test). A
+proxima-model-interop/src/mapping_residency.rs:514:    /// byte qwen35moe blob with 49% of pages missing after prefault + one
+proxima-model-interop/src/mapping_residency.rs:572:    /// `MADV_WILLNEED`, and an `mlock` against the same real qwen35moe
+proxima-model-interop/src/memory_fit.rs:56:/// (dense/experts/tables) plus the SSM recurrent-state bytes a qwen35
+proxima-model-interop/src/memory_fit.rs:66:    /// `blk.{layer}.{proj}_exps.weight` stacks (llama.cpp's own naming) --
+proxima-model-interop/src/memory_fit.rs:71:    /// A qwen35 hybrid checkpoint's per-layer SSM conv-history plus
+proxima-model-interop/src/quality.rs:950:    /// (`openchat-3.5-1210.Q3_K_M.gguf`, llama-quantize output) has no
+proxima-model-interop/src/quality.rs:955:                "PROXIMA_OPENCHAT_GGUF_VARIANT is required: path to openchat-3.5-1210.Q3_K_M.gguf (llama-quantize Q3_K_M output)"
+proxima-model-interop/src/quality.rs:1041:// == "qwen35"`, never `"qwen3"`), so no qwen3-specific loader exists or is
+proxima-model-interop/src/qwen35.rs:1://! Qwen3.8-27B's real hybrid checkpoint (`general.architecture = "qwen35"`):
+proxima-model-interop/src/qwen35.rs:6://! marker, don't assume the dense shape" move [`crate::lfm2`] makes for its
+proxima-model-interop/src/qwen35.rs:70:/// does not have to re-derive them: [`crate::lfm2::Lfm2Hparams`]'s own
+proxima-model-interop/src/qwen35.rs:101:/// llama.cpp's own RMSNorm epsilon default, used only when
+proxima-model-interop/src/qwen35.rs:103:/// fallback shape [`crate::lfm2::LFM2_RMS_EPSILON_DEFAULT`] uses.
+proxima-model-interop/src/qwen35.rs:107:/// [`crate::lfm2::lfm2_architecture_from_metadata`]'s scalar-interval
+proxima-model-interop/src/qwen35.rs:210:/// [`crate::lfm2::run_lfm2_prefill`]'s bind-only counterpart, minus the
+proxima-model-interop/src/qwen35.rs:239:/// This checkpoint's forward-program seam -- [`crate::lfm2::run_lfm2_prefill`]'s
+proxima-model-interop/src/qwen35.rs:247:/// `proxima_tensor::spec` does not export a qwen35 one yet:
+proxima-model-interop/src/qwen35.rs:274:/// time -- `qwen35.cpp:57-60`'s same derivation this module's
+proxima-model-interop/src/qwen35.rs:294:/// hyperparameters -- `qwen35.cpp:57-60`'s same arithmetic
+proxima-model-interop/src/qwen35.rs:321:/// for every non-qwen35 checkpoint, which never builds a [`SsmShape`]
+proxima-model-interop/src/qwen35.rs:433:const FAMILY: &str = "qwen35";
+proxima-model-interop/src/qwen35moe/execution.rs:1://! Typed phase boundary for a routed `qwen35moe` decode step.
+proxima-model-interop/src/qwen35moe/execution.rs:179:/// Builds the explicit router/gather handoff used by qwen35moe's per-layer
+proxima-model-interop/src/qwen35moe/execution.rs:221:#[cfg(feature = "qwen35moe-linked-suffix")]
+proxima-model-interop/src/qwen35moe/execution.rs:467:    #[cfg(feature = "qwen35moe-linked-suffix")]
+proxima-model-interop/src/qwen35moe/execution.rs:476:    #[cfg(feature = "qwen35moe-linked-suffix")]
+proxima-model-interop/src/qwen35moe/execution.rs:486:    #[cfg(feature = "qwen35moe-linked-suffix")]
+proxima-model-interop/src/qwen35moe/execution.rs:489:    #[cfg(feature = "qwen35moe-linked-suffix")]
+proxima-model-interop/src/qwen35moe/execution.rs:608:    #[cfg(feature = "qwen35moe-linked-suffix")]
+proxima-model-interop/src/qwen35moe/hparams.rs:225:                Value::String("qwen35moe".to_string()),
+proxima-model-interop/src/qwen35moe/hparams.rs:227:            ("qwen35moe.block_count", Value::U32(40)),
+proxima-model-interop/src/qwen35moe/hparams.rs:229:                "qwen35moe.attention.head_count_kv",
+proxima-model-interop/src/qwen35moe/hparams.rs:236:            ("qwen35moe.attention.key_length", Value::U32(256)),
+proxima-model-interop/src/qwen35moe/layer_boundary.rs:1://! Borrowed activation handoff for a single qwen35moe layer.
+proxima-model-interop/src/qwen35moe/program.rs:1://! `qwen35moe`'s forward program, lowered by
+proxima-model-interop/src/qwen35moe/program.rs:11://! and `rope.mrope_interleaved` -- Qwen2-VL/Qwen3-VL-style multi-axis
+proxima-model-interop/src/qwen35moe/program.rs:36:const FAMILY: &str = "qwen35moe";
+proxima-model-interop/src/qwen35moe/program.rs:133:/// Builds `qwen35moe`'s whole-model forward program.
+proxima-model-interop/src/rope_scaling.rs:57:        /// Multiplier on the extrapolation share of the blend (llama.cpp's
+proxima-model-interop/src/rope_scaling.rs:129:    /// Reads `{arch}.rope.scaling.*` off `parsed`, using llama.cpp's key
+proxima-model-interop/src/serving.rs:2://! mirroring llama-server's CLI surface (`-c`, `-np`, `-ctk`, `-ctv`, `-fa`,
+proxima-model-interop/src/serving.rs:31://! enum -- llama.cpp's own `--cache-type-k`/`-ctv` accept exactly this
+proxima-model-interop/src/serving.rs:34://! `gpu_layers` reuses llama.cpp's own `n_gpu_layers` convention -- a plain
+proxima-model-interop/src/serving.rs:164:/// llama.cpp's `common_speculative_type` (`common/common.h:173-186`), named
+proxima-model-interop/src/serving.rs:165:/// identically so this crate's config round-trips llama's own `--spec-type`
+proxima-model-interop/src/serving.rs:172:/// `speculative-decode-llama-parity` sub-specs (R11a-d) own the draft-model
+proxima-model-interop/src/serving.rs:191:    /// llama's own `--spec-type` string for this variant
+proxima-model-interop/src/serving.rs:211:    /// llama's own `--spec-type` strings.
+proxima-model-interop/src/serving.rs:231:/// llama's fixed speculator priority order (`common/speculative.cpp:2617-2629`,
+proxima-model-interop/src/serving.rs:233:/// priority first. Registration order in llama's own `--spec-type` list
+proxima-model-interop/src/serving.rs:238:/// absent: llama's own `switch` in `common_speculative_init` treats that
+proxima-model-interop/src/serving.rs:254:/// llama's `std::vector<common_speculative_type> types`
+proxima-model-interop/src/serving.rs:261:/// llama runs every enabled speculator per step in priority order until one
+proxima-model-interop/src/serving.rs:273:/// what lets a config round-trip any of llama's `--spec-type` combinations
+proxima-model-interop/src/serving.rs:280:    /// llama's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+proxima-model-interop/src/serving.rs:293:    /// This set with `type_id` added, llama's own `types.push_back`.
+proxima-model-interop/src/serving.rs:305:    /// No speculator enabled -- llama's own default, and this crate's
+proxima-model-interop/src/serving.rs:312:    /// This set's members in llama's own fixed priority order
+proxima-model-interop/src/serving.rs:323:/// llama's `common_params_speculative_ngram_map` (`common/common.h:361-365`),
+proxima-model-interop/src/serving.rs:324:/// shared verbatim by llama's own `ngram_simple`/`ngram_map_k`/
+proxima-model-interop/src/serving.rs:328:    /// llama's `size_n`: the n-gram size looked up in history.
+proxima-model-interop/src/serving.rs:330:    /// llama's `size_m`: the m-gram size drafted after a match.
+proxima-model-interop/src/serving.rs:332:    /// llama's `min_hits`: minimum hits before a match is proposed.
+proxima-model-interop/src/serving.rs:337:    /// llama's own default for all three of `ngram_simple`/`ngram_map_k`/
+proxima-model-interop/src/serving.rs:348:/// llama's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
+proxima-model-interop/src/serving.rs:366:/// [`ServingConfig::speculative`]'s own data: llama's `common_params_speculative`
+proxima-model-interop/src/serving.rs:368:/// `types`, llama's own `Vec<common_speculative_type>` SET of
+proxima-model-interop/src/serving.rs:378:/// `speculative-decode-llama-parity/TASKS.md` slice 9 adds wires the rest) --
+proxima-model-interop/src/serving.rs:386:    /// llama's `types` (`common/common.h:373`) -- the enabled-speculator set.
+proxima-model-interop/src/serving.rs:388:    /// llama's `common_params_speculative_draft::n_max` (`common/common.h:328`):
+proxima-model-interop/src/serving.rs:391:    /// llama's `common_params_speculative_draft::n_min` (`common/common.h:329`):
+proxima-model-interop/src/serving.rs:394:    /// llama's `common_params_speculative_draft::p_min` (`common/common.h:332`):
+proxima-model-interop/src/serving.rs:401:    /// llama's `common_params_speculative_ngram_cache::lookup_cache_static`.
+proxima-model-interop/src/serving.rs:403:    /// llama's `common_params_speculative_ngram_cache::lookup_cache_dynamic`.
+proxima-model-interop/src/serving.rs:408:    /// Speculation OFF: llama's own default `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+proxima-model-interop/src/serving.rs:412:    /// param defaults still hold llama's own values so enabling any single
+proxima-model-interop/src/serving.rs:413:    /// member of [`Self::speculative_types`] alone reproduces llama's
+proxima-model-interop/src/serving.rs:447:    /// Speculation on with the single `ngram-simple` drafter at llama's own
+proxima-model-interop/src/serving.rs:479:    /// `2_147_483_648` (2 GiB). Measured on gemma4-E2B, one entry holds 69.2
+proxima-model-interop/src/serving.rs:504:    /// the oldest of the rest evicted first. One gemma4-E2B checkpoint is 12
+proxima-model-interop/src/serving.rs:509:    /// llama's `n_cache_reuse`): a run of at least this many tokens that the
+proxima-model-interop/src/serving.rs:516:    /// from them can differ too, as they do under llama-server; an entry built
+proxima-model-interop/src/serving.rs:520:    /// chunk reuse off like llama's `n_cache_reuse`.
+proxima-model-interop/src/serving.rs:545:    /// llama-server's `--slot-prompt-similarity` default, 0.1, and its strict
+proxima-model-interop/src/serving.rs:667:/// across every qwen35moe layer. Consulted at exactly one site,
+proxima-model-interop/src/serving.rs:672:    /// Byte budget applied independently to each qwen35moe layer's own
+proxima-model-interop/src/serving.rs:687:    /// Serve the limit itself, e.g. 131072 for gemma4 at its trained context.
+proxima-model-interop/src/serving.rs:693:    /// Serve exactly `n` tokens even past the limit -- llama.cpp's silent
+proxima-model-interop/src/serving.rs:739:/// One field per llama-server flag the repo owner's invocation sets,
+proxima-model-interop/src/serving.rs:744:    /// GGUF checkpoint path. Not one of llama-server's flags in the task's
+proxima-model-interop/src/serving.rs:770:    /// not `single_position_step` (gemma4, dense llama-family) evaluates a
+proxima-model-interop/src/serving.rs:853:    /// Not an upstream llama-server flag -- a plan-cache key rounding
+proxima-model-interop/src/serving.rs:865:    /// Not an upstream llama-server flag -- `omega::metal::MathMode` for
+proxima-model-interop/src/serving.rs:876:    /// Not an upstream llama-server flag -- `proxima_tensor::NumericPolicy`,
+proxima-model-interop/src/serving.rs:897:    /// Not an upstream llama-server flag -- `omega::metal::DispatchType` for
+proxima-model-interop/src/serving.rs:908:    /// Not an upstream llama-server flag -- routes the CPU forward's
+proxima-model-interop/src/serving.rs:919:    /// Not an upstream llama-server flag -- per-tensor bind-time recode
+proxima-model-interop/src/serving.rs:933:    /// Requests the routed qwen35moe execution seam that runs the router,
+proxima-model-interop/src/serving.rs:968:    /// Number of adjacent qwen35moe layers to execute in one exact
+proxima-model-interop/src/serving.rs:983:    /// Not an upstream llama-server flag -- runtime switch for the
+proxima-model-interop/src/serving.rs:994:    /// Not an upstream llama-server flag -- caps how many prompt positions
+proxima-model-interop/src/serving.rs:999:    /// `crate::qwen35moe::qwen35moe_forward_program_at_width`, with
+proxima-model-interop/src/serving.rs:1008:    /// Not an upstream llama-server flag -- runtime toggle for
+proxima-model-interop/src/serving.rs:1015:    /// Not an upstream llama-server flag -- runtime toggle for
+proxima-model-interop/src/serving.rs:1022:    /// Not an upstream llama-server flag -- runtime toggle for
+proxima-model-interop/src/serving.rs:1029:    /// Not an upstream llama-server flag -- marks every plan's own
+proxima-model-interop/src/serving.rs:1041:    /// Not an upstream llama-server flag -- whether a plan-cache miss that
+proxima-model-interop/src/serving.rs:1049:    /// Not an upstream llama-server flag -- how many `MTLCommandBuffer`s
+proxima-model-interop/src/serving.rs:1062:    /// doc -- gemma4's is `8`, the Intervention 6 measured decode
+proxima-model-interop/src/serving.rs:1066:    /// Not an upstream llama-server flag -- a hard ceiling on
+proxima-model-interop/src/serving.rs:1094:    /// llama's `common_params_speculative` (`common/common.h:372-389`). See
+proxima-model-interop/src/serving.rs:1096:    /// from llama's own `Vec<type>`. Consulted by `generate/decode.rs`'s
+proxima-model-interop/src/serving_settings.rs:31:/// the values llama accepts for `--cache-type-k` and `--cache-type-v`, spelled
+proxima-model-interop/src/serving_settings.rs:32:/// as llama spells them; `as_ggml` is the lowering to the type the serving
+proxima-model-interop/src/serving_settings.rs:128:/// the llama-flag surface of [`ServingConfig`], loadable from toml and env
+proxima-model-interop/src/serving_settings.rs:508:model_path = "/models/gemma4-e2b-it-qat.gguf"
+proxima-model-interop/src/serving_settings.rs:552:            .model_path("/models/gemma4-e2b-it-qat.gguf".to_owned())
+proxima-model-interop/src/serving_settings.rs:571:                ("PROXIMA_SERVING_MODEL_PATH", Some("/models/gemma4-e2b-it-qat.gguf")),
+proxima-model-interop/src/serving_settings.rs:601:        assert_eq!(lowered.model_path, "/models/gemma4-e2b-it-qat.gguf");
+proxima-model-interop/src/speculative_settings.rs:30:/// llama's `common_speculative_type`, serde/`FromStr`-facing mirror of
+proxima-model-interop/src/speculative_settings.rs:32:/// `serving.rs` never derives `serde`). Variant names round-trip llama's own
+proxima-model-interop/src/speculative_settings.rs:86:/// `value` was not one of llama's own `--spec-type` strings.
+proxima-model-interop/src/speculative_settings.rs:116:/// `Display` a deterministic member order; llama's own set semantics never
+proxima-model-interop/src/speculative_settings.rs:131:/// llama's `std::vector<common_speculative_type> types` (`common/common.h:373`),
+proxima-model-interop/src/speculative_settings.rs:135:/// [`SpeculativeType`]). Round-trips llama's own `--spec-type`
+proxima-model-interop/src/speculative_settings.rs:143:/// shape. The empty set displays as llama's own default string, `"none"`.
+proxima-model-interop/src/speculative_settings.rs:148:    /// llama's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }` --
+proxima-model-interop/src/speculative_settings.rs:155:    /// This set with `name` added, llama's own `types.push_back` --
+proxima-model-interop/src/speculative_settings.rs:156:    /// `SpeculativeTypeName::None` is a no-op (llama's own `switch` in
+proxima-model-interop/src/speculative_settings.rs:191:    /// This set's members in llama's own fixed priority order
+proxima-model-interop/src/speculative_settings.rs:249:/// llama's `common_params_speculative` (`common/common.h:372-389`), env/TOML
+proxima-model-interop/src/speculative_settings.rs:257:    /// llama's `types` -- see [`crate::SpeculativeConfig::speculative_types`]'s
+proxima-model-interop/src/speculative_settings.rs:266:    /// llama's `common_params_speculative_draft::n_max`.
+proxima-model-interop/src/speculative_settings.rs:270:    /// llama's `common_params_speculative_draft::n_min`.
+proxima-model-interop/src/speculative_settings.rs:274:    /// llama's `common_params_speculative_draft::p_min`.
+proxima-model-interop/src/speculative_settings.rs:279:    /// llama's `ngram_simple.size_n`.
+proxima-model-interop/src/speculative_settings.rs:283:    /// llama's `ngram_simple.size_m`.
+proxima-model-interop/src/speculative_settings.rs:287:    /// llama's `ngram_simple.min_hits`.
+proxima-model-interop/src/speculative_settings.rs:292:    /// llama's `ngram_map_k.size_n`.
+proxima-model-interop/src/speculative_settings.rs:296:    /// llama's `ngram_map_k.size_m`.
+proxima-model-interop/src/speculative_settings.rs:300:    /// llama's `ngram_map_k.min_hits`.
+proxima-model-interop/src/speculative_settings.rs:305:    /// llama's `ngram_map_k4v.size_n`.
+proxima-model-interop/src/speculative_settings.rs:309:    /// llama's `ngram_map_k4v.size_m`.
+proxima-model-interop/src/speculative_settings.rs:313:    /// llama's `ngram_map_k4v.min_hits`.
+proxima-model-interop/src/speculative_settings.rs:318:    /// llama's `ngram_mod.n_match`.
+proxima-model-interop/src/speculative_settings.rs:322:    /// llama's `ngram_mod.n_max`.
+proxima-model-interop/src/speculative_settings.rs:326:    /// llama's `ngram_mod.n_min`.
+proxima-model-interop/src/speculative_settings.rs:331:    /// llama's `ngram_cache.lookup_cache_static` -- empty string means unset,
+proxima-model-interop/src/speculative_settings.rs:335:    /// llama's `ngram_cache.lookup_cache_dynamic`.
+proxima-model-interop/src/speculative_settings.rs:458:    /// llama's `common_params_speculative` (`common/common.h:372-389`).
+proxima-model-interop/src/speculative_settings.rs:666:    /// R9: llama's own `--spec-type` strings round-trip through
+proxima-model-interop/src/speculative_settings.rs:697:    /// R9: llama's own multi-type `--spec-type` string form
+proxima-model-interop/src/speculative_settings.rs:711:        // llama's own priority order (`common/speculative.cpp:2617-2629`),
+proxima-model-interop/src/task.rs:249:        let mut checkpoint = parsed("llama", None, None);
+proxima-model-interop/src/task.rs:251:            "llama.attention.causal".to_string(),
+proxima-model-interop/src/task.rs:259:        let mut checkpoint = parsed("llama", None, None);
+proxima-model-interop/src/task.rs:260:        checkpoint.metadata.retain(|(key, _)| key != "llama.block_count");
+proxima-model-interop/src/test_support.rs:32:/// 3afb3db37 (a qwen35moe residency-boundary side effect, not a per-model
+proxima-model-interop/src/test_support.rs:56:/// for gemma4-E2B on this host.
+proxima-model-interop/src/test_support.rs:108:/// reads `PROXIMA_QWEN3MOE_GGUF`: unset keeps a qwen35moe fixture test
+proxima-model-interop/src/test_support.rs:110:/// qwen35moe`) checkpoint -- the one `real_qwen35moe_registry_probe.rs`'s
+proxima-model-interop/src/test_support.rs:111:/// own doc already names as the real blob every qwen35moe-specific
+proxima-model-interop/src/test_support.rs:145:/// `gemma4:e2b-it-qat`'s KV-relevant header (`ollama /api/show`, 2026-09-29):
+proxima-model-interop/src/test_support.rs:153:            MetadataValue::String("gemma4".to_string()),
+proxima-model-interop/src/test_support.rs:155:        ("gemma4.block_count", MetadataValue::U32(35)),
+proxima-model-interop/src/test_support.rs:157:            "gemma4.attention.head_count_kv",
+proxima-model-interop/src/test_support.rs:161:            "gemma4.attention.sliding_window_pattern",
+proxima-model-interop/src/test_support.rs:166:        ("gemma4.attention.shared_kv_layers", MetadataValue::U32(20)),
+proxima-model-interop/src/test_support.rs:167:        ("gemma4.attention.key_length", MetadataValue::U32(512)),
+proxima-model-interop/src/test_support.rs:168:        ("gemma4.attention.key_length_swa", MetadataValue::U32(256)),
+proxima-model-interop/src/test_support.rs:169:        ("gemma4.attention.sliding_window", MetadataValue::U32(512)),
+proxima-model-interop/src/transform.rs:186:                MetadataValue::String("llama".to_string()),
+proxima-model-interop/src/transform.rs:188:            ("llama.context_length".to_string(), MetadataValue::U32(4096)),
+proxima-tensor/src/bind/builder_compose_window.rs:579:/// into a [`TensorError`] instead of a panic -- the multi-position qwen35
+proxima-tensor/src/bind/cached_attention_epilogue_liveness.rs:28:        // folded into their single consumer (qwen35's own `attended` tap,
+proxima-tensor/src/bind/cached_attention_epilogue_liveness.rs:53:                    // the anchor itself (qwen35's own `attended` tap, single-
+proxima-tensor/src/bind/dead_code_cached_attention.rs:347:/// shape gemma4-E2B binds.
+proxima-tensor/src/bind/dead_code_cached_attention.rs:376:/// One un-rotated pass-plane term (qwen35's `score_cached_pass`/
+proxima-tensor/src/bind/dead_code_cached_attention.rs:388:/// pass plane is present (qwen35's chain, `spec.rs`'s own `score_cached`/
+proxima-tensor/src/bind/dead_code_cached_attention.rs:428:/// excludes exactly `x >= n`, and qwen35's own builder (`spec.rs:4973-4987`,
+proxima-tensor/src/bind/dead_code_cached_attention.rs:442:/// Walks past qwen35's own padding mask (`spec.rs:4979-4997`,
+proxima-tensor/src/bind/dead_code_cached_attention.rs:566:/// [`unwrap_cached_padding_select`]'s gemma4-shaped counterpart: walks past
+proxima-tensor/src/bind/dead_code_cached_attention.rs:574:/// qwen35's own bare shape is untouched by this function's existence.
+proxima-tensor/src/bind/dead_code_cached_attention.rs:871:        // qwen35's own chain masks cached-range padding with a `Select`
+proxima-tensor/src/bind/dead_code_cached_attention.rs:951:                "cached_attention decline -- cached score does not decompose into the qwen35 q.k score-source shape"
+proxima-tensor/src/bind/dead_code_cached_attention.rs:967:                "cached_attention decline -- new score does not decompose into the qwen35 q.k score-source shape"
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1016:        // at all -- qwen35's own builder always emits it on both sides
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1184:        // Eligibility guards for the gemma4-shaped windowed/padded masks
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1189:        // of qwen35's existing accepted candidates can be reached by them.
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1258:            // gemma4 arm only (`via_gemma_template`, the THIRD element
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1275:            // mistral, or no match at all) skips both declines entirely --
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1316:        // present (every non-qwen35 caller today) -- V is never rotated, so
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1414:        // every OTHER arm (qwen35/mistral/prefill/non-unity-scale gemma).
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1797:        // every caller the softmax-weights arm does not claim (qwen35,
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1798:        // mistral, prefill, non-unity-scale gemma).
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1812:                // non-qwen35 caller, `total_head_dim == rotary_width`);
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1813:                // qwen35's own partial-rotary chain sets this strictly
+proxima-tensor/src/bind/dead_code_cached_attention.rs:1928:        // mistral's single-range chain never carries a pass plane -- this
+proxima-tensor/src/bind/gdn_moe_fusion_apply.rs:304:/// own physical operand and instead binds what llama.cpp's fused Metal kernel
+proxima-tensor/src/bind/gdn_moe_fusion_apply.rs:653:        // broadcast) or the real qwen35moe two-letter `head = "ug"` split --
+proxima-tensor/src/bind/gdn_moe_fusion_apply.rs:947:    // `expert_bias`, the ONLY shape `proxima-model-interop`'s own qwen35moe
+proxima-tensor/src/bind/gdn_moe_fusion_apply.rs:948:    // builder produces (`qwen35moe/program.rs:122-135`). Any bias/Sigmoid
+proxima-tensor/src/bind/gdn_moe_fusion_apply.rs:1246:    // full-attention/gated-delta-net model (qwen35moe) loses all of its
+proxima-tensor/src/bind/types_layout_boundop.rs:57:/// qwen35's partial-rotary chain matched.
+proxima-tensor/src/bind/types_layout_boundop.rs:180:    /// every column rotates — mistral/openchat/qwen3 today); when
+proxima-tensor/src/bind/types_layout_boundop.rs:187:    /// == head_dim`, which is every existing caller — qwen35's partial-rotary
+proxima-tensor/src/bind/types_layout_boundop.rs:189:    /// `proxima-model-interop/src/qwen35.rs:37-38,142,179,182`) is the one
+proxima-tensor/src/bind/types_layout_boundop.rs:222:    /// `key_index % kv_heads` itself, exactly llama.cpp's own fused Metal
+proxima-tensor/src/bind/types_layout_boundop.rs:236:    /// (`num_v_heads = kv_heads * group`) -- the real qwen35moe GQA shape,
+proxima-tensor/src/bind/types_layout_boundop.rs:262:    /// One qwen35moe layer's whole top-k routing decision (ROW 569,
+proxima-tensor/src/bind/types_layout_boundop.rs:269:    /// `proxima-model-interop/src/qwen35moe/program.rs`'s own
+proxima-tensor/src/bind/types_layout_boundop.rs:477:    /// One backend-neutral fused softmax-normalization step for gemma4's
+proxima-tensor/src/cpu/gemm_dot_quant.rs:266:    // 561, found by direct instrumentation on qwen35's own partial-rotary
+proxima-tensor/src/cpu/gemm_dot_quant.rs:271:    // broadcast like qwen35's `q_first_grouped`/`q_pass_grouped`
+proxima-tensor/src/cpu/run_node.rs:1078:/// slice's matched shape (single physical head axis OR the real qwen35moe
+proxima-tensor/src/error.rs:319:    /// (`(layer + 1) % full_attention_interval != 0`, `qwen35.cpp`'s own
+proxima-tensor/src/gdn.rs:114:            // llama.cpp's own fused Metal kernel mod-broadcasts a flat query
+proxima-tensor/src/numeric.rs:45:    /// sum-of-squares reduce (170 dispatches per gemma4-E2B decode token).
+proxima-tensor/src/numeric.rs:50:    /// elements per norm differ by at most 2.4e-7. The gemma4-E2B logits then
+proxima-tensor/src/physical.rs:142:/// RoPE operands used by the cached Mistral/Qwen3 graph. The key/value rows
+proxima-tensor/src/physical.rs:284:/// partial-rotary head (`rotary_dim < head_dim`, qwen35's dense attention)
+proxima-tensor/src/physical.rs:322:/// rotary_dim` un-rotated columns a partial-rotary caller (qwen35) scores
+proxima-tensor/src/physical.rs:717:    /// one axis qwen35's real shape (`kv_heads: 2`) adds. The rotary planes
+proxima-tensor/src/physical.rs:800:    /// are BOTH non-trivial, the exact shape ROW 559's own real qwen35
+proxima-tensor/src/shape.rs:2403:    /// mask on the real gemma4-E2B checkpoint).
+proxima-tensor/src/sized.rs:77:/// Raised from 3 to 32: the multi-position qwen35 mixer at real dims
+proxima-tensor/src/sized.rs:340:/// `llama.rope.freq_base` key, so this fallback path has never yet been
+proxima-tensor/src/spec/attention_forward.rs:16:    /// gemma4 E2B's cross-layer shared-KV shape ([`ValueSourceKind::SharedFromLayer`]).
+proxima-tensor/src/spec/attention_forward.rs:25:/// `wk` projection + k-norm + RoPE chain; [`Self::Shared`] is gemma4 E2B's
+proxima-tensor/src/spec/attention_forward.rs:39:/// needs to reuse verbatim (gemma4 E2B). A caller with no shared-KV layers
+proxima-tensor/src/spec/attention_forward.rs:74:/// disk). [`Self::SharedFromLayer`] is gemma4 E2B's shared-KV shape: no
+proxima-tensor/src/spec/attention_forward.rs:79:/// ollama's `mlxrunner/model/gemma4/gemma4.go` `Attention.Forward` reads one
+proxima-tensor/src/spec/attention_forward.rs:80:/// donor's `sharedHistory` for both (`gemma4.go:1392-1449`: `kv := donor`,
+proxima-tensor/src/spec/attention_forward.rs:358:    /// LFM2's own MoE softmax-free routing; Gemma 4 uses `Softmax`.
+proxima-tensor/src/spec/attention_forward.rs:374:    /// (`gemma4::hparams::Gemma4Hparams::feed_forward_by_layer`). `None`
+proxima-tensor/src/spec/attention_forward.rs:382:    /// sandwich norm (`gemma4.go`'s `PostFFNorm`), the same role
+proxima-tensor/src/spec/attention_forward.rs:386:    /// caller before Gemma 4 E2B, including LFM2) reproduces the prior
+proxima-tensor/src/spec/attention_forward.rs:390:    /// (gemma4.go:1349-1361: gate/GeGLU/proj/`post_norm`, added into the
+proxima-tensor/src/spec/attention_forward.rs:429:    /// `1/sqrt(query_pre_attn_scalar)`, the Gemma 2/3 convention. LFM2 and
+proxima-tensor/src/spec/attention_forward.rs:485:    /// QK-norm instead -- so gemma4's layers use
+proxima-tensor/src/spec/attention_forward.rs:494:    /// normalized. Every caller before this field existed (LFM2 and every
+proxima-tensor/src/spec/attention_forward.rs:606:/// rather than shared by refactoring that function, so the dense Mistral/Llama
+proxima-tensor/src/spec/attention_forward.rs:1032:/// gemma4's `ffn_gate_inp.scale`/`ffn_down_exps.scale` (`false` for every
+proxima-tensor/src/spec/attention_forward.rs:1191:/// when `ffn_config.ple` is ALSO `true` (gemma4.go:1349-1361): gate/GeGLU
+proxima-tensor/src/spec/attention_forward.rs:1196:/// trailing `* layer_output_scale` (gemma4.go:1359-1361), reused here
+proxima-tensor/src/spec/attention_forward.rs:1306:            // (gemma4) where the router's own input is the RAW
+proxima-tensor/src/spec/attention_forward.rs:1576:/// (PLE) input slices out of -- gemma4.go's `computePLEInputs` preamble
+proxima-tensor/src/spec/attention_forward.rs:1577:/// (`gemma4.go:1276-1301`), built ONCE regardless of `block_count` since
+proxima-tensor/src/spec/attention_forward.rs:1589:    /// AFTER slicing, per gemma4.go:1297.
+proxima-tensor/src/spec/attention_forward.rs:1598:/// Stage A preamble (gemma4.go:1276-1297): the per-token matmul
+proxima-tensor/src/spec/attention_forward.rs:1605:/// hidden state (`gemma4.go:1291`, `h` there is the preamble's own `h0`).
+proxima-tensor/src/spec/attention_forward.rs:1675:/// Stage A per-layer slice + norm + combine (gemma4.go:1297-1301): this
+proxima-tensor/src/spec/attention_forward.rs:1729:/// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
+proxima-tensor/src/spec/attention_forward.rs:1736:/// `leading_dense_block_count` (LFM2.5-8B-A1B: `2`) is threaded per layer
+proxima-tensor/src/spec/attention_forward.rs:1744:/// behind the `gemma4-kv-cache` feature one level up in
+proxima-tensor/src/spec/attention_forward.rs:1764:/// final logits. `ple_dim` (`Some(256)` for gemma4 E2B, `None` for every
+proxima-tensor/src/spec/attention_forward.rs:1864:    // Stage A preamble (gemma4.go:1276-1301): `x` here is still `h0`, the
+proxima-tensor/src/spec/attention_forward.rs:1894:    // schedule entry (gemma4 E2B's cross-layer shared-KV) reads
+proxima-tensor/src/spec/attention_forward.rs:2273:/// two ops this adds over the plain Mistral layer. Qwen3 has no
+proxima-tensor/src/spec/attention_forward.rs:2442:/// Qwen2 uses split-half (NEOX) RoPE even though it has no QK-norm weights,
+proxima-tensor/src/spec/attention_forward.rs:2447:/// `RopePairing::SplitHalf { pairs: head_dim / 2 }` for a `"qwen2"`
+proxima-tensor/src/spec/attention_forward.rs:3001:/// (`crate::generate::LoadedModel::load`) for every non-qwen35 checkpoint --
+proxima-tensor/src/spec/attention_forward.rs:3013:    /// gemma4 E2B's cross-layer shared-KV layer
+proxima-tensor/src/spec/attention_forward.rs:3032:/// following llama.cpp's own `hparams.is_recr_impl[i] = (i < n_layer) &&
+proxima-tensor/src/spec/attention_forward.rs:3033:/// ((i + 1) % full_attention_interval != 0)` (`qwen35.cpp:19-20`) -- layer
+proxima-tensor/src/spec/attention_forward.rs:3036:/// through experts (`qwen35.cpp:471`, `GGML_ASSERT(model.layers[il].ffn_gate_inp
+proxima-tensor/src/spec/attention_forward.rs:3042:/// the same five hyperparameters `qwen35.cpp:335-343`'s own
+proxima-tensor/src/spec/attention_forward.rs:3101:/// Builds the Qwen35 program while optionally reducing the final vocabulary
+proxima-tensor/src/spec/attention_forward.rs:3259:/// worked example (`gemma4.go:1276-1301`, `H=4` embedding, `P=2`
+proxima-tensor/src/spec/attention_forward.rs:3366:/// derived worked example's `h_final` (`gemma4.go:1349-1361`), chained onto
+proxima-tensor/src/spec/attention_forward.rs:3555:/// unboundedly every layer was gemma4-E2B's actual root cause: real-blob
+proxima-tensor/src/spec/descriptor.rs:75:    /// gemma4's dense and routed branches run at different widths
+proxima-tensor/src/spec/descriptor.rs:90:    /// `layers` holds no `ShortConv` entry, as every gemma4 layer is
+proxima-tensor/src/spec/descriptor.rs:105:    /// (gemma4's four sliding layers then a full one, three times); it expands
+proxima-tensor/src/spec/descriptor.rs:117:    /// gemma4 E2B/E4B's per-layer-embedding preamble width
+proxima-tensor/src/spec/descriptor.rs:318:    /// How this family pairs RoPE channels, per llama.cpp's
+proxima-tensor/src/spec/descriptor.rs:319:    /// `llama_model_rope_type` (`src/llama-model.cpp`): NEOX/MROPE/IMROPE
+proxima-tensor/src/spec/descriptor.rs:460:/// `DenseArch` serves llama, mistral, qwen2, qwen3 and mixtral headers alike;
+proxima-tensor/src/spec/descriptor.rs:570:    /// [`LayerCacheRoots::SharedFromLayer`] for a gemma4 shared-KV layer that
+proxima-tensor/src/spec/descriptor.rs:635:/// working gemma4 two-range engine, already schedule-driven rather than
+proxima-tensor/src/spec/descriptor.rs:636:/// gemma4-hardcoded internally) and [`lfm2_forward_program_with_experts`]
+proxima-tensor/src/spec/descriptor.rs:813:            // re-inferred from `qk_norm` here -- Qwen2 needs split-half RoPE
+proxima-tensor/src/spec/gguf_descriptor.rs:8:/// Builds a gemma4-family [`ModelDescriptor`] from a parsed GGUF header: the
+proxima-tensor/src/spec/gguf_descriptor.rs:17:/// This is the one place a gemma4 descriptor is built; the bind in
+proxima-tensor/src/spec/gguf_descriptor.rs:177:/// `gemma4.go:590-611`). Falls back to `first_shared_idx - 1` when no layer
+proxima-tensor/src/spec/hybrid_forward.rs:179:        // (`proxima_model_interop::qwen35`'s own module doc, confirmed via
+proxima-tensor/src/spec/hybrid_forward.rs:196:            // by [`crate::qwen35::qwen35_architecture_from_metadata`]'s own
+proxima-tensor/src/spec/hybrid_forward.rs:555:            // through experts, `qwen35.cpp:471`).
+proxima-tensor/src/spec/hybrid_forward.rs:820:/// shape every `qwen35moe` layer shares, dense-attention or GDN alike.
+proxima-tensor/src/spec/hybrid_forward.rs:1071:                // real `qwen35` dense checkpoint reads off `attn_q.weight`
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:369:/// `apply_rotary_pos_emb`; cross-checked against `qwen35.cpp`'s own
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:394:///    tracks are initialized from the SAME position (`llama-graph.cpp`'s
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:408:///    `:325-328`; `qwen35.cpp:322-328` runs the identical
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:418:/// NOT dense (a routed-MoE checkpoint such as `qwen35moe`, which carries no
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:580:/// reference -- a downstream `qwen35moe`-shaped consumer's own layer-3
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:690:    // last dim is `self.head_dim` = `attn_head_dim`; `qwen35.cpp:308-317`
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:1079:    // (`modeling_qwen3_next.py:325-328`, `qwen35.cpp:322-328`).
+proxima-tensor/src/spec/hyperconn_qwen35_dense.rs:1169:/// (`qwen35moe`-shaped) calls [`append_qwen35_dense_attention_only`]
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:177:    // `llama.cpp`'s own `create_tensor(.., {n_shortconv_l_cache, n_embd},
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:210:/// LFM2's gated short-convolution mixer, [`append_mistral_layer`]'s
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:236:/// LiquidAI's published LFM2 short-convolution block, `y = out_proj(C ⊙
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:357:/// attention (SSM) layers run -- llama.cpp's own reference,
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:372:/// (`llama.cpp:305-306`, `sk = sum_rows(state * k)`), `delta[j] = beta *
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:376:/// = q / sqrt(key_dim)` is applied by the caller (`llama.cpp:295`,
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:381:/// token (`llama.cpp`'s own `softplus(alpha + dt_bias) * ssm_a` and
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:529:/// (`llama.cpp:370`, `ggml_softplus`) -- not a [`ScalarOp`] primitive, so
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:560:/// (`qwen35.cpp:428-429`, applied to `q_conv`/`k_conv` with no weight
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:628:/// `x * sigmoid(x)`, `ggml_silu`'s own contract (`qwen35.cpp:391-392`, run on
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:857:/// Qwen3.5's `q|k|v` conv branch -- llama.cpp's own
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:858:/// `build_layer_attn_linear` (`qwen35.cpp:385-431`): `causal_conv1d` over
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:871:// own doc describes, rather than calling this. A prefill-only qwen35
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:923:/// [`append_qwen35_delta_net_step`] (`qwen35.cpp:437-440`,
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:1006:/// llama.cpp's own `build_layer_attn_linear` (`qwen35.cpp:335-466`) run
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:1016:/// `qwen35.cpp:243-250`: `rmsnorm(out) * silu(z)`), and the output
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:1071:    /// `qwen35_forward_program`'s own GDN layers (`qwen35.cpp:243-250`).
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:2132:        // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * output_gate(z)`,
+proxima-tensor/src/spec/lfm2_qwen35_gdn.rs:2133:        // `output_gate` per [`GdnOutputGate`] (silu for qwen35, sigmoid for
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:14://! Gated one level up (`proxima-model-interop`'s `gemma4-kv-cache`
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:18://! `crate::gemma4::bind::Gemma4Arch::bind`'s own choice of which builder
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:410:/// this crate's `gemma4-kv-cache` root cause (a single softmax has no
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:478:    // `KeySource::Shared` (gemma4 E2B's cross-layer shared-KV,
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:483:    // `ValueSource::SharedWithKey` below, which gemma4 E2B's shared layers
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:942:/// halves and post-norm `V` (the exact nodes gemma4 E2B's
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:1000:    // gemma4 E2B/E4B's per-layer-embedding preamble
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:1182:    // schedule entry (gemma4 E2B's cross-layer shared-KV) reads
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:1240:        // gemma4 E2B shares BOTH `K` and `V` from the same donor layer
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:1242:        // `gemma4.go` reads one donor's `sharedHistory` for both, never `K`
+proxima-tensor/src/spec/lfm2_single_range_cached.rs:1471:    // This is the builder gemma4's real production decode path actually
+proxima-tensor/src/spec/mistral_forward_cached.rs:695:    // checkpoint carries QK-norm weights: Qwen2 uses NEOX split-half RoPE
+proxima-tensor/src/spec/mistral_forward_cached.rs:696:    // without QK-norm, while ordinary LLaMA/Mistral checkpoints use the
+proxima-tensor/src/spec/mistral_layer_moe.rs:558:/// gather. Used to fold a per-expert output scale (gemma4's
+proxima-tensor/src/spec/mistral_layer_moe.rs:584:/// scores -- llama.cpp's own `llama_expert_gating_func_type`
+proxima-tensor/src/spec/mistral_layer_moe.rs:585:/// (`llama-hparams.h:11-14`), read from a checkpoint's own
+proxima-tensor/src/spec/mistral_layer_moe.rs:587:/// `Softmax` is llama.cpp's own fallback when that key is absent
+proxima-tensor/src/spec/mistral_layer_moe.rs:588:/// (`llama-model.cpp:1237-1240`, "existing models that have no
+proxima-tensor/src/spec/mistral_layer_moe.rs:593:/// LFM2's own value (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:209`'s
+proxima-tensor/src/spec/mistral_layer_moe.rs:636:    /// `blk.{layer}.exp_probs_b.bias` (`[expert_count]`) on a real LFM2
+proxima-tensor/src/spec/mistral_layer_moe.rs:643:    /// gemma4 checkpoint: gathered by each round's own selected route and
+proxima-tensor/src/spec/mistral_layer_moe.rs:646:    /// unscaled combination byte-for-byte (Mixtral, LFM2, qwen3.6 MoE).
+proxima-tensor/src/spec/mistral_layer_moe.rs:703:/// `expert_bias` (`blk.{layer}.exp_probs_b.bias` on a real LFM2 checkpoint,
+proxima-tensor/src/spec/mistral_layer_moe.rs:704:/// `[expert_count]`) is llama.cpp's own `ffn_exp_probs_b` /
+proxima-tensor/src/spec/mistral_layer_moe.rs:706:/// (`modeling_lfm2_moe.py:210-213`, `llama-graph.cpp`'s own
+proxima-tensor/src/spec/primitives.rs:212:/// into rotation pairs -- interleaved (`(2*i, 2*i+1)`, llama's
+proxima-tensor/src/spec/primitives.rs:214:/// (`(i, i+pairs)`, llama's `kernel_rope_neox`,
+proxima-tensor/src/spec/primitives.rs:264:/// [`Op::Elementwise`], mirroring llama's `kernel_rope_neox`/
+proxima-tensor/src/spec/single_range_moe_cached.rs:1104:    // split-half layout, never llama.cpp's converter-permuted interleaved
+proxima-tensor/src/spec/single_range_moe_cached.rs:1105:    // pairing a no-qk_norm (Mistral/LLaMA) checkpoint uses.
+proxima-tensor/src/spec/single_range_moe_cached.rs:1231:/// Which mixer one transformer block runs. LFM2.5-8B-A1B (`general.architecture
+proxima-tensor/src/spec/single_range_moe_cached.rs:1247:    /// Derives one block's kind from its own tensor name set: LFM2.5-8B-A1B's
+proxima-tokenizer/src/bpe.rs:64:/// (leftmost on ties), matching llama.cpp's `llm_bigram_bpe` comparator.
+proxima-tokenizer/src/bpe.rs:85:/// Char-level BPE over one pre-token of gemma4's `[^\n]+|[\n]+` split, with
+proxima-tokenizer/src/byte_level.rs:2://! `encoder.py`, reused verbatim by every llama-family BPE vocab this crate
+proxima-tokenizer/src/byte_level.rs:121:        // private range. GPT-2/llama.cpp's well-known marker for it is
+proxima-tokenizer/src/draft/mod.rs:3://! continuation tokens with no second model (llama.cpp's own
+proxima-tokenizer/src/draft/ngram_cache.rs:1://! A faithful port of llama.cpp's `common_ngram_cache` machinery
+proxima-tokenizer/src/draft/ngram_cache.rs:69://! LLAMA_NGRAM_MAX]` arrays on the stack (llama's own `common_ngram` is the
+proxima-tokenizer/src/draft/ngram_cache.rs:101:/// llama's `LLAMA_NGRAM_MIN` (`common/ngram-cache.h:9`).
+proxima-tokenizer/src/draft/ngram_cache.rs:104:/// llama's `LLAMA_NGRAM_MAX` (`common/ngram-cache.h:10`).
+proxima-tokenizer/src/draft/ngram_cache.rs:107:/// llama's `LLAMA_NGRAM_STATIC` (`common/ngram-cache.h:11`).
+proxima-tokenizer/src/draft/ngram_cache.rs:110:/// llama's `create_state_ngram_cache`'s hardcoded `n_draft`
+proxima-tokenizer/src/draft/ngram_cache.rs:114:/// llama's `draft_min_sample_size_lax` (`common/ngram-cache.cpp:60`),
+proxima-tokenizer/src/draft/ngram_cache.rs:118:/// llama's `draft_min_percent_lax` (`common/ngram-cache.cpp:61`).
+proxima-tokenizer/src/draft/ngram_cache.rs:121:/// llama's `draft_min_sample_size_strict` (`common/ngram-cache.cpp:62`).
+proxima-tokenizer/src/draft/ngram_cache.rs:124:/// llama's `draft_min_percent_strict` (`common/ngram-cache.cpp:63`).
+proxima-tokenizer/src/draft/ngram_cache.rs:127:/// llama's `common_ngram` (`common/ngram-cache.h:15-38`): up to
+proxima-tokenizer/src/draft/ngram_cache.rs:128:/// [`LLAMA_NGRAM_MAX`] token ids, `None` in place of llama's own
+proxima-tokenizer/src/draft/ngram_cache.rs:138:/// flat-slab equivalent of llama's own `common_ngram_cache_part`
+proxima-tokenizer/src/draft/ngram_cache.rs:147:/// A read view over one n-gram's continuation-token distribution -- llama's
+proxima-tokenizer/src/draft/ngram_cache.rs:158:    /// followed by it -- llama's own `part.find(token)`.
+proxima-tokenizer/src/draft/ngram_cache.rs:165:    /// own chain order (newest-inserted first) -- distinct from llama's own
+proxima-tokenizer/src/draft/ngram_cache.rs:169:    /// replays 200+ real llama.cpp cases; a tie-breaking divergence would
+proxima-tokenizer/src/draft/ngram_cache.rs:218:    // for this structure's OWN open addressing, never ported from llama
+proxima-tokenizer/src/draft/ngram_cache.rs:234:/// llama's `common_ngram_cache` (`common/ngram-cache.h:61`): n-gram ->
+proxima-tokenizer/src/draft/ngram_cache.rs:239:/// than llama's own `unordered_map` + hand-written hasher (same lookup
+proxima-tokenizer/src/draft/ngram_cache.rs:252:    /// An empty, growable cache -- llama's own default-constructed
+proxima-tokenizer/src/draft/ngram_cache.rs:283:    /// Number of distinct n-grams recorded -- llama's own `.size()`
+proxima-tokenizer/src/draft/ngram_cache.rs:355:    /// or the token entry as needed -- llama's own
+proxima-tokenizer/src/draft/ngram_cache.rs:404:/// reuse"): llama's own `common_ngram_cache_update` body
+proxima-tokenizer/src/draft/ngram_cache.rs:433:/// `inp_data` is llama's `inp_data`; `nnew` is llama's `nnew` (how many
+proxima-tokenizer/src/draft/ngram_cache.rs:460:/// llama's `get_token` (`common/ngram-cache.cpp:55-57`): reads position
+proxima-tokenizer/src/draft/ngram_cache.rs:462:/// the sequence llama's own `inp ++ draft[1..]` represents, without
+proxima-tokenizer/src/draft/ngram_cache.rs:474:/// llama's single-cache `try_draft` overload (`common/ngram-cache.cpp:66-95`):
+proxima-tokenizer/src/draft/ngram_cache.rs:501:/// llama's two-cache `try_draft` overload (`common/ngram-cache.cpp:97-144`):
+proxima-tokenizer/src/draft/ngram_cache.rs:545:/// three-cache, longest-n-gram-first algorithm. `history` is llama's `inp`
+proxima-tokenizer/src/draft/ngram_cache.rs:549:/// llama's `draft` minus its own leading `id_last` sentinel entry -- this
+proxima-tokenizer/src/draft/ngram_cache.rs:639:    /// Every cache starts empty -- llama's own default-constructed
+proxima-tokenizer/src/draft/ngram_cache.rs:660:    /// llama's own `common_speculative_impl_ngram_cache` constructor
+proxima-tokenizer/src/draft/ngram_cache.rs:708:    /// The file ended in the middle of a record -- llama's own loader
+proxima-tokenizer/src/draft/ngram_cache.rs:712:    #[error("truncated llama ngram cache: expected {expected} more bytes at offset {offset}, found {found}")]
+proxima-tokenizer/src/draft/ngram_cache.rs:743:/// file-reading wrapper). Each record is llama's own raw struct layout,
+proxima-tokenizer/src/draft/ngram_cache.rs:745:/// tokens (`-1` is llama's `LLAMA_TOKEN_NULL`, mapped to `None`), then one
+proxima-tokenizer/src/draft/ngram_cache.rs:770:/// -- llama's own `common_speculative_impl_ngram_cache` constructor loads
+proxima-tokenizer/src/draft/ngram_cache.rs:787:    #[error("failed to read llama ngram cache file: {0}")]
+proxima-tokenizer/src/draft/ngram_cache.rs:842:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_cache.rs:846:        "/tests/fixtures/llama-ngram/fixtures/ngram_cache.json"
+proxima-tokenizer/src/draft/ngram_cache.rs:850:        "/tests/fixtures/llama-ngram/fixtures/ngram_cache_static.bin"
+proxima-tokenizer/src/draft/ngram_cache.rs:854:    /// `tests/fixtures/llama-ngram/fixtures/ngram_cache.json` (SPEC.md
+proxima-tokenizer/src/draft/ngram_cache.rs:907:    /// SPEC.md AC9's second half, R7's own "loads llama.cpp static/dynamic
+proxima-tokenizer/src/draft/ngram_cache.rs:910:    /// real cache built from `streams[2]`, llama.cpp's own
+proxima-tokenizer/src/draft/ngram_cache.rs:911:    /// `common/ngram-map.cpp`, via llama's own `common_ngram_cache_update` +
+proxima-tokenizer/src/draft/ngram_cache.rs:914:    /// context/dynamic-empty [`NgramCacheState`] over a real gemma4-tokenized
+proxima-tokenizer/src/draft/ngram_map.rs:1://! A faithful port of llama.cpp's `common_ngram_map` (`common/ngram-map.h`,
+proxima-tokenizer/src/draft/ngram_map.rs:5://! step. `key_only = true` gives llama's `ngram-map-k` speculation type;
+proxima-tokenizer/src/draft/ngram_map.rs:14://! `keys` list (llama's `std::vector<common_ngram_map_key>`), a fixed-size
+proxima-tokenizer/src/draft/ngram_map.rs:15://! hash index `key_map` (llama's `COMMON_NGRAM_HASH_MAP_SIZE`-entry
+proxima-tokenizer/src/draft/ngram_map.rs:20://! `last_draft_*`) llama's `common_ngram_map_draft` reads and writes every
+proxima-tokenizer/src/draft/ngram_map.rs:43://! by CONTENT, not by position -- llama's own linear scan over
+proxima-tokenizer/src/draft/ngram_map.rs:49://! `stat_idx` (llama's own value-slot content comparison, not position
+proxima-tokenizer/src/draft/ngram_map.rs:60://! draft from that same value slot to that length -- llama's own adaptive
+proxima-tokenizer/src/draft/ngram_map.rs:65:/// llama's `COMMON_NGRAM_MAX_VALUES` (`common/ngram-map.h:39`): the number of
+proxima-tokenizer/src/draft/ngram_map.rs:70:/// llama's `COMMON_NGRAM_HASH_MAP_SIZE` (`common/ngram-map.h:42`): the fixed
+proxima-tokenizer/src/draft/ngram_map.rs:75:/// llama's `COMMON_NGRAM_MAX_VALUE_COUNT` (`common/ngram-map.cpp:119`): the
+proxima-tokenizer/src/draft/ngram_map.rs:79:/// llama's `LCG_FACTOR` (`common/ngram-map.cpp:11`): the 32-bit LCG
+proxima-tokenizer/src/draft/ngram_map.rs:83:/// llama.cpp's `ngram-map` default `size_key` (`README.md`'s own recorded
+proxima-tokenizer/src/draft/ngram_map.rs:87:/// llama.cpp's `ngram-map` default `size_value`.
+proxima-tokenizer/src/draft/ngram_map.rs:90:/// llama.cpp's `ngram-map` default `min_hits`.
+proxima-tokenizer/src/draft/ngram_map.rs:93:/// llama.cpp's `common_ngram_map` constructor arguments (`common/ngram-map.h:72-77`):
+proxima-tokenizer/src/draft/ngram_map.rs:94:/// `size_key`/`size_value` name the n-gram/m-gram sizes (llama's own
+proxima-tokenizer/src/draft/ngram_map.rs:103:    /// Size of the key n-gram looked up in history -- llama's `size_key`.
+proxima-tokenizer/src/draft/ngram_map.rs:105:    /// Size of the value m-gram drafted after a key match -- llama's `size_value`.
+proxima-tokenizer/src/draft/ngram_map.rs:116:/// llama's `common_ngram_map_value` (`common/ngram-map.h:45-49`): one
+proxima-tokenizer/src/draft/ngram_map.rs:134:/// llama's `common_ngram_map_key` (`common/ngram-map.h:52-58`): one tracked
+proxima-tokenizer/src/draft/ngram_map.rs:148:/// [`ngram_map_draft`], and [`ngram_map_accept`] are llama's own
+proxima-tokenizer/src/draft/ngram_map.rs:167:    /// index, llama's own `key_map.resize(COMMON_NGRAM_HASH_MAP_SIZE)`) and
+proxima-tokenizer/src/draft/ngram_map.rs:219:/// -- see this module's own doc for the algorithm. `tokens` is llama's
+proxima-tokenizer/src/draft/ngram_map.rs:267:/// llama's stale-value shift loop inside `common_ngram_map_begin`
+proxima-tokenizer/src/draft/ngram_map.rs:285:/// `inp` is llama's `inp` (every token generated so far, NOT including
+proxima-tokenizer/src/draft/ngram_map.rs:294:/// guards against `size_key == 0` either -- llama's own `ngram-map`
+proxima-tokenizer/src/draft/ngram_map.rs:306:    // llama.cpp: `if (cur_len < 2 * n + m) return;`
+proxima-tokenizer/src/draft/ngram_map.rs:398:/// llama's key_map index-maintenance step (`common/ngram-map.cpp:318-340`):
+proxima-tokenizer/src/draft/ngram_map.rs:437:/// llama's `key_only` draft branch (`common/ngram-map.cpp:382-398`): always
+proxima-tokenizer/src/draft/ngram_map.rs:456:/// llama's `key4v` draft branch (`common/ngram-map.cpp:408-515`): tallies up
+proxima-tokenizer/src/draft/ngram_map.rs:594:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_map.rs:598:        "/tests/fixtures/llama-ngram/fixtures/ngram_map_k.json"
+proxima-tokenizer/src/draft/ngram_map.rs:602:        "/tests/fixtures/llama-ngram/fixtures/ngram_map_k4v.json"
+proxima-tokenizer/src/draft/ngram_map.rs:607:    /// (`tests/fixtures/llama-ngram/generator/main.cpp`'s `replay_ngram_map`,
+proxima-tokenizer/src/draft/ngram_map.rs:667:    /// `tests/fixtures/llama-ngram/fixtures/ngram_map_k.json`
+proxima-tokenizer/src/draft/ngram_map.rs:668:    /// (SPEC.md AC6), produced by calling llama.cpp's own
+proxima-tokenizer/src/draft/ngram_map.rs:679:    /// `tests/fixtures/llama-ngram/fixtures/ngram_map_k4v.json`
+proxima-tokenizer/src/draft/ngram_mod.rs:1://! A faithful port of llama.cpp's `common_ngram_mod` (`common/ngram-mod.h`,
+proxima-tokenizer/src/draft/ngram_mod.rs:5://! the ONE token last seen following it -- llama's own PR description names
+proxima-tokenizer/src/draft/ngram_mod.rs:6://! it "basic n-gram hasher" (`ngram-mod.h:9`, `ggml-org/llama.cpp#19164`).
+proxima-tokenizer/src/draft/ngram_mod.rs:17://! (llama's own multiplicative hash, `idx()`, `common/ngram-mod.cpp:15-25`
+proxima-tokenizer/src/draft/ngram_mod.rs:28://! [`OCCUPANCY_THRESHOLD`] (`0.25` -- llama's own hardcoded constant,
+proxima-tokenizer/src/draft/ngram_mod.rs:40://! have been drafted returns NOTHING at all, not a short draft (llama's own
+proxima-tokenizer/src/draft/ngram_mod.rs:43://! in CHUNKS of 32 new tokens at a time (`:1940-1946` -- llama's own
+proxima-tokenizer/src/draft/ngram_mod.rs:52://! scratch) -- llama's own defense against a table that has drifted into
+proxima-tokenizer/src/draft/ngram_mod.rs:59://! for the `draft_n`/telemetry counters `speculative-decode-llama-parity`
+proxima-tokenizer/src/draft/ngram_mod.rs:64:/// llama's `common_ngram_mod` table size, hardcoded at the call site
+proxima-tokenizer/src/draft/ngram_mod.rs:69:/// llama's occupancy reset threshold (`common/speculative.cpp:1914`).
+proxima-tokenizer/src/draft/ngram_mod.rs:72:/// llama's low-acceptance reset threshold (`common/speculative.cpp:2006`).
+proxima-tokenizer/src/draft/ngram_mod.rs:75:/// llama's low-acceptance reset streak length (`common/speculative.cpp:2008`,
+proxima-tokenizer/src/draft/ngram_mod.rs:79:/// llama's `common_params_speculative_ngram_mod` default `n_match`
+proxima-tokenizer/src/draft/ngram_mod.rs:83:/// llama's `common_params_speculative_ngram_mod` default `n_max`
+proxima-tokenizer/src/draft/ngram_mod.rs:87:/// llama's `common_params_speculative_ngram_mod` default `n_min`
+proxima-tokenizer/src/draft/ngram_mod.rs:91:/// llama's `common_ngram_mod::EMPTY` sentinel (`common/ngram-mod.h:16`):
+proxima-tokenizer/src/draft/ngram_mod.rs:95:/// llama's `idx()` multiplier (`common/ngram-mod.cpp:19`) -- the constant
+proxima-tokenizer/src/draft/ngram_mod.rs:100:/// llama's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
+proxima-tokenizer/src/draft/ngram_mod.rs:103:    /// The context window size hashed into the table -- llama's `n_match`.
+proxima-tokenizer/src/draft/ngram_mod.rs:105:    /// The maximum chain length drafted after a hit -- llama's `n_max`.
+proxima-tokenizer/src/draft/ngram_mod.rs:108:    /// llama's `n_min`.
+proxima-tokenizer/src/draft/ngram_mod.rs:174:    /// llama's `common_ngram_mod::idx` (`common/ngram-mod.cpp:15-25`).
+proxima-tokenizer/src/draft/ngram_mod.rs:186:    /// llama's `common_ngram_mod::add` (`common/ngram-mod.cpp:27-35`).
+proxima-tokenizer/src/draft/ngram_mod.rs:195:        // llama.cpp's own storage is `int32_t`; real vocab ids never
+proxima-tokenizer/src/draft/ngram_mod.rs:200:    /// llama's `common_ngram_mod::get` (`common/ngram-mod.cpp:37-41`).
+proxima-tokenizer/src/draft/ngram_mod.rs:207:    /// llama's `common_ngram_mod::reset` (`common/ngram-mod.cpp:43-46`) --
+proxima-tokenizer/src/draft/ngram_mod.rs:219:/// `prompt` is llama's `prompt` argument: every token this generation
+proxima-tokenizer/src/draft/ngram_mod.rs:244:/// the chained-lookahead algorithm. `history` is llama's `prompt` (every
+proxima-tokenizer/src/draft/ngram_mod.rs:249:/// `out` doubles as llama's own `result` scratch buffer (`draft_one`
+proxima-tokenizer/src/draft/ngram_mod.rs:269:    // llama.cpp: `if (sinfo.i_last + 32 < cur_len) { ... }` -- chunked
+proxima-tokenizer/src/draft/ngram_mod.rs:294:        // llama.cpp's own storage is `int32_t`; see `NgramMod::add`'s doc.
+proxima-tokenizer/src/draft/ngram_mod.rs:403:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_mod.rs:407:        "/tests/fixtures/llama-ngram/fixtures/ngram_mod.json"
+proxima-tokenizer/src/draft/ngram_mod.rs:411:    /// every case in `tests/fixtures/llama-ngram/fixtures/ngram_mod.json`
+proxima-tokenizer/src/draft/ngram_mod.rs:433:    /// so both sides produce the same stream. llama.cpp's own `begin()`
+proxima-tokenizer/src/draft/ngram_mod.rs:472:            "llama.cpp's own recorded occupancy warmup must reset the table exactly once before replay"
+proxima-tokenizer/src/draft/ngram_mod.rs:521:            "the synthetic occupancy warmup replayed against llama.cpp must fire at least one reset"
+proxima-tokenizer/src/draft/ngram_mod.rs:533:    /// mechanism against llama.cpp's own recorded 2.2-million-token
+proxima-tokenizer/src/draft/ngram_mod.rs:616:    /// must draft nothing, not a short chain -- llama's own
+proxima-tokenizer/src/draft/ngram_simple.rs:1://! A faithful port of llama.cpp's `common_ngram_simple_draft`
+proxima-tokenizer/src/draft/ngram_simple.rs:3://! self-speculative n-gram drafter every llama.cpp speculation type traces
+proxima-tokenizer/src/draft/ngram_simple.rs:24://! llama.cpp's own loop counts down, so a later match always wins over an
+proxima-tokenizer/src/draft/ngram_simple.rs:33://! 1` -- llama.cpp's own guard, preserved exactly (a strict `>`, not
+proxima-tokenizer/src/draft/ngram_simple.rs:38:/// llama.cpp's `common_ngram_simple_config` (`common/ngram-map.h:24`),
+proxima-tokenizer/src/draft/ngram_simple.rs:39:/// renamed to the field names `speculative-decode-llama-parity/SPEC.md`
+proxima-tokenizer/src/draft/ngram_simple.rs:40:/// (requirement R4) uses: `size_n` is llama's `size_ngram` (the n-gram
+proxima-tokenizer/src/draft/ngram_simple.rs:41:/// looked up in the token history), `size_m` is llama's `size_mgram` (how
+proxima-tokenizer/src/draft/ngram_simple.rs:42:/// many tokens after a match are drafted). llama.cpp's own default for
+proxima-tokenizer/src/draft/ngram_simple.rs:48:    /// Size of the n-gram looked up in `history` -- llama's `size_ngram`.
+proxima-tokenizer/src/draft/ngram_simple.rs:50:    /// Size of the m-gram drafted after a match -- llama's `size_mgram`.
+proxima-tokenizer/src/draft/ngram_simple.rs:54:/// llama.cpp's `ngram-simple` default `size_n`
+proxima-tokenizer/src/draft/ngram_simple.rs:58:/// llama.cpp's `ngram-simple` default `size_m`
+proxima-tokenizer/src/draft/ngram_simple.rs:139:    // llama.cpp: `if (cur_len <= n_draft_min + n_draft_max + 1) return {};`
+proxima-tokenizer/src/draft/ngram_simple.rs:144:    // llama.cpp builds `pattern` as `tokens[cur_len - n_draft_min + 1 ..
+proxima-tokenizer/src/draft/ngram_simple.rs:156:    // llama.cpp: `for (j = cur_len - n_draft_min - 1; j > 0; --j)` -- scans
+proxima-tokenizer/src/draft/ngram_simple.rs:170:    // llama.cpp: `copy_max = min(n_draft_max, cur_len - (match_pos +
+proxima-tokenizer/src/draft/ngram_simple.rs:225:        "/tests/fixtures/llama-ngram/fixtures/streams.json"
+proxima-tokenizer/src/draft/ngram_simple.rs:229:        "/tests/fixtures/llama-ngram/fixtures/ngram_simple.json"
+proxima-tokenizer/src/draft/ngram_simple.rs:233:    /// `tests/fixtures/llama-ngram/fixtures/ngram_simple.json`, whose
+proxima-tokenizer/src/draft/ngram_simple.rs:234:    /// `draft` field was produced by calling llama.cpp's own
+proxima-tokenizer/src/draft/ngram_simple.rs:236:    /// `speculative-decode-llama-parity/SPEC.md` AC5) -- never by
+proxima-tokenizer/src/gguf.rs:10://! `~/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf` (a
+proxima-tokenizer/src/gguf.rs:16://! | `tokenizer.ggml.model` | string | `"gpt2"` (byte-level BPE) on the llama-bpe fixture; `"llama"` (SentencePiece/SPM) on the openchat-3.5-1210 fixture below -- this is the key [`vocab_from_metadata`] dispatches the encoder on |
+proxima-tokenizer/src/gguf.rs:17://! | `tokenizer.ggml.pre` | string | `"llama-bpe"` on the llama-bpe fixture, `"qwen2"` on qwen2.5 and qwen3, `"qwen35"` on qwen3.5; [`vocab_from_metadata`] maps it to a [`PreType`] exactly as llama.cpp does (`llama-vocab.cpp:2168-2271`), and a `"gpt2"` vocab with a missing value uses the default pre-split with a warning, and an unmapped value is an error |
+proxima-tokenizer/src/gguf.rs:21://! | `tokenizer.ggml.scores` | array\<f32\> | one per token, `"llama"` vocabs only -- dumped from the real 32002-token openchat-3.5-1210 fixture (`tokenizer.ggml.model = "llama"`, no `merges` key at all) |
+proxima-tokenizer/src/gguf.rs:24://! | `tokenizer.ggml.add_bos_token` | bool | present (`true`) on the real openchat-3.5-1210 and Nous-Hermes-2-Mixtral fixtures; **absent** on the real deepseek-coder-33b-instruct and LFM2.5-8B-A1B fixtures -- this is llama.cpp's own conversion-time heuristic, not guaranteed present, so [`vocab_from_metadata`] threads it through as `Option<bool>` ([`crate::vocab::Vocab::with_bos_eos_policy`]) rather than defaulting it |
+proxima-tokenizer/src/gguf.rs:28://! are read too, but absent on the llama-bpe fixture -- byte-level BPE has
+proxima-tokenizer/src/gguf.rs:29://! no OOV case (every byte has a base token), so llama.cpp's own gguf
+proxima-tokenizer/src/gguf.rs:57:/// constructor ([`Vocab::new`]), a `"llama"` model with a
+proxima-tokenizer/src/gguf.rs:68:/// companion array (`merges` for `"gpt2"`, `scores` for `"llama"`) is
+proxima-tokenizer/src/gguf.rs:89:        ("llama", None) => {
+proxima-tokenizer/src/gguf.rs:124:/// llama.cpp maps it ([`PreType::from_gguf_name`]).
+proxima-tokenizer/src/gguf.rs:126:/// A missing or empty value is llama.cpp's `default` pre type with a warning
+proxima-tokenizer/src/gguf.rs:127:/// (`llama-vocab.cpp:2159-2167`), so it is [`PreType::Default`] here with the
+proxima-tokenizer/src/gguf.rs:129:/// is an error carrying that value: llama.cpp throws on a name it does not
+proxima-tokenizer/src/gguf.rs:130:/// know (`llama-vocab.cpp:2423`), and for the names it does know but this
+proxima-tokenizer/src/gguf.rs:223:/// `deepseek-coder-33b-instruct` and `LFM2.5-8B-A1B` fixtures, both of which
+proxima-tokenizer/src/gguf.rs:330:                    MetadataValue::String(String::from("llama-bpe"))
+proxima-tokenizer/src/gguf.rs:379:            ("llama-bpe", PreType::Llama3),
+proxima-tokenizer/src/gguf.rs:380:            ("lfm2", PreType::Llama3),
+proxima-tokenizer/src/gguf.rs:381:            ("qwen2", PreType::Qwen2),
+proxima-tokenizer/src/gguf.rs:382:            ("deepseek-r1-qwen", PreType::Qwen2),
+proxima-tokenizer/src/gguf.rs:383:            ("qwen35", PreType::Qwen35),
+proxima-tokenizer/src/gguf.rs:407:            .expect("a byte-level vocab with no pre key builds, as in llama.cpp");
+proxima-tokenizer/src/gguf.rs:449:        for model in ["gemma4", "gpt2", "some-future-char-level-model"] {
+proxima-tokenizer/src/gguf.rs:458:        let vocab = vocab_from_metadata(&char_level_metadata("gemma4", Some("qwen3-unreleased")))
+proxima-tokenizer/src/gguf.rs:477:            .expect("an empty pre value builds, as in llama.cpp");
+proxima-tokenizer/src/gguf.rs:481:    /// Loads the real llama-bpe vocab fixture and confirms the exact
+proxima-tokenizer/src/gguf.rs:490:            "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
+proxima-tokenizer/src/gguf.rs:637:        // (`tokenizer.ggml.model = "llama"`, a SentencePiece/unigram
+proxima-tokenizer/src/gguf.rs:684:    /// checkpoint (`tokenizer.ggml.model = "llama"`) declares no
+proxima-tokenizer/src/gguf.rs:700:            "openchat-3.5-1210 declares tokenizer.ggml.model = \"llama\""
+proxima-tokenizer/src/gguf.rs:747:    /// existing philosophy for the llama-bpe fixture,
+proxima-tokenizer/src/gguf.rs:804:    /// of the 10 real-world prompts llama.cpp's own tokenizer + greedy
+proxima-tokenizer/src/gguf.rs:807:    /// reproduce llama.cpp's own prompt token ids exactly. This is a
+proxima-tokenizer/src/gguf.rs:814:    /// (this crate's own logits-driven decode vs. llama.cpp's), not
+proxima-tokenizer/src/gguf.rs:830:                "{}: our encoder's ids for {:?} must match llama.cpp's own tokenization (got {ids:?})",
+proxima-tokenizer/src/gguf.rs:855:    /// Reference ids captured directly from llama.cpp's own tokenizer
+proxima-tokenizer/src/gguf.rs:856:    /// (`llama-tokenize -m <fixture> -p '<prompt>'`, same provenance as
+proxima-tokenizer/src/gguf.rs:879:            "our ids for the chat-template prompt must match llama.cpp's own tokenization exactly (got {ids:?})"
+proxima-tokenizer/src/gguf.rs:888:    /// Regression for the phantom-separator bug: gemma4's real 262144-token
+proxima-tokenizer/src/gguf.rs:893:    /// SentencePiece marker (`"▁"`, U+2581) gemma4's own merges are keyed
+proxima-tokenizer/src/gguf.rs:898:    /// word. `#[ignore]`d: depends on a host-local gemma4 gguf checkout.
+proxima-tokenizer/src/gguf.rs:900:    #[ignore = "depends on a host-local gemma4 gguf checkout outside this repo"]
+proxima-tokenizer/src/gguf.rs:908:            eprintln!("no real gemma4 gguf found at {candidate:?}, skipping");
+proxima-tokenizer/src/gguf.rs:911:        let mut file = std::fs::File::open(candidate).expect("open host-local gemma4 fixture");
+proxima-tokenizer/src/gguf.rs:925:        let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real gemma4 metadata");
+proxima-tokenizer/src/gguf.rs:932:            .expect("gemma4's real vocab carries a literal Ġ entry");
+proxima-tokenizer/src/gguf.rs:944:                    .unwrap_or_else(|| panic!("{word:?} must be a real gemma4 vocab entry"))
+proxima-tokenizer/src/hf.rs:149:/// **no `add_bos_token` key at all**. That absence is llama.cpp's own GGUF
+proxima-tokenizer/src/lib.rs:28://! `tokenizer.ggml.pre` (`"llama-bpe"` is the LLAMA3 rule, `"qwen2"` and
+proxima-tokenizer/src/lib.rs:29://! `"qwen35"` split digits one per pretoken); `tokenizer.ggml.model = "gpt2"`
+proxima-tokenizer/src/lib.rs:32://! Char-level BPE for `tokenizer.ggml.model = "gemma4"`: merges keyed on raw
+proxima-tokenizer/src/lib.rs:38://! SentencePiece/SPM ([`unigram`]) for `tokenizer.ggml.model = "llama"`
+proxima-tokenizer/src/pipe.rs:83:/// gemma4's encoder: split only on newline runs, spell spaces `▁` (no
+proxima-tokenizer/src/pipe.rs:225:    /// A [`TokenType::Control`] id (gemma4's `<turn|>`-shaped turn marker,
+proxima-tokenizer/src/pipe.rs:250:    /// gemma4 is merges-driven ([`crate::vocab::Vocab::is_unigram`] is
+proxima-tokenizer/src/pretokenize.rs:4://! each variant mirrors one `LLAMA_VOCAB_PRE_TYPE_*` of llama.cpp f1ea20621
+proxima-tokenizer/src/pretokenize.rs:5://! (`src/llama-vocab.cpp` regexes, `src/unicode.cpp` matchers):
+proxima-tokenizer/src/pretokenize.rs:11://! qwen2   same, with \p{N} (one digit per pretoken) in place of \p{N}{1,3}
+proxima-tokenizer/src/pretokenize.rs:12://! qwen35  qwen2 with [\p{L}\p{M}]+ for \p{L}+ and [^\s\p{L}\p{M}\p{N}]+ for
+proxima-tokenizer/src/pretokenize.rs:19://! tables llama.cpp's own matchers read, so the class boundaries agree with
+proxima-tokenizer/src/pretokenize.rs:37:    Qwen2,
+proxima-tokenizer/src/pretokenize.rs:40:    Qwen35,
+proxima-tokenizer/src/pretokenize.rs:42:    /// [`crate::pretokenize_passes`]. What llama.cpp uses for `tokenizer.ggml.pre =
+proxima-tokenizer/src/pretokenize.rs:58:    /// Maps a `tokenizer.ggml.pre` value exactly as llama.cpp's
+proxima-tokenizer/src/pretokenize.rs:59:    /// `llama_vocab::impl::load` does (`llama-vocab.cpp:2168-2425`), for the
+proxima-tokenizer/src/pretokenize.rs:61:    /// value, including ones llama.cpp itself accepts. Names whose branch also
+proxima-tokenizer/src/pretokenize.rs:67:            "llama3" | "llama-v3" | "llama-bpe" | "falcon3" | "falcon-h1" | "pixtral"
+proxima-tokenizer/src/pretokenize.rs:68:            | "midm-2.0" | "lfm2" | "jina-v5-nano" | "dbrx" | "smaug-bpe" | "glm4"
+proxima-tokenizer/src/pretokenize.rs:70:            "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2" | "megrez" | "stablelm2"
+proxima-tokenizer/src/pretokenize.rs:71:            | "hunyuan" | "solar-open" | "grok-2" => Some(Self::Qwen2),
+proxima-tokenizer/src/pretokenize.rs:72:            "qwen35" => Some(Self::Qwen35),
+proxima-tokenizer/src/pretokenize.rs:90:            Self::Llama3 | Self::Qwen2 | Self::Qwen35 => None,
+proxima-tokenizer/src/pretokenize.rs:96:            Self::Qwen2 | Self::Qwen35 => 1,
+proxima-tokenizer/src/pretokenize.rs:103:            Self::Qwen35 => is_letter(character) || is_mark(character),
+proxima-tokenizer/src/pretokenize.rs:182:/// gemma4's pre-split, `[^\n]+|[\n]+` (`LLAMA_VOCAB_PRE_TYPE_GEMMA4`,
+proxima-tokenizer/src/pretokenize.rs:183:/// `llama-vocab.cpp:528-536`): alternating runs of non-newline and newline
+proxima-tokenizer/src/pretokenize.rs:185:/// BPE merges run over the whole line, since gemma4's merges are keyed on raw
+proxima-tokenizer/src/pretokenize.rs:243:/// `[^\r\n\p{L}\p{N}]?\p{L}+`, or `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+` for qwen35
+proxima-tokenizer/src/pretokenize.rs:268:/// `\p{N}{1,3}` for llama3, `\p{N}` for qwen2 and qwen35
+proxima-tokenizer/src/pretokenize.rs:281:/// `' '?[^\s\p{L}\p{N}]+[\r\n]*` (with `\p{M}` also excluded for qwen35)
+proxima-tokenizer/src/pretokenize.rs:369:            spans_under("$1,299.99", PreType::Qwen2),
+proxima-tokenizer/src/pretokenize.rs:372:        assert_eq!(spans_under("3333", PreType::Qwen35), ["3", "3", "3", "3"]);
+proxima-tokenizer/src/pretokenize.rs:378:        assert_eq!(spans_under("v2024", PreType::Qwen2), ["v", "2", "0", "2", "4"]);
+proxima-tokenizer/src/pretokenize.rs:385:            spans_under(text, PreType::Qwen35),
+proxima-tokenizer/src/pretokenize.rs:389:            spans_under(text, PreType::Qwen2),
+proxima-tokenizer/src/pretokenize.rs:423:        assert_eq!(PreType::from_gguf_name("stablelm2"), Some(PreType::Qwen2));
+proxima-tokenizer/src/pretokenize.rs:424:        assert_eq!(PreType::from_gguf_name("hunyuan"), Some(PreType::Qwen2));
+proxima-tokenizer/src/pretokenize.rs:425:        assert_eq!(PreType::from_gguf_name("solar-open"), Some(PreType::Qwen2));
+proxima-tokenizer/src/pretokenize.rs:456:        assert_eq!(PreType::from_gguf_name("llama-bpe"), Some(PreType::Llama3));
+proxima-tokenizer/src/pretokenize.rs:457:        assert_eq!(PreType::from_gguf_name("lfm2"), Some(PreType::Llama3));
+proxima-tokenizer/src/pretokenize.rs:458:        assert_eq!(PreType::from_gguf_name("qwen2"), Some(PreType::Qwen2));
+proxima-tokenizer/src/pretokenize.rs:459:        assert_eq!(PreType::from_gguf_name("deepseek-r1-qwen"), Some(PreType::Qwen2));
+proxima-tokenizer/src/pretokenize.rs:460:        assert_eq!(PreType::from_gguf_name("megrez"), Some(PreType::Qwen2));
+proxima-tokenizer/src/pretokenize.rs:461:        assert_eq!(PreType::from_gguf_name("qwen35"), Some(PreType::Qwen35));
+proxima-tokenizer/src/pretokenize_passes.rs:1://! The multi-pass pre-splits: llama.cpp pre types whose regex list is several
+proxima-tokenizer/src/pretokenize_passes.rs:14://! (`unicode_regex_split_stl`); the gpt2 pass is llama.cpp's hand-written
+proxima-tokenizer/src/sample.rs:23://! upstream llama.cpp's own default chain order
+proxima-tokenizer/src/sample.rs:32://! penalties (`src/llama-sampling.cpp:1650-1681`), top-k
+proxima-tokenizer/src/sample.rs:33://! (`src/llama-sampling.cpp:228-267`), top-p (`:708-733`), min-p
+proxima-tokenizer/src/sample.rs:52://! (`src/llama-sampling.cpp:617-627`) rather than reseeding per token.
+proxima-tokenizer/src/sample.rs:88:/// `top_k <= 0` disables the filter (`src/llama-sampling.cpp:234-236`);
+proxima-tokenizer/src/sample.rs:553:    /// (`src/llama-sampling.cpp:234-236`) -- a no-op, not an error.
+proxima-tokenizer/src/sample.rs:618:    /// first two survive (`src/llama-sampling.cpp:708-733`).
+proxima-tokenizer/src/sample.rs:637:    /// (`src/llama-sampling.cpp:711-713`).
+proxima-tokenizer/src/sample.rs:648:    /// `-1.0` are both below it (`src/llama-sampling.cpp:775-806`).
+proxima-tokenizer/src/sample.rs:656:    /// Hand-computed against `src/llama-sampling.cpp:1650-1681`'s own
+proxima-tokenizer/src/sample.rs:735:            "swapping penalty/temperature order changes id 0's logit -- llama.cpp applies \
+proxima-tokenizer/src/sample.rs:1186:    /// (`repeat_penalty: 1.1`, the upstream llama.cpp default) with a full
+proxima-tokenizer/src/unicode_tables.rs:1://! Generated from llama.cpp f1ea206218210afb913ae2f5d2c51faed35915da `src/unicode-data.cpp` by
+proxima-tokenizer/src/unicode_tables.rs:3://! `\p{N}` / `\p{L}` / `\p{M}` / `\p{P}` / `\s` tables llama.cpp's
+proxima-tokenizer/src/unigram.rs:1://! SentencePiece-family segmentation for `tokenizer.ggml.model = "llama"`
+proxima-tokenizer/src/unigram.rs:4://! literature unigram-Viterbi lattice: `tokenizer.ggml.model == "llama"`
+proxima-tokenizer/src/unigram.rs:5://! dispatches to `LLAMA_VOCAB_TYPE_SPM` in llama.cpp
+proxima-tokenizer/src/unigram.rs:6://! (`llama-vocab.cpp:1405-1406`), whose tokenizer
+proxima-tokenizer/src/unigram.rs:7://! (`llm_tokenizer_spm_session::tokenize`, `llama-vocab.cpp:116-172`)
+proxima-tokenizer/src/unigram.rs:27:/// `tokenizer.ggml.model = "llama"` vocabs store every space-containing
+proxima-tokenizer/src/unigram.rs:29:/// (`llama_escape_whitespace`, `llama-vocab.cpp:2372-2374`).
+proxima-tokenizer/src/unigram.rs:32:/// Normalizes raw text the way llama.cpp's SPM path does before segmenting:
+proxima-tokenizer/src/unigram.rs:34:/// `LLAMA_VOCAB_TYPE_SPM`, `llama-vocab.cpp:1664`, unless overridden by
+proxima-tokenizer/src/unigram.rs:37:/// `SPACE_MARKER` (crate-private). `""` stays `""`: llama.cpp only ever
+proxima-tokenizer/src/unigram.rs:38:/// tokenizes a non-empty fragment (`llama-vocab.cpp:2409`).
+proxima-tokenizer/src/unigram.rs:57:/// prefix -- the gemma4 half of [`escape`] (char-level BPE adds no leading
+proxima-tokenizer/src/unigram.rs:95:/// `llama-vocab.cpp:2684-2685`).
+proxima-tokenizer/src/unigram.rs:108:/// split into pretokens first (`llama-vocab.cpp:2430-2446` calls
+proxima-tokenizer/src/unigram.rs:115:/// priority-queue comparator at `llama-vocab.cpp:96-100`) until no pair
+proxima-tokenizer/src/vocab.rs:15:/// Mirrors llama.cpp's `llama_token_type` (`include/llama.h:131-137`) --
+proxima-tokenizer/src/vocab.rs:67:    /// byte-level alphabet -- llama (unigram) and gemma4 (merges) both
+proxima-tokenizer/src/vocab.rs:153:    /// "llama"`) from its per-token unigram scores instead of an explicit
+proxima-tokenizer/src/vocab.rs:156:    /// crate-private) (mirroring llama.cpp's `llm_tokenizer_spm_session`)
+proxima-tokenizer/src/vocab.rs:207:        // keyed on it (llama, gemma4); otherwise it spells space the gpt2
+proxima-tokenizer/src/vocab.rs:219:        // char-level BPE (gemma4): merges keyed on raw UTF-8 characters with
+proxima-tokenizer/src/vocab.rs:261:            // A SentencePiece byte-BPE vocab (e.g. `gemma4`) spells the
+proxima-tokenizer/src/vocab.rs:267:            // entry (a real, if merge-orphaned, token in gemma4's actual
+proxima-tokenizer/src/vocab.rs:400:    /// byte-level path. Not consulted by the char-level (gemma4) or unigram
+proxima-tokenizer/src/vocab.rs:496:    /// Whether this vocab merges over raw UTF-8 characters (gemma4) rather
+proxima-tokenizer/src/vocab.rs:538:    /// gemma4 is merges-engine + SentencePiece-space, the cell that
+proxima-tokenizer/src/vocab.rs:588:/// (`"<0x1A>"`, uppercase hex, zero-padded) -- the convention llama.cpp's
+proxima-tokenizer/src/vocab.rs:589:/// SentencePiece/unigram vocabs (`tokenizer.ggml.model = "llama"`) use for
+proxima-tokenizer/src/vocab.rs:632:/// through as its own UTF-8 encoding — the same fallback llama.cpp's
+proxima-tokenizer/src/vocab.rs:696:    /// A tiny gemma4-shaped vocab: merges-driven ([`Vocab::new`], no
+proxima-tokenizer/src/vocab.rs:707:        Vocab::new(tokens, &merges, None, None, None).expect("tiny gemma4 vocab builds")
+proxima-tokenizer/src/vocab.rs:713:        assert!(!vocab.is_unigram(), "gemma4 is merges-driven, not unigram");
