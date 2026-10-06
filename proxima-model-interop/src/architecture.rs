@@ -295,10 +295,10 @@ pub trait Architecture: Send + Sync {
 
     /// Binds every weight tensor and assembles the forward program in one
     /// pass, borrowing from `file_bytes` -- the checkpoint's own mmap,
-    /// never copied (mirrors `qwen35::bind_qwen35_weights` +
-    /// `qwen35::qwen35_forward_program`'s existing two-call shape, fused
-    /// here so the trait has one entry point, not two callers that must
-    /// sequence them in the right order).
+    /// never copied (lower the program first, then bind the weights its `Input`
+    /// leaves name with [`crate::bind_leaves::bind_program_leaves`]; fused here
+    /// so the trait has one entry point, not two callers that must sequence
+    /// them in the right order).
     ///
     /// # Errors
     ///

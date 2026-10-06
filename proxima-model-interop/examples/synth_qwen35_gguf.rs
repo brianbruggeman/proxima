@@ -12,7 +12,7 @@
 //! Composes [`proxima_gguf::writer::write_complete`] (the existing sans-IO
 //! GGUF writer -- no new writer needed, `grep GgufWriter` found this one
 //! already shipping) with [`Qwen35LayerKind::from_interval`]'s own layer-kind
-//! arithmetic to emit exactly the tensor set [`crate::qwen35::bind_qwen35_weights`]
+//! arithmetic to emit exactly the tensor set [`proxima_model_interop::bind_program_leaves`]
 //! expects, at exactly the shapes
 //! [`proxima_tensor::spec::qwen35_forward_program`] compiles its op graph
 //! against (`proxima-tensor/src/spec.rs:7692` and its per-layer `input_leaf`
@@ -166,7 +166,7 @@ pub(crate) fn vector_tensor(name: &str, len: u32, seed: u64) -> TensorPayload<'s
     }
 }
 
-/// Every tensor [`proxima_model_interop::qwen35::bind_qwen35_weights`] binds
+/// Every tensor [`proxima_model_interop::bind_program_leaves`] binds
 /// for one layer, at exactly the shapes
 /// `proxima_tensor::spec::qwen35_forward_program`'s per-layer `input_leaf`
 /// calls declare (`proxima-tensor/src/spec.rs:7808-8087`) -- read from that

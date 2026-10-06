@@ -7,12 +7,7 @@
 //! own hybrid checkpoint, just from a scalar interval instead of a
 //! per-layer array.
 //!
-//! [`bind_qwen35_weights`] picks which fixed tensor set each layer binds by
-//! its own [`Qwen35LayerKind`] ([`crate::bind::bind_all_weights`]'s
-//! unconditional per-layer set was wrong for this checkpoint -- it demands
-//! `blk.N.ffn_norm.weight`, which does not exist here; this checkpoint names
-//! that tensor `post_attention_norm.weight` instead, on every layer,
-//! regardless of kind). [`qwen35_forward_program`] compiles the whole
+//! [`qwen35_forward_program`] compiles the whole
 //! hybrid forward program (`proxima_tensor::spec::qwen35_forward_program`),
 //! interleaving [`Qwen35LayerKind::Attention`]/[`Qwen35LayerKind::Ssm`]
 //! layers per that same per-layer marker.
@@ -26,67 +21,12 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::op::{NodeId, Op};
 
 use crate::bind::{
-    BoundWeights, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
-    find_tensor, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
+    metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
     vocab_from_token_embedding,
 };
+use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
-
-/// `name`'s own on-disk `(out_dim, in_dim)`, read from its declared GGUF
-/// shape rather than derived from `{architecture}.attention.head_count` *
-/// `rope.dimension_count` -- confirmed necessary against the real 27B
-/// checkpoint: `rope.dimension_count` (`64`) is this architecture's
-/// PARTIAL-rotary width, not the attention head's real width (`attn_q`'s
-/// own on-disk shape proves the real per-head width is `512`, not `64`),
-/// so deriving `attn_q`'s `out_dim` from that metadata product silently
-/// disagreed with the file itself. GGUF's own `ne` convention stores a
-/// dense weight as `[in_dim, out_dim]` (`crate::lfm2::bind_lfm2_shortconv_in_proj`'s
-/// own doc confirms the same convention for a fused projection).
-fn out_in_dims(parsed: &ParsedGguf, name: &str) -> Result<(usize, usize), InteropError> {
-    let tensor = find_tensor(parsed, name)?;
-    let in_dim = *tensor.dims.first().unwrap_or(&0) as usize;
-    let out_dim = *tensor.dims.get(1).unwrap_or(&1) as usize;
-    Ok((out_dim, in_dim))
-}
-
-/// [`bind_matmul_weight`] with `out_dim`/`in_dim` read straight from
-/// `name`'s own on-disk shape ([`out_in_dims`]) instead of handed down from
-/// a caller's derived hparams.
-fn bind_matmul_weight_self_shaped<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    name: alloc::string::String,
-    state: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
-    let (out_dim, in_dim) = out_in_dims(parsed, &name)?;
-    bind_matmul_weight(parsed, file_bytes, name, out_dim, in_dim, state)
-}
-
-/// [`bind_matmul_weight_self_shaped`]'s alias-under-a-different-name
-/// counterpart -- [`crate::qwen35::qwen35_forward_program`]'s ssm-kind
-/// branch declares its fused gated-input-projection weights under its own
-/// `Op::Input` names (`ssm_in.weight`/`ssm_gate.weight`), not this
-/// checkpoint's real on-disk names (`attn_qkv.weight`/`attn_gate.weight`),
-/// the same source-name-vs-target-name split [`bind_matmul_weight_as`]
-/// already exists for.
-fn bind_matmul_weight_as_self_shaped<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    source_name: alloc::string::String,
-    target_name: alloc::string::String,
-    state: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
-    let (out_dim, in_dim) = out_in_dims(parsed, &source_name)?;
-    bind_matmul_weight_as(
-        parsed,
-        file_bytes,
-        &source_name,
-        target_name,
-        out_dim,
-        in_dim,
-        state,
-    )
-}
+use crate::profiles::binding_profile;
 
 /// One layer's real tensor shape, derived from
 /// `{architecture}.full_attention_interval` rather than assumed uniform --
@@ -259,227 +199,6 @@ fn metadata_u32_nonzero_uniform(parsed: &ParsedGguf, key: &str) -> Result<u32, I
     }
 }
 
-/// Runs [`crate::bind::bind_dense`]/[`bind_matmul_weight`]
-/// over every one of `architecture`'s `block_count` layers --
-/// [`crate::bind::bind_all_weights`]'s per-layer-kind counterpart. Binds
-/// `post_attention_norm.weight` on every layer (this checkpoint's own
-/// `ffn_norm.weight` replacement, present on both layer kinds) rather than
-/// the fixed dense set [`crate::bind::bind_all_weights`] demands.
-///
-/// The ssm-kind fused `attn_gate.weight`/`attn_qkv.weight` and all 7
-/// `ssm_*` tensors bind through [`bind_dense`] rather than
-/// [`bind_matmul_weight`]: no forward program consumes them yet, so this
-/// pass has no derived `out_dim`/`in_dim` to hand a matmul-shaped bind, and
-/// [`bind_dense`] binds any tensor's bytes without needing one.
-///
-/// # Errors
-///
-/// Whatever [`crate::bind::bind_dense`]/[`bind_matmul_weight`] can fail
-/// with -- most notably
-/// [`InteropError::UnknownTensor`] if a layer's own kind-specific tensor
-/// set is not actually present.
-pub fn bind_qwen35_weights<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    architecture: &Qwen35Architecture,
-) -> Result<BoundWeights<'file>, InteropError> {
-    let mut state = BoundWeights {
-        resident_bytes: file_bytes.len(),
-        owned: Vec::new(),
-        packed: Vec::new(),
-        packed_owned: Vec::new(),
-        precision: &[],
-    };
-
-    bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
-
-    for (layer, kind) in architecture.layer_kinds.iter().enumerate() {
-        let layer = layer as u32;
-        bind_dense(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.attn_norm.weight"),
-            &mut state,
-        )?;
-        bind_dense(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.post_attention_norm.weight"),
-            &mut state,
-        )?;
-
-        match kind {
-            Qwen35LayerKind::Attention => {
-                bind_matmul_weight_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_q.weight"),
-                    &mut state,
-                )?;
-                bind_matmul_weight_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_k.weight"),
-                    &mut state,
-                )?;
-                bind_matmul_weight_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_v.weight"),
-                    &mut state,
-                )?;
-                bind_matmul_weight_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_output.weight"),
-                    &mut state,
-                )?;
-                bind_dense(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_q_norm.weight"),
-                    &mut state,
-                )?;
-                bind_dense(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_k_norm.weight"),
-                    &mut state,
-                )?;
-            }
-            Qwen35LayerKind::Ssm => {
-                // [`proxima_tensor::spec::qwen35_forward_program`]'s ssm
-                // branch consumes ONE fused gated-input-projection weight
-                // per name (`ssm_in.weight`/`ssm_gate.weight`), splitting
-                // `q`/`k`/`v` out of the matmul's own ACTIVATION output
-                // (`qkv_mixed`) inside the graph -- not the weight itself,
-                // so this binds the real on-disk fused tensors
-                // (`attn_qkv.weight`/`attn_gate.weight`) matmul-shaped
-                // under the forward program's own names, rather than
-                // pre-splitting the weight at bind time
-                // ([`bind_qwen35_attn_qkv_split`]'s own row-split, built
-                // for a since-abandoned pre-split forward-program design).
-                bind_matmul_weight_as_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_qkv.weight"),
-                    format!("blk.{layer}.ssm_in.weight"),
-                    &mut state,
-                )?;
-                bind_matmul_weight_as_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_gate.weight"),
-                    format!("blk.{layer}.ssm_gate.weight"),
-                    &mut state,
-                )?;
-                // `ssm_alpha.weight`/`ssm_beta.weight` feed directly into
-                // `qwen35_forward_program`'s `elementwise(Multiply,
-                // [(normed, ...), (ssm_alpha/beta, ...)])` -> `reduce(Add,
-                // ...)` pair (`spec.rs:4986-5017`) with no intermediate node
-                // between the weight leaf and the fused reduce -- exactly
-                // the direct-operand shape `quantized_operand`
-                // (`cpu.rs:6007`) requires to route a `Q8_0` tensor through
-                // `run_reduce_quantized` instead of dequantizing to owned
-                // `f32`. `bind_matmul_weight_self_shaped` is the same
-                // packed-capable bind every dense-attention projection
-                // weight already uses, reused rather than duplicated.
-                // `ssm_out.weight`/`ssm_conv1d.weight` stay on `bind_dense`:
-                // both are consumed only after an intermediate elementwise
-                // (`ssm_out_split`/`channel_slice`, `spec.rs:5036-5052,5203-5211`),
-                // so the packed weight would need to survive through a
-                // second op the generic evaluator does not carry a
-                // quantized path for.
-                bind_matmul_weight_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.ssm_alpha.weight"),
-                    &mut state,
-                )?;
-                bind_matmul_weight_self_shaped(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.ssm_beta.weight"),
-                    &mut state,
-                )?;
-                for suffix in [
-                    "ssm_a",
-                    "ssm_conv1d.weight",
-                    "ssm_norm.weight",
-                    "ssm_out.weight",
-                ] {
-                    bind_dense(
-                        parsed,
-                        file_bytes,
-                        format!("blk.{layer}.{suffix}"),
-                        &mut state,
-                    )?;
-                }
-                // On disk (ROW: real `qwen3.6:35b-a3b` blob, `general.architecture
-                // = qwen35moe`, confirmed via `strings` on the raw GGUF bytes) this
-                // tensor is named `ssm_dt`, with NO `.bias` suffix --
-                // `pr27742.diff`'s own `tn(LLM_TENSOR_SSM_DT, "bias", il)` call does
-                // not produce the literal `.bias` suffix its argument suggests, and
-                // this crate's earlier `bind_dense(.., "ssm_dt.bias", ..)` transcribed
-                // that C++ call literally instead of reading the file it produces.
-                // `qwen35_forward_program`'s own `Op::Input` leaf (`spec.rs:8681`)
-                // is still named `blk.{layer}.ssm_dt.bias` (unaffected by this
-                // fix -- it addresses only which on-disk tensor to bind FROM), so
-                // this is `bind_matmul_weight_as_self_shaped`'s source-name-vs-
-                // target-name split above, applied to `bind_dense` instead of
-                // `bind_matmul_weight`.
-                bind_dense_as(
-                    parsed,
-                    file_bytes,
-                    &format!("blk.{layer}.ssm_dt"),
-                    format!("blk.{layer}.ssm_dt.bias"),
-                    &mut state,
-                )?;
-            }
-        }
-
-        bind_matmul_weight_self_shaped(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_gate.weight"),
-            &mut state,
-        )?;
-        bind_matmul_weight_self_shaped(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_up.weight"),
-            &mut state,
-        )?;
-        bind_matmul_weight_self_shaped(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_down.weight"),
-            &mut state,
-        )?;
-    }
-
-    bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state)?;
-    // tied embeddings (confirmed on the real 2B checkpoint, `strings` shows
-    // no standalone `output.weight` tensor): the same
-    // `bind_matmul_weight_as` alias `crate::bind::bind_all_weights` already
-    // uses for a tied-embedding dense checkpoint (`bind.rs:1122-1141`).
-    if find_tensor(parsed, "output.weight").is_ok() {
-        bind_matmul_weight_self_shaped(parsed, file_bytes, "output.weight".into(), &mut state)?;
-    } else {
-        let (vocab, embedding) = out_in_dims(parsed, "token_embd.weight")?;
-        bind_matmul_weight_as(
-            parsed,
-            file_bytes,
-            "token_embd.weight",
-            "output.weight".into(),
-            vocab,
-            embedding,
-            &mut state,
-        )?;
-    }
-    Ok(state)
-}
-
 /// One bind attempt's report for a caller that never sees [`BoundWeights`]
 /// (`pub(crate)`, `crate::generate::LoadedModel`'s own field type) --
 /// [`crate::lfm2::run_lfm2_prefill`]'s bind-only counterpart, minus the
@@ -488,14 +207,21 @@ pub fn bind_qwen35_weights<'file>(
 ///
 /// # Errors
 ///
-/// Whatever `qwen35_architecture_from_metadata`/`bind_qwen35_weights`
-/// can fail with.
+/// Whatever `qwen35_architecture_from_metadata`, [`qwen35_forward_program`]
+/// and [`bind_program_leaves`] can fail with.
 pub fn bind_qwen35_checkpoint(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
 ) -> Result<(Qwen35Architecture, usize, usize, usize), InteropError> {
     let architecture = qwen35_architecture_from_metadata(parsed)?;
-    let weights = bind_qwen35_weights(parsed, file_bytes, &architecture)?;
+    let (program, _, _) = qwen35_forward_program(&architecture)?;
+    let weights = bind_program_leaves(
+        parsed,
+        file_bytes,
+        &program,
+        &binding_profile(FAMILY)?,
+        &[],
+    )?;
     Ok((
         architecture,
         weights.resident_bytes,
@@ -622,6 +348,10 @@ pub fn qwen35_forward_program(
     Ok((program, logits_root, layer_roots))
 }
 
+/// The binding profile key and the registry name: the architecture that lowers this program
+/// is what names its leaves, so a delegating foreign architecture binds the same way.
+const FAMILY: &str = "qwen35";
+
 /// The [`crate::architecture::Architecture`] registered under the name
 /// `"qwen35"` -- [`crate::architecture::ArchitectureRegistry::with_builtin`]'s
 /// hybrid-checkpoint arm, and the worked example that trait's own doc
@@ -641,7 +371,7 @@ pub static QWEN35: Qwen35Arch = Qwen35Arch;
 
 impl crate::architecture::Architecture for Qwen35Arch {
     fn name(&self) -> &'static str {
-        "qwen35"
+        FAMILY
     }
 
     fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
@@ -658,8 +388,14 @@ impl crate::architecture::Architecture for Qwen35Arch {
         file_bytes: &'file [u8],
     ) -> Result<crate::architecture::BoundProgram<'file>, InteropError> {
         let qwen_architecture = qwen35_architecture_from_metadata(parsed)?;
-        let weights = bind_qwen35_weights(parsed, file_bytes, &qwen_architecture)?;
         let (program, logits_root, layer_roots) = qwen35_forward_program(&qwen_architecture)?;
+        let weights = bind_program_leaves(
+            parsed,
+            file_bytes,
+            &program,
+            &binding_profile(FAMILY)?,
+            &[],
+        )?;
         let architecture = crate::bind::ModelArchitecture {
             vocab: qwen_architecture.vocab,
             embedding: qwen_architecture.embedding,
