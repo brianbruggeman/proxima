@@ -74,7 +74,7 @@ pub(super) fn render_cached_attention(
         });
     };
     // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
-    // qwen35's partial-rotary shape: the trailing `pass_query`/
+    // the recurrent-interval family's partial-rotary shape: the trailing `pass_query`/
     // `pass_cached_key`/`pass_new_key` operands carry one un-rotated plane
     // per side, scored as an extra additive dot term (`physical.rs:477-488`,
     // the same CPU reference this kernel must match). `rotary_dim > head_dim`
@@ -188,7 +188,7 @@ pub(super) fn render_cached_attention(
     // runtime field on that SAME path, so `entry_name` (below) can drop the
     // `_c{}`/`_n{}` row-count tokens entirely -- the compiled kernel text no
     // longer depends on the compiled `kv-capacity-bucket` extent at all, and
-    // one pipeline serves every bucket, matching llama's own `ne11`-as-
+    // one pipeline serves every bucket, matching llama.cpp's own `ne11`-as-
     // runtime-field property (`ggml-metal.m:4790-4813`).
     // `splits` (redesign §4c, [`NumericRewrite::ContextSplitMerge`]) rides
     // the SAME "runtime `Uniforms` field, never a `constexpr`" precedent
@@ -296,7 +296,7 @@ pub(super) fn render_cached_attention(
     // runtime `Uniforms` field (packed by `pack_cached_attention_uniforms`),
     // and simdgroups `chunk >= chunks` contribute the merge's own identity
     // (`maximum = -INFINITY`, `sum = 0.0`) rather than looping -- the same
-    // "idle simdgroup, identity partial" shape llama's own dispatch-time
+    // "idle simdgroup, identity partial" shape llama.cpp's own dispatch-time
     // `nsg` uses against a compiled maximum (`ggml-metal.m:4887-4913`).
     let cap = effective_context_chunk_cap(*query_groups, *head_dim);
     // The block-staged body's `float4` K/Q loads (below) reinterpret each
@@ -404,7 +404,7 @@ pub(super) fn render_cached_attention(
         // `block_width == 1` renders EXACTLY the strictly-sequential per-key
         // walk (byte for byte) -- see [`block_width_for`]'s own doc for why
         // this is the `bit_exact` lowering, not a fallback bolted on beside
-        // it. `block_width > 1` renders §4b's block-staged walk: llama's
+        // it. `block_width > 1` renders §4b's block-staged walk: llama.cpp's
         // `kernel_flash_attn_ext_vec` shape (ggml-metal.metal:4014-4143)
         // ported onto this kernel's cached/new dual-range band masking --
         // `ss[]` stages `block_width` raw scores via a `float4` Q·K dot plus
@@ -413,7 +413,7 @@ pub(super) fn render_cached_attention(
         // the real/imaginary planes), one `simd_max`/`simd_sum` combine per
         // 32-lane sub-block (not per key), then a threadgroup-broadcast read
         // of each key's softmax weight back out of the SAME `ss[]` slots for
-        // the V accumulate -- llama's own `ss[]` reuse
+        // the V accumulate -- llama.cpp's own `ss[]` reuse
         // (ggml-metal.metal:4114, `ss[tiisg] = vs;`). `ss[]` is sized and
         // indexed per `local_group_index` exactly like `shared_m`/
         // `shared_l`/`shared_o` below it, so concurrent simdgroups in the
@@ -424,7 +424,7 @@ pub(super) fn render_cached_attention(
                 cached_attention_scalar_score_body(pass_present),
             ));
         } else {
-            // The float4/ty-group V accumulate (llama's `kernel_flash_attn_
+            // The float4/ty-group V accumulate (llama.cpp's `kernel_flash_attn_
             // ext_vec` register form, ggml-metal.metal:4125-4143) needs each
             // `tx` lane's `v_registers` float4 loads to land on a 16-byte
             // boundary and never read past `head_dim` floats -- true only
@@ -550,7 +550,7 @@ pub(super) fn render_cached_attention(
 /// it verbatim): lane `i` (`i < splits`) loads that split's own `(M_i,
 /// S_i)`; `simd_max`/`simd_sum` combine the up-to-32 lanes (one lane per
 /// split, `ATTENTION_SPLIT_MAX <= 32` so every live split fits in one
-/// simdgroup's shuffle network, the same reason llama's own reduce needs no
+/// simdgroup's shuffle network, the same reason llama.cpp's own reduce needs no
 /// tree); each lane then walks its own lane-strided subset of `head_dim`
 /// dimensions, re-deriving every split's rescale weight straight from
 /// device memory (cheap here -- this kernel is `O(splits * head_dim)`, not

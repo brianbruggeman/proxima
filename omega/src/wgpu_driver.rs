@@ -1051,7 +1051,7 @@ pub fn execute_plan(
             .max(1) as u32;
         // Vulkan/D3D12 cap each dispatch dimension independently. Flattening
         // every workgroup into x rejects real vocab-sized projections (the
-        // Qwen2.5 output head reaches 151,936 groups), so spill whole
+        // 151,936-token output head reaches 151,936 groups), so spill whole
         // workgroups into y. WGSL reconstructs the same linear gid using
         // `num_workgroups.x`.
         let max_x = plan.device.limits().max_compute_workgroups_per_dimension;

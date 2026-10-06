@@ -1037,7 +1037,7 @@ pub(super) fn push_tiled_gemm_body(
 /// The dense (unquantized) counterpart to [`push_tiled_gemm_body`]: BOTH
 /// operand tiles load straight `float` reads (no codec decode arm, so
 /// `weight_tile` is `float` here, not `half`, and both `simdgroup_load`s
-/// build `simdgroup_float8x8` fragments) -- gemma4's GQA attention score
+/// build `simdgroup_float8x8` fragments) -- the sliding-pattern family's GQA attention score
 /// (`Q.K^T`) and value (`P.V`) folds, ported behind `PROXIMA_TILED_GEMM_DENSE=1`
 /// (`classify_dense_batched_gemm`'s own doc).
 ///

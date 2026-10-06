@@ -125,7 +125,7 @@ pub enum EmitError {
     /// `crate::msl::render_cached_attention` still assumes every rotary
     /// plane covers the whole `head_dim` (`BoundOpKind::CachedAttention`'s
     /// own doc: `rotary_dim == head_dim` is byte-identical to this backend's
-    /// pre-partial-rotary shape) -- a partial-rotary bind (qwen35's dense
+    /// pre-partial-rotary shape) -- a partial-rotary bind (the recurrent-interval family's dense
     /// attention, `rotary_dim < head_dim`, three trailing pass-plane
     /// operands) is rejected here rather than silently dropping the pass
     /// plane's score contribution, the same CPU-ahead-of-GPU gap

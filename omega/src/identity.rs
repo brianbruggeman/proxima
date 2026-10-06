@@ -620,7 +620,7 @@ mod gated {
                     )
                     | None => "",
                 };
-                // `rotary_dim == head_dim` (every caller before qwen35's
+                // `rotary_dim == head_dim` (every caller before the recurrent-interval family's
                 // partial-rotary dense attention) is byte-identical to this
                 // identity's pre-partial-rotary string -- the `_r{rotary_dim}`
                 // token appears ONLY when the pass plane is present, since a

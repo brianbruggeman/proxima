@@ -1596,7 +1596,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
 
     /// `Q4_0`/`Q8_0` are flat (non-K-quant) codecs that still route through
     /// `push_packed_row_blocked_body`'s single-row arm
-    /// (`m=1`, `packed_row_block_token_total(block, ..) == 1`) for gemma4-E2B's
+    /// (`m=1`, `packed_row_block_token_total(block, ..) == 1`) for the E2B checkpoint's
     /// decode-shaped dispatches -- `op_profile_codec` already counted ~275 of
     /// these on the fast packed-row path while `op_profile_kind` mislabeled
     /// every one `reduce-cooperative` because [`PACKED_ROW_BODY_MARKERS`]
@@ -1689,7 +1689,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             .expect("one fused bound emitted")
     }
 
-    /// gemma4-E2B's width-2 verify matmul: a 2-token `Q4_0` reduce whose
+    /// the E2B checkpoint's width-2 verify matmul: a 2-token `Q4_0` reduce whose
     /// weight and activation each keep `k` contiguous. Default `index32`
     /// reads the weight through the block-origin pointer `wblk0`, a spelling
     /// no marker matched, so `op_profile_kind` reported all 275 of these
@@ -1764,7 +1764,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         )
     }
 
-    /// ROW 538: the real qwen35moe decode shape (256 experts, top-8, hidden
+    /// ROW 538: the real recurrent-routed decode shape (256 experts, top-8, hidden
     /// 2048, embedding 512), gate/up/down each grouped over the `k` selected
     /// experts through ONE [`grouped_gathered_expert_product`] call apiece --
     /// gate/up via main's own exported function (the same primitive
@@ -1973,10 +1973,10 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         .expect("grouped down reduce lowers");
 
         let symbols = [SEQUENCE as u64];
-        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped grouped ffn infers");
+        let shapes = infer(&program, &symbols).expect("the routed-expert-shaped grouped ffn infers");
         let mut resolved =
             bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
-                .expect("the qwen35moe-shaped grouped ffn binds");
+                .expect("the routed-expert-shaped grouped ffn binds");
 
         let gate_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
         let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
@@ -2146,13 +2146,13 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             strategy: proxima_tensor::spec::MoeProjectionStrategy::GroupedGateUp,
         };
         let (root, _site) = proxima_tensor::spec::append_moe_ffn(&mut program, 0, x_node, &moe_spec)
-            .expect("append_moe_ffn with GroupedGateUp lowers at the real qwen35moe shape");
+            .expect("append_moe_ffn with GroupedGateUp lowers at the real routed-expert shape");
 
         let symbols = [SEQUENCE as u64];
-        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped ffn infers");
+        let shapes = infer(&program, &symbols).expect("the routed-expert-shaped ffn infers");
         let mut resolved =
             bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
-                .expect("the qwen35moe-shaped ffn binds");
+                .expect("the routed-expert-shaped ffn binds");
 
         let mut packed_operands: PackedOperands = BTreeMap::new();
         packed_operands.insert(expert_w_gate_node, Codec::Q4K);

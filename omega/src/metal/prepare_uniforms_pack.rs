@@ -475,7 +475,7 @@ pub(super) fn element_count(shape: &[u64]) -> usize {
 /// reads: it reads exactly one `element_stride`-sized row per index in
 /// `lookup.indices` (ROW 543/544, `proxima-tensor/docs/discipline.md`).
 /// Reporting the full declared shape for a gathered operand overstated a
-/// qwen35moe-shaped grouped gate/up dispatch's own `operand_bytes` by two
+/// recurrent-routed-shaped grouped gate/up dispatch's own `operand_bytes` by two
 /// orders of magnitude (the whole 256-expert stack, `~151 MB`, in place of
 /// the `k=8` selected rows this dispatch's `lookup.indices` shape names) --
 /// found by comparing this formula's output against the emitted kernel's

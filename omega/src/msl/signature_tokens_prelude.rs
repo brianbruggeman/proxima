@@ -1463,9 +1463,9 @@ pub(crate) fn block_width_for(policy: NumericPolicy) -> u64 {
 /// threadgroup); this is the same partition one hardware level up
 /// (threadgroups sharing one dispatch), llama.cpp's `nwg`
 /// (`ggml-metal-ops.cpp:3457-3466`) ported as a compiled-capacity-derived
-/// count rather than llama's fixed 32, because this backend's threadgroup is
+/// count rather than llama.cpp's fixed 32, because this backend's threadgroup is
 /// heavier (cooperative `query_groups`-way K/V sharing across its `cap`
-/// simdgroups) than llama's per-Q-head one.
+/// simdgroups) than llama.cpp's per-Q-head one.
 ///
 /// `context_length` is the SAME compiled-capacity input
 /// [`context_chunks_for`] already takes (`cached_key_rows + new_key_rows`),
