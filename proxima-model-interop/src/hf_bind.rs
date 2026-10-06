@@ -286,7 +286,7 @@ pub fn permute_rope_rows(
 /// Qwen3-1.7B safetensors `attn_q`/`attn_k` bind against a known-good GGUF:
 /// permuting rows lands `rel_err ~= 1.15` (scrambled), leaving them in
 /// place lands `rel_err ~= 0.043` (quant noise). A family with neither
-/// QK-norm nor the split-half convention (llama/mistral) still needs
+/// QK-norm nor the split-half convention (the dense decoders) still needs
 /// [`permute_rope_rows`] to convert HF's `rotate_half` layout into this
 /// crate's interleaved RoPE pairing, which is why this same presence check
 /// gates both.
@@ -402,7 +402,7 @@ fn hf_bind_matmul_weight<'file>(
 }
 
 /// Every dense-checkpoint weight name `crate::bind_leaves::bind_program_leaves`'s
-/// GGUF loop binds, HF's own naming instead -- the standard Llama/Mistral/
+/// GGUF loop binds, HF's own naming instead -- the standard dense-decoder
 /// Qwen `transformers` layout (`model.layers.{layer}.*`), the convention
 /// every dense checkpoint on HuggingFace this crate has been checked against
 /// uses, as opposed to GGUF's `blk.{n}.*` convention (see
@@ -933,7 +933,7 @@ mod tests {
     /// carries `model.layers.0.self_attn.q_norm.weight` (Qwen3's own
     /// split-half/NEOX family, per [`safetensors_has_qk_norm`]'s doc) must
     /// bind `attn_q`/`attn_k` with rows exactly as HF wrote them, while the
-    /// identical checkpoint minus that tensor (llama/mistral's `rotate_half`
+    /// identical checkpoint minus that tensor (the `rotate_half`
     /// family) must bind them permuted -- the defect this guards is
     /// [`hf_bind_rope_weight`] applying [`permute_rope_rows`]
     /// unconditionally, which scrambles Qwen3's `attn_q`/`attn_k`
@@ -985,7 +985,7 @@ mod tests {
         // own fixture generator); `attn_q_rows` reads back
         // [`crate::bind::transpose_out_in_to_in_out`]'s `[in_dim, out_dim]`
         // storage, so both expectations below are that same matrix
-        // transposed, by hand, after (Qwen3) or before (llama) permuting
+        // transposed, by hand, after (Qwen3) or before (a rotate_half family) permuting
         // its rows.
         let qwen3_expected = vec![
             0.0, 2.0, 4.0, 6.0, 0.5, 2.5, 4.5, 6.5, 1.0, 3.0, 5.0, 7.0, 1.5, 3.5, 5.5, 7.5,
@@ -1000,7 +1000,7 @@ mod tests {
         );
         assert_eq!(
             llama_attn_q, llama_expected,
-            "a rotate_half family (llama/mistral) must still permute attn_q rows before transposing"
+            "a rotate_half family must still permute attn_q rows before transposing"
         );
         assert_ne!(
             llama_attn_q, qwen3_attn_q,

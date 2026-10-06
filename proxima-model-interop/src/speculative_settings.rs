@@ -27,9 +27,9 @@ use crate::serving::{
     NgramMapParams, NgramModParams, SpeculativeConfig, SpeculativeType, SpeculativeTypeSet,
 };
 
-/// llama's `common_speculative_type`, serde/`FromStr`-facing mirror of
+/// llama.cpp's `common_speculative_type`, serde/`FromStr`-facing mirror of
 /// [`crate::SpeculativeType`] (kept separate so the no_std-safe enum in
-/// `serving.rs` never derives `serde`). Variant names round-trip llama's own
+/// `serving.rs` never derives `serde`). Variant names round-trip llama.cpp's own
 /// `--spec-type` strings (`common_speculative_type_to_str`,
 /// `common/speculative.cpp:2229-2244`) via `#[serde(rename = ..)]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ impl core::fmt::Display for SpeculativeTypeName {
     }
 }
 
-/// `value` was not one of llama's own `--spec-type` strings.
+/// `value` was not one of llama.cpp's own `--spec-type` strings.
 #[derive(Debug, Error)]
 #[error("unknown speculative type: {0}")]
 pub struct InvalidSpeculativeType(String);
@@ -113,7 +113,7 @@ impl core::str::FromStr for SpeculativeTypeName {
 /// [`SpeculativeTypeName`] (mirrors
 /// [`crate::serving::SpeculativeTypeSet`]'s private `PRIORITY_ORDER` one to
 /// one) -- used only to give [`SpeculativeTypeNameSet::iter`] and its
-/// `Display` a deterministic member order; llama's own set semantics never
+/// `Display` a deterministic member order; llama.cpp's own set semantics never
 /// depend on registration order (that type's own doc).
 const PRIORITY_ORDER: [SpeculativeTypeName; 10] = [
     SpeculativeTypeName::NgramSimple,
@@ -128,11 +128,11 @@ const PRIORITY_ORDER: [SpeculativeTypeName; 10] = [
     SpeculativeTypeName::DraftDspark,
 ];
 
-/// llama's `std::vector<common_speculative_type> types` (`common/common.h:373`),
+/// llama.cpp's `std::vector<common_speculative_type> types` (`common/common.h:373`),
 /// serde/`FromStr`/`Display`-facing mirror of
 /// [`crate::serving::SpeculativeTypeSet`] (kept separate for the same
 /// no_std-isolation reason [`SpeculativeTypeName`] is its own mirror of
-/// [`SpeculativeType`]). Round-trips llama's own `--spec-type`
+/// [`SpeculativeType`]). Round-trips llama.cpp's own `--spec-type`
 /// comma-separated string form (`common/arg.cpp`'s own handler:
 /// `string_split<std::string>(value, ',')` then
 /// `common_speculative_types_from_names`) through [`core::str::FromStr`] and
@@ -140,20 +140,20 @@ const PRIORITY_ORDER: [SpeculativeTypeName; 10] = [
 /// (`parse_speculative_type_set`, below) and TOML (`Serialize`/`Deserialize`,
 /// via that `Display`/`FromStr` pair) accept, matching this crate's own
 /// convention of one textual form per setting rather than a second TOML-only
-/// shape. The empty set displays as llama's own default string, `"none"`.
+/// shape. The empty set displays as llama.cpp's own default string, `"none"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SpeculativeTypeNameSet(u16);
 
 impl SpeculativeTypeNameSet {
-    /// llama's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }` --
+    /// llama.cpp's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }` --
     /// no speculator enabled.
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
     }
 
-    /// This set with `name` added, llama's own `types.push_back` --
-    /// `SpeculativeTypeName::None` is a no-op (llama's own `switch` in
+    /// This set with `name` added, llama.cpp's own `types.push_back` --
+    /// `SpeculativeTypeName::None` is a no-op (llama.cpp's own `switch` in
     /// `common_speculative_init` never adds an implementation for it).
     #[must_use]
     pub fn insert(self, name: SpeculativeTypeName) -> Self {
@@ -188,7 +188,7 @@ impl SpeculativeTypeNameSet {
         self.0 == 0
     }
 
-    /// This set's members in llama's own fixed priority order
+    /// This set's members in llama.cpp's own fixed priority order
     /// (`PRIORITY_ORDER`'s own doc).
     pub fn iter(self) -> impl Iterator<Item = SpeculativeTypeName> {
         PRIORITY_ORDER.into_iter().filter(move |&name| self.contains(name))
@@ -246,7 +246,7 @@ fn parse_speculative_type_set(
 }
 
 /// The conflaguration/`bon` mirror of [`crate::SpeculativeConfig`] --
-/// llama's `common_params_speculative` (`common/common.h:372-389`), env/TOML
+/// llama.cpp's `common_params_speculative` (`common/common.h:372-389`), env/TOML
 /// loadable and fluent-buildable. See the module doc for why this owns the
 /// data separately from the no_std-safe, `Copy` struct
 /// [`crate::ServingConfig::speculative`] actually reads at decode time.
@@ -254,7 +254,7 @@ fn parse_speculative_type_set(
 #[settings(prefix = "PROXIMA_SPECULATIVE")]
 #[builder(derive(Clone, Debug))]
 pub struct SpeculativeSettings {
-    /// llama's `types` -- see [`crate::SpeculativeConfig::speculative_types`]'s
+    /// llama.cpp's `types` -- see [`crate::SpeculativeConfig::speculative_types`]'s
     /// own doc for the set semantics this mirrors. Defaults to `ngram-simple`
     /// (speculation on); `none` -- builder `SpeculativeTypeNameSet::empty()`,
     /// TOML `speculative_types = "none"`, env `PROXIMA_SPECULATIVE_TYPES=none`
@@ -263,76 +263,76 @@ pub struct SpeculativeSettings {
     #[builder(default = SpeculativeTypeNameSet::ngram_simple())]
     pub speculative_types: SpeculativeTypeNameSet,
 
-    /// llama's `common_params_speculative_draft::n_max`.
+    /// llama.cpp's `common_params_speculative_draft::n_max`.
     #[setting(default = 3)]
     #[builder(default = 3)]
     pub n_max: i32,
-    /// llama's `common_params_speculative_draft::n_min`.
+    /// llama.cpp's `common_params_speculative_draft::n_min`.
     #[setting(default = 0)]
     #[builder(default = 0)]
     pub n_min: i32,
-    /// llama's `common_params_speculative_draft::p_min`.
+    /// llama.cpp's `common_params_speculative_draft::p_min`.
     #[setting(default = 0.0)]
     #[builder(default = 0.0)]
     pub p_min: f32,
 
-    /// llama's `ngram_simple.size_n`.
+    /// llama.cpp's `ngram_simple.size_n`.
     #[setting(default = 12)]
     #[builder(default = 12)]
     pub ngram_simple_size_n: u16,
-    /// llama's `ngram_simple.size_m`.
+    /// llama.cpp's `ngram_simple.size_m`.
     #[setting(default = 48)]
     #[builder(default = 48)]
     pub ngram_simple_size_m: u16,
-    /// llama's `ngram_simple.min_hits`.
+    /// llama.cpp's `ngram_simple.min_hits`.
     #[setting(default = 1)]
     #[builder(default = 1)]
     pub ngram_simple_min_hits: u16,
 
-    /// llama's `ngram_map_k.size_n`.
+    /// llama.cpp's `ngram_map_k.size_n`.
     #[setting(default = 12)]
     #[builder(default = 12)]
     pub ngram_map_k_size_n: u16,
-    /// llama's `ngram_map_k.size_m`.
+    /// llama.cpp's `ngram_map_k.size_m`.
     #[setting(default = 48)]
     #[builder(default = 48)]
     pub ngram_map_k_size_m: u16,
-    /// llama's `ngram_map_k.min_hits`.
+    /// llama.cpp's `ngram_map_k.min_hits`.
     #[setting(default = 1)]
     #[builder(default = 1)]
     pub ngram_map_k_min_hits: u16,
 
-    /// llama's `ngram_map_k4v.size_n`.
+    /// llama.cpp's `ngram_map_k4v.size_n`.
     #[setting(default = 12)]
     #[builder(default = 12)]
     pub ngram_map_k4v_size_n: u16,
-    /// llama's `ngram_map_k4v.size_m`.
+    /// llama.cpp's `ngram_map_k4v.size_m`.
     #[setting(default = 48)]
     #[builder(default = 48)]
     pub ngram_map_k4v_size_m: u16,
-    /// llama's `ngram_map_k4v.min_hits`.
+    /// llama.cpp's `ngram_map_k4v.min_hits`.
     #[setting(default = 1)]
     #[builder(default = 1)]
     pub ngram_map_k4v_min_hits: u16,
 
-    /// llama's `ngram_mod.n_match`.
+    /// llama.cpp's `ngram_mod.n_match`.
     #[setting(default = 24)]
     #[builder(default = 24)]
     pub ngram_mod_n_match: u16,
-    /// llama's `ngram_mod.n_max`.
+    /// llama.cpp's `ngram_mod.n_max`.
     #[setting(default = 64)]
     #[builder(default = 64)]
     pub ngram_mod_n_max: u16,
-    /// llama's `ngram_mod.n_min`.
+    /// llama.cpp's `ngram_mod.n_min`.
     #[setting(default = 48)]
     #[builder(default = 48)]
     pub ngram_mod_n_min: u16,
 
-    /// llama's `ngram_cache.lookup_cache_static` -- empty string means unset,
+    /// llama.cpp's `ngram_cache.lookup_cache_static` -- empty string means unset,
     /// matching upstream's own empty-`std::string` default.
     #[serde(default)]
     pub ngram_cache_lookup_static: Option<String>,
-    /// llama's `ngram_cache.lookup_cache_dynamic`.
+    /// llama.cpp's `ngram_cache.lookup_cache_dynamic`.
     #[serde(default)]
     pub ngram_cache_lookup_dynamic: Option<String>,
 }
@@ -455,7 +455,7 @@ mod tests {
 
     /// Owner directive 2026-09-29: speculation is ON by default with the
     /// `ngram-simple` drafter; its per-type param defaults still match
-    /// llama's `common_params_speculative` (`common/common.h:372-389`).
+    /// llama.cpp's `common_params_speculative` (`common/common.h:372-389`).
     #[test]
     fn default_speculative_settings_enable_ngram_simple_with_llama_defaults() {
         temp_env::with_vars(
@@ -663,7 +663,7 @@ mod tests {
         });
     }
 
-    /// R9: llama's own `--spec-type` strings round-trip through
+    /// R9: llama.cpp's own `--spec-type` strings round-trip through
     /// [`SpeculativeTypeName`]'s `FromStr`/`Display`.
     #[test]
     fn llama_type_names_round_trip() {
@@ -694,7 +694,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// R9: llama's own multi-type `--spec-type` string form
+    /// R9: llama.cpp's own multi-type `--spec-type` string form
     /// (`ngram-simple,ngram-map-k,ngram-mod`) round-trips through
     /// [`SpeculativeTypeNameSet`]'s `FromStr`/`Display` -- proving the SET
     /// (not a single active type) is what this crate's config carries, and
@@ -708,7 +708,7 @@ mod tests {
         assert!(parsed.contains(SpeculativeTypeName::NgramMapK));
         assert!(parsed.contains(SpeculativeTypeName::NgramMod));
         assert!(!parsed.contains(SpeculativeTypeName::NgramCache));
-        // llama's own priority order (`common/speculative.cpp:2617-2629`),
+        // llama.cpp's own priority order (`common/speculative.cpp:2617-2629`),
         // not the string's own member order (mod was listed last above).
         assert_eq!(parsed.to_string(), "ngram-simple,ngram-map-k,ngram-mod");
 

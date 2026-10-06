@@ -162,7 +162,7 @@ pub enum GdnPrefillBackend {
 }
 
 /// llama.cpp's `common_speculative_type` (`common/common.h:173-186`), named
-/// identically so this crate's config round-trips llama's own `--spec-type`
+/// identically so this crate's config round-trips llama.cpp's own `--spec-type`
 /// vocabulary (`common_speculative_type_to_str`,
 /// `common/speculative.cpp:2229-2244`). Every upstream variant is present so
 /// a config file naming a not-yet-wired type (e.g. `draft-mtp`) still parses
@@ -188,7 +188,7 @@ pub enum SpeculativeType {
 }
 
 impl SpeculativeType {
-    /// llama's own `--spec-type` string for this variant
+    /// llama.cpp's own `--spec-type` string for this variant
     /// (`common_speculative_type_to_str`, `common/speculative.cpp:2229-2244`).
     #[must_use]
     pub const fn llama_name(self) -> &'static str {
@@ -208,7 +208,7 @@ impl SpeculativeType {
     }
 
     /// The inverse of [`Self::llama_name`]. `None` when `name` is not one of
-    /// llama's own `--spec-type` strings.
+    /// llama.cpp's own `--spec-type` strings.
     #[must_use]
     pub fn from_llama_name(name: &str) -> Option<Self> {
         match name {
@@ -228,14 +228,14 @@ impl SpeculativeType {
     }
 }
 
-/// llama's fixed speculator priority order (`common/speculative.cpp:2617-2629`,
+/// llama.cpp's fixed speculator priority order (`common/speculative.cpp:2617-2629`,
 /// "this list here defines the priority of the speculators"): highest
-/// priority first. Registration order in llama's own `--spec-type` list
+/// priority first. Registration order in llama.cpp's own `--spec-type` list
 /// never matters -- `common_get_enabled_speculative_configs` folds the
 /// caller's `Vec<type>` into a bitset before this order is walked -- so
 /// [`SpeculativeTypeSet::iter_priority_order`] reproduces the SAME set
 /// semantics for any set a caller enables. `SpeculativeType::None` is
-/// absent: llama's own `switch` in `common_speculative_init` treats that
+/// absent: llama.cpp's own `switch` in `common_speculative_init` treats that
 /// variant as a no-op (`case COMMON_SPECULATIVE_TYPE_NONE: break;`), never
 /// adding an implementation.
 const PRIORITY_ORDER: [SpeculativeType; 10] = [
@@ -251,14 +251,14 @@ const PRIORITY_ORDER: [SpeculativeType; 10] = [
     SpeculativeType::DraftDspark,
 ];
 
-/// llama's `std::vector<common_speculative_type> types`
+/// llama.cpp's `std::vector<common_speculative_type> types`
 /// (`common/common.h:373`) -- a SET of simultaneously-enabled speculators,
 /// not a single active choice (`common_get_enabled_speculative_configs`,
 /// `common/speculative.cpp:2310-2316`, folds the caller's list into exactly
 /// this bitset before `common_speculative_init` walks `PRIORITY_ORDER`
 /// over it). A `u16` bitmask keeps this `Copy` -- [`SpeculativeConfig`], and
 /// therefore [`ServingConfig`], depend on that (this struct's own doc).
-/// llama runs every enabled speculator per step in priority order until one
+/// llama.cpp runs every enabled speculator per step in priority order until one
 /// yields a non-empty draft for a position (`common_speculative_draft`,
 /// `common/speculative.cpp:2802-2843`: each enabled impl's `draft()` is
 /// tried in turn; the first to fill `dp.result` wins and the rest are
@@ -270,14 +270,14 @@ const PRIORITY_ORDER: [SpeculativeType; 10] = [
 /// draft/verify loop for exactly one member of the set today
 /// (`generate/decode.rs`'s own speculative branch checks
 /// `contains(SpeculativeType::NgramSimple)`) -- the SET representation is
-/// what lets a config round-trip any of llama's `--spec-type` combinations
+/// what lets a config round-trip any of llama.cpp's `--spec-type` combinations
 /// even before every member is wired; [`apply_serving_config`] rejects only
 /// the members that are not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SpeculativeTypeSet(u16);
 
 impl SpeculativeTypeSet {
-    /// llama's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+    /// llama.cpp's own default: `types = { COMMON_SPECULATIVE_TYPE_NONE }`
     /// (`common/common.h:373`) -- no speculator enabled.
     #[must_use]
     pub const fn empty() -> Self {
@@ -290,7 +290,7 @@ impl SpeculativeTypeSet {
         Self(1u16 << type_id as u16)
     }
 
-    /// This set with `type_id` added, llama's own `types.push_back`.
+    /// This set with `type_id` added, llama.cpp's own `types.push_back`.
     #[must_use]
     pub const fn insert(self, type_id: SpeculativeType) -> Self {
         Self(self.0 | (1u16 << type_id as u16))
@@ -302,14 +302,14 @@ impl SpeculativeTypeSet {
         self.0 & (1u16 << type_id as u16) != 0
     }
 
-    /// No speculator enabled -- llama's own default, and this crate's
+    /// No speculator enabled -- llama.cpp's own default, and this crate's
     /// speculation-off state.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    /// This set's members in llama's own fixed priority order
+    /// This set's members in llama.cpp's own fixed priority order
     /// (`PRIORITY_ORDER`'s own doc) -- the order `common_speculative_init`
     /// registers implementations in and `common_speculative_draft` tries
     /// them in, regardless of the order a caller named them in.
@@ -320,21 +320,21 @@ impl SpeculativeTypeSet {
     }
 }
 
-/// llama's `common_params_speculative_ngram_map` (`common/common.h:361-365`),
-/// shared verbatim by llama's own `ngram_simple`/`ngram_map_k`/
+/// llama.cpp's `common_params_speculative_ngram_map` (`common/common.h:361-365`),
+/// shared verbatim by llama.cpp's own `ngram_simple`/`ngram_map_k`/
 /// `ngram_map_k4v` fields -- one struct shape, three instances, matched here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NgramMapParams {
-    /// llama's `size_n`: the n-gram size looked up in history.
+    /// llama.cpp's `size_n`: the n-gram size looked up in history.
     pub size_n: u16,
-    /// llama's `size_m`: the m-gram size drafted after a match.
+    /// llama.cpp's `size_m`: the m-gram size drafted after a match.
     pub size_m: u16,
-    /// llama's `min_hits`: minimum hits before a match is proposed.
+    /// llama.cpp's `min_hits`: minimum hits before a match is proposed.
     pub min_hits: u16,
 }
 
 impl Default for NgramMapParams {
-    /// llama's own default for all three of `ngram_simple`/`ngram_map_k`/
+    /// llama.cpp's own default for all three of `ngram_simple`/`ngram_map_k`/
     /// `ngram_map_k4v` (`common/common.h:362-364`).
     fn default() -> Self {
         Self {
@@ -345,7 +345,7 @@ impl Default for NgramMapParams {
     }
 }
 
-/// llama's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
+/// llama.cpp's `common_params_speculative_ngram_mod` (`common/common.h:354-359`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NgramModParams {
     pub n_match: u16,
@@ -363,9 +363,9 @@ impl Default for NgramModParams {
     }
 }
 
-/// [`ServingConfig::speculative`]'s own data: llama's `common_params_speculative`
+/// [`ServingConfig::speculative`]'s own data: llama.cpp's `common_params_speculative`
 /// (`common/common.h:372-389`), mirrored field for field -- including
-/// `types`, llama's own `Vec<common_speculative_type>` SET of
+/// `types`, llama.cpp's own `Vec<common_speculative_type>` SET of
 /// simultaneously-enabled speculators ([`SpeculativeTypeSet`]'s own doc for
 /// the set/priority/accept-notification semantics this reproduces). A `u16`
 /// bitmask keeps [`Self::speculative_types`], and therefore this struct and
@@ -383,34 +383,34 @@ impl Default for NgramModParams {
 /// `std`-gated, is the conflaguration-facing owner of that storage).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpeculativeConfig<'model> {
-    /// llama's `types` (`common/common.h:373`) -- the enabled-speculator set.
+    /// llama.cpp's `types` (`common/common.h:373`) -- the enabled-speculator set.
     pub speculative_types: SpeculativeTypeSet,
-    /// llama's `common_params_speculative_draft::n_max` (`common/common.h:328`):
+    /// llama.cpp's `common_params_speculative_draft::n_max` (`common/common.h:328`):
     /// maximum tokens to draft.
     pub n_max: i32,
-    /// llama's `common_params_speculative_draft::n_min` (`common/common.h:329`):
+    /// llama.cpp's `common_params_speculative_draft::n_min` (`common/common.h:329`):
     /// minimum draft tokens to keep.
     pub n_min: i32,
-    /// llama's `common_params_speculative_draft::p_min` (`common/common.h:332`):
+    /// llama.cpp's `common_params_speculative_draft::p_min` (`common/common.h:332`):
     /// minimum greedy-acceptance probability.
     pub p_min: f32,
     pub ngram_simple: NgramMapParams,
     pub ngram_map_k: NgramMapParams,
     pub ngram_map_k4v: NgramMapParams,
     pub ngram_mod: NgramModParams,
-    /// llama's `common_params_speculative_ngram_cache::lookup_cache_static`.
+    /// llama.cpp's `common_params_speculative_ngram_cache::lookup_cache_static`.
     pub ngram_cache_lookup_static: Option<&'model str>,
-    /// llama's `common_params_speculative_ngram_cache::lookup_cache_dynamic`.
+    /// llama.cpp's `common_params_speculative_ngram_cache::lookup_cache_dynamic`.
     pub ngram_cache_lookup_dynamic: Option<&'model str>,
 }
 
 impl SpeculativeConfig<'static> {
-    /// Speculation OFF: llama's own default `types = { COMMON_SPECULATIVE_TYPE_NONE }`
+    /// Speculation OFF: llama.cpp's own default `types = { COMMON_SPECULATIVE_TYPE_NONE }`
     /// (`common/common.h:373`) -- the empty set. This crate's [`Default`] is
     /// [`Self::ngram_simple`], not this; `none` is how a caller turns
     /// speculation off. Per-type
-    /// param defaults still hold llama's own values so enabling any single
-    /// member of [`Self::speculative_types`] alone reproduces llama's
+    /// param defaults still hold llama.cpp's own values so enabling any single
+    /// member of [`Self::speculative_types`] alone reproduces llama.cpp's
     /// defaults for that type.
     #[must_use]
     pub const fn none() -> Self {
@@ -444,7 +444,7 @@ impl SpeculativeConfig<'static> {
         }
     }
 
-    /// Speculation on with the single `ngram-simple` drafter at llama's own
+    /// Speculation on with the single `ngram-simple` drafter at llama.cpp's own
     /// per-type defaults (`size_n 12`, `size_m 48`, `min_hits 1`) -- this
     /// crate's shipped default ([`Default`]). Output is unchanged by it:
     /// every drafted token is checked against `select_decoded_token`'s own
@@ -476,7 +476,7 @@ impl Default for SpeculativeConfig<'static> {
 pub struct PromptCacheConfig {
     /// Most host bytes the cache may hold across all entries; `0` turns the
     /// cache off, so a request prefills its whole prompt. The default is
-    /// `2_147_483_648` (2 GiB). Measured on gemma4-E2B, one entry holds 69.2
+    /// `2_147_483_648` (2 GiB). Measured on the E2B checkpoint, one entry holds 69.2
     /// MB after a 2,063-token request and 220.3 MB after an 8,207-token one:
     /// 18.9 MB of ring rows that never grow, plus the three full-attention
     /// layers' rows at 12,288 bytes per token, allocated by doubling. That
@@ -501,12 +501,12 @@ pub struct PromptCacheConfig {
     /// resume point still count).
     pub checkpoint_interval: u32,
     /// Checkpoints kept per entry, `0` for none. The earliest is pinned and
-    /// the oldest of the rest evicted first. One gemma4-E2B checkpoint is 12
+    /// the oldest of the rest evicted first. One E2B checkpoint is 12
     /// MiB (12 ring layers x 512 rows x 2,048 bytes), counted against
     /// [`Self::byte_budget`].
     pub max_checkpoints: u32,
     /// Shortest run of tokens worth shifting after a divergence (spec R5,
-    /// llama's `n_cache_reuse`): a run of at least this many tokens that the
+    /// llama.cpp's `n_cache_reuse`): a run of at least this many tokens that the
     /// prompt shares with the entry at another position is moved with its keys
     /// re-rotated by the position delta instead of prefilled, e.g. `256` for
     /// the turns kept after a summary replaced the middle of a conversation.
@@ -517,7 +517,7 @@ pub struct PromptCacheConfig {
     /// from a shift carries those rows into later requests. Needs
     /// [`Self::ring_rewind_slack`] above zero, and a run whose sliding-window
     /// rows the entry's ring has overwritten is prefilled instead. `0` keeps
-    /// chunk reuse off like llama's `n_cache_reuse`.
+    /// chunk reuse off like llama.cpp's `n_cache_reuse`.
     pub cache_reuse_min: u32,
     /// Tokens one anticipatory-prefill chunk covers (spec R10): a prewarm
     /// stops at every multiple of this to check whether a request is waiting,
@@ -664,12 +664,12 @@ impl Default for PhaseSchedule {
 
 /// I11's per-layer expert-residency level, distinct from
 /// [`ServingConfig::moe_residency_budget_bytes`]'s single pool shared
-/// across every qwen35moe layer. Consulted at exactly one site,
+/// across every recurrent-routed layer. Consulted at exactly one site,
 /// `generate/decode.rs`'s residency-pool construction, independent of
 /// [`AdmissionSchedule`] and [`PhaseSchedule`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExpertResidencySchedule {
-    /// Byte budget applied independently to each qwen35moe layer's own
+    /// Byte budget applied independently to each recurrent-routed layer's own
     /// resident expert set, rather than one pool shared across all layers.
     /// `0` (this field's default) disables the per-layer cap, matching
     /// today's behavior byte-for-byte -- unmeasured until a caller opts in.
@@ -684,7 +684,7 @@ pub struct ExpertResidencySchedule {
 /// (`crate::memory_fit::fit_context_length`) then clamps the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextLength {
-    /// Serve the limit itself, e.g. 131072 for gemma4 at its trained context.
+    /// Serve the limit itself, e.g. 131072 for sliding-pattern at its trained context.
     #[default]
     Native,
     /// Serve exactly `n` tokens; `n` above the limit is rejected with
@@ -767,7 +767,7 @@ pub struct ServingConfig<'model> {
     /// `-b`: logical prompt-processing batch size in tokens.
     pub batch_size: u32,
     /// `-ub`: physical micro-batch size in tokens. An architecture that is
-    /// not `single_position_step` (gemma4, dense llama-family) evaluates a
+    /// not `single_position_step` (sliding-pattern, dense uniform-schedule) evaluates a
     /// prompt longer than this in `ceil(prompt_tokens / ubatch_size)`
     /// evaluations of `ubatch_size` rows each (the last takes the
     /// remainder): `cached_len` and the sliding KV ring advance per chunk
@@ -930,7 +930,7 @@ pub struct ServingConfig<'model> {
     /// bind time as `crate::error::InteropError::UnsupportedWeightPrecisionTarget`
     /// (`std`-gated) instead.
     pub weight_precision: &'model [WeightPrecisionRule<'model>],
-    /// Requests the routed qwen35moe execution seam that runs the router,
+    /// Requests the routed recurrent-routed execution seam that runs the router,
     /// residency transition, and expert gather as separate phases. The Metal
     /// path binds only the selected expert sources at the gather boundary;
     /// the full graph remains the explicit monolithic arm.
@@ -965,7 +965,7 @@ pub struct ServingConfig<'model> {
     pub moe_expert_prefetch: bool,
     /// Allows the all-low monolithic pre-gather diagnostic path.
     pub moe_monolithic_all_low: bool,
-    /// Number of adjacent qwen35moe layers to execute in one exact
+    /// Number of adjacent recurrent-routed layers to execute in one exact
     /// sidecar-backed pre-gather window. `1` is the existing router/gather
     /// boundary; `2` admits the bounded pair window, which exposes both
     /// router outputs only after the pair has completed.
@@ -1059,7 +1059,7 @@ pub struct ServingConfig<'model> {
     /// config-sourced default for, not a replacement for it. A checkpoint
     /// whose family profile declares its own
     /// non-default split count (`FamilyProfile::command_buffer_chunks`'s own
-    /// doc -- gemma4's is `8`, the Intervention 6 measured decode
+    /// doc -- the sliding-pattern family's is `8`, the Intervention 6 measured decode
     /// configuration) uses that value instead of this field's own default,
     /// but never overrides a caller who set this field explicitly.
     pub command_buffer_chunks: u32,
@@ -1091,9 +1091,9 @@ pub struct ServingConfig<'model> {
     /// `ExpertResidencySchedule`'s own doc for the one site that
     /// consults it.
     pub expert_residency_schedule: ExpertResidencySchedule,
-    /// llama's `common_params_speculative` (`common/common.h:372-389`). See
+    /// llama.cpp's `common_params_speculative` (`common/common.h:372-389`). See
     /// `SpeculativeConfig`'s own doc for the shape and the one narrowing
-    /// from llama's own `Vec<type>`. Consulted by `generate/decode.rs`'s
+    /// from llama.cpp's own `Vec<type>`. Consulted by `generate/decode.rs`'s
     /// speculative branch -- the sole gate for whether speculation runs,
     /// replacing this crate's former process-env toggle. On by default
     /// (`ngram-simple`); `SpeculativeConfig::none()` is the off switch.

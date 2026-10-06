@@ -1,4 +1,4 @@
-//! Typed phase boundary for a routed `qwen35moe` decode step.
+//! Typed phase boundary for a routed `recurrent-routed` decode step.
 //!
 //! The router and expert gather cannot be represented as one opaque callback
 //! when a residency policy must run between them.  These consuming phase
@@ -176,7 +176,7 @@ impl LayerProgramBoundary {
     }
 }
 
-/// Builds the explicit router/gather handoff used by qwen35moe's per-layer
+/// Builds the explicit router/gather handoff used by the recurrent-routed family's per-layer
 /// pre-gather execution.  This is deliberately a thin named wrapper around
 /// the tensor partition algebra so future routed architectures share the
 /// same cut semantics.

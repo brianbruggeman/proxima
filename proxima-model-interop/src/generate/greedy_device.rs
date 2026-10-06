@@ -78,7 +78,7 @@ mod tests {
         }
     }
 
-    /// A softcapped row shaped like gemma4's real logits: every entry inside
+    /// A softcapped row shaped like the sliding-pattern family's real logits: every entry inside
     /// `(-30, 30)`, spread unevenly, none repeating the peak by accident.
     fn softcapped_row() -> Vec<f32> {
         (0..VOCAB)

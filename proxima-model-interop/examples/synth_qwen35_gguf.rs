@@ -20,7 +20,7 @@
 //! guessed.
 //!
 //! LAYER COUNT: 4, not the documented 64
-//! (`proxima-model-interop/src/qwen35.rs`'s own test fixture). Owner
+//! (`proxima-model-interop/src/recurrent_interval.rs`'s own test fixture). Owner
 //! directive, binding: the real Qwen3.8 checkpoint froze the box under
 //! memory pressure once already; this fixture stays small enough to never
 //! approach that regime. `full_attention_interval = 4` applied to 4 layers

@@ -848,7 +848,7 @@ pub struct LoadedModel<'file> {
     pub(super) block_summarizer: Option<BlockSummarizer>,
     /// This checkpoint's own weight bytes, by class
     /// (`crate::bind::tensor_bytes_by_class`'s own dense/expert/table
-    /// split, plus the SSM state bytes a qwen35 checkpoint's layers hold)
+    /// split, plus the SSM state bytes a recurrent-interval checkpoint's layers hold)
     /// -- kept as a plain [`crate::memory_fit::WeightClassBytes`] rather
     /// than re-borrowing `file_bytes`/`parsed` themselves, since
     /// [`Self::generate_with_serving_config`]'s own load-time memory-fit
@@ -882,7 +882,7 @@ pub struct LoadedModel<'file> {
     /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
     /// (`Self::load`/`Self::load_from_safetensors`, both wrapping
     /// `mistral_cached_forward_program_with_experts`) -- `None` on the
-    /// qwen35 hybrid path (`crate::recurrent_interval::qwen35_forward_program` returns
+    /// recurrent-interval hybrid path (`crate::recurrent_interval::qwen35_forward_program` returns
     /// a bare `logits` root with no named hidden-state counterpart yet).
     pub(super) hidden_root: Option<NodeId>,
     /// `general.name` off the checkpoint's own metadata ([`Self::load`]/
@@ -900,16 +900,16 @@ pub struct LoadedModel<'file> {
     /// [`CachedLayerRoots`] in that variant so both checkpoint families
     /// share one cache-threading loop, [`Self::run_decode_loop`]), and a mix
     /// of [`LayerCacheRoots::Attention`]/[`LayerCacheRoots::Ssm`] on the
-    /// qwen35 path (`crate::recurrent_interval::qwen35_forward_program`'s own return).
+    /// recurrent-interval path (`crate::recurrent_interval::qwen35_forward_program`'s own return).
     pub(super) layer_roots: Vec<LayerCacheRoots>,
     /// One post-layer residual root per dense layer, when the forward
     /// builder exposes them (`crate::lowering::BoundProgram::residual_roots`'s
-    /// own doc) -- empty on the qwen35 hybrid path, which has no single
+    /// own doc) -- empty on the recurrent-interval hybrid path, which has no single
     /// per-layer residual node. See [`Self::layer_residual_roots`].
     pub(super) residual_roots: Vec<NodeId>,
-    /// Graph-level producer boundaries for each qwen35moe layer.
+    /// Graph-level producer boundaries for each recurrent-routed layer.
     pub(super) moe_layer_diagnostics: Vec<crate::recurrent_routed_interval::MoeLayerDiagnostics>,
-    /// Router-logit roots aligned with routed layers.  Qwen35MoE fills this
+    /// Router-logit roots aligned with routed layers.  recurrent-routed fills this
     /// from the same graph nodes used by its gather; other architectures leave
     /// it empty.  These roots are the concrete input to a future per-layer
     /// pre-gather evaluator, not a second router computation.
@@ -934,7 +934,7 @@ pub struct LoadedModel<'file> {
     /// batches its whole prompt into one evaluation or feeds it one
     /// position at a time.
     pub(super) single_position_step: bool,
-    /// This checkpoint's own qwen35moe hparams, re-derived from `parsed`'s
+    /// This checkpoint's own recurrent-routed hparams, re-derived from `parsed`'s
     /// metadata alone (no weight bytes -- `crate::recurrent_routed_interval::hparams::from_metadata`'s
     /// own doc) at the same bind site that already called it once
     /// inside `crate::recurrent_routed_interval::qwen35moe_forward_program`. `None` for
@@ -950,9 +950,9 @@ pub struct LoadedModel<'file> {
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
-    /// dense, non-qwen35, non-MoE path (the single-range program is
+    /// dense, non-recurrent-interval, non-MoE path (the single-range program is
     /// dense-only, see [`mistral_single_range_cached_forward_program`]'s
-    /// own doc). CPU decode, any MoE checkpoint, and the qwen35 hybrid path
+    /// own doc). CPU decode, any MoE checkpoint, and the recurrent-interval hybrid path
     /// always run the two-range `program`/`layer_roots` fields instead;
     /// [`Self::run_decode_loop`] picks whichever this field's presence and
     /// the runtime backend selection together allow.
@@ -1034,7 +1034,7 @@ pub struct LoadedModel<'file> {
     pub(super) prewarm_queue: super::PrewarmQueue,
 }
 
-/// Concrete qwen35moe router/gather partitions for one KV shape bucket.
+/// Concrete recurrent-routed router/gather partitions for one KV shape bucket.
 ///
 /// GDN prefill must remain sequential by position, but the graph cuts do
 /// not change while `(new_count, kv_bound_extent)` is unchanged. Keeping
@@ -1291,8 +1291,8 @@ pub(super) fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, Inte
 /// Builds [`SingleRangeProgram`] for a checkpoint whose
 /// `architecture.expert_count == 0` -- `None` for any mixture-of-experts
 /// checkpoint, since [`mistral_single_range_cached_forward_program`] is
-/// dense-only (that function's own doc). Never called for a qwen35
-/// checkpoint: [`LoadedModel::load`]'s qwen35 branch returns before this
+/// dense-only (that function's own doc). Never called for a recurrent-interval
+/// checkpoint: [`LoadedModel::load`]'s recurrent-interval branch returns before this
 /// function's own call site is reached.
 ///
 /// # Errors
@@ -1438,7 +1438,7 @@ pub(super) struct SegmentPlacements<'placements> {
     pub(super) output_placements: &'placements [(NodeId, &'placements PlacedBuffer, usize)],
 }
 
-/// The per-call evaluation inputs for one qwen35moe pre-gather pass, grouped
+/// The per-call evaluation inputs for one recurrent-routed pre-gather pass, grouped
 /// so the method they feed keeps its argument count under clippy's
 /// threshold. `'mapping` matches the borrow the sidecar and its scratch hold
 /// across a layer window; `'file` matches the bound model's own file borrow.

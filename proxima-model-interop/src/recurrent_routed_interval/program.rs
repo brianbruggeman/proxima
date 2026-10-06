@@ -1,4 +1,4 @@
-//! `qwen35moe`'s forward program, lowered by
+//! `recurrent-routed`'s forward program, lowered by
 //! [`proxima_tensor::spec::build_forward`] from one [`ModelDescriptor`]: the
 //! hybrid stack of gated-DeltaNet and gated attention layers over a routed FFN
 //! plus a sigmoid-gated shared expert is the recurrent-hybrid engine's routed
@@ -8,7 +8,7 @@
 //!
 //! The real checkpoint also carries `{architecture}.rope.dimension_sections`/
 //! `rope.mrope_section` (`[11, 11, 10]`, summing to `rope_dims / 2` pairs)
-//! and `rope.mrope_interleaved` -- Qwen2-VL/Qwen3-VL-style multi-axis
+//! and `rope.mrope_interleaved` -- vision-language-style multi-axis
 //! (text/height/width) RoPE. The lowered program still applies one uniform
 //! split-half rotation across the `rope_dims` width; the multi-axis position
 //! table is a step input the decode loop builds, not part of the lowering.
@@ -128,7 +128,7 @@ pub fn descriptor_from_architecture(
     })
 }
 
-/// Builds `qwen35moe`'s whole-model forward program.
+/// Builds `recurrent-routed`'s whole-model forward program.
 ///
 /// # Errors
 ///

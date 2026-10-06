@@ -1037,8 +1037,8 @@ mod real_openchat_file {
 // pairing -- this module exercises that arm specifically, not a second
 // copy of the openchat coverage. `LoadedModel::load` takes the same
 // architecture-name-agnostic path both checkpoints go through
-// (`generate.rs`'s `load_inner` only special-cases `general.architecture
-// == "qwen35"`, never `"qwen3"`), so no qwen3-specific loader exists or is
+// (`generate.rs`'s `load_inner` only special-cases a `general.architecture`
+// naming a recurrent-interval family, never a qwen3 one), so no qwen3-specific loader exists or is
 // needed here.
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -1099,7 +1099,7 @@ fn write_attn_layer0_failure_report(
 ///
 /// `target_node_offsets` are the 14 absorbed nodes' ids MINUS
 /// `attended_node.0` -- `S/census/absorbed_nodes.txt`'s own per-layer
-/// `ABSORBED` blocks show every gemma4 layer (0, 1, 2, 4, 10 checked
+/// `ABSORBED` blocks show every sliding-pattern layer (0, 1, 2, 4, 10 checked
 /// directly) shares this EXACT relative layout (node numbering is one fixed
 /// per-layer template offset by a constant 189-node stride), so the 15-node
 /// closure generalizes to any layer from its own attended node alone,
@@ -1341,7 +1341,7 @@ fn select_decoded_token(
 /// exactly once at [`LoadedModel::generate_with_serving_config`]'s own entry
 /// -- same one-call-site shape as [`prefill_one_evaluation_requested`]
 /// immediately above. Unset keeps `configured` (today's `Serial` default for
-/// gemma4's MoE graph, `docs/model-interop/discipline.md` C3: `Concurrent`'s
+/// the sliding-pattern family's MoE graph, `docs/model-interop/discipline.md` C3: `Concurrent`'s
 /// `HazardTracker` schedule is proven only for the placed single-range
 /// program, not the recurrent/MoE graph). An unrecognized value is a
 /// misconfiguration surfaced as [`InteropError::InvalidDispatchTypeOverride`]
@@ -1871,7 +1871,7 @@ impl<'file> LoadedModel<'file> {
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: self.architecture.family.clone(),
-                reason: String::from("expert sidecars require a qwen35moe expert graph"),
+                reason: String::from("expert sidecars require a routed-expert graph"),
             });
         }
         sidecar.install_low_copies(
@@ -1994,7 +1994,7 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// Runs the explicit router -> residency -> gather protocol for a
-    /// qwen35moe runtime integration.  The current forward graph exposes the
+    /// recurrent-routed runtime integration.  The current forward graph exposes the
     /// router and routed gather as one graph evaluation, so this seam accepts
     /// a caller-owned router prepass and source transition rather than
     /// pretending that the existing graph has been partitioned.  A caller
@@ -2026,13 +2026,13 @@ impl<'file> LoadedModel<'file> {
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(architecture),
-                reason: String::from("the bound model is not a routed qwen35moe graph"),
+                reason: String::from("the bound model is not a routed-expert graph"),
             });
         }
         if self.router_roots.is_empty() {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(architecture),
-                reason: String::from("the bound qwen35moe graph exposes no router roots"),
+                reason: String::from("the bound routed-expert graph exposes no router roots"),
             });
         }
         crate::recurrent_routed_interval::execution::execute_pre_gather(router, boundary, gather)
@@ -3005,7 +3005,7 @@ impl<'file> LoadedModel<'file> {
     /// sequence when there is one.
     ///
     /// [`Self::drive_serving_loop`], then the monolithic expert-source
-    /// release a qwen35moe all-low run owes on every exit, the error ones
+    /// release a recurrent-routed all-low run owes on every exit, the error ones
     /// included: the serving loop's `?` returns leave no point after the loop
     /// where the release could run.
     #[allow(clippy::too_many_arguments)] // the seeded loop's own parameter list, split at the tokenization
@@ -3125,7 +3125,7 @@ impl<'file> LoadedModel<'file> {
         // Persistent device-resident KV: only reachable when this build was
         // compiled with `metal-output-placement`, this checkpoint built a
         // single-range program (`LoadedModel::single_range`'s own doc --
-        // `None` for any mixture-of-experts or qwen35 checkpoint), this
+        // `None` for any mixture-of-experts or recurrent-interval checkpoint), this
         // call's own `ServingConfig` selected the Metal backend
         // (`runtime.is_metal()`), AND the caller did not ask to force the
         // two-range path (`force_two_range`). [`Self::prefill_prefix`]/
@@ -3135,7 +3135,7 @@ impl<'file> LoadedModel<'file> {
         // it is not eligible for either primitive regardless of whether
         // this checkpoint would otherwise take it. Every other caller
         // (ordinary `generate`/`generate_streaming`, `seed: None`) is
-        // unaffected: CPU decode, any MoE checkpoint, and the qwen35 hybrid
+        // unaffected: CPU decode, any MoE checkpoint, and the recurrent-interval hybrid
         // path always fall through to the two-range `layer_roots` path
         // below, byte-for-byte unchanged.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3243,7 +3243,7 @@ impl<'file> LoadedModel<'file> {
         // call -- only ever filled for a [`LayerCacheState::Attention`]
         // layer (the only cache shape `mistral_cached_forward_program_with_experts`
         // produces, `LayerCacheRoots`'s own doc), left empty and unread for
-        // every `DenseAttention`/`Ssm` layer a qwen35 checkpoint carries.
+        // every `DenseAttention`/`Ssm` layer a recurrent-interval checkpoint carries.
         let mut kv_pad_scratch: Vec<KvPadScratch> = self
             .layer_roots
             .iter()
@@ -3253,7 +3253,7 @@ impl<'file> LoadedModel<'file> {
         // padding above is not enough on its own -- a `DenseAttention` layer
         // shares the identical `Extent::Symbolic(1)` slot, so it needs the
         // same treatment or a bucketed `symbols[1]` reads past a shorter,
-        // unpadded buffer on every qwen35 checkpoint.
+        // unpadded buffer on every recurrent-interval checkpoint.
         let mut qwen35_dense_pad_scratch: Vec<DenseAttentionPadScratch> = self
             .layer_roots
             .iter()
@@ -3585,10 +3585,10 @@ impl<'file> LoadedModel<'file> {
         }
 
         // Default-on speculative decode (ngram-simple; `SpeculativeConfig::none()`
-        // turns it off) (gemma4-only -- see
+        // turns it off) (sliding-pattern-only -- see
         // [`Self::speculative_verify_program`]'s own doc): built once, here,
         // outside the decode loop, matching [`prefill_one_evaluation_requested`]'s
-        // own config-gate shape. `DrafterSet` drives every enabled n-gram type in llama's own
+        // own config-gate shape. `DrafterSet` drives every enabled n-gram type in llama.cpp's own
         // priority order (`drafter.rs`'s own doc); `apply_serving_config`
         // already rejects the unwired draft-model types before this call is
         // reached. `begin` trains `ngram-map`/`ngram-mod`'s own index over
@@ -3615,7 +3615,7 @@ impl<'file> LoadedModel<'file> {
         // the two-layer cache checksum walks whole caches every step; only the diag knob pays for it
         #[cfg(feature = "instrument")]
         let cache_checksum_diag = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
-        // gemma4's attention layers keep their KV on the device once decode starts
+        // the sliding-pattern family's attention layers keep their KV on the device once decode starts
         // (`DeviceKv`'s own doc); every other architecture keeps the host path
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let device_kv_eligible = runtime.is_metal()
@@ -3699,7 +3699,7 @@ impl<'file> LoadedModel<'file> {
                 // genuine one-token decode step (`ServingState::Decode`,
                 // never the prompt's own `Prefill`) with a
                 // real cache to draft against (`cached_len > 0`) and a
-                // gemma4-only verify program bound at load time
+                // sliding-pattern-only verify program bound at load time
                 // (`Self::speculative_verify_program`'s own doc). Every
                 // `ServingConfig` is eligible now -- the verify branch below
                 // selects each row through `select_decoded_token`, the SAME
@@ -3722,7 +3722,7 @@ impl<'file> LoadedModel<'file> {
                 // duplicates that tail token into the trailing pattern,
                 // which can never match a real earlier occurrence and
                 // silently drafted nothing on every real decode step (a real
-                // gemma4-E2B run measured `speculative_verify_steps == 0`
+                // the E2B checkpoint run measured `speculative_verify_steps == 0`
                 // end to end before this was fixed). `saturating_sub(1)`
                 // degrades to an empty slice rather than panicking on the
                 // (unreached, guarded by `cached_len > 0` above)
@@ -4209,7 +4209,7 @@ impl<'file> LoadedModel<'file> {
                     // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head):
                     // `PROXIMA_HEAD_REPEATS=1|2|3` head-cost measurement knob.
                     // `lfm2_two_range_cached_forward_program_with_experts`
-                    // (the builder gemma4's `CacheMask::Padded` production
+                    // (the builder the sliding-pattern family's `CacheMask::Padded` production
                     // path calls) appends its `repeats - 1` duplicate head
                     // chains when the same env var is set at build time
                     // (`append_head`'s own doc), and returns their real
@@ -4300,7 +4300,7 @@ impl<'file> LoadedModel<'file> {
                                 let _ = state_is_placed;
                                 roots.push(*state_out);
                             }
-                            // gemma4 E2B's cross-layer shared-KV layer: no
+                            // the E2B checkpoint's cross-layer shared-KV layer: no
                             // `K`/`V` root of its own to request -- its
                             // attention op already reads the donor layer's
                             // own already-requested nodes in-graph
@@ -4418,7 +4418,7 @@ impl<'file> LoadedModel<'file> {
                     }
                     roots.sort_unstable_by_key(|node| node.0);
                     roots.dedup();
-                    // gemma4's `KvCacheShape::Custom` excludes it from
+                    // the sliding-pattern family's `KvCacheShape::Custom` excludes it from
                     // `LoadedModel::single_range` (`run_decode_loop_placed_kv`'s
                     // own doc, this function's own branch above at
                     // `self.single_range`), so its real decode step reaches
@@ -4829,10 +4829,10 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(not(feature = "instrument"))]
                     let monolithic_profile_target = false;
                     // `PROXIMA_METAL_DISPATCH_PROFILE_STEP`'s own reader for
-                    // THIS step's two-range/non-placed-KV shape -- gemma4-E2B's
+                    // THIS step's two-range/non-placed-KV shape -- the E2B checkpoint's
                     // real forward (`KvCacheShape::Custom` excludes it from
                     // `LoadedModel::single_range`, so it never reaches the
-                    // placed-KV branch above, and it is not qwen35moe so it
+                    // placed-KV branch above, and it is not recurrent-routed so it
                     // never reaches `monolithic_profile_target` either) falls
                     // through every arm above to plain `runtime.evaluate`
                     // below. Same default-off, one-env-var-per-step
@@ -4887,7 +4887,7 @@ impl<'file> LoadedModel<'file> {
                                     )?;
                                 info!(
                                     step = step as u64,
-                                    sampling_mode, "dispatch_profile: qwen35moe full graph"
+                                    sampling_mode, "dispatch_profile: routed-expert full graph"
                                 );
                                 report_op_timings(step, &timings, active_program);
                                 evaluated
@@ -4973,7 +4973,7 @@ impl<'file> LoadedModel<'file> {
                             // same `upload_block` path every node takes in
                             // `runtime.evaluate` below -- so this arm reuses the
                             // placed-KV timed executor to time the SAME unplaced
-                            // shape gemma4's two-range path actually runs, never a
+                            // shape the sliding-pattern family's two-range path actually runs, never a
                             // fabricated placement.
                             let (evaluated, timings, sampling_mode, split_ns) = runtime
                                 .evaluate_dispatch_timed_with_placements(
@@ -5564,7 +5564,7 @@ impl<'file> LoadedModel<'file> {
                     let layer_cache_append_started = read_ticks();
                     #[cfg(feature = "instrument")]
                     let mut layer_cache_append_elements: u64 = 0;
-                    // History-carry bisection step 3 (diag/qwen35moe-history-carry):
+                    // History-carry bisection step 3 (the routed history-carry diagnostic):
                     // before-state for layers 0 (GDN) and 3 (this checkpoint's
                     // first attention layer, 3-GDN-to-1-attention interleave) --
                     // paired with the AFTER checksum below to prove whether this
@@ -5722,7 +5722,7 @@ impl<'file> LoadedModel<'file> {
                                     cache.advance_conv_history(qkv_mixed_data, conv_history_len);
                                 }
                             }
-                            // gemma4 E2B's cross-layer shared-KV layer: no
+                            // the E2B checkpoint's cross-layer shared-KV layer: no
                             // state of its own to append to -- its `K`/`V`
                             // were never requested as separate roots for
                             // this layer index (the earlier
@@ -7229,7 +7229,7 @@ impl<'file> LoadedModel<'file> {
         // `run_reduce_with_quantized_weights` always has: `None` here is
         // not "experts disabled", it is "no per-step snapshot applies to a
         // call outside the decode loop".
-        // The qwen35moe diagnostic can request an interior routed node, so
+        // The recurrent-routed diagnostic can request an interior routed node, so
         // keep it on the partition-isolated seam. Other one-shot forwards
         // retain the ordinary evaluator and its normal cache bookkeeping.
         let evaluated = if self.ffn_routing == FfnRouting::Routed {
@@ -7376,7 +7376,7 @@ pub(super) fn use_metal_output_placements(
 ) -> bool {
     // `evaluate_with_placements` has carried `expert_sources` since it grew
     // `execute_plan_named_with_placements_and_expert_sources` -- excluding
-    // routed-expert steps here (ROW 549) used to send every qwen35moe
+    // routed-expert steps here (ROW 549) used to send every recurrent-routed
     // (MoE + GDN) decode step through the unplaced `runtime.evaluate`
     // fallback, so the fused `GatedDeltaNet` state_out
     // (`omega::metal::encode_op`) never found its caller-owned buffer in

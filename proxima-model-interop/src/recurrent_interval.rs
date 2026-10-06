@@ -1,9 +1,9 @@
-//! Qwen3.8-27B's real hybrid checkpoint (`general.architecture = "qwen35"`):
+//! The hybrid checkpoint whose `general.architecture` selects the `recurrent_interval` schedule source:
 //! [`Qwen35Hparams`] derives this architecture's own metadata shape --
 //! `{architecture}.full_attention_interval` marks every `interval`th layer
 //! (1-indexed) as dense attention, every other layer as a gated
 //! state-space mixer -- the same "read the checkpoint's own per-layer
-//! marker, don't assume the dense shape" move [`crate::lfm2`] makes for its
+//! marker, don't assume the dense shape" move [`crate::short_conv`] makes for its
 //! own hybrid checkpoint, just from a scalar interval instead of a
 //! per-layer array.
 //!
@@ -247,7 +247,7 @@ pub fn bind_qwen35_checkpoint(
 /// (`proxima-tensor/src/spec.rs`) -- every forward program this crate runs
 /// today is one call into a `pub fn ..._forward_program...` that module
 /// exports whole, never a graph this crate assembles itself.
-/// `proxima_tensor::spec` does not export a qwen35 one yet:
+/// `proxima_tensor::spec` does not export a recurrent-interval one yet:
 /// `append_qwen35_delta_net_step`/`append_qwen35_conv_branch` (`spec.rs`)
 /// are its own state-space building blocks, still module-private, with no
 /// `append_qwen35_ssm_mixer`/`qwen35_forward_program_with_experts` wrapping
@@ -274,7 +274,7 @@ pub fn bind_qwen35_checkpoint(
 /// reads it straight off `{architecture}.full_attention_interval`).
 /// [`crate::generate::LoadedModel`]'s own `SsmLayerCache::new` fixed sizes,
 /// all derived from [`Qwen35Hparams`]'s ssm hyperparameters at load
-/// time -- `qwen35.cpp:57-60`'s same derivation this module's
+/// time -- llama.cpp's hybrid-model source, lines 57-60's same derivation this module's
 /// `bind_qwen35_attn_qkv_split` already walks through for the fused
 /// `attn_qkv.weight` split.
 #[derive(Debug, Clone, Copy)]
@@ -294,7 +294,7 @@ pub struct SsmShape {
 }
 
 /// [`SsmShape`]'s own derivation off a real checkpoint's ssm
-/// hyperparameters -- `qwen35.cpp:57-60`'s same arithmetic
+/// hyperparameters -- llama.cpp's hybrid-model source, lines 57-60's same arithmetic
 /// [`Qwen35Hparams`]'s own `ssm_key_dim`/`ssm_value_dim` derivation
 /// already uses for the fused `attn_qkv.weight` row split, plus
 /// `head_v_dim = ssm_inner_size / ssm_time_step_rank` and `ssm_group =
@@ -321,7 +321,7 @@ pub fn qwen35_ssm_shape(architecture: &Qwen35Hparams) -> SsmShape {
 /// elements plus `state_len` state elements, both `f32`) times
 /// `block_count` layers. `crate::memory_fit`'s own load-time gate reads
 /// this as the SSM class of `crate::memory_fit::WeightClassBytes` -- `0`
-/// for every non-qwen35 checkpoint, which never builds a [`SsmShape`]
+/// for every non-recurrent-interval checkpoint, which never builds a [`SsmShape`]
 /// at all. Plain arithmetic, no platform dependency -- unlike the field it
 /// used to feed directly, this function itself is not `metal`-gated, so
 /// [`crate::lowering::step_state`] can call it on every build.

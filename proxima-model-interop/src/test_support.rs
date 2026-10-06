@@ -29,7 +29,7 @@ pub(crate) fn math_mode_from_env() -> omega::MathMode {
 /// `PROXIMA_MATH_MODE`: `"serial"` selects [`omega::DispatchType::Serial`],
 /// unset or `"concurrent"` selects [`omega::DispatchType::Concurrent`].
 /// `ServingConfig::default`'s own `dispatch_type` flipped to `Serial` at
-/// 3afb3db37 (a qwen35moe residency-boundary side effect, not a per-model
+/// 3afb3db37 (a recurrent-routed residency-boundary side effect, not a per-model
 /// measurement); this function's own unset-is-`Concurrent` default predates
 /// that flip and was not updated to match, so a caller of this function
 /// still gets `Concurrent` unless it opts into `serial` explicitly, and any
@@ -53,7 +53,7 @@ pub(crate) fn dispatch_type_from_env() -> omega::DispatchType {
 /// `ServingConfig` or any non-test source.
 /// `PROXIMA_GEMMA4_E2B_GGUF` read the way [`openchat_gguf_path`] reads
 /// `PROXIMA_OPENCHAT_GGUF`: unset keeps every caller pointed at the ollama blob
-/// for gemma4-E2B on this host.
+/// for the E2B checkpoint on this host.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn gemma4_e2b_gguf_path() -> String {
     std::env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| {
@@ -105,10 +105,10 @@ pub(crate) fn qwen3moe_30b_gguf_path() -> String {
 }
 
 /// `PROXIMA_QWEN35MOE_GGUF` read the same way [`qwen3moe_30b_gguf_path`]
-/// reads `PROXIMA_QWEN3MOE_GGUF`: unset keeps a qwen35moe fixture test
+/// reads `PROXIMA_QWEN3MOE_GGUF`: unset keeps a recurrent-routed fixture test
 /// pointed at this host-local `qwen3.6:35b-a3b` (`general.architecture =
-/// qwen35moe`) checkpoint -- the one `real_qwen35moe_registry_probe.rs`'s
-/// own doc already names as the real blob every qwen35moe-specific
+/// recurrent-routed`) checkpoint -- the one `real_qwen35moe_registry_probe.rs`'s
+/// own doc already names as the real blob every recurrent-routed-specific
 /// diagnostic in this crate resolves against.
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 pub(crate) fn qwen35moe_gguf_path() -> String {
@@ -142,7 +142,7 @@ pub(crate) fn require_fixture(path: &str, env_var: Option<&str>) {
     }
 }
 
-/// `gemma4:e2b-it-qat`'s KV-relevant header (`ollama /api/show`, 2026-09-29):
+/// `e2b-it-qat`'s KV-relevant header (`ollama /api/show`, 2026-09-29):
 /// 35 blocks, one kv head everywhere, every fifth layer full attention (key
 /// length 512) and the rest sliding (key length 256, window 512), the last 20
 /// layers sharing an earlier layer's KV.

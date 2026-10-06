@@ -37,7 +37,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 }
 
 /// Reproduces `gemma4_descriptor_from_gguf`
-/// (`proxima-model-interop/src/gemma4/bind.rs`, private to that crate)
+/// (`proxima-model-interop/src/sliding_pattern/bind.rs`, private to that crate)
 /// so this diagnostic can call `lfm2_forward_program_with_experts` directly
 /// -- pure graph construction, no weight bytes touched, so it is
 /// near-instant next to the real `bind_checkpoint`'s full weight bind

@@ -1,4 +1,4 @@
-//! LFM2.5-8B-A1B's hybrid checkpoint as data: [`Lfm2Hparams`] reads this
+//! the 8B-A1B short-conv checkpoint's hybrid checkpoint as data: [`Lfm2Hparams`] reads this
 //! architecture's own metadata shape -- a per-layer `head_count_kv` array whose
 //! zero entries mark short-convolution layers ([`crate::bind::architecture_from_metadata`]
 //! reads the array; the dense descriptor builder
@@ -80,7 +80,7 @@ const LFM2_RMS_EPSILON_DEFAULT: f32 = 1e-5;
 /// Derives [`Lfm2Hparams`] from `parsed`'s own metadata --
 /// [`crate::bind::architecture_from_metadata`]'s hybrid-checkpoint
 /// counterpart. Reads `general.architecture` itself (`lfm2moe` on the real
-/// checkpoint, not `lfm2`) rather than assuming it, the same "read the
+/// checkpoint, not `short-conv`) rather than assuming it, the same "read the
 /// wire, don't hard-code the string" shape every other key here already
 /// uses.
 ///

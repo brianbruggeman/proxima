@@ -479,7 +479,7 @@ mod tests {
         assert_ne!(&even[..live * EVEN_ODD_ROW], want_even.as_slice());
     }
 
-    /// gemma4 E2B at 2,048 positions: the 12 sliding layers hold the
+    /// the E2B checkpoint at 2,048 positions: the 12 sliding layers hold the
     /// checkpoint's own `attention.sliding_window` rows (read from the
     /// header, not assumed), the 3 full layers all 2,048. The 20 shared-KV
     /// layers own no cache, so `kv_layers` lists 15.
