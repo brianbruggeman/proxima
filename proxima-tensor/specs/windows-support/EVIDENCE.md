@@ -15,6 +15,23 @@ cross-target check; none is native Windows runtime evidence.
 | complete Proxima TLS library suite | 36 passed, 0 failed, 0 skipped | `/private/tmp/proxima-windows-evidence/tls-native-roots/final-host.stdout` |
 | complete TLS connector filter | 14 passed, 0 failed, 0 skipped | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-10-host.stdout` |
 | Windows MSVC compile including Windows-only store fixture | `cargo xwin check -p proxima-tls --features futures-io --all-targets --target x86_64-pc-windows-msvc` finished successfully with no compiler errors | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-10-windows-xwin.stdout` |
+| AC11 universal client spec and canonical forwarding | 2 tests passed: the fluent universal client carries `tls_client`, and canonical HTTP forwarding preserves native/custom roots | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-client.stdout` |
+| AC11 HTTP TLS factory propagation | 2 tests passed: prime and Hyper factories each fail before dialing on a configured missing custom CA and include its path | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-http-factory.stdout` |
+| AC11 gRPC TLS factory propagation | 1 test passed: configured missing custom CA fails before dialing and the error includes its path | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-grpc-factory.stdout` |
+| AC11 listener mTLS custom roots | 1 test passed: required client-CA bundle path round-trips through the listener TLS spec and builds a client-certificate verifier | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-listener.stdout` |
+| AC7–AC11 full TLS library after facade wiring | 37 passed, 0 failed, 0 skipped | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-tls-full.stdout` |
+| AC11 Proxima Windows MSVC all-target check | `cargo xwin check -p proxima --all-targets --target x86_64-pc-windows-msvc` finished with exit 0 in 5m10s | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-windows-xwin.stdout` |
+| AC11 Hyper feature Windows MSVC all-target check | `cargo xwin check -p proxima-http --all-targets --features http1-stream-client,http1-tls --target x86_64-pc-windows-msvc` finished with exit 0 in 1m51s | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-http-windows-xwin.stdout` |
+| AC11 universal Listener TLS forwarding | 1 test passed, 0 failed/skipped; `TlsListenProtocol` forwards `required_files` and `client-ca.pem` to the wrapped protocol spec | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-11-listener-facade.stdout` |
+
+The universal facade acceptance commands are:
+
+```text
+cargo nextest run -p proxima --lib --features http-prime-deps -E 'test(tls_client_settings_are_carried_by_the_universal_client_spec) + test(canonical_http_forwards_transport_now)' --no-tests=fail --test-threads 1 --retries 0
+cargo nextest run -p proxima --lib --features http-prime,http2 -E 'test(grpc_factory_applies_client_tls_root_settings)' --no-tests=fail --test-threads 1 --retries 0
+cargo nextest run -p proxima-http --lib --features http1-stream-client,http1-tls -E 'test(factory_applies_client_tls_root_settings_before_dial) + test(hyper_factory_applies_client_tls_root_settings)' --no-tests=fail --test-threads 1 --retries 0
+cargo nextest run -p proxima-tls --lib --features futures-io -E 'test(listener_client_auth_bundle_paths_round_trip_and_build)' --no-tests=fail --test-threads 1 --retries 0
+```
 
 The portable round-trip assertions compare exact `b"tls root probe"` replies;
 the untrusted certificate is rejected and malformed bundle errors retain the

@@ -74,6 +74,7 @@ pub type SharedHyperClient = Client<ConnectorImpl, StreamingHyperBody>;
 #[derive(Clone)]
 pub struct SharedHttpClient {
     inner: Arc<SharedHyperClient>,
+    pool_config: PoolConfig,
 }
 
 impl SharedHttpClient {
@@ -86,6 +87,26 @@ impl SharedHttpClient {
     /// fields are optional — `None` defers to hyper-util's default.
     #[must_use]
     pub fn with_config(config: &PoolConfig) -> Self {
+        Self::with_connector(config, connector())
+    }
+
+    #[cfg(all(feature = "http1-tls", feature = "http1-stream-client"))]
+    /// Clone this client's pool tuning with a connector using configured TLS roots.
+    pub fn with_client_tls_config(
+        &self,
+        tls_config: &proxima_tls::TlsClientConfig,
+    ) -> Result<Self, ProximaError> {
+        let rustls_config = tls_config.build_rustls_config()?;
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(rustls_config)
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build();
+        Ok(Self::with_connector(&self.pool_config, connector))
+    }
+
+    fn with_connector(config: &PoolConfig, connector: ConnectorImpl) -> Self {
         let mut builder = Client::builder(TokioExecutor::new());
         if let Some(max_idle) = config.max_idle_per_host {
             builder.pool_max_idle_per_host(max_idle);
@@ -117,9 +138,10 @@ impl SharedHttpClient {
         if let Some(max) = config.http1_max_headers {
             builder.http1_max_headers(max);
         }
-        let client = builder.build(connector());
+        let client = builder.build(connector);
         Self {
             inner: Arc::new(client),
+            pool_config: config.clone(),
         }
     }
 
@@ -127,6 +149,7 @@ impl SharedHttpClient {
     pub fn from_client(client: SharedHyperClient) -> Self {
         Self {
             inner: Arc::new(client),
+            pool_config: PoolConfig::default(),
         }
     }
 

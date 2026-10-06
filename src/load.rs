@@ -629,6 +629,7 @@ fn canonical_http(http_field: &Value, full: &Value) -> Result<Value, ProximaErro
         "proxy",
         "response",
         "transport",
+        "tls_client",
     ] {
         if let Some(value) = full.get(forwarded) {
             spec.insert(forwarded.into(), value.clone());
@@ -1042,9 +1043,15 @@ mod tests {
 
     #[test]
     fn canonical_http_forwards_transport_now() {
-        let full = json!({"http": "http://example.test", "transport": "tls"});
+        let full = json!({
+            "http": "http://example.test",
+            "transport": "tls",
+            "tls_client": {"root_source": "native", "ca_bundle_paths": ["corp.pem"]}
+        });
         let canonical = canonical_http(&full["http"], &full).expect("canonical_http");
         assert_eq!(canonical["transport"], "tls");
+        assert_eq!(canonical["tls_client"]["root_source"], "native");
+        assert_eq!(canonical["tls_client"]["ca_bundle_paths"][0], "corp.pem");
     }
 
     #[proxima::test]

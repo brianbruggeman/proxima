@@ -547,6 +547,22 @@ impl ClientBuilder {
         self
     }
 
+    /// Configure trust roots for outbound HTTPS and gRPC-over-TLS requests.
+    /// The destination hostname remains derived from each request URL; the
+    /// config supplies the root source, custom CA bundle paths, and ALPN.
+    #[cfg(feature = "http-prime-deps")]
+    #[must_use]
+    pub fn tls_client(
+        mut self,
+        config: proxima_tls::TlsClientConfig,
+    ) -> Result<Self, ProximaError> {
+        let value = serde_json::to_value(config).map_err(|error| {
+            ProximaError::Config(format!("serialize outbound TLS client settings: {error}"))
+        })?;
+        self.spec.insert("tls_client".to_string(), value);
+        Ok(self)
+    }
+
     /// Plug in an out-of-crate protocol: merge its spec and register its
     /// factory. The typed, no-import path — `Client::builder().protocol(Foo::dsn(..))`.
     #[must_use]
@@ -1113,6 +1129,40 @@ mod tests {
         assert_eq!(
             grpc.inner.spec.get("grpc").and_then(Value::as_str),
             Some("https://collector:4317")
+        );
+    }
+
+    #[cfg(feature = "http-prime-deps")]
+    #[test]
+    fn tls_client_settings_are_carried_by_the_universal_client_spec() {
+        let config = proxima_tls::TlsClientConfig::layered()
+            .with_root_source(proxima_tls::RootSource::Native)
+            .with_ca_bundle_paths(vec!["corp.pem".into()])
+            .build_for_client()
+            .expect("TLS client config");
+        let built = Client::builder()
+            .https("https://api.example.com")
+            .tls_client(config)
+            .expect("attach TLS client config")
+            .build()
+            .expect("client build");
+        assert_eq!(built.inner.spec["tls_client"]["root_source"], "native");
+        assert_eq!(
+            built.inner.spec["tls_client"]["ca_bundle_paths"][0],
+            "corp.pem"
+        );
+
+        let configured = Client::from_value(serde_json::json!({
+            "http": "https://api.example.com",
+            "tls_client": {
+                "root_source": "custom_only",
+                "ca_bundle_paths": ["private-root.pem"]
+            }
+        }))
+        .expect("client config file shape");
+        assert_eq!(
+            configured.inner.spec["tls_client"]["root_source"],
+            "custom_only"
         );
     }
 

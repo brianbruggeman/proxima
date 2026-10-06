@@ -25,6 +25,7 @@ use proxima_core::ProximaError;
 use proxima_net::prime::{ConnectTunneledUpstream, PrimeTcpUpstream};
 use proxima_primitives::pipe::handler::{PipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
+use proxima_primitives::stream::StreamUpstream;
 use proxima_tls::TlsStreamUpstream;
 
 use crate::http1::client::H1ClientUpstream;
@@ -74,17 +75,19 @@ impl PipeFactory for PrimeHttpPipeFactory {
                 .map(str::to_string);
             let config: HttpConfig = serde_json::from_value(spec)
                 .map_err(|err| ProximaError::Config(format!("http config: {err}")))?;
+            let tls_client = config.tls_client.clone();
             // mirror the hyper factory: the same HttpUpstreamConfig
             // (timeout / method / header forward + inject) is lowered off
             // the spec and applied per-request by the h1 client.
             let runtime = config.into_runtime_config()?;
-            build_prime_upstream(
+            build_prime_upstream_with_tls(
                 &config.url,
                 &config.name,
                 runtime,
                 config.response,
                 proxy.as_deref(),
                 transport.as_deref(),
+                tls_client.as_ref(),
             )
         })
     }
@@ -102,13 +105,26 @@ impl PipeFactory for PrimeHttpPipeFactory {
 /// `build()` side-effect-free so an upstream can be configured for a host
 /// that is not (yet) reachable, matching the hyper factory which also
 /// defers resolution to request time.
+#[cfg(test)]
 fn build_prime_upstream(
+    url: &str,
+    label: &str,
+    config: crate::http1::http_config::HttpUpstreamConfig,
+    response: crate::http1::response_config::ResponseHandlingConfig,
+    proxy: Option<&str>,
+    transport: Option<&str>,
+) -> Result<PipeHandle, ProximaError> {
+    build_prime_upstream_with_tls(url, label, config, response, proxy, transport, None)
+}
+
+fn build_prime_upstream_with_tls(
     url: &str,
     label: &str,
     mut config: crate::http1::http_config::HttpUpstreamConfig,
     response: crate::http1::response_config::ResponseHandlingConfig,
     proxy: Option<&str>,
     transport: Option<&str>,
+    tls_client: Option<&proxima_tls::TlsClientConfig>,
 ) -> Result<PipeHandle, ProximaError> {
     // a bare `host:port` with no `http://`/`https://` scheme (e.g. the
     // common Ollama-style `"127.0.0.1:11434"`) is a config error, not a
@@ -157,7 +173,7 @@ fn build_prime_upstream(
                 host.clone(),
                 port,
             );
-            let tls = TlsStreamUpstream::with_webpki_roots(tunnel, host.clone())?;
+            let tls = build_tls_upstream(tunnel, &host, tls_client)?;
             into_handle(
                 H1ClientUpstream::new(tls, host_header, label.to_string())
                     .with_config(config)
@@ -178,7 +194,7 @@ fn build_prime_upstream(
         }
         (None, true) => {
             let tcp = PrimeTcpUpstream::with_host(host.clone(), port);
-            let tls = TlsStreamUpstream::with_webpki_roots(tcp, host.clone())?;
+            let tls = build_tls_upstream(tcp, &host, tls_client)?;
             into_handle(
                 H1ClientUpstream::new(tls, host_header, label.to_string())
                     .with_config(config)
@@ -196,6 +212,18 @@ fn build_prime_upstream(
     };
     debug!(host = %host, port, secure, label = %label, proxied = proxy.is_some(), "prime http upstream built");
     Ok(handle)
+}
+
+fn build_tls_upstream<U: StreamUpstream>(
+    inner: U,
+    host: &str,
+    configured: Option<&proxima_tls::TlsClientConfig>,
+) -> Result<TlsStreamUpstream<U>, ProximaError> {
+    let mut config = configured.cloned().unwrap_or_default();
+    if config.server_name.is_empty() {
+        config.server_name = host.to_string();
+    }
+    TlsStreamUpstream::from_config(inner, &config)
 }
 
 /// Normalize a parsed url's path into the prefix `apply_config` prepends to
@@ -362,6 +390,31 @@ mod tests {
             None,
         ));
         assert!(outcome.is_ok(), "factory builds with a proxy key");
+    }
+
+    #[proxima::test]
+    async fn factory_applies_client_tls_root_settings_before_dial() {
+        let factory = PrimeHttpPipeFactory::new();
+        let result = factory
+            .build(
+                &serde_json::json!({
+                    "url": "https://api.example.test",
+                    "tls_client": {
+                        "root_source": "custom_only",
+                        "ca_bundle_paths": ["missing-client-root.pem"]
+                    }
+                }),
+                None,
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("missing configured root must fail before dialing"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("missing-client-root.pem"),
+            "configured trust policy must reach TLS construction: {error}"
+        );
     }
 
     /// DNS deferral: building an upstream for a host that does not resolve

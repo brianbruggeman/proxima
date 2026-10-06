@@ -745,7 +745,14 @@ mod tests {
         let inner: Arc<dyn ListenProtocol> = Arc::new(SpecCapturingProto {
             captured: captured.clone(),
         });
-        let wrapped = TlsListenProtocol::new(inner, proxima_tls::TlsConfig::self_signed());
+        let wrapped = TlsListenProtocol::new(
+            inner,
+            proxima_tls::TlsConfig::self_signed().with_client_auth(
+                proxima_tls::ClientAuth::RequiredFiles {
+                    ca_bundle_paths: vec!["client-ca.pem".into()],
+                },
+            ),
+        );
 
         let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
         let context = ServeContext::new(Arc::new(NoopTelemetry));
@@ -768,6 +775,14 @@ mod tests {
             spec.get(proxima_tls::SPEC_KEY).is_some(),
             "expected {} in {spec:?}",
             proxima_tls::SPEC_KEY
+        );
+        assert_eq!(
+            spec[proxima_tls::SPEC_KEY]["client_auth"]["kind"],
+            "required_files"
+        );
+        assert_eq!(
+            spec[proxima_tls::SPEC_KEY]["client_auth"]["ca_bundle_paths"][0],
+            "client-ca.pem"
         );
     }
 
