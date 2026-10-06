@@ -5,8 +5,9 @@
 //! shape, see that function's own doc for why a genuinely hybrid
 //! architecture cannot use the generic dense-checkpoint reader) -- binds
 //! every weight [`proxima_tensor::spec::lfm2_forward_program_with_experts`]
-//! needs ([`bind_lfm2_weights`], including [`bind_lfm2_shortconv_in_proj`]'s
-//! binder-side split of the real checkpoint's one fused `in_proj` tensor),
+//! needs ([`bind_program_leaves`] over the lowered program, the real
+//! checkpoint's one fused `in_proj` tensor split by the `part` aliases in its
+//! binding profile),
 //! and runs the resulting program end to end ([`run_lfm2_prefill`]):
 //! tokenize, one whole-sequence prefill pass per generated token (this
 //! architecture's own forward program is prefill-only --
@@ -22,7 +23,7 @@
 //! [`proxima_tensor::spec::append_moe_ffn`]'s own `expert_bias` parameter),
 //! and `{architecture}.expert_gating_func == 2`
 //! (`LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID`, `llama-hparams.h:14`) --
-//! [`bind_lfm2_weights`] binds all three, and [`run_lfm2_prefill`] builds
+//! [`bind_program_leaves`] binds all three, and [`run_lfm2_prefill`] builds
 //! the program with [`proxima_tensor::spec::ExpertGatingFunc::Sigmoid`]
 //! rather than the softmax-style top-k reweighting a dense-gated checkpoint
 //! (Mixtral) still gets.
@@ -34,24 +35,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_gguf::types::GgmlType;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
-use proxima_tensor::op::NodeId;
+use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     AttentionScoreScale, KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind,
     LayerSchedule, RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
 };
 use proxima_tokenizer::Vocab;
 
-use crate::Codec;
 use crate::bind::{
-    BoundWeights, aligned_f32_view, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
-    bind_moe_expert_weights, find_tensor, metadata_f32_optional, metadata_str, metadata_u32,
-    metadata_u32_optional, metadata_u32_optional_or, reinterpret_f32, vocab_from_token_embedding,
+    BoundWeights, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional,
+    metadata_u32_optional_or, vocab_from_token_embedding,
 };
+use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
 use crate::generate::build_position_inputs;
+use crate::profiles::binding_profile;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
 
 /// Every hparam [`lfm2_forward_program_with_experts`] needs, derived from a
@@ -227,342 +227,6 @@ fn nonzero_uniform_u32_array(
     }
 }
 
-/// Row-splits a real checkpoint's fused `blk.{layer}.shortconv.in_proj.weight`
-/// (GGUF's on-disk `[out_dim = 3 * embedding, in_dim = embedding]`
-/// row-major layout: `3 * embedding` rows of `embedding` contiguous
-/// elements each) into the three same-width `b`/`c`/`x` projections
-/// [`lfm2_forward_program_with_experts`]'s own `LayerKind::ShortConv`
-/// branch declares as separate `Input`s (`proxima-tensor/src/spec.rs`,
-/// `append_lfm2_conv_mixer`'s own doc) -- that doc already proves the split
-/// cannot happen inside the tensor program's own `Affine` grammar
-/// (`shape::unify_iteration_space` resolves a pure single-term axis's
-/// extent from the sliced operand's own FULL buffer width regardless of
-/// offset), so it happens here, in the binder, instead.
-///
-/// The split is a ROW split, never a column slice: HuggingFace's own
-/// reference (`Lfm2MoeShortConv.slow_forward`,
-/// `transformers/models/lfm2_moe/modeling_lfm2_moe.py:443-444`) computes
-/// `BCx = in_proj(x).transpose(-1, -2)` then `B, C, x = BCx.chunk(3,
-/// dim=-2)` -- chunking the LINEAR LAYER'S OUTPUT axis, which is exactly
-/// GGUF's `out_dim` axis, the *row* axis of the on-disk `[out_dim, in_dim]`
-/// buffer. `B` is rows `0..embedding`, `C` is rows `embedding..2*embedding`,
-/// `x` (ungated) is rows `2*embedding..3*embedding` -- `Bx = B * x` feeds
-/// [`proxima_tensor::spec`]'s causal convolution, `C` gates the convolved
-/// result (`modeling_lfm2_moe.py:446,462`), matching
-/// `append_lfm2_conv_mixer`'s own `b_proj`/`c_proj`/`x_proj` argument order.
-///
-/// Block-quantized types (`Q4_K`/`Q5_K`/`Q6_K`) never need a mid-block
-/// slice for this: `ggml` requires a row's own element count
-/// (`in_dim = embedding`) be a whole multiple of the codec's
-/// `block_elements` to quantize that row at all (confirmed on the real
-/// checkpoint: `Q4_K`'s `block_elements = 256`, `embedding = 2048 = 8 *
-/// 256`), and a K-quant superblock never spans two rows regardless of
-/// `in_dim`'s own divisibility -- so a row-COUNT split is always a
-/// byte-offset split at an exact multiple of one block's own
-/// `block_bytes`, verified by this function's own arithmetic
-/// (`rows_per_chunk * bytes_per_row`), never assumed. For the real
-/// checkpoint's `Q4_K` `in_proj` (`embedding = 2048`): `bytes_per_row =
-/// (2048 / 256) * 144 = 1152`; the `B`/`C` boundary lands at byte
-/// `2048 * 1152 = 2359296`, the `C`/`x` boundary at `4096 * 1152 =
-/// 4718592`, and the whole tensor spans `6144 * 1152 = 7077888` bytes --
-/// every one an exact multiple of `144` (`1152 / 144 = 8` blocks per row).
-///
-/// # Errors
-///
-/// [`InteropError::UnknownTensor`] if the fused tensor is absent;
-/// [`InteropError::ShortConvInProjShapeMismatch`] if its element count is
-/// not exactly `3 * embedding * embedding`;
-/// [`InteropError::ShortConvInProjNotBlockAligned`] if `embedding` is not a
-/// whole multiple of the tensor's own codec `block_elements` (never
-/// observed on the real checkpoint, but not assumed away either);
-/// [`InteropError::UnrepresentableGgmlType`] for any `GgmlType` besides
-/// `F32`/`Q4_K`/`Q5_K`/`Q6_K`.
-pub(crate) fn bind_lfm2_shortconv_in_proj<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    layer: u32,
-    embedding: u32,
-    state: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
-    let name = format!("blk.{layer}.shortconv.in_proj.weight");
-    let tensor = find_tensor(parsed, &name)?;
-    let elements = tensor.element_count();
-    let expected = 3u64 * u64::from(embedding) * u64::from(embedding);
-    if elements != expected {
-        return Err(InteropError::ShortConvInProjShapeMismatch {
-            layer,
-            elements,
-            embedding,
-            expected,
-        });
-    }
-
-    let layout = tensor.ggml_type.block_layout();
-    let elements_per_row = u64::from(embedding);
-    if layout.block_elements == 0 || !elements_per_row.is_multiple_of(layout.block_elements) {
-        return Err(InteropError::ShortConvInProjNotBlockAligned {
-            layer,
-            ggml_type: tensor.ggml_type,
-            embedding,
-        });
-    }
-
-    let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
-    let bytes = &file_bytes[range.start as usize..range.end as usize];
-    let bytes_per_row = (elements_per_row / layout.block_elements) * layout.block_bytes;
-    let chunk_bytes = (u64::from(embedding) * bytes_per_row) as usize;
-
-    let (b_bytes, rest) = bytes.split_at(chunk_bytes);
-    let (c_bytes, x_bytes) = rest.split_at(chunk_bytes);
-
-    for (suffix, chunk) in [("b", b_bytes), ("c", c_bytes), ("x", x_bytes)] {
-        let chunk_name = format!("{name}.{suffix}");
-        match tensor.ggml_type {
-            GgmlType::F32 => match aligned_f32_view(chunk) {
-                Some(view) => state
-                    .packed
-                    .push((chunk_name, QuantizedBlock::Float32(view))),
-                None => {
-                    let owned = reinterpret_f32(chunk);
-                    state.resident_bytes += owned.len() * core::mem::size_of::<f32>();
-                    state.owned.push((chunk_name, owned));
-                }
-            },
-            GgmlType::Q4_K => state.packed.push((chunk_name, QuantizedBlock::Packed { codec: Codec::Q4K, bytes: chunk })),
-            GgmlType::Q5_K => state.packed.push((chunk_name, QuantizedBlock::Packed { codec: Codec::Q5K, bytes: chunk })),
-            GgmlType::Q6_K => state.packed.push((chunk_name, QuantizedBlock::Packed { codec: Codec::Q6K, bytes: chunk })),
-            other => {
-                return Err(InteropError::UnrepresentableGgmlType {
-                    tensor: name,
-                    ggml_type: other,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Runs [`crate::bind::bind_dense`]/[`bind_matmul_weight`]/
-/// [`bind_lfm2_shortconv_in_proj`] over every one of `architecture`'s
-/// `block_count` layers -- [`crate::bind::bind_all_weights`]'s
-/// hybrid-checkpoint counterpart. Two real-checkpoint naming quirks this
-/// function papers over at bind time rather than in
-/// [`lfm2_forward_program_with_experts`] itself (that program's own `Input`
-/// names, `output_norm.weight`/`output.weight`, match every OTHER
-/// checkpoint this crate has bound): this checkpoint ties its output
-/// projection to `token_embd.weight` (no separate `output.weight` tensor
-/// exists on disk) and names its final norm `token_embd_norm.weight` (no
-/// `output_norm.weight` tensor exists either) -- confirmed via `strings` on
-/// the real file, neither name present. [`bind_dense_as`]/
-/// [`bind_matmul_weight_as`] bind the real on-disk tensor under the
-/// program's expected alias, the same "the binder papers over a naming
-/// difference, the program never learns about it" shape
-/// [`bind_lfm2_shortconv_in_proj`] itself uses.
-///
-/// # Errors
-///
-/// Whatever [`crate::bind::bind_dense`]/[`bind_matmul_weight`]/
-/// [`bind_lfm2_shortconv_in_proj`]/[`bind_moe_expert_weights`] can fail
-/// with.
-pub(crate) fn bind_lfm2_weights<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    architecture: &Lfm2Architecture,
-) -> Result<BoundWeights<'file>, InteropError> {
-    let mut state = BoundWeights {
-        resident_bytes: file_bytes.len(),
-        owned: Vec::new(),
-        packed: Vec::new(),
-        packed_owned: Vec::new(),
-        precision: &[],
-    };
-
-    let embedding = architecture.embedding as usize;
-    let feed_forward = architecture.feed_forward as usize;
-    let expert_feed_forward = architecture.expert_feed_forward as usize;
-    let vocab = architecture.vocab as usize;
-    let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
-
-    bind_dense_as(
-        parsed,
-        file_bytes,
-        "token_embd.weight",
-        "token_embd.weight".into(),
-        &mut state,
-    )?;
-
-    for (layer, kind) in architecture.layer_kinds.iter().enumerate() {
-        let layer = layer as u32;
-        bind_dense_as(
-            parsed,
-            file_bytes,
-            &format!("blk.{layer}.attn_norm.weight"),
-            format!("blk.{layer}.attn_norm.weight"),
-            &mut state,
-        )?;
-        bind_dense_as(
-            parsed,
-            file_bytes,
-            &format!("blk.{layer}.ffn_norm.weight"),
-            format!("blk.{layer}.ffn_norm.weight"),
-            &mut state,
-        )?;
-
-        match kind {
-            LayerKind::Attention => {
-                bind_matmul_weight(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_q.weight"),
-                    embedding,
-                    embedding,
-                    &mut state,
-                )?;
-                bind_matmul_weight(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_k.weight"),
-                    kv_dim,
-                    embedding,
-                    &mut state,
-                )?;
-                bind_matmul_weight(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_v.weight"),
-                    kv_dim,
-                    embedding,
-                    &mut state,
-                )?;
-                bind_matmul_weight(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.attn_output.weight"),
-                    embedding,
-                    embedding,
-                    &mut state,
-                )?;
-                bind_dense_as(
-                    parsed,
-                    file_bytes,
-                    &format!("blk.{layer}.attn_q_norm.weight"),
-                    format!("blk.{layer}.attn_q_norm.weight"),
-                    &mut state,
-                )?;
-                bind_dense_as(
-                    parsed,
-                    file_bytes,
-                    &format!("blk.{layer}.attn_k_norm.weight"),
-                    format!("blk.{layer}.attn_k_norm.weight"),
-                    &mut state,
-                )?;
-            }
-            LayerKind::ShortConv => {
-                bind_lfm2_shortconv_in_proj(
-                    parsed,
-                    file_bytes,
-                    layer,
-                    architecture.embedding,
-                    &mut state,
-                )?;
-                bind_dense_as(
-                    parsed,
-                    file_bytes,
-                    &format!("blk.{layer}.shortconv.conv.weight"),
-                    format!("blk.{layer}.shortconv.conv.weight"),
-                    &mut state,
-                )?;
-                bind_matmul_weight(
-                    parsed,
-                    file_bytes,
-                    format!("blk.{layer}.shortconv.out_proj.weight"),
-                    embedding,
-                    embedding,
-                    &mut state,
-                )?;
-            }
-        }
-
-        if layer < architecture.leading_dense_block_count {
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.ffn_gate.weight"),
-                feed_forward,
-                embedding,
-                &mut state,
-            )?;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.ffn_up.weight"),
-                feed_forward,
-                embedding,
-                &mut state,
-            )?;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.ffn_down.weight"),
-                embedding,
-                feed_forward,
-                &mut state,
-            )?;
-        } else {
-            let expert_count = architecture.expert_count;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.ffn_gate_inp.weight"),
-                expert_count as usize,
-                embedding,
-                &mut state,
-            )?;
-            for (projection, out_dim, in_dim) in [
-                ("ffn_gate", expert_feed_forward, embedding),
-                ("ffn_up", expert_feed_forward, embedding),
-                ("ffn_down", embedding, expert_feed_forward),
-            ] {
-                bind_moe_expert_weights(
-                    parsed,
-                    file_bytes,
-                    layer,
-                    projection,
-                    expert_count,
-                    out_dim,
-                    in_dim,
-                    &mut state,
-                )?;
-            }
-            bind_dense_as(
-                parsed,
-                file_bytes,
-                &format!("blk.{layer}.exp_probs_b.bias"),
-                format!("blk.{layer}.exp_probs_b.bias"),
-                &mut state,
-            )?;
-        }
-    }
-
-    bind_dense_as(
-        parsed,
-        file_bytes,
-        "token_embd_norm.weight",
-        "output_norm.weight".into(),
-        &mut state,
-    )?;
-    bind_matmul_weight_as(
-        parsed,
-        file_bytes,
-        "token_embd.weight",
-        "output.weight".into(),
-        vocab,
-        embedding,
-        &mut state,
-    )?;
-    Ok(state)
-}
-
 /// One call's worth of position-dependent `Input`s
 /// [`lfm2_forward_program_with_experts`] needs beyond the model weights --
 /// [`crate::generate::PositionInputs`]'s prefill-only, always-starts-at-0
@@ -638,29 +302,15 @@ pub fn uniform_lfm2_schedule(architecture: &Lfm2Architecture) -> Vec<LayerSchedu
         .collect()
 }
 
-/// Binds `architecture`'s weights, builds
-/// [`lfm2_forward_program_with_experts`] once, then greedily generates up
-/// to `max_new_tokens` tokens -- one full re-prefill of the growing
-/// sequence per step, since this program's own scope is prefill-only (no
-/// key/value or convolution-state cache to carry a `new_count == 1` step
-/// against; see [`lfm2_forward_program_with_experts`]'s own doc). Stops
-/// early on the vocab's own `eos_token_id`, matching every other decode
-/// loop in this crate.
-///
-/// # Errors
-///
-/// Whatever `bind_lfm2_weights`, [`lfm2_forward_program_with_experts`],
-/// tokenizing `prompt`, or evaluating the program can fail with.
-#[allow(clippy::too_many_arguments)]
-pub fn run_lfm2_prefill(
+/// [`lfm2_forward_program_with_experts`] over `architecture`'s uniform
+/// schedule, with the weights its `Input` leaves name bound from `parsed`
+/// ([`bind_program_leaves`]) -- lowering first, so the program decides what
+/// binds.
+fn lower_and_bind<'file>(
     parsed: &ParsedGguf,
-    file_bytes: &[u8],
+    file_bytes: &'file [u8],
     architecture: &Lfm2Architecture,
-    vocab: &Vocab,
-    prompt: &str,
-    max_new_tokens: usize,
-) -> Result<(Vec<u32>, String), InteropError> {
-    let weights = bind_lfm2_weights(parsed, file_bytes, architecture)?;
+) -> Result<(Vec<Op>, NodeId, BoundWeights<'file>), InteropError> {
     let (program, logits_root, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
@@ -678,6 +328,39 @@ pub fn run_lfm2_prefill(
         false,
         None,
     )?;
+    let weights = bind_program_leaves(
+        parsed,
+        file_bytes,
+        &program,
+        &binding_profile(metadata_str(parsed, "general.architecture")?)?,
+        &[],
+    )?;
+    Ok((program, logits_root, weights))
+}
+
+/// Binds `architecture`'s weights, builds
+/// [`lfm2_forward_program_with_experts`] once, then greedily generates up
+/// to `max_new_tokens` tokens -- one full re-prefill of the growing
+/// sequence per step, since this program's own scope is prefill-only (no
+/// key/value or convolution-state cache to carry a `new_count == 1` step
+/// against; see [`lfm2_forward_program_with_experts`]'s own doc). Stops
+/// early on the vocab's own `eos_token_id`, matching every other decode
+/// loop in this crate.
+///
+/// # Errors
+///
+/// Whatever [`lower_and_bind`], [`lfm2_forward_program_with_experts`],
+/// tokenizing `prompt`, or evaluating the program can fail with.
+#[allow(clippy::too_many_arguments)]
+pub fn run_lfm2_prefill(
+    parsed: &ParsedGguf,
+    file_bytes: &[u8],
+    architecture: &Lfm2Architecture,
+    vocab: &Vocab,
+    prompt: &str,
+    max_new_tokens: usize,
+) -> Result<(Vec<u32>, String), InteropError> {
+    let (program, logits_root, weights) = lower_and_bind(parsed, file_bytes, architecture)?;
 
     let mut ids = proxima_tokenizer::encode_with_bos_eos(
         prompt,
@@ -761,7 +444,7 @@ pub fn run_lfm2_prefill(
 ///
 /// # Errors
 ///
-/// Whatever `bind_lfm2_weights`/[`lfm2_forward_program_with_experts`]/
+/// Whatever [`lower_and_bind`]/[`lfm2_forward_program_with_experts`]/
 /// evaluating the program can fail with, plus
 /// [`InteropError::MissingEvaluatedNode`] if the evaluator's output is
 /// missing the logits root or one of `extra_node_ids` -- an
@@ -774,24 +457,7 @@ pub fn lfm2_forward_values(
     ids: &[u32],
     extra_node_ids: &[NodeId],
 ) -> Result<(Vec<f32>, Vec<Vec<f32>>), InteropError> {
-    let weights = bind_lfm2_weights(parsed, file_bytes, architecture)?;
-    let (program, logits_root, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
-        architecture.vocab,
-        architecture.embedding,
-        architecture.feed_forward,
-        architecture.expert_feed_forward,
-        architecture.query_heads,
-        architecture.block_count,
-        architecture.expert_count,
-        architecture.expert_used_count,
-        architecture.leading_dense_block_count,
-        architecture.l_cache,
-        &uniform_lfm2_schedule(architecture),
-        None,
-        None,
-        false,
-        None,
-    )?;
+    let (program, logits_root, weights) = lower_and_bind(parsed, file_bytes, architecture)?;
 
     let inputs = build_lfm2_position_inputs(
         ids,
@@ -850,188 +516,8 @@ pub fn lfm2_forward_values(
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use proxima_gguf::quant::q4_k;
-    use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
-
     use super::*;
     use crate::error::InteropError;
-
-    fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_DIMS }> {
-        values.iter().copied().collect()
-    }
-
-    /// One real Q4_K-quantized fused `in_proj` tensor, `embedding = 256`
-    /// (exactly one `Q4_K` super-block per row, `QK_K = 256`): row `r`'s
-    /// 256 elements are all `r as f32`, so a correct `B`/`C`/`x` row split
-    /// reconstructs row ranges `0..256`, `256..512`, `512..768`
-    /// respectively -- an off-by-one-chunk split would instead reconstruct
-    /// an adjacent, distinguishable range.
-    fn quantized_fused_in_proj(embedding: u32) -> (ParsedGguf, Vec<u8>) {
-        let rows = 3 * embedding as usize;
-        let mut flat = vec![0.0f32; rows * embedding as usize];
-        for row in 0..rows {
-            let value = row as f32;
-            flat[row * embedding as usize..(row + 1) * embedding as usize].fill(value);
-        }
-        let block_count = (rows * embedding as usize) / q4_k::QK_K;
-        let mut quantized = vec![0u8; block_count * q4_k::BLOCK_BYTES];
-        q4_k::quantize(&flat, &mut quantized).expect("quantize a real constant-per-row matrix");
-
-        let model = GgufModel {
-            version: 3,
-            metadata: alloc::vec![(
-                "general.architecture".to_string(),
-                proxima_gguf::value::MetadataValue::String("lfm2moe".to_string())
-            )],
-            tensors: alloc::vec![TensorPayload {
-                name: "blk.0.shortconv.in_proj.weight".to_string(),
-                dims: dims(&[u64::from(embedding), 3 * u64::from(embedding)]),
-                ggml_type: WireType::Q4_K,
-                data: quantized.as_slice(),
-            }],
-        };
-        let file_bytes = write_complete(&model).expect("writes a real gguf file");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses it back");
-        (parsed, file_bytes)
-    }
-
-    fn dequantize_chunk(chunk: &QuantizedBlock, elements: usize) -> Vec<f32> {
-        match chunk {
-            QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => {
-                let mut output = vec![0.0f32; elements];
-                q4_k::dequantize(bytes, &mut output).expect("dequantize a split chunk");
-                output
-            }
-            other => panic!("expected a Q4K chunk, got {other:?}"),
-        }
-    }
-
-    /// The real split, proved against real quantized bytes: each of
-    /// `b`/`c`/`x` dequantizes to its own contiguous, distinguishable row
-    /// range of the source matrix (`0..256`, `256..512`, `512..768`) --
-    /// never a mid-range mix, which an off-by-one row count or a
-    /// mid-block byte offset would produce instead.
-    #[test]
-    fn splits_a_real_q4_k_in_proj_into_its_three_row_ranges() {
-        let embedding = 256u32;
-        let (parsed, file_bytes) = quantized_fused_in_proj(embedding);
-        let mut state = BoundWeights {
-            resident_bytes: 0,
-            owned: Vec::new(),
-            packed: Vec::new(),
-            packed_owned: Vec::new(),
-            precision: &[],
-        };
-
-        bind_lfm2_shortconv_in_proj(&parsed, &file_bytes, 0, embedding, &mut state)
-            .expect("split a real q4_k in_proj");
-
-        assert_eq!(
-            state.packed.len(),
-            3,
-            "b/c/x each bind packed for a Q4_K source"
-        );
-        let elements = embedding as usize * embedding as usize;
-
-        let (b_name, b_block) = &state.packed[0];
-        let (c_name, c_block) = &state.packed[1];
-        let (x_name, x_block) = &state.packed[2];
-        assert_eq!(b_name, "blk.0.shortconv.in_proj.weight.b");
-        assert_eq!(c_name, "blk.0.shortconv.in_proj.weight.c");
-        assert_eq!(x_name, "blk.0.shortconv.in_proj.weight.x");
-
-        let b_values = dequantize_chunk(b_block, elements);
-        let c_values = dequantize_chunk(c_block, elements);
-        let x_values = dequantize_chunk(x_block, elements);
-
-        for row in 0..embedding as usize {
-            let b_row = &b_values[row * embedding as usize..(row + 1) * embedding as usize];
-            let c_row = &c_values[row * embedding as usize..(row + 1) * embedding as usize];
-            let x_row = &x_values[row * embedding as usize..(row + 1) * embedding as usize];
-            for &value in b_row {
-                assert!(
-                    (value - row as f32).abs() < 0.5,
-                    "b row {row} reconstructed {value}, want ~{row}"
-                );
-            }
-            for &value in c_row {
-                let expected = (embedding as usize + row) as f32;
-                assert!(
-                    (value - expected).abs() < 0.5,
-                    "c row {row} reconstructed {value}, want ~{expected}"
-                );
-            }
-            for &value in x_row {
-                let expected = (2 * embedding as usize + row) as f32;
-                assert!(
-                    (value - expected).abs() < 0.5,
-                    "x row {row} reconstructed {value}, want ~{expected}"
-                );
-            }
-        }
-    }
-
-    /// The block-boundary arithmetic this split relies on, stated as
-    /// assertions rather than prose: `Q4_K`'s `256`-element super-block
-    /// never spans two rows of a `2048`-wide real checkpoint row (`8`
-    /// whole blocks per row), so every chunk boundary this function
-    /// computes lands on an exact multiple of `block_bytes`.
-    #[test]
-    fn real_checkpoint_row_width_is_a_whole_number_of_q4_k_blocks() {
-        let embedding = 2048u64;
-        assert_eq!(
-            embedding % q4_k::QK_K as u64,
-            0,
-            "2048 must be a whole multiple of Q4_K's 256-element block"
-        );
-        let blocks_per_row = embedding / q4_k::QK_K as u64;
-        assert_eq!(blocks_per_row, 8);
-        let bytes_per_row = blocks_per_row * q4_k::BLOCK_BYTES as u64;
-        assert_eq!(bytes_per_row, 1152, "8 blocks * 144 bytes/block");
-        assert_eq!(
-            embedding * bytes_per_row,
-            2_359_296,
-            "the b/c boundary, an exact multiple of 144"
-        );
-        assert_eq!(
-            2 * embedding * bytes_per_row,
-            4_718_592,
-            "the c/x boundary, an exact multiple of 144"
-        );
-        assert_eq!(
-            3 * embedding * bytes_per_row,
-            7_077_888,
-            "the whole tensor, an exact multiple of 144"
-        );
-    }
-
-    /// The defect this shape-check exists to catch: a fused tensor whose
-    /// element count disagrees with `3 * embedding * embedding` (a
-    /// malformed file, or a caller passing the wrong `embedding`) must
-    /// surface as a typed error, never a silent wrong split or a slice
-    /// panic.
-    #[test]
-    fn shape_mismatch_is_a_typed_error_not_a_panic() {
-        let embedding = 256u32;
-        let (parsed, file_bytes) = quantized_fused_in_proj(embedding);
-        let mut state = BoundWeights {
-            resident_bytes: 0,
-            owned: Vec::new(),
-            packed: Vec::new(),
-            packed_owned: Vec::new(),
-            precision: &[],
-        };
-
-        let outcome =
-            bind_lfm2_shortconv_in_proj(&parsed, &file_bytes, 0, embedding + 1, &mut state);
-        assert!(
-            matches!(
-                outcome,
-                Err(InteropError::ShortConvInProjShapeMismatch { .. })
-            ),
-            "wrong embedding must be a named shape-mismatch error, got {outcome:?}"
-        );
-    }
 
     /// [`nonzero_uniform_u32_array`]'s own contract, proved directly: zero
     /// entries (convolution layers) are skipped, and every real, nonzero
