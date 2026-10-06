@@ -1,0 +1,10 @@
+/Users/brianbruggeman/.ollama/models/blobs/sha256-797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662 general.architecture=String("bert")
+/Users/brianbruggeman/.ollama/models/blobs/sha256-797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662 bert.block_count=U32(6)
+/Users/brianbruggeman/.ollama/models/blobs/sha256-797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662 bert.attention.causal=Bool(false)
+/Users/brianbruggeman/.ollama/models/blobs/sha256-797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662 bert.pooling_type=U32(1)
+/Users/brianbruggeman/.ollama/models/blobs/sha256-797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662 heads=["token_embd.weight", "position_embd.weight", "token_types.weight", "token_embd_norm.weight", "token_embd_norm.bias"]
+/Users/brianbruggeman/.ollama/models/blobs/sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6 general.architecture=String("nomic-bert")
+/Users/brianbruggeman/.ollama/models/blobs/sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6 nomic-bert.block_count=U32(12)
+/Users/brianbruggeman/.ollama/models/blobs/sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6 nomic-bert.attention.causal=Bool(false)
+/Users/brianbruggeman/.ollama/models/blobs/sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6 nomic-bert.pooling_type=U32(1)
+/Users/brianbruggeman/.ollama/models/blobs/sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6 heads=["token_embd_norm.bias", "token_embd_norm.weight", "token_types.weight", "token_embd.weight"]

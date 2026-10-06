@@ -1,0 +1,7 @@
+18:19  up 6 days,  4:23, 5 users, load averages: 3.99 3.58 4.20
+ %CPU of the five busiest processes at launch (names omitted)
+70.6
+25.1
+21.4
+14.5
+13.0
