@@ -23,6 +23,7 @@ webpki-roots = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+rustls-platform-verifier = { version = "0.7.1", optional = true }
 
 [dev-dependencies]
 # `tokio` alongside `test-support`: the connector tests bind a
@@ -83,7 +84,12 @@ futures-io = [
     "dep:bon",
     "dep:conflaguration",
     "dep:serde",
+    "dep:rustls-platform-verifier",
 ]
+rustls-platform-verifier = ["dep:rustls-platform-verifier"]
 
 [lints]
 workspace = true
+
+[target."cfg(windows)".dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography"] }
