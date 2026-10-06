@@ -1,10 +1,10 @@
 //! `#[ignore]`d, real-blob probes for the `gemma4` architecture handler:
-//! does the BUILTIN registry (`ArchitectureRegistry::with_builtin`) route a
-//! real `gemma4` checkpoint to its own entry, does `gemma4::from_metadata`
+//! does the family profile a real `gemma4` checkpoint's
+//! `general.architecture` keys name the sliding-pattern header reader, does `gemma4::from_metadata`
 //! preserve the header's per-layer KV-head and sliding-window-pattern
 //! arrays, and does the header declare the tensor count the checkpoint's own
 //! tensor directory holds. Header-only, same contract as
-//! `real_qwen35moe_registry_probe.rs`: `parse_complete` reads the directory
+//! `real_qwen35moe_header_probe.rs`: `parse_complete` reads the directory
 //! while the mapping stays demand-paged, and nothing here forces the
 //! multi-GB expert payload resident.
 //!
@@ -39,8 +39,10 @@
 use std::fs::File;
 
 use proxima_gguf::parse_complete;
-use proxima_model_interop::ArchitectureRegistry;
+use proxima_model_interop::metadata_str;
+use proxima_model_interop::profiles::family_profile;
 use proxima_model_interop::gemma4::from_metadata;
+use proxima_tensor::spec::ScheduleSource;
 
 /// `batiai/gemma4-26b:latest` manifest's own model layer digest -- see this
 /// module's own doc for the manifest path and byte count.
@@ -81,16 +83,17 @@ fn parse_real_blob(path: &str) -> (memmap2::Mmap, proxima_gguf::pipe::ParsedGguf
 /// blob is absent; never silently routes to a different `gemma4` variant.
 #[proxima::test]
 #[ignore = "requires the real, local gemma4 26B-A4B MoE GGUF blob (batiai/gemma4-26b:latest); set PROXIMA_GEMMA4_GGUF"]
-async fn builtin_registry_routes_real_gemma4_header_with_its_tensor_count() {
+async fn family_profile_routes_real_gemma4_header_with_its_tensor_count() {
     let path = gemma4_moe_gguf_path();
     require_fixture(&path, "PROXIMA_GEMMA4_GGUF");
     let (_mapping, parsed) = parse_real_blob(&path);
 
-    let registry = ArchitectureRegistry::with_builtin();
-    let route = registry
-        .resolve(&parsed)
-        .expect("builtin registry resolves the real gemma4 header");
-    assert_eq!(route.name(), "gemma4", "gemma4 must not fall back to dense");
+    let family = metadata_str(&parsed, "general.architecture").expect("the real header names its family");
+    assert_eq!(
+        family_profile(family).expect("the gemma4 profile is embedded").schedule_source,
+        ScheduleSource::SlidingPattern,
+        "gemma4 must read through the sliding-pattern header reader, not the uniform one"
+    );
 
     let architecture =
         from_metadata(&parsed).expect("gemma4 hparams parse from the real checkpoint header");
@@ -139,26 +142,23 @@ async fn builtin_registry_routes_real_gemma4_header_with_its_tensor_count() {
 
 /// The dense, matformer-style E2B checkpoint (`library/gemma4:e2b-it-qat`)
 /// -- present on this host even when the MoE 26B-A4B blob above is not.
-/// Same assertion shape as the MoE test: registry routing, every header
+/// Same assertion shape as the MoE test: profile routing, every header
 /// field `gemma4::from_metadata` derives, and the tensor count -- with
 /// values read from this checkpoint's own real GGUF header (dumped via a
 /// throwaway instrumented run of this same parse path; see this test's own
 /// assertions below for the values that run captured).
 #[proxima::test]
 #[ignore = "requires the real, local gemma4 E2B dense GGUF blob (library/gemma4:e2b-it-qat); set PROXIMA_GEMMA4_E2B_GGUF"]
-async fn builtin_registry_routes_real_gemma4_e2b_dense_header() {
+async fn family_profile_routes_real_gemma4_e2b_dense_header() {
     let path = gemma4_e2b_gguf_path();
     require_fixture(&path, "PROXIMA_GEMMA4_E2B_GGUF");
     let (_mapping, parsed) = parse_real_blob(&path);
 
-    let registry = ArchitectureRegistry::with_builtin();
-    let route = registry
-        .resolve(&parsed)
-        .expect("builtin registry resolves the real gemma4 E2B header");
+    let family = metadata_str(&parsed, "general.architecture").expect("the real E2B header names its family");
     assert_eq!(
-        route.name(),
-        "gemma4",
-        "the dense E2B checkpoint is still general.architecture = gemma4, not a separate route"
+        family_profile(family).expect("the gemma4 profile is embedded").schedule_source,
+        ScheduleSource::SlidingPattern,
+        "the dense E2B checkpoint is still general.architecture = gemma4, not a separate profile"
     );
 
     let architecture =

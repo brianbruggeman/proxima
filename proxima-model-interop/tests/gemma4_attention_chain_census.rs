@@ -52,7 +52,7 @@ use std::io::Write;
 use memmap2::Mmap;
 use omega::PackedOperands;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{Architecture, GEMMA4, bind_symbols};
+use proxima_model_interop::{bind_checkpoint, bind_symbols};
 use proxima_tensor::bind::{BoundOp, BoundOpKind};
 use proxima_tensor::spec::Qwen35LayerRoots;
 use proxima_tensor::{NodeId, NumericPolicy, Op, bind_with_fusion, infer, prune_dead};
@@ -337,8 +337,7 @@ async fn gemma4_attention_chain_census() {
     // `Gemma4Arch` impl, `last_row_only: true`
     // (`gemma4/bind.rs:1071-1078`) -- byte-for-byte the program
     // `LoadedModel::load`'s registry path binds for real decode.
-    let bound_program = GEMMA4
-        .bind(&parsed, bytes)
+    let bound_program = bind_checkpoint(&parsed, bytes)
         .expect("bind the real gemma4-E2B checkpoint's production decode program");
 
     let named = named_input_nodes(&bound_program.program);

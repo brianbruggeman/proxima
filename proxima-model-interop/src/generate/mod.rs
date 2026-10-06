@@ -80,7 +80,7 @@ use proxima_tensor::cpu::{
 use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
-use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape};
+use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, Qwen35LayerRoots, ScheduleSource, build_forward, mistral_descriptor_from_shape};
 use proxima_tokenizer::{SamplingConfig, TokenType, Vocab, sample_next_token};
 use std::cell::RefCell;
 use std::fs::File;
@@ -183,14 +183,16 @@ use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
-use crate::architecture::{Architecture, KvLayout, StepInput, StepInputContext, bind_symbols};
-use crate::bind::{
-    BoundWeights, Codec, ModelArchitecture, architecture_from_metadata,
+use crate::bind::{BoundWeights, Codec, ModelArchitecture, metadata_str};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use crate::lowering::KvCacheShape;
+use crate::lowering::{
+    FfnRouting, KvLayout, StepInput, bind_checkpoint_with_kv_layout, bind_symbols, rope_freq_factors,
+    sliding_rope_inputs,
 };
-use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;
-use crate::profiles::{binding_profile, family_profile};
+use crate::profiles::family_profile;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;

@@ -1426,9 +1426,7 @@ impl<'file> LoadedModel<'file> {
     /// derived these from the program (correct) while the one-shot forward
     /// path hard-coded `kv_cache.{layer}.{k_even,k_odd,v}` (wrong for any
     /// architecture, such as a partial-rotary attention layer, whose cache
-    /// leaves are named differently) -- see this crate's own
-    /// `StepInputArch`-style fixtures in `tests/` for the shape a foreign
-    /// architecture takes advantage of. Never trusts
+    /// leaves are named differently). Never trusts
     /// `self.layer_roots[layer]`'s own hand-kept discriminant over what the
     /// program actually declared (`DeclaredCacheKind`'s own doc).
     ///
@@ -1438,7 +1436,7 @@ impl<'file> LoadedModel<'file> {
     /// program leaves disagree with `self.layer_roots`' own tag for it.
     /// `self`, checked against [`Self::declared_layer_cache_names_and_widths`]
     /// and discarded if that check errors -- every production
-    /// [`Self::load`]/[`Self::load_with_registry`]/[`Self::load_from_safetensors`]
+    /// [`Self::load`]/[`Self::load_with_descriptor`]/[`Self::load_from_safetensors`]
     /// construction site runs through this before it ever reaches the
     /// decode loop, so a layer whose `layer_roots` say it is stateful but
     /// whose program bakes that state as constants fails here, at load,
@@ -1539,12 +1537,11 @@ impl<'file> LoadedModel<'file> {
     /// independently of what
     /// [`declared_layer_cache_names_and_widths`](Self::declared_layer_cache_names_and_widths)
     /// already decided. `layer_row_widths` (not
-    /// [`crate::architecture::Architecture::step_state`]) is the `Ssm` arm's
+    /// [`crate::lowering::step_state`]) is the `Ssm` arm's
     /// own size source -- see [`cache_leaf_total_elements`]'s own doc for
-    /// why: a foreign `Architecture` that never overrides `step_state`
-    /// (the trait's own `Ok(None)` default) still declares its
+    /// why: a family whose `step_state` is `None` still declares its
     /// `ssm_cache.{layer}.*` leaves as `Op::Input` ops, so the program
-    /// itself, not a per-architecture hook, is what every layer's initial
+    /// itself, not a per-family hook, is what every layer's initial
     /// cache is sized from.
     pub(super) fn fresh_layer_caches(
         &self,
@@ -1653,13 +1650,12 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// Pushes one step's position/RoPE inputs, `cached_len`/`lm_head_row`
-    /// scalars, [`Architecture::step_inputs`]' own per-step leaves, and
+    /// scalars, [`sliding_rope_inputs`]' per-step leaves, and
     /// every KV/SSM cache leaf ([`push_kv_named_blocks`]) into `named_blocks`
     /// -- the ONE assembly both
     /// [`Self::run_decode_loop_observed_seeded`] and
-    /// [`Self::forward_node_values_on_backend`] call, so a foreign
-    /// architecture's own [`Architecture::step_inputs`] override and its own
-    /// cache leaf names are fed identically whether the caller is decoding
+    /// [`Self::forward_node_values_on_backend`] call, so the
+    /// sliding-rope leaves and the cache leaf names are fed identically whether the caller is decoding
     /// token-by-token or tapping one interior node from a single forward
     /// pass. `position_inputs`/`cached_len_scalar`/`lm_head_row_scalar` are
     /// owned by the CALLER (not this method) so the `QuantizedBlock`s this
@@ -1673,7 +1669,7 @@ impl<'file> LoadedModel<'file> {
     ///
     /// # Errors
     ///
-    /// [`InteropError::UnknownStepInput`] if `Architecture::step_inputs`
+    /// [`InteropError::UnknownStepInput`] if [`sliding_rope_inputs`]
     /// names a leaf this checkpoint's program never declared, plus whatever
     /// [`push_kv_named_blocks`]/[`bind_symbols`] can fail with.
     #[allow(clippy::too_many_arguments)]
@@ -1683,7 +1679,6 @@ impl<'file> LoadedModel<'file> {
         cached_len_scalar: &'call [f32; 1],
         sliding_len_scalar: &'call [f32; 1],
         lm_head_row_scalar: &'call [f32; 1],
-        token_history: &[u32],
         new_start: usize,
         new_count: usize,
         cache_names: &'call [LayerCacheNames],
@@ -1723,15 +1718,7 @@ impl<'file> LoadedModel<'file> {
         ));
 
         step_input_scratch.clear();
-        if let Some(architecture_impl) = self.architecture_impl {
-            let step_context = StepInputContext {
-                all_token_ids: token_history,
-                new_start,
-                new_count,
-                architecture: &self.architecture,
-            };
-            architecture_impl.step_inputs(&step_context, step_input_scratch);
-        }
+        sliding_rope_inputs(&self.architecture, new_start, new_count, step_input_scratch);
         for step_input in step_input_scratch.iter() {
             if !self
                 .program
@@ -1755,7 +1742,7 @@ impl<'file> LoadedModel<'file> {
                 proxima_tensor::spec::SLIDING_CACHED_LEN_INPUT,
                 QuantizedBlock::Float32(sliding_len_scalar.as_slice()),
             ));
-            symbols[usize::from(crate::architecture::symbols::SLIDING_KV_BOUND)] =
+            symbols[usize::from(crate::lowering::symbols::SLIDING_KV_BOUND)] =
                 ring.bound_extent(kv_bound_extent) as u64;
         }
 
@@ -1880,15 +1867,10 @@ impl<'file> LoadedModel<'file> {
         &mut self,
         sidecar: crate::expert_sidecar::MappedExpertSidecar,
     ) -> Result<(), InteropError> {
-        if !self
-            .architecture_impl
-            .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed)
+        if self.ffn_routing != FfnRouting::Routed
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: self.architecture_impl.map_or_else(
-                    || String::from("unknown"),
-                    |value| String::from(value.name()),
-                ),
+                architecture: self.architecture.family.clone(),
                 reason: String::from("expert sidecars require a qwen35moe expert graph"),
             });
         }
@@ -2039,10 +2021,8 @@ impl<'file> LoadedModel<'file> {
             crate::qwen35moe::execution::GatherPhase<'_, Source>,
         ) -> Result<Output, InteropError>,
     {
-        let architecture = self.architecture_impl.map_or("unknown", Architecture::name);
-        if !self
-            .architecture_impl
-            .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed)
+        let architecture = self.architecture.family.as_str();
+        if self.ffn_routing != FfnRouting::Routed
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(architecture),
@@ -2444,21 +2424,18 @@ impl<'file> LoadedModel<'file> {
         Ok(effective_serving_config)
     }
 
-    /// Applies this checkpoint's own resolved
-    /// [`crate::architecture::Architecture::command_buffer_chunks`] as
+    /// Applies this checkpoint's own family-profile
+    /// [`proxima_tensor::spec::FamilyProfile::command_buffer_chunks`] as
     /// `serving_config.command_buffer_chunks`'s default -- only when the
     /// caller left that field at [`ServingConfig`]'s own type default of
-    /// `1`, never overriding an explicit non-default caller value. `self
-    /// .architecture_impl` is `None` for every non-registry load entry point
-    /// (`Self::architecture_impl`'s own doc), which leaves this a no-op:
-    /// every field this method could write is already `1`.
+    /// `1`, never overriding an explicit non-default caller value. A load
+    /// that resolves no family profile carries `1`, which leaves this a
+    /// no-op: every field this method could write is already `1`.
     pub(super) fn apply_command_buffer_chunks_default(&self, serving_config: &mut ServingConfig) {
         if serving_config.command_buffer_chunks != 1 {
             return;
         }
-        if let Some(architecture) = self.architecture_impl {
-            serving_config.command_buffer_chunks = architecture.command_buffer_chunks();
-        }
+        serving_config.command_buffer_chunks = self.command_buffer_chunks;
     }
 
     /// The rope scaling this call runs: `serving_config.rope_scaling` when
@@ -3080,9 +3057,7 @@ impl<'file> LoadedModel<'file> {
         qwen35moe_monolithic_all_low_enabled(
             qwen35moe_pre_gather_enabled(
                 serving_config.qwen35moe_pre_gather,
-                self.architecture_impl.is_some_and(|architecture| {
-                    architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
-                }),
+                self.ffn_routing == FfnRouting::Routed,
             ),
             runtime.uses_gpu(),
             serving_config.qwen35moe_monolithic_all_low,
@@ -3219,17 +3194,15 @@ impl<'file> LoadedModel<'file> {
         // The program's own declared `Op::Input` leaves are the single
         // source of truth for which cache shape each layer needs fed --
         // never `self.layer_roots[layer]`'s own discriminant, which a
-        // foreign `Architecture::bind` assembles by hand and can tag
-        // inconsistently with the ops it actually emitted (see
-        // `DeclaredCacheKind`'s own doc). The SAME derivation
-        // [`Self::forward_node_values_on_backend`] calls, so a foreign
-        // architecture's cache leaf names are never hard-coded twice.
+        // config-edited descriptor can tag inconsistently with the ops it
+        // actually emitted (see `DeclaredCacheKind`'s own doc). The SAME
+        // derivation [`Self::forward_node_values_on_backend`] calls, so
+        // cache leaf names are never hard-coded twice.
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         #[cfg(feature = "metal")]
         let qwen35_pre_gather_requested = qwen35moe_pre_gather_enabled(
             serving_config.qwen35moe_pre_gather,
-            self.architecture_impl
-                .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed),
+            self.ffn_routing == FfnRouting::Routed,
         );
         #[cfg(feature = "metal")]
         let monolithic_high_mmap_requested = qwen35_pre_gather_requested
@@ -3291,9 +3264,7 @@ impl<'file> LoadedModel<'file> {
         // KV roots are device-resident on Metal regardless of expert-residency
         // mode, so this gate is the architecture, never the pre-gather flag.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let qwen35moe_architecture = self
-            .architecture_impl
-            .is_some_and(|architecture| architecture.kv_cache_shape() == crate::architecture::KvCacheShape::Monolithic);
+        let qwen35moe_architecture = self.kv_cache_shape == KvCacheShape::Monolithic;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let dense_attention_placement_enabled = !monolithic_all_low_requested
             && qwen35_dense_attention_placement_enabled(
@@ -3404,9 +3375,7 @@ impl<'file> LoadedModel<'file> {
         // when the model owns a low-codec sidecar and the caller supplies a
         // high-precision residency budget.
         let residency_budget = serving_config.qwen35moe_residency_budget_bytes;
-        let mut qwen35moe_residency = if self
-            .architecture_impl
-            .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed)
+        let mut qwen35moe_residency = if self.ffn_routing == FfnRouting::Routed
             && self.expert_sidecar.is_some()
             && residency_budget > 0
         {
@@ -3495,8 +3464,8 @@ impl<'file> LoadedModel<'file> {
         let mut serving: Option<ServingState<u32, usize>> =
             Some(ServingState::start(ids.clone(), seed_cached_len));
         let vocab_size = self.architecture.vocab as usize;
-        // Reused across every step ([`Architecture::step_inputs`]'s own
-        // doc) -- cleared, never reallocated from scratch, at the top of
+        // Reused across every step ([`sliding_rope_inputs`]'s
+        // output) -- cleared, never reallocated from scratch, at the top of
         // each closure invocation below.
         let mut step_input_scratch: Vec<StepInput> = Vec::new();
         let gdn_prefill_names: Vec<String> = (0..self.architecture.block_count as usize)
@@ -3535,7 +3504,7 @@ impl<'file> LoadedModel<'file> {
         // `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
         // squeeze-reduce silently sums across positions for anything but a
         // literal `Extent::Static` axis. `self.qwen35moe_hparams`
-        // (`Self::load`'s registry bind site) is the seam meant to fix it:
+        // (`Self::load`'s bind site) is the seam meant to fix it:
         // `qwen35moe_forward_program_at_width` builds a SECOND program with
         // `s` pinned to `Extent::Static(prompt_token_count)`, which reaches
         // that same builder's M>1 branch instead. That branch is proven
@@ -3832,7 +3801,7 @@ impl<'file> LoadedModel<'file> {
                 // and `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
                 // squeeze-reduce silently sums across positions for
                 // anything but a literal `Extent::Static` axis. `self.qwen35moe_hparams`
-                // (`Self::load`'s registry bind site) is the seam that
+                // (`Self::load`'s bind site) is the seam that
                 // fixes it: `qwen35moe_forward_program_at_width` builds a
                 // SECOND program with `s` pinned to `Extent::Static(new_count)`,
                 // which reaches that same builder's M>1 branch instead
@@ -3963,9 +3932,7 @@ impl<'file> LoadedModel<'file> {
                         self.architecture.head_dim,
                         self.architecture.rope_freq_base,
                         self.architecture.rms_epsilon,
-                        self.architecture_impl
-                            .as_ref()
-                            .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
+                        rope_freq_factors(&self.weights),
                         self.effective_rope_scaling(serving_config),
                     );
                     #[cfg(feature = "instrument")]
@@ -4061,9 +4028,8 @@ impl<'file> LoadedModel<'file> {
                     // `recent_tokens`'s repeat-penalty slice below relies on).
                     // The SAME assembly [`Self::forward_node_values_on_backend`]
                     // calls -- position/RoPE inputs, `cached_len`/`lm_head_row`,
-                    // `Architecture::step_inputs`' own leaves, and every KV/SSM
-                    // cache leaf -- so a foreign architecture's own leaf names
-                    // are fed identically whether decoding or tapping one node.
+                    // `sliding_rope_inputs`' leaves, and every KV/SSM
+                    // cache leaf -- so the leaf names are fed identically whether decoding or tapping one node.
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if !device_kv_attempted
                         && device_kv_eligible
@@ -4119,7 +4085,6 @@ impl<'file> LoadedModel<'file> {
                         &cached_len_scalar,
                         &sliding_len_scalar,
                         &lm_head_row_scalar,
-                        &token_history,
                         cached_len,
                         new_count,
                         &cache_names,
@@ -4234,9 +4199,7 @@ impl<'file> LoadedModel<'file> {
                         Vec::with_capacity(1 + active_layer_roots.len() * 3);
                     let monolithic_prefill_requested = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
-                        self.architecture_impl.is_some_and(|architecture| {
-                            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
-                        }),
+                        self.ffn_routing == FfnRouting::Routed,
                     ) && runtime.uses_gpu()
                         && step == 0
                         && serving_config.qwen35moe_monolithic_all_low;
@@ -4251,7 +4214,7 @@ impl<'file> LoadedModel<'file> {
                     // chains when the same env var is set at build time
                     // (`append_head`'s own doc), and returns their real
                     // `NodeId`s as `duplicate_head_roots`
-                    // (`crate::architecture::BoundProgram::duplicate_head_roots`),
+                    // (`crate::lowering::BoundProgram::duplicate_head_roots`),
                     // threaded through `self.duplicate_head_roots` at load time --
                     // `NodeId(program.len() - offset)` is wrong for a chain (each
                     // duplicate head appends multiple ops, not one), so this reads
@@ -4512,10 +4475,7 @@ impl<'file> LoadedModel<'file> {
                             missing_program_input(active_program, &named_blocks).filter(|name| {
                                 !(qwen35moe_pre_gather_enabled(
                                     serving_config.qwen35moe_pre_gather,
-                                    self.architecture_impl.is_some_and(|architecture| {
-                                        architecture.ffn_routing()
-                                            == crate::architecture::FfnRouting::Routed
-                                    }),
+                                    self.ffn_routing == FfnRouting::Routed,
                                 ) && (name.contains("_exps.weight")
                                     || name.starts_with("gdn_prefill.")))
                             })
@@ -4632,9 +4592,7 @@ impl<'file> LoadedModel<'file> {
                     // reachable only in `active_program`'s own numbering).
                     let pre_gather = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
-                        self.architecture_impl.is_some_and(|architecture| {
-                            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
-                        }),
+                        self.ffn_routing == FfnRouting::Routed,
                     ) && !monolithic_high_mmap_requested
                         && !one_evaluation_prefill;
                     #[cfg(feature = "metal")]
@@ -5611,7 +5569,7 @@ impl<'file> LoadedModel<'file> {
                     // first attention layer, 3-GDN-to-1-attention interleave) --
                     // paired with the AFTER checksum below to prove whether this
                     // step's cache append actually mutated either layer's state.
-                    // `.get` rather than a literal index: a foreign `Architecture`
+                    // `.get` rather than a literal index: a program
                     // with an empty `layer_roots` (no cache leaves at all) has an
                     // empty `layer_caches` too, and this diagnostic must degrade
                     // to "nothing to report" rather than index out of bounds.
@@ -5747,10 +5705,9 @@ impl<'file> LoadedModel<'file> {
                                 // `ssm_cache.{layer}.conv_history` shape, the
                                 // SAME source [`fresh_layer_caches`] sized this
                                 // cache's initial window from, never
-                                // `Architecture::step_state` (that hook's `None`
-                                // default is exactly the real-world defect this
-                                // read used to reproduce on a foreign
-                                // architecture).
+                                // `step_state` (whose `None` is exactly the
+                                // real-world defect this read used to
+                                // reproduce).
                                 let conv_history_len = match &layer_row_widths[layer] {
                                     LayerPadRowWidths::Ssm {
                                         conv_history_len, ..
@@ -6029,9 +5986,9 @@ impl<'file> LoadedModel<'file> {
                             },
                         )?;
                         // `logits_root` must be the `lm_head_row`-gathered LAST row
-                        // only (`crate::architecture`'s doc on `BoundProgram::logits_root`)
-                        // -- exactly one row of `vocab_size`. A foreign `Architecture`
-                        // that hands back the full `[new_count, vocab]` buffer is
+                        // only (`crate::lowering`'s doc on `BoundProgram::logits_root`)
+                        // -- exactly one row of `vocab_size`. A program that
+                        // hands back the full `[new_count, vocab]` buffer is
                         // rejected here rather than silently sampled at row 0.
                         #[cfg(feature = "instrument")]
                         let non_finite_count = if logits_diag_enabled {
@@ -6368,9 +6325,7 @@ impl<'file> LoadedModel<'file> {
                 let residency_boundary_requested = qwen35moe_residency.is_some()
                     && qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
-                        self.architecture_impl.is_some_and(|architecture| {
-                            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
-                        }),
+                        self.ffn_routing == FfnRouting::Routed,
                     )
                     && runtime.uses_gpu()
                     && !monolithic_high_mmap_requested;
@@ -6635,9 +6590,7 @@ impl<'file> LoadedModel<'file> {
                     self.architecture.head_dim,
                     self.architecture.rope_freq_base,
                     self.architecture.rms_epsilon,
-                    self.architecture_impl
-                        .as_ref()
-                        .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
+                    rope_freq_factors(&self.weights),
                     self.effective_rope_scaling(serving_config),
                 );
                 #[cfg(feature = "instrument")]
@@ -6950,9 +6903,9 @@ impl<'file> LoadedModel<'file> {
                     },
                 )?;
                 // `logits_root` must be the `lm_head_row`-gathered LAST row
-                // only (`crate::architecture`'s doc on `BoundProgram::logits_root`)
-                // -- exactly one row of `vocab_size`. A foreign `Architecture`
-                // that hands back the full `[new_count, vocab]` buffer is
+                // only (`crate::lowering`'s doc on `BoundProgram::logits_root`)
+                // -- exactly one row of `vocab_size`. A program that
+                // hands back the full `[new_count, vocab]` buffer is
                 // rejected here rather than silently sampled at row 0.
                 if logits.len() != vocab_size {
                     return Err(InteropError::LogitsShapeMismatch {
@@ -7184,18 +7137,16 @@ impl<'file> LoadedModel<'file> {
             self.architecture.head_dim,
             self.architecture.rope_freq_base,
             self.architecture.rms_epsilon,
-            self.architecture_impl
-                .as_ref()
-                .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
+            rope_freq_factors(&self.weights),
             self.effective_rope_scaling(&serving_config),
         );
 
         // The SAME program-derived cache-leaf-name/step_inputs assembly
         // `Self::run_decode_loop_observed_seeded` calls -- before this,
         // this method hard-coded `kv_cache.{layer}.{k_even,k_odd,v}` and
-        // never ran `Architecture::step_inputs` at all, so a foreign
-        // architecture with differently-named cache leaves (or a leaf only
-        // `step_inputs` feeds) surfaced `InteropError::UnboundInputName`
+        // never ran `sliding_rope_inputs` at all, so a program with
+        // differently-named cache leaves (or a leaf only
+        // `sliding_rope_inputs` feeds) surfaced `InteropError::UnboundInputName`
         // the moment a caller tapped an interior node here instead of
         // decoding. `cached_len: 0`, `new_start: 0`, `new_count:
         // ids.len()` -- this is always a one-shot forward from an empty
@@ -7255,7 +7206,6 @@ impl<'file> LoadedModel<'file> {
             &cached_len_scalar,
             &sliding_len_scalar,
             &lm_head_row_scalar,
-            &ids,
             0,
             ids.len(),
             &cache_names,
@@ -7282,9 +7232,7 @@ impl<'file> LoadedModel<'file> {
         // The qwen35moe diagnostic can request an interior routed node, so
         // keep it on the partition-isolated seam. Other one-shot forwards
         // retain the ordinary evaluator and its normal cache bookkeeping.
-        let evaluated = if self.architecture_impl.as_ref().is_some_and(|architecture| {
-            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
-        }) {
+        let evaluated = if self.ffn_routing == FfnRouting::Routed {
             runtime.evaluate_segment(
                 &self.program,
                 &symbols,
@@ -7386,8 +7334,8 @@ impl<'file> LoadedModel<'file> {
         let logits = values.remove(0);
         let vocab_size = self.architecture.vocab as usize;
         // `logits_root` must be the `lm_head_row`-gathered LAST row only
-        // (`crate::architecture`'s doc on `BoundProgram::logits_root`) --
-        // exactly one row of `vocab_size`. A foreign `Architecture` that
+        // (`crate::lowering`'s doc on `BoundProgram::logits_root`) --
+        // exactly one row of `vocab_size`. A program that
         // hands back the full `[new_count, vocab]` buffer is rejected here
         // rather than silently sampled at row 0.
         if logits.len() != vocab_size {

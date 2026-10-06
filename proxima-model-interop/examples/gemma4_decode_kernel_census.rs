@@ -1369,7 +1369,7 @@ mod real_program_names {
     use memmap2::Mmap;
     use omega::PackedOperands;
     use proxima_gguf::parse_complete;
-    use proxima_model_interop::{Architecture, GEMMA4, bind_symbols};
+    use proxima_model_interop::{bind_checkpoint, bind_symbols};
     use proxima_tensor::spec::Qwen35LayerRoots;
     use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
 
@@ -1395,8 +1395,7 @@ mod real_program_names {
         // SAFETY: read-only mapping of a checkpoint no other process writes.
         let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real checkpoint");
         let parsed = parse_complete(&mapping).expect("parse the real checkpoint header");
-        let bound_program = GEMMA4
-            .bind(&parsed, &mapping)
+        let bound_program = bind_checkpoint(&parsed, &mapping)
             .expect("bind gemma4 production program");
         let outputs = production_outputs(bound_program.logits_root, &bound_program.layer_roots);
         let symbols = bind_symbols(

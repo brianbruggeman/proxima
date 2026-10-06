@@ -11,7 +11,7 @@ use std::path::Path;
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::gemma4::program::gemma4_sliding_rope_table;
-use proxima_model_interop::{ArchitectureRegistry, KvLayout, StepInput, StepInputContext};
+use proxima_model_interop::{KvLayout, StepInput, bind_checkpoint_with_kv_layout, sliding_rope_inputs};
 
 const POSITIONS: usize = 1500;
 
@@ -50,22 +50,11 @@ fn assert_swa_rope_matches_oracle(name: &str, env: &str, path: &str) {
     let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
-    let route = ArchitectureRegistry::with_builtin()
-        .resolve(&parsed)
-        .expect("registry resolves the gemma4 checkpoint");
-    let bound = route
-        .bind_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+    let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .expect("binds the real checkpoint");
 
-    let token_ids = vec![0_u32; POSITIONS];
-    let context = StepInputContext {
-        all_token_ids: &token_ids,
-        new_start: 0,
-        new_count: POSITIONS,
-        architecture: &bound.architecture,
-    };
     let mut inputs: Vec<StepInput> = Vec::new();
-    route.step_inputs(&context, &mut inputs);
+    sliding_rope_inputs(&bound.architecture, 0, POSITIONS, &mut inputs);
 
     let positions: Vec<usize> = (0..POSITIONS).collect();
     let (expected_cos, expected_sin) =
@@ -73,11 +62,11 @@ fn assert_swa_rope_matches_oracle(name: &str, env: &str, path: &str) {
     let cos = inputs
         .iter()
         .find(|input| input.name == "rope_cos_swa")
-        .expect("step_inputs feeds rope_cos_swa");
+        .expect("sliding_rope_inputs feeds rope_cos_swa");
     let sin = inputs
         .iter()
         .find(|input| input.name == "rope_sin_swa")
-        .expect("step_inputs feeds rope_sin_swa");
+        .expect("sliding_rope_inputs feeds rope_sin_swa");
     assert_eq!(cos.values.len(), POSITIONS * dimension_count as usize / 2);
     assert_eq!(cos.values, expected_cos, "{name} cos table");
     assert_eq!(sin.values, expected_sin, "{name} sin table");

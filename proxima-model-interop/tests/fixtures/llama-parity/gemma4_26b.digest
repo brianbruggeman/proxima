@@ -1,6 +1,5 @@
 checkpoint=gemma4_26b
 architecture=gemma4
-registry_entry=gemma4
 kv_layout=SlidingRing
 bind.ops=13314
 bind.ops_sha256=16df0e6e9e7dca0a66dbe85da03a0d923078eeae673a26989d1fb4179d9be1ee

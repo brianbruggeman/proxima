@@ -1,6 +1,5 @@
 checkpoint=qwen35moe
 architecture=qwen35moe
-registry_entry=qwen35moe
 kv_layout=SlidingRing
 bind.ops=14982
 bind.ops_sha256=673ac8ff40188127fafd1cf7c8a99ad278d4aee1d5d01c4f8b70a1c940e0ee87

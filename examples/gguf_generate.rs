@@ -60,7 +60,6 @@ use conflaguration::Settings;
 use serde::{Deserialize, Serialize};
 
 use proxima_gguf::pipe::parse_complete;
-use proxima_model_interop::ArchitectureRegistry;
 use proxima_model_interop::GPU_LAYERS_ALL;
 use proxima_model_interop::GdnPrefillBackend;
 use proxima_model_interop::LoadedModel;
@@ -633,8 +632,7 @@ fn main() {
     }
 
     let load_started = Instant::now();
-    let registry = ArchitectureRegistry::with_builtin();
-    let mut model = match LoadedModel::load_with_registry(&parsed, file_bytes, &registry) {
+    let mut model = match LoadedModel::load(&parsed, file_bytes) {
         Ok(model) => model,
         Err(error) => {
             println!("WEIGHT LOAD FAILED: {error}");

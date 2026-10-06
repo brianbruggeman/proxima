@@ -3,8 +3,8 @@
 //! build itself: the sliding-window RoPE table's own values. Every other
 //! node this checkpoint needs (attention mixer, dense/routed FFN, per-layer
 //! norms, embedding scale, logit softcap) is now a config value
-//! `crate::gemma4::bind::Gemma4Arch::bind` hands that engine directly --
-//! see that module's own doc for the descriptor it builds. This file used to
+//! [`crate::gemma4::descriptor_from_gguf`] hands that engine directly --
+//! see that function's own doc for the descriptor it builds. This file used to
 //! hold a bespoke `gemma4_forward_program`/`gemma4_attention`/
 //! `gemma4_ffn_block` graph-building layer; that layer is deleted, not
 //! moved, now that the generic engine's `LayerAttentionConfig`/
@@ -14,14 +14,14 @@
 use alloc::vec::Vec;
 
 /// Builds the sliding-window layers' own RoPE `cos`/`sin` table --
-/// `crate::gemma4::bind::Gemma4Arch::step_inputs`'s own seam feeds this
+/// [`crate::lowering::sliding_rope_inputs`] feeds this
 /// into the `rope_cos_swa`/`rope_sin_swa` leaves
 /// [`proxima_tensor::spec::lfm2_forward_program_with_experts`] declares once
 /// a sliding layer's [`proxima_tensor::spec::RopeTableSel`] names them,
 /// since the FULL-layer table those leaves' own `rope_cos`/`rope_sin`
 /// siblings read comes from the decode loop's builtin per-position table at
 /// the checkpoint's own full-layer base/dimension instead
-/// (`Gemma4Arch::bind`'s own `ModelArchitecture::head_dim`/
+/// (the header reader's own `ModelArchitecture::head_dim`/
 /// `rope_freq_base`).
 #[must_use]
 pub fn gemma4_sliding_rope_table(

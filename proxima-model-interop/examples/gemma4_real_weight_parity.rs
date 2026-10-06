@@ -5,7 +5,7 @@
 //! the SAME real `token_embd.weight` (Q6_K) bytes directly with
 //! `proxima_gguf::quant::q6_k::dequantize` and applies the same
 //! `sqrt(embedding)` scale gemma4's own bind path
-//! (`Gemma4Arch::bind`, `EmbeddingScale::Sqrt`) declares. Not library
+//! (`bind_checkpoint`, `EmbeddingScale::Sqrt`) declares. Not library
 //! surface -- a one-shot diagnostic, same convention as
 //! `smollm2_layer_oracle_diff.rs`.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -40,9 +40,9 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 /// (`proxima-model-interop/src/gemma4/bind.rs`, private to that crate)
 /// so this diagnostic can call `lfm2_forward_program_with_experts` directly
 /// -- pure graph construction, no weight bytes touched, so it is
-/// near-instant next to the real `Gemma4Arch::bind`'s full weight bind
+/// near-instant next to the real `bind_checkpoint`'s full weight bind
 /// (proven too slow for this checkpoint's size in this same session: a
-/// second independent `Gemma4Arch::bind` call alone exceeded a 280s
+/// second independent `bind_checkpoint` call alone exceeded a 280s
 /// budget). This reproduces the exact same `(Vec<Op>, NodeId, MoeSites)`
 /// `LoadedModel::load` built internally, so its `NodeId`s are the same ones
 /// `LoadedModel::forward_node_values` evaluates against the real blob.
@@ -132,13 +132,13 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
         true,
         None,
     )
-    .expect("build gemma4 program (mirrors Gemma4Arch::bind)");
+    .expect("build gemma4 program (mirrors bind_checkpoint)");
     (program, logits)
 }
 
 /// Dequantizes ONE row (or the whole 1-D tensor, for a rank-1 leaf) of a
 /// named real tensor directly from the mapped file bytes -- no weight bind,
-/// so this stays cheap even though `Gemma4Arch::bind` itself proved too
+/// so this stays cheap even though `bind_checkpoint` itself proved too
 /// slow to call twice in this session's budget.
 fn dequant_tensor(
     parsed: &proxima_gguf::ParsedGguf,
@@ -295,10 +295,10 @@ fn main() {
     println!("prompt={prompt:?} wants_bos={wants_bos} add_eos={add_eos} ids={ids:?}");
 
     println!(
-        "== deriving layer-0 attention-mixer NodeIds from the SAME program builder Gemma4Arch::bind calls =="
+        "== deriving layer-0 attention-mixer NodeIds from the SAME program builder bind_checkpoint lowers through =="
     );
     // `gemma4_program` calls `lfm2_forward_program_with_experts` with the
-    // same args `Gemma4Arch::bind` (`gemma4/bind.rs:550`) does -- pure graph
+    // same args `bind_checkpoint` does -- pure graph
     // construction, no weight bytes touched, so this reproduces the exact
     // `NodeId` numbering `LoadedModel::load` built internally without paying
     // for a second full weight bind (proven >280s and still incomplete for
@@ -740,7 +740,7 @@ fn main() {
     // Stage C (fused ffn_gate_up_exps split, engine bind vs. independent byte
     // split) was already proven byte-exact in the prior pass on this same
     // checkpoint -- NOT re-run here: a second independent
-    // `Gemma4Arch::bind` full-weight bind alone exceeded a 280s budget in
+    // `bind_checkpoint` full-weight bind alone exceeded a 280s budget in
     // THIS session (see git history / prior log), so re-proving it here would
     // burn the whole 30-minute ceiling on an already-settled stage. Priority
     // 1 (attention q/k/v) is what the task asked this pass to reach.
@@ -883,7 +883,7 @@ fn main() {
     // STAGE 4 -- THE KEY SLIDING CHECK: independently rotate the engine's OWN
     // q_normed/k_normed with the sliding rope formula
     // (`gemma4_sliding_rope_table`, `gemma4/program.rs:27-44`, and its ONE
-    // call site, `Gemma4Arch::step_inputs`, `gemma4/bind.rs:637`):
+    // call site, `sliding_rope_inputs`):
     // `theta = position * 1e4^(-2*pair/256)` for ALL 128 pairs (full
     // rotation, base 1e4, dim 256) -- NOT layer 5's base-1e6/full-512-dim
     // table and NOT a partial rotation.

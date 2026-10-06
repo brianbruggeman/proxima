@@ -19,8 +19,9 @@
 mod support;
 
 use proxima_gguf::GgmlType;
-use proxima_model_interop::{InteropError, LoadedModel};
+use proxima_model_interop::{InteropError, KvLayout, LoadedModel, header_descriptor};
 use proxima_primitives::pipe::Pipe;
+use proxima_tensor::spec::ModelDescriptor;
 
 /// A real English sentence, not a byte stub -- every one of its bytes
 /// round-trips through the fixture's byte-level BPE vocab
@@ -379,4 +380,46 @@ mod metal_backend {
     async fn dense_metal_q6_k_matches_cpu(#[case] max_tokens: usize) {
         assert_metal_matches_cpu(GgmlType::Q6_K, max_tokens).await;
     }
+}
+
+/// The decode loop samples exactly one row of `vocab` logits per step, the
+/// `lm_head_row`-gathered last position. A config whose descriptor keeps every
+/// position's row (`last_row_only = false`, the verify program's shape) lowers
+/// a `logits_root` of `[new_count, vocab]`; the loop must refuse it by name
+/// instead of silently sampling position 0.
+#[proxima::test]
+async fn a_config_that_keeps_every_logits_row_is_refused_instead_of_sampling_row_zero() {
+    let file_bytes = support::checkpoint_bytes(GgmlType::F32);
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let header = header_descriptor(&parsed, KvLayout::Full).expect("the synthetic header names a profiled family");
+    assert!(header.last_row_only, "the header descriptor gathers the last row");
+    let config = ModelDescriptor { last_row_only: false, ..header };
+    let model = LoadedModel::load_with_descriptor(&parsed, &file_bytes, &config)
+        .expect("loads: lowering never evaluates the program, so the shape is only observable at decode");
+
+    match Pipe::call(&model, (PROMPT.to_string(), 1)).await {
+        Err(InteropError::LogitsShapeMismatch { expected_rows, found_rows, vocab }) => {
+            assert_eq!(expected_rows, 1, "the contract is exactly one row");
+            assert!(found_rows > 1, "found_rows must report the multi-row buffer, got {found_rows}");
+            assert_eq!(vocab, support::VOCAB as usize, "vocab is this checkpoint's own");
+        }
+        Ok(_) => panic!("expected LogitsShapeMismatch: the program never gathers to the last row"),
+        Err(other) => panic!("expected LogitsShapeMismatch, got {other}"),
+    }
+}
+
+#[proxima::test]
+async fn the_header_descriptor_decodes_through_the_same_one_row_check() {
+    let file_bytes = support::checkpoint_bytes(GgmlType::F32);
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let header =
+        header_descriptor(&parsed, KvLayout::SlidingRing).expect("the synthetic header names a profiled family");
+    let model = LoadedModel::load_with_descriptor(&parsed, &file_bytes, &header)
+        .expect("loads the header's own descriptor");
+
+    let (ids, _text, _stopped) = Pipe::call(&model, (PROMPT.to_string(), 2))
+        .await
+        .expect("a one-row logits_root decodes without LogitsShapeMismatch");
+
+    assert!(!ids.is_empty() && ids.len() <= 2, "decodes within the budget, got {ids:?}");
 }

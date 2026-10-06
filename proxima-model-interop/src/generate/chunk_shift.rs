@@ -22,7 +22,7 @@
 //! rotations compose, so the key a fresh prefill stores at `p + d` is
 //! `R(d) (R(p) k)`: one rotation by the delta, with the angle table the model
 //! itself builds for a single position `d` ([`build_position_inputs`] for the
-//! builtin table, [`Architecture::step_inputs`] for a named one). Which table
+//! builtin table, [`sliding_rope_inputs`] for a named one). Which table
 //! a layer rotates with is read off the bound program ([`rope_leaves_of`]),
 //! not guessed from the layer kind.
 //!
@@ -400,24 +400,12 @@ impl LoadedModel<'_> {
             self.architecture.head_dim,
             self.architecture.rope_freq_base,
             self.architecture.rms_epsilon,
-            self.architecture_impl
-                .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
+            rope_freq_factors(&self.weights),
             scaling,
         );
         let attention_factor = scaling.attention_factor();
-        let history = vec![0_u32; magnitude + 1];
         let mut named = Vec::new();
-        if let Some(architecture) = self.architecture_impl {
-            architecture.step_inputs(
-                &StepInputContext {
-                    all_token_ids: &history,
-                    new_start: magnitude,
-                    new_count: 1,
-                    architecture: &self.architecture,
-                },
-                &mut named,
-            );
-        }
+        sliding_rope_inputs(&self.architecture, magnitude, 1, &mut named);
         let sign = if delta < 0 { -1.0 } else { 1.0 };
         let table = |name: &str, builtin_values: &[f32], builtin_name: &str, scale: f32| {
             let values = if name == builtin_name {

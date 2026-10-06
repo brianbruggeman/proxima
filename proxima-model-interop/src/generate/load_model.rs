@@ -806,15 +806,23 @@ pub(super) fn strip_layer_index(name: &str) -> String {
 pub struct LoadedModel<'file> {
     pub(super) weights: BoundWeights<'file>,
     pub(super) architecture: ModelArchitecture,
-    /// [`Self::load`]'s resolved [`crate::architecture::Architecture`] impl,
-    /// kept so [`Self::run_decode_loop_observed_seeded`] can call
-    /// [`Architecture::step_inputs`] every step -- `None` only on the
-    /// narrow `load_inner` fallthrough that predates the registry seam
-    /// (`paired_gate_up_reduce`/`fused_qkv_reduce` on a non-qwen35
-    /// checkpoint), which never resolves against an `Architecture` at all.
-    pub(super) architecture_impl: Option<&'static dyn Architecture>,
+    /// The decode-time cache shape this checkpoint's family profile names
+    /// ([`proxima_tensor::spec::FamilyProfile::kv_cache_shape`]); `Uniform` for
+    /// a load that resolves no family profile (safetensors, synthetic
+    /// fixtures).
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) kv_cache_shape: KvCacheShape,
+    /// Whether this checkpoint's family profile routes the FFN through
+    /// experts ([`proxima_tensor::spec::FamilyProfile::ffn_routing`]); `Dense`
+    /// for a load that resolves no family profile.
+    pub(super) ffn_routing: FfnRouting,
+    /// The family profile's measured default for
+    /// `ServingConfig::command_buffer_chunks`; `1` for a load that resolves no
+    /// family profile. Consulted by [`Self::apply_command_buffer_chunks_default`]
+    /// only when a caller left that field at its own default.
+    pub(super) command_buffer_chunks: u32,
     /// The checkpoint's own `{arch}.context_length`
-    /// ([`Architecture::trained_context_length`]), `None` when the header
+    /// ([`crate::lowering::trained_context_length`]), `None` when the header
     /// carries none (safetensors loads, synthetic fixtures). Read only
     /// through [`Self::serving_context_length`].
     pub(super) trained_context_length: Option<u32>,
@@ -825,7 +833,7 @@ pub struct LoadedModel<'file> {
     pub(super) rope_scaling: RopeScaling,
     /// One `(kv_heads, head_dim, window)` entry per layer that owns a KV
     /// cache, as this decode path allocates it
-    /// ([`Architecture::kv_layers`] under this load's [`KvLayout`]: a
+    /// ([`crate::lowering::kv_layers`] under this load's [`KvLayout`]: a
     /// sliding layer keeps its window under [`KvLayout::SlidingRing`], where
     /// the cache holds exactly that many rows, and loses it under
     /// [`KvLayout::Full`], where it stores every position). Both what
@@ -895,7 +903,7 @@ pub struct LoadedModel<'file> {
     /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
     pub(super) layer_roots: Vec<Qwen35LayerRoots>,
     /// One post-layer residual root per dense layer, when the forward
-    /// builder exposes them (`crate::architecture::BoundProgram::residual_roots`'s
+    /// builder exposes them (`crate::lowering::BoundProgram::residual_roots`'s
     /// own doc) -- empty on the qwen35 hybrid path, which has no single
     /// per-layer residual node. See [`Self::layer_residual_roots`].
     pub(super) residual_roots: Vec<NodeId>,
@@ -913,16 +921,14 @@ pub struct LoadedModel<'file> {
     /// (`proxima_tensor::instrument::ExpertObserver`, `instrument`-gated)
     /// is registered.
     pub(super) moe_sites: proxima_tensor::spec::MoeSites,
-    /// `crate::architecture::BoundProgram::duplicate_head_roots` off this
-    /// checkpoint's own resolved [`crate::Architecture`] (`Self::load`'s
-    /// registry path) -- empty for every non-gemma4 architecture and for
-    /// every non-registry load entry point below. `Self::run_decode_loop_observed_seeded`
+    /// `crate::lowering::BoundProgram::duplicate_head_roots` off this
+    /// checkpoint's own bound program -- empty unless `PROXIMA_HEAD_REPEATS`
+    /// is set, and for every non-GGUF load entry point below. `Self::run_decode_loop_observed_seeded`
     /// reads this instead of reconstructing the roots from `program.len()`.
     pub(super) duplicate_head_roots: Vec<NodeId>,
-    /// `crate::architecture::BoundProgram::single_position_step` off this
-    /// checkpoint's own resolved [`crate::Architecture`] (`Self::load`'s
-    /// `resolved.bind(..)` for the registry path; `false` for every other
-    /// load entry point below, all of which wrap
+    /// `crate::lowering::BoundProgram::single_position_step` off this
+    /// checkpoint's own bound program (`false` for every non-GGUF load entry
+    /// point below, all of which wrap
     /// `mistral_cached_forward_program_with_experts`) -- read by
     /// [`Self::run_decode_loop_observed_seeded`] to decide whether prefill
     /// batches its whole prompt into one evaluation or feeds it one
@@ -930,9 +936,9 @@ pub struct LoadedModel<'file> {
     pub(super) single_position_step: bool,
     /// This checkpoint's own qwen35moe hparams, re-derived from `parsed`'s
     /// metadata alone (no weight bytes -- `crate::qwen35moe::hparams::from_metadata`'s
-    /// own doc) at the same registry bind site that already called it once
+    /// own doc) at the same bind site that already called it once
     /// inside `crate::qwen35moe::qwen35moe_forward_program`. `None` for
-    /// every other architecture. [`Self::run_decode_loop_observed_seeded`]'s
+    /// every family whose profile does not route the FFN. [`Self::run_decode_loop_observed_seeded`]'s
     /// own prefill batch reads this to build a SECOND, `Extent::Static`-width
     /// program via `crate::qwen35moe::qwen35moe_forward_program_at_width`
     /// on demand -- see `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
@@ -952,17 +958,16 @@ pub struct LoadedModel<'file> {
     /// the runtime backend selection together allow.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) single_range: Option<SingleRangeProgram>,
-    /// gemma4-only all-positions verify program
-    /// ([`crate::gemma4::bind::bind_gemma4_all_positions_logits`]) -- the
-    /// same weights and layer schedule as `program`/`logits_root`/
+    /// The all-positions verify program ([`crate::lowering::speculative_verify_program`])
+    /// -- the same weights and layer schedule as `program`/`logits_root`/
     /// `layer_roots`, but `logits_root` gathers EVERY new position's own
     /// row (`[new_count, vocab]`) instead of just the last one
-    /// (`Gemma4Arch::bind`'s own `last_row_only: true`). Speculative
+    /// (`last_row_only: true` on the decode descriptor). Speculative
     /// decode's verify step (`Self::run_decode_loop_observed_seeded`)
     /// swaps this in for one forward over `[current, draft...]` the same
     /// way `one_evaluation_prefill_programs` swaps in an alt program, then
     /// reads back one row per drafted token instead of one row total.
-    /// `None` for every non-gemma4 checkpoint -- built once, at load time,
+    /// `None` unless the descriptor arms verify -- built once, at load time,
     /// never per step, since the program itself never changes.
     pub(super) speculative_verify_program: Option<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>)>,
     /// The same `file_bytes` slice [`Self::load`]/[`Self::load_inner`]
@@ -1227,11 +1232,11 @@ impl Drop for LoadedModel<'_> {
 /// The first `program` [`Op::Input`] leaf `named` carries no entry for --
 /// the same name-resolution [`proxima_tensor::cpu::resolve_named_blocks`]
 /// performs internally (and would itself error on), surfaced here as the
-/// typed, architecture-facing [`InteropError::MissingStepInput`] instead
+/// typed, model-facing [`InteropError::MissingStepInput`] instead
 /// of the generic [`proxima_tensor::TensorError::UnboundInputName`] a
 /// caller several layers down [`BackendRuntime::evaluate`] would otherwise
 /// see: a program leaf beyond the decode loop's own builtin set is, by
-/// construction, one [`crate::architecture::Architecture::step_inputs`]
+/// construction, one [`crate::lowering::sliding_rope_inputs`] leaf
 /// either never fed or fed with the wrong name.
 pub(super) fn missing_program_input(
     program: &[Op],
@@ -1386,7 +1391,7 @@ pub(super) fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize
         .min(capacity)
 }
 
-/// [`Architecture::kv_layers`] as `layout` allocates it. A ring layout keeps
+/// [`crate::lowering::kv_layers`] as `layout` allocates it. A ring layout keeps
 /// each sliding layer's window, so [`crate::memory_fit`] prices the rows the
 /// ring holds. A full layout stores every position of a sliding layer too, so
 /// its window is dropped and the fit prices the rows actually written.

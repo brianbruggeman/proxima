@@ -420,8 +420,7 @@ pub struct ModelArchitecture {
     /// `{architecture}.rope.freq_base_swa` / `rope.dimension_count_swa` for a
     /// checkpoint whose sliding-window layers rotate with their own table;
     /// `None` when every layer shares the builtin one.
-    /// [`crate::architecture::Architecture::step_inputs`] reads it per step
-    /// through [`crate::architecture::StepInputContext::architecture`].
+    /// [`crate::lowering::sliding_rope_inputs`] reads it per step.
     pub sliding_rope: Option<SlidingRope>,
 }
 
@@ -945,9 +944,9 @@ pub struct BoundWeights<'file> {
 impl<'file> BoundWeights<'file> {
     /// Starting point every `bind_dense`/`bind_matmul_weight` call above
     /// mutates in place -- the same struct-literal shape this module's own
-    /// architecture arms build inline, promoted to a constructor so a
-    /// foreign `Architecture::bind` implementation (this toolkit's whole
-    /// reason for going `pub`) has a way to obtain one: the struct's own
+    /// binders build inline, promoted to a constructor so a caller assembling
+    /// its own bind (this toolkit's whole reason for going `pub`) has a way to
+    /// obtain one: the struct's own
     /// fields stay `pub(crate)` because they are bind-in-progress
     /// bookkeeping, not a public data shape a caller should read field by
     /// field.
@@ -964,8 +963,8 @@ impl<'file> BoundWeights<'file> {
 
     /// Bytes resident on the device once every weight this bind pass wrote
     /// is uploaded -- the running total [`bind_dense`]/[`bind_matmul_weight`]
-    /// (and every `Architecture::bind` that calls them) accumulate as they
-    /// go, read back here so a foreign `Architecture` impl's own bind can
+    /// (and every bind that calls them) accumulate as they
+    /// go, read back here so a caller's own bind can
     /// report the same number [`crate::generate::LoadedModel::checkpoint_bytes`]'s
     /// callers already expect.
     #[must_use]

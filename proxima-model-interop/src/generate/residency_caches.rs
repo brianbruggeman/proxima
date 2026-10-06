@@ -768,7 +768,7 @@ impl KvPadScratch {
     /// `shape` sized that leaf's own scratch buffer to -- `shape`'s row
     /// widths come from the bound program's own declared cache-leaf
     /// extents ([`layer_pad_row_widths`]'s own doc), so this only fires
-    /// when a foreign bind's program under-declares a leaf its own
+    /// when a bind's program under-declares a leaf its own
     /// [`LayerCache::append`] then over-fills, not on any checkpoint whose
     /// program and cache stay in agreement.
     pub(super) fn fill(
@@ -833,7 +833,7 @@ impl KvPadScratch {
 /// one reference says what was already true by convention. `even_odd_row`/
 /// `v_row` are each `kv_heads * width` for their own leaf, read back off
 /// this layer's declared `Op::Input` shape by [`cache_leaf_row_elements`]
-/// -- never derived from `ModelArchitecture` scalars a foreign bind may
+/// -- never derived from `ModelArchitecture` scalars a bind may
 /// leave zero/unset (that doc's own paragraph on why).
 pub(super) struct KvPadShape {
     pub(super) bound_extent: usize,
@@ -876,7 +876,7 @@ impl KvPadShape {
 /// declared row width, so `source` (this layer's real, unpadded cache)
 /// fitting inside it is the invariant the whole pad-scratch mechanism
 /// depends on. Previously an unchecked `copy_from_slice`, panicking with
-/// "range end index out of range" the moment a foreign bind's declared
+/// "range end index out of range" the moment a bind's declared
 /// shape undercounted a leaf's true width; now a named, typed error.
 ///
 /// # Errors
@@ -1002,8 +1002,8 @@ impl Qwen35DenseAttentionPadScratch {
     /// bind whose program under-declares a leaf its own
     /// [`Qwen35DenseAttentionCache::append`] then over-fills. This is the
     /// exact defect measured on the real `qwen3.6:35b-a3b` checkpoint: a
-    /// foreign bind's [`crate::architecture::Architecture::step_state`]
-    /// left `attn_head_dim` at the trait default (`Ok(None)`), which used
+    /// bind's [`crate::lowering::step_state`]
+    /// left `attn_head_dim` unset (`None`), which used
     /// to size `v`'s scratch to `0` while `source.v` held real data --
     /// this fill no longer reads `attn_head_dim` at all, so that failure
     /// mode is gone; the check stays as the general safety net.
@@ -1071,7 +1071,7 @@ impl Qwen35DenseAttentionPadScratch {
 /// [`LayerPadRowWidths::Ssm`] -- the program's own declared
 /// `ssm_cache.{layer}.conv_history`/`.state` `Op::Input` shapes
 /// ([`cache_leaf_total_elements`]'s own doc on why this, not
-/// [`crate::architecture::Architecture::step_state`], is authoritative).
+/// [`crate::lowering::step_state`], is authoritative).
 #[derive(Clone)]
 pub(super) struct SsmLayerCache {
     pub(super) conv_history: Vec<f32>,
@@ -1253,7 +1253,7 @@ pub(super) enum LayerCacheNames {
 /// Which of the three per-layer cache shapes a layer's `Op::Input` leaves
 /// actually declare, at `layer` -- [`LayerCacheNames`]/[`LayerCacheState`]
 /// are now built FROM this, not from [`Qwen35LayerRoots`]'s own
-/// discriminant. A foreign [`crate::architecture::Architecture::bind`] can
+/// discriminant. A config-edited descriptor can
 /// tag that enum inconsistently with the ops it actually emitted (copy a
 /// [`Qwen35DenseAttentionRoots`] tuple into the wrong variant, drop the
 /// `k_pass` leaf); the program's own declared leaf names cannot lie about
@@ -1357,13 +1357,12 @@ pub(super) fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
 /// need is the PRODUCT of every extent after the leading symbolic
 /// bound-extent slot, not a single dimension. This is the single source of
 /// truth those two shapes size their scratch buffers from -- never
-/// `ModelArchitecture`/[`crate::architecture::Architecture::step_state`]
-/// scalars a foreign bind may leave zero or unset -- the real defect this
+/// `ModelArchitecture`/[`crate::lowering::step_state`]
+/// scalars a bind may leave zero or unset -- the real defect this
 /// function replaces: `LoadedModel` used to carry a single model-wide
-/// `qwen35_attn_head_dim: Option<u32>`, read from a trait method whose
-/// default impl is `Ok(None)`, silently sizing every `DenseAttention`
-/// layer's `v`/`k_pass` scratch to zero on any foreign
-/// [`crate::architecture::Architecture`] that never overrides it.
+/// `qwen35_attn_head_dim: Option<u32>`, read from a hook whose
+/// default is `None`, silently sizing every `DenseAttention`
+/// layer's `v`/`k_pass` scratch to zero for any family that left it unset.
 ///
 /// `None` when `name` is not declared at all, or when the program declared
 /// it with an unexpected shape (fewer than two dimensions, or a second
@@ -1418,8 +1417,8 @@ pub(super) fn cache_leaf_bound_slot(program: &[Op], name: &str) -> Option<u16> {
 /// something to skip). This is the single source of truth
 /// [`layer_pad_row_widths`]'s own `Ssm` arm sizes
 /// [`SsmLayerCache::new`]/[`SsmLayerCache::advance`] from -- never
-/// [`crate::architecture::Architecture::step_state`]'s `ssm_shape`, whose
-/// default impl a foreign architecture leaves `None` (the real defect this
+/// [`crate::lowering::step_state`]'s `ssm_shape`, which a family with no
+/// recurrent layers leaves `None` (the real defect this
 /// function replaces, the `Ssm` sibling of [`cache_leaf_row_elements`]'s own
 /// doc on the `DenseAttention` case).
 ///
@@ -1463,7 +1462,7 @@ pub(super) enum LayerPadRowWidths {
     /// steady-state window sizes -- the flat element count of
     /// `ssm_cache.{layer}.conv_history`/`.state` as the program itself
     /// declared them ([`cache_leaf_total_elements`]), never
-    /// [`crate::architecture::Architecture::step_state`]'s `ssm_shape`.
+    /// [`crate::lowering::step_state`]'s `ssm_shape`.
     Ssm {
         conv_history_len: usize,
         state_len: usize,
@@ -1525,8 +1524,8 @@ pub(super) struct KvStep<'resident> {
 /// [`LoadedModel::run_decode_loop_observed_seeded`] (a growing cache,
 /// `kv_pad_scratch` reused across steps) or
 /// [`LoadedModel::forward_node_values_on_backend`] (a fresh, empty cache,
-/// one shot) turns cache state into named blocks, so a foreign
-/// architecture's own leaf names (`k_first`/`k_second`/`k_pass` in place of
+/// one shot) turns cache state into named blocks, so a program's
+/// own leaf names (`k_first`/`k_second`/`k_pass` in place of
 /// `k_even`/`k_odd`) are fed identically by both callers. Two passes over
 /// the same `layer`/`cache` pairing, not one interleaved pass: see this
 /// function's own former call-site comment (now here) on why
@@ -1674,7 +1673,7 @@ pub(crate) struct PositionInputs {
 /// Builds the `ids`/`eps`/`rope_cos`/`rope_sin` step inputs every
 /// architecture's builtin decode-loop leaves share. `rope_freqs`, when
 /// present, is the checkpoint's own per-pair frequency-scaling factor
-/// (GGUF `ROPE_FREQS`, `crate::gemma4::bind::Gemma4Arch::rope_freq_factors`)
+/// (GGUF `ROPE_FREQS`, [`crate::lowering::rope_freq_factors`])
 /// that ggml divides each pair's angle by before taking `cos`/`sin` --
 /// gemma4's full/global layers are the only architecture this crate binds
 /// one for (`[1.0]*64 + [1e30]*192]` on the real checkpoint: dividing by

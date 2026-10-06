@@ -19,7 +19,7 @@ use std::fs::File;
 use memmap2::Mmap;
 use omega::PackedOperands;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{Architecture, GEMMA4, KvLayout, bind_symbols, symbols};
+use proxima_model_interop::{KvLayout, bind_checkpoint_with_kv_layout, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOpKind, prune_dead};
 use proxima_tensor::spec::Qwen35LayerRoots;
 use proxima_tensor::{DType, NodeId, NumericPolicy, bind_with_fusion, infer};
@@ -75,8 +75,7 @@ async fn gemma4_e2b_decode_binds_35_cached_attention_ops_and_no_softmax_weights_
     let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
-    let bound_program = GEMMA4
-        .bind_with_kv_layout(&parsed, bytes, KvLayout::SlidingRing)
+    let bound_program = bind_checkpoint_with_kv_layout(&parsed, bytes, KvLayout::SlidingRing)
         .expect("bind the real gemma4-E2B checkpoint's production decode program");
     let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
     let policy = NumericPolicy::llama_relaxed();

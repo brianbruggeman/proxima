@@ -19,12 +19,11 @@ impl<'file> LoadedModel<'file> {
         self.single_range.is_some()
     }
 
-    /// The `general.architecture` family this load resolved against
-    /// ([`Architecture::name`]), the label every typed error from a
-    /// family-specific path carries. `"unknown"` only on the load fallthrough
-    /// with no resolved [`Architecture`] impl.
-    pub(super) fn family(&self) -> &'static str {
-        self.architecture_impl.map_or("unknown", Architecture::name)
+    /// The family string the checkpoint declares (`general.architecture` on
+    /// the GGUF path, `model_type` on the HF path), the label every typed
+    /// error from a family-specific path carries.
+    pub(super) fn family(&self) -> &str {
+        &self.architecture.family
     }
 
     /// `general.name` off the checkpoint this call loaded, when the
@@ -71,9 +70,7 @@ impl<'file> LoadedModel<'file> {
         gpu_layers: i32,
     ) -> Result<Vec<Vec<f32>>, InteropError> {
         if self.router_roots.is_empty()
-            || self
-                .architecture_impl
-                .is_none_or(|architecture| architecture.ffn_routing() != crate::architecture::FfnRouting::Routed)
+            || self.ffn_routing != FfnRouting::Routed
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
@@ -94,9 +91,7 @@ impl<'file> LoadedModel<'file> {
         symbols: &[u64],
     ) -> Result<Vec<crate::qwen35moe::execution::LayerProgramBoundary>, InteropError> {
         if self.qwen35moe_layer_diagnostics.is_empty()
-            || self
-                .architecture_impl
-                .is_none_or(|architecture| architecture.ffn_routing() != crate::architecture::FfnRouting::Routed)
+            || self.ffn_routing != FfnRouting::Routed
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
@@ -134,9 +129,7 @@ impl<'file> LoadedModel<'file> {
         InteropError,
     > {
         if self.qwen35moe_layer_diagnostics.is_empty()
-            || self
-                .architecture_impl
-                .is_none_or(|architecture| architecture.ffn_routing() != crate::architecture::FfnRouting::Routed)
+            || self.ffn_routing != FfnRouting::Routed
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
@@ -2356,7 +2349,7 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// One post-layer residual root per dense layer
-    /// (`crate::architecture::BoundProgram::residual_roots`'s own doc) --
+    /// (`crate::lowering::BoundProgram::residual_roots`'s own doc) --
     /// empty on the qwen35 hybrid path, which exposes no single per-layer
     /// residual node. `examples/compare_local.rs`/`examples/embed_local.rs`
     /// walk this to compare CPU/GPU at the first divergent layer instead of
@@ -2421,39 +2414,7 @@ impl<'file> LoadedModel<'file> {
     /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
-        Self::load_with_registry(
-            parsed,
-            file_bytes,
-            &crate::architecture::ArchitectureRegistry::with_builtin(),
-        )
-    }
-
-    /// [`Self::load`] with the [`crate::architecture::ArchitectureRegistry`]
-    /// caller-supplied rather than fixed to
-    /// [`crate::architecture::ArchitectureRegistry::with_builtin`] --
-    /// the seam a foreign `Architecture` (registered against its own
-    /// registry, never against this crate's) loads a checkpoint through,
-    /// the same way [`crate::architecture::ArchitectureRegistry::resolve`]'s
-    /// own doc describes. [`Self::load`] is this call with the builtin
-    /// table, unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::load`].
-    pub fn load_with_registry(
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-        registry: &crate::architecture::ArchitectureRegistry,
-    ) -> Result<Self, InteropError> {
-        Self::load_inner(
-            parsed,
-            file_bytes,
-            false,
-            false,
-            registry,
-            KvLayout::SlidingRing,
-            None,
-        )
+        Self::load_inner(parsed, file_bytes, KvLayout::SlidingRing, None)
     }
 
     /// [`Self::load`] with the sliding-window layers' KV layout chosen
@@ -2475,15 +2436,7 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         layout: KvLayout,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(
-            parsed,
-            file_bytes,
-            false,
-            false,
-            &crate::architecture::ArchitectureRegistry::with_builtin(),
-            layout,
-            None,
-        )
+        Self::load_inner(parsed, file_bytes, layout, None)
     }
 
     /// Writes every sliding-ring row `offset` slots away from where the read
@@ -2536,15 +2489,7 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         paired_gate_up_reduce: bool,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(
-            parsed,
-            file_bytes,
-            paired_gate_up_reduce,
-            false,
-            &crate::architecture::ArchitectureRegistry::with_builtin(),
-            KvLayout::SlidingRing,
-            None,
-        )
+        Self::load_with_reduce_flags(parsed, file_bytes, paired_gate_up_reduce, false)
     }
 
     /// [`Self::load`] with the fused Q/K/V reduce
@@ -2569,15 +2514,32 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         fused_qkv_reduce: bool,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(
-            parsed,
-            file_bytes,
-            false,
+        Self::load_with_reduce_flags(parsed, file_bytes, false, fused_qkv_reduce)
+    }
+
+    /// The two diagnostic reduce flags are fields of the descriptor, so a load
+    /// that sets one is a config load over the header's own descriptor
+    /// ([`Self::load_with_descriptor`]). Only a family whose header reader is
+    /// the uniform one lowers through the engine that reads them; every other
+    /// schedule source loads as [`Self::load`] does, which is the "no effect on
+    /// a `qwen35` checkpoint" the two constructors above document.
+    fn load_with_reduce_flags(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        paired_gate_up_reduce: bool,
+        fused_qkv_reduce: bool,
+    ) -> Result<Self, InteropError> {
+        let family = metadata_str(parsed, "general.architecture")?;
+        if family_profile(family)?.schedule_source != ScheduleSource::Uniform {
+            return Self::load(parsed, file_bytes);
+        }
+        let header = crate::lowering::header_descriptor(parsed, KvLayout::SlidingRing)?;
+        let descriptor = ModelDescriptor {
+            paired_gate_up_reduce,
             fused_qkv_reduce,
-            &crate::architecture::ArchitectureRegistry::with_builtin(),
-            KvLayout::SlidingRing,
-            None,
-        )
+            ..header
+        };
+        Self::load_inner(parsed, file_bytes, KvLayout::SlidingRing, Some(&descriptor))
     }
 
     /// [`Self::load`] with the forward program lowered from `descriptor`
@@ -2606,23 +2568,12 @@ impl<'file> LoadedModel<'file> {
         } else {
             KvLayout::Full
         };
-        Self::load_inner(
-            parsed,
-            file_bytes,
-            false,
-            false,
-            &crate::architecture::ArchitectureRegistry::with_builtin(),
-            kv_layout,
-            Some(descriptor),
-        )
+        Self::load_inner(parsed, file_bytes, kv_layout, Some(descriptor))
     }
 
     pub(super) fn load_inner(
         parsed: &ParsedGguf,
         file_bytes: &'file [u8],
-        paired_gate_up_reduce: bool,
-        fused_qkv_reduce: bool,
-        registry: &crate::architecture::ArchitectureRegistry,
         kv_layout: KvLayout,
         descriptor: Option<&ModelDescriptor>,
     ) -> Result<Self, InteropError> {
@@ -2676,241 +2627,63 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let (dense_weight_bytes, expert_weight_bytes, table_weight_bytes) =
             crate::bind::tensor_bytes_by_class(parsed);
-        // The common case resolves the checkpoint's own `general.architecture`
-        // against the registered `Architecture` table and lets that impl's
-        // own `bind` do everything `load_inner`'s qwen35/dense arms used to
-        // assemble by hand -- see `crate::architecture`'s own module doc
-        // for why this seam exists. `paired_gate_up_reduce`/`fused_qkv_reduce`
-        // are per-call diagnostic knobs `Architecture::bind`'s fixed
-        // signature does not carry (`crate::dense::DenseArch`'s own doc on
-        // why), and [`crate::architecture::Architecture::diagnostic_reduce_flags_apply`]
-        // is `false` for an architecture whose `bind` never reads either flag
-        // (documented on both flag-carrying constructors as "no effect on a
-        // qwen35 checkpoint") -- so that architecture always takes this
-        // registry path regardless of either flag, and only an architecture
-        // that DOES read the flags, with one set, falls through to the
-        // narrow inline path below.
-        let resolved = registry.resolve(parsed)?;
+        // The checkpoint's own `general.architecture` keys its family profile,
+        // which names the header reader, the cache shape, the routing and the
+        // chunk default; `crate::lowering` binds and lowers from that one
+        // config, so no per-family branch exists here.
+        let profile = family_profile(metadata_str(parsed, "general.architecture")?)?;
         debug!(
-            value = ?resolved.name(),
-            diagnostic_reduce_flags_apply = resolved.diagnostic_reduce_flags_apply(),
-            flags = ?(paired_gate_up_reduce, fused_qkv_reduce),
-            "architecture_route"
+            family = ?profile.schedule_source,
+            kv_cache_shape = ?profile.kv_cache_shape,
+            ffn_routing = ?profile.ffn_routing,
+            "family_route"
         );
-        if !resolved.diagnostic_reduce_flags_apply() || (!paired_gate_up_reduce && !fused_qkv_reduce)
-        {
-            let bound = resolved.bind_with_kv_layout(parsed, file_bytes, kv_layout)?;
-            let bound = match descriptor {
-                Some(config) => bound.lowered_from(config, parsed, file_bytes)?,
-                None => bound,
-            };
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            let step_state = resolved.step_state(parsed)?;
-            let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-            // The single-range program is dense-Mistral-only
-            // (`SingleRangeProgram`'s own field doc): never built for
-            // qwen35's hybrid attention+state-space layers, and
-            // `build_single_range_program` itself already turns away any
-            // mixture-of-experts checkpoint. gemma4 E2B/E4B (dense,
-            // `expert_count == 0`, so NOT already excluded by that
-            // mixture-of-experts gate) needs the same exclusion for a
-            // different reason: `mistral_single_range_cached_forward_program`
-            // declares a uniform `attn_k.weight`/`attn_k_norm.weight`/
-            // `attn_v.weight` `Op::Input` leaf for every layer 0..block_count
-            // with no concept of `KeySourceKind::SharedFromLayer`/
-            // `ValueSourceKind::SharedFromLayer` (gemma4 E2B's trailing
-            // shared-KV layers, `gemma4_descriptor_from_gguf`'s own
-            // doc) -- it would declare `blk.15.attn_k.weight` for the real
-            // `gemma4:e2b-it-qat` checkpoint even though that tensor never
-            // exists on disk and the leaf binder correctly never binds
-            // it, so `run_decode_loop_placed_kv` would execute a graph
-            // asking for a weight that was never bound
-            // (`TensorError::UnboundInputName`, measured against the real
-            // checkpoint on Metal). Every gemma4 checkpoint that reaches this
-            // gate dense enough to pass the mixture-of-experts check above
-            // is, by this crate's own E2B-vs-MoE discriminator
-            // (`shared_kv_layers > 0`), exactly a shared-KV checkpoint --
-            // gemma4's two-range path (`self.program`, built by
-            // `lfm2_forward_program_with_experts` over
-            // `gemma4_descriptor_from_gguf`) already implements the SharedFromLayer
-            // contract correctly, so excluding gemma4 here falls through to
-            // that proven-correct path rather than porting cross-layer KV
-            // reuse into the placed-KV single-range cache scheme (a
-            // materially different device-buffer design, not a mechanical
-            // port).
-            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            let single_range = if resolved.kv_cache_shape() != crate::architecture::KvCacheShape::Uniform
-            {
-                None
-            } else {
-                let qk_norm = descriptor
-                    .map_or_else(|| crate::bind::checkpoint_has_qk_norm(parsed), |config| config.qk_norm);
-                build_single_range_program(&bound.architecture, qk_norm)?
-            };
-            // Armed by the descriptor ([`ModelDescriptor::verify`]), never by a
-            // name: a config decides directly, and without one the architecture
-            // reads its own header descriptor ([`crate::architecture::Architecture::speculative_verify_program`]).
-            let speculative_verify_program = match descriptor {
-                Some(config) => config
-                    .verify()
-                    .map(|verify| {
-                        resolved
-                            .bind_with_kv_layout(parsed, file_bytes, kv_layout)?
-                            .lowered_from(&verify, parsed, file_bytes)
-                    })
-                    .transpose()?,
-                None => resolved.speculative_verify_program_with_kv_layout(parsed, file_bytes, kv_layout)?,
-            }
-                .map(|verify_bound| {
-                    (
-                        verify_bound.program,
-                        verify_bound.logits_root,
-                        verify_bound.layer_roots,
-                    )
-                });
-            let bound = bound;
-            let expert_slab =
-                crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
-            let rope_scaling = RopeScaling::from_gguf(parsed)?;
-            let kv_layers = kv_layers_for_layout(kv_layout, resolved.kv_layers(parsed)?);
-            return Self {
-                expert_slab: Mutex::new(expert_slab),
-                expert_sidecar: None,
-            prompt_cache: Mutex::new(PromptCache::new()),
-            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            plan_life: Arc::new(()),
-            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            kv_buffer_source: allocate_placed_buffer,
-            prewarm_gate: PrewarmGate::new(),
-            prewarm_queue: PrewarmQueue::new(),
-                weights: bound.weights,
-                architecture: bound.architecture,
-                architecture_impl: Some(resolved),
-                trained_context_length: resolved.trained_context_length(parsed),
-                rope_scaling,
-                kv_layers,
-                ring_write_offset: 0,
-                block_summarizer: None,
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
-                    dense_bytes: dense_weight_bytes,
-                    expert_bytes: expert_weight_bytes,
-                    table_bytes: table_weight_bytes,
-                    ssm_state_bytes: step_state.as_ref().map_or(0, |state| state.ssm_state_bytes),
-                },
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                mapping_residency_rung,
-                vocab,
-                program: bound.program,
-                logits_root: bound.logits_root,
-                hidden_root: bound.hidden_root,
-                layer_roots: bound.layer_roots,
-                residual_roots: bound.residual_roots,
-                qwen35moe_layer_diagnostics: bound.qwen35moe_layer_diagnostics,
-                router_roots: bound.router_roots,
-                moe_sites: bound.moe_sites,
-                duplicate_head_roots: bound.duplicate_head_roots,
-                single_position_step: bound.single_position_step,
-                qwen35moe_hparams: (resolved.ffn_routing() == crate::architecture::FfnRouting::Routed)
-                    .then(|| crate::qwen35moe::hparams::from_metadata(parsed).ok())
-                    .flatten(),
-                model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
-                checkpoint_bytes: file_bytes.len(),
-                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                single_range,
-                speculative_verify_program,
-                checkpoint_mapping: file_bytes,
-            }
-            .validated();
-        }
-
-        let architecture = architecture_from_metadata(parsed)?;
+        let bound = bind_checkpoint_with_kv_layout(parsed, file_bytes, kv_layout)?;
+        let bound = match descriptor {
+            Some(config) => bound.lowered_from(config, parsed, file_bytes)?,
+            None => bound,
+        };
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let step_state = crate::lowering::step_state(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-        // `architecture.expert_count`/`expert_used_count` read `0` for every
-        // dense checkpoint (`ModelArchitecture`'s own doc), which selects
-        // exactly the dense program this crate has always built -- a
-        // mixture-of-experts checkpoint (`expert_count > 0`) is the only case
-        // that changes which program gets compiled here. `qk_norm` is Qwen3's
-        // own per-head QK-norm (`crate::bind::checkpoint_has_qk_norm`'s own
-        // doc) -- `false` reproduces the identical program this call has
-        // always compiled for a checkpoint that carries no
-        // `attn_q_norm.weight` tensor.
-        let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
-        let profile = family_profile(&architecture.family)?;
-        let descriptor = mistral_descriptor_from_shape(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.query_heads,
-            architecture.kv_heads,
-            architecture.head_dim,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            qk_norm,
-            false,
-            paired_gate_up_reduce,
-            fused_qkv_reduce,
-            &profile,
-        );
-        let ForwardProgram {
-            program,
-            logits: logits_root,
-            layer_roots,
-            moe_sites,
-            layer_residuals,
-            hidden: hidden_root,
-            ..
-        } = build_forward(&descriptor)?;
-        // `&[]`: `Self::load`/`load_with_*` take no `ServingConfig`, so
-        // there is no `weight_precision` rule set to thread here yet.
-        let weights = bind_program_leaves(
-            parsed,
-            file_bytes,
-            &program,
-            &binding_profile(&architecture.family)?,
-            &[],
-        )?;
-        // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`/
-        // `wq`/`wk`/`wv` leaves (`build_single_range_program`) do not know
-        // about `paired_gate_up_reduce`/`fused_qkv_reduce` yet --
-        // `LoadedModel::run_decode_loop_observed`'s placed-KV fast path
-        // would try to read `blk.{layer}.ffn_gate.weight`/
-        // `blk.{layer}.attn_q.weight` against a `weights` set that, under
-        // either flag, binds a differently-named fused tensor instead.
-        // Forcing `None` here falls through to the two-range decode loop
-        // below, which DOES thread both flags correctly, rather than a
-        // `Metal(Tensor(UnboundInputName(..)))` panic -- the correct,
-        // fusion-aware path over a crash, until the placed-KV builder
-        // gains both flags (tracked, not done in this change: threading
-        // `fused_qkv_reduce` through `mistral_single_range_cached_forward_program`
-        // is a second builder needing the identical q/k/v leaf and
-        // extract-op rewrite `append_mistral_cached_layer` just got, and is
-        // out of this change's scope).
-        //
-        // `qk_norm` (ROW 373): `append_mistral_single_range_cached_layer`
-        // (`proxima-tensor/src/spec.rs`) now takes the SAME
-        // `Option<(NodeId, NodeId, NodeId)>` shape its two-range sibling
-        // does and derives its RoPE pairing from `qk_norm.is_some()` the
-        // same way -- a qk-norm checkpoint (Qwen3) now takes this
-        // placed-KV fast path on Metal instead of falling back to the
-        // two-range program (`build_single_range_program` no longer turns
-        // a qk-norm request into `Ok(None)`; ROW 372's typed rejection is
-        // gone from this builder). Before ROW 372, the same checkpoint
-        // class silently ran attention on raw, un-normed Q/K with the wrong
-        // RoPE pairing through this exact path -- no error, just a
-        // structurally different (wrong) computation. ROW 372 made the
-        // wrong path loud (reject); this row makes the right path fast
-        // (build it correctly instead).
+        // The single-range program is dense-Mistral-only
+        // (`SingleRangeProgram`'s own field doc): it has no concept of
+        // recurrent layers, and `build_single_range_program` itself already
+        // turns away any mixture-of-experts checkpoint. A family whose profile
+        // names a cache shape other than `Uniform` is excluded for the same
+        // reason: gemma4 E2B/E4B (dense, `expert_count == 0`) declare shared-KV
+        // layers, and `mistral_single_range_cached_forward_program` declares a
+        // uniform `attn_k.weight`/`attn_k_norm.weight`/`attn_v.weight`
+        // `Op::Input` leaf for every layer 0..block_count with no concept of
+        // `KeySourceKind::SharedFromLayer` -- it would declare
+        // `blk.15.attn_k.weight` for the real `gemma4:e2b-it-qat` checkpoint
+        // even though that tensor never exists on disk and the leaf binder
+        // correctly never binds it, so `run_decode_loop_placed_kv` would
+        // execute a graph asking for a weight that was never bound
+        // (`TensorError::UnboundInputName`, measured against the real
+        // checkpoint on Metal). The two-range path (`self.program`) already
+        // implements the SharedFromLayer contract correctly, so excluding the
+        // family here falls through to that proven-correct path rather than
+        // porting cross-layer KV reuse into the placed-KV single-range cache
+        // scheme (a materially different device-buffer design, not a
+        // mechanical port).
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = if paired_gate_up_reduce || fused_qkv_reduce {
+        let single_range = if profile.kv_cache_shape != KvCacheShape::Uniform {
             None
         } else {
-            build_single_range_program(&architecture, qk_norm)?
+            let qk_norm = descriptor
+                .map_or_else(|| crate::bind::checkpoint_has_qk_norm(parsed), |config| config.qk_norm);
+            build_single_range_program(&bound.architecture, qk_norm)?
         };
-        let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
+        // Armed by the descriptor ([`ModelDescriptor::verify`]), never by a
+        // name: a config decides directly, and without one the family's
+        // header descriptor does.
+        let speculative_verify_program = crate::lowering::bind_speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
+            .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
+        let expert_slab =
+            crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
         let rope_scaling = RopeScaling::from_gguf(parsed)?;
-        let kv_layers = crate::bind::kv_layers_from_metadata(parsed)?;
+        let kv_layers = kv_layers_for_layout(kv_layout, crate::lowering::kv_layers(parsed)?);
         Self {
             expert_slab: Mutex::new(expert_slab),
             expert_sidecar: None,
@@ -2921,10 +2694,13 @@ impl<'file> LoadedModel<'file> {
             kv_buffer_source: allocate_placed_buffer,
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
-            weights,
-            architecture,
-            architecture_impl: None,
-            trained_context_length: crate::dense::DENSE.trained_context_length(parsed),
+            weights: bound.weights,
+            architecture: bound.architecture,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_cache_shape: profile.kv_cache_shape,
+            ffn_routing: profile.ffn_routing,
+            command_buffer_chunks: profile.command_buffer_chunks,
+            trained_context_length: crate::lowering::trained_context_length(parsed),
             rope_scaling,
             kv_layers,
             ring_write_offset: 0,
@@ -2934,32 +2710,29 @@ impl<'file> LoadedModel<'file> {
                 dense_bytes: dense_weight_bytes,
                 expert_bytes: expert_weight_bytes,
                 table_bytes: table_weight_bytes,
-                ssm_state_bytes: 0,
+                ssm_state_bytes: step_state.as_ref().map_or(0, |state| state.ssm_state_bytes),
             },
             #[cfg(all(feature = "metal", target_os = "macos"))]
             mapping_residency_rung,
             vocab,
-            program,
-            logits_root,
-            hidden_root,
-            layer_roots,
-            residual_roots: layer_residuals,
-            qwen35moe_layer_diagnostics: Vec::new(),
-            router_roots: Vec::new(),
-            moe_sites,
-            duplicate_head_roots: Vec::new(),
-            single_position_step: false,
-            qwen35moe_hparams: None,
+            program: bound.program,
+            logits_root: bound.logits_root,
+            hidden_root: bound.hidden_root,
+            layer_roots: bound.layer_roots,
+            residual_roots: bound.residual_roots,
+            qwen35moe_layer_diagnostics: bound.qwen35moe_layer_diagnostics,
+            router_roots: bound.router_roots,
+            moe_sites: bound.moe_sites,
+            duplicate_head_roots: bound.duplicate_head_roots,
+            single_position_step: bound.single_position_step,
+            qwen35moe_hparams: (profile.ffn_routing == FfnRouting::Routed)
+                .then(|| crate::qwen35moe::hparams::from_metadata(parsed).ok())
+                .flatten(),
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
-            // Never gemma4 -- this is the plain dense-Mistral-shape builder
-            // (`mistral_cached_forward_program_with_experts_and_layer_taps`),
-            // and gemma4 always resolves through the registry `resolved.bind`
-            // branch above instead (`Self::speculative_verify_program`'s own
-            // doc).
-            speculative_verify_program: None,
+            speculative_verify_program,
             checkpoint_mapping: file_bytes,
         }
         .validated()
@@ -3048,7 +2821,10 @@ impl<'file> LoadedModel<'file> {
             prewarm_queue: PrewarmQueue::new(),
             weights,
             architecture,
-            architecture_impl: None,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            kv_cache_shape: KvCacheShape::Uniform,
+            ffn_routing: FfnRouting::Dense,
+            command_buffer_chunks: 1,
             // safetensors carries no context_length or rope.scaling key this
             // crate reads (`crate::hf_config::architecture_from_hf_config`
             // parses neither), so the limit is the memory fit alone.
@@ -3108,16 +2884,15 @@ impl<'file> LoadedModel<'file> {
 /// Regression coverage for the SECOND gemma4-E2B forward crash
 /// (`Metal(Tensor(UnboundInputName("blk.15.attn_k.weight")))`, measured
 /// against the real `gemma4:e2b-it-qat` checkpoint on Metal): `Self::load`'s
-/// `resolved.kv_cache_shape() != KvCacheShape::Uniform` gate above
-/// (`crate::architecture::Architecture::kv_cache_shape` returns
-/// `KvCacheShape::Custom` for `Gemma4Arch`) is what stops
+/// `profile.kv_cache_shape != KvCacheShape::Uniform` gate above
+/// (the gemma4 family profile's `kv_cache_shape` is
+/// `KvCacheShape::Custom`) is what stops
 /// `build_single_range_program` from ever running for gemma4, and this
 /// module proves both halves of why that gate is necessary, without
 /// loading any checkpoint.
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 mod gemma4_single_range_exclusion_tests {
     use super::*;
-    use crate::architecture::Architecture as ArchitectureTrait;
 
     /// gemma4 E2B's own shape (`gemma4::bind::declared_leaves_match_bound_leaves_tests::e2b_shaped_architecture`'s
     /// own doc: 35 layers, `blk.15..=34` shared-KV) flattened into the
@@ -3178,16 +2953,16 @@ mod gemma4_single_range_exclusion_tests {
         );
     }
 
-    /// The actual production gate reads
-    /// [`crate::architecture::Architecture::kv_cache_shape`] -- reproduced
-    /// here directly so flipping `Gemma4Arch`'s override back to the trait
-    /// default breaks this test rather than silently reopening the panic
-    /// this fix closed.
+    /// The actual production gate reads the family profile's
+    /// [`proxima_tensor::spec::FamilyProfile::kv_cache_shape`] -- reproduced
+    /// here directly so flipping the gemma4 profile back to the default breaks
+    /// this test rather than silently reopening the panic this fix closed.
     #[test]
+    #[allow(clippy::expect_used)]
     fn load_single_range_exclusion_covers_gemma4() {
         assert_ne!(
-            crate::gemma4::GEMMA4.kv_cache_shape(),
-            crate::architecture::KvCacheShape::Uniform,
+            family_profile("gemma4").expect("gemma4 profile embedded").kv_cache_shape,
+            KvCacheShape::Uniform,
             "gemma4 must stay excluded from the placed-KV single-range program"
         );
     }

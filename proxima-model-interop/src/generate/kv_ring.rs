@@ -295,7 +295,6 @@ fn copy_row(destination: &mut Vec<f32>, slot: usize, width: usize, source: &[f32
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::gemma4::GEMMA4;
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
     use crate::serving::{NgramModParams, SpeculativeTypeSet};
     use crate::test_support::gemma4_e2b_header;
@@ -487,8 +486,7 @@ mod tests {
     #[test]
     fn gemma4_ring_rows() {
         let parsed = gemma4_e2b_header();
-        let layers = GEMMA4
-            .kv_layers(&parsed)
+        let layers = crate::lowering::kv_layers(&parsed)
             .expect("the e2b header carries every key kv_layers reads");
         let window_from_header = layers
             .iter()
@@ -541,8 +539,7 @@ mod tests {
     fn memory_budget_gemma4_ring_draft_slack() {
         const CONTEXT: u32 = 131_072;
         let parsed = gemma4_e2b_header();
-        let layers = GEMMA4
-            .kv_layers(&parsed)
+        let layers = crate::lowering::kv_layers(&parsed)
             .expect("the e2b header carries every key kv_layers reads");
         let budget_for = |config: &SpeculativeConfig<'_>| {
             let slack = speculative_draft_limit(config, None).map_or(0, |limit| limit as u32);
