@@ -1293,6 +1293,36 @@ fn granite_moe_config_with_the_hf_split_half_pairing_is_refused_by_the_lowering(
 }
 
 #[test]
+fn a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds() {
+    let mapping = OPENCHAT.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let architecture = architecture_from_metadata(&parsed).expect("hparams parse from the header");
+    let bound = resolve(&OPENCHAT, &parsed)
+        .bind_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+        .expect("binds from the header descriptor");
+    let fused_leaf = |layer: u32| format!("blk.{layer}.ffn_gate_up.weight");
+    let holds = |weights: &BoundWeights<'_>, name: &str| {
+        weights.packed().iter().any(|(bound_name, _)| bound_name == name)
+            || weights.packed_owned().iter().any(|(bound_name, _, _)| bound_name == name)
+    };
+    assert!(!holds(&bound.weights, &fused_leaf(0)), "the header descriptor does not pair gate and up");
+
+    let config = ModelDescriptor {
+        paired_gate_up_reduce: true,
+        ..dense_descriptor_from_gguf(&parsed, &architecture).expect("the header descriptor")
+    };
+    let lowered = bound
+        .lowered_from(&config, &parsed, file_bytes)
+        .expect("lowers the config and binds the leaves it adds");
+
+    for layer in 0..architecture.block_count {
+        assert!(holds(&lowered.weights, &fused_leaf(layer)), "layer {layer} fused gate/up operand is bound");
+    }
+    assert_unbound_leaves_are_step_inputs(&OPENCHAT, &lowered);
+}
+
+#[test]
 fn model_config_file_layer_turns_the_decode_config_into_the_verify_program() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");

@@ -30,7 +30,9 @@ use proxima_tensor::spec::{
 };
 
 use crate::bind::{BoundWeights, ModelArchitecture, metadata_str};
+use crate::bind_leaves::bind_missing_leaves;
 use crate::error::InteropError;
+use crate::profiles::binding_profile;
 use crate::qwen35moe::Qwen35MoeLayerDiagnostics;
 
 /// Names for every `Extent::Symbolic` slot the decode loop itself binds
@@ -675,11 +677,12 @@ impl ArchitectureRegistry {
     }
 }
 
-impl BoundProgram<'_> {
+impl<'file> BoundProgram<'file> {
     /// This bound program with its forward program lowered from `descriptor`
-    /// instead of the descriptor the binder derived: the weights stay what
-    /// the binder bound, the op graph and every root into it come from
-    /// [`proxima_tensor::spec::build_forward`] over the config. A root the
+    /// instead of the descriptor the binder derived: the op graph and every
+    /// root into it come from [`proxima_tensor::spec::build_forward`] over the
+    /// config, and the weights gain whatever leaves that program names which the
+    /// binder's own program did not ([`crate::bind_leaves::bind_missing_leaves`]). A root the
     /// binder chose not to expose (`hidden_root`, `residual_roots`) stays
     /// unexposed, so a decode loop reads the same outputs it always did.
     ///
@@ -692,7 +695,12 @@ impl BoundProgram<'_> {
     ///
     /// [`proxima_tensor::spec::build_forward`] refuses the config, or the
     /// engine returns a cache-root count that disagrees with the schedule.
-    pub fn lowered_from(self, descriptor: &ModelDescriptor) -> Result<Self, InteropError> {
+    pub fn lowered_from(
+        mut self,
+        descriptor: &ModelDescriptor,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<Self, InteropError> {
         let (program, logits_root, cache_roots, moe_sites, residual_roots, hidden_root, duplicate_head_roots) =
             build_forward(descriptor)?;
         let layer_roots = match descriptor.cache_strategy {
@@ -702,6 +710,13 @@ impl BoundProgram<'_> {
             )?,
             CacheStrategy::Cacheless => Vec::new(),
         };
+        bind_missing_leaves(
+            parsed,
+            file_bytes,
+            &program,
+            &binding_profile(&self.architecture.family)?,
+            &mut self.weights,
+        )?;
         Ok(Self {
             architecture: self.architecture.reshaped_by(descriptor),
             program,
