@@ -64,7 +64,8 @@ pub fn family_profile(family: &str) -> Result<FamilyProfile, InteropError> {
 mod tests {
     use super::*;
     use proxima_tensor::spec::{
-        Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination, RopePairing,
+        Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination, FfnRouting,
+        KvCacheShape, RopePairing, ScheduleSource,
     };
 
     #[test]
@@ -118,6 +119,35 @@ mod tests {
             let armed = family_profile(family).expect("profile embedded").speculative_verify;
 
             assert_eq!(armed, *family == "gemma4", "{family}");
+        }
+    }
+
+    #[test]
+    fn each_profile_names_its_header_reader_cache_shape_routing_and_chunk_default() {
+        let table = [
+            ("llama", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
+            ("mixtral", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
+            ("granitemoe", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
+            ("qwen2", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
+            ("qwen3", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
+            ("lfm2moe", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
+            ("gemma4", ScheduleSource::SlidingPattern, KvCacheShape::Custom, FfnRouting::Dense, 8),
+            ("qwen35", ScheduleSource::RecurrentInterval, KvCacheShape::Custom, FfnRouting::Dense, 1),
+            (
+                "qwen35moe",
+                ScheduleSource::RecurrentRoutedInterval,
+                KvCacheShape::Monolithic,
+                FfnRouting::Routed,
+                1,
+            ),
+        ];
+        for (family, source, shape, routing, chunks) in table {
+            let profile = family_profile(family).expect("profile embedded");
+
+            assert_eq!(profile.schedule_source, source, "{family} schedule source");
+            assert_eq!(profile.kv_cache_shape, shape, "{family} cache shape");
+            assert_eq!(profile.ffn_routing, routing, "{family} routing");
+            assert_eq!(profile.command_buffer_chunks, chunks, "{family} chunk default");
         }
     }
 

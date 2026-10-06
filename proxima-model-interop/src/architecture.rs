@@ -223,39 +223,7 @@ pub struct StepState {
     pub ssm_state_bytes: u64,
 }
 
-/// [`Architecture::kv_cache_shape`]'s value -- what the DECODE loop
-/// composes or matches on, never [`Architecture::name`]. `Uniform` is the
-/// one shape `crate::generate::pregather`'s single-range cached forward
-/// program (`mistral_single_range_cached_forward_program`, dense-Mistral-
-/// only) is valid for; `Custom` covers both qwen35 (hybrid attention +
-/// state-space layers the single-range builder has no concept of) and
-/// gemma4 (its own proven-correct two-range `SharedFromLayer` path already
-/// covers its trailing shared-KV layers -- porting cross-layer KV reuse
-/// into the single-range scheme is a materially different device-buffer
-/// design, not a mechanical port); `Monolithic` is qwen35moe's combined
-/// MoE-routed FFN + `GatedDeltaNet` recurrent state, whose decode-step
-/// cache leaves must stay device-resident and segment-isolated together
-/// (the dense-attention-placement gate, residency-budget sizing, MRoPE
-/// position build, missing-program-input tolerance for unresolved expert
-/// leaves, and partition-isolated one-shot evaluator all match on this one
-/// variant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvCacheShape {
-    Uniform,
-    Custom,
-    Monolithic,
-}
-
-/// [`Architecture::ffn_routing`]'s value -- `Routed` (qwen35moe only) gates
-/// expert-sidecar attachment, the partition-isolated pre-gather execution
-/// entry point, and whether qwen35moe's own router hyperparameters apply;
-/// `Dense` is every other architecture this crate ships, whose forward
-/// program evaluates the same FFN every layer unconditionally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfnRouting {
-    Dense,
-    Routed,
-}
+pub use proxima_tensor::spec::{FfnRouting, KvCacheShape};
 
 /// How a bound program lays out the KV cache of its sliding-window layers.
 /// [`Self::Full`] stores every position and lets the window mask hide the

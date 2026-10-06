@@ -325,6 +325,81 @@ pub struct FamilyProfile {
     /// tokens its drafts save.
     #[serde(default)]
     pub speculative_verify: bool,
+    /// Which header reader fills this family's [`ModelDescriptor`]: the layout
+    /// the GGUF header uses to spell the layer schedule. Config selects a
+    /// compiled reader; a family whose header already reads as one of these
+    /// layouts is a profile file with no Rust.
+    #[serde(default)]
+    pub schedule_source: ScheduleSource,
+    /// The decode-time cache shape the lowered program needs from the runtime
+    /// loop, read once per load. A value other than [`KvCacheShape::Uniform`]
+    /// keeps the family off the placed single-range cached program.
+    #[serde(default)]
+    pub kv_cache_shape: KvCacheShape,
+    /// Whether the feed-forward routes through experts with a pre-gather
+    /// execution protocol ([`FfnRouting::Routed`]) or evaluates the same FFN
+    /// every layer.
+    #[serde(default)]
+    pub ffn_routing: FfnRouting,
+    /// Measured default for the number of command-buffer chunks one decode
+    /// step is submitted in. `1` unless this family's decode was measured to
+    /// gain from chunked submission; an explicit caller value always wins.
+    #[serde(default = "default_command_buffer_chunks")]
+    pub command_buffer_chunks: u32,
+}
+
+const fn default_command_buffer_chunks() -> u32 {
+    1
+}
+
+/// How a family's GGUF header spells its layer schedule, as data on
+/// [`FamilyProfile::schedule_source`]. Each variant names one compiled header
+/// reader; none names a family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleSource {
+    /// Scalar `{family}.*` keys describe every layer alike; a layer whose
+    /// `head_count_kv` entry is zero is a short-convolution layer.
+    #[default]
+    Uniform,
+    /// A per-layer sliding-window pattern, trailing shared-KV layers and
+    /// per-layer widths.
+    SlidingPattern,
+    /// A scalar `full_attention_interval` places an attention layer every
+    /// interval; the layers between are gated delta net, over a dense FFN.
+    RecurrentInterval,
+    /// [`Self::RecurrentInterval`] over a routed FFN with a shared expert.
+    RecurrentRoutedInterval,
+}
+
+/// The decode-time shape of a lowered program's KV cache, as data on
+/// [`FamilyProfile::kv_cache_shape`]. Distinct from [`CacheStrategy`], which
+/// picks the lowering engine: this describes what the already-built program's
+/// cache needs from the decode loop.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvCacheShape {
+    /// One uniform per-layer attention cache, which the single-range cached
+    /// program covers.
+    #[default]
+    Uniform,
+    /// Layers the single-range program has no concept of: recurrent state
+    /// beside attention, or shared-KV and per-layer widths.
+    Custom,
+    /// Routed FFN and recurrent state whose decode-step cache leaves stay
+    /// device-resident and segment-isolated together.
+    Monolithic,
+}
+
+/// Whether a family's feed-forward is evaluated unconditionally every layer or
+/// routed through experts under the pre-gather protocol, as data on
+/// [`FamilyProfile::ffn_routing`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FfnRouting {
+    #[default]
+    Dense,
+    Routed,
 }
 
 /// Which channels RoPE rotates together: `(i, i + rotary_dim / 2)` or
