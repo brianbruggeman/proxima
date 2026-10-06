@@ -640,13 +640,30 @@ mod tests {
         program
     }
 
+    fn defaults() -> BindingProfile {
+        binding_profile("no-family-file").expect("defaults parse")
+    }
+
+    fn fused_thirds() -> BindingProfile {
+        let part = |suffix: &str, index: u32| TensorAlias::Part {
+            leaf: format!("shortconv.in_proj.weight.{suffix}"),
+            from: "shortconv.in_proj.weight".into(),
+            part: index,
+            of: 3,
+        };
+        BindingProfile {
+            aliases: vec![part("b", 0), part("c", 1), part("x", 2)],
+            ..defaults()
+        }
+    }
+
     fn bind<'file>(
         bytes: &'file [u8],
         program: &[Op],
-        family: &str,
+        binding: &BindingProfile,
     ) -> Result<BoundWeights<'file>, InteropError> {
         let parsed = parse_complete(bytes).expect("parses the gguf the encoder just wrote");
-        bind_program_leaves(&parsed, bytes, program, &binding_profile(family)?, &[])
+        bind_program_leaves(&parsed, bytes, program, binding, &[])
     }
 
     #[test]
@@ -655,7 +672,7 @@ mod tests {
         let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&stored))]);
         let program = contraction("blk.0.ffn_down.weight", &[3, 2], [2, 1]);
 
-        let weights = bind(&bytes, &program, "llama").expect("binds");
+        let weights = bind(&bytes, &program, &defaults()).expect("binds");
 
         let [(name, bound)] = weights.owned() else {
             panic!("one owned weight, got {:?}", weights.owned().len());
@@ -670,7 +687,7 @@ mod tests {
         let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&stored))]);
         let program = contraction("blk.0.ffn_down.weight", &[2, 3], [1, 2]);
 
-        let weights = bind(&bytes, &program, "llama").expect("binds");
+        let weights = bind(&bytes, &program, &defaults()).expect("binds");
 
         let [(name, QuantizedBlock::Float32(bound))] = weights.packed() else {
             panic!("one borrowed f32 weight, got {:?}", weights.packed().len());
@@ -684,7 +701,7 @@ mod tests {
         let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&[0.0; 6]))]);
         let program = contraction("blk.0.ffn_down.weight", &[3, 2], [2, 1]);
 
-        let weights = bind(&bytes, &program, "llama").expect("binds");
+        let weights = bind(&bytes, &program, &defaults()).expect("binds");
 
         let bound: Vec<&str> = weights
             .owned()
@@ -701,7 +718,7 @@ mod tests {
         let bytes = gguf(&[("token_embd.weight", &[3, 2], GgmlType::F32, &f32_bytes(&stored))]);
         let program = contraction("output.weight", &[3, 2], [2, 1]);
 
-        let weights = bind(&bytes, &program, "llama").expect("binds");
+        let weights = bind(&bytes, &program, &defaults()).expect("binds");
 
         let [(name, bound)] = weights.owned() else {
             panic!("one owned weight, got {:?}", weights.owned().len());
@@ -718,7 +735,7 @@ mod tests {
             ("blk.0.ffn_up.weight", &[3, 2], GgmlType::F32, &stored),
         ]);
         let parsed = parse_complete(&bytes).expect("parses");
-        let profile = binding_profile("llama").expect("defaults parse");
+        let profile = defaults();
         let down = contraction("blk.0.ffn_down.weight", &[3, 2], [2, 1]);
         let up = contraction("blk.0.ffn_up.weight", &[3, 2], [2, 1]);
         let mut weights = bind_program_leaves(&parsed, &bytes, &down, &profile, &[]).expect("binds");
@@ -735,7 +752,7 @@ mod tests {
         let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2], GgmlType::F32, &f32_bytes(&[0.0; 6]))]);
         let program = contraction("blk.0.ffn_down.weight", &[3, 3], [2, 1]);
 
-        let refused = bind(&bytes, &program, "llama");
+        let refused = bind(&bytes, &program, &defaults());
 
         assert!(
             matches!(refused, Err(InteropError::LeafShapeMismatch { leaf_elements: 9, tensor_elements: 6, .. })),
@@ -776,7 +793,7 @@ mod tests {
         );
         let bytes = gguf(&[("blk.0.ffn_down.weight", &[3, 2, 2], GgmlType::F32, &f32_bytes(&[0.0; 12]))]);
 
-        let refused = bind(&bytes, &program, "llama");
+        let refused = bind(&bytes, &program, &defaults());
 
         assert!(matches!(refused, Err(InteropError::LeafAxesInterleaved { .. })), "got {:?}", refused.err());
     }
@@ -806,7 +823,7 @@ mod tests {
             input(&mut program, &format!("blk.0.shortconv.in_proj.weight.{suffix}"), &[256, 256]);
         }
 
-        let weights = bind(&bytes, &program, "lfm2").expect("binds");
+        let weights = bind(&bytes, &program, &fused_thirds()).expect("binds");
 
         assert_eq!(weights.packed().len(), 3, "each third borrows from the mapping");
         for ((name, block), (suffix, first_row)) in weights
@@ -834,7 +851,7 @@ mod tests {
         input(&mut program, "blk.0.ffn_gate_exps.weight", &[2, 256, 2]);
         input(&mut program, "blk.0.ffn_up_exps.weight", &[2, 256, 2]);
 
-        let weights = bind(&bytes, &program, "llama").expect("binds");
+        let weights = bind(&bytes, &program, &defaults()).expect("binds");
 
         assert!(weights.packed().is_empty(), "a stack's halves are not contiguous, so none borrow");
         let [(gate_name, gate, gate_codec), (up_name, up, _)] = weights.packed_owned() else {
@@ -876,7 +893,7 @@ mod tests {
     fn a_family_extra_binds_a_tensor_no_leaf_reads() {
         let bytes = gguf(&[("rope_freqs.weight", &[4], GgmlType::F32, &f32_bytes(&[1.0, 1.0, 1.0e30, 1.0e30]))]);
 
-        let weights = bind(&bytes, &[], "gemma4").expect("binds");
+        let weights = bind(&bytes, &[], &BindingProfile { extra: vec!["rope_freqs.weight".into()], ..defaults() }).expect("binds");
 
         let [(name, values)] = weights.owned() else {
             panic!("one owned table, got {}", weights.owned().len());
@@ -921,8 +938,8 @@ mod tests {
             program
         };
 
-        let packed = bind(&bytes, &program, "llama").expect("binds without a rule");
-        let decoded = bind(&bytes, &program, "qwen35moe").expect("binds with the family rule");
+        let packed = bind(&bytes, &program, &defaults()).expect("binds without a rule");
+        let decoded = bind(&bytes, &program, &BindingProfile { decode_f32: vec!["ssm_alpha.weight".into()], ..defaults() }).expect("binds with the family rule");
 
         assert!(matches!(packed.packed(), [(_, QuantizedBlock::Packed { codec: Codec::Q4K, .. })]));
         let [(_, values)] = decoded.owned() else {
