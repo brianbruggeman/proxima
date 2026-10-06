@@ -3473,21 +3473,21 @@ impl<'file> LoadedModel<'file> {
             .collect();
         let mut gdn_prefill_zero_scratch: Vec<f32> = Vec::new();
         let mut moe_pre_gather_plan: Option<PreGatherPlan> = None;
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         let mut moe_route_history =
             vec![MoeRouteHistory::default(); self.architecture.block_count as usize];
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         let moe_expert_prefetch_enabled =
             moe_expert_prefetch_requested(serving_config.moe_expert_prefetch);
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         let mut moe_prefetch_prediction_count = 0usize;
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         let mut moe_prefetch_hit_count = 0usize;
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         let mut moe_prefetch_overfetch_count = 0usize;
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         let mut moe_prefetch_advice_events = 0usize;
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         let mut moe_prefetch_advised_bytes = 0u64;
         let mapped_window_capacity = self.expert_sidecar.as_ref().map_or([0; 3], |sidecar| {
             sidecar.mapped_window_capacity(self.architecture.expert_used_count as usize)
@@ -4703,7 +4703,7 @@ impl<'file> LoadedModel<'file> {
                     let current_sources = RefCell::new(CurrentExpertSources::new());
                     // Own the Arc-backed sidecar handle inside the callback so
                     // its borrow is not tied to the short `&self` call.
-                    #[cfg(feature = "qwen35moe-expert-prefetch")]
+                    #[cfg(feature = "moe-expert-prefetch")]
                     let expert_sidecar_for_gather = self.expert_sidecar.clone();
                     let mut before_qwen35moe_gather =
                         |layer: usize,
@@ -4730,7 +4730,7 @@ impl<'file> LoadedModel<'file> {
                                 experts = ?&selected_experts[..routes.len()],
                                 "qwen35_route"
                             );
-                            #[cfg(feature = "qwen35moe-expert-prefetch")]
+                            #[cfg(feature = "moe-expert-prefetch")]
                             if moe_expert_prefetch_enabled {
                                 if let Some(previous_history) = moe_route_history.get(layer) {
                                     for predicted in
@@ -4789,7 +4789,7 @@ impl<'file> LoadedModel<'file> {
                             }
                             expert_slab
                                 .add_selected_experts(layer, &selected_experts[..routes.len()]);
-                            #[cfg(feature = "qwen35moe-expert-prefetch")]
+                            #[cfg(feature = "moe-expert-prefetch")]
                             if moe_expert_prefetch_enabled
                                 && let Some(history) = moe_route_history.get_mut(layer)
                             {
@@ -6403,7 +6403,7 @@ impl<'file> LoadedModel<'file> {
             device.flush(&mut layer_caches, cached_len, positions_needed);
         }
 
-        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        #[cfg(feature = "moe-expert-prefetch")]
         if moe_expert_prefetch_enabled {
             debug!(
                 predictions = moe_prefetch_prediction_count,

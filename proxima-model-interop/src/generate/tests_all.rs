@@ -45,7 +45,7 @@ use super::PlanNumerics;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod tests {
     use proxima_primitives::sync::blocking::Mutex;
-    #[cfg(feature = "qwen35moe-expert-prefetch")]
+    #[cfg(feature = "moe-expert-prefetch")]
     use super::super::moe_expert_prefetch_requested;
     use super::{
         RouterExpertCounts, RouterLogits, SsmLayerCache, collect_future_gather_cuts,
@@ -77,7 +77,7 @@ pub(super) mod tests {
     use proxima_tensor::NodeId;
     use proxima_tensor::cpu::Evaluated;
 
-    #[cfg(feature = "qwen35moe-expert-prefetch")]
+    #[cfg(feature = "moe-expert-prefetch")]
     #[test]
     fn expert_prefetch_gate_requires_an_explicit_truthy_value() {
         assert!(!moe_expert_prefetch_requested(false));

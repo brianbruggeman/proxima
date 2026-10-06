@@ -1053,14 +1053,14 @@ pub(super) struct PreGatherPlan {
     pub(super) router_cut_placements: BTreeMap<NodeId, PlacedBuffer>,
 }
 
-#[cfg(feature = "qwen35moe-expert-prefetch")]
+#[cfg(feature = "moe-expert-prefetch")]
 #[derive(Clone, Copy)]
 pub(super) struct MoeRouteHistory {
     pub(super) routes: [crate::residency::RoutedExpert; 16],
     pub(super) len: usize,
 }
 
-#[cfg(feature = "qwen35moe-expert-prefetch")]
+#[cfg(feature = "moe-expert-prefetch")]
 impl Default for MoeRouteHistory {
     fn default() -> Self {
         Self {
@@ -1073,7 +1073,7 @@ impl Default for MoeRouteHistory {
     }
 }
 
-#[cfg(feature = "qwen35moe-expert-prefetch")]
+#[cfg(feature = "moe-expert-prefetch")]
 pub(super) fn moe_expert_prefetch_requested(value: bool) -> bool {
     value
 }

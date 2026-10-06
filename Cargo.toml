@@ -486,7 +486,7 @@ proc-macro2.workspace = true
 syn = { workspace = true, features = ["full"] }
 quote.workspace = true
 proc-macro-crate = "3.5.0"
-proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument", "qwen35moe-expert-prefetch", "qwen35moe-linked-suffix"] }
+proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument", "moe-expert-prefetch", "moe-linked-suffix"] }
 proxima-gguf = { path = "proxima-gguf" }
 memmap2 = "0.9.11"
 omega = { path = "omega", features = ["metal", "instrument"] }

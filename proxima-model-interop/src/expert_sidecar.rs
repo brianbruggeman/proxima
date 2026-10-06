@@ -1240,7 +1240,7 @@ impl MappedExpertSidecar {
     /// Advises the kernel that one expert's low-codec ranges will be needed
     /// soon. This changes only page-cache scheduling: it does not copy bytes,
     /// change the slab epoch, or promote the expert to the high codec.
-    #[cfg(all(unix, any(feature = "qwen35moe-expert-prefetch", test)))]
+    #[cfg(all(unix, any(feature = "moe-expert-prefetch", test)))]
     pub(crate) fn advise_expert_low(&self, address: ExpertAddress) -> Result<u64, InteropError> {
         let mut advised_bytes = 0_u64;
         for projection in ExpertProjection::ALL {
@@ -1261,7 +1261,7 @@ impl MappedExpertSidecar {
         Ok(advised_bytes)
     }
 
-    #[cfg(all(not(unix), any(feature = "qwen35moe-expert-prefetch", test)))]
+    #[cfg(all(not(unix), any(feature = "moe-expert-prefetch", test)))]
     pub(crate) fn advise_expert_low(&self, _address: ExpertAddress) -> Result<u64, InteropError> {
         Err(InteropError::PreGatherExecutionUnsupported {
             architecture: String::from("qwen35moe"),
