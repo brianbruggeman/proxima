@@ -1,0 +1,165 @@
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-core)
+   Compiling proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-config)
+   Compiling proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-runtime)
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-protocols)
+   Compiling proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-codec)
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-primitives)
+   Compiling proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-clock)
+   Compiling proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tls)
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-gguf)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-process)
+   Compiling proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-telemetry)
+   Compiling prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/prime)
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tokenizer)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-patterns)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-recording)
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-net)
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-test)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-listen)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-quic)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-http)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.36s
+────────────
+ Nextest run ID 40877a61-49e0-41fd-8e6c-a5633087ea65 with nextest profile: default
+    Starting 138 tests across 1 binary
+        PASS [   0.012s] (  1/138) proxima-core accept_rule::tests::accept_rule_minimum_run_refuses_short_runs
+        PASS [   0.012s] (  2/138) proxima-core accept_rule::tests::accept_rule_default_matches_leading_equal_accept
+        PASS [   0.013s] (  3/138) proxima-core accept_rule::config_tests::accept_rule_round_trip_similarity_floor
+        PASS [   0.013s] (  4/138) proxima-core accept_rule::config_tests::accept_rule_rejects_malformed_values
+        PASS [   0.013s] (  5/138) proxima-core accept_rule::config_tests::configured_rule_equality_matches_sequential
+        PASS [   0.013s] (  6/138) proxima-core accept_rule::config_tests::configured_rule_anchor_run_matches_sequential
+        PASS [   0.013s] (  7/138) proxima-core accept_rule::config_tests::accept_rule_round_trip_run_and_cap
+        PASS [   0.013s] (  8/138) proxima-core accept_rule::tests::accept_rule_row_cap_limits_the_accepted_run
+        PASS [   0.014s] (  9/138) proxima-core accept_rule::config_tests::accept_rule_builder_defaults_match_default_impl
+        PASS [   0.018s] ( 10/138) proxima-core accept_rule::config_tests::configured_rule_verifier_exact_matches_sequential
+        PASS [   0.009s] ( 11/138) proxima-core arena::tests::append_returns_offsets_and_reads_back_each_payload
+        PASS [   0.010s] ( 12/138) proxima-core accept_rule::tests::accept_rule_similarity_floor_admits_near_matches
+        PASS [   0.009s] ( 13/138) proxima-core batch::tests::empty_flush_does_not_write
+        PASS [   0.010s] ( 14/138) proxima-core arch::tests::prefetch_is_a_safe_no_fault_hint
+        PASS [   0.010s] ( 15/138) proxima-core arena::tests::grows_power_of_two_and_preserves_prior_payloads
+        PASS [   0.010s] ( 16/138) proxima-core batch::tests::buffer_reuses_after_flush
+        PASS [   0.010s] ( 17/138) proxima-core batch::tests::fmt_write_appends_formatted_output
+        PASS [   0.011s] ( 18/138) proxima-core arena::tests::reset_rewinds_cursor_and_keeps_capacity
+        PASS [   0.013s] ( 19/138) proxima-core batch::tests::many_appends_flush_in_one_write
+        PASS [   0.010s] ( 20/138) proxima-core batch::tests::push_bytes_carries_raw_bytes
+        PASS [   0.010s] ( 21/138) proxima-core batch::tests::write_sink_adapts_io_write
+        PASS [   0.009s] ( 22/138) proxima-core buffer::tests::capacity_overflow_drops_extra_buffers
+        PASS [   0.010s] ( 23/138) proxima-core batch::tests::with_capacity_preallocates
+        PASS [   0.011s] ( 24/138) proxima-core buffer::tests::acquire_returns_buffer_with_zero_length
+        PASS [   0.009s] ( 25/138) proxima-core buffer::tests::take_consumes_buffer_without_returning_to_pool
+        PASS [   0.009s] ( 26/138) proxima-core datagram_batch::tests::default_datagram_batch_constructs_from_sized_consts
+        PASS [   0.010s] ( 27/138) proxima-core buffer::tests::returned_buffer_is_reused_by_next_acquire_on_same_thread
+        PASS [   0.010s] ( 28/138) proxima-core datagram_batch::tests::recv_slab_commit_then_filled_datagrams_yields_zero_copy_views_in_order
+        PASS [   0.010s] ( 29/138) proxima-core datagram_batch::tests::recv_slab_grows_past_initial_cap_to_drain_a_burst
+        PASS [   0.010s] ( 30/138) proxima-core datagram_batch::tests::send_batch_reset_retains_allocation_and_clears_spans
+        PASS [   0.009s] ( 31/138) proxima-core datagram_batch::tests::send_batch_try_append_and_spans_round_trip_through_the_arena
+        PASS [   0.009s] ( 32/138) proxima-core factory::config::tests::build_drives_a_composition_tree_in_one_call
+        PASS [   0.009s] ( 33/138) proxima-core factory::config::tests::build_surfaces_an_unknown_kind_as_a_registry_error
+        PASS [   0.009s] ( 34/138) proxima-core factory::config::tests::conflaguration_builder_validates_a_fluent_composition
+        PASS [   0.009s] ( 35/138) proxima-core factory::config::tests::fluent_and_serde_forms_are_identical
+        PASS [   0.011s] ( 36/138) proxima-core factory::config::tests::validate_rejects_an_empty_kind_anywhere_in_the_tree
+        PASS [   0.011s] ( 37/138) proxima-core factory::registry::tests::duplicate_name_is_a_registry_error
+        PASS [   0.012s] ( 38/138) proxima-core factory::registry::tests::fluent_with_chains_registration
+        PASS [   0.011s] ( 39/138) proxima-core factory::registry::tests::missing_name_is_a_registry_error
+        PASS [   0.010s] ( 40/138) proxima-core histogram::tests::boundary_values_land_in_expected_buckets
+        PASS [   0.010s] ( 41/138) proxima-core histogram::tests::branchless_matches_linear_reference::at_min
+        PASS [   0.013s] ( 42/138) proxima-core factory::registry::tests::register_get_and_names_round_trip
+        PASS [   0.011s] ( 43/138) proxima-core histogram::tests::branchless_matches_linear_reference::half
+        PASS [   0.011s] ( 44/138) proxima-core histogram::tests::branchless_matches_linear_reference::hundred
+        PASS [   0.013s] ( 45/138) proxima-core histogram::tests::branchless_matches_linear_reference::hundred_thousand
+        PASS [   0.012s] ( 46/138) proxima-core histogram::tests::branchless_matches_linear_reference::million
+        PASS [   0.011s] ( 47/138) proxima-core histogram::tests::branchless_matches_linear_reference::one
+        PASS [   0.010s] ( 48/138) proxima-core histogram::tests::branchless_matches_linear_reference::over_max
+        PASS [   0.011s] ( 49/138) proxima-core histogram::tests::branchless_matches_linear_reference::small
+        PASS [   0.010s] ( 50/138) proxima-core histogram::tests::branchless_matches_linear_reference::ten
+        PASS [   0.011s] ( 51/138) proxima-core histogram::tests::branchless_matches_linear_reference::sub_min
+        PASS [   0.011s] ( 52/138) proxima-core histogram::tests::branchless_matches_linear_reference::ten_thousand
+        PASS [   0.010s] ( 53/138) proxima-core histogram::tests::branchless_matches_linear_reference::thousand
+        PASS [   0.008s] ( 54/138) proxima-core histogram::tests::f64_record_increments_bucket_for_1
+        PASS [   0.008s] ( 55/138) proxima-core histogram::tests::builder_fields_carried
+        PASS [   0.012s] ( 56/138) proxima-core histogram::tests::branchless_matches_linear_reference::tenth
+        PASS [   0.009s] ( 57/138) proxima-core histogram::tests::concurrent_record_total_count_matches
+        PASS [   0.010s] ( 58/138) proxima-core histogram::tests::branchless_matches_linear_reference::two
+        PASS [   0.009s] ( 59/138) proxima-core histogram::tests::sizes_are_pinned
+        PASS [   0.008s] ( 60/138) proxima-core histogram::tests::u64_record_increments_correct_bucket
+        PASS [   0.008s] ( 61/138) proxima-core kv_decision::tests::kv_decision_seal_target_edges
+        PASS [   0.009s] ( 62/138) proxima-core kv_decision::tests::kv_decision_seal_target_worked
+        PASS [   0.008s] ( 63/138) proxima-core kv_decision::tests::kv_decision_sealed_blocks_is_monotone
+        PASS [   0.008s] ( 64/138) proxima-core live::tests::update_derives_next_from_current
+        PASS [   0.009s] ( 65/138) proxima-core live::tests::read_sees_the_initial_value
+        PASS [   0.010s] ( 66/138) proxima-core live::tests::all_clones_share_one_cell
+        PASS [   0.009s] ( 67/138) proxima-core live::tests::replace_is_visible_to_an_existing_reader
+        PASS [   0.011s] ( 68/138) proxima-core live::tests::snapshot_escapes_the_read_borrow
+        PASS [   0.008s] ( 69/138) proxima-core per_core::tests::local_is_sticky_within_a_thread
+        PASS [   0.009s] ( 70/138) proxima-core per_core::tests::per_core_new_with_and_from_vec
+        PASS [   0.009s] ( 71/138) proxima-core per_core::tests::static_per_core_routes_by_index
+        PASS [   0.008s] ( 72/138) proxima-core ring::bounded::tests::drop_newest_leaves_queue_untouched
+        PASS [   0.009s] ( 73/138) proxima-core ring::bounded::tests::drain_into_batch_pops_fifo_both_tiers
+        PASS [   0.008s] ( 74/138) proxima-core ring::bounded::tests::enqueue_assisting_hands_back_on_give_up
+        PASS [   0.009s] ( 75/138) proxima-core ring::bounded::tests::enqueue_assisting_makes_room_and_lands
+        PASS [   0.009s] ( 76/138) proxima-core ring::bounded::tests::heap_capacity_rounds_up_to_power_of_two
+        PASS [   0.009s] ( 77/138) proxima-core ring::bounded::tests::heap_tier_matches
+        PASS [   0.008s] ( 78/138) proxima-core ring::bounded::tests::static_tier_matches
+        PASS [   0.009s] ( 79/138) proxima-core ring::mpsc::tests::ring_tests::cap_rounds_up_to_power_of_two_min_two
+        PASS [   0.008s] ( 80/138) proxima-core ring::mpsc::tests::ring_tests::drop_items_inside_ring_are_dropped_properly
+        PASS [   0.008s] ( 81/138) proxima-core ring::mpsc::tests::ring_tests::edge_min_cap_push_full_drain_push_again
+        PASS [   0.010s] ( 82/138) proxima-core ring::mpsc::tests::ring_tests::concurrency_single_producer_order_preserved
+        PASS [   0.010s] ( 83/138) proxima-core ring::mpsc::tests::ring_tests::happy_push_n_drain_n_in_order::large_cap
+        PASS [   0.009s] ( 84/138) proxima-core ring::mpsc::tests::ring_tests::invalid_cap_zero_returns_error
+        PASS [   0.011s] ( 85/138) proxima-core ring::mpsc::tests::ring_tests::happy_push_n_drain_n_in_order::small_cap
+        PASS [   0.011s] ( 86/138) proxima-core ring::mpsc::tests::ring_tests::happy_push_n_drain_n_in_order::push_all_drain_all
+        PASS [   0.010s] ( 87/138) proxima-core ring::mpsc::tests::ring_tests::property_random_push_drain_interleaving_preserves_fifo::medium
+        PASS [   0.009s] ( 88/138) proxima-core ring::mpsc::tests::ring_tests::sad_push_into_full_ring_returns_full::many
+        PASS [   0.010s] ( 89/138) proxima-core ring::mpsc::tests::ring_tests::property_random_push_drain_interleaving_preserves_fifo::tiny
+        PASS [   0.011s] ( 90/138) proxima-core ring::mpsc::tests::ring_tests::property_random_push_drain_interleaving_preserves_fifo::large
+        PASS [   0.007s] ( 91/138) proxima-core ring::mpsc::tests::ring_tests::with_capacity_is_infallible_and_clamps_zero_to_min
+        PASS [   0.009s] ( 92/138) proxima-core ring::mpsc::tests::ring_tests::worked_example_fifo_full_at_cap_then_reclaim
+        PASS [   0.009s] ( 93/138) proxima-core ring::mpsc::tests::ring_tests::worked_example_mpmc_two_consumers_fifo_then_reclaim
+        PASS [   0.011s] ( 94/138) proxima-core ring::mpsc::tests::ring_tests::sad_push_into_full_ring_returns_full::small
+        PASS [   0.009s] ( 95/138) proxima-core ring::mpsc::tests::static_ring_backs_a_static_with_no_lazy_init
+        PASS [   0.007s] ( 96/138) proxima-core ring::mpsc::tests::static_ring_full_hands_record_back_without_blocking
+        PASS [   0.008s] ( 97/138) proxima-core ring::mpsc::tests::static_ring_fifo_roundtrip
+        PASS [   0.009s] ( 98/138) proxima-core ring::mpsc::tests::static_ring_drop_drains_buffered_records
+        PASS [   0.013s] ( 99/138) proxima-core ring::mpsc::tests::static_ring_non_power_of_two_panics
+        PASS [   0.014s] (100/138) proxima-core serving_state::tests::accept_rows_needs_tokens_only_up_to_the_first_differing_row
+        PASS [   0.020s] (101/138) proxima-core ring::mpsc::tests::static_ring_concurrent_mpmc_no_loss_no_dup
+        PASS [   0.017s] (102/138) proxima-core serving_state::tests::accept_rows_takes_declared_count_not_prefix
+        PASS [   0.012s] (103/138) proxima-core serving_state::tests::action_speculation_anchor_macro_matches_sequential
+        PASS [   0.013s] (104/138) proxima-core serving_state::tests::action_fixture_sequential_matches_hand_derivation
+        PASS [   0.015s] (105/138) proxima-core serving_state::tests::action_speculation_verifier_exact_matches_sequential
+        PASS [   0.015s] (106/138) proxima-core serving_state::tests::action_speculation_equality_matches_sequential
+        PASS [   0.010s] (107/138) proxima-core serving_state::tests::serving_fsm_error_names_the_attempted_transition
+        PASS [   0.010s] (108/138) proxima-core serving_state::tests::serving_state_accept_rejects_mismatched_or_empty_draft
+        PASS [   0.008s] (109/138) proxima-core serving_state::tests::serving_state_draft_prompt_lookup_finds_the_earlier_occurrence
+        PASS [   0.008s] (110/138) proxima-core serving_state::tests::serving_state_walkthrough_drives_every_legal_transition
+        PASS [   0.008s] (111/138) proxima-core serving_state::tests::walk_prefill_decode_verify_finish
+        PASS [   0.011s] (112/138) proxima-core serving_state::tests::serving_state_speculation_matches_plain_greedy_for_thirty_two_tokens
+        PASS [   0.008s] (113/138) proxima-core signal::tests::a_poisoned_waiter_registry_still_wakes_its_waiters
+        PASS [   0.008s] (114/138) proxima-core signal::tests::child_observes_parent_fire
+        PASS [   0.008s] (115/138) proxima-core signal::tests::disarmed_guard_does_not_fire_on_drop
+        PASS [   0.008s] (116/138) proxima-core signal::tests::dropping_a_pending_waiter_unregisters_its_slot
+        PASS [   0.008s] (117/138) proxima-core signal::tests::fire_is_sticky_and_idempotent
+        PASS [   0.008s] (118/138) proxima-core signal::tests::grandchild_observes_root_through_the_merge
+        PASS [   0.008s] (119/138) proxima-core signal::tests::guard_fires_own_level_on_drop
+        PASS [   0.008s] (120/138) proxima-core signal::tests::late_observer_resolves_on_first_poll
+        PASS [   0.008s] (121/138) proxima-core signal::tests::parent_is_untouched_by_child_fire
+        PASS [   0.008s] (122/138) proxima-core signal::tests::repolling_does_not_grow_the_waiter_list
+        PASS [   0.007s] (123/138) proxima-core tests::config_required_field_renders_component_and_field
+        PASS [   0.009s] (124/138) proxima-core signal::tests::registered_waiter_is_woken_by_fire
+        PASS [   0.007s] (125/138) proxima-core tests::decode_kind_carries_typed_payload
+        PASS [   0.008s] (126/138) proxima-core tests::from_decode_error_to_proxima_error_via_from_impl
+        PASS [   0.008s] (127/138) proxima-core tests::legacy_upstream_is_retryable
+        PASS [   0.008s] (128/138) proxima-core tests::record_version_mismatch_carries_numbers
+        PASS [   0.010s] (129/138) proxima-core tests::rate_limited_is_not_retryable
+        PASS [   0.007s] (130/138) proxima-core tests::timeout_is_retryable
+        PASS [   0.008s] (131/138) proxima-core tests::registry_not_registered_uses_kind_and_name
+        PASS [   0.008s] (132/138) proxima-core tests::typed_upstream_io_is_retryable_but_bad_status_is_not
+        PASS [   0.007s] (133/138) proxima-core time::tests::timeout_returns_ok_when_future_completes_in_time
+        PASS [   0.023s] (134/138) proxima-core time::tests::timeout_returns_elapsed_when_timer_fires_first
+        PASS [   0.048s] (135/138) proxima-core time::tests::interval_emits_first_tick_immediately_then_periodic
+        PASS [   0.047s] (136/138) proxima-core time::tests::sleep_resolves_after_duration
+        PASS [   0.115s] (137/138) proxima-core ring::mpsc::tests::ring_tests::mpmc_many_producers_many_consumers_no_loss_no_tear
+        PASS [   0.131s] (138/138) proxima-core ring::mpsc::tests::ring_tests::mpsc_many_producers_no_loss_no_tear
+────────────
+     Summary [   0.216s] 138 tests run: 138 passed, 0 skipped

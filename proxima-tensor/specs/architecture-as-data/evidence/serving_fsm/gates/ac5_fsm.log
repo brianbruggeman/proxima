@@ -1,0 +1,9 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 2.25s
+────────────
+ Nextest run ID cf69cc72-f0ce-4732-b1cd-c2d0037d37ce with nextest profile: default
+    Starting 2 tests across 35 binaries (832 tests skipped)
+        PASS [   2.353s] (1/2) proxima-model-interop::arch_data_baseline serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps
+        PASS [   4.976s] (2/2) proxima-model-interop::arch_data_baseline serving_fsm_drives_speculative_verify_through_accept_and_rollback
+────────────
+     Summary [   7.332s] 2 tests run: 2 passed, 832 skipped
