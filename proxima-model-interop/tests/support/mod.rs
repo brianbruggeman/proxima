@@ -158,7 +158,7 @@ fn architecture_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
 }
 
 /// [`architecture_metadata`] plus the two MoE-only keys
-/// [`bind_all_weights`](proxima_model_interop) reads
+/// [`bind_program_leaves`](proxima_model_interop::bind_program_leaves) reads
 /// (`bind.rs:263-264`'s own `metadata_u32_optional` lookups) to route a
 /// layer's FFN through the routed path instead of the dense triple.
 fn moe_architecture_metadata(
@@ -443,7 +443,7 @@ pub const EXPERT_USED_COUNT: u32 = 2;
 /// vectors never carrying a matmul quant codec in this fixture) and the
 /// stacked `ffn_{gate,up,down}_exps.weight` routed experts in `weight_codec`
 /// ([`push_moe_expert_stack`]), plus the `{architecture}.expert_count`/
-/// `expert_used_count` metadata keys [`bind_all_weights`](proxima_model_interop)
+/// `expert_used_count` metadata keys [`bind_program_leaves`](proxima_model_interop::bind_program_leaves)
 /// reads to select the routed bind path at all. Same real GGUF byte stream
 /// (`write_complete`), same real quantizer per codec, same 2-layer/256-wide
 /// shape as [`checkpoint_bytes`] -- the only difference is which FFN weight

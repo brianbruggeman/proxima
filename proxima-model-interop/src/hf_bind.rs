@@ -1,5 +1,5 @@
 //! safetensors weights -> the same [`BoundWeights`] structures
-//! [`crate::bind::bind_all_weights`] produces from a GGUF checkpoint --
+//! [`crate::bind_leaves::bind_program_leaves`] produces from a GGUF checkpoint --
 //! HF-directory counterpart to that module, over the tensor manifest
 //! [`proxima_safetensors::Manifest`] hands back instead of GGUF's
 //! [`ParsedGguf`] tensor directory.
@@ -16,7 +16,7 @@
 //! path has never needed since no GGUF checkpoint this crate has evaluated
 //! stores `F16`/`Bf16` weights.
 //!
-//! `std`-gated, matching `bind.rs`'s own `bind_all_weights`: both walk a
+//! `std`-gated, matching `bind.rs`'s own `bind_program_leaves`: both walk a
 //! whole tensor directory and need [`proxima_gguf::restack`]-free but still
 //! platform-shaped support (an owned `Vec<f32>` per non-packed weight, sized
 //! by the checkpoint), and [`crate::generate::LoadedModel`] (the only
@@ -401,7 +401,7 @@ fn hf_bind_matmul_weight<'file>(
     Ok(())
 }
 
-/// Every dense-checkpoint weight name `crate::bind::bind_all_weights`'s
+/// Every dense-checkpoint weight name `crate::bind_leaves::bind_program_leaves`'s
 /// GGUF loop binds, HF's own naming instead -- the standard Llama/Mistral/
 /// Qwen `transformers` layout (`model.layers.{layer}.*`), the convention
 /// every dense checkpoint on HuggingFace this crate has been checked against
@@ -524,7 +524,7 @@ pub mod node_names {
     }
 }
 
-/// HF/safetensors counterpart to [`crate::bind::bind_all_weights`]: binds
+/// HF/safetensors counterpart to [`crate::bind_leaves::bind_program_leaves`]: binds
 /// every weight [`proxima_tensor::spec::mistral_cached_forward_program`]
 /// needs out of a single safetensors buffer's [`Manifest`], using HF's own
 /// per-tensor names ([`names`]) in place of GGUF's `blk.{n}.*` convention.

@@ -18,7 +18,7 @@
 //! resulting [`ParsedGguf`] plus the byte buffer it was parsed from.
 //!
 //! [`architecture_from_metadata`] and the `std`-gated weight-binding
-//! orchestration below it (`bind_all_weights` and friends, `pub(crate)`:
+//! orchestration below it (`bind_program_leaves` and friends, `pub(crate)`:
 //! [`crate::generate::LoadedModel::load`] is their one caller) turn that
 //! same `(ParsedGguf, file_bytes)` pair into every input
 //! `proxima_tensor::spec::mistral_cached_forward_program` needs, still
@@ -535,7 +535,7 @@ fn head_dim_from_metadata(
 /// (`modeling_qwen3.py`'s `Qwen3Attention`), applied to `q`/`k` right after
 /// projection and before RoPE. Presence, not the architecture name, decides
 /// this -- the same "read the file, don't assume the shape" move
-/// [`bind_all_weights`]'s tied-embeddings check already makes -- so a future
+/// [`bind_program_leaves`]'s tied-embeddings check already makes -- so a future
 /// checkpoint that also carries these tensors under a different
 /// `general.architecture` value is handled without a name-based dispatch.
 #[cfg(feature = "std")]
@@ -1808,73 +1808,6 @@ pub(crate) fn bind_matmul_weight_triple<'file>(
     Ok(())
 }
 
-/// ROW 328 diagnostic knob: `PROXIMA_HEAD_PRIVATE_COPY=1`, unset in every
-/// production run. Same env-var convention as `PROXIMA_PREFAULT`/
-/// `PROXIMA_MLOCK` (this module's `real_openchat_file` submodule).
-#[cfg(feature = "std")]
-fn head_private_copy_requested() -> bool {
-    std::env::var("PROXIMA_HEAD_PRIVATE_COPY").is_ok_and(|value| value == "1")
-}
-
-/// [`bind_matmul_weight`]'s ROW 328 counterpart: binds the SAME packed
-/// bytes through [`BoundWeights::packed_owned`] (an owned `Vec<u8>` copy)
-/// instead of [`BoundWeights::packed`] (a zero-copy borrow into
-/// `file_bytes`) -- the existing split [`Codec`]'s own doc
-/// already describes for [`bind_moe_expert_weights`]'s restack fallback,
-/// reused here rather than adding a second owned-bytes mechanism. Same
-/// shape, same quantization codec, same compiled kernel; the only
-/// difference downstream is the buffer's address: a `packed_owned` copy
-/// never falls inside `omega::metal::register_checkpoint_mapping`'s
-/// registered mmap range, so the driver's `checkpoint_mapping_offset`
-/// no-copy lookup misses and it uploads a private/resident copy instead --
-/// exactly the isolation this row's private-copy arm needs.
-///
-/// A codec [`Codec`] has no tag for (`Q3_K`, `Q4_0`, `F16`,
-/// `BFloat16`) falls back to the normal zero-copy [`bind_matmul_weight`]
-/// bind unchanged, so this knob never fails a checkpoint whose head is not
-/// one of the four `Codec` codecs -- it only changes behavior for
-/// the `Q6_K` shape this row's own openchat fixture actually has.
-///
-/// # Errors
-///
-/// See [`bind_matmul_weight`].
-#[cfg(feature = "std")]
-fn bind_matmul_weight_private_copy<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    source_name: &str,
-    target_name: alloc::string::String,
-    out_dim: usize,
-    in_dim: usize,
-    state: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
-    match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
-        Ok(proxima_tensor::cpu::QuantizedBlock::Float32(_)) | Err(_) => {
-            let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
-            state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            let transposed = transpose_out_in_to_in_out(&decoded, source_name, out_dim, in_dim)?;
-            state.owned.push((target_name, transposed));
-        }
-        Ok(block) => {
-            let owned = match block {
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => Some((bytes, Codec::Q4K)),
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q5K, bytes } => Some((bytes, Codec::Q5K)),
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q6K, bytes } => Some((bytes, Codec::Q6K)),
-                proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes } => Some((bytes, Codec::Q8_0)),
-                _ => None,
-            };
-            match owned {
-                Some((bytes, kind)) => {
-                    state.resident_bytes += bytes.len();
-                    state.packed_owned.push((target_name, bytes.to_vec(), kind));
-                }
-                None => state.packed.push((target_name, block)),
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Row-major transpose of one `[expert_count, out_dim, in_dim]` stack into
 /// `[expert_count, in_dim, out_dim]`, expert-by-expert, via the same
 /// [`transpose_out_in_to_in_out`] a dense matmul weight already uses --
@@ -2152,272 +2085,10 @@ pub fn bind_moe_expert_weights<'file>(
     Ok(())
 }
 
-/// Runs [`bind_dense`]/[`bind_matmul_weight`] over every one of
-/// `architecture`'s `block_count` layers plus `token_embd.weight` and
-/// `output.weight` -- the load loop [`crate::generate::LoadedModel::load`]
-/// runs once per checkpoint, so every [`Pipe::call`](proxima_primitives::pipe::Pipe::call)
-/// after that reuses the result instead of re-walking the tensor
-/// directory per request. `architecture.expert_count > 0` binds the routed
-/// FFN's weight family instead of the dense triple (see
-/// [`bind_moe_expert_weights`]) -- every other weight is identical between
-/// the two shapes.
-///
-/// # Errors
-///
-/// [`InteropError::UnrepresentableGgmlType`] if any bound tensor carries a
-/// `GgmlType` this crate has no decoder for -- a checkpoint using an
-/// undecoded codec fails the load with a typed error rather than aborting
-/// the process (see [`bind_dense`]/[`bind_matmul_weight`]); whatever
-/// [`bind_moe_expert_weights`] can fail with, for a MoE checkpoint;
-/// whatever [`recode_tensor`] can fail with, for a tensor `weight_precision`
-/// matches.
-///
-/// `weight_precision`: [`crate::serving::ServingConfig::weight_precision`]'s
-/// per-tensor recode rules, stored on the returned [`BoundWeights`] and
-/// consulted by [`bind_dense_as`]/[`bind_matmul_weight_as`] before either
-/// binds a tensor at its on-disk codec. Not yet threaded from
-/// [`crate::generate::LoadedModel::load`]'s own `ServingConfig` (that
-/// constructor's signature has 22 call sites across this crate and is a
-/// separate change) -- today's one caller passes `&[]`, reproducing
-/// pre-recode behavior exactly; a future slice's job is wiring `load`'s own
-/// config through to this parameter.
-#[cfg(feature = "std")]
-pub(crate) fn bind_all_weights<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    architecture: &ModelArchitecture,
-    paired_gate_up_reduce: bool,
-    fused_qkv_reduce: bool,
-    weight_precision: &'file [crate::serving::WeightPrecisionRule<'file>],
-) -> Result<BoundWeights<'file>, InteropError> {
-    let mut state = BoundWeights {
-        resident_bytes: file_bytes.len(),
-        owned: Vec::new(),
-        packed: Vec::new(),
-        packed_owned: Vec::new(),
-        precision: weight_precision,
-    };
-
-    let embedding = architecture.embedding as usize;
-    // `query_heads * head_dim`, NOT `embedding` -- the two agree only when
-    // `head_dim == embedding / query_heads` (Mistral's own shape). Qwen3
-    // declares `head_dim` independently (`attention.key_length`), and its
-    // real checkpoint has `query_heads * head_dim = 16 * 128 = 2048 !=
-    // embedding (1024)`; binding `attn_q`/`attn_output` at `embedding` there
-    // silently mis-shapes both tensors by 2x.
-    let q_dim = architecture.query_heads as usize * architecture.head_dim as usize;
-    let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
-    let feed_forward = architecture.feed_forward as usize;
-    let vocab = architecture.vocab as usize;
-    let qk_norm = checkpoint_has_qk_norm(parsed);
-    let qkv_biases = checkpoint_qkv_biases(parsed, architecture)?;
-
-    bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
-
-    for layer in 0..architecture.block_count {
-        bind_dense(
-            parsed,
-            file_bytes,
-            alloc::format!("blk.{layer}.attn_norm.weight"),
-            &mut state,
-        )?;
-        bind_dense(
-            parsed,
-            file_bytes,
-            alloc::format!("blk.{layer}.ffn_norm.weight"),
-            &mut state,
-        )?;
-        if fused_qkv_reduce {
-            bind_matmul_weight_triple(
-                parsed,
-                file_bytes,
-                &alloc::format!("blk.{layer}.attn_q.weight"),
-                &alloc::format!("blk.{layer}.attn_k.weight"),
-                &alloc::format!("blk.{layer}.attn_v.weight"),
-                alloc::format!("blk.{layer}.attn_qkv.weight"),
-                &mut state,
-            )?;
-        } else {
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_q.weight"),
-                q_dim,
-                embedding,
-                &mut state,
-            )?;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_k.weight"),
-                kv_dim,
-                embedding,
-                &mut state,
-            )?;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_v.weight"),
-                kv_dim,
-                embedding,
-                &mut state,
-            )?;
-        }
-        if qkv_biases {
-            bind_dense(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_q.bias"),
-                &mut state,
-            )?;
-            bind_dense(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_k.bias"),
-                &mut state,
-            )?;
-            bind_dense(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_v.bias"),
-                &mut state,
-            )?;
-        }
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            alloc::format!("blk.{layer}.attn_output.weight"),
-            embedding,
-            q_dim,
-            &mut state,
-        )?;
-
-        if qk_norm {
-            bind_dense(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_q_norm.weight"),
-                &mut state,
-            )?;
-            bind_dense(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.attn_k_norm.weight"),
-                &mut state,
-            )?;
-        }
-
-        if architecture.expert_count == 0 {
-            if paired_gate_up_reduce {
-                bind_matmul_weight_paired(
-                    parsed,
-                    file_bytes,
-                    &alloc::format!("blk.{layer}.ffn_gate.weight"),
-                    &alloc::format!("blk.{layer}.ffn_up.weight"),
-                    alloc::format!("blk.{layer}.ffn_gate_up.weight"),
-                    &mut state,
-                )?;
-            } else {
-                bind_matmul_weight(
-                    parsed,
-                    file_bytes,
-                    alloc::format!("blk.{layer}.ffn_gate.weight"),
-                    feed_forward,
-                    embedding,
-                    &mut state,
-                )?;
-                bind_matmul_weight(
-                    parsed,
-                    file_bytes,
-                    alloc::format!("blk.{layer}.ffn_up.weight"),
-                    feed_forward,
-                    embedding,
-                    &mut state,
-                )?;
-            }
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.ffn_down.weight"),
-                embedding,
-                feed_forward,
-                &mut state,
-            )?;
-        } else {
-            let expert_count = architecture.expert_count;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
-                expert_count as usize,
-                embedding,
-                &mut state,
-            )?;
-            for (projection, out_dim, in_dim) in [
-                ("ffn_gate", feed_forward, embedding),
-                ("ffn_up", feed_forward, embedding),
-                ("ffn_down", embedding, feed_forward),
-            ] {
-                bind_moe_expert_weights(
-                    parsed,
-                    file_bytes,
-                    layer,
-                    projection,
-                    expert_count,
-                    out_dim,
-                    in_dim,
-                    &mut state,
-                )?;
-            }
-        }
-    }
-    bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state)?;
-    // tied embeddings (`general.tie_word_embeddings=true`, e.g. the real
-    // SmolLM2-135M checkpoint's own GGUF export): no standalone
-    // `output.weight` tensor exists on disk at all, only `token_embd.weight`
-    // reused for both the input embedding lookup and the output projection.
-    // `bind_matmul_weight_as` is the same alias mechanism `crate::lfm2`'s own
-    // tied output projection already uses (`lfm2.rs:544-545`) -- not a new
-    // bind path, just reached from the plain dense/MoE loop too.
-    if find_tensor(parsed, "output.weight").is_ok() {
-        if head_private_copy_requested() {
-            bind_matmul_weight_private_copy(
-                parsed,
-                file_bytes,
-                "output.weight",
-                "output.weight".into(),
-                vocab,
-                embedding,
-                &mut state,
-            )?;
-        } else {
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                "output.weight".into(),
-                vocab,
-                embedding,
-                &mut state,
-            )?;
-        }
-    } else {
-        bind_matmul_weight_as(
-            parsed,
-            file_bytes,
-            "token_embd.weight",
-            "output.weight".into(),
-            vocab,
-            embedding,
-            &mut state,
-        )?;
-    }
-    Ok(state)
-}
-
 /// [`QuantizedBlock`](proxima_tensor::cpu::QuantizedBlock)'s byte-carrying
 /// variants paired with the [`Codec`] tag
 /// [`crate::expert_slab::ExpertSlab::bind_layer_stack`] needs -- the same
-/// per-variant match [`bind_matmul_weight_private_copy`] already runs,
+/// per-variant match the packed binders already run,
 /// generalized to every codec [`Codec`] names rather than just the
 /// four that function's own private-copy knob cares about. `None` for
 /// `Float32`/`Q2K`/anything else [`Codec`] has no tag for -- a
@@ -4622,7 +4293,7 @@ mod real_qwen3moe_file {
     /// (6144) instead of `expert_feed_forward_length` (768) once
     /// `expert_count != 0`. Binds only layer 0's own three expert-family
     /// tensors through the exact same [`architecture_from_metadata`] +
-    /// `bind_moe_expert_weights` call shape `bind_all_weights`'s own MoE
+    /// `bind_moe_expert_weights` call shape `bind_program_leaves`'s own MoE
     /// loop uses -- cheap enough (one layer, not all 48) to run without the
     /// model-load memory ceiling a full `LoadedModel::load` would need.
     #[test]
@@ -4982,7 +4653,8 @@ mod real_openchat_file {
 
     #[cfg(feature = "metal")]
     use super::{ParsedGguf, find_tensor};
-    use super::{architecture_from_metadata, bind_all_weights, gguf_tensor_as_f32};
+    use super::{architecture_from_metadata, gguf_tensor_as_f32};
+    use crate::bind_leaves::bind_program_leaves;
 
     /// A read-only `mmap` of the fixture file (rustix, already a workspace
     /// dependency used the same way by `proxima-storage/src/dax/region.rs`
@@ -5989,8 +5661,6 @@ mod real_openchat_file {
             .expect("parse host-local checkpoint fixture");
         let architecture =
             architecture_from_metadata(&parsed).expect("derive architecture from real metadata");
-        let weights = bind_all_weights(&parsed, file_bytes, &architecture, false, false, &[])
-            .expect("bind real checkpoint weights");
         let qk_norm = crate::bind::checkpoint_has_qk_norm(&parsed);
 
         use proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps;
@@ -6012,6 +5682,14 @@ mod real_openchat_file {
                 false,
             )
             .expect("moe forward program with layer taps lowers");
+        let weights = bind_program_leaves(
+            &parsed,
+            file_bytes,
+            &program,
+            &crate::profiles::binding_profile(&architecture.family).expect("binding profile"),
+            &[],
+        )
+        .expect("bind real checkpoint weights");
 
         let prompt = default_prompt();
         let ids: Vec<u32> = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
@@ -6408,8 +6086,6 @@ mod real_openchat_file {
                 .expect("parse host-local openchat gguf fixture");
             let architecture = architecture_from_metadata(&parsed)
                 .expect("derive architecture from real metadata");
-            let weights = bind_all_weights(&parsed, file_bytes, &architecture, false, false, &[])
-                .expect("bind real openchat checkpoint weights");
 
             use proxima_tensor::spec::mistral_cached_forward_program;
             let (program, logits_root, cache_roots) = mistral_cached_forward_program(
@@ -6422,6 +6098,14 @@ mod real_openchat_file {
                 architecture.block_count,
             )
             .expect("the cached forward pass lowers to a program");
+            let weights = bind_program_leaves(
+                &parsed,
+                file_bytes,
+                &program,
+                &crate::profiles::binding_profile(&architecture.family).expect("binding profile"),
+                &[],
+            )
+            .expect("bind real openchat checkpoint weights");
 
             let kv_cache_names: Vec<(
                 alloc::string::String,
@@ -7671,10 +7355,10 @@ mod real_mixtral_file {
     /// separately from this change, evidenced by `generate.rs`'s own doc at
     /// that call site. The second gap this doc named -- `ffn_gate_inp.weight`
     /// (`F16`) hitting [`InteropError::UnrepresentableGgmlType`] before
-    /// `bind_all_weights` ever reaches the expert-weight loop -- IS this
+    /// `bind_program_leaves` ever reaches the expert-weight loop -- IS this
     /// change's own fix: [`gguf_tensor_as_packed_block`] now decodes `F16`
     /// (see [`binds_the_real_f16_router_weight_packed_and_matches_independent_f16_decode`]
-    /// for the real-bytes proof), so `bind_all_weights` now reaches
+    /// for the real-bytes proof), so `bind_program_leaves` now reaches
     /// [`bind_moe_expert_weights`] for every layer.
     ///
     /// **Second stale-doc correction (this change): the ~180 GiB SIGKILL

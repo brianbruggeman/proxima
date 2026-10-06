@@ -7,7 +7,7 @@
 //! through nothing but `pub` API.
 //!
 //! Composes [`proxima_model_interop::DenseArch`]'s own `bind` (the builtin
-//! fallback architecture) rather than reassembling `bind_all_weights` +
+//! fallback architecture) rather than reassembling `bind_program_leaves` +
 //! `mistral_cached_forward_program_with_experts` by hand -- a foreign
 //! architecture that wants "exactly what dense checkpoints already do,
 //! under a different `general.architecture` name" delegates to it instead

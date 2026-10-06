@@ -40,11 +40,12 @@ use proxima_tensor::spec::{
 
 use crate::architecture::{Architecture, BoundProgram};
 use crate::bind::{
-    ModelArchitecture, architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm,
+    ModelArchitecture, architecture_from_metadata, checkpoint_has_qk_norm,
     checkpoint_qkv_biases, metadata_f32_optional, metadata_u32_optional,
 };
+use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
-use crate::profiles::family_profile;
+use crate::profiles::{binding_profile, family_profile};
 use crate::task::{ModelTask, classify_task};
 
 /// The registered fallback architecture -- see [`Architecture::name`]'s own
@@ -94,14 +95,17 @@ fn bind_descriptor<'file>(
     architecture: ModelArchitecture,
     descriptor: &ModelDescriptor,
 ) -> Result<BoundProgram<'file>, InteropError> {
-    // `&[]`: this entry point takes no `ServingConfig`, so there is no
-    // `weight_precision` rule set to thread here yet --
-    // `crate::bind::bind_all_weights`'s own doc names this as the
-    // wiring a future slice does, unchanged from `load_inner`'s prior
-    // inline call.
-    let weights = bind_all_weights(parsed, file_bytes, &architecture, false, false, &[])?;
     let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
         build_forward(descriptor)?;
+    // `&[]`: this entry point takes no `ServingConfig`, so there is no
+    // `weight_precision` rule set to thread here yet.
+    let weights = bind_program_leaves(
+        parsed,
+        file_bytes,
+        &program,
+        &binding_profile(&architecture.family)?,
+        &[],
+    )?;
     Ok(BoundProgram {
         weights,
         architecture,

@@ -185,7 +185,7 @@ async fn dense_cpu_q6_k_forward_produces_a_deterministic_token_sequence(#[case] 
 /// `QuantError::UnsupportedCodec`) -- `bind::gguf_tensor_as_f32`'s own `match`
 /// names every one of them as `InteropError::UnrepresentableGgmlType` rather
 /// than misreading a codec it has no decoder for. `bind::bind_dense`/
-/// `bind::bind_matmul_weight`/`bind::bind_all_weights` now propagate that
+/// `bind::bind_matmul_weight`/`bind::bind_program_leaves` now propagate that
 /// `Err` with `?` instead of `.unwrap_or_else(|error| panic!(...))`, so
 /// `LoadedModel::load` returns it through its own documented `Result`
 /// rather than aborting the process on untrusted input.
