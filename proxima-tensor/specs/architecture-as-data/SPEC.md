@@ -459,3 +459,32 @@ function; `opt-level` did not move it. Attribution table:
   prefill 2531.5 vs 2533.9 ms, peak RSS -4857856 B, footprint -3571744 B, GPU bytes -1179648 B. granite moe: ms/token
   14.8675 vs 14.8875, prefill 6522.97 vs 6524.01 ms, peak RSS -117661696 B (limit 54258074), footprint -1417248 B, GPU
   bytes 0.
+
+## findings from slice 10b (the serving state machine drives the live decode loop, 2026-10-06)
+
+- R2's FSM half is wired: `run_decode_loop_from_ids` holds one `ServingState<u32, usize>` (entry `u32`, cache the
+  cache cursor), and `ServingState` lives in `proxima-core/src/serving_state.rs` (the `serving_fsm.rs` named in R2 no
+  longer exists). `decode.rs` `run_decode_loop_from_ids`: `Prefill`/`Decode` supply the step's input ids, a drafted
+  step enters `Verify`, and the verify readout calls `accept_rows` then `resume` (every draft matched) or `rollback`.
+- Verify evaluates `last` plus the D drafts, D+1 rows. `Accept` resumes through `advance_decode` of the bonus token,
+  because that row is the next single-row decode step and the verify batch already computed it; `Rollback` carries the
+  cursor to truncate the attention caches to. A `Verify` snapshot is a `usize` copy, which is why the cache type is the
+  cursor and not the per-layer `Vec<LayerCacheState>` that `generate/serving_backend.rs` sketches (cloning that for a
+  snapshot would copy every KV layer per verify step).
+- `ServingState::accept_rows` requires `row_tokens` only through row `accepted` (the verifier stops sampling at the
+  first differing row, so later rows do not exist); `row_caches` still has one entry per draft.
+- Open against R2: the `pending` queue and the evaluation closure remain. `pending` buffers the tokens a verify step
+  settles beyond the first, because `decode_until_stop_or_budget` pulls one token per call; the closure still owns
+  the device buffers, residency policy and scratch that the state machine must not carry. Neither holds control state
+  (which evaluation shape runs, the cursor, the rewind); both are plumbing between the state machine and the
+  termination policy.
+- Behavior change: drafting needs `Decode`, so a seeded call whose new range is one token no longer drafts at its
+  prefill step. Ids are unchanged (AC2, AC6).
+- Gates at the slice tip, per-slice tier in the gate profile, logs in `evidence/serving_fsm/gates/`: clippy exit 0,
+  tensor alloc check exit 0, interop no-default check exit 0, tensor 779 passed 8 skipped (6.9 s), interop slice-gate
+  709 passed 125 skipped (100.2 s), 136 s for the chain; core `nextest -p proxima-core --features config` 138 passed;
+  AC5 FSM half 2 passed, AC6 7 passed (154.9 s), AC2 5 passed (164.8 s).
+- Performance arms (decode_arms, 2 processes x 3 runs, tip against the 0c binary, `evidence/serving_fsm/perf_e2b`
+  and `perf_granite`): 12 of 12 bound lines within. gemma4 E2B ms/token 11.9500 vs 12.1605, prefill 2514.49 vs
+  2494.48 ms; granite moe ms/token 14.8760 vs 14.8240, prefill 6519.96 vs 6515.96 ms. The full 8 x 7 arms run at the
+  end of the run.

@@ -1,0 +1,13 @@
+    Finished `gate` profile [optimized] target(s) in 0.34s
+────────────
+ Nextest run ID 2f1dd2c3-c7b2-4a59-91ae-12b8a196d755 with nextest profile: default
+    Starting 5 tests across 35 binaries (829 tests skipped)
+        PASS [   4.659s] (1/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [   9.595s] (2/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  74.186s] (3/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  12.649s] (4/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  63.663s] (5/5) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+────────────
+     Summary [ 164.758s] 5 tests run: 5 passed (2 slow), 829 skipped

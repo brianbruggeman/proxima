@@ -1,0 +1,9 @@
+    Checking proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-core)
+    Checking proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-runtime)
+    Checking proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-codec)
+    Checking proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-primitives)
+    Checking proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-gguf)
+    Checking proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+    Checking proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.48s
