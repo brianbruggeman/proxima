@@ -86,7 +86,7 @@ fn supported_config(gpu_layers: i32) -> ServingConfig<'static> {
 /// garbage text is expected (LCG-filled weights), this only proves the
 /// hybrid attention+state-space graph runs end to end through the real
 /// `qwen35` bind + forward-program path
-/// (`proxima_model_interop::qwen35::bind_qwen35_weights` /
+/// (`proxima_model_interop::bind_program_leaves` /
 /// `qwen35_forward_program`), not that its output means anything.
 #[test]
 #[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
