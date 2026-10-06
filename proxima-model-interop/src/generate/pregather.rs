@@ -2722,7 +2722,7 @@ impl<'file> LoadedModel<'file> {
             // shared-KV layers, `gemma4_descriptor_from_gguf`'s own
             // doc) -- it would declare `blk.15.attn_k.weight` for the real
             // `gemma4:e2b-it-qat` checkpoint even though that tensor never
-            // exists on disk and `bind_gemma4_weights` correctly never binds
+            // exists on disk and the leaf binder correctly never binds
             // it, so `run_decode_loop_placed_kv` would execute a graph
             // asking for a weight that was never bound
             // (`TensorError::UnboundInputName`, measured against the real
@@ -3145,7 +3145,7 @@ mod gemma4_single_range_exclusion_tests {
     /// `KeySourceKind::SharedFromLayer` concept at all) still declares
     /// `blk.15.attn_k.weight` -- the exact leaf name the real checkpoint's
     /// own Metal run panicked on with `UnboundInputName` before this fix,
-    /// since `bind_gemma4_weights` never binds that tensor for a shared-KV
+    /// since the leaf binder never binds that tensor for a shared-KV
     /// layer. Proves the exclusion at `Self::load` is load-bearing, not
     /// dead code guarding against a case that could not occur anyway.
     #[test]

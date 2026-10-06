@@ -1,18 +1,17 @@
-//! Weight binding, tensor-name enumeration, and [`crate::architecture::Architecture`]
-//! registration for the `gemma4` checkpoint family. `Gemma4Arch::bind` is a
-//! DESCRIPTOR consumer: it hands the parsed header to
-//! [`proxima_tensor::spec::gemma4_descriptor_from_gguf`], which builds the
-//! whole [`proxima_tensor::spec::ModelDescriptor`] (per-layer
+//! [`crate::architecture::Architecture`] registration for the `gemma4`
+//! checkpoint family. `Gemma4Arch::bind` is a DESCRIPTOR consumer: it hands the
+//! parsed header to [`proxima_tensor::spec::gemma4_descriptor_from_gguf`],
+//! which builds the whole [`proxima_tensor::spec::ModelDescriptor`] (per-layer
 //! [`proxima_tensor::spec::LayerAttentionConfig`]/
-//! [`proxima_tensor::spec::LayerFfnConfig`] schedule included), and lowers it
-//! through [`proxima_tensor::spec::build_forward`] -- there is no bespoke
-//! gemma4 forward-graph builder and no gemma4 schedule in this crate.
+//! [`proxima_tensor::spec::LayerFfnConfig`] schedule included), lowers it
+//! through [`proxima_tensor::spec::build_forward`], and binds the weights that
+//! program's `Input` leaves name ([`crate::bind_leaves::bind_program_leaves`])
+//! -- there is no bespoke gemma4 forward-graph builder, no gemma4 schedule and
+//! no gemma4 tensor-name table in this crate.
 //! Teaching pointer: read `proxima_tensor::spec::attention_forward`'s own doc
 //! on `lfm2_forward_program_with_experts` before touching this file -- every
 //! knob the descriptor sets is documented there, not here.
 
-use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
@@ -23,626 +22,17 @@ use proxima_tensor::spec::{
 use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext, rebuild_layer_roots,
 };
-use crate::bind::{
-    BoundWeights, ModelArchitecture, SlidingRope, bind_dense, bind_matmul_weight,
-    bind_matmul_weight_as, bind_matmul_weight_transposed_f32, bind_moe_expert_weights,
-    codec_from_ggml_type, find_tensor, gguf_tensor_as_f32, metadata_str,
-};
+use crate::bind::{BoundWeights, ModelArchitecture, SlidingRope, find_tensor, metadata_str};
+use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
-use crate::profiles::family_profile;
+use crate::profiles::{binding_profile, family_profile};
 
-use super::hparams::{Architecture, from_metadata};
+use super::hparams::from_metadata;
 use super::program::gemma4_sliding_rope_table;
 
-/// Enumerates every tensor name `gemma4::hparams::from_metadata`'s own
-/// `Architecture` implies. Confirmed against the real `qwen3.6`-sibling
-/// `gemma4` MoE checkpoint (`examples/gemma4_dump.rs` /
-/// `examples/gemma4_layer_scan.rs`, `shared_kv_layers == 0`): every layer
-/// carries 22 tensors EXCEPT `attn_v.weight`, which is absent on the five
-/// full-attention layers (indices 5, 11, 17, 23, 29 on the real checkpoint)
-/// and present only on sliding-window layers -- 25 layers of 22 plus
-/// 5 layers of 21, plus 3 global tensors, is exactly the real header's 658.
-/// On a shared-KV checkpoint (`attention.shared_kv_layers > 0`, e.g.
-/// `gemma4:e2b-it-qat`) this does NOT hold: every own-KV layer (`layer <
-/// block_count - shared_kv_layers`), sliding or full, carries its own
-/// `attn_v.weight` (confirmed against the real E2B header -- `blk.4`,
-/// `blk.9`, `blk.14`, the three full own-KV layers among the first 15,
-/// each list `attn_v.weight`). Every TRAILING layer from
-/// `block_count - shared_kv_layers` onward (confirmed against the real
-/// header by an `UnknownTensor` load error on `blk.15.attn_k_norm.weight`)
-/// carries none of `attn_k.weight`, `attn_k_norm.weight`, or
-/// `attn_v.weight` at all -- see `gemma4_descriptor_from_gguf`'s own
-/// `shared_kv_source_layer` for which own-KV layer supplies them instead.
-/// The eight routed-expert leaves (`ffn_down_exps.{scale,weight}`,
-/// `ffn_gate_inp.{scale,weight}`, `ffn_gate_up_exps.weight`,
-/// `post_ffw_norm_1.weight`, `post_ffw_norm_2.weight`,
-/// `pre_ffw_norm_2.weight`) are gated on `architecture.expert_count > 0`,
-/// mirroring `bind_gemma4_weights`'s own split -- a dense checkpoint
-/// (E2B/E4B) carries none of them on disk, only the single
-/// `post_ffw_norm.weight` every layer lists unconditionally.
-#[must_use]
-pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
-    let mut names = Vec::new();
-    let first_shared_idx = architecture
-        .block_count
-        .saturating_sub(architecture.shared_kv_layers);
-
-    let is_moe = architecture.expert_count > 0;
-    for (layer, &is_sliding) in architecture.sliding_window_pattern.iter().enumerate() {
-        let is_shared_kv = layer as u32 >= first_shared_idx;
-        let mut suffixes = alloc::vec![
-            "attn_norm.weight",
-            "attn_output.weight",
-            "attn_q.weight",
-            "attn_q_norm.weight",
-            "ffn_down.weight",
-            "ffn_gate.weight",
-            "ffn_norm.weight",
-            "ffn_up.weight",
-            "layer_output_scale.weight",
-            "post_attention_norm.weight",
-            "post_ffw_norm.weight",
-        ];
-        // `bind_gemma4_weights`'s own `expert_count > 0` split (this file's
-        // own doc above it): these eight leaves exist on disk ONLY for a
-        // routed-expert checkpoint (12B/26B/31B) -- a dense checkpoint
-        // (E2B/E4B, `expert_count == 0`) carries none of them, only the
-        // single `post_ffw_norm.weight` already listed above.
-        if is_moe {
-            suffixes.push("ffn_down_exps.scale");
-            suffixes.push("ffn_down_exps.weight");
-            suffixes.push("ffn_gate_inp.scale");
-            suffixes.push("ffn_gate_inp.weight");
-            suffixes.push("ffn_gate_up_exps.weight");
-            suffixes.push("post_ffw_norm_1.weight");
-            suffixes.push("post_ffw_norm_2.weight");
-            suffixes.push("pre_ffw_norm_2.weight");
-        }
-        if !is_shared_kv {
-            suffixes.push("attn_k.weight");
-            suffixes.push("attn_k_norm.weight");
-            // Mirrors `bind_gemma4_weights`'s own `attn_v.weight` bind gate
-            // and `gemma4_descriptor_from_gguf`'s own `value_source_kind` gate --
-            // MoE's full layers alone lack `attn_v.weight` (`is_sliding`);
-            // a shared-KV checkpoint's (E2B/E4B) own-KV layers ALL carry it.
-            if is_sliding || architecture.shared_kv_layers > 0 {
-                suffixes.push("attn_v.weight");
-            }
-        }
-        // Per-layer-embedding (PLE) Stage B's own three per-block leaves --
-        // absent (E4B/12B/26B/31B, `ple_dim == 0`) means this checkpoint
-        // carries no PLE tensors at all (`hparams::Architecture::ple_dim`'s
-        // own doc).
-        if architecture.ple_dim > 0 {
-            suffixes.push("inp_gate.weight");
-            suffixes.push("proj.weight");
-            suffixes.push("post_norm.weight");
-        }
-        for suffix in suffixes {
-            names.push(format!("blk.{layer}.{suffix}"));
-        }
-    }
-
-    names.push(String::from("token_embd.weight"));
-    names.push(String::from("output_norm.weight"));
-    names.push(String::from("rope_freqs.weight"));
-    // Per-layer-embedding (PLE) Stage A's own three shared, whole-checkpoint
-    // leaves -- see the per-layer trio above for the per-block half.
-    if architecture.ple_dim > 0 {
-        names.push(String::from("per_layer_token_embd.weight"));
-        names.push(String::from("per_layer_model_proj.weight"));
-        names.push(String::from("per_layer_proj_norm.weight"));
-    }
-    names
-}
-
-/// Binds `rope_freqs.weight` (GGUF `ROPE_FREQS`) as raw, unmodified `f32`
-/// values -- the per-pair frequency-scaling factor
-/// [`Gemma4Arch::rope_freq_factors`] hands back to
-/// `crate::generate::build_position_inputs`, which divides each full-layer
-/// RoPE pair's angle by it. Unlike [`bind_norm`]'s norms this is not an
-/// RMSNorm gamma shift, and it declares no `Op::Input` leaf the
-/// forward program consumes -- it rides in [`BoundWeights::owned`] purely
-/// as a lookup table [`Gemma4Arch::rope_freq_factors`] reads back out by
-/// name, the same way every other bound weight is name-tagged there.
-fn bind_rope_freqs<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    state: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
-    let values = gguf_tensor_as_f32(parsed, file_bytes, "rope_freqs.weight")?;
-    state.resident_bytes += values.len() * core::mem::size_of::<f32>();
-    state.owned.push((String::from("rope_freqs.weight"), values));
-    Ok(())
-}
-
-/// The RMSNorm gamma shift this checkpoint family stores on disk, added to
-/// every norm weight at bind time so the generic engine's `rmsnorm`
-/// (`gamma * x`, no offset) stays unaware of the convention.
-/// `modeling_gemma4.py`'s `Gemma4RMSNorm` is ones-init and applies
-/// `normed * weight` directly (no `+ 1`) -- unlike gemma3's zero-init
-/// `(1 + weight)` convention, whose shift is `1.0`. Gemma 4's GGUF already
-/// stores the full effective gamma, so this is `0.0`: shifting by it is a
-/// byte-identical no-op, keeping the convention explicit data instead of a
-/// baked-in function name.
-const GEMMA4_NORM_SHIFT: f32 = 0.0;
-
-/// Decodes `name` to `f32` and adds `norm_shift` to every element -- the
-/// RMSNorm gamma convention this checkpoint family uses, applied once here
-/// at bind time so the generic engine's `rmsnorm` (`gamma * x`, no offset)
-/// stays unaware of it. Every norm this checkpoint carries is small
-/// (`embedding` or `head_dim` wide), so a full decode is the right shape
-/// here -- unlike the fused expert tensors below, there is no
-/// packed-and-huge case to avoid. Gemma 4 passes [`GEMMA4_NORM_SHIFT`]
-/// (`0.0`, ones-init `normed * weight`); Gemma 3's zero-init
-/// `(1 + weight)` convention would pass `1.0` here instead -- the shift is
-/// a config value, not a hard-coded convention.
-fn bind_norm<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    name: String,
-    norm_shift: f32,
-    state: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
-    let mut values = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
-    if norm_shift != 0.0 {
-        for value in &mut values {
-            *value += norm_shift;
-        }
-    }
-    state.resident_bytes += values.len() * core::mem::size_of::<f32>();
-    state.owned.push((name, values));
-    Ok(())
-}
-
-/// Binds every weight [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s `Input` leaves
-/// declare for gemma4's own [`Gemma4Arch::bind`] descriptor.
-/// `blk.{layer}.pre_ffw_norm_2.weight` is bound (via `bind_norm` with
-/// `GEMMA4_NORM_SHIFT`) and consumed by the engine's
-/// `routed_pre_norm` knob (`gemma4_descriptor_from_gguf` sets it), which normalizes
-/// the routed branch's input separately from the dense branch's shared
-/// `ffn_norm`-normed one -- matching the real Gemma 4 graph.
-///
-/// The fused `blk.{layer}.ffn_gate_up_exps.weight` splits into the two
-/// separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves the engine's
-/// routed FFN declares WITHOUT a dequant -- see
-/// `bind_gemma4_fused_gate_up_experts`'s own doc for the confirmed axis
-/// (the real checkpoint's `ne[0]`=2816 embedding is the quantization block
-/// axis; `ne[1]`=1408=2*`expert_feed_forward` is the row axis the split
-/// cuts, orthogonal to blocks) and the packed-memcpy implementation.
-///
-/// # Errors
-///
-/// Whatever [`find_tensor`]/[`gguf_tensor_as_f32`]/[`bind_dense`]/
-/// [`bind_matmul_weight`]/`bind_gemma4_fused_gate_up_experts`/
-/// [`bind_moe_expert_weights`] can fail with.
-#[cfg(feature = "std")]
-pub fn bind_gemma4_weights<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    architecture: &Architecture,
-) -> Result<BoundWeights<'file>, InteropError> {
-    let mut state = BoundWeights::new(&[]);
-    let embedding = architecture.embedding as usize;
-    let expert_count = architecture.expert_count as usize;
-
-    bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
-    bind_norm(
-        parsed,
-        file_bytes,
-        "output_norm.weight".into(),
-        GEMMA4_NORM_SHIFT,
-        &mut state,
-    )?;
-    bind_rope_freqs(parsed, file_bytes, &mut state)?;
-
-    // Per-layer-embedding (PLE) Stage A's own three shared, whole-checkpoint
-    // leaves. `per_layer_token_embd.weight` is a lookup table
-    // (`attention_forward.rs`'s `append_ple_shared_projections` reads it
-    // through `embedding_lookup`, the same gather `token_embd.weight`
-    // above uses) so it binds `bind_dense`, not `bind_matmul_weight`, the
-    // same convention `token_embd.weight` itself uses.
-    // `per_layer_model_proj.weight` is a plain `[in, out]` matmul weight.
-    if architecture.ple_dim > 0 {
-        let ple_total = architecture.ple_dim * architecture.block_count;
-        bind_dense(
-            parsed,
-            file_bytes,
-            "per_layer_token_embd.weight".into(),
-            &mut state,
-        )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            "per_layer_model_proj.weight".into(),
-            ple_total as usize,
-            embedding,
-            &mut state,
-        )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            "per_layer_proj_norm.weight".into(),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-    }
-
-    if find_tensor(parsed, "output.weight").is_ok() {
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            "output.weight".into(),
-            architecture.vocab as usize,
-            embedding,
-            &mut state,
-        )?;
-    } else {
-        bind_matmul_weight_as(
-            parsed,
-            file_bytes,
-            "token_embd.weight",
-            "output.weight".into(),
-            architecture.vocab as usize,
-            embedding,
-            &mut state,
-        )?;
-    }
-
-    let first_shared_idx = architecture
-        .block_count
-        .saturating_sub(architecture.shared_kv_layers);
-    for (layer_index, &is_sliding) in architecture.sliding_window_pattern.iter().enumerate() {
-        let layer = layer_index as u32;
-        let is_shared_kv = layer >= first_shared_idx;
-        let head_dim = if is_sliding {
-            architecture.key_length_swa
-        } else {
-            architecture.key_length
-        } as usize;
-        let kv_heads = architecture.kv_heads_by_layer[layer_index] as usize;
-        let query_heads = architecture.head_count as usize;
-        let feed_forward = architecture.feed_forward_by_layer[layer_index] as usize;
-
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.attn_norm.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.post_attention_norm.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.attn_q_norm.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-        // Shared-KV layers (E2B: blk.15..=34, `is_shared_kv`) carry none of
-        // `attn_k.weight`/`attn_k_norm.weight`/`attn_v.weight` on disk at
-        // all (confirmed by an `UnknownTensor` load error on
-        // `blk.15.attn_k_norm.weight` against the real checkpoint) --
-        // `gemma4_descriptor_from_gguf`'s own `KeySourceKind::SharedFromLayer`/
-        // `ValueSourceKind::SharedFromLayer` never declare `Input` leaves
-        // for them, so binding them here would look up a tensor the
-        // forward program never asks for.
-        if !is_shared_kv {
-            bind_norm(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.attn_k_norm.weight"),
-                GEMMA4_NORM_SHIFT,
-                &mut state,
-            )?;
-        }
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.attn_q.weight"),
-            query_heads * head_dim,
-            embedding,
-            &mut state,
-        )?;
-        if !is_shared_kv {
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.attn_k.weight"),
-                kv_heads * head_dim,
-                embedding,
-                &mut state,
-            )?;
-        }
-        // Mirrors `gemma4_descriptor_from_gguf`'s own `value_source_kind` gate --
-        // MoE keeps `is_sliding` (a full layer has no `attn_v.weight` on
-        // disk); E2B/E4B (`shared_kv_layers > 0`) binds every own-KV
-        // layer's real `attn_v.weight` unconditionally.
-        if (is_sliding || architecture.shared_kv_layers > 0) && !is_shared_kv {
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.attn_v.weight"),
-                kv_heads * head_dim,
-                embedding,
-                &mut state,
-            )?;
-        }
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.attn_output.weight"),
-            embedding,
-            query_heads * head_dim,
-            &mut state,
-        )?;
-        bind_dense(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.layer_output_scale.weight"),
-            &mut state,
-        )?;
-
-        // Per-layer-embedding (PLE) Stage B's own three per-block leaves --
-        // `attention_forward.rs`'s `append_lfm2_layer_ffn` declares
-        // `inp_gate.weight`/`proj.weight` as `[in, out]` matmul weights
-        // (`bind_matmul_weight`'s own convention, same as `ffn_gate`/
-        // `ffn_up`/`ffn_down` above) and `post_norm.weight` as a plain
-        // RMSNorm gamma (`bind_norm`, [`GEMMA4_NORM_SHIFT`]).
-        if architecture.ple_dim > 0 {
-            let ple_dim = architecture.ple_dim as usize;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.inp_gate.weight"),
-                ple_dim,
-                embedding,
-                &mut state,
-            )?;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.proj.weight"),
-                embedding,
-                ple_dim,
-                &mut state,
-            )?;
-            bind_norm(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.post_norm.weight"),
-                GEMMA4_NORM_SHIFT,
-                &mut state,
-            )?;
-        }
-
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_norm.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_gate.weight"),
-            feed_forward,
-            embedding,
-            &mut state,
-        )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_up.weight"),
-            feed_forward,
-            embedding,
-            &mut state,
-        )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_down.weight"),
-            embedding,
-            feed_forward,
-            &mut state,
-        )?;
-
-        // E2B/E4B are DENSE (`expert_count == 0`, see
-        // `hparams::from_metadata`'s own `metadata_u32_optional` read) --
-        // the real checkpoint carries no `ffn_gate_inp.*`/`ffn_*_exps.*`/
-        // `post_ffw_norm_1`/`post_ffw_norm_2`/`pre_ffw_norm_2` tensors at
-        // all (confirmed against the real gemma4-E2B blob: `strings` over
-        // its GGUF header finds none of these names), only a single
-        // `post_ffw_norm.weight` -- binding any of the MoE-only leaves on
-        // that checkpoint would fail with `MissingMetadataKey`/
-        // `UnknownTensor`. 12B/26B/31B (`expert_count > 0`) still bind the
-        // full MoE set exactly as before.
-        if expert_count > 0 {
-            bind_norm(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.post_ffw_norm_1.weight"),
-                GEMMA4_NORM_SHIFT,
-                &mut state,
-            )?;
-            bind_norm(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.post_ffw_norm_2.weight"),
-                GEMMA4_NORM_SHIFT,
-                &mut state,
-            )?;
-            bind_norm(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.post_ffw_norm.weight"),
-                GEMMA4_NORM_SHIFT,
-                &mut state,
-            )?;
-            bind_norm(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.pre_ffw_norm_2.weight"),
-                GEMMA4_NORM_SHIFT,
-                &mut state,
-            )?;
-            bind_matmul_weight_transposed_f32(
-                parsed,
-                file_bytes,
-                &format!("blk.{layer}.ffn_gate_inp.weight"),
-                format!("blk.{layer}.ffn_gate_inp.weight"),
-                expert_count,
-                embedding,
-                &mut state,
-            )?;
-            // `[embedding]` F32, NOT a dequant scale -- `ffn_gate_inp.weight`
-            // is already F32 with its own values; this is the SEPARATE
-            // architectural router-input scale. `append_routed_expert_ffn`'s
-            // `router_scale` knob binds this raw (no `1 +` offset) as the
-            // gamma of a `with_scale=False` RMSNorm over the router's own
-            // input, then multiplies by the constant `embedding**-0.5`, before
-            // the router projection (`Gemma4TextRouter.forward`). Confirmed
-            // via `gemma4_dump` (`examples/gemma4_dump.rs`): `ggml_type=F32`,
-            // `dims=[2816]`.
-            bind_dense(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.ffn_gate_inp.scale"),
-                &mut state,
-            )?;
-
-            let expert_feed_forward = architecture.expert_feed_forward as usize;
-            bind_gemma4_fused_gate_up_experts(
-                parsed,
-                file_bytes,
-                layer,
-                expert_count,
-                expert_feed_forward,
-                embedding,
-                &mut state,
-            )?;
-            bind_moe_expert_weights(
-                parsed,
-                file_bytes,
-                layer,
-                "ffn_down",
-                architecture.expert_count,
-                embedding,
-                expert_feed_forward,
-                &mut state,
-            )?;
-            // `[expert_count]` F32, ARCHITECTURAL (not a dequant scale --
-            // `ffn_down_exps.weight` is Q5_1 with its own block scales). Folded
-            // into each selected expert's combination weight,
-            // [`append_moe_ffn`]'s own doc on `MoeFfnSpec::expert_scale`.
-            bind_dense(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.ffn_down_exps.scale"),
-                &mut state,
-            )?;
-        } else {
-            bind_norm(
-                parsed,
-                file_bytes,
-                format!("blk.{layer}.post_ffw_norm.weight"),
-                GEMMA4_NORM_SHIFT,
-                &mut state,
-            )?;
-        }
-    }
-
-    Ok(state)
-}
-
-/// Splits the real checkpoint's fused `blk.{layer}.ffn_gate_up_exps.weight`
-/// into the two separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves
-/// [`lfm2_forward_program_with_experts`]'s routed FFN declares, by a packed
-/// byte memcpy -- no dequantize, no new kernel.
-///
-/// Axis confirmed against the real checkpoint (`examples/gemma4_dump.rs`,
-/// `cargo run --release --example gemma4_dump`): the fused tensor's
-/// `dims = [2816, 1408, 128]` (`ne0`=embedding, `ne1`=2*`expert_feed_forward`,
-/// `ne2`=expert_count), `Q3_K`, `block_elements=256`. `ne0` (2816 = 11*256)
-/// is the quantization block axis; `ne1` (1408) is the row axis the
-/// gate/up split cuts at row `expert_feed_forward` (704), which is
-/// orthogonal to `ne0`'s blocks -- every row is a whole number of blocks
-/// regardless of where the row-axis split falls, so the split never crosses
-/// a block boundary. `ggml`/GGUF layout is row-major with `ne0` fastest, so
-/// one expert's `ne1` rows are contiguous in the packed buffer: gate rows
-/// `[0, expert_feed_forward)` and up rows
-/// `[expert_feed_forward, 2*expert_feed_forward)` are each one contiguous
-/// byte span per expert. Experts themselves are NOT contiguous across that
-/// boundary (expert `e+1`'s gate bytes follow expert `e`'s up bytes, not
-/// expert `e`'s gate bytes), so the two halves cannot be exposed as a
-/// single strided borrow the way [`bind_moe_expert_weights`]'s
-/// already-native-stacked fast path does -- each half is assembled into its
-/// own owned packed buffer, one packed memcpy per expert per half, matching
-/// the two `Q3_K`-tagged [`Codec::Q3K`] buffers
-/// [`BoundWeights::packed_owned`] already carries for every other MoE
-/// family's restack fallback ([`bind_moe_expert_weights`]).
-///
-/// # Errors
-///
-/// [`InteropError::UnknownTensor`] if the fused tensor is absent;
-/// [`InteropError::UnrepresentableGgmlType`] if its `ggml_type` has no
-/// [`Codec`] (every codec a real gemma4 checkpoint ships does);
-/// whatever [`ParsedGguf::tensor_data_range`] can fail with if the tensor's
-/// declared byte range does not fit `file_bytes`.
-fn bind_gemma4_fused_gate_up_experts<'file>(
-    parsed: &ParsedGguf,
-    file_bytes: &'file [u8],
-    layer: u32,
-    expert_count: usize,
-    expert_feed_forward: usize,
-    embedding: usize,
-    state: &mut BoundWeights<'file>,
-) -> Result<(), InteropError> {
-    let name = format!("blk.{layer}.ffn_gate_up_exps.weight");
-    let tensor = find_tensor(parsed, &name)?;
-    let layout = tensor.ggml_type.block_layout();
-    let kind = codec_from_ggml_type(tensor.ggml_type).ok_or_else(|| {
-        InteropError::UnrepresentableGgmlType {
-            tensor: name.clone(),
-            ggml_type: tensor.ggml_type,
-        }
-    })?;
-
-    let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
-    let source = &file_bytes[range.start as usize..range.end as usize];
-
-    let bytes_per_row = (embedding as u64 / layout.block_elements) * layout.block_bytes;
-    let gate_bytes = expert_feed_forward as u64 * bytes_per_row;
-    let per_expert_bytes = 2 * gate_bytes;
-
-    let mut gate_buf = Vec::with_capacity(gate_bytes as usize * expert_count);
-    let mut up_buf = Vec::with_capacity(gate_bytes as usize * expert_count);
-
-    for expert in 0..expert_count {
-        let expert_start = expert as u64 * per_expert_bytes;
-        let gate_start = expert_start as usize;
-        let gate_end = gate_start + gate_bytes as usize;
-        let up_end = gate_end + gate_bytes as usize;
-        gate_buf.extend_from_slice(&source[gate_start..gate_end]);
-        up_buf.extend_from_slice(&source[gate_end..up_end]);
-    }
-
-    state.resident_bytes += gate_buf.len() + up_buf.len();
-    state
-        .packed_owned
-        .push((format!("blk.{layer}.ffn_gate_exps.weight"), gate_buf, kind));
-    state
-        .packed_owned
-        .push((format!("blk.{layer}.ffn_up_exps.weight"), up_buf, kind));
-    Ok(())
-}
+/// The binding profile key and the registry name: the architecture that lowers this program
+/// is what names its leaves, so a delegating foreign architecture binds the same way.
+const FAMILY: &str = "gemma4";
 
 /// Marker registered for `general.architecture = "gemma4"`.
 pub struct Gemma4Arch;
@@ -692,7 +82,6 @@ fn bind_gemma4_with_last_row_only<'file>(
     layout: KvLayout,
 ) -> Result<BoundProgram<'file>, InteropError> {
     let architecture = from_metadata(parsed)?;
-    let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
 
     // every gemma4 shape routes through the padded-mask cached engine (all layers are `LayerKind::Attention`);
     // the two-range engine, not single-range, because the first step processes the whole
@@ -710,6 +99,13 @@ fn bind_gemma4_with_last_row_only<'file>(
     let cache_strategy = descriptor.cache_strategy;
         let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
             build_forward(&descriptor)?;
+        let weights = bind_program_leaves(
+            parsed,
+            file_bytes,
+            &program,
+            &binding_profile(FAMILY)?,
+            &[],
+        )?;
         let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
             CacheStrategy::Cached => {
                 // `cache_roots` holds one entry per REAL cache-owning layer,
@@ -788,7 +184,7 @@ pub fn bind_gemma4_all_positions_logits<'file>(
 
 impl ArchitectureTrait for Gemma4Arch {
     fn name(&self) -> &'static str {
-        "gemma4"
+        FAMILY
     }
 
     fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
@@ -944,8 +340,8 @@ impl ArchitectureTrait for Gemma4Arch {
     }
 }
 
-/// Regression coverage for the bug this crate shipped once: `bind` and the
-/// forward program each independently gate `attn_k.weight`/
+/// Regression coverage for the bug this crate shipped once: the binder and the
+/// forward program each independently gated `attn_k.weight`/
 /// `attn_k_norm.weight`/`attn_v.weight` per layer, and nothing forced the
 /// two gates to agree -- `gemma4_descriptor_from_gguf` used to gate
 /// `ValueSourceKind::ProjectedV` (and therefore the forward program's own
@@ -959,13 +355,14 @@ impl ArchitectureTrait for Gemma4Arch {
 /// checkpoint's own measured values (a real header dump against
 /// `~/.ollama/models/blobs/sha256-3646b4c...` on 2026-09-20), then asserts
 /// the forward program's own declared `Input` leaf names for these three
-/// per-layer weights equal exactly the name set [`bind_gemma4_weights`]'s
-/// own gates would bind -- no declared-but-unbound leaf, and no bound
-/// leaf the forward program never asks for either.
+/// per-layer weights equal exactly the layers that own those tensors in the
+/// real checkpoint (derived below from the header pattern, never from the
+/// lowering under test).
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
+    use crate::gemma4::Architecture;
     use arrayvec::ArrayVec;
     use proxima_tensor::spec::KeySourceKind;
     use proxima_gguf::types::GgmlType;
@@ -1029,11 +426,10 @@ mod declared_leaves_match_bound_leaves_tests {
         (parsed, architecture)
     }
 
-    /// The name set [`bind_gemma4_weights`]'s own per-layer gates would
-    /// bind for `suffix` -- reproduces those gates verbatim (not a
-    /// re-derivation) so this test fails the moment either site's
-    /// condition drifts from the other.
-    fn bound_leaf_names(
+    /// The leaf names of `suffix` a checkpoint with this header stores a
+    /// tensor for: own-KV layers carry K and its norm, and V where the
+    /// sliding pattern or a shared-KV header says so.
+    fn stored_leaf_names(
         architecture: &Architecture,
         suffix: &str,
     ) -> alloc::collections::BTreeSet<String> {
@@ -1088,7 +484,7 @@ mod declared_leaves_match_bound_leaves_tests {
     fn e2b_declared_attn_v_leaves_equal_bound_attn_v_leaves() {
         let (parsed, architecture) = e2b_shaped(20);
         let declared = declared_leaf_names(&parsed, "attn_v.weight");
-        let bound = bound_leaf_names(&architecture, "attn_v.weight");
+        let bound = stored_leaf_names(&architecture, "attn_v.weight");
         assert_eq!(
             declared, bound,
             "forward program declares attn_v.weight leaves the binder does not bind (or vice versa)"
@@ -1111,7 +507,7 @@ mod declared_leaves_match_bound_leaves_tests {
         let (parsed, architecture) = e2b_shaped(20);
         for suffix in ["attn_k.weight", "attn_k_norm.weight"] {
             let declared = declared_leaf_names(&parsed, suffix);
-            let bound = bound_leaf_names(&architecture, suffix);
+            let bound = stored_leaf_names(&architecture, suffix);
             assert_eq!(declared, bound, "{suffix} declare/bind set mismatch");
         }
     }
@@ -1123,7 +519,7 @@ mod declared_leaves_match_bound_leaves_tests {
     fn moe_declared_attn_v_leaves_stay_gated_on_is_sliding_only() {
         let (parsed, architecture) = e2b_shaped(0);
         let declared = declared_leaf_names(&parsed, "attn_v.weight");
-        let bound = bound_leaf_names(&architecture, "attn_v.weight");
+        let bound = stored_leaf_names(&architecture, "attn_v.weight");
         assert_eq!(declared, bound);
         for full_layer in [4, 9, 14] {
             let name = format!("blk.{full_layer}.attn_v.weight");
@@ -1184,101 +580,5 @@ mod declared_leaves_match_bound_leaves_tests {
             .filter(|entry| entry.attention.mask_window.is_none())
             .count();
         assert_eq!(full_layers, 7);
-    }
-}
-
-/// Regression coverage for the bug this file shipped once:
-/// [`gemma4_tensor_names`] unconditionally listed the eight routed-expert
-/// leaves (`ffn_down_exps.*`, `ffn_gate_inp.*`, `ffn_gate_up_exps.weight`,
-/// `post_ffw_norm_1.weight`, `post_ffw_norm_2.weight`,
-/// `pre_ffw_norm_2.weight`) even on a dense checkpoint (`expert_count == 0`),
-/// producing 280 phantom names with no tensor behind them on the real
-/// `gemma4:e2b-it-qat` blob. Both fixtures below parse the real header
-/// (`parse_complete`, never a hand-built buffer, per guiding-principle 9) and
-/// assert [`gemma4_tensor_names`] equals the header's own tensor directory
-/// exactly -- zero missing, zero extra, in both directions.
-#[cfg(all(test, feature = "std"))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod real_checkpoint_tensor_directory_tests {
-    use std::collections::BTreeSet;
-    use std::fs::File;
-
-    use super::{from_metadata, gemma4_tensor_names};
-
-    /// The real dense E2B checkpoint the bug report names: 35 blocks, no
-    /// experts, `attention.shared_kv_layers=20`, `per_layer_token_embd`
-    /// (PLE) present. No environment override exists for this path --
-    /// `crate::test_support::require_fixture`'s own `None` branch, matching
-    /// `real_mixtral_file`/`real_lfm2_hybrid_file`'s convention for a
-    /// hardcoded fixture with no env var.
-    const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
-
-    fn assert_tensor_directory_matches(path: &str) -> (usize, usize) {
-        let file = File::open(path).unwrap_or_else(|error| panic!("open {path}: {error}"));
-        // SAFETY: `file` stays open (owned by this stack frame) for as long
-        // as `mapping` is alive; the mapping is read-only and this test never
-        // writes to the backing file, so no other process racing a write can
-        // be observed as a data race on this side.
-        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
-        let file_bytes: &[u8] = &mapping;
-        let parsed =
-            proxima_gguf::parse_complete(file_bytes).expect("parses the real checkpoint's own GGUF header");
-        let architecture =
-            from_metadata(&parsed).expect("gemma4 hparams parse from the real checkpoint header");
-
-        let computed_names: BTreeSet<String> = gemma4_tensor_names(&architecture).into_iter().collect();
-        let real_names: BTreeSet<String> = parsed
-            .tensors
-            .iter()
-            .map(|tensor| tensor.name.clone())
-            .collect();
-
-        let missing: Vec<&String> = real_names.difference(&computed_names).collect();
-        let extra: Vec<&String> = computed_names.difference(&real_names).collect();
-        eprintln!(
-            "listed = {} header = {} extra = {} missing = {}",
-            computed_names.len(),
-            real_names.len(),
-            extra.len(),
-            missing.len()
-        );
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "gemma4_tensor_names must exactly match {path}'s own tensor directory: missing={missing:?} extra={extra:?}"
-        );
-        (computed_names.len(), real_names.len())
-    }
-
-    #[proxima::test]
-    #[ignore = "requires a real, local gemma4 E2B (dense) GGUF blob at REAL_GEMMA4_E2B_GGUF_PATH"]
-    async fn gemma4_tensor_names_matches_real_dense_e2b_header_with_no_moe_leaves() {
-        crate::test_support::require_fixture(REAL_GEMMA4_E2B_GGUF_PATH, None);
-        let (listed, header) = assert_tensor_directory_matches(REAL_GEMMA4_E2B_GGUF_PATH);
-        assert_eq!(listed, header);
-    }
-
-    /// `PROXIMA_GEMMA4_MOE_GGUF` read the same way `crate::test_support`'s
-    /// other `PROXIMA_*_GGUF` knobs are: unset falls back to this host-local
-    /// `batiai/gemma4-26b` checkpoint (`gemma4.expert_count`/
-    /// `gemma4.expert_used_count` present in its own GGUF metadata,
-    /// confirmed via `strings` over the blob header on 2026-09-28), the real
-    /// routed-expert sibling of the dense fixture above -- proves the MoE
-    /// leaves this fix keeps gated on `expert_count > 0` are still produced,
-    /// exactly, when a real MoE checkpoint's header says they should be.
-    fn real_gemma4_moe_gguf_path() -> String {
-        std::env::var("PROXIMA_GEMMA4_MOE_GGUF").unwrap_or_else(|_| {
-            "/Users/brianbruggeman/.ollama/models/blobs/\
-             sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129"
-                .to_string()
-        })
-    }
-
-    #[proxima::test]
-    #[ignore = "requires a real, local gemma4 MoE GGUF blob; set PROXIMA_GEMMA4_MOE_GGUF"]
-    async fn gemma4_tensor_names_matches_real_moe_header_with_expert_leaves_present() {
-        let path = real_gemma4_moe_gguf_path();
-        crate::test_support::require_fixture(&path, Some("PROXIMA_GEMMA4_MOE_GGUF"));
-        let (listed, header) = assert_tensor_directory_matches(&path);
-        assert_eq!(listed, header);
     }
 }
