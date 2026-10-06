@@ -51,24 +51,24 @@ const UNKNOWN_KEY: &str = "tokenizer.ggml.unknown_token_id";
 const ADD_BOS_KEY: &str = "tokenizer.ggml.add_bos_token";
 const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
 
-/// Builds a [`Vocab`] from `metadata`'s tokenizer keys, selecting the
-/// merges-driven ([`Vocab::new`]) or scores-driven ([`Vocab::new_unigram`])
-/// constructor from `tokenizer.ggml.model` -- never a caller flag, matching
-/// llama.cpp's own dispatch (`tokenizer_model == "gpt2"` /
-/// `tokenizer_model == "llama"`, `llama-vocab.cpp:1405-1428`). `"gemma4"`
-/// (llama.cpp `llama-vocab.cpp:2110`) rides the merges-driven arm as
-/// `"gpt2"` does; the vocab's own shape decides between byte-level and
-/// char-level BPE (see the match arm below).
+/// Builds a [`Vocab`] from `metadata`'s tokenizer keys. The engine is read
+/// off the companion arrays the file carries, never a caller flag and never a
+/// model name: a `tokenizer.ggml.merges` array selects the merges-driven
+/// constructor ([`Vocab::new`]), a `"llama"` model with a
+/// `tokenizer.ggml.scores` array and no merges selects the scores-driven one
+/// ([`Vocab::new_unigram`]). A merges-driven vocab whose own tokens are
+/// char-level (see [`Vocab::is_char_level_bpe`]) carries its own splitting and
+/// reads no `tokenizer.ggml.pre`; every other merges-driven vocab maps
+/// `tokenizer.ggml.pre` through [`PreType::from_gguf_name`].
 ///
 /// # Errors
 ///
 /// [`TokenizerError::MissingMetadataKey`] if `tokenizer.ggml.tokens` or
 /// `tokenizer.ggml.model` is absent, or if the declared model's required
 /// companion array (`merges` for `"gpt2"`, `scores` for `"llama"`) is
-/// missing -- a vocab that declares one family but carries neither or both
-/// arrays is exactly this case, named by which key came up empty.
-/// [`TokenizerError::UnsupportedTokenizerModel`] for any other
-/// `tokenizer.ggml.model` value. [`TokenizerError::UnsupportedPreTokenizer`] for a `"gpt2"` vocab whose `tokenizer.ggml.pre` has no exact mapping ([`PreType::from_gguf_name`]); [`TokenizerError::WrongMetadataType`] if a
+/// missing, named by which key came up empty.
+/// [`TokenizerError::UnsupportedTokenizerModel`] for any other model value
+/// that carries no merges. [`TokenizerError::UnsupportedPreTokenizer`] for a byte-level vocab whose `tokenizer.ggml.pre` has no exact mapping ([`PreType::from_gguf_name`]); [`TokenizerError::WrongMetadataType`] if a
 /// present key has the wrong GGUF value type. Anything [`Vocab::new`]/
 /// [`Vocab::new_unigram`] can fail with otherwise (a malformed merge rule,
 /// a missing base byte token, a scores/tokens length mismatch).
@@ -84,44 +84,29 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
     let add_bos_token = bool_scalar(metadata, ADD_BOS_KEY)?;
     let add_eos_token = bool_scalar(metadata, ADD_EOS_KEY)?;
 
-    let vocab = match model.as_str() {
-        "gpt2" => {
-            let merges = string_array(metadata, MERGES_KEY)?
-                .ok_or(TokenizerError::MissingMetadataKey { key: MERGES_KEY })?;
-            let pre_type = pre_type_from_metadata(metadata)?;
-            Vocab::new(
-                tokens,
-                &merges,
-                bos_token_id,
-                eos_token_id,
-                unknown_token_id,
-            )?
-            .with_pre_type(pre_type)
-        }
-        // `gemma4` carries a real `tokenizer.ggml.merges` keyed on raw UTF-8
-        // characters with `▁` for space (llama.cpp `LLAMA_VOCAB_PRE_TYPE_GEMMA4`,
-        // `byte_encode = false`); llama.cpp pins its pre type from the model
-        // name (`llama-vocab.cpp:2149`), so no `tokenizer.ggml.pre` is read.
-        // `Vocab::assemble` probes the token list (merges present, `▁` and
-        // `<0x0A>` are tokens) and marks it char-level, which routes encode
-        // to `bpe::encode_char_pretoken` and decode to raw UTF-8.
-        "gemma4" => {
-            let merges = string_array(metadata, MERGES_KEY)?
-                .ok_or(TokenizerError::MissingMetadataKey { key: MERGES_KEY })?;
-            Vocab::new(
-                tokens,
-                &merges,
-                bos_token_id,
-                eos_token_id,
-                unknown_token_id,
-            )?
-        }
-        "llama" => {
+    let merges = string_array(metadata, MERGES_KEY)?;
+    let vocab = match (model.as_str(), merges) {
+        ("llama", None) => {
             let scores = f32_array(metadata, SCORES_KEY)?
                 .ok_or(TokenizerError::MissingMetadataKey { key: SCORES_KEY })?;
             Vocab::new_unigram(tokens, scores, bos_token_id, eos_token_id, unknown_token_id)?
         }
-        other => {
+        (_, Some(merges)) => {
+            let vocab = Vocab::new(
+                tokens,
+                &merges,
+                bos_token_id,
+                eos_token_id,
+                unknown_token_id,
+            )?;
+            if vocab.is_char_level_bpe() {
+                vocab
+            } else {
+                vocab.with_pre_type(pre_type_from_metadata(metadata)?)
+            }
+        }
+        ("gpt2", None) => return Err(TokenizerError::MissingMetadataKey { key: MERGES_KEY }),
+        (other, None) => {
             return Err(TokenizerError::UnsupportedTokenizerModel {
                 model: String::from(other),
             });
@@ -421,6 +406,69 @@ mod tests {
         let vocab = vocab_from_metadata(&byte_level_metadata(None))
             .expect("a byte-level vocab with no pre key builds, as in llama.cpp");
         assert_eq!(vocab.pre_type(), PreType::Default);
+    }
+
+    fn char_level_metadata(model: &str, pre: Option<&str>) -> ParsedGguf {
+        let mut tokens: Vec<String> = (0..=255u8)
+            .map(|byte| alloc::format!("<0x{byte:02X}>"))
+            .collect();
+        tokens.push(String::from("\u{2581}"));
+        tokens.push(String::from("hi"));
+        tokens.push(String::from("\u{2581}hi"));
+        let merges = alloc::vec![String::from("\u{2581} hi")];
+        let mut metadata = alloc::vec![
+            (
+                String::from(TOKENS_KEY),
+                MetadataValue::Array(MetadataArray::String(tokens))
+            ),
+            (
+                String::from(MODEL_KEY),
+                MetadataValue::String(String::from(model))
+            ),
+            (
+                String::from(MERGES_KEY),
+                MetadataValue::Array(MetadataArray::String(merges))
+            ),
+        ];
+        if let Some(pre) = pre {
+            metadata.push((String::from(PRE_KEY), MetadataValue::String(String::from(pre))));
+        }
+        ParsedGguf {
+            version: 3,
+            tensor_count: 0,
+            kv_count: 0,
+            metadata,
+            tensors: Vec::new(),
+            data_offset: 0,
+            alignment: 32,
+        }
+    }
+
+    #[test]
+    fn char_level_vocab_builds_with_no_pre_key_whatever_its_model_string() {
+        for model in ["gemma4", "gpt2", "some-future-char-level-model"] {
+            let vocab = vocab_from_metadata(&char_level_metadata(model, None))
+                .expect("a char-level merges vocab builds without a pre key");
+            assert!(vocab.is_char_level_bpe(), "model {model:?}");
+        }
+    }
+
+    #[test]
+    fn char_level_vocab_does_not_consult_the_pre_key() {
+        let vocab = vocab_from_metadata(&char_level_metadata("gemma4", Some("qwen3-unreleased")))
+            .expect("a char-level vocab carries its own splitting");
+        assert!(vocab.is_char_level_bpe());
+    }
+
+    #[test]
+    fn unknown_model_without_merges_or_scores_is_unsupported() {
+        let mut metadata = char_level_metadata("bert", None);
+        metadata.metadata.retain(|(key, _)| key != MERGES_KEY);
+        let error = vocab_from_metadata(&metadata).expect_err("no engine to select");
+        assert_eq!(
+            error,
+            TokenizerError::UnsupportedTokenizerModel { model: String::from("bert") }
+        );
     }
 
     #[test]
