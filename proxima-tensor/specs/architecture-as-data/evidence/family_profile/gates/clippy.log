@@ -1,0 +1,5 @@
+    Checking proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+    Checking omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+    Checking proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.77s

@@ -1,0 +1,16 @@
+    Finished `gate` profile [optimized] target(s) in 0.31s
+────────────
+ Nextest run ID 7cc7dc80-954f-4a2d-93eb-84dffe3d14b3 with nextest profile: default
+    Starting 10 tests across 31 binaries (812 tests skipped)
+        PASS [   0.227s] ( 1/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_26b
+        PASS [   0.202s] ( 2/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_e2b
+        PASS [   0.026s] ( 3/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_granite_moe
+        PASS [   0.020s] ( 4/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_openchat
+        PASS [   0.047s] ( 5/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen2
+        PASS [   0.049s] ( 6/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen3
+        PASS [   0.112s] ( 7/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen35
+        PASS [   0.131s] ( 8/10) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen35moe
+        PASS [   2.404s] ( 9/10) proxima-model-interop::arch_data_baseline serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps
+        PASS [   5.004s] (10/10) proxima-model-interop::arch_data_baseline serving_fsm_drives_speculative_verify_through_accept_and_rollback
+────────────
+     Summary [   8.225s] 10 tests run: 10 passed, 812 skipped

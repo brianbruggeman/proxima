@@ -1,0 +1,8 @@
+    Finished `gate` profile [optimized] target(s) in 0.20s
+────────────
+ Nextest run ID 7ef37be8-7aae-48e0-9bf7-54a4051455fe with nextest profile: default
+    Starting 2 tests across 31 binaries (820 tests skipped)
+        PASS [   2.956s] (1/2) proxima-model-interop::arch_data_baseline zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs
+        PASS [   3.563s] (2/2) proxima-model-interop::arch_data_baseline zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids
+────────────
+     Summary [   6.523s] 2 tests run: 2 passed, 820 skipped

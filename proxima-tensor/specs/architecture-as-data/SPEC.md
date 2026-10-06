@@ -29,9 +29,12 @@ Either one becomes a recorded irreducible (see below) or retracts the invariant.
 
 - Descriptor and lowering: `proxima-tensor/src/spec/descriptor.rs` (`ModelDescriptor`,
   `CacheStrategy`, `build_forward` :538).
-- Architecture trait and registry: `proxima-model-interop/src/architecture.rs` (trait :282,
-  `with_builtin` :612).
-- Per-architecture modules:
+- Lowering from a family profile: `proxima-model-interop/src/lowering.rs` (`bind_checkpoint`,
+  `header_descriptor`, `bind_speculative_verify`, `kv_layers`, `step_state`); the profile's `schedule_source`
+  names the header reader, and `kv_cache_shape`, `ffn_routing` and `command_buffer_chunks` ride the same
+  profile (`proxima-tensor/src/spec/descriptor.rs` `FamilyProfile`). The trait and registry this replaced
+  were `proxima-model-interop/src/architecture.rs` at 9dd9deef (trait :282, `with_builtin` :612).
+- Header readers, one per schedule source (no per-family type, no registry):
   - `proxima-model-interop/src/gemma4/{bind,hparams,program}.rs`
   - `proxima-model-interop/src/qwen35.rs`
   - `proxima-model-interop/src/qwen35moe/*.rs`
@@ -156,7 +159,7 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC2 | R3, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/generic_verify_llama_parity_/)'` | 5 passed: gemma4 E2B, openchat, qwen2, qwen3 and granite moe, each loaded from its header descriptor with `speculative_verify` set, drafts forced at widths 1 and 3, at least one verify step run, equal their llama ids | the same tests with `speculative_verify` unset: 0 passed, 2 failed ("the verify program never ran"; measured on gemma4 E2B and qwen2). At the previous commit the openchat and qwen3 verify programs did not exist |
 | AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 8 passed (the seven checkpoints of the original count plus granite moe): bound names, codec, byte length and sha256 equal the incumbent's; the storage class of an f32 tensor (borrowed from the mapping or owned) is not compared, because the incumbent's gemma4 binder held its norms owned and its layer output scale borrowed, a split no property of the program decides; the f32 bytes and sha256 are compared | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
 | AC4 | R6 | consistency | `git grep -nIiP '\b(gemma4\|qwen35moe\|qwen35\|qwen2\|lfm2\|mistral\|llama)\b' -- proxima-model-interop/src proxima-tensor/src omega/src proxima-tokenizer/src ':!*tests*' ':!*profiles*' \| wc -l` | 0 | 1214 |
-| AC5 | R2 | consistency | `git grep -nP '\b(trait\|impl\|struct\|enum)\b[^;{]*Architecture' -- proxima-model-interop/src proxima-tensor/src \| wc -l`, then `cargo nextest run -p proxima-model-interop --features std,conflaguration -E 'test(/descriptor_config_parity_\|serving_fsm_drives_/)'` | 0; then 9 passed: one descriptor config-vs-builder round trip per checkpoint (7), plus 2 FSM tests (a plain decode and a speculative verify-accept-rollback run that the live generate path routes through `ServingState`) | first command prints 17 (trait, registry, 4 family impls, the test fake, and the per-family `Architecture`/`*Architecture` hparams structs); second: tests absent |
+| AC5 | R2 | consistency | `git grep -nP '\b(trait\|impl\|struct\|enum)\b[^;{]*Architecture' -- proxima-model-interop/src proxima-tensor/src \| wc -l`, then `cargo nextest run -p proxima-model-interop --features std,metal,conflaguration -E 'test(/model_config_roundtrip_/) or test(/serving_fsm_drives_/)'` | 0; then 10 passed: one descriptor config round trip per checkpoint that lowers through the descriptor (8: gemma4 26B and E2B, openchat, qwen2, qwen3, granite moe, qwen35, qwen35moe), plus 2 FSM tests (a plain decode and a speculative verify-accept-rollback run that the live generate path routes through `ServingState`) | first command prints 17 (trait, registry, 4 family impls, the test fake, and the per-family `Architecture`/`*Architecture` hparams structs); second: tests absent |
 | AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/) and not test(/generic_verify_/)'` | 7 passed, one per checkpoint with an oracle: gemma4 26b, gemma4 e2b, granite moe, openchat, qwen2, qwen3 (6 at slice 8; qwen35 and qwen35moe have none, O1) and lfm2 from slice 9 | 3 passed, 4 failed at ac4eb2c7 (measured 2026-10-04); 4 passed (gemma4 e2b, openchat, qwen2, qwen3) once ids are compared through llama's first EOG (owner stop-set policy). Still failing: D2 gemma4 26b diverges at index 0 on 2 of 3 prompts; O1 qwen35 + qwen35moe have no oracle (llama f1ea20621 rejects the blobs: rope.dimension_sections length 3, expects 4) |
 | AC7 | R4 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/window_ring_layers_/)'` | 2 passed: (a) gemma4 E2B ring layers equal `swa_layers.txt`; (b) a synthetic descriptor with a window on one dense layer gets a ring on exactly that layer | 1 passed, 1 failed ((b) fails: dense layers ignore the window) |
 | AC8 | R8 | oracle | `cargo nextest run -p proxima-tokenizer --features gguf -E 'binary(gemma4_llama_oracle)'` | 20 passed, 0 failed | 20 passed |
@@ -511,3 +514,78 @@ function; `opt-level` did not move it. Attribution table:
   -16441344 B, footprint +7716928 B (limit 14120444), GPU bytes -1179648 B. granite moe ms/token 15.1290 vs
   15.1245 (limit 0.3025), prefill 6518.54 vs 6516.96 ms, peak RSS +31776768 B (limit 49721344), footprint
   -23101376 B, GPU bytes 0.
+
+## findings from slice 10c (the architecture trait and registry are deleted, 2026-10-06)
+
+- Landed as six commits: `95ad3fa8` (profile fields), `35494fe2` (the trait, its four impls and the registry),
+  `9bdfa6c3` (header hparams type names), `bba7f356` (recurrent runtime type names), `292c2b96` (routed-expert
+  serving knob names), `48c57e9b` (three broken intra-doc links in `proxima-tensor`).
+- What replaced the trait. `FamilyProfile` (`proxima-tensor/src/spec/descriptor.rs`) carries four more data fields,
+  all in the profile TOML keyed by `general.architecture`: `schedule_source` (`uniform`, `sliding_pattern`,
+  `recurrent_interval`, `recurrent_routed_interval`: which compiled header reader fills the descriptor),
+  `kv_cache_shape` (`uniform`, `custom`, `monolithic`), `ffn_routing` (`dense`, `routed`) and
+  `command_buffer_chunks` (default 1, gemma4 8). `proxima-model-interop/src/lowering.rs` is a set of free functions
+  (`bind_checkpoint`, `bind_checkpoint_with_kv_layout`, `bind_speculative_verify`, `header_descriptor`,
+  `kv_layers`, `step_state`, `trained_context_length`, `rope_freq_factors`, `sliding_rope_inputs`); each header
+  reader is one `match` on `schedule_source`, and the lowering, the weight bind and the `BoundProgram` roots are the
+  one generic `bind_descriptor` for every family (a root an engine does not produce is the empty value of its type,
+  so the digest records of all 8 checkpoints are unchanged).
+- Designs ruled out while writing it. (1) A smaller trait or a `HeaderReader` registry: the schedule source is an
+  enum in the profile, so adding a family whose header already reads as one of the four layouts is a profile file.
+  (2) Deriving `kv_cache_shape` and `ffn_routing` from the descriptor ("every layer is attention with one
+  window"): a gemma4 variant with every layer full attention would satisfy that predicate and enter the
+  single-range builder, which has no per-layer widths, PLE or value norm; the profile states the shape instead.
+  (3) Keeping the foreign `step_inputs` and `rope_freq_factors` hooks: both reduced to functions of data already on
+  the bound model (`ModelHparams::sliding_rope`, and an owned `rope_freqs.weight` the binding profile names).
+- Removed with the trait: `tests/external_architecture_{registry,step_inputs,hybrid_cache,single_position_prefill}.rs`
+  (16 integration tests) and the registry's 10 unit tests, 26 together; they proved the foreign-registry seam, which
+  no longer exists. Also removed: `InteropError::UnknownArchitecture`, `LoadedModel::load_with_registry`,
+  `StepInputContext`, `bind_gemma4_all_positions_logits`. The one behavior those tests held that a config can still
+  express is kept: `capability_matrix.rs` loads the synthetic checkpoint with `last_row_only = false` and expects
+  `LogitsShapeMismatch`, with the header descriptor as the positive control. The two reduce flags
+  (`load_with_paired_gate_up_reduce`, `load_with_fused_qkv_reduce`) are descriptor fields now: they load the
+  header descriptor with the flag set when the schedule source is `uniform`, and load as `load` does otherwise.
+- The digest fixtures lost one line each, `registry_entry=...`, which recorded the deleted registry's route name;
+  every op count, op digest, root, and bound-weight line is unchanged (AC0 8 passed, AC3 8 passed).
+- Renames: `ModelArchitecture` is `ModelHparams`; the four per-family header structs are `Gemma4Hparams`,
+  `Qwen35MoeHparams`, `Qwen35Hparams`, `Lfm2Hparams`; `Qwen35LayerRoots` is `LayerCacheRoots`, `Qwen35SsmShape`
+  is `SsmShape`, `Qwen35DenseAttention*` is `DenseAttention*`, `Qwen35Gdn*` is `Gdn*`,
+  `Qwen35MoeLayerDiagnostics`, `Qwen35MoeExecutionMode`, `Qwen35MoePreGatherPlan`, `Qwen35MoeRouteHistory`,
+  `Qwen35MoeLayerSegments` lose the model name; the seven serving knobs `qwen35moe_pre_gather`,
+  `_persistent_cuts`, `_residency_budget_bytes`, `_expert_prefetch`, `_monolithic_all_low`, `_layer_window`,
+  `_monolithic_high_mmap` are `moe_*` (the `examples/gguf_generate.rs` env spelling follows:
+  `PROXIMA_MOE_PRE_GATHER`). Test function names and the `qwen35moe-*` cargo feature names keep the checkpoint
+  name.
+- Measured, AC5 first command: 17 at 91280669, 0 at `292c2b96` (`evidence/family_profile/acs/ac5_grep.txt` is
+  empty). AC4 (the name search, not this row's AC): 1190 at 91280669, 1113 at `292c2b96`.
+- Spec correction: the AC5 second command named `descriptor_config_parity_` tests that no commit ever held; the
+  config round trips are `model_config_roundtrip_` (8 checkpoints since slice 9), and the FSM tests take 7 to 8 s
+  with `metal` and 70 to 225 s on the CPU without it, so the command carries `metal`. 10 passed (8.2 s).
+- Gates, per-slice tier in the gate profile at `292c2b96`, logs in `evidence/family_profile/gates/`: clippy exit 0,
+  tensor alloc check exit 0, interop no-default check exit 0, interop all-targets check with `instrument`,
+  `qwen35moe-linked-suffix`, `qwen35moe-expert-prefetch` exit 0, the root package's `gguf_generate`,
+  `stream_generate`, `write_qwen35_sidecar` and `openai_serve_gguf` examples check exit 0, tensor 779 passed 8
+  skipped (7.8 s), interop slice-gate 697 passed 125 skipped (105.6 s; 709 at the previous slice, plus the profile
+  field test, minus 26 deleted tests, plus 11 `lowering` unit tests and 2 `capability_matrix` tests). At `292c2b96`
+  (`evidence/family_profile/acs/`): AC0 8 passed (3.0 s), AC3 8 passed (71.7 s), AC6 7 passed (154.7 s), AC2 5 passed
+  (164.9 s), AC5 second command 10 passed (8.2 s), AC10 2 passed, AC1 2 passed, AC7 2 passed.
+- Performance, decode loop touched (the step inputs and the routing and shape reads moved from a trait object to
+  fields): decode_arms 2 processes x 3 runs, tip (release `decode_gbps_baseline` built from `292c2b96`, sha256
+  `e81e3601b2b28febbb3a53ed1b11ef1eefed2c09d470dc6d39454eeaac106a55`, kept as
+  `perf/decode_gbps_baseline_slice10c`) against the 0c binary, Ollama stopped by SIGTERM (`osascript` quit returned
+  "User canceled"; reopened after). The box was shared with another checkout's `cargo xwin check` runs, so each
+  model was re-run until one run started with no `cargo`, `xwin` or `rustc` process present. Quiet runs
+  (`perf_e2b`, `perf_granite`): 12 of 12 bound lines within. gemma4 E2B ms/token 12.0660 vs 12.3825 (limit
+  0.3485), prefill 2520.9850 vs 2517.5075 ms (limit 50.3501), TTFT 2521 vs 2517.5, peak RSS +6455296 B, footprint
+  -3096640 B, GPU bytes -1179648 B; granite moe ms/token 15.0555 vs 15.0500 (limit 0.3010), prefill 6519.0090 vs
+  6516.9450 ms (limit 130.3389), peak RSS -44974080 B, footprint -9290176 B, GPU bytes 0. Contended runs, kept:
+  `perf_e2b_run1` (load average 7.86) ms/token 12.4120 vs 12.1950 (limit 0.2439), 6 of 6 within;
+  `perf_granite_run1` (an xwin check running) ms/token 21.8120 vs 21.7535 and peak footprint +12066848 B against a
+  limit of 11620804 (within=false), the other 5 within; `perf_granite_run2` (xwin running at launch) base arm CoV
+  18.79%, ms/token 15.0600 vs 18.3380, within only because the base MAD is 3.365. Neither contended granite run
+  is a measurement of this change.
+- Not done, and why it is outside the row: the decode loop still calls `qwen35moe_forward_program_at_width` through
+  `LoadedModel::qwen35moe_hparams` to pin a prompt width. `ModelDescriptor::prefill_width` is the field that
+  carries the same value, so the loop can rebuild that program from the descriptor in force and drop the family
+  reader from the loop; AC4 counts that name and the `qwen35moe`, `gemma4` and `lfm2` module and profile-key
+  literals still in non-test source.

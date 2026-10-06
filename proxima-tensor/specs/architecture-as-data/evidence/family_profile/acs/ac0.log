@@ -1,0 +1,14 @@
+    Finished `gate` profile [optimized] target(s) in 0.26s
+────────────
+ Nextest run ID 39b1e2e6-a5de-45b2-9d7b-6f69d930ee1f with nextest profile: default
+    Starting 8 tests across 31 binaries (814 tests skipped)
+        PASS [   2.396s] (1/8) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_26b
+        PASS [   0.206s] (2/8) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_e2b
+        PASS [   0.030s] (3/8) proxima-model-interop::arch_data_baseline arch_data_digest_granite_moe
+        PASS [   0.017s] (4/8) proxima-model-interop::arch_data_baseline arch_data_digest_openchat
+        PASS [   0.045s] (5/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen2
+        PASS [   0.050s] (6/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen3
+        PASS [   0.100s] (7/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35
+        PASS [   0.174s] (8/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35moe
+────────────
+     Summary [   3.022s] 8 tests run: 8 passed, 814 skipped

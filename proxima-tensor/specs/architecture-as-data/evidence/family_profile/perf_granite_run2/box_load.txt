@@ -1,0 +1,18 @@
+four busiest processes at launch, percent CPU, names omitted:  75.1  74.6  38.9  38.8 
+15:38  up 6 days,  1:42, 5 users, load averages: 8.74 10.34 11.24
+997 /Users/brianbruggeman/.cargo/bin/cargo-xwin xwin check -p proxima-http --all
+1016 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ca
+1017 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/tool
+1018 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/tool
+1019 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ru
+1020 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/tool
+1024 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ru
+1027 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ru
+1036 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/tool
+1037 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/tool
+1039 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ru
+1040 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ru
+1120 /tmp/cargo_target/debug/build/proxima-primitives-ce06390dd303c41a/build-scr
+1121 /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/tool
+1122 /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/ru
+83444 /Users/brianbruggeman/.cargo/bin/sccache

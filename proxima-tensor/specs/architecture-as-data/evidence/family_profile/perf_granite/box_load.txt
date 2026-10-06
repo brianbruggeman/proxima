@@ -1,0 +1,4 @@
+four busiest processes at launch, percent CPU, names omitted:  74.9  24.6  23.1  21.2 
+15:50  up 6 days,  1:54, 5 users, load averages: 3.35 4.59 7.09
+at exit:
+15:53  up 6 days,  1:57, 5 users, load averages: 4.43 4.58 6.72
