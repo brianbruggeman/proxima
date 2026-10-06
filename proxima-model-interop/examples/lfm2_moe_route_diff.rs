@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, uniform_lfm2_schedule,
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
 };
 use proxima_tensor::dtype::DType;
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
@@ -61,7 +61,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
     if depth == 0 {
         return NodeId(2);
     }
-    let full_schedule = uniform_lfm2_schedule(architecture);
+    let full_schedule = &architecture.layers;
     let shallow_schedule = &full_schedule[..depth as usize];
     let (shallow, _, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
@@ -287,7 +287,7 @@ fn main() {
         architecture.expert_used_count,
         architecture.leading_dense_block_count,
         architecture.l_cache,
-        &uniform_lfm2_schedule(&architecture),
+        &architecture.layers,
         None,
         None,
         false,
@@ -431,7 +431,7 @@ fn main() {
     // `layer_boundary_node_id`/`route_node_ids` walk is mixer-agnostic, so it
     // silently found nothing for every ATTENTION layer until this matched
     // the oracle's own per-kind name.
-    let mixer_out_suffix = match architecture.layer_kinds[layer as usize] {
+    let mixer_out_suffix = match architecture.layers[layer as usize].kind {
         proxima_tensor::spec::LayerKind::Attention => "self_attn.out_proj",
         proxima_tensor::spec::LayerKind::ShortConv => "conv.out_proj",
         proxima_tensor::spec::LayerKind::Gdn => "linear_attn.out_proj",

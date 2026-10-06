@@ -444,6 +444,18 @@ impl ModelArchitecture {
         )
     }
 
+    /// The KV-head count every attention layer shares. A layer that declares
+    /// zero KV heads keeps no KV cache (a short-convolution layer in a hybrid
+    /// stack) and is skipped, so a hybrid checkpoint answers with its attention
+    /// layers' count and a uniform one answers exactly as
+    /// [`Self::uniform_kv_heads`] does.
+    pub fn uniform_attention_kv_heads(&self) -> Result<u32, InteropError> {
+        uniform_u32_array(
+            "attention.head_count_kv",
+            self.kv_heads_by_layer.iter().copied().filter(|kv_heads| *kv_heads != 0),
+        )
+    }
+
     /// This architecture with the shape fields `descriptor` carries read off
     /// the config instead of the header. The per-head width and KV-head count
     /// follow the config only when every layer agrees; a non-uniform schedule

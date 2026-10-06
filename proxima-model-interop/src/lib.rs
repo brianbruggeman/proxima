@@ -130,8 +130,7 @@ pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_r
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
 pub use lfm2::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, run_lfm2_prefill,
-    uniform_lfm2_schedule,
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_descriptor, lfm2_forward_values,
 };
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
