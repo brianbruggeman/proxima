@@ -2348,7 +2348,7 @@ impl<'file> LoadedModel<'file> {
     /// passed to [`Self::load`]/[`Self::load_from_safetensors`]) -- the
     /// on-disk size a live indicator reports, not this call's resident
     /// memory footprint (weights may be memory-mapped rather than copied;
-    /// see `crate::bind::bind_all_weights`'s own doc for which tensors are
+    /// see `crate::bind_leaves::bind_program_leaves`'s own doc for which tensors are
     /// borrowed versus owned).
     #[must_use]
     pub fn checkpoint_bytes(&self) -> usize {
@@ -2407,7 +2407,7 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// Binds every weight the cached forward program needs out of
-    /// `parsed`/`file_bytes` (`crate::bind::bind_all_weights`), derives
+    /// `parsed`/`file_bytes` (`crate::bind_leaves::bind_program_leaves`), derives
     /// [`ModelArchitecture`] from `parsed`'s own metadata
     /// ([`crate::bind::architecture_from_metadata`]), builds the vocab
     /// from the same metadata, and compiles the cached forward program
@@ -2826,18 +2826,6 @@ impl<'file> LoadedModel<'file> {
 
         let architecture = architecture_from_metadata(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-        // `&[]`: `Self::load`/`load_with_*` take no `ServingConfig`, so
-        // there is no `weight_precision` rule set to thread here yet --
-        // `crate::bind::bind_all_weights`'s own doc names this as the
-        // wiring a future slice does.
-        let weights = bind_all_weights(
-            parsed,
-            file_bytes,
-            &architecture,
-            paired_gate_up_reduce,
-            fused_qkv_reduce,
-            &[],
-        )?;
         // `architecture.expert_count`/`expert_used_count` read `0` for every
         // dense checkpoint (`ModelArchitecture`'s own doc), which selects
         // exactly the dense program this crate has always built -- a
@@ -2867,6 +2855,15 @@ impl<'file> LoadedModel<'file> {
         );
         let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
             build_forward(&descriptor)?;
+        // `&[]`: `Self::load`/`load_with_*` take no `ServingConfig`, so
+        // there is no `weight_precision` rule set to thread here yet.
+        let weights = bind_program_leaves(
+            parsed,
+            file_bytes,
+            &program,
+            &binding_profile(&architecture.family)?,
+            &[],
+        )?;
         // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`/
         // `wq`/`wk`/`wv` leaves (`build_single_range_program`) do not know
         // about `paired_gate_up_reduce`/`fused_qkv_reduce` yet --

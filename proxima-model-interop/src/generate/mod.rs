@@ -8,7 +8,7 @@
 //! since neither `In` nor `Out` is `()`). [`LoadedModel::load`] is a plain
 //! constructor, not a pipe: it pays the expensive one-time cost (mmap +
 //! parse + bind 226 tensors, ~4 GB / ~120 ms prefault on the real
-//! openchat-3.5 checkpoint -- `crate::bind::bind_all_weights`'s own doc)
+//! openchat-3.5 checkpoint -- `crate::bind_leaves::bind_program_leaves`'s own doc)
 //! and hands back a value that [`Pipe::call`] is then cheap to invoke many
 //! times against, one call per generation request, without rebinding.
 //! That two-step shape is the direct answer to "load once, generate
@@ -185,11 +185,12 @@ use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_fo
 
 use crate::architecture::{Architecture, KvLayout, StepInput, StepInputContext, bind_symbols};
 use crate::bind::{
-    BoundWeights, Codec, ModelArchitecture, architecture_from_metadata, bind_all_weights,
+    BoundWeights, Codec, ModelArchitecture, architecture_from_metadata,
 };
+use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;
-use crate::profiles::family_profile;
+use crate::profiles::{binding_profile, family_profile};
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;
