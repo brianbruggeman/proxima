@@ -1994,10 +1994,14 @@ fn restack_error_as_interop_error(
 /// `file_bytes`; [`InteropError::UnrepresentableGgmlType`] for a
 /// block-quantized type this crate has no dequantizer for.
 #[cfg(feature = "std")]
-fn bind_moe_stacked_experts<'file>(
+// source and target names, expert_count, out_dim and in_dim are one stack's own shape, the same
+// real parameter count `bind_moe_expert_weights` carries for the identical stack.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bind_moe_stacked_experts<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     name: alloc::string::String,
+    target_name: alloc::string::String,
     expert_count: usize,
     out_dim: usize,
     in_dim: usize,
@@ -2006,17 +2010,17 @@ fn bind_moe_stacked_experts<'file>(
     let tensor = find_tensor(parsed, &name)?;
     match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(_)) => {
-            state.packed.push((name, block));
+            state.packed.push((target_name, block));
         }
         Ok(block) if codec_from_ggml_type(tensor.ggml_type).is_some() => {
-            state.packed.push((name, block));
+            state.packed.push((target_name, block));
         }
         Ok(_) | Err(_) => {
             let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
             let transposed =
                 transpose_expert_stack(&decoded, &name, expert_count, out_dim, in_dim)?;
             state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
-            state.owned.push((name, transposed));
+            state.owned.push((target_name, transposed));
         }
     }
     Ok(())
@@ -2092,6 +2096,7 @@ pub fn bind_moe_expert_weights<'file>(
         return bind_moe_stacked_experts(
             parsed,
             file_bytes,
+            stacked_name.clone(),
             stacked_name,
             expert_count as usize,
             out_dim,

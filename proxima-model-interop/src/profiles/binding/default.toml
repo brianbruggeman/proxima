@@ -1,0 +1,28 @@
+[[alias]]
+kind = "rename"
+leaf = "output.weight"
+from = "token_embd.weight"
+
+[[alias]]
+kind = "part"
+leaf = "ffn_gate_exps.weight"
+from = "ffn_gate_up_exps.weight"
+part = 0
+of = 2
+
+[[alias]]
+kind = "part"
+leaf = "ffn_up_exps.weight"
+from = "ffn_gate_up_exps.weight"
+part = 1
+of = 2
+
+[[alias]]
+kind = "join"
+leaf = "ffn_gate_up.weight"
+from = ["ffn_gate.weight", "ffn_up.weight"]
+
+[[alias]]
+kind = "join"
+leaf = "attn_qkv.weight"
+from = ["attn_q.weight", "attn_k.weight", "attn_v.weight"]

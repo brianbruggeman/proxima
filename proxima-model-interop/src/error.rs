@@ -144,6 +144,38 @@ pub enum InteropError {
     #[error("family profile for {family:?} does not parse: {message}")]
     InvalidFamilyProfile { family: String, message: String },
 
+    /// [`crate::profiles::binding_profile`]: an embedded binding file did not
+    /// parse into a [`crate::profiles::BindingProfile`].
+    #[error("binding profile for {family:?} does not parse: {message}")]
+    InvalidBindingProfile { family: String, message: String },
+
+    /// [`crate::bind_leaves::bind_program_leaves`]: a program leaf and the
+    /// tensor that satisfies it disagree on how many elements the weight has.
+    #[error(
+        "leaf {leaf:?} declares {leaf_elements} elements but tensor {tensor:?} holds {tensor_elements}"
+    )]
+    LeafShapeMismatch {
+        leaf: String,
+        leaf_elements: u64,
+        tensor: String,
+        tensor_elements: u64,
+    },
+
+    /// [`crate::bind_leaves::bind_program_leaves`]: the program contracts some
+    /// of a leaf's axes and keeps others, interleaved, so no single byte order
+    /// of the stored matrix is the one the program reads.
+    #[error("leaf {leaf:?} interleaves its contracted and kept axes; a stored matrix cannot match that order")]
+    LeafAxesInterleaved { leaf: String },
+
+    /// [`crate::bind_leaves::bind_program_leaves`]: a `part` alias cannot cut
+    /// `tensor` into equal whole-block row slices.
+    #[error("tensor {tensor:?} has {rows} rows, which do not split into {of} whole-block parts")]
+    TensorPartInvalid {
+        tensor: String,
+        rows: u64,
+        of: u32,
+    },
+
     /// [`crate::dense::DenseArch`]: the header's `<arch>.rope.dimension_count`
     /// differs from the head width, so RoPE rotates only part of each head.
     #[error("{family:?} rotates {rope_dimension_count} of {head_dim} head dims; the single-range dense program rotates the full head")]

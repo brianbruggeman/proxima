@@ -18,6 +18,10 @@ use proxima_tensor::spec::FamilyProfile;
 
 use crate::error::InteropError;
 
+mod binding;
+
+pub use binding::{BindingProfile, TensorAlias, binding_profile};
+
 const FAMILY_PROFILES: &[(&str, &str)] = &[
     ("gemma4", include_str!("gemma4.toml")),
     ("llama", include_str!("llama.toml")),
