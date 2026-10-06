@@ -320,7 +320,18 @@ impl PipeFactory for HttpPipeFactory {
 // without pulling this hyper-backed module in.
 impl HttpConfig {
     /// Materialise the `http` upstream over a shared client pool.
-    pub fn into_upstream(self, client: SharedHttpClient) -> Result<HttpUpstream, ProximaError> {
+    pub fn into_upstream(self, mut client: SharedHttpClient) -> Result<HttpUpstream, ProximaError> {
+        #[cfg(all(feature = "http1-stream-client", feature = "http1-tls"))]
+        if let Some(tls_config) = &self.tls_client {
+            client = client.with_client_tls_config(tls_config)?;
+        }
+        #[cfg(all(feature = "http1-stream-client", not(feature = "http1-tls")))]
+        if self.tls_client.is_some() {
+            return Err(ProximaError::Config(
+                "http tls_client settings require the `http1-tls` feature on the hyper backend"
+                    .into(),
+            ));
+        }
         let runtime = self.into_runtime_config()?;
         Ok(HttpUpstream::with_shared_client(self.url, self.name, client).with_config(runtime))
     }
@@ -372,6 +383,28 @@ mod tests {
         let factory = HttpPipeFactory::new();
         let outcome = futures::executor::block_on(factory.build(&serde_json::json!({}), None));
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+
+    #[cfg(all(feature = "http1-tls", feature = "http1-stream-client"))]
+    #[test]
+    fn hyper_factory_applies_client_tls_root_settings() {
+        let config: HttpConfig = serde_json::from_value(serde_json::json!({
+            "url": "https://api.example.test",
+            "tls_client": {
+                "root_source": "custom_only",
+                "ca_bundle_paths": ["missing-hyper-client-root.pem"]
+            }
+        }))
+        .expect("HTTP config");
+        let outcome = config.into_upstream(SharedHttpClient::new());
+        let error = match outcome {
+            Ok(_) => panic!("missing configured root must fail before dialing"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("missing-hyper-client-root.pem"),
+            "configured trust policy must reach hyper TLS setup: {error}"
+        );
     }
 
     #[test]

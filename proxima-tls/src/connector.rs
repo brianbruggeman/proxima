@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use crate::RootSource;
 use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use futures::io::{AsyncRead, AsyncWrite};
@@ -34,6 +35,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 mod generated_defaults {
     include!(concat!(env!("OUT_DIR"), "/tls_client_defaults.rs"));
 }
@@ -88,6 +90,7 @@ fn parse_root_source(raw: &str) -> Result<RootSource, serde_json::Error> {
     serde_json::from_value(serde_json::Value::String(raw.to_owned()))
 }
 
+#[cfg(test)]
 fn default_root_source() -> RootSource {
     if generated_defaults::TLS_CLIENT_NATIVE_ROOTS_DEFAULT {
         RootSource::Native
@@ -240,13 +243,7 @@ impl<U: StreamUpstream> TlsStreamUpstream<U> {
         config
             .validate()
             .map_err(|err| ProximaError::Config(format!("tls client config: {err}")))?;
-        let custom_roots = load_custom_roots(&config.ca_bundle_paths)?;
-        let alpn = config
-            .alpn_protocols
-            .iter()
-            .map(|protocol| protocol.clone().into_bytes())
-            .collect();
-        let client = build_client_config(config.root_source, custom_roots, alpn)?;
+        let client = config.build_rustls_config()?;
         Ok(Self::new(
             inner,
             config.server_name.clone(),
@@ -262,30 +259,6 @@ impl<U: StreamUpstream> TlsStreamUpstream<U> {
     }
 }
 
-/// The source of trust anchors used for server certificate verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootSource {
-    /// Mozilla's bundled WebPKI root set.
-    Mozilla,
-    /// Operating-system roots, including Windows certificate stores.
-    Native,
-    /// Only certificates in `ca_bundle_paths`.
-    CustomOnly,
-}
-
-impl RootSource {
-    fn target_default() -> Self {
-        default_root_source()
-    }
-}
-
-impl Default for RootSource {
-    fn default() -> Self {
-        Self::target_default()
-    }
-}
-
 /// The declarative, serializable description of a client TLS session —
 /// the half of a [`TlsStreamUpstream`] that can live in env / TOML.
 ///
@@ -296,7 +269,10 @@ impl Default for RootSource {
 #[builder(derive(Clone, Debug))]
 pub struct TlsClientConfig {
     /// Hostname presented via SNI and verified against the server cert
-    /// (e.g. `"huggingface.co"`). Required — there is no sane default.
+    /// (e.g. `"huggingface.co"`). Universal URL clients fill this when omitted.
+    #[setting(default)]
+    #[serde(default)]
+    #[builder(default)]
     pub server_name: String,
     /// Selects the platform, Mozilla, or custom-only trust anchors.
     #[setting(resolve_with = "parse_root_source", default)]
@@ -332,6 +308,51 @@ impl TlsClientConfig {
     /// environment, and explicit value layers in call order.
     pub fn layered() -> TlsClientLayerBuilder {
         TlsClientLayerBuilder::new()
+    }
+
+    /// Build the rustls client config for a URL-aware TLS connector. The
+    /// connector supplies the destination SNI name from its request URI.
+    pub fn build_rustls_config(&self) -> Result<ClientConfig, ProximaError> {
+        self.validate_trust_settings()
+            .map_err(|err| ProximaError::Config(format!("tls client config: {err}")))?;
+        let custom_roots = load_custom_roots(&self.ca_bundle_paths)?;
+        let alpn = self
+            .alpn_protocols
+            .iter()
+            .map(|protocol| protocol.clone().into_bytes())
+            .collect();
+        build_client_config(self.root_source, custom_roots, alpn)
+    }
+
+    fn validate_trust_settings(&self) -> conflaguration::Result<()> {
+        let mut errors = Vec::new();
+        if self.alpn_protocols.iter().any(String::is_empty) {
+            errors.push(ValidationMessage::new(
+                "alpn_protocols",
+                "must not contain an empty protocol id",
+            ));
+        }
+        if self
+            .ca_bundle_paths
+            .iter()
+            .any(|path| path.as_os_str().is_empty())
+        {
+            errors.push(ValidationMessage::new(
+                "ca_bundle_paths",
+                "must not contain an empty path",
+            ));
+        }
+        if self.root_source == RootSource::CustomOnly && self.ca_bundle_paths.is_empty() {
+            errors.push(ValidationMessage::new(
+                "ca_bundle_paths",
+                "must contain at least one PEM bundle when root_source is custom_only",
+            ));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(conflaguration::Error::Validation { errors })
+        }
     }
 }
 
@@ -427,6 +448,13 @@ impl TlsClientLayerBuilder {
     /// Validate and return the resolved configuration.
     pub fn build(self) -> conflaguration::Result<TlsClientConfig> {
         self.config.validate()?;
+        Ok(self.config)
+    }
+
+    /// Validate roots and ALPN for attachment to a destination-aware
+    /// universal client. The HTTP/gRPC factory supplies SNI from its URL.
+    pub fn build_for_client(self) -> conflaguration::Result<TlsClientConfig> {
+        self.config.validate_trust_settings()?;
         Ok(self.config)
     }
 }

@@ -19,6 +19,41 @@ use tokio_rustls::TlsAcceptor;
 
 use proxima_core::ProximaError;
 
+mod generated_defaults {
+    include!(concat!(env!("OUT_DIR"), "/tls_client_defaults.rs"));
+}
+
+/// Trust-anchor source for outbound TLS clients. Listener mTLS has a separate
+/// explicit client-CA policy because the platform's web-server roots are not
+/// an implicit authorization policy for client certificates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "futures-io", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "futures-io", serde(rename_all = "snake_case"))]
+pub enum RootSource {
+    /// Mozilla's bundled WebPKI root set.
+    Mozilla,
+    /// Operating-system certificate anchors, including the Windows store.
+    Native,
+    /// Only certificates from configured PEM bundle paths.
+    CustomOnly,
+}
+
+impl RootSource {
+    pub(crate) fn target_default() -> Self {
+        if generated_defaults::TLS_CLIENT_NATIVE_ROOTS_DEFAULT {
+            Self::Native
+        } else {
+            Self::Mozilla
+        }
+    }
+}
+
+impl Default for RootSource {
+    fn default() -> Self {
+        Self::target_default()
+    }
+}
+
 /// Listener-side TLS configuration. Construction is type-safe via
 /// `TlsMode`; serialization to the spec JSON is symmetric so the
 /// config-file path produces the same struct.
@@ -121,15 +156,31 @@ impl TlsConfig {
     }
 }
 
-/// mTLS policy. `trust_anchors` is the PEM bytes of CA roots the
-/// listener will accept client certs from. `Required` rejects
-/// unauthenticated handshakes; `Optional` requests a cert but lets
-/// clients omit it (and still validates any chain they do present).
+/// mTLS policy. Inline variants carry PEM bytes; file variants carry PEM
+/// bundle paths. `Required` rejects unauthenticated handshakes; `Optional`
+/// requests a cert but lets clients omit it while validating any presented
+/// chain against the configured roots.
 #[derive(Debug, Clone)]
 pub enum ClientAuth {
     Disabled,
     Optional { trust_anchors: Vec<u8> },
     Required { trust_anchors: Vec<u8> },
+    OptionalFiles { ca_bundle_paths: Vec<PathBuf> },
+    RequiredFiles { ca_bundle_paths: Vec<PathBuf> },
+}
+
+impl ClientAuth {
+    /// Request an optional client certificate validated against PEM files.
+    #[must_use]
+    pub fn optional_files(ca_bundle_paths: Vec<PathBuf>) -> Self {
+        Self::OptionalFiles { ca_bundle_paths }
+    }
+
+    /// Require a client certificate validated against PEM files.
+    #[must_use]
+    pub fn required_files(ca_bundle_paths: Vec<PathBuf>) -> Self {
+        Self::RequiredFiles { ca_bundle_paths }
+    }
 }
 
 /// Cert sources we can build a `ServerConfig` from. Variants we don't
@@ -207,6 +258,14 @@ pub fn build_server_config(config: &TlsConfig) -> Result<ServerConfig, ProximaEr
         }
         ClientAuth::Optional { trust_anchors } => {
             let verifier = client_cert_verifier(trust_anchors, true)?;
+            builder.with_client_cert_verifier(verifier)
+        }
+        ClientAuth::OptionalFiles { ca_bundle_paths } => {
+            let verifier = client_cert_verifier_from_paths(ca_bundle_paths, true)?;
+            builder.with_client_cert_verifier(verifier)
+        }
+        ClientAuth::RequiredFiles { ca_bundle_paths } => {
+            let verifier = client_cert_verifier_from_paths(ca_bundle_paths, false)?;
             builder.with_client_cert_verifier(verifier)
         }
     };
@@ -287,6 +346,57 @@ fn client_cert_verifier(
     builder
         .build()
         .map_err(|err| ProximaError::Config(format!("tls: build client verifier: {err}")))
+}
+
+fn client_cert_verifier_from_paths(
+    ca_bundle_paths: &[PathBuf],
+    optional: bool,
+) -> Result<Arc<dyn ClientCertVerifier>, ProximaError> {
+    if ca_bundle_paths.is_empty() {
+        return Err(ProximaError::Config(
+            "tls: client CA bundle paths must not be empty".into(),
+        ));
+    }
+    let mut roots = RootCertStore::empty();
+    for path in ca_bundle_paths {
+        let certificates = CertificateDer::pem_file_iter(path)
+            .map_err(|error| {
+                ProximaError::Config(format!(
+                    "tls: read client CA bundle `{}`: {error}",
+                    path.display()
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                ProximaError::Config(format!(
+                    "tls: parse client CA bundle `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+        if certificates.is_empty() {
+            return Err(ProximaError::Config(format!(
+                "tls: client CA bundle `{}` contains no certificates",
+                path.display()
+            )));
+        }
+        for certificate in certificates {
+            roots.add(certificate).map_err(|error| {
+                ProximaError::Config(format!(
+                    "tls: invalid client CA in `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    let builder = WebPkiClientVerifier::builder(Arc::new(roots));
+    let builder = if optional {
+        builder.allow_unauthenticated()
+    } else {
+        builder
+    };
+    builder
+        .build()
+        .map_err(|error| ProximaError::Config(format!("tls: build client verifier: {error}")))
 }
 
 /// SNI-driven cert resolver. Picks a preloaded `CertifiedKey` per
@@ -440,6 +550,14 @@ pub fn config_to_spec_value(config: &TlsConfig) -> serde_json::Value {
         ClientAuth::Required { trust_anchors } => serde_json::json!({
             "kind": "required",
             "trust_anchors_pem_b64": b64(trust_anchors),
+        }),
+        ClientAuth::OptionalFiles { ca_bundle_paths } => serde_json::json!({
+            "kind": "optional_files",
+            "ca_bundle_paths": ca_bundle_paths,
+        }),
+        ClientAuth::RequiredFiles { ca_bundle_paths } => serde_json::json!({
+            "kind": "required_files",
+            "ca_bundle_paths": ca_bundle_paths,
         }),
     };
     let mut root = serde_json::json!({
@@ -618,9 +736,38 @@ pub fn config_from_spec_value(
                         )?,
                     }
                 }
+                "optional_files" | "required_files" => {
+                    let paths = auth_table
+                        .get("ca_bundle_paths")
+                        .and_then(|raw| raw.as_array())
+                        .ok_or_else(|| {
+                            ProximaError::Config(format!(
+                                "tls.client_auth.{kind} requires `ca_bundle_paths` array"
+                            ))
+                        })?
+                        .iter()
+                        .map(|entry| {
+                            entry.as_str().map(PathBuf::from).ok_or_else(|| {
+                                ProximaError::Config(
+                                    "tls.client_auth.ca_bundle_paths entries must be strings"
+                                        .into(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if kind == "optional_files" {
+                        ClientAuth::OptionalFiles {
+                            ca_bundle_paths: paths,
+                        }
+                    } else {
+                        ClientAuth::RequiredFiles {
+                            ca_bundle_paths: paths,
+                        }
+                    }
+                }
                 other => {
                     return Err(ProximaError::Config(format!(
-                        "tls.client_auth.kind `{other}` unsupported; expected disabled | optional | required"
+                        "tls.client_auth.kind `{other}` unsupported; expected disabled | optional | required | optional_files | required_files"
                     )));
                 }
             }
@@ -812,6 +959,29 @@ mod tests {
         // anchors survive the round-trip AND parse: WebPkiClientVerifier accepts them.
         let _ =
             build_server_config(&parsed).expect("server config builds with round-tripped anchors");
+    }
+
+    #[test]
+    fn listener_client_auth_bundle_paths_round_trip_and_build() {
+        let ca = rcgen::generate_simple_self_signed(vec!["proxima-client-ca".to_string()])
+            .expect("generate client CA");
+        let directory = tempfile::tempdir().expect("create CA directory");
+        let bundle_path = directory.path().join("client-ca.pem");
+        std::fs::write(&bundle_path, ca.cert.pem()).expect("write client CA bundle");
+
+        let original = TlsConfig::self_signed().with_client_auth(ClientAuth::RequiredFiles {
+            ca_bundle_paths: vec![bundle_path.clone()],
+        });
+        let value = config_to_spec_value(&original);
+        let parsed = config_from_spec_value(Some(&value))
+            .expect("parse listener TLS config")
+            .expect("listener TLS config exists");
+        assert!(matches!(
+            &parsed.client_auth,
+            ClientAuth::RequiredFiles { ca_bundle_paths }
+                if ca_bundle_paths == &[bundle_path]
+        ));
+        let _ = build_server_config(&parsed).expect("build mTLS listener config");
     }
 
     #[test]

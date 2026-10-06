@@ -39,6 +39,4 @@ mod build_defaults;
 mod connector;
 
 #[cfg(feature = "futures-io")]
-pub use connector::{
-    RootSource, TlsClientConfig, TlsClientLayerBuilder, TlsConn, TlsStreamUpstream,
-};
+pub use connector::{TlsClientConfig, TlsClientLayerBuilder, TlsConn, TlsStreamUpstream};

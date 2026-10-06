@@ -110,6 +110,13 @@ pub struct HttpConfig {
     #[serde(default)]
     #[builder(default)]
     pub response: ResponseHandlingConfig,
+
+    /// Outbound TLS trust policy. The destination hostname is supplied by
+    /// the URL, so config files only need to choose roots and ALPN.
+    #[cfg(feature = "http1-stream-client")]
+    #[setting(skip)]
+    #[serde(default)]
+    pub tls_client: Option<proxima_tls::TlsClientConfig>,
 }
 
 fn default_label() -> String {

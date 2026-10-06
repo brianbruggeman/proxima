@@ -26,6 +26,11 @@ use crate::PrimeTcpUpstream;
 use crate::ProximaError;
 use crate::h2::H2ClientUpstream;
 
+#[cfg(any(feature = "tls", feature = "http-prime-deps"))]
+type TlsClientConfigOption<'a> = Option<&'a proxima_tls::TlsClientConfig>;
+#[cfg(not(any(feature = "tls", feature = "http-prime-deps")))]
+type TlsClientConfigOption<'a> = ();
+
 /// Typed config for the `grpc` key. The spec contract mirrors `http`: the
 /// umbrella's `canonical_http` folds `{"grpc": "http://host:4317", ...}` into an
 /// object carrying a `url` string (plus `name`); this reads `url` + `name`.
@@ -44,6 +49,13 @@ pub struct GrpcConfig {
     #[serde(default = "default_label")]
     #[builder(default = default_label())]
     pub name: String,
+
+    /// Outbound TLS trust policy. gRPC fixes ALPN to `h2`; the destination
+    /// hostname is derived from `url`.
+    #[cfg(any(feature = "tls", feature = "http-prime-deps"))]
+    #[setting(skip)]
+    #[serde(default)]
+    pub tls_client: Option<proxima_tls::TlsClientConfig>,
 }
 
 fn default_label() -> String {
@@ -72,7 +84,11 @@ impl GrpcConfig {
     pub fn from_config(self) -> Result<PipeHandle, ProximaError> {
         self.validate()
             .map_err(|err| ProximaError::Config(format!("{err}")))?;
-        build_grpc_h2_upstream(&self.url, &self.name)
+        #[cfg(any(feature = "tls", feature = "http-prime-deps"))]
+        let tls_client = self.tls_client.as_ref();
+        #[cfg(not(any(feature = "tls", feature = "http-prime-deps")))]
+        let tls_client = ();
+        build_grpc_h2_upstream(&self.url, &self.name, tls_client)
     }
 }
 
@@ -108,7 +124,11 @@ impl PipeFactory for GrpcH2PipeFactory {
 
 /// Stack the h2 client over the prime transport for `url`. DNS is resolved lazily
 /// at connect time (side-effect-free build, matching the prime `http` factory).
-fn build_grpc_h2_upstream(url: &str, label: &str) -> Result<PipeHandle, ProximaError> {
+fn build_grpc_h2_upstream(
+    url: &str,
+    label: &str,
+    tls_client: TlsClientConfigOption<'_>,
+) -> Result<PipeHandle, ProximaError> {
     let parsed = Url::parse(url)
         .map_err(|err| ProximaError::Config(format!("parse grpc url `{url}`: {err}")))?;
     let secure = match parsed.scheme() {
@@ -129,7 +149,7 @@ fn build_grpc_h2_upstream(url: &str, label: &str) -> Result<PipeHandle, ProximaE
         .ok_or_else(|| ProximaError::Config(format!("grpc url `{url}` has no port")))?;
     let authority = authority(&host, port, secure);
     if secure {
-        secure_grpc_upstream(host, port, authority, label)
+        secure_grpc_upstream(host, port, authority, label, tls_client)
     } else {
         let tcp = PrimeTcpUpstream::with_host(host, port);
         Ok(into_handle(H2ClientUpstream::new(
@@ -141,21 +161,21 @@ fn build_grpc_h2_upstream(url: &str, label: &str) -> Result<PipeHandle, ProximaE
     }
 }
 
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", feature = "http-prime-deps"))]
 fn secure_grpc_upstream(
     host: String,
     port: u16,
     authority: String,
     label: &str,
+    configured: TlsClientConfigOption<'_>,
 ) -> Result<PipeHandle, ProximaError> {
     let tcp = PrimeTcpUpstream::with_host(host.clone(), port);
-    // gRPC-over-TLS negotiates ALPN `h2` (not the h1 default `with_webpki_roots`
-    // would pick) so the server speaks HTTP/2 on the same socket.
-    let tls_config = crate::tls::TlsClientConfig::builder()
-        .server_name(host)
-        .alpn_protocols(vec!["h2".to_string()])
-        .build();
-    let tls = crate::tls::TlsStreamUpstream::from_config(tcp, &tls_config)?;
+    let mut tls_config = configured.cloned().unwrap_or_default();
+    tls_config.server_name = host;
+    // gRPC requires h2 on the wire; root source and custom bundles come from
+    // caller settings while this protocol owns its ALPN contract.
+    tls_config.alpn_protocols = vec!["h2".to_string()];
+    let tls = proxima_tls::TlsStreamUpstream::from_config(tcp, &tls_config)?;
     Ok(into_handle(H2ClientUpstream::new(
         tls,
         authority,
@@ -164,12 +184,13 @@ fn secure_grpc_upstream(
     )))
 }
 
-#[cfg(not(feature = "tls"))]
+#[cfg(not(any(feature = "tls", feature = "http-prime-deps")))]
 fn secure_grpc_upstream(
     _host: String,
     _port: u16,
     _authority: String,
     _label: &str,
+    _configured: TlsClientConfigOption<'_>,
 ) -> Result<PipeHandle, ProximaError> {
     Err(ProximaError::Config(
         "grpcs (gRPC over TLS) requires the `tls` feature".into(),
@@ -191,6 +212,32 @@ fn authority(host: &str, port: u16, secure: bool) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[cfg(any(feature = "tls", feature = "http-prime-deps"))]
+    #[proxima::test]
+    async fn grpc_factory_applies_client_tls_root_settings() {
+        let factory = GrpcH2PipeFactory::new();
+        let result = factory
+            .build(
+                &serde_json::json!({
+                    "url": "https://collector.example.test:4317",
+                    "tls_client": {
+                        "root_source": "custom_only",
+                        "ca_bundle_paths": ["missing-grpc-client-root.pem"]
+                    }
+                }),
+                None,
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("missing configured root must fail before dialing"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("missing-grpc-client-root.pem"),
+            "configured trust policy must reach gRPC TLS setup: {error}"
+        );
+    }
 
     // principle-4 parity: the fluent builder and the config value must lower to
     // identical GrpcConfig state (the pipe label), and both build successfully.
