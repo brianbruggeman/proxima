@@ -641,7 +641,7 @@ pub(super) fn push_packed_row_blocked_body(
                     if is_plain_product_reduce(resolved, reduce_op, weight, other)
                         && resolved.dtype == DType::Float32 =>
                 {
-                    // BATCHED ARM -- the #1 GPU-time bucket in gemma4-E2B
+                    // BATCHED ARM -- the #1 GPU-time bucket in the E2B checkpoint
                     // decode (`reduce-packed-row-blocked`, 39.6%, 275
                     // dispatches/step) ran through the per-element fallback
                     // below on every one of those dispatches. Same posture as
@@ -959,7 +959,7 @@ pub(super) fn push_q4k_plain_product_y4_address(source: &mut String, other: usiz
 /// [`push_q4k_plain_product_y4_address`] generalized to any ggml-port body's
 /// own lane-derived activation offset -- [`push_q6k_ggml_port_body`] shares
 /// this instead of a second copy of the address arithmetic, passing
-/// `"128u * ip + l0"` (llama's `y_offset`, `ggml-metal.metal:5383`) in place
+/// `"128u * ip + l0"` (llama.cpp's `y_offset`, `ggml-metal.metal:5383`) in place
 /// of `Q4_K`'s `"64u * iq + 8u * ir"`.
 pub(super) fn push_packed_row_plain_product_y4_address(
     source: &mut String,
@@ -1224,7 +1224,7 @@ pub(super) fn push_q4k_ggml_port_body(
 /// [`Q4_0_BLOCK_BYTES`] (18) per step), so 16 lane-PAIRS of one 32-lane
 /// simdgroup read 16 contiguous blocks (288 bytes) every outer-loop
 /// iteration -- see this landing's discipline row for the measured effect
-/// on real gemma4-E2B `Q4_0` weights.
+/// on the E2B checkpoint's real `Q4_0` weights.
 ///
 /// Activation gather (`yl[16]`, `sumy0`/`sumy1`): four registers are filled
 /// per iteration of the inner 4-step loop (`i = 0, 2, 4, 6`), pre-scaled by
@@ -1552,7 +1552,7 @@ pub(super) fn push_q5k_ggml_port_body(
 /// `kernel_mul_mv_q6_K_f32_impl<nr0=1, nsg=2, nw=32>`
 /// (`ggml-metal.metal:5340-5433`).
 ///
-/// Lane variable mapping, llama -> this function (`ggml-metal.metal:5376-5385`):
+/// Lane variable mapping, llama.cpp -> this function (`ggml-metal.metal:5376-5385`):
 /// `tid = tiisg/2` -> `tid = lane/2u`; `ix = tiisg%2` -> `ix = lane%2u`;
 /// `ip = tid/8` -> `ip = tid/8u`; `il = tid%8` -> `il = tid%8u`;
 /// `l0 = 4*il` -> `l0 = 4u*il`; `y_offset = 128*ip+l0` -> the `lane_offset`

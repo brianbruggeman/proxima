@@ -96,7 +96,7 @@ impl BufferArena {
 ///
 /// Reading the caller's own row count, rather than scanning `resolved` for
 /// the largest leading `extents` axis, is what keeps this correct
-/// regardless of a bind's op shapes: gemma4-E2B's own bound graph on a
+/// regardless of a bind's op shapes: the E2B checkpoint's own bound graph on a
 /// build without `metal-fuse-attn-decode` decomposes attention into plain
 /// `Elementwise`/`Reduce` ops with no `CachedAttention` node to read a row
 /// count off at all, while a vocab- or expert-count-leading op elsewhere in
@@ -2101,7 +2101,7 @@ pub(super) fn encode_op(
         // decision point: whether this node's recurrent state carried
         // forward from the caller's placement (ROW 549 -- a stale
         // `use_metal_output_placements` gate left this always missing for
-        // qwen35moe's routed-expert + GDN decode step, discarding state
+        // the recurrent-routed family's routed-expert + GDN decode step, discarding state
         // every dispatch).
         #[cfg(feature = "instrument")]
         {
@@ -2777,7 +2777,7 @@ pub(super) mod operand_tensor_bytes_tests {
     /// must report bytes for the rows its OWN `lookup.indices` selects,
     /// never the full declared expert-stack shape `shapes.of(source)`
     /// carries -- the defect this test guards against overstated a
-    /// qwen35moe-shaped grouped gate/up dispatch's `operand_bytes` by
+    /// recurrent-routed-shaped grouped gate/up dispatch's `operand_bytes` by
     /// ~7x the whole 256-expert stack (`proxima-tensor/docs/discipline.md`
     /// ROW 543/544).
     #[test]
@@ -4426,7 +4426,7 @@ pub(super) mod attention_scratch_len_tests {
         );
     }
 
-    /// One gemma4-E2B attention op as speculative verify binds it: eight query
+    /// One E2B checkpoint attention op as speculative verify binds it: eight query
     /// groups on one kv head, `rows` new rows over the `cached_key_rows`
     /// bucket, the sliding window (head_dim 256) or the full range (512).
     #[cfg(feature = "metal-attn-split-rows")]
@@ -4592,9 +4592,9 @@ pub(super) mod plan_query_rows_tests {
     /// Production crash (2026-09-29): `OFF decode: Backend(Metal(
     /// ArenaOverCap { peak_bytes: 495315984, cap_bytes: 172812125,
     /// query_rows: 1, device_limit: 51539607552 }))` --
-    /// `speculative_decode_parity --gpu-layers all` against gemma4-E2B on
+    /// `speculative_decode_parity --gpu-layers all` against the E2B checkpoint on
     /// the 1618-token `rag001` prompt (`proxima-model-interop/examples/
-    /// data/speculative_corpus.jsonl`). gemma4-E2B's attention lowers to a
+    /// data/speculative_corpus.jsonl`). The E2B checkpoint's attention lowers to a
     /// plain elementwise/reduce decomposition on a build without
     /// `metal-fuse-attn-decode` -- ZERO `CachedAttention` nodes in the bound
     /// graph -- so a scan over `resolved` for a `CachedAttention`-shaped row
@@ -4695,7 +4695,7 @@ pub(super) mod plan_query_rows_tests {
     /// The invariant this fix exists to hold: a bound op whose LEADING axis
     /// is something other than the token/row axis must never move the cap.
     /// A router-logits `Reduce` over 128 experts, or a stacked per-expert
-    /// weight `Constant` (qwen35moe-style MoE layers carry both shapes;
+    /// weight `Constant` (recurrent-routed-style MoE layers carry both shapes;
     /// this fixture is a constructed adversarial shape, not a captured
     /// trace, chosen to isolate the hazard), carries `extents[0] ==
     /// expert_count` with no relation whatsoever to how many tokens this

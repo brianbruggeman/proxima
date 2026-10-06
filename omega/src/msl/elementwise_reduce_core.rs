@@ -2232,7 +2232,7 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // (see this const's own doc above). `push_packed_row_blocked_body`'s
     // single-row arm (`packed_row_blocked_ggml.rs`) emits
     // `q4_0_super_element(blk`/`q8_0_super_element(blk`; the classifier's
-    // `op_profile_kind` count for gemma4-E2B's ~275 Q4_0 dispatches fell
+    // `op_profile_kind` count for the E2B checkpoint's ~275 Q4_0 dispatches fell
     // through this gap into `"reduce-cooperative"` before these two markers.
     "q4_0_super_element(blk",
     "q8_0_super_element(blk",

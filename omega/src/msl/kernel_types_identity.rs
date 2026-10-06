@@ -1304,7 +1304,7 @@ static inline float q4_0_super_element(device const uchar *superblock, uint inde
 "#;
 
 /// Batched-unpack fast arm for `Q4_0`, the primitive this landing exists to
-/// add: `reduce-packed-row-blocked` is the #1 GPU-time bucket in gemma4-E2B
+/// add: `reduce-packed-row-blocked` is the #1 GPU-time bucket in the E2B checkpoint
 /// decode (39.6%, 275 dispatches/step) and every `Q4_0` weight matvec went
 /// through [`Q4_0_SUPER_ELEMENT_MSL`]'s `q4_0_super_element`, which re-reads
 /// `d_bits` from `block[0..2]` and re-derives the nibble mask on EVERY
@@ -2004,7 +2004,7 @@ pub(super) const fn tiled_gemm_q4_0_override() -> bool {
 }
 
 /// `PROXIMA_TILED_GEMM_DENSE`: admits a dense (neither operand quantized)
-/// batched matmul -- gemma4's GQA attention score (`Q.K^T`) and value
+/// batched matmul -- the sliding-pattern family's GQA attention score (`Q.K^T`) and value
 /// (`P.V`) folds -- onto the same `simdgroup_matrix` tiled path
 /// [`tiled_gemm_q4_0_override`] admits `Codec::Q4_0` onto, plus a z-grid
 /// batch axis for the head-broadcast dimension `classify_dense_batched_gemm`

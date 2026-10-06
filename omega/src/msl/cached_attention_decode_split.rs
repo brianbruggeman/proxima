@@ -10,7 +10,7 @@ use super::*;
 /// partial plus `(max, sum)` into the interleaved scratch layout
 /// [`super::render_cached_attention_merge`] reads back.
 ///
-/// The lane layout is llama's `NE`/`NL` split of a simdgroup
+/// The lane layout is llama.cpp's `NE`/`NL` split of a simdgroup
 /// (`[attention_decode].keys_in_flight`): `32 / keys_in_flight` lanes span one
 /// key's head dim, so a lane owns `head_dim / 8 / lanes` float4 of each K and
 /// Q plane row and `head_dim / 4 / lanes` float4 of each V row. At the default

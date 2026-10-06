@@ -1031,7 +1031,7 @@ pub(super) fn split_into_independent_groups(
 /// buffer whenever that buffer exists -- the group does not need it to exist
 /// YET at this call, only to agree on WHICH node it will be. ROW 571 measured
 /// that requiring the activation buffer to already be resolved here (the
-/// admission this replaces) refused 100% of the real qwen35moe decode
+/// admission this replaces) refused 100% of the real recurrent-routed decode
 /// graph's own candidates, because a real activation is an intermediate
 /// hidden state the per-position encode loop has not reached yet -- never an
 /// `Op::Input` leaf like this crate's own synthetic fixtures use. Output is
@@ -1283,7 +1283,7 @@ pub(super) fn ensure_merged_group_resolved(
     // call, not just the first, or a later step's own reader of a NON-leader
     // member's output fails exactly the way a caller-placed output never
     // could (`MetalError::UnresolvedHazardOperand`, measured against the
-    // real qwen35moe decode graph's own second-and-later decode step).
+    // real recurrent-routed decode graph's own second-and-later decode step).
     let already_resolved = {
         let merged_guard = plan.merged.borrow();
         let dispatch = &merged_guard.as_ref().ok_or(MetalError::CompileFailed {

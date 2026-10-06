@@ -3436,7 +3436,7 @@ pub(super) fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 
 /// `token_total` activation rows: the smallest power of two that holds them,
 /// capped at `crate::sized::PACKED_ROW_ACTIVATION_GROUP`. A fixed cap makes a
 /// 2-row verify forward compute and load the full group's 8 rows, six of them
-/// clamped duplicates -- gemma4-E2B width 2 measured 97.8 ms/step at cap 8
+/// clamped duplicates -- the E2B checkpoint width 2 measured 97.8 ms/step at cap 8
 /// against 61.5 at cap 2. The multi-row body, the dispatch grid and the
 /// kernel identity all read this one function so they cannot disagree.
 pub(crate) fn packed_row_activation_cap(token_total: u64) -> u64 {
@@ -3527,7 +3527,7 @@ pub enum DenseBatchedGemmRejection {
 /// group exclusively owned by the other (`other`), and zero or more BATCH
 /// axes neither owns exclusively -- an axis where BOTH operands carry a real
 /// stride (no broadcast) or where one carries a real stride and the other
-/// reads stride `0` (a genuine broadcast, gemma4's GQA head-group axis:
+/// reads stride `0` (a genuine broadcast, the sliding-pattern family's GQA head-group axis:
 /// K/V's single kv-head repeats across every query-group row of Q/P). The
 /// batch axes are never folded to one flat stride the way `token_axes`/
 /// `feature_axes` are -- [`push_dense_batched_gemm_body`] decomposes the
@@ -3638,7 +3638,7 @@ pub(super) fn classify_dense_batched_gemm(
         // Unlike `classify_tiled_gemm`'s packed-weight counterpart, this
         // does NOT fold every exclusively-owned axis into one flat
         // multi-axis group: this repo's own root cause is that
-        // gemma4's GQA head axis (`heads`) shares ownership with the real
+        // the sliding-pattern family's GQA head axis (`heads`) shares ownership with the real
         // token axis (`query`, both other-owned -- K/V broadcast over both)
         // but is NOT contiguous with it in the op's own output layout (`kv`
         // sits between them in memory). Folding both into one `token_axes`
@@ -3707,7 +3707,7 @@ pub(super) fn classify_dense_batched_gemm(
         // the_row_blocked_vector_path` test asserts must NEVER tile. Taking
         // the first candidate in declaration order instead is a fixed
         // per-node choice: `query` is declared before `heads` in every
-        // real gemma4 attention product (a real captured attention
+        // real sliding-pattern attention product (a real captured attention
         // dump), so this both fixes the flip-flop and keeps the decode
         // gate's own `token_extent < TILED_GEMM_MIN_TOKENS` check honest
         // (a real `query` extent of `1` correctly declines, every call).
