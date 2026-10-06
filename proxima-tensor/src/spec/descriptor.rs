@@ -472,40 +472,67 @@ pub fn mistral_descriptor_from_shape(
     }
 }
 
-/// [`build_forward`]'s own return shape: the lowered program, its `logits`
-/// root, one [`CachedLayerRoots`] per layer (empty under
-/// [`CacheStrategy::Cacheless`]), one [`MoeSite`] per MoE layer, one
-/// residual [`NodeId`] per layer (empty under
-/// [`CacheStrategy::Cacheless`]/[`CacheMask::Padded`], neither of
-/// which tracks it -- [`CacheMask::Bounded`]'s own arm is the only
-/// one that populates it, straight from
-/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
-/// fourth return element), and the `hidden` root (`ForwardRoots::hidden` --
-/// the last-norm activation `logits` projects from, the node
-/// `proxima-model-interop`'s `LoadedModel::embed` pooling path needs and
-/// `DenseArch::bind`'s mistral arm carried before it routed through this
-/// function). `None` under [`CacheStrategy::Cacheless`]/[`CacheMask::Padded`]:
-/// neither `lfm2_forward_program_with_experts` nor
-/// `lfm2_two_range_cached_forward_program_with_experts` expose a hidden
-/// node at all, so there is no value here to forward, not merely one this
-/// function declines to read -- same "degenerate default for an engine
-/// that does not produce this value" precedent `cache_roots` and the
-/// residual `Vec<NodeId>` already set. The seventh element,
-/// `duplicate_head_roots`, is `PROXIMA_HEAD_REPEATS`'s own scratch output
-/// (`lfm2_forward_program_with_experts`'s own doc) forwarded through under
-/// [`CacheStrategy::Cacheless`] only -- empty everywhere else, same
-/// degenerate-default precedent.
-pub type BuildForwardProgram = (
-    Vec<Op>,
-    NodeId,
-    Vec<CachedLayerRoots>,
-    MoeSites,
-    Vec<NodeId>,
-    Option<NodeId>,
-    Vec<NodeId>,
-);
+/// [`build_forward`]'s return: the lowered program with every root a caller
+/// reads back out of it. A root an engine does not produce is the empty value
+/// of its type (`None`, an empty `Vec`), never a placeholder node.
+#[derive(Debug, Clone)]
+pub struct ForwardProgram {
+    pub program: Vec<Op>,
+    /// The root a decode step samples from.
+    pub logits: NodeId,
+    /// One entry per layer that carries or reads a cache, in layer order:
+    /// [`Qwen35LayerRoots::Attention`] for a layer that owns a KV cache,
+    /// [`Qwen35LayerRoots::SharedFromLayer`] for a gemma4 shared-KV layer that
+    /// reads another layer's. Empty under [`CacheStrategy::Cacheless`], which
+    /// keeps no cache.
+    pub layer_roots: Vec<Qwen35LayerRoots>,
+    /// One [`MoeSite`] per routed layer; empty for a dense program.
+    pub moe_sites: MoeSites,
+    /// One residual root per layer, populated only by [`CacheMask::Bounded`]'s
+    /// engine (`mistral_cached_forward_program_with_experts_and_layer_taps`).
+    pub layer_residuals: Vec<NodeId>,
+    /// The last-norm activation `logits` projects from, which a pooled
+    /// embedding reads. `None` for the engines that expose no hidden node.
+    pub hidden: Option<NodeId>,
+    /// `PROXIMA_HEAD_REPEATS`'s scratch output
+    /// ([`ModelDescriptor::head_repeats`]): the duplicate head chains' roots.
+    pub duplicate_head_roots: Vec<NodeId>,
+}
 
-fn refuse_when(
+/// One [`Qwen35LayerRoots`] per layer for a cached program: the engine returns
+/// one [`CachedLayerRoots`] per layer whose [`KeySourceKind`] is
+/// [`KeySourceKind::ProjectedK`] (a shared-KV layer owns no cache leaves),
+/// and this zips them back against the schedule so the result has one entry
+/// per layer index. A count that disagrees means an engine pushed a different
+/// number of roots than the schedule declares cache-owning layers.
+pub(super) fn layer_roots_from_cache(
+    layers: &[LayerSchedule],
+    cache_roots: Vec<CachedLayerRoots>,
+) -> Result<Vec<Qwen35LayerRoots>, TensorError> {
+    let expected = layers
+        .iter()
+        .filter(|layer| layer.attention.key_source_kind == KeySourceKind::ProjectedK)
+        .count();
+    let produced = cache_roots.len();
+    let mismatch = || TensorError::CacheRootsCountMismatch { produced, expected };
+    let mut cache_roots = cache_roots.into_iter();
+    let layer_roots = layers
+        .iter()
+        .map(|layer| match layer.attention.key_source_kind {
+            KeySourceKind::ProjectedK => cache_roots
+                .next()
+                .map(Qwen35LayerRoots::Attention)
+                .ok_or_else(mismatch),
+            KeySourceKind::SharedFromLayer(source) => Ok(Qwen35LayerRoots::SharedFromLayer(source)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match cache_roots.next() {
+        Some(_) => Err(mismatch()),
+        None => Ok(layer_roots),
+    }
+}
+
+pub(super) fn refuse_when(
     set: bool,
     builder: &'static str,
     feature: &'static str,
@@ -546,13 +573,8 @@ fn refuse_when(
 /// precedent `cache_roots` itself already sets on the [`Cacheless`][CacheStrategy::Cacheless]
 /// arm above.
 ///
-/// [`BuildForwardProgram`]'s own doc names each element -- the same
-/// named-tuple-alias precedent
-/// `MistralMoeForwardProgramWithLayerTaps` already sets for a
-/// same-shaped return.
-pub fn build_forward(
-    descriptor: &ModelDescriptor,
-) -> Result<BuildForwardProgram, TensorError> {
+/// [`ForwardProgram`]'s own doc names each root and which engine fills it.
+pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
     match (descriptor.cache_strategy, descriptor.cache_mask) {
         (CacheStrategy::Cached, CacheMask::Padded) => {
             refuse_when(
@@ -584,15 +606,15 @@ pub fn build_forward(
                     descriptor.sliding_kv_ring,
                     descriptor.head_repeats,
                 )?;
-            Ok((
+            Ok(ForwardProgram {
                 program,
                 logits,
-                cache_roots,
+                layer_roots: layer_roots_from_cache(&descriptor.layers, cache_roots)?,
                 moe_sites,
-                Vec::new(),
-                None,
+                layer_residuals: Vec::new(),
+                hidden: None,
                 duplicate_head_roots,
-            ))
+            })
         }
         (CacheStrategy::Cacheless, _) => {
             refuse_when(
@@ -623,15 +645,15 @@ pub fn build_forward(
                 descriptor.ple_dim,
                 descriptor.head_repeats,
             )?;
-            Ok((
+            Ok(ForwardProgram {
                 program,
                 logits,
-                Vec::new(),
+                layer_roots: Vec::new(),
                 moe_sites,
-                Vec::new(),
-                None,
+                layer_residuals: Vec::new(),
+                hidden: None,
                 duplicate_head_roots,
-            ))
+            })
         }
         (CacheStrategy::Cached, CacheMask::Bounded) => {
             if descriptor.layers.len() != descriptor.block_count as usize {
@@ -714,15 +736,15 @@ pub fn build_forward(
                     &layer_windows,
                     descriptor.sliding_kv_ring,
                 )?;
-            Ok((
+            Ok(ForwardProgram {
                 program,
-                roots.logits,
-                cache_roots,
+                logits: roots.logits,
+                layer_roots: layer_roots_from_cache(&descriptor.layers, cache_roots)?,
                 moe_sites,
                 layer_residuals,
-                Some(roots.hidden),
-                Vec::new(),
-            ))
+                hidden: Some(roots.hidden),
+                duplicate_head_roots: Vec::new(),
+            })
         }
     }
 }

@@ -34,8 +34,8 @@
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    AttentionScoreScale, EmbeddingScale, LayerAttentionConfig, LayerSchedule, ModelDescriptor,
-    Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape,
+    AttentionScoreScale, EmbeddingScale, ForwardProgram, LayerAttentionConfig, LayerSchedule, ModelDescriptor,
+    build_forward, mistral_descriptor_from_shape,
 };
 
 use crate::architecture::{Architecture, BoundProgram};
@@ -95,7 +95,7 @@ fn bind_descriptor<'file>(
     architecture: ModelArchitecture,
     descriptor: &ModelDescriptor,
 ) -> Result<BoundProgram<'file>, InteropError> {
-    let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
+    let ForwardProgram { program, logits, layer_roots, moe_sites, layer_residuals, hidden, .. } =
         build_forward(descriptor)?;
     // `&[]`: this entry point takes no `ServingConfig`, so there is no
     // `weight_precision` rule set to thread here yet.
@@ -110,13 +110,10 @@ fn bind_descriptor<'file>(
         weights,
         architecture,
         program,
-        logits_root,
-        hidden_root,
+        logits_root: logits,
+        hidden_root: hidden,
         residual_roots: layer_residuals,
-        layer_roots: cache_roots
-            .into_iter()
-            .map(Qwen35LayerRoots::Attention)
-            .collect(),
+        layer_roots,
         qwen35moe_layer_diagnostics: Vec::new(),
         router_roots: Vec::new(),
         moe_sites,

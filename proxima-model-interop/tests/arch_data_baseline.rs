@@ -36,7 +36,8 @@ use proxima_tensor::op::{Extent, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, CacheMask, CacheStrategy, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
-    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind, build_forward,
+    ParallelDenseMoeConfig, CachedLayerRoots, ForwardProgram, Qwen35LayerRoots, RopePairing, RopeTableSel,
+    ValueSourceKind, build_forward,
     SLIDING_KV_SYMBOL, gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
     mistral_cached_forward_program_with_experts_and_layer_taps, mistral_descriptor_from_shape,
 };
@@ -574,7 +575,7 @@ fn model_config_roundtrip(checkpoint: &Checkpoint) {
         conflaguration::Validate::validate(&restored)
             .unwrap_or_else(|error| panic!("{} {label}: the real checkpoint's config fails validation: {error}", checkpoint.name));
 
-        let (program, logits_root, ..) = build_forward(&restored)
+        let ForwardProgram { program, logits: logits_root, .. } = build_forward(&restored)
             .unwrap_or_else(|error| panic!("{} {label}: restored config does not lower: {error:?}", checkpoint.name));
         assert!(!program.is_empty(), "{} {label}: lowered zero ops", checkpoint.name);
         for expected in [
@@ -631,7 +632,7 @@ fn model_config_text_edit_changes_the_lowered_program() {
     assert!(text.contains("activation = \"GeluTanh\""), "e2b runs a gelu ffn, got:\n{text}");
 
     let edited: ModelDescriptor = toml::from_str(&text.replace("GeluTanh", "Silu")).expect("the edited toml parses");
-    let (program, ..) = build_forward(&edited).expect("the edited config lowers");
+    let ForwardProgram { program, .. } = build_forward(&edited).expect("the edited config lowers");
 
     let incumbent = std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
     assert!(
@@ -655,6 +656,16 @@ fn model_config_rejects_an_unknown_field() {
 
     let error = outcome.expect_err("an unknown key must be an error, never a silent default");
     assert!(error.to_string().contains("unknown field"), "got: {error}");
+}
+
+fn owned_cache_roots(layer_roots: &[Qwen35LayerRoots]) -> Vec<CachedLayerRoots> {
+    layer_roots
+        .iter()
+        .filter_map(|roots| match roots {
+            Qwen35LayerRoots::Attention(cached) => Some(*cached),
+            _ => None,
+        })
+        .collect()
 }
 
 fn assert_programs_identical(direct: &[Op], descriptor: &[Op]) {
@@ -757,13 +768,13 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
         )
         .expect("direct real-dims build");
 
-    let (program, logits, roots, moe, ..) =
+    let ForwardProgram { program, logits, layer_roots, moe_sites, .. } =
         build_forward(&descriptor).expect("build_forward real-dims build");
 
     assert_programs_identical(&direct, &program);
     assert_eq!(direct_logits, logits, "root node id mismatch");
-    assert_eq!(direct_roots, roots, "cache roots mismatch");
-    assert_eq!(direct_moe.0.len(), moe.0.len(), "moe site count mismatch");
+    assert_eq!(direct_roots, owned_cache_roots(&layer_roots), "cache roots mismatch");
+    assert_eq!(direct_moe.0.len(), moe_sites.0.len(), "moe site count mismatch");
 }
 
 #[test]
@@ -811,15 +822,15 @@ fn descriptor_real_dims_openchat_program_equals_direct_builder() {
         &family_profile(OPENCHAT.architecture).expect("the openchat family profile is embedded"),
     );
 
-    let (program, logits, cache_roots, moe, residuals, hidden, _head_repeats) =
+    let ForwardProgram { program, logits, layer_roots, moe_sites, layer_residuals, hidden, .. } =
         build_forward(&descriptor).expect("build_forward real-dims build");
 
     assert_programs_identical(&direct, &program);
     assert_eq!(direct_roots.logits, logits, "root node id mismatch");
     assert_eq!(Some(direct_roots.hidden), hidden, "hidden root mismatch");
-    assert_eq!(direct_cache_roots, cache_roots, "cache roots mismatch");
-    assert_eq!(direct_moe.0.len(), moe.0.len(), "moe site count mismatch");
-    assert_eq!(direct_residuals, residuals, "layer-residual roots mismatch");
+    assert_eq!(direct_cache_roots, owned_cache_roots(&layer_roots), "cache roots mismatch");
+    assert_eq!(direct_moe.0.len(), moe_sites.0.len(), "moe site count mismatch");
+    assert_eq!(direct_residuals, layer_residuals, "layer-residual roots mismatch");
 }
 
 #[test]
@@ -1153,7 +1164,7 @@ fn zero_rust_variant_hand_written_qwen2_config_reproduces_llama_ids() {
 
     let model = load_from_config(&parsed, file_bytes, &config);
 
-    let (program, ..) = build_forward(&config).expect("the hand-written config lowers");
+    let ForwardProgram { program, .. } = build_forward(&config).expect("the hand-written config lowers");
     assert_eq!(model.op_count(), program.len(), "the loaded model must run the config's lowering");
     assert_llama_ids(&QWEN2, &parsed, &model);
 }
@@ -1210,8 +1221,8 @@ fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
         "every layer of the file must be a full-attention layer"
     );
 
-    let (base_program, ..) = build_forward(&base).expect("the base lowers");
-    let (variant_program, ..) = build_forward(&variant).expect("the file lowers");
+    let ForwardProgram { program: base_program, .. } = build_forward(&base).expect("the base lowers");
+    let ForwardProgram { program: variant_program, .. } = build_forward(&variant).expect("the file lowers");
     assert!(
         window_ceiling_constants(&base_program, window) > 0,
         "e2b's program must carry the {window}-token window mask the variant removes"
@@ -1339,7 +1350,7 @@ fn model_config_file_layer_turns_the_decode_config_into_the_verify_program() {
         .build()
         .expect("the layered descriptor validates");
 
-    let (program, logits_root, ..) = build_forward(&layered).expect("the layered config lowers");
+    let ForwardProgram { program, logits: logits_root, .. } = build_forward(&layered).expect("the layered config lowers");
     let incumbent = std::fs::read_to_string(GEMMA4_E2B.fixture("digest")).expect("incumbent digest exists");
     for expected in [
         format!("verify.ops={}", program.len()),
@@ -1476,7 +1487,7 @@ fn kv_in_caller_memory_granite_moe() {
 }
 
 fn ring_layers(descriptor: &ModelDescriptor) -> Vec<bool> {
-    let (program, ..) = build_forward(descriptor).expect("the descriptor lowers");
+    let ForwardProgram { program, .. } = build_forward(descriptor).expect("the descriptor lowers");
     let leading_extent = |name: &str| {
         program.iter().find_map(|op| match op {
             Op::Input { name: Some(leaf), shape, .. } if leaf == name => shape.first().copied(),

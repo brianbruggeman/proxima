@@ -307,6 +307,14 @@ pub enum TensorError {
     #[error("schedule has {found} entries but block_count is {expected}")]
     LayerScheduleCountMismatch { expected: u32, found: usize },
 
+    /// [`crate::spec::build_forward`] rebuilds one root per layer by zipping
+    /// the schedule against the cache roots its engine returned (one per
+    /// layer that owns a KV cache); this fires only when the two counts
+    /// disagree, which is an engine that pushed a different number of roots
+    /// than the schedule declares cache-owning layers.
+    #[error("engine produced {produced} cache roots, schedule declares {expected} cache-owning layers")]
+    CacheRootsCountMismatch { produced: usize, expected: usize },
+
     /// [`crate::spec::qwen35_forward_program`]'s own dense/SSM layer split
     /// (`(layer + 1) % full_attention_interval != 0`, `qwen35.cpp`'s own
     /// `load_arch_hparams` default) divides by this value; zero has no

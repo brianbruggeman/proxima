@@ -25,9 +25,7 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
-use proxima_tensor::spec::{
-    CacheStrategy, CachedLayerRoots, KeySourceKind, ModelDescriptor, Qwen35LayerRoots, build_forward,
-};
+use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, Qwen35LayerRoots, build_forward};
 
 use crate::bind::{BoundWeights, ModelArchitecture, metadata_str};
 use crate::bind_leaves::bind_missing_leaves;
@@ -701,15 +699,15 @@ impl<'file> BoundProgram<'file> {
         parsed: &ParsedGguf,
         file_bytes: &'file [u8],
     ) -> Result<Self, InteropError> {
-        let (program, logits_root, cache_roots, moe_sites, residual_roots, hidden_root, duplicate_head_roots) =
-            build_forward(descriptor)?;
-        let layer_roots = match descriptor.cache_strategy {
-            CacheStrategy::Cached => rebuild_layer_roots(
-                descriptor.layers.iter().map(|layer| layer.attention.key_source_kind),
-                cache_roots,
-            )?,
-            CacheStrategy::Cacheless => Vec::new(),
-        };
+        let ForwardProgram {
+            program,
+            logits,
+            layer_roots,
+            moe_sites,
+            layer_residuals,
+            hidden,
+            duplicate_head_roots,
+        } = build_forward(descriptor)?;
         bind_missing_leaves(
             parsed,
             file_bytes,
@@ -720,36 +718,14 @@ impl<'file> BoundProgram<'file> {
         Ok(Self {
             architecture: self.architecture.reshaped_by(descriptor),
             program,
-            logits_root,
-            hidden_root: self.hidden_root.and(hidden_root),
-            residual_roots: if self.residual_roots.is_empty() { Vec::new() } else { residual_roots },
+            logits_root: logits,
+            hidden_root: self.hidden_root.and(hidden),
+            residual_roots: if self.residual_roots.is_empty() { Vec::new() } else { layer_residuals },
             layer_roots,
             moe_sites,
             duplicate_head_roots,
             ..self
         })
-    }
-}
-
-pub(crate) fn rebuild_layer_roots(
-    key_sources: impl Iterator<Item = KeySourceKind> + Clone,
-    cache_roots: Vec<CachedLayerRoots>,
-) -> Result<Vec<Qwen35LayerRoots>, InteropError> {
-    let expected = key_sources.clone().filter(|kind| *kind == KeySourceKind::ProjectedK).count();
-    let produced = cache_roots.len();
-    let count_mismatch = || InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced, expected };
-    let mut cache_roots = cache_roots.into_iter();
-    let layer_roots = key_sources
-        .map(|kind| match kind {
-            KeySourceKind::ProjectedK => {
-                cache_roots.next().map(Qwen35LayerRoots::Attention).ok_or_else(count_mismatch)
-            }
-            KeySourceKind::SharedFromLayer(source) => Ok(Qwen35LayerRoots::SharedFromLayer(source)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    match cache_roots.next() {
-        Some(_) => Err(count_mismatch()),
-        None => Ok(layer_roots),
     }
 }
 
@@ -951,57 +927,5 @@ mod tests {
             None,
             "a header without {{arch}}.context_length must read None, not a default"
         );
-    }
-}
-
-#[cfg(test)]
-mod rebuild_layer_roots_tests {
-    use super::*;
-    use proxima_tensor::op::NodeId;
-
-    fn roots(seed: u32) -> CachedLayerRoots {
-        (NodeId(seed), NodeId(seed + 1), NodeId(seed + 2))
-    }
-
-    #[test]
-    fn interleaves_shared_layers_between_owning_layers_in_schedule_order() -> Result<(), InteropError> {
-        let kinds = [
-            KeySourceKind::ProjectedK,
-            KeySourceKind::ProjectedK,
-            KeySourceKind::SharedFromLayer(1),
-            KeySourceKind::SharedFromLayer(1),
-        ];
-
-        let rebuilt = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10), roots(20)])?;
-
-        assert!(matches!(rebuilt[0], Qwen35LayerRoots::Attention((NodeId(10), _, _))));
-        assert!(matches!(rebuilt[1], Qwen35LayerRoots::Attention((NodeId(20), _, _))));
-        assert!(matches!(rebuilt[2], Qwen35LayerRoots::SharedFromLayer(1)));
-        assert_eq!(rebuilt.len(), 4);
-        Ok(())
-    }
-
-    #[test]
-    fn fewer_cache_roots_than_owning_layers_reports_both_counts() {
-        let kinds = [KeySourceKind::ProjectedK, KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)];
-
-        let outcome = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10)]);
-
-        assert!(matches!(
-            outcome,
-            Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced: 1, expected: 2 })
-        ));
-    }
-
-    #[test]
-    fn more_cache_roots_than_owning_layers_reports_both_counts() {
-        let kinds = [KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)];
-
-        let outcome = rebuild_layer_roots(kinds.into_iter(), alloc::vec![roots(10), roots(20)]);
-
-        assert!(matches!(
-            outcome,
-            Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch { produced: 2, expected: 1 })
-        ));
     }
 }

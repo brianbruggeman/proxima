@@ -2853,8 +2853,15 @@ impl<'file> LoadedModel<'file> {
             fused_qkv_reduce,
             &profile,
         );
-        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
-            build_forward(&descriptor)?;
+        let ForwardProgram {
+            program,
+            logits: logits_root,
+            layer_roots,
+            moe_sites,
+            layer_residuals,
+            hidden: hidden_root,
+            ..
+        } = build_forward(&descriptor)?;
         // `&[]`: `Self::load`/`load_with_*` take no `ServingConfig`, so
         // there is no `weight_precision` rule set to thread here yet.
         let weights = bind_program_leaves(
@@ -2935,10 +2942,7 @@ impl<'file> LoadedModel<'file> {
             program,
             logits_root,
             hidden_root,
-            layer_roots: cache_roots
-                .into_iter()
-                .map(Qwen35LayerRoots::Attention)
-                .collect(),
+            layer_roots,
             residual_roots: layer_residuals,
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
@@ -3016,8 +3020,15 @@ impl<'file> LoadedModel<'file> {
             false,
             &profile,
         );
-        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root, _head_repeats) =
-            build_forward(&descriptor)?;
+        let ForwardProgram {
+            program,
+            logits: logits_root,
+            layer_roots,
+            moe_sites,
+            layer_residuals,
+            hidden: hidden_root,
+            ..
+        } = build_forward(&descriptor)?;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
@@ -3070,10 +3081,7 @@ impl<'file> LoadedModel<'file> {
             program,
             logits_root,
             hidden_root,
-            layer_roots: cache_roots
-                .into_iter()
-                .map(Qwen35LayerRoots::Attention)
-                .collect(),
+            layer_roots,
             residual_roots: layer_residuals,
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),

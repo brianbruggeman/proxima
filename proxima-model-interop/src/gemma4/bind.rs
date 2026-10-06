@@ -15,13 +15,8 @@
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::{
-    CacheStrategy, ModelDescriptor, Qwen35LayerRoots, build_forward,
-    gemma4_descriptor_from_gguf,
-};
-use crate::architecture::{
-    Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext, rebuild_layer_roots,
-};
+use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, build_forward, gemma4_descriptor_from_gguf};
+use crate::architecture::{Architecture as ArchitectureTrait, BoundProgram, KvLayout, StepInput, StepInputContext};
 use crate::bind::{BoundWeights, ModelArchitecture, SlidingRope, find_tensor, metadata_str};
 use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
@@ -95,9 +90,7 @@ fn bind_gemma4_with_last_row_only<'file>(
         head_repeats: head_repeats_from_env(),
         ..descriptor
     };
-    let schedule = &descriptor.layers;
-    let cache_strategy = descriptor.cache_strategy;
-        let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden, duplicate_head_roots) =
+        let ForwardProgram { program, logits, layer_roots, moe_sites, duplicate_head_roots, .. } =
             build_forward(&descriptor)?;
         let weights = bind_program_leaves(
             parsed,
@@ -106,24 +99,6 @@ fn bind_gemma4_with_last_row_only<'file>(
             &binding_profile(FAMILY)?,
             &[],
         )?;
-        let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
-            CacheStrategy::Cached => {
-                // `cache_roots` holds one entry per REAL cache-owning layer,
-                // in layer order (`lfm2_two_range_cached_forward_program_with_experts`'s
-                // own `stored_kv`/`cache_roots.push` doc: a
-                // `KeySourceKind::SharedFromLayer` layer owns none) -- this
-                // zips it back against `schedule`'s own per-layer
-                // discriminant to rebuild the full, positionally-real
-                // `Qwen35LayerRoots` vec `LoadedModel::declared_layer_cache_names_and_widths`
-                // needs (one entry per layer index, `SharedFromLayer`
-                // included).
-                rebuild_layer_roots(
-                    schedule.iter().map(|entry| entry.attention.key_source_kind),
-                    cache_roots,
-                )?
-            }
-            CacheStrategy::Cacheless => Vec::new(),
-        };
 
         let tied_embeddings = find_tensor(parsed, "output.weight").is_err();
         let full_head_dim = architecture.key_length;
@@ -364,7 +339,7 @@ mod declared_leaves_match_bound_leaves_tests {
     use super::*;
     use crate::gemma4::Architecture;
     use arrayvec::ArrayVec;
-    use proxima_tensor::spec::KeySourceKind;
+    use proxima_tensor::spec::{CacheStrategy, KeySourceKind};
     use proxima_gguf::types::GgmlType;
     use proxima_gguf::value::{MetadataArray, MetadataValue};
     use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};
@@ -466,7 +441,7 @@ mod declared_leaves_match_bound_leaves_tests {
         let mut descriptor = descriptor_from_gguf(parsed, false)
             .expect("the e2b-shaped header carries every key the descriptor reads");
         descriptor.cache_strategy = CacheStrategy::Cacheless;
-        let (program, ..) = build_forward(&descriptor).expect("gemma4 e2b-shaped forward program lowers");
+        let ForwardProgram { program, .. } = build_forward(&descriptor).expect("gemma4 e2b-shaped forward program lowers");
 
         program
             .iter()
