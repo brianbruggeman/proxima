@@ -3,6 +3,7 @@ use core::ops::ControlFlow;
 use super::*;
 #[cfg(all(feature = "instrument", feature = "metal"))]
 use proxima_telemetry::metric::Counter;
+use proxima_core::ServingState;
 
 /// GAP.md's own residual: the `resolve_cached_plan` `BTreeMap` lookup runs
 /// between `evaluate_started` (`decode.rs:3847`) and `step_encode_start`
@@ -3714,6 +3715,20 @@ pub struct SpeculativeDecodeStats {
     /// actually won each verify step, when more than one n-gram type is
     /// enabled at once.
     pub per_type: [SpeculativeTypeStats; SPECULATIVE_NGRAM_TYPE_COUNT],
+    /// Serving-machine evaluations that entered `ServingState::Prefill`: the
+    /// prompt's own evaluation (one per decode call; cacheless
+    /// architectures re-enter it every step).
+    pub prefill_steps: u64,
+    /// Serving-machine evaluations that entered `ServingState::Decode` and
+    /// ran as one single-row step (a step that drafted enters `Verify`
+    /// instead).
+    pub decode_steps: u64,
+    /// Verify steps whose every drafted row matched, so the machine settled
+    /// into `ServingState::Accept`.
+    pub accept_steps: u64,
+    /// Verify steps that rejected a drafted row, so the machine settled into
+    /// `ServingState::Rollback` and the cache rewound.
+    pub rollback_steps: u64,
 }
 
 /// The five n-gram [`SpeculativeType`] variants the decode loop's own
@@ -3747,6 +3762,20 @@ pub struct SpeculativeTypeStats {
 }
 
 impl SpeculativeDecodeStats {
+    /// Counts the serving-machine state one decode step is about to evaluate
+    /// (`Prefill`, `Decode`) or just settled into (`Accept`, `Rollback`); a
+    /// `Verify` evaluation is counted by [`Self::record_verify_step`] and
+    /// `Done` evaluates nothing.
+    pub fn record_state(&mut self, state: &ServingState<u32, usize>) {
+        match state {
+            ServingState::Prefill { .. } => self.prefill_steps += 1,
+            ServingState::Decode { .. } => self.decode_steps += 1,
+            ServingState::Accept { .. } => self.accept_steps += 1,
+            ServingState::Rollback { .. } => self.rollback_steps += 1,
+            ServingState::Verify { .. } | ServingState::Done { .. } => {}
+        }
+    }
+
     /// One verify step's own readout: `drafted` is `speculative_draft.len()`
     /// before verification, `accepted` is `emitted.len() - 1` after it.
     pub fn record_verify_step(&mut self, drafted: usize, accepted: usize) {

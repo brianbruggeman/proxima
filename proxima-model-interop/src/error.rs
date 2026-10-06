@@ -235,6 +235,14 @@ pub enum InteropError {
     #[error(transparent)]
     Tokenizer(#[from] proxima_tokenizer::TokenizerError),
 
+    /// The serving state machine (`proxima_core::ServingState`) refused the
+    /// transition the decode loop attempted -- the loop and the machine
+    /// disagree about which evaluation shape is legal, surfaced instead of
+    /// continuing from an unknown state.
+    #[cfg(feature = "std")]
+    #[error(transparent)]
+    ServingFsm(#[from] proxima_core::ServingFsmError),
+
     /// [`crate::generate::LoadedModel`]'s evaluator ran but `node` (one of
     /// the logits root or a per-layer cache root) is absent from its
     /// output -- an interpreter/program-construction invariant violation
