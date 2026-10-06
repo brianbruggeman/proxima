@@ -165,6 +165,49 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC12 | R10 | oracle (incumbent speed: llama-server f1ea20621 and Ollama in the same interleaved run) plus a consistency baseline | `cargo run --release -p proxima-model-interop --example decode_arms -- --prompt-file <1k-token prompt> --processes 2 --runs 7 --arm base=<decode_gbps_baseline built at 9f0647da> --arm tip=<built at the slice> --llama-server <f1ea20621> --ollama gemma4:e2b-it-qat`, run alone on a quiet box (Ollama idle, no peer GPU or cargo jobs) | tip median ms/token <= base median + max(base MAD, 2%), outliers removed; the same for prefill ms; llama and Ollama arms printed alongside | base vs base: within the same bound (this proves the noise floor) |
 | AC11 | R9 | consistency | `cargo check -p proxima-tensor --no-default-features --features alloc` and `git grep -nE 'std::(fs\|io\|net)\|File::' -- proxima-tensor/src/spec \| wc -l` | exit 0; 0, with `spec` compiled at the alloc tier (it sat behind `config`, so the check built none of it) | exit 0; 0 (measured at edd4163c), compiling zero lines of `spec` |
 
+## gate tiers (measured 2026-10-06, `/private/tmp/cargo_target_arch`, ollama stopped)
+
+Real-checkpoint tests build with the `gate` profile (`Cargo.toml` `[profile.gate]`: release codegen,
+no fat lto, 16 codegen units, `debug-assertions` and `overflow-checks` on, `panic = "unwind"`,
+incremental). They serialize against each other through the `real-checkpoint` nextest group
+(`.config/nextest.toml`), so no `-j 1` is needed. The per-slice tier is the `slice-gate` nextest
+profile: every test in the package except the bind, decode, verify and cache tests of the large
+checkpoints (gemma4 26b, openchat, qwen2, qwen3, qwen35, qwen35moe) and every lfm2 test. The
+digests and descriptor round trips of every checkpoint stay in it. The weights hash in
+`generic_binder_` is unchanged (every bound byte, same fixtures); it is fast because the dev
+dependency `sha2` carries its `asm` feature (granite 4.2 s -> 0.77 s).
+
+Per-slice gate, run from the checkout, in this order (about 2 minutes; measured breakdown below):
+
+```
+cargo clippy -p proxima-tensor -p proxima-model-interop --features proxima-model-interop/std,proxima-model-interop/metal --all-targets -- -D warnings
+cargo check -p proxima-tensor --no-default-features --features alloc
+cargo check -p proxima-model-interop --no-default-features
+cargo nextest run -p proxima-tensor --cargo-profile gate
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate
+```
+
+Measured, warm cache: clippy 24.5 s (clippy of a one-file change is seconds; this figure is the
+first run after a full-workspace change), alloc check 1.3 s, interop no-default check under 1 s,
+tensor 779 passed in 6.7 s run, interop 707 passed in 86.4 s run (125 skipped: 105 ignored or
+feature-gated, 20 end-of-run). The chain ran in 122 s end to end with 112 s of it in the last
+command. A one-file edit in `proxima-tensor` rebuilds the gate profile in 10.4 s; the first build of the
+profile is 81 s.
+
+End-of-run gate, once, after the last slice (everything above, plus the 20 large-checkpoint tests):
+
+```
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate
+```
+
+Measured: 727 passed, 105 skipped, 607 s. The timing arms (AC12) are separate and run alone.
+
+Where the time went before (test profile, same machine): `generic_binder_` gemma4 26B 606 s, openchat
+182 s, E2B 167 s, granite 67 s, qwen35moe about 17 minutes. 99.9% of the granite and E2B tests was the
+sha256 over every weight byte, at 320-340 MB/s because `sha2` was running its portable compression
+function; `opt-level` did not move it. Attribution table:
+`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fast_gates/attribution.md`.
+
 ## out of scope
 
 - New kernels; any omega kernel change.
