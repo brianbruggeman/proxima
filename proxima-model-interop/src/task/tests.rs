@@ -80,19 +80,19 @@ fn pooling_type_key_marks_an_encoder_whatever_the_family_is_called() {
     let mut checkpoint = parsed("qwen3", None, None);
     checkpoint.metadata.push((
         "qwen3.pooling_type".to_string(),
-        MetadataValue::U32(1),
+        MetadataValue::U32(3),
     ));
-    assert_ne!(classify_task(&checkpoint).task, ModelTask::CausalGeneration);
+    assert_eq!(classify_task(&checkpoint).task, ModelTask::Embedding);
 }
 
 #[test]
-fn non_causal_attention_key_is_not_a_decoder() {
+fn non_causal_attention_key_is_an_embedding_encoder() {
     let mut checkpoint = parsed("llama", None, None);
     checkpoint.metadata.push((
         "llama.attention.causal".to_string(),
         MetadataValue::Bool(false),
     ));
-    assert_ne!(classify_task(&checkpoint).task, ModelTask::CausalGeneration);
+    assert_eq!(classify_task(&checkpoint).task, ModelTask::Embedding);
 }
 
 #[test]
@@ -106,4 +106,49 @@ fn a_checkpoint_with_no_block_keys_is_unknown() {
 fn classifier_head_is_not_a_decoder() {
     let profile = classify_task(&parsed("unknown", None, Some("classifier.weight")));
     assert_eq!(profile.task, ModelTask::SequenceClassification);
+}
+
+fn encoder(architecture: &str, block_count: u32, pooling_type: u32) -> ParsedGguf {
+    let mut checkpoint = parsed(architecture, None, None);
+    checkpoint.metadata.retain(|(key, _)| !key.ends_with(".block_count"));
+    checkpoint.metadata.extend([
+        (
+            format!("{architecture}.block_count"),
+            MetadataValue::U32(block_count),
+        ),
+        (
+            format!("{architecture}.attention.causal"),
+            MetadataValue::Bool(false),
+        ),
+        (
+            format!("{architecture}.pooling_type"),
+            MetadataValue::U32(pooling_type),
+        ),
+    ]);
+    checkpoint
+}
+
+#[test]
+fn a_bert_header_with_mean_pooling_is_an_embedding_model() {
+    let profile = classify_task(&encoder("bert", 6, 1));
+    assert_eq!(profile.task, ModelTask::Embedding);
+    assert!(!profile.generation_supported);
+    assert_eq!(profile.evidence, ["encoder keys: bert"]);
+}
+
+#[test]
+fn a_nomic_bert_header_with_mean_pooling_is_an_embedding_model() {
+    assert_eq!(classify_task(&encoder("nomic-bert", 12, 1)).task, ModelTask::Embedding);
+}
+
+#[test]
+fn rank_pooling_marks_a_reranker_whatever_the_family_is_called() {
+    assert_eq!(classify_task(&encoder("bert", 12, 4)).task, ModelTask::Reranker);
+    assert_eq!(classify_task(&encoder("some_future_family", 24, 4)).task, ModelTask::Reranker);
+}
+
+#[test]
+fn an_architecture_named_like_an_encoder_with_decoder_keys_is_a_decoder() {
+    let profile = classify_task(&parsed("bert_style_decoder", None, None));
+    assert_eq!(profile.task, ModelTask::CausalGeneration);
 }
