@@ -1,0 +1,24 @@
+2026-10-06T02:12:23Z LAUNCH decode_arms proxima arm=base0b process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0b_probe
+2026-10-06T02:12:59Z EXIT decode_arms proxima arm=base0b process=0 status=exit status: 0
+2026-10-06T02:12:59Z LAUNCH decode_arms proxima arm=base0c process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0c
+2026-10-06T02:13:34Z EXIT decode_arms proxima arm=base0c process=0 status=exit status: 0
+2026-10-06T02:13:34Z LAUNCH decode_arms proxima arm=tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_slice7
+2026-10-06T02:14:09Z EXIT decode_arms proxima arm=tip process=0 status=exit status: 0
+2026-10-06T02:14:09Z LAUNCH decode_arms proxima arm=base0c process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0c
+2026-10-06T02:14:43Z EXIT decode_arms proxima arm=base0c process=1 status=exit status: 0
+2026-10-06T02:14:43Z LAUNCH decode_arms proxima arm=tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_slice7
+2026-10-06T02:15:18Z EXIT decode_arms proxima arm=tip process=1 status=exit status: 0
+2026-10-06T02:15:18Z LAUNCH decode_arms proxima arm=base0b process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0b_probe
+2026-10-06T02:15:53Z EXIT decode_arms proxima arm=base0b process=1 status=exit status: 0
+2026-10-06T02:15:53Z LAUNCH decode_arms proxima arm=tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_slice7
+2026-10-06T02:16:27Z EXIT decode_arms proxima arm=tip process=2 status=exit status: 0
+2026-10-06T02:16:27Z LAUNCH decode_arms proxima arm=base0b process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0b_probe
+2026-10-06T02:17:02Z EXIT decode_arms proxima arm=base0b process=2 status=exit status: 0
+2026-10-06T02:17:02Z LAUNCH decode_arms proxima arm=base0c process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0c
+2026-10-06T02:17:37Z EXIT decode_arms proxima arm=base0c process=2 status=exit status: 0
+2026-10-06T02:17:37Z LAUNCH decode_arms proxima arm=base0b process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0b_probe
+2026-10-06T02:18:12Z EXIT decode_arms proxima arm=base0b process=3 status=exit status: 0
+2026-10-06T02:18:13Z LAUNCH decode_arms proxima arm=base0c process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_0c
+2026-10-06T02:18:47Z EXIT decode_arms proxima arm=base0c process=3 status=exit status: 0
+2026-10-06T02:18:48Z LAUNCH decode_arms proxima arm=tip process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/arch_data/perf/arm_slice7
+2026-10-06T02:19:22Z EXIT decode_arms proxima arm=tip process=3 status=exit status: 0

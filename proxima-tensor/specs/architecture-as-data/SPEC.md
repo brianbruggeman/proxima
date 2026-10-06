@@ -250,3 +250,25 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
   set. The family profile supplies the default (`speculative_verify = true` only for gemma4,
   whose verify step was measured to pay), and a config layer overrides it. With the default, the
   granite moe decode program and its speed are the 0c baseline's.
+
+## findings from slice 7 (one cache engine, 2026-10-05)
+
+- The three `CacheStrategy` arms were two whole-model builders plus the cacheless one, and the
+  two cached builders carried three textual copies of the same two-block score algebra: the
+  dense layer (`append_mistral_cached_layer`), the MoE layer (`append_mistral_cached_moe_layer`)
+  and the gemma4-shaped layer (`append_lfm2_two_range_cached_attention`). Compared line by line,
+  the copies differ in three places only: the cached block's mask (`Option` in the dense and MoE
+  layers, always present in the gemma4-shaped one), where the local block's `-inf` constant is
+  emitted, and an instrumentation call in the dense layer.
+- Landed: one score core, `two_block_attention.rs` (`group_queries`, `append_cached_block_scores`,
+  `append_local_block_and_combine`), used by all three layers, with the mask as the one argument
+  that selects an arm. `CacheStrategy` is `Cacheless | Cached`; `ModelDescriptor::cache_mask`
+  (`CacheMask::Bounded | Padded`, serde default `Bounded`) names the cached block's mask. The
+  rewrite is node for node: the 8 AC0 digests are unchanged.
+- Not collapsed: `build_forward` still reaches two whole-model preludes, chosen by
+  `(cache_strategy, cache_mask)`. The dense builder emits its leaves (`cos`/`sin`, masks,
+  `cached_len`) in an order the AC0 digests pin and the gemma4-shaped builder emits another, so
+  one prelude would change the op graph of one family (R7). The preludes also differ in what they
+  support (fused QKV, biases and layer taps in one; shared KV, PLE and per-layer widths in the
+  other), and those are fields the mask does not select. Reaching one prelude needs a graph
+  change that re-captures the incumbent digests, which this slice does not do.

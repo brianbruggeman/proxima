@@ -1,0 +1,16 @@
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.89s
+────────────
+ Nextest run ID 6afae734-45b1-4bed-956c-bae99c8a57d8 with nextest profile: default
+    Starting 8 tests across 35 binaries (642 tests skipped)
+        PASS [   3.474s] (1/8) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_26b
+        PASS [   0.934s] (2/8) proxima-model-interop::arch_data_baseline arch_data_digest_gemma4_e2b
+        PASS [   0.213s] (3/8) proxima-model-interop::arch_data_baseline arch_data_digest_granite_moe
+        PASS [   0.103s] (4/8) proxima-model-interop::arch_data_baseline arch_data_digest_openchat
+        PASS [   0.188s] (5/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen2
+        PASS [   0.232s] (6/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen3
+        PASS [   0.379s] (7/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35
+        PASS [   1.190s] (8/8) proxima-model-interop::arch_data_baseline arch_data_digest_qwen35moe
+────────────
+     Summary [   6.719s] 8 tests run: 8 passed, 642 skipped
