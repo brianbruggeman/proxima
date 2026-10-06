@@ -2568,8 +2568,7 @@ pub struct ExpertRouting<'a> {
 pub struct ObserverAlreadySet;
 
 /// The one registered [`ExpertObserver`], set at most once. `&'static dyn`
-/// (never `Box`): the registering crate owns its own `static` value (the
-/// same shape `proxima-model-interop`'s `ArchitectureRegistry` uses for an
+/// (never `Box`): the registering crate owns its own `static` value (an
 /// open, unbounded set of foreign observers -- guiding-principles §20's
 /// legitimate dynamic-dispatch exception), and `OnceLock` is this module's
 /// own established set-once pattern (`ARENA_PER_NODE_TICKS`, above).
