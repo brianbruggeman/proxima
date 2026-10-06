@@ -1,0 +1,2 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.06s
+cargo clippy -p proxima-tensor -p proxima-model-interop --features   -- -D   0.29s user 0.24s system 38% cpu 1.372 total

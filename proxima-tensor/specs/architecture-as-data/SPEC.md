@@ -379,3 +379,83 @@ function; `opt-level` did not move it. Attribution table:
   step as an unbound input naming it. The 8 checkpoints are held to the opposite by
   `assert_unbound_leaves_are_step_inputs`: every leaf nothing binds is in the step-input vocabulary
   the test lists.
+
+## findings from slice 9 (recurrent hybrids and lfm2 as descriptors, 2026-10-06)
+
+- Landed:
+  - `LayerKind::Gdn`; `ModelDescriptor` fields for the recurrence (`ssm_conv_kernel`,
+    `ssm_state_size`, `ssm_group_count`, `ssm_time_step_rank`, `ssm_inner_size`, `ssm_epsilon`,
+    `v_head_reordered`), the shared expert (`expert_shared_feed_forward`), the pinned prefill
+    length (`prefill_width`) and the attention variant (`gated_attention`), each with a serde
+    default so every earlier config still loads; `FfnCombination::RoutedWithSharedExpert`.
+  - `build_forward` returns a named `ForwardProgram` instead of a seven-tuple, with one
+    `Qwen35LayerRoots` per layer for every engine (the zip of schedule against cache roots that
+    `rebuild_layer_roots` did in `proxima-model-interop` now runs inside the lowering, and its
+    interop error variant is gone) and a `layer_diagnostics` table the routed hybrid fills.
+  - `hybrid_forward.rs`: the layer loop that was `qwen35_forward_program_with_last_row`
+    (`(layer + 1) % full_attention_interval` decided the mixer) and the loop of
+    `qwen35moe/program.rs` now read `layers[i].kind` and the descriptor's fields. Two arms,
+    chosen by `layers[i].ffn.combination` (dense SwiGLU, or routed with a shared expert),
+    because their leaf order is pinned by the AC0 digests, the same reason slice 7 kept two
+    preludes. `qwen35_forward_program*` stays as a positional wrapper that builds a descriptor
+    and calls `build_forward`. `qwen35moe/program.rs` is now the map from the header and the
+    family profile to a descriptor, `shared_expert.rs` moved into the tensor crate.
+  - Profiles `qwen35`, `qwen35moe`, `lfm2` and `lfm2moe`; `qwen35::descriptor_from_architecture`,
+    `qwen35moe::descriptor_from_architecture`. AC9 now covers both: 8 passed.
+  - lfm2 loads through `DenseArch`: a header that declares zero KV heads on some layers is a
+    hybrid, the tensor directory says which kind each such layer is
+    (`LayerKind::from_tensor_names`), the FFN widths and the leading dense block count come off
+    the header, and the descriptor is cacheless. `uniform_lfm2_schedule` and `run_lfm2_prefill`
+    are deleted; `Lfm2Architecture` carries the schedule from the same descriptor.
+- Designs abandoned, with the reason:
+  - a `CacheStrategy` arm that forwards to the bespoke qwen35 builder with an interval argument:
+    it keeps the bespoke op order by construction and a variant with another layer pattern
+    would need Rust;
+  - `LayerKind::Gdn(GdnConfig)` with the recurrence shape in the variant: both builders take one
+    recurrence shape for the whole model, so flat model-global fields follow `l_cache`, `qk_norm`
+    and the other flat knobs and keep `LayerKind` a `Copy` unit enum;
+  - an `Lfm2Arch` registry entry: one more per-family type, where the dense builder already
+    reads a per-layer KV array;
+  - a `cache_strategy` field in the family profile: whether a schedule can be cached follows
+    from its layer kinds (no cached lowering exists for a short-convolution layer), the rule
+    `gemma4_descriptor_from_gguf` already used.
+- Findings that came out of the data, not the plan:
+  - the first routing rule (a schedule holding a `Gdn` layer) sent a qwen35 header with
+    `full_attention_interval = 1` through the plain attention engine, and an all-recurrent prefix
+    through an engine that wanted an attention layer to read the shape from: 3 model tests
+    failed (`LeafShapeMismatch` on `blk.0.attn_q.weight`, 16 elements against 32, twice;
+    `UnsupportedInBuilder` "a hybrid schedule with no attention layer" once). The gated
+    attention variant lays `attn_q` out as `[Q | gate]` per head, which no layer kind says, so it
+    is the field `gated_attention`; every layer carries the one attention shape, a recurrent layer
+    unread.
+  - lfm2 was recorded twice. The first recording (the three raw prompts of the other fixtures,
+    32 tokens) gave 2 divergences of 3: proxima and llama split at generated index 12 and 13,
+    where llama's top-1 minus top-2 logprob is 0.133 and 0.124 nats. The fixture was replaced
+    under the gemma4 26B criterion (llama top-1 minus top-2 at least 1.0 nat at every compared
+    step, chosen by llama alone in candidate order; 14 chat-templated candidates, 3 kept, compared
+    through the longest such prefix of the 32 requested tokens: 21, 19 and 20 ids). The raw
+    recording stays in `.long_ctx_backups/arch_data/slice_9/`.
+  - the oracle tells the rope pairing: the lfm2 profile pairs split-half (llama.cpp's rope-type
+    table puts LFM2 and LFM2MOE with the NEOX families) and the three prompts pass; the same
+    config with interleaved pairing diverges on 1 of 3 (`model_config_edit_to_the_lfm2_rope_pairing_diverges_from_llama_on_at_least_one_prompt`).
+- Not done, and why:
+  - lfm2 runs cacheless: every generated token re-prefills the whole sequence, because no
+    short-convolution state-cache engine exists (the cached engines lower attention layers only).
+    Parity is measured; the speed of that path is not a goal of this slice and is not compared
+    to anything.
+  - `Qwen35Arch` and `Qwen35MoeArch` are still registered `Architecture` values (slice 10c);
+    the qwen35moe runtime still reads `qwen35moe::hparams::Architecture` for the multi-axis
+    position table and the pre-gather path.
+  - qwen35 and qwen35moe have no oracle (O1); their parity here is AC0 (digests byte-identical
+    through the descriptor lowering) and AC9.
+- Gates at the slice tip, per-slice tier in the gate profile (cb155e98), logs in `evidence/recurrent_hybrids/gates/v_*.log`:
+  clippy over both crates exit 0 (1.4 s, warm); tensor alloc check exit 0 (0.4 s); interop no-default check exit 0 (0.2 s);
+  `nextest -p proxima-tensor --cargo-profile gate` 779 passed, 8 skipped, 6.8 s run;
+  `nextest -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate` 707 passed, 125 skipped, 86.7 s run;
+  `generic_binder_qwen35` and `generic_binder_qwen35moe` 2 passed, 830 skipped, 43.8 s run (1.6 s and 42.2 s).
+  AC0 8 passed (3.6 s), AC9 8 passed (3.8 s), AC6 7 passed (200.2 s, lfm2 included).
+- Performance arms (decode_arms, tip against the 0c binary, `evidence/recurrent_hybrids/perf_e2b` and `perf_granite`):
+  36 of 36 bound lines within (18 per model, 0 outside). Tip against 0c, gemma4 E2B: ms/token 12.2310 vs 12.2150,
+  prefill 2531.5 vs 2533.9 ms, peak RSS -4857856 B, footprint -3571744 B, GPU bytes -1179648 B. granite moe: ms/token
+  14.8675 vs 14.8875, prefill 6522.97 vs 6524.01 ms, peak RSS -117661696 B (limit 54258074), footprint -1417248 B, GPU
+  bytes 0.

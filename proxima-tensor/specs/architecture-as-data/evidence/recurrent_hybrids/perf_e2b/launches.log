@@ -1,0 +1,48 @@
+2026-10-06T14:49:07Z LAUNCH decode_arms proxima arm=base0b process=0 bin=perf/arms9/base0b
+2026-10-06T14:49:42Z EXIT decode_arms proxima arm=base0b process=0 status=exit status: 0
+2026-10-06T14:49:43Z LAUNCH decode_arms proxima arm=base0c process=0 bin=perf/arms9/base0c
+2026-10-06T14:50:18Z EXIT decode_arms proxima arm=base0c process=0 status=exit status: 0
+2026-10-06T14:50:18Z LAUNCH decode_arms proxima arm=tip process=0 bin=perf/arms9/tip
+2026-10-06T14:50:53Z EXIT decode_arms proxima arm=tip process=0 status=exit status: 0
+2026-10-06T14:50:53Z LAUNCH decode_arms proxima arm=base0c process=1 bin=perf/arms9/base0c
+2026-10-06T14:51:28Z EXIT decode_arms proxima arm=base0c process=1 status=exit status: 0
+2026-10-06T14:51:28Z LAUNCH decode_arms proxima arm=tip process=1 bin=perf/arms9/tip
+2026-10-06T14:52:03Z EXIT decode_arms proxima arm=tip process=1 status=exit status: 0
+2026-10-06T14:52:03Z LAUNCH decode_arms proxima arm=base0b process=1 bin=perf/arms9/base0b
+2026-10-06T14:52:38Z EXIT decode_arms proxima arm=base0b process=1 status=exit status: 0
+2026-10-06T14:52:38Z LAUNCH decode_arms proxima arm=tip process=2 bin=perf/arms9/tip
+2026-10-06T14:53:15Z EXIT decode_arms proxima arm=tip process=2 status=exit status: 0
+2026-10-06T14:53:15Z LAUNCH decode_arms proxima arm=base0b process=2 bin=perf/arms9/base0b
+2026-10-06T14:53:54Z EXIT decode_arms proxima arm=base0b process=2 status=exit status: 0
+2026-10-06T14:53:54Z LAUNCH decode_arms proxima arm=base0c process=2 bin=perf/arms9/base0c
+2026-10-06T14:54:33Z EXIT decode_arms proxima arm=base0c process=2 status=exit status: 0
+2026-10-06T14:54:33Z LAUNCH decode_arms proxima arm=base0b process=3 bin=perf/arms9/base0b
+2026-10-06T14:55:09Z EXIT decode_arms proxima arm=base0b process=3 status=exit status: 0
+2026-10-06T14:55:09Z LAUNCH decode_arms proxima arm=base0c process=3 bin=perf/arms9/base0c
+2026-10-06T14:55:44Z EXIT decode_arms proxima arm=base0c process=3 status=exit status: 0
+2026-10-06T14:55:44Z LAUNCH decode_arms proxima arm=tip process=3 bin=perf/arms9/tip
+2026-10-06T14:56:19Z EXIT decode_arms proxima arm=tip process=3 status=exit status: 0
+2026-10-06T14:56:19Z LAUNCH decode_arms proxima arm=base0c process=4 bin=perf/arms9/base0c
+2026-10-06T14:56:54Z EXIT decode_arms proxima arm=base0c process=4 status=exit status: 0
+2026-10-06T14:56:54Z LAUNCH decode_arms proxima arm=tip process=4 bin=perf/arms9/tip
+2026-10-06T14:57:29Z EXIT decode_arms proxima arm=tip process=4 status=exit status: 0
+2026-10-06T14:57:29Z LAUNCH decode_arms proxima arm=base0b process=4 bin=perf/arms9/base0b
+2026-10-06T14:58:04Z EXIT decode_arms proxima arm=base0b process=4 status=exit status: 0
+2026-10-06T14:58:04Z LAUNCH decode_arms proxima arm=tip process=5 bin=perf/arms9/tip
+2026-10-06T14:58:39Z EXIT decode_arms proxima arm=tip process=5 status=exit status: 0
+2026-10-06T14:58:39Z LAUNCH decode_arms proxima arm=base0b process=5 bin=perf/arms9/base0b
+2026-10-06T14:59:14Z EXIT decode_arms proxima arm=base0b process=5 status=exit status: 0
+2026-10-06T14:59:14Z LAUNCH decode_arms proxima arm=base0c process=5 bin=perf/arms9/base0c
+2026-10-06T14:59:48Z EXIT decode_arms proxima arm=base0c process=5 status=exit status: 0
+2026-10-06T14:59:48Z LAUNCH decode_arms proxima arm=base0b process=6 bin=perf/arms9/base0b
+2026-10-06T15:00:23Z EXIT decode_arms proxima arm=base0b process=6 status=exit status: 0
+2026-10-06T15:00:23Z LAUNCH decode_arms proxima arm=base0c process=6 bin=perf/arms9/base0c
+2026-10-06T15:00:58Z EXIT decode_arms proxima arm=base0c process=6 status=exit status: 0
+2026-10-06T15:00:58Z LAUNCH decode_arms proxima arm=tip process=6 bin=perf/arms9/tip
+2026-10-06T15:01:33Z EXIT decode_arms proxima arm=tip process=6 status=exit status: 0
+2026-10-06T15:01:33Z LAUNCH decode_arms proxima arm=base0c process=7 bin=perf/arms9/base0c
+2026-10-06T15:02:07Z EXIT decode_arms proxima arm=base0c process=7 status=exit status: 0
+2026-10-06T15:02:07Z LAUNCH decode_arms proxima arm=tip process=7 bin=perf/arms9/tip
+2026-10-06T15:02:42Z EXIT decode_arms proxima arm=tip process=7 status=exit status: 0
+2026-10-06T15:02:42Z LAUNCH decode_arms proxima arm=base0b process=7 bin=perf/arms9/base0b
+2026-10-06T15:03:17Z EXIT decode_arms proxima arm=base0b process=7 status=exit status: 0

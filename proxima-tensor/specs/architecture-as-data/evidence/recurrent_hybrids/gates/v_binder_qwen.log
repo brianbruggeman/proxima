@@ -1,0 +1,8 @@
+    Finished `gate` profile [optimized] target(s) in 0.22s
+────────────
+ Nextest run ID c7c506ae-e5d3-43c6-9e7f-b084cafb4b26 with nextest profile: default
+    Starting 2 tests across 35 binaries (830 tests skipped)
+        PASS [   1.600s] (1/2) proxima-model-interop::arch_data_baseline generic_binder_qwen35
+        PASS [  42.161s] (2/2) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+────────────
+     Summary [  43.764s] 2 tests run: 2 passed, 830 skipped

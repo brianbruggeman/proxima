@@ -1,0 +1,2 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
+cargo check -p proxima-tensor --no-default-features --features alloc  0.14s user 0.09s system 52% cpu 0.443 total
