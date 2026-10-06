@@ -37,6 +37,8 @@ impl LayerKind {
 
 #[derive(Debug, Clone)]
 pub struct Qwen35MoeHparams {
+    /// `general.architecture` as the file declares it, the key the family and binding profiles resolve through.
+    pub family: String,
     pub vocab: u32,
     pub embedding: u32,
     pub query_heads: u32,
@@ -137,6 +139,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Qwen35MoeHparams, InteropErr
         Some(MetadataValue::Bool(true))
     );
     Ok(Qwen35MoeHparams {
+        family: family.to_owned(),
         vocab: crate::bind::vocab_from_token_embedding(parsed, embedding)?,
         embedding,
         query_heads: metadata_u32(parsed, &prefix("attention.head_count"))?,

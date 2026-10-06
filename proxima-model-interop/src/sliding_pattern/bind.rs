@@ -107,7 +107,7 @@ pub(crate) fn header(
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
     use proxima_tensor::spec::{ForwardProgram, build_forward};
-    use crate::gemma4::Gemma4Hparams;
+    use crate::sliding_pattern::Gemma4Hparams;
     use arrayvec::ArrayVec;
     use proxima_tensor::spec::{CacheStrategy, KeySourceKind};
     use proxima_gguf::types::GgmlType;

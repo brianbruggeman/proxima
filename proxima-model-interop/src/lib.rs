@@ -41,20 +41,20 @@ pub mod expert_sidecar;
 #[cfg(feature = "std")]
 pub mod expert_slab;
 #[cfg(feature = "std")]
-pub mod gemma4;
+pub mod sliding_pattern;
 #[cfg(feature = "std")]
 mod generate;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
 #[cfg(feature = "std")]
-mod lfm2;
+mod short_conv;
 #[cfg(feature = "std")]
 mod loader;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod mapping_residency;
 #[cfg(feature = "std")]
-pub mod qwen35moe;
+pub mod recurrent_routed_interval;
 #[cfg(feature = "std")]
 pub mod residency;
 // The arithmetic is pure, but its production consumer is the std+metal
@@ -69,7 +69,7 @@ mod quality;
 #[cfg(feature = "std")]
 pub mod profiles;
 #[cfg(feature = "std")]
-mod qwen35;
+mod recurrent_interval;
 pub mod rope_scaling;
 mod serving;
 mod serving_grammar;
@@ -128,7 +128,7 @@ pub use generate::{
 pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_rows};
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
-pub use lfm2::{
+pub use short_conv::{
     Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_descriptor, lfm2_forward_values,
 };
 #[cfg(feature = "std")]
@@ -138,7 +138,7 @@ pub use quality::print_quality_report;
 #[cfg(feature = "std")]
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
 #[cfg(feature = "std")]
-pub use qwen35::{
+pub use recurrent_interval::{
     Qwen35Hparams, IntervalLayerKind, SsmShape, bind_qwen35_checkpoint,
     descriptor_from_architecture as qwen35_descriptor_from_architecture, qwen35_architecture_from_metadata,
 };

@@ -9,7 +9,7 @@
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::ModelDescriptor;
 
-use crate::bind::{ModelHparams, metadata_str};
+use crate::bind::ModelHparams;
 use crate::error::InteropError;
 
 use super::hparams::from_metadata;
@@ -34,7 +34,7 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHpara
         rope_freq_base: hparams.rope_freq_base,
         rms_epsilon: hparams.rms_epsilon,
         tied_embeddings: false,
-        family: metadata_str(parsed, "general.architecture")?.into(),
+        family: hparams.family.clone(),
         sliding_rope: None,
     };
     Ok((descriptor, architecture))

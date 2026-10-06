@@ -996,7 +996,7 @@ pub struct ServingConfig<'model> {
     /// (`generate/decode.rs`'s prefill batch loop, I9/Sarathi-style chunked
     /// prefill): the prompt is split into chunks of this many positions,
     /// each built at its own width via
-    /// `crate::qwen35moe::qwen35moe_forward_program_at_width`, with
+    /// `crate::recurrent_routed_interval::qwen35moe_forward_program_at_width`, with
     /// `cached_len` carried across chunks the same way the existing
     /// one-position split loop already carries it. Bounds peak activation
     /// memory for a long prompt instead of the whole-prompt evaluation

@@ -5,7 +5,7 @@
 //! `mistral_cached` engine -- none reference gemma4's real per-layer
 //! schedule at all. This builds the REAL forward-program builder
 //! (`proxima_tensor::spec::lfm2_forward_program_with_experts`, the exact
-//! function [`crate::gemma4::bind::Gemma4Arch::bind`] hands its own
+//! function [`crate::sliding_pattern::bind::Gemma4Arch::bind`] hands its own
 //! `gemma4_descriptor_from_gguf` to -- never a second hand-rolled copy of its
 //! graph) over a small SYNTHETIC checkpoint that reproduces gemma4's own
 //! dual-RoPE schedule: `sliding_window_pattern` alternates sliding/global
@@ -22,7 +22,7 @@
 //! establishes this is the correct, CPU-proven shape for that schedule; this
 //! file adds the Metal side that CPU-only test never had). Both RoPE tables
 //! are built by gemma4's own real
-//! `proxima_model_interop::gemma4::program::gemma4_sliding_rope_table`
+//! `proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table`
 //! function (public, reused verbatim), not a hand-rolled angle formula.
 //!
 //! `lfm2_forward_program_with_experts` has no per-layer-taps counterpart
@@ -59,7 +59,7 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::gemma4::program::gemma4_sliding_rope_table;
+use proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,

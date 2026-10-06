@@ -1,5 +1,5 @@
 //! Header configuration for the `gemma4` mixture-of-experts checkpoint
-//! family -- `qwen35moe::hparams`'s own shape (family-prefixed metadata
+//! family -- `recurrent_routed_interval::hparams`'s own shape (family-prefixed metadata
 //! reads, a per-layer array read into `Vec`) applied to Gemma 4's own
 //! alternating sliding-window/full-attention schedule instead of Qwen 3.6's
 //! GDN/attention schedule. Layer kind (sliding vs full) lives entirely in

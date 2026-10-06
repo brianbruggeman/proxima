@@ -1,4 +1,4 @@
-//! The one-evaluation qwen35moe prefill (M=13, `crate::qwen35moe::
+//! The one-evaluation qwen35moe prefill (M=13, `crate::recurrent_routed_interval::
 //! qwen35moe_forward_program_at_width`) is wrong on the real checkpoint on
 //! Metal from layer 0, yet the isolated M-position mixer at real dims
 //! (`omega/tests/qwen35_mixer_multi_position_metal_parity.rs`) and the
@@ -18,8 +18,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-use proxima_model_interop::qwen35moe::hparams::{Qwen35MoeHparams, LayerKind};
-use proxima_model_interop::qwen35moe::qwen35moe_forward_program_at_width;
+use proxima_model_interop::recurrent_routed_interval::hparams::{Qwen35MoeHparams, LayerKind};
+use proxima_model_interop::recurrent_routed_interval::qwen35moe_forward_program_at_width;
 use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
@@ -49,6 +49,7 @@ fn real_dims_architecture(layer_count: u32) -> Qwen35MoeHparams {
         })
         .collect();
     Qwen35MoeHparams {
+        family: String::from("qwen35moe"),
         vocab: 32,
         embedding: 2048,
         query_heads: 16,
@@ -139,6 +140,7 @@ fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
         })
         .collect();
     Qwen35MoeHparams {
+        family: String::from("qwen35moe"),
         vocab: 16,
         embedding: 8,
         query_heads: 2,

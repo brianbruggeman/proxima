@@ -1389,7 +1389,7 @@ pub(super) mod tests {
     /// 4-layer hybrid checkpoint `feat/synthetic-qwen38-fixture`'s own
     /// `examples/synth_qwen35_gguf.rs` builds (~918 MiB, out of this slice's
     /// time budget): one synthetic, `full_attention_interval: 1` layer (so
-    /// every layer is [`crate::qwen35::IntervalLayerKind::Attention`], no
+    /// every layer is [`crate::recurrent_interval::IntervalLayerKind::Attention`], no
     /// state-space mixer to also fixture), just wide enough
     /// (`query_heads = kv_heads = 1`, `attention.key_length = 4`,
     /// `rope.dimension_count = 2`, so `pass_dim = 2` is exercised alongside
@@ -3667,7 +3667,7 @@ pub(super) mod memory_fit_gate_tests {
 
         /// Diagnostic companion to the oracle above: when it fails, this
         /// names the first layer whose own `block_output` (post-residual,
-        /// after FFN -- [`crate::qwen35moe::MoeLayerDiagnostics::block_output`])
+        /// after FFN -- [`crate::recurrent_routed_interval::MoeLayerDiagnostics::block_output`])
         /// disagrees between the one-evaluation and sequential prefill
         /// paths, at the prompt's own last position, relative to that
         /// row's own norm.
@@ -3697,7 +3697,7 @@ pub(super) mod memory_fit_gate_tests {
             let embedding = model.architecture.embedding as usize;
 
             let (_program, _roots, static_layer_roots, _moe_sites, static_diagnostics) =
-                crate::qwen35moe::qwen35moe_forward_program_at_width(
+                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
                     hparams,
                     Some(prompt_len as u32),
                 )
@@ -3840,7 +3840,7 @@ pub(super) mod memory_fit_gate_tests {
             let prompt_len = prompt_ids.len();
 
             let (_program, _roots, _static_layer_roots, _moe_sites, static_diagnostics) =
-                crate::qwen35moe::qwen35moe_forward_program_at_width(
+                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
                     hparams,
                     Some(prompt_len as u32),
                 )
@@ -3996,7 +3996,7 @@ pub(super) mod memory_fit_gate_tests {
             let prompt_len = prompt_ids.len();
 
             let (_program, _roots, _static_layer_roots, _moe_sites, static_diagnostics) =
-                crate::qwen35moe::qwen35moe_forward_program_at_width(
+                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
                     hparams,
                     Some(prompt_len as u32),
                 )
@@ -4207,7 +4207,7 @@ pub(super) mod memory_fit_gate_tests {
                 .expect("this checkpoint routes through the qwen35moe family profile");
 
             let (program, roots, layer_roots, _moe_sites, _diagnostics) =
-                crate::qwen35moe::qwen35moe_forward_program_at_width(hparams, Some(13))
+                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(hparams, Some(13))
                     .expect("static-width program builds");
 
             let mut production_outputs = alloc::vec![roots.logits];

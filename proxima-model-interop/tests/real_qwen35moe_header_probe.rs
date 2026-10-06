@@ -51,7 +51,7 @@ async fn family_profile_routes_real_qwen35moe_header_with_per_layer_kv_configura
 
     let architecture = architecture_from_metadata(&parsed)
         .expect("the real header's per-layer KV-head array is configuration, not a parse error");
-    let moe_architecture = proxima_model_interop::qwen35moe::from_metadata(&parsed)
+    let moe_architecture = proxima_model_interop::recurrent_routed_interval::from_metadata(&parsed)
         .expect("qwen35moe hparams preserve the hybrid layer configuration");
     assert_eq!(architecture.block_count, 40);
     assert_eq!(architecture.kv_heads_by_layer.len(), 40);
@@ -122,11 +122,11 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
     let file_bytes: &[u8] = &mapping;
 
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's own GGUF header");
-    let architecture = proxima_model_interop::qwen35moe::from_metadata(&parsed)
+    let architecture = proxima_model_interop::recurrent_routed_interval::from_metadata(&parsed)
         .expect("qwen35moe hparams preserve the hybrid layer configuration");
 
     let (program, roots, _layer_roots, _moe_sites, _diagnostics) =
-        proxima_model_interop::qwen35moe::qwen35moe_forward_program_at_width(
+        proxima_model_interop::recurrent_routed_interval::qwen35moe_forward_program_at_width(
             &architecture,
             Some(13),
         )

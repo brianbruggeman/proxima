@@ -26,10 +26,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel, bind_checkpoint_with_kv_layout, bind_speculative_verify,
-    PromptCacheConfig, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
+    PromptCacheConfig, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, sliding_pattern,
     metadata_f32_optional,
     metadata_str, metadata_u32, profiles::family_profile, qwen35_architecture_from_metadata,
-    qwen35_descriptor_from_architecture, qwen35moe,
+    qwen35_descriptor_from_architecture, recurrent_routed_interval,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::TensorError;
@@ -523,7 +523,7 @@ fn config_descriptors(
     parsed: &proxima_gguf::pipe::ParsedGguf,
 ) -> Vec<(&'static str, ModelDescriptor)> {
     if checkpoint.architecture == "gemma4" {
-        let decode = gemma4::descriptor_from_gguf(parsed, true)
+        let decode = sliding_pattern::descriptor_from_gguf(parsed, true)
             .unwrap_or_else(|error| panic!("{}: descriptor_from_gguf failed: {error:?}", checkpoint.name));
         let verify = ModelDescriptor {
             last_row_only: false,
@@ -539,9 +539,9 @@ fn config_descriptors(
         return vec![("bind", descriptor)];
     }
     if checkpoint.architecture == "qwen35moe" {
-        let architecture = qwen35moe::from_metadata(parsed)
+        let architecture = recurrent_routed_interval::from_metadata(parsed)
             .unwrap_or_else(|error| panic!("{}: qwen35moe hparams failed: {error:?}", checkpoint.name));
-        let descriptor = qwen35moe::descriptor_from_architecture(&architecture, None)
+        let descriptor = recurrent_routed_interval::descriptor_from_architecture(&architecture, None)
             .unwrap_or_else(|error| panic!("{}: the qwen35moe descriptor failed: {error:?}", checkpoint.name));
         return vec![("bind", descriptor)];
     }
@@ -641,7 +641,7 @@ fn model_config_roundtrip_qwen35moe() {
 fn model_config_text_edit_changes_the_lowered_program() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let descriptor = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
     let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
     assert!(text.contains("activation = \"GeluTanh\""), "e2b runs a gelu ffn, got:\n{text}");
 
@@ -695,7 +695,7 @@ fn model_config_edit_moves_a_qwen35_attention_layer_to_the_recurrent_mixer() {
 fn model_config_rejects_an_unknown_field() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let descriptor = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
     let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
 
     let outcome = toml::from_str::<ModelDescriptor>(&format!("block_cuont = 30\n{text}"));
@@ -1370,7 +1370,7 @@ fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
     let mapping = GEMMA4_E2B.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
-    let base = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let base = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
     let window = base.layers[0].attention.mask_window.expect("e2b's first layer is a sliding layer");
 
     assert_eq!(variant, full_attention(&base), "the file must differ from e2b in the layer windows and the ring only");
@@ -1578,7 +1578,7 @@ fn a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds() {
 fn model_config_file_layer_turns_the_decode_config_into_the_verify_program() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let decode = gemma4::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
+    let decode = sliding_pattern::descriptor_from_gguf(&parsed, true).expect("the e2b header carries every key the descriptor reads");
     let directory = tempfile::tempdir().expect("a scratch directory");
     let layer_path = directory.path().join("verify.toml");
     std::fs::write(&layer_path, "last_row_only = false\n").expect("the layer file is written");
@@ -1776,7 +1776,7 @@ fn window_ring_layers_equal_the_oracle_swa_flags_on_both_gemma4_checkpoints() {
     for checkpoint in [&GEMMA4_E2B, &GEMMA4_26B] {
         let mapping = checkpoint.open();
         let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-        let descriptor = gemma4::descriptor_from_gguf(&parsed, true)
+        let descriptor = sliding_pattern::descriptor_from_gguf(&parsed, true)
             .unwrap_or_else(|error| panic!("{}: descriptor_from_gguf failed: {error:?}", checkpoint.name));
 
         let ring = ring_layers(&descriptor);

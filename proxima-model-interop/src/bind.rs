@@ -390,8 +390,8 @@ pub struct ModelHparams {
     /// added under the square root before the reciprocal) --
     /// `RMS_EPSILON_DEFAULT` (llama.cpp's own default for a llama/mistral
     /// checkpoint, matching openchat-3.5's own declared value) when the key
-    /// is absent. `crate::qwen35::Qwen35Hparams::rms_epsilon`
-    /// (`std`-gated) and `crate::lfm2::Lfm2Hparams::rms_epsilon`
+    /// is absent. `crate::recurrent_interval::Qwen35Hparams::rms_epsilon`
+    /// (`std`-gated) and `crate::short_conv::Lfm2Hparams::rms_epsilon`
     /// (`std`-gated) read the same metadata
     /// key with their own architecture-specific defaults (`1e-6`) --
     /// duplicated per architecture rather than shared because each
@@ -709,8 +709,8 @@ pub(crate) fn kv_layers_from_metadata(
 /// llama.cpp's own RMSNorm epsilon default for a llama/mistral checkpoint
 /// (openchat-3.5 among them) -- used only when
 /// `{architecture}.attention.layer_norm_rms_epsilon` is absent from the
-/// checkpoint's own metadata. [`crate::qwen35::QWEN35_RMS_EPSILON_DEFAULT`]/
-/// [`crate::lfm2::LFM2_RMS_EPSILON_DEFAULT`] are the same fallback shape for
+/// checkpoint's own metadata. [`crate::recurrent_interval::QWEN35_RMS_EPSILON_DEFAULT`]/
+/// [`crate::short_conv::LFM2_RMS_EPSILON_DEFAULT`] are the same fallback shape for
 /// their own architectures, whose real checkpoints declare `1e-6` instead.
 const RMS_EPSILON_DEFAULT: f32 = 1e-5;
 
@@ -819,7 +819,7 @@ pub(crate) fn metadata_u32_per_layer(
 /// bool array; [`InteropError::MetadataArrayLengthMismatch`] when the array
 /// length is not the declared block count.
 ///
-/// `std`-gated: its only caller, `gemma4::hparams::from_metadata`, lives
+/// `std`-gated: its only caller, `sliding_pattern::hparams::from_metadata`, lives
 /// behind `#[cfg(feature = "std")]` (`lib.rs:28`).
 #[cfg(feature = "std")]
 pub(crate) fn metadata_bool_per_layer(

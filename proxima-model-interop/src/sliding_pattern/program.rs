@@ -3,7 +3,7 @@
 //! build itself: the sliding-window RoPE table's own values. Every other
 //! node this checkpoint needs (attention mixer, dense/routed FFN, per-layer
 //! norms, embedding scale, logit softcap) is now a config value
-//! [`crate::gemma4::descriptor_from_gguf`] hands that engine directly --
+//! [`crate::sliding_pattern::descriptor_from_gguf`] hands that engine directly --
 //! see that function's own doc for the descriptor it builds. This file used to
 //! hold a bespoke `gemma4_forward_program`/`gemma4_attention`/
 //! `gemma4_ffn_block` graph-building layer; that layer is deleted, not

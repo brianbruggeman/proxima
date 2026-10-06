@@ -9017,7 +9017,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
 /// at.
 ///
 /// Parametrized over exactly the arguments
-/// [`proxima_model_interop::qwen35moe::program`] passes that this
+/// [`proxima_model_interop::recurrent_routed_interval::program`] passes that this
 /// oracle's un-parametrized form did not: `v_head_reordered`, whether
 /// `attn_norm_weight` is present, the output gate, and the prefill
 /// width -- the full program builds with `Some(attn_norm_weight)`,
@@ -11896,7 +11896,7 @@ fn causal_mask_merged_windowed_with_no_window_matches_causal_mask_merged_exactly
 /// checkpoint. Compares the ENGINE (the exact
 /// [`append_attention_mixer`]/[`append_dense_swiglu_ffn`]/
 /// [`append_routed_expert_ffn`]/[`lfm2_forward_program_with_experts`]
-/// functions [`crate::gemma4::bind::Gemma4Arch::bind`]'s real construction
+/// functions [`crate::sliding_pattern::bind::Gemma4Arch::bind`]'s real construction
 /// calls, gemma4-interop crate not needed here -- this crate owns every one
 /// of those functions) against an INDEPENDENT reference computed by plain
 /// array math in this module, from the authoritative gemma4 graph description
@@ -11962,7 +11962,7 @@ mod gemma4_synthetic_parity {
 
     /// [`wave`] for a norm weight leaf, with gemma's own `(1 + w)` RMSNorm
     /// offset baked in at generation time -- mirrors
-    /// `crate::gemma4::bind::bind_norm_plus_one` (proxima-model-interop),
+    /// `crate::sliding_pattern::bind::bind_norm_plus_one` (proxima-model-interop),
     /// which does the identical `+= 1.0` at real-checkpoint bind time before
     /// ever handing the engine's generic `rmsnorm()` a gamma leaf. Every
     /// `*_norm`/`output_norm` weight in this harness MUST be generated
@@ -15727,7 +15727,7 @@ mod gemma4_synthetic_parity {
 
         // -- ONE forward, ALL K=3 positions: `last_row_only=false`, this
         // slice's own additive readout mode
-        // (`proxima-model-interop::gemma4::bind_gemma4_all_positions_logits`
+        // (`proxima-model-interop::sliding_pattern::bind_gemma4_all_positions_logits`
         // is the same knob threaded one level up). `logits_all` evaluates to
         // `[SEQ, VOCAB]` -- every new position's own row, not just the last.
         let (program_all, logits_all, _cache_roots_all, _moe_sites_all, _head_repeats_all) =

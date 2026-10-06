@@ -1,6 +1,6 @@
 //! `#[ignore]`d, real-blob probes for the `gemma4` architecture handler:
 //! does the family profile a real `gemma4` checkpoint's
-//! `general.architecture` keys name the sliding-pattern header reader, does `gemma4::from_metadata`
+//! `general.architecture` keys name the sliding-pattern header reader, does `sliding_pattern::from_metadata`
 //! preserve the header's per-layer KV-head and sliding-window-pattern
 //! arrays, and does the header declare the tensor count the checkpoint's own
 //! tensor directory holds. Header-only, same contract as
@@ -41,7 +41,7 @@ use std::fs::File;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::metadata_str;
 use proxima_model_interop::profiles::family_profile;
-use proxima_model_interop::gemma4::from_metadata;
+use proxima_model_interop::sliding_pattern::from_metadata;
 use proxima_tensor::spec::ScheduleSource;
 
 /// `batiai/gemma4-26b:latest` manifest's own model layer digest -- see this
@@ -143,7 +143,7 @@ async fn family_profile_routes_real_gemma4_header_with_its_tensor_count() {
 /// The dense, matformer-style E2B checkpoint (`library/gemma4:e2b-it-qat`)
 /// -- present on this host even when the MoE 26B-A4B blob above is not.
 /// Same assertion shape as the MoE test: profile routing, every header
-/// field `gemma4::from_metadata` derives, and the tensor count -- with
+/// field `sliding_pattern::from_metadata` derives, and the tensor count -- with
 /// values read from this checkpoint's own real GGUF header (dumped via a
 /// throwaway instrumented run of this same parse path; see this test's own
 /// assertions below for the values that run captured).
