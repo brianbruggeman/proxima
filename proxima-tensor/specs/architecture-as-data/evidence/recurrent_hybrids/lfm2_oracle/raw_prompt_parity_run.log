@@ -1,0 +1,36 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.03s
+────────────
+ Nextest run ID 6df3a8de-1d7e-4729-8e6e-8ed9cea8c405 with nextest profile: default
+    Starting 1 test across 35 binaries (826 tests skipped)
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        FAIL [ 107.934s] (1/1) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+  stdout ───
+
+    running 1 test
+    test llama_parity_lfm2 has been running for over 60 seconds
+    test llama_parity_lfm2 ... FAILED
+
+    failures:
+
+    failures:
+        llama_parity_lfm2
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 57 filtered out; finished in 107.92s
+
+  stderr ───
+
+    thread 'llama_parity_lfm2' (62881430) panicked at proxima-model-interop/tests/arch_data_baseline.rs:1076:5:
+    2 divergences from llama.cpp across 3 prompts:
+    MODEL lfm2 prompt "The capital of France is": first divergent index 12; llama [278, 3270, 302, 4741, 22, 3270, 302, 4741, 355, 267, 3270, 296, 278, 3671, 302, 278, 5205, 302, 3980, 22, 3270, 302, 4741, 355, 267, 3270, 296, 278, 3671, 302, 278, 5205], proxima [278, 3270, 302, 4741, 22, 3270, 302, 4741, 355, 267, 3270, 296, 3980, 22, 3270, 302, 4741, 355, 278, 5205, 302, 3980, 22, 2329, 437, 612, 2846, 14949, 22, 22, 8694, 685]
+    MODEL lfm2 prompt "Rivers carry silt from the mountains to the sea, building fertile plains along the way. Farmers have settled these deltas for thousands of years because the soil renews itself each spring. Today engineers manage the same floods with dams and levees, trading some of that renewal for safety.": first divergent index 13; llama [36492, 551, 4158, 1196, 36829, 309, 444, 623, 273, 2755, 278, 17939, 5094, 22, 6027, 20, 10779, 309, 17384, 437, 1558, 10982, 836, 278, 1542, 4379, 34, 278, 7507, 589, 3008, 22], proxima [36492, 551, 4158, 1196, 36829, 309, 444, 623, 273, 2755, 278, 17939, 5094, 20, 309, 278, 5238, 355, 2009, 1493, 37075, 20, 702, 513, 405, 11765, 22, 16448, 278, 2938, 53473, 20]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [ 107.938s] 1 test run: 0 passed, 1 failed, 826 skipped
+        FAIL [ 107.934s] (1/1) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+error: test run failed
+DONE=100

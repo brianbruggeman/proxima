@@ -1,0 +1,14 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+────────────
+ Nextest run ID 5e17d1e2-9bb9-4de4-9596-4ad9487be13b with nextest profile: default
+    Starting 8 tests across 35 binaries (664 tests skipped)
+        PASS [   1.204s] (1/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_26b
+        PASS [   0.891s] (2/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_gemma4_e2b
+        PASS [   0.194s] (3/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_granite_moe
+        PASS [   0.108s] (4/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_openchat
+        PASS [   0.186s] (5/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen2
+        PASS [   0.232s] (6/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen3
+        PASS [   0.372s] (7/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen35
+        PASS [   0.628s] (8/8) proxima-model-interop::arch_data_baseline model_config_roundtrip_qwen35moe
+────────────
+     Summary [   3.817s] 8 tests run: 8 passed, 664 skipped

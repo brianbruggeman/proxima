@@ -1,0 +1,18 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.24s
+────────────
+ Nextest run ID e90314e6-ee5d-4f6e-a073-1158c71e7f5b with nextest profile: default
+    Starting 7 tests across 35 binaries (825 tests skipped)
+        PASS [  27.080s] (1/7) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   9.794s] (2/7) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [  10.114s] (3/7) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [ 103.463s] (4/7) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [  21.076s] (5/7) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   6.920s] (6/7) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  21.713s] (7/7) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+────────────
+     Summary [ 200.165s] 7 tests run: 7 passed (1 slow), 825 skipped
