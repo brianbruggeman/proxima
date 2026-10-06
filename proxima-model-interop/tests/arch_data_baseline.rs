@@ -301,6 +301,39 @@ fn bound_lines(weights: &BoundWeights<'_>) -> Vec<String> {
     lines
 }
 
+fn is_step_input(name: &str) -> bool {
+    matches!(
+        name,
+        "ids" | "eps" | "rope_cos" | "rope_sin" | "rope_cos_swa" | "rope_sin_swa" | "cached_len" | "cached_len_swa" | "lm_head_row"
+    ) || name.starts_with("kv_cache.")
+        || name.starts_with("ssm_cache.")
+}
+
+fn assert_unbound_leaves_are_step_inputs(checkpoint: &Checkpoint, bound: &BoundProgram<'_>) {
+    let bound_names: std::collections::BTreeSet<&str> = bound
+        .weights
+        .owned()
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(bound.weights.packed().iter().map(|(name, _)| name.as_str()))
+        .chain(bound.weights.packed_owned().iter().map(|(name, _, _)| name.as_str()))
+        .collect();
+    let weight_leaves_left_unbound: Vec<&str> = bound
+        .program
+        .iter()
+        .filter_map(|op| match op {
+            Op::Input { name: Some(name), .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .filter(|name| !bound_names.contains(name) && !is_step_input(name))
+        .collect();
+    assert!(
+        weight_leaves_left_unbound.is_empty(),
+        "{}: program leaves bound to nothing and fed by no step: {weight_leaves_left_unbound:?}",
+        checkpoint.name
+    );
+}
+
 fn bound_record(checkpoint: &Checkpoint) -> String {
     let mapping = checkpoint.open();
     let file_bytes: &[u8] = &mapping;
@@ -316,9 +349,10 @@ fn bound_record(checkpoint: &Checkpoint) -> String {
     let lines = bound_lines(&bound.weights);
     assert!(
         !lines.is_empty(),
-        "{}: the incumbent bound zero weights; the capture would assert nothing",
+        "{}: the binder bound zero weights; the comparison would assert nothing",
         checkpoint.name
     );
+    assert_unbound_leaves_are_step_inputs(checkpoint, &bound);
     let mut record = format!(
         "checkpoint={}\nbound_weights={}\nkind\tname\tcodec\tbytes\tsha256\n",
         checkpoint.name,
