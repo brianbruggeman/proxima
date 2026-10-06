@@ -1,0 +1,13 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.26s
+────────────
+ Nextest run ID a0d41134-0bdf-452d-95f1-6d04bc835ebe with nextest profile: default
+    Starting 6 tests across 35 binaries (820 tests skipped)
+        PASS [  27.812s] (1/6) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   9.702s] (2/6) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   9.421s] (3/6) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        PASS [  20.668s] (4/6) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   6.694s] (5/6) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  20.265s] (6/6) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+────────────
+     Summary [  94.574s] 6 tests run: 6 passed, 820 skipped

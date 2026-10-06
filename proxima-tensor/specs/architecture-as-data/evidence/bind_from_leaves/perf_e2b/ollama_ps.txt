@@ -1,0 +1,1 @@
+ollama_ps exit=7

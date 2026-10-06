@@ -1,0 +1,51 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.22s
+────────────
+ Nextest run ID 355bf16f-82f1-4ca2-8b0a-0588dddc3886 with nextest profile: default
+    Starting 8 tests across 35 binaries (658 tests skipped)
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>120.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>180.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>240.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>300.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>360.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>420.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>480.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>540.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [>600.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        PASS [ 612.450s] (1/8) proxima-model-interop::arch_data_baseline generic_binder_gemma4_26b
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_e2b
+        SLOW [>120.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_gemma4_e2b
+        PASS [ 165.996s] (2/8) proxima-model-interop::arch_data_baseline generic_binder_gemma4_e2b
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_granite_moe
+        PASS [  66.576s] (3/8) proxima-model-interop::arch_data_baseline generic_binder_granite_moe
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        SLOW [>120.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        SLOW [>180.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        PASS [ 187.896s] (4/8) proxima-model-interop::arch_data_baseline generic_binder_openchat
+        PASS [  24.343s] (5/8) proxima-model-interop::arch_data_baseline generic_binder_qwen2
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        SLOW [>120.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        SLOW [>180.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        PASS [ 238.813s] (6/8) proxima-model-interop::arch_data_baseline generic_binder_qwen3
+        PASS [  48.851s] (7/8) proxima-model-interop::arch_data_baseline generic_binder_qwen35
+        SLOW [> 60.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>120.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>180.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>240.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>300.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>360.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>420.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>480.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>540.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>600.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>660.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>720.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>780.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>840.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>900.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>960.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        SLOW [>1020.000s] (───) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+        PASS [1029.955s] (8/8) proxima-model-interop::arch_data_baseline generic_binder_qwen35moe
+────────────
+     Summary [2374.886s] 8 tests run: 8 passed (6 slow), 658 skipped

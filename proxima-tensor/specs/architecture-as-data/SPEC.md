@@ -37,7 +37,10 @@ Either one becomes a recorded irreducible (see below) or retracts the invariant.
   - `proxima-model-interop/src/qwen35moe/*.rs`
   - `proxima-model-interop/src/dense.rs`
   - `proxima-model-interop/src/lfm2.rs`
-- Dense weight binding: `proxima-model-interop/src/bind.rs`.
+- Weight binding: `proxima-model-interop/src/bind_leaves.rs` walks a lowered program's `Op::Input` leaves;
+  `proxima-model-interop/src/profiles/binding.rs` and `profiles/binding/*.toml` hold the names a
+  tensor directory uses that a program does not; the per-tensor binders (`bind_dense_as`,
+  `bind_matmul_weight_as`, `bind_moe_expert_weights`) stay in `proxima-model-interop/src/bind.rs`.
 - Decode loop: `proxima-model-interop/src/generate/decode.rs`.
 - Serving config: `proxima-model-interop/src/serving.rs`.
 - Tokenizer dispatch: `proxima-tokenizer/src/gguf.rs`.
@@ -151,7 +154,7 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
 | AC0 | R7 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/arch_data_digest_/)'` | 8 passed (gemma4 26B 13314 ops, logits root NodeId(13313), gemma4 E2B, openchat, qwen2, qwen3, qwen35, qwen35moe, granite moe) | 8 passed |
 | AC1 | R1 | oracle | `cargo nextest run -p proxima-model-interop --features std -E 'test(/swa_rope_from_metadata/)'` | 2 passed: E2B and 26B tables equal the `rope.freq_base_swa`/`rope.dimension_count_swa` in `gguf_kv.txt` | 2 passed only if the files hold 1e4/256 (the hard-coded values); slice 0 records which, and a file with other values makes the control FAIL |
 | AC2 | R3, R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/generic_verify_llama_parity_/)'` | 5 passed: gemma4 E2B, openchat, qwen2, qwen3 and granite moe, each loaded from its header descriptor with `speculative_verify` set, drafts forced at widths 1 and 3, at least one verify step run, equal their llama ids | the same tests with `speculative_verify` unset: 0 passed, 2 failed ("the verify program never ran"; measured on gemma4 E2B and qwen2). At the previous commit the openchat and qwen3 verify programs did not exist |
-| AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 7 passed: bound names and tensor-byte digest equal the incumbent's | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
+| AC3 | R5 | consistency | `cargo nextest run -p proxima-model-interop --features std -E 'test(/generic_binder_/)'` | 8 passed (the seven checkpoints of the original count plus granite moe): bound names, codec, byte length and sha256 equal the incumbent's; the storage class of an f32 tensor (borrowed from the mapping or owned) is not compared, because the incumbent's gemma4 binder held its norms owned and its layer output scale borrowed, a split no property of the program decides; the f32 bytes and sha256 are compared | n/a: the generic binder does not exist at 9dd9deef. Slice 0 asserts the incumbent's capture is non-empty: 7 passed |
 | AC4 | R6 | consistency | `git grep -nIiP '\b(gemma4\|qwen35moe\|qwen35\|qwen2\|lfm2\|mistral\|llama)\b' -- proxima-model-interop/src proxima-tensor/src omega/src proxima-tokenizer/src ':!*tests*' ':!*profiles*' \| wc -l` | 0 | 1214 |
 | AC5 | R2 | consistency | `git grep -nP '\b(trait\|impl\|struct\|enum)\b[^;{]*Architecture' -- proxima-model-interop/src proxima-tensor/src \| wc -l`, then `cargo nextest run -p proxima-model-interop --features std,conflaguration -E 'test(/descriptor_config_parity_\|serving_fsm_drives_/)'` | 0; then 9 passed: one descriptor config-vs-builder round trip per checkpoint (7), plus 2 FSM tests (a plain decode and a speculative verify-accept-rollback run that the live generate path routes through `ServingState`) | first command prints 17 (trait, registry, 4 family impls, the test fake, and the per-family `Architecture`/`*Architecture` hparams structs); second: tests absent |
 | AC6 | R8 | oracle | `cargo nextest run -p proxima-model-interop --features std,metal -E 'test(/llama_parity_/) and not test(/generic_verify_/)'` | 7 passed, one per checkpoint; 8 passed from slice 9 (lfm2 added) | 3 passed, 4 failed at ac4eb2c7 (measured 2026-10-04); 4 passed (gemma4 e2b, openchat, qwen2, qwen3) once ids are compared through llama's first EOG (owner stop-set policy). Still failing: D2 gemma4 26b diverges at index 0 on 2 of 3 prompts; O1 qwen35 + qwen35moe have no oracle (llama f1ea20621 rejects the blobs: rope.dimension_sections length 3, expects 4) |
@@ -272,3 +275,64 @@ Control: whether 9dd9deef passes the same check, stated per AC. A capability AC 
   support (fused QKV, biases and layer taps in one; shared KV, PLE and per-layer widths in the
   other), and those are fields the mask does not select. Reaching one prelude needs a graph
   change that re-captures the incumbent digests, which this slice does not do.
+
+## findings from slice 8 (weights bind from the lowered program, 2026-10-06)
+
+- Every `Op::Input` leaf of the 8 AC0 programs was listed against the incumbent's bound set before
+  any code changed (leaf name, shape, GGUF dims and type, consuming ops;
+  `evidence/bind_from_leaves/survey/survey_*.tsv`). Leaves, bound weights and leaves nothing
+  binds: gemma4 26B 787, 688, 99; gemma4 E2B 595, 541, 54; granite moe 321, 243, 78; openchat 393,
+  291, 102; qwen2 369, 291, 78; qwen3 513, 399, 114; qwen35 387, 321, 66; qwen35moe 839, 733, 106.
+  The leaves nothing binds are the step inputs (ids, eps, the RoPE tables, `cached_len`, the
+  `kv_cache.*` and `ssm_cache.*` leaves, `lm_head_row`) in all 8; the only bound tensor no leaf
+  names is gemma4's `rope_freqs.weight`.
+- Landed: `bind_program_leaves` (`proxima-model-interop/src/bind_leaves.rs`) walks the leaves and
+  chooses the per-tensor binder from the program:
+  - a leaf a `Multiply` feeds into an `Add` reduce is a matmul weight when its contracted axes lead
+    its kept axes (the program declares `[in, out]`, the file stores `[out, in]`) and binds in file
+    order otherwise (the conv kernel of the hybrid layers binds in file order, bytes equal to the
+    incumbent's);
+  - a rank-3 leaf a computed map indexes is an expert stack;
+  - every other leaf binds as stored.
+  A leaf the directory does not name resolves through `profiles/binding/*.toml`: `default.toml`
+  (a tied output reads the embedding table, a fused `gate_up` expert stack splits by row into
+  `gate` and `up`, the paired gate/up and fused qkv diagnostic programs join their sources) and one
+  small file per family that needs more (gemma4 `extra`, qwen35 three renames, qwen35moe
+  `decode_f32`, lfm2 a rename and three row parts).
+- Deleted: `bind_all_weights`, `bind_gemma4_weights` with `gemma4_tensor_names` and the fused
+  gate/up split, `bind_qwen35_weights`, `bind_qwen35moe_weights` with `qwen35moe_tensor_names`,
+  `bind_lfm2_weights` with the `in_proj` split, the dead `GEMMA4_NORM_SHIFT` path, the
+  `PROXIMA_HEAD_PRIVATE_COPY` knob (its only caller was `bind_all_weights`) and the error variants
+  only those functions raised. `hf_bind.rs` stays: it maps safetensors names, a naming universe
+  with no GGUF directory to walk, and V3 does not list it.
+- Designs abandoned, with the reason:
+  - read a leaf's orientation off its shape against the GGUF dims: a square matrix
+    (`[1024, 16, 64]` over dims `[1024, 1024]`) reads both ways, so the consuming reduce decides;
+  - one binder function per family, the shape the slice deletes;
+  - an alias list kept in the Rust of each bespoke builder: the names are data, so they moved to
+    `profiles/binding`.
+- Findings that came out of the data, not the plan:
+  - the incumbent held gemma4's norms as owned buffers and its layer output scale as a borrowed
+    view, a split no property of the program decides, so AC3 does not compare the storage class of
+    an f32 tensor (`without_f32_storage_class` in the test; bytes and sha256 still compare);
+  - qwen35moe binds `ssm_alpha.weight` and `ssm_beta.weight` as owned f32 transposed while qwen35
+    binds the same leaves packed. qwen35moe has no oracle (O1), so the incumbent's choice is
+    carried as the `decode_f32` data in its binding file instead of being changed;
+  - a binder keyed by the checkpoint's `general.architecture` string lost the qwen35 renames for a
+    foreign architecture that delegates to the builtin one
+    (`external_architecture_hybrid_cache`, 3 tests: `MissingStepInput { name: "blk.0.ssm_in.weight" }`).
+    The hybrid and gemma4 binders key their profile by the architecture that lowers the program,
+    the dense one by the checkpoint's family;
+  - `BoundProgram::lowered_from` kept the weights the header program bound, so a config that adds a
+    leaf (`paired_gate_up_reduce` adds `ffn_gate_up.weight`) left it unbound. It now binds the
+    leaves the new program adds and leaves the rest as bound
+    (`a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds`; with the bind call disabled
+    the same test fails at `layer 0 fused gate/up operand is bound`).
+- Equality with the table binder on a checkpoint outside the 8: LFM2.5-8B-A1B Q4_K_M, 293 bound
+  names on both sides, no name on one side only, bytes and codec equal on every name, measured with
+  both binders compiled together before the table binder was deleted
+  (`evidence/bind_from_leaves/gates/lfm2_compare.log`).
+- A weight leaf the directory does not name is skipped like a step input and surfaces at the first
+  step as an unbound input naming it. The 8 checkpoints are held to the opposite by
+  `assert_unbound_leaves_are_step_inputs`: every leaf nothing binds is in the step-input vocabulary
+  the test lists.

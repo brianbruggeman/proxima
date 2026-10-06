@@ -1,0 +1,8 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+────────────
+ Nextest run ID b46869b4-e5f2-420c-b82b-6b43e391d69b with nextest profile: default
+    Starting 1 test across 1 binary (53 tests skipped)
+        PASS [   0.082s] (1/1) proxima-model-interop::arch_data_baseline a_config_that_pairs_gate_and_up_binds_the_fused_operand_it_adds
+────────────
+     Summary [   0.083s] 1 test run: 1 passed, 53 skipped

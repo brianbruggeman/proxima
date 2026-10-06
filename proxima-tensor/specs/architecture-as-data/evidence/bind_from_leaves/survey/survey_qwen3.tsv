@@ -1,0 +1,513 @@
+LEAF	ids	Int32	[Symbolic(0)]	gguf=-	bound=-	
+LEAF	token_embd.weight	Float32	[Static(151936), Static(4096)]	gguf=[4096, 151936]/Q4_K	bound=packed	ew:Identity:Computed { indices: NodeId(0), index_map: IndexPattern { iter_rank: 2,
+LEAF	eps	Float32	[Symbolic(0)]	gguf=-	bound=-	ew:Add:Affine(IndexPattern { iter_rank: 1, axes: [AxisIndex { terms: [AxisTer | ew:Add:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	rope_cos	Float32	[Symbolic(0), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	rope_sin	Float32	[Symbolic(0), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	cached_len	Float32	[]	gguf=-	bound=-	
+LEAF	blk.0.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.0.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.0.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.0.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.0.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.1.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.1.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.1.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.1.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.2.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.2.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.2.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.2.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.3.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.3.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.3.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.3.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.4.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.4.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.4.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.4.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.5.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.5.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.5.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.5.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.6.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.6.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.6.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.6.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.7.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.7.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.7.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.7.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.8.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.8.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.8.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.8.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.9.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.9.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.9.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.9.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.10.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.10.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.10.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.10.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.11.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.11.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.11.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.11.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.12.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.12.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.12.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.12.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.13.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.13.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.13.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.13.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.14.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.14.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.14.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.14.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.15.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.15.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.15.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.15.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.16.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.16.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.16.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.16.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.17.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.17.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.17.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.17.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.18.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.18.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.18.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.18.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.19.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.19.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.19.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.19.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.20.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.20.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.20.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.20.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.21.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.21.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.21.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.21.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.22.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.22.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.22.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.22.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.23.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.23.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.23.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.23.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.24.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.24.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.24.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.24.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.25.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.25.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.25.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.25.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.26.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.26.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.26.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.26.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.27.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.27.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.27.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.27.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.28.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.28.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.28.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.28.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.29.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.29.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.29.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.29.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.30.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.30.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.30.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.30.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.31.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.31.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.31.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.31.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.32.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.32.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.32.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.32.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.33.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.33.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.33.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.33.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.34.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.34.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.34.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.34.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.attn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.ffn_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.attn_q.weight	Float32	[Static(4096), Static(32), Static(128)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.attn_k.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.attn_v.weight	Float32	[Static(4096), Static(8), Static(128)]	gguf=[4096, 1024]/F16	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 4, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.attn_output.weight	Float32	[Static(8), Static(4), Static(128), Static(4096)]	gguf=[4096, 4096]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.35.k_even	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.35.k_odd	Float32	[Symbolic(1), Static(8), Static(64)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	kv_cache.35.v	Float32	[Symbolic(1), Static(8), Static(128)]	gguf=-	bound=-	ew:Multiply:Affine(IndexPattern { iter_rank: 5, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.ffn_gate.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.ffn_up.weight	Float32	[Static(4096), Static(12288)]	gguf=[4096, 12288]/Q4_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.ffn_down.weight	Float32	[Static(12288), Static(4096)]	gguf=[12288, 4096]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.attn_q_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	blk.35.attn_k_norm.weight	Float32	[Static(128)]	gguf=[128]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
+LEAF	output_norm.weight	Float32	[Static(4096)]	gguf=[4096]/F32	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 2, axes: [AxisIndex { terms: [AxisTer
+LEAF	lm_head_row	Int32	[Static(1)]	gguf=-	bound=-	
+LEAF	output.weight	Float32	[Static(4096), Static(151936)]	gguf=[4096, 151936]/Q6_K	bound=packed	ew:Multiply:Affine(IndexPattern { iter_rank: 3, axes: [AxisIndex { terms: [AxisTer
