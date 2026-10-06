@@ -55,6 +55,7 @@ The port is refuted if the default Windows build omits a portable workspace memb
 | R9 | Emit the client root-source default from `proxima-tls/build.rs` by target OS: native on Windows, Mozilla elsewhere. `Settings`, serde, and both fluent builders seed their defaults from the emitted constant; the explicit `with_webpki_roots` constructor still selects Mozilla. | yes |
 | R10 | Execute local CA handshakes and the native Windows system-store fixture in the Windows workflow; retain the actual run output, target, and historical counts separately from new acceptance targets. | yes |
 | R11 | Wire outbound TLS root settings through the universal `proxima::Client` spec and its HTTP/gRPC factories. Wire listener mTLS CA bundle paths through the universal `ListenerBuilder::tls` surface. Preserve destination-derived SNI and protocol-owned ALPN. | yes |
+| R12 | Compile the hyper alias factory on Windows whenever both hyper and the prime runtime are enabled. Before handing a rustls config to `hyper-rustls`, clear configured ALPN because the Hyper connector owns protocol negotiation; root policy and TLS version settings remain intact. | yes |
 
 ## architecture
 
@@ -181,6 +182,8 @@ in the existing crates; the worktree directory name is not a new Cargo package.
 | AC9a | R9 | `cargo nextest run -p proxima-tls --lib --features futures-io -E 'test(build_defaults::tests::)' --no-tests=fail --test-threads 1 --retries 0` | 3 target-selector matrix tests passed (`windows`, `linux`, `macos`), 0 failed/skipped |
 | AC9b | R9 | `cargo nextest run -p proxima-tls --lib --features futures-io -E 'test(connector::tests::tls_trust_defaults_follow_target)' --no-tests=fail --test-threads 1 --retries 0` | 1 actual-target emitted-default test passed, 0 failed/skipped on each host |
 | AC10 | R8, R10 | `cargo nextest run -p proxima-tls --lib --features futures-io -E 'test(connector::tests::)' --no-tests=fail --test-threads 1 --retries 0` after the native all-workspace compile | Windows: exactly 15 connector tests execute, 0 failed/skipped; host: exactly 14, 0 failed/skipped; source-v3's earlier 48/38 records stay labeled historical |
+| AC12a | R12 | `cargo xwin check -p proxima --lib --features http-hyper --target x86_64-pc-windows-msvc` | Windows target compiles the root `http-tokio` alias registration with its `AliasFactory` definition present; 0 compiler errors |
+| AC12b | R12 | `cargo nextest run -p proxima-http --lib --features http1-stream-client,http1-tls -E 'test(configured_tls_client_clears_alpn_for_hyper_connector)' --no-tests=fail --test-threads 1 --retries 0`; `cargo check -p proxima-http --lib --features http1` | the default non-TLS Hyper feature set compiles; configured TLS client builds the Hyper connector without ALPN panic |
 
 An AC result is recorded only after its command runs. Installing a toolchain, writing CI, compiling tests, or capturing a cross compile does not fulfill native execution. No fallback from native test to host test is allowed under the same evidence label.
 
