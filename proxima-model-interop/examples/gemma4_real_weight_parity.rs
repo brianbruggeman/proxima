@@ -42,7 +42,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 /// -- pure graph construction, no weight bytes touched, so it is
 /// near-instant next to the real `Gemma4Arch::bind`'s full weight bind
 /// (proven too slow for this checkpoint's size in this same session: a
-/// second independent `bind_gemma4_weights` call alone exceeded a 280s
+/// second independent `Gemma4Arch::bind` call alone exceeded a 280s
 /// budget). This reproduces the exact same `(Vec<Op>, NodeId, MoeSites)`
 /// `LoadedModel::load` built internally, so its `NodeId`s are the same ones
 /// `LoadedModel::forward_node_values` evaluates against the real blob.
@@ -138,7 +138,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
 
 /// Dequantizes ONE row (or the whole 1-D tensor, for a rank-1 leaf) of a
 /// named real tensor directly from the mapped file bytes -- no weight bind,
-/// so this stays cheap even though `bind_gemma4_weights` itself proved too
+/// so this stays cheap even though `Gemma4Arch::bind` itself proved too
 /// slow to call twice in this session's budget.
 fn dequant_tensor(
     parsed: &proxima_gguf::ParsedGguf,
@@ -740,7 +740,7 @@ fn main() {
     // Stage C (fused ffn_gate_up_exps split, engine bind vs. independent byte
     // split) was already proven byte-exact in the prior pass on this same
     // checkpoint -- NOT re-run here: a second independent
-    // `bind_gemma4_weights` full-weight bind alone exceeded a 280s budget in
+    // `Gemma4Arch::bind` full-weight bind alone exceeded a 280s budget in
     // THIS session (see git history / prior log), so re-proving it here would
     // burn the whole 30-minute ceiling on an already-settled stage. Priority
     // 1 (attention q/k/v) is what the task asked this pass to reach.

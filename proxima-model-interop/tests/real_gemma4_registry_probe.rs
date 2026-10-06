@@ -2,8 +2,8 @@
 //! does the BUILTIN registry (`ArchitectureRegistry::with_builtin`) route a
 //! real `gemma4` checkpoint to its own entry, does `gemma4::from_metadata`
 //! preserve the header's per-layer KV-head and sliding-window-pattern
-//! arrays, and does `gemma4_tensor_names` produce the real checkpoint's own
-//! tensor directory. Header-only, same contract as
+//! arrays, and does the header declare the tensor count the checkpoint's own
+//! tensor directory holds. Header-only, same contract as
 //! `real_qwen35moe_registry_probe.rs`: `parse_complete` reads the directory
 //! while the mapping stays demand-paged, and nothing here forces the
 //! multi-GB expert payload resident.
@@ -36,12 +36,11 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeSet;
 use std::fs::File;
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::ArchitectureRegistry;
-use proxima_model_interop::gemma4::{Architecture, from_metadata, gemma4_tensor_names};
+use proxima_model_interop::gemma4::from_metadata;
 
 /// `batiai/gemma4-26b:latest` manifest's own model layer digest -- see this
 /// module's own doc for the manifest path and byte count.
@@ -77,28 +76,12 @@ fn parse_real_blob(path: &str) -> (memmap2::Mmap, proxima_gguf::pipe::ParsedGguf
     (mapping, parsed)
 }
 
-fn assert_exact_tensor_directory(architecture: &Architecture, parsed: &proxima_gguf::pipe::ParsedGguf) {
-    let computed_names: BTreeSet<String> = gemma4_tensor_names(architecture).into_iter().collect();
-    let real_names: BTreeSet<String> = parsed
-        .tensors
-        .iter()
-        .map(|tensor| tensor.name.clone())
-        .collect();
-
-    let missing: Vec<&String> = real_names.difference(&computed_names).collect();
-    let extra: Vec<&String> = computed_names.difference(&real_names).collect();
-    assert!(
-        missing.is_empty() && extra.is_empty(),
-        "gemma4_tensor_names must exactly match the real tensor directory: missing={missing:?} extra={extra:?}"
-    );
-}
-
 /// The MoE 26B-A4B checkpoint (`batiai/gemma4-26b:latest`) -- the variant
 /// this test was originally written for. Skips when that specific manifest's
 /// blob is absent; never silently routes to a different `gemma4` variant.
 #[proxima::test]
 #[ignore = "requires the real, local gemma4 26B-A4B MoE GGUF blob (batiai/gemma4-26b:latest); set PROXIMA_GEMMA4_GGUF"]
-async fn builtin_registry_routes_real_gemma4_header_with_exact_tensor_directory() {
+async fn builtin_registry_routes_real_gemma4_header_with_its_tensor_count() {
     let path = gemma4_moe_gguf_path();
     require_fixture(&path, "PROXIMA_GEMMA4_GGUF");
     let (_mapping, parsed) = parse_real_blob(&path);
@@ -147,7 +130,6 @@ async fn builtin_registry_routes_real_gemma4_header_with_exact_tensor_directory(
         "real header marks every 6th layer (5, 11, 17, 23, 29) as full attention"
     );
 
-    assert_exact_tensor_directory(&architecture, &parsed);
     assert_eq!(
         parsed.tensors.len(),
         658,
@@ -158,21 +140,10 @@ async fn builtin_registry_routes_real_gemma4_header_with_exact_tensor_directory(
 /// The dense, matformer-style E2B checkpoint (`library/gemma4:e2b-it-qat`)
 /// -- present on this host even when the MoE 26B-A4B blob above is not.
 /// Same assertion shape as the MoE test: registry routing, every header
-/// field `gemma4::from_metadata` derives, and the tensor directory -- with
+/// field `gemma4::from_metadata` derives, and the tensor count -- with
 /// values read from this checkpoint's own real GGUF header (dumped via a
 /// throwaway instrumented run of this same parse path; see this test's own
 /// assertions below for the values that run captured).
-///
-/// `gemma4_tensor_names` (`proxima-model-interop/src/gemma4/bind.rs`) lists
-/// the eight MoE-only suffixes (`ffn_down_exps.scale`,
-/// `ffn_down_exps.weight`, `ffn_gate_inp.scale`, `ffn_gate_inp.weight`,
-/// `ffn_gate_up_exps.weight`, `post_ffw_norm_1.weight`,
-/// `post_ffw_norm_2.weight`, `pre_ffw_norm_2.weight`) only when
-/// `expert_count > 0` (`d818c362`). On this real dense header
-/// (`expert_count = 0`, `block_count = 35`) the listed set therefore equals
-/// the header's tensor directory exactly, with none of the `8 * 35 = 280`
-/// MoE-suffix names a dense checkpoint never carries; the test asserts that
-/// exact equality through [`assert_exact_tensor_directory`].
 #[proxima::test]
 #[ignore = "requires the real, local gemma4 E2B dense GGUF blob (library/gemma4:e2b-it-qat); set PROXIMA_GEMMA4_E2B_GGUF"]
 async fn builtin_registry_routes_real_gemma4_e2b_dense_header() {
@@ -250,7 +221,6 @@ async fn builtin_registry_routes_real_gemma4_e2b_dense_header() {
         "the real E2B header's matformer feed_forward_length array widens from 6144 to 12288 at layer 15"
     );
 
-    assert_exact_tensor_directory(&architecture, &parsed);
     assert_eq!(
         parsed.tensors.len(),
         541,

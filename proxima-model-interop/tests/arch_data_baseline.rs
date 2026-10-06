@@ -363,6 +363,28 @@ fn bound_record(checkpoint: &Checkpoint) -> String {
     record
 }
 
+/// The AC3 comparison drops the storage class of an `f32` tensor (a borrowed view of the mapping
+/// or an owned buffer): every consumer reads the two the same, and the bytes and sha256 beside
+/// it still have to match. Every other column is compared as captured, and the weight lines are
+/// re-sorted because the capture sorted them on the storage class this drops.
+fn without_f32_storage_class(record: &str) -> String {
+    const HEADER_LINES: usize = 3;
+    let lines: Vec<String> = record
+        .lines()
+        .map(|line| match line.split('\t').collect::<Vec<_>>().as_slice() {
+            ["owned" | "packed", name, "f32", rest @ ..] => format!("f32\t{name}\tf32\t{}", rest.join("\t")),
+            _ => line.to_string(),
+        })
+        .collect();
+    let (header, weights) = lines.split_at(HEADER_LINES.min(lines.len()));
+    let mut weights = weights.to_vec();
+    weights.sort();
+    let mut normalized: Vec<String> = header.to_vec();
+    normalized.extend(weights);
+    normalized.push(String::new());
+    normalized.join("\n")
+}
+
 fn assert_matches_fixture(checkpoint: &Checkpoint, extension: &str, actual: &str) {
     let fixture = checkpoint.fixture(extension);
     if std::env::var(CAPTURE_ENV).is_ok_and(|value| value == "1") {
@@ -376,13 +398,24 @@ fn assert_matches_fixture(checkpoint: &Checkpoint, extension: &str, actual: &str
             fixture.display()
         )
     });
-    assert_eq!(
-        expected,
-        actual,
-        "{} {extension} differs from the incumbent baseline {}",
-        checkpoint.name,
-        fixture.display()
-    );
+    let (expected, actual) = if extension == "bound" {
+        (without_f32_storage_class(&expected), without_f32_storage_class(actual))
+    } else {
+        (expected, actual.to_string())
+    };
+    if expected != actual {
+        let expected_lines: std::collections::BTreeSet<&str> = expected.lines().collect();
+        let actual_lines: std::collections::BTreeSet<&str> = actual.lines().collect();
+        let only_expected: Vec<&&str> = expected_lines.difference(&actual_lines).take(12).collect();
+        let only_actual: Vec<&&str> = actual_lines.difference(&expected_lines).take(12).collect();
+        panic!(
+            "{} {extension} differs from the incumbent baseline {}\nexpected {} lines, got {}\nonly in the baseline: {only_expected:#?}\nonly in the run: {only_actual:#?}",
+            checkpoint.name,
+            fixture.display(),
+            expected.lines().count(),
+            actual.lines().count()
+        );
+    }
 }
 
 fn assert_digest(checkpoint: &Checkpoint) {
