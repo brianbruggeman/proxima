@@ -2,6 +2,8 @@ use core::ops::ControlFlow;
 
 use alloc::collections::VecDeque;
 
+use proxima_core::{ServingFsmError, ServingState};
+
 use super::*;
 use super::drafter::{DrafterSet, draft_limit_for_step};
 
@@ -3430,8 +3432,8 @@ impl<'file> LoadedModel<'file> {
         let resident_names: BTreeSet<&str> = self.resident_names();
 
         let prompt_token_count = ids.len();
-        let mut cached_len = seed_cached_len;
-        let mut next_ids = ids.clone();
+        let mut serving: Option<ServingState<u32, usize>> =
+            Some(ServingState::start(ids.clone(), seed_cached_len));
         let vocab_size = self.architecture.vocab as usize;
         // Reused across every step ([`Architecture::step_inputs`]'s own
         // doc) -- cleared, never reallocated from scratch, at the top of
@@ -3649,12 +3651,28 @@ impl<'file> LoadedModel<'file> {
                     debug!(step = _step as u64, "speculative_pending_pop");
                     return Ok(queued);
                 }
+                let mut state = serving.take().ok_or(ServingFsmError::IllegalTransition {
+                    attempted: "evaluate_without_state",
+                })?;
+                let mut cached_len = match &state {
+                    ServingState::Prefill { cache, .. } | ServingState::Decode { cache, .. } => *cache,
+                    _ => {
+                        return Err(ServingFsmError::IllegalTransition {
+                            attempted: "evaluate_from_settled_state",
+                        }
+                        .into());
+                    }
+                };
+                let decoding_from = match &state {
+                    ServingState::Decode { last, .. } => Some(*last),
+                    _ => None,
+                };
                 // Speculative decode's draft half (`drafter.rs`'s
                 // `DrafterSet`, a faithful port of llama.cpp's own
                 // `common_speculative_draft` priority walk -- no second
                 // model, only the five n-gram types): only attempted on a
-                // genuine one-token decode step (`next_ids.len() == 1`,
-                // excludes the prompt's own prefill at `_step == 0`) with a
+                // genuine one-token decode step (`ServingState::Decode`,
+                // never the prompt's own `Prefill`) with a
                 // real cache to draft against (`cached_len > 0`) and a
                 // gemma4-only verify program bound at load time
                 // (`Self::speculative_verify_program`'s own doc). Every
@@ -3684,8 +3702,8 @@ impl<'file> LoadedModel<'file> {
                 // degrades to an empty slice rather than panicking on the
                 // (unreached, guarded by `cached_len > 0` above)
                 // empty-history edge.
-                if speculative_enabled
-                    && next_ids.len() == 1
+                if let Some(sampled) = decoding_from
+                    && speculative_enabled
                     && cached_len > 0
                     && self.speculative_verify_program.is_some()
                 {
@@ -3707,13 +3725,13 @@ impl<'file> LoadedModel<'file> {
                         speculative_draft.clear();
                         speculative_draft.resize(
                             usize::from(forced_width).min(step_draft_limit),
-                            next_ids[0],
+                            sampled,
                         );
                     } else {
                         let history_len = token_history.len().saturating_sub(1);
                         drafter_set.draft(
                             &token_history[..history_len],
-                            next_ids[0],
+                            sampled,
                             step_draft_limit,
                             &mut speculative_draft,
                         );
@@ -3722,13 +3740,25 @@ impl<'file> LoadedModel<'file> {
                     speculative_draft.clear();
                 }
                 let speculative_step = !speculative_draft.is_empty();
-                let speculative_ids: Vec<u32> = if speculative_step {
-                    let mut ids = Vec::with_capacity(1 + speculative_draft.len());
-                    ids.push(next_ids[0]);
-                    ids.extend_from_slice(&speculative_draft);
-                    ids
-                } else {
-                    Vec::new()
+                let speculative_ids: Vec<u32> = match decoding_from {
+                    Some(sampled) if speculative_step => {
+                        let mut ids = Vec::with_capacity(1 + speculative_draft.len());
+                        ids.push(sampled);
+                        ids.extend_from_slice(&speculative_draft);
+                        ids
+                    }
+                    _ => Vec::new(),
+                };
+                if speculative_step {
+                    state = state.enter_verify(speculative_draft.clone())?;
+                }
+                if let Some(stats) = speculative_stats.as_deref_mut() {
+                    stats.record_state(&state);
+                }
+                let next_ids: &[u32] = match &state {
+                    ServingState::Prefill { positions, .. } => positions,
+                    ServingState::Decode { last, .. } => core::slice::from_ref(last),
+                    _ => &[],
                 };
                 // ROW 130's own fix, built: every counter this step's
                 // `evaluate_ms` decomposition reads is zeroed HERE, at step
@@ -3798,7 +3828,7 @@ impl<'file> LoadedModel<'file> {
                     } else if split_prefill {
                         core::slice::from_ref(&next_ids[batch_index])
                     } else {
-                        next_ids.as_slice()
+                        next_ids
                     };
                     // A SHARED borrow of the precomputed alt program(s)
                     // (`one_evaluation_prefill_programs`, built once before
@@ -5738,7 +5768,7 @@ impl<'file> LoadedModel<'file> {
                     // no `LayerCache` to advance -- `cached_len` stays 0 so next
                     // step's `build_position_inputs`/`apply_serving_config` above
                     // compute positions against the FULL re-fed sequence starting
-                    // at 0, matching the `next_ids` re-prefill below, rather than
+                    // at 0, matching the cacheless re-prefill below, rather than
                     // an offset into a cache that was never populated.
                     // Speculative decode's own verify batch appended K+1
                     // positions' worth of K/V above, but only `verified.
@@ -5847,33 +5877,57 @@ impl<'file> LoadedModel<'file> {
                         // ports today.
                         drafter_set.accept(accepted as u16);
 
+                        let draft_rows = speculative_draft.len();
+                        let row_caches: Vec<usize> = (1..=draft_rows)
+                            .map(|row| cached_len_before_step + row)
+                            .collect();
+                        let settled = state.accept_rows(
+                            accepted,
+                            &emitted[..emitted.len().min(draft_rows)],
+                            row_caches,
+                        )?;
+                        if let Some(stats) = speculative_stats.as_deref_mut() {
+                            stats.record_state(&settled);
+                        }
                         // The append loop above wrote `new_count` positions'
-                        // worth of K/V for every layer; only `emitted.len()`
-                        // of them are real (`LayerCache::truncate`'s own doc
-                        // -- proved against an incrementally-appended prefix
-                        // in `layer_cache_truncate_tests`).
-                        let keep_positions = cached_len_before_step + emitted.len();
-                        for (layer, widths) in layer_row_widths.iter().enumerate() {
-                            if let (
-                                LayerPadRowWidths::Attention {
-                                    even_odd_row,
-                                    v_row,
-                                },
-                                LayerCacheState::Attention(cache),
-                            ) = (widths, &mut layer_caches[layer])
-                            {
-                                cache.try_truncate(keep_positions, *even_odd_row, *v_row)?;
+                        // worth of K/V for every layer; a rollback keeps only
+                        // the rows its snapshot names (`LayerCache::truncate`'s
+                        // own doc -- proved against an incrementally-appended
+                        // prefix in `layer_cache_truncate_tests`).
+                        if let ServingState::Rollback { snapshot, .. } = &settled {
+                            for (layer, widths) in layer_row_widths.iter().enumerate() {
+                                if let (
+                                    LayerPadRowWidths::Attention {
+                                        even_odd_row,
+                                        v_row,
+                                    },
+                                    LayerCacheState::Attention(cache),
+                                ) = (widths, &mut layer_caches[layer])
+                                {
+                                    cache.try_truncate(*snapshot, *even_odd_row, *v_row)?;
+                                }
                             }
                         }
-                        cached_len = keep_positions;
+                        // The verify batch evaluated one row past the last
+                        // draft; when every draft matched that row is the next
+                        // single-row decode step, already computed.
+                        let resumed = match settled {
+                            accepted_all @ ServingState::Accept { .. } => accepted_all
+                                .resume()?
+                                .advance_decode(emitted[draft_rows], cached_len_before_step + draft_rows + 1)?,
+                            rejected @ ServingState::Rollback { .. } => rejected.rollback()?,
+                            _ => {
+                                return Err(ServingFsmError::IllegalTransition {
+                                    attempted: "settle_verify",
+                                }
+                                .into());
+                            }
+                        };
                         seal_attention_layers(&mut layer_caches, &layer_row_widths, block_tokens, seal_horizon_rows, summarizer);
                         for &extra in &emitted[1..] {
                             pending.push_back(extra);
                         }
-                        // `emitted` always has at least one element (the
-                        // loop above runs its first iteration
-                        // unconditionally), so this index never panics.
-                        next_ids = alloc::vec![emitted[emitted.len() - 1]];
+                        serving = Some(resumed);
                         return Ok(emitted[0]);
                     }
                     if is_last_step_batch {
@@ -6153,22 +6207,6 @@ impl<'file> LoadedModel<'file> {
                             token_sampled = token_id,
                             "decode_loop_step_trace: sampled token fed forward as next step's next_ids"
                         );
-                        // Cacheless architectures (`active_layer_roots.is_empty()`)
-                        // have no KV cache carrying prior context forward, so
-                        // feeding only the new token would forward a one-token
-                        // sequence with no history. Re-prefill the FULL growing
-                        // sequence instead -- `next_ids` here is still THIS step's
-                        // own `ids_for_step` source (its last use already passed),
-                        // so appending is exactly last step's sequence plus the
-                        // token just sampled.
-                        next_ids = if active_layer_roots.is_empty() {
-                            let mut resent_sequence = next_ids.clone();
-                            resent_sequence.push(token_id);
-                            resent_sequence
-                        } else {
-                            alloc::vec![token_id]
-                        };
-
                         #[cfg(feature = "instrument")]
                         {
                             emit_token_breakdown(&TokenBreakdown {
@@ -6291,6 +6329,28 @@ impl<'file> LoadedModel<'file> {
                     debug!(position = cached_len as u64, "qwen35_residency_boundary");
                 }
 
+                // a cacheless architecture carries no KV between steps, so each
+                // step re-enters Prefill over the whole sequence so far
+                let settled = if self.layer_roots.is_empty() {
+                    match state {
+                        ServingState::Prefill { mut positions, .. } => {
+                            positions.push(token_id);
+                            ServingState::start(positions, cached_len)
+                        }
+                        _ => {
+                            return Err(ServingFsmError::IllegalTransition {
+                                attempted: "re_prefill_cacheless",
+                            }
+                            .into());
+                        }
+                    }
+                } else if matches!(state, ServingState::Prefill { .. }) {
+                    state.advance_prefill(token_id, cached_len)?
+                } else {
+                    state.advance_decode(token_id, cached_len)?
+                };
+                serving = Some(settled);
+
                 Ok(token_id)
             },
             on_token,
@@ -6305,6 +6365,13 @@ impl<'file> LoadedModel<'file> {
         }
 
         let (generated_ids, stopped_by_eos) = decode_result?;
+
+        let Some(ServingState::Done { cache: cached_len }) = serving.take().map(ServingState::finish) else {
+            return Err(ServingFsmError::IllegalTransition {
+                attempted: "finish_without_state",
+            }
+            .into());
+        };
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if let Some(device) = device_kv.as_ref() {
