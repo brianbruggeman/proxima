@@ -1,0 +1,9 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 1.77s
+────────────
+ Nextest run ID 23908f42-3c1b-49a5-990d-87e850987047 with nextest profile: default
+    Starting 2 tests across 1 binary (33 tests and 30 binaries skipped)
+        PASS [   0.139s] (1/2) proxima-model-interop::capability_matrix a_reduce_flag_load_decodes_the_same_ids_as_the_baseline::fused_qkv
+        PASS [   0.089s] (2/2) proxima-model-interop::capability_matrix a_reduce_flag_load_decodes_the_same_ids_as_the_baseline::paired_gate_up
+────────────
+     Summary [   0.230s] 2 tests run: 2 passed, 33 skipped
