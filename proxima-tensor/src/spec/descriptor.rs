@@ -620,6 +620,11 @@ pub fn build_forward(
                     feature: "non-uniform per-layer attention config",
                 });
             }
+            refuse_when(
+                descriptor.layers.iter().any(|layer| layer.kind != LayerKind::Attention),
+                "build_forward(CacheMask::Bounded)",
+                "a layer that is not attention",
+            )?;
             let attention = &first.attention;
             let layer_windows: Vec<Option<u32>> =
                 descriptor.layers.iter().map(|layer| layer.attention.mask_window).collect();

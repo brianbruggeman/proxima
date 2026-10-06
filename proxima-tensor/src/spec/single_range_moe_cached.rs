@@ -1233,10 +1233,14 @@ pub fn append_mistral_cached_moe_layer(
 /// 24-layer stack, and GGUF carries no `layer_types` metadata key for this
 /// architecture (confirmed absent on the real checkpoint's own metadata dump)
 /// -- the only ground truth is which tensors a block's own name prefix owns.
+/// [`Self::Gdn`] is the gated-DeltaNet recurrent mixer a qwen3.5 hybrid stack
+/// interleaves with attention; its shape lives on the descriptor's `ssm_*`
+/// fields, and it carries a state cache a rejected draft cannot truncate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum LayerKind {
     Attention,
     ShortConv,
+    Gdn,
 }
 
 impl LayerKind {

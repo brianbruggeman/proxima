@@ -18456,3 +18456,44 @@ mod cache_mask {
         assert_eq!(loaded.cache_mask, CacheMask::Padded);
     }
 }
+
+mod gdn_layer_kind {
+    use super::head_repeats;
+    use super::*;
+
+    fn with_gdn_layer(cache_strategy: CacheStrategy, cache_mask: CacheMask) -> ModelDescriptor {
+        let mut descriptor = head_repeats::descriptor(cache_strategy, cache_mask, 1);
+        descriptor.layers[1].kind = LayerKind::Gdn;
+        descriptor
+    }
+
+    #[test]
+    fn every_attention_engine_refuses_a_gated_delta_net_layer_it_cannot_lower() {
+        for (cache_strategy, cache_mask) in [
+            (CacheStrategy::Cacheless, CacheMask::Bounded),
+            (CacheStrategy::Cached, CacheMask::Bounded),
+            (CacheStrategy::Cached, CacheMask::Padded),
+        ] {
+            let outcome = build_forward(&with_gdn_layer(cache_strategy, cache_mask));
+
+            assert!(
+                matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+                "{cache_strategy:?} {cache_mask:?}: {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gdn_layer_survives_a_toml_round_trip_and_cannot_rewind() {
+        let descriptor = ModelDescriptor {
+            speculative_verify: true,
+            ..with_gdn_layer(CacheStrategy::Cached, CacheMask::Padded)
+        };
+        let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+
+        let loaded: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+
+        assert_eq!(loaded.layers[1].kind, LayerKind::Gdn);
+        assert_eq!(loaded.verify(), None, "a recurrent state is not truncated to reject a draft");
+    }
+}
