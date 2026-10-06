@@ -240,7 +240,7 @@ impl<'file> LoadedModel<'file> {
                 })
                 .transpose()
                 .map_err(InteropError::from)?;
-            #[cfg(feature = "qwen35moe-linked-suffix")]
+            #[cfg(feature = "moe-linked-suffix")]
             let gather = if diagnostic.block_output == last_layer_output {
                 crate::qwen35moe::execution::split_gather_and_suffix_segment(
                     &self.program,

@@ -12,9 +12,9 @@ readme.workspace = true
 [features]
 default = []
 # joins the final routed gather to the logits suffix without crossing a router boundary.
-qwen35moe-linked-suffix = ["std"]
+moe-linked-suffix = ["std"]
 # advisory one-layer-ahead mmap warming for the HOBBIT/DynaExq route
-qwen35moe-expert-prefetch = ["std"]
+moe-expert-prefetch = ["std"]
 # strictly additive over the alloc-tier floor (guiding-principle 3): opens
 # proxima-gguf's `edge::read_file` (whole-file IO) and proxima-tensor's
 # `cpu` interpreter (both std-gated in their own crates) so this crate's

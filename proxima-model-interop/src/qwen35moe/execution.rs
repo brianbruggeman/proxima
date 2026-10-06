@@ -218,7 +218,7 @@ pub fn split_mapped_layer_segment(
 
 /// Uses [`partition_between_with_mapping`] to retain the final gather and
 /// logits suffix in one program; the router remains an external cut.
-#[cfg(feature = "qwen35moe-linked-suffix")]
+#[cfg(feature = "moe-linked-suffix")]
 pub(crate) fn split_gather_and_suffix_segment(
     program: &[Op],
     symbols: &[u64],
@@ -464,7 +464,7 @@ pub const fn route_address(decision: ServeDecision) -> ExpertAddress {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    #[cfg(feature = "qwen35moe-linked-suffix")]
+    #[cfg(feature = "moe-linked-suffix")]
     use alloc::collections::BTreeMap;
     use alloc::vec;
 
@@ -473,7 +473,7 @@ mod tests {
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{Extent, NodeId, Op, ScalarOp, append};
 
-    #[cfg(feature = "qwen35moe-linked-suffix")]
+    #[cfg(feature = "moe-linked-suffix")]
     use super::{MappedLayerSegment, split_gather_and_suffix_segment};
     use super::{
         MoeExecutionMode, execute_pre_gather, route_address,
@@ -483,10 +483,10 @@ mod tests {
     };
     use crate::residency::{ExpertAddress, ServeDecision, ServePrecision};
     use core::cell::Cell;
-    #[cfg(feature = "qwen35moe-linked-suffix")]
+    #[cfg(feature = "moe-linked-suffix")]
     use proxima_tensor::error::TensorError;
 
-    #[cfg(feature = "qwen35moe-linked-suffix")]
+    #[cfg(feature = "moe-linked-suffix")]
     #[test]
     fn linked_final_gather_keeps_routes_sources_and_logits_bit_exact() {
         let identity = IndexMap::Affine(map::projection(1, &[0]));
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(candidate[&NodeId(7)], vec![-8.75, -6.875]);
     }
 
-    #[cfg(feature = "qwen35moe-linked-suffix")]
+    #[cfg(feature = "moe-linked-suffix")]
     #[test]
     fn linked_final_gather_rejects_reversed_boundaries_before_partitioning() {
         assert!(matches!(
