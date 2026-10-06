@@ -19,6 +19,10 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::op::{NodeId, Op};
+use proxima_tensor::spec::{
+    CacheMask, CacheStrategy, ForwardProgram, KeySourceKind, LayerAttentionConfig, LayerKind, LayerSchedule,
+    ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
+};
 
 use crate::bind::{
     metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
@@ -26,7 +30,7 @@ use crate::bind::{
 };
 use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
-use crate::profiles::binding_profile;
+use crate::profiles::{binding_profile, family_profile};
 
 /// One layer's real tensor shape, derived from
 /// `{architecture}.full_attention_interval` rather than assumed uniform --
@@ -323,29 +327,104 @@ pub fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
     per_layer_elements * core::mem::size_of::<f32>() as u64 * u64::from(block_count)
 }
 
+/// The checkpoint's whole pre-lowering program as one config: the header's
+/// layer kinds, attention and recurrence shapes over the family profile's FFN,
+/// score scale and rope pairing. [`proxima_tensor::spec::build_forward`] over
+/// the result is the entire lowering; serialize the descriptor, edit the layer
+/// schedule, and a restored copy lowers the edited program with no Rust.
+///
+/// # Errors
+///
+/// The family has no embedded profile.
+pub fn descriptor_from_architecture(architecture: &Qwen35Architecture) -> Result<ModelDescriptor, InteropError> {
+    let profile = family_profile(FAMILY)?;
+    let attention = LayerAttentionConfig {
+        head_dim: architecture.attn_head_dim,
+        kv_heads: architecture.kv_heads,
+        mask_window: None,
+        value_source_kind: ValueSourceKind::ProjectedV,
+        key_source_kind: KeySourceKind::ProjectedK,
+        rope_table: RopeTableSel {
+            cos_name: "rope_cos".into(),
+            sin_name: "rope_sin".into(),
+        },
+        rope_pairing: profile.rope_pairing(architecture.head_dim),
+        score_scale: profile.score_scale(architecture.attn_head_dim),
+        value_norm: profile.value_norm,
+    };
+    let ffn = profile.layer_ffn(0);
+    let layers = architecture
+        .layer_kinds
+        .iter()
+        .map(|kind| match kind {
+            Qwen35LayerKind::Attention => LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: attention.clone(),
+                ffn,
+            },
+            Qwen35LayerKind::Ssm => LayerSchedule {
+                kind: LayerKind::Gdn,
+                attention: attention.clone(),
+                ffn,
+            },
+        })
+        .collect();
+    Ok(ModelDescriptor {
+        vocab: architecture.vocab,
+        embedding: architecture.embedding,
+        feed_forward: architecture.feed_forward,
+        expert_feed_forward: architecture.feed_forward,
+        query_heads: architecture.query_heads,
+        block_count: architecture.block_count,
+        expert_count: 0,
+        expert_used_count: 0,
+        leading_dense_block_count: architecture.block_count,
+        l_cache: 0,
+        embedding_scale: profile.embedding_scale,
+        logit_softcap: None,
+        logit_scale: None,
+        residual_scale: None,
+        layers,
+        cache_strategy: CacheStrategy::Cached,
+        cache_mask: CacheMask::Bounded,
+        ple_dim: None,
+        sliding_kv_ring: false,
+        qk_norm: false,
+        qkv_biases: false,
+        paired_gate_up_reduce: false,
+        fused_qkv_reduce: false,
+        head_repeats: 1,
+        last_row_only: true,
+        speculative_verify: profile.speculative_verify,
+        ssm_conv_kernel: architecture.ssm_conv_kernel,
+        ssm_state_size: architecture.ssm_state_size,
+        ssm_group_count: architecture.ssm_group_count,
+        ssm_time_step_rank: architecture.ssm_time_step_rank,
+        ssm_inner_size: architecture.ssm_inner_size,
+        ssm_epsilon: architecture.rms_epsilon,
+        v_head_reordered: false,
+        expert_shared_feed_forward: 0,
+        prefill_width: None,
+        gated_attention: true,
+    })
+}
+
+/// This checkpoint's forward program: [`descriptor_from_architecture`] lowered
+/// by [`proxima_tensor::spec::build_forward`].
+///
+/// # Errors
+///
+/// The family has no profile, or the descriptor does not lower.
 pub fn qwen35_forward_program(
     architecture: &Qwen35Architecture,
 ) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::Qwen35LayerRoots>), InteropError> {
-    let (program, logits_root, layer_roots) =
-        proxima_tensor::spec::qwen35_forward_program_with_last_row(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.query_heads,
-            architecture.kv_heads,
-            architecture.head_dim,
-            architecture.attn_head_dim,
-            architecture.block_count,
-            architecture.full_attention_interval,
-            architecture.ssm_state_size,
-            architecture.ssm_time_step_rank,
-            architecture.ssm_group_count,
-            architecture.ssm_inner_size,
-            architecture.ssm_conv_kernel,
-            architecture.rms_epsilon,
-            true,
-        )?;
-    Ok((program, logits_root, layer_roots))
+    let ForwardProgram {
+        program,
+        logits,
+        layer_roots,
+        ..
+    } = build_forward(&descriptor_from_architecture(architecture)?)?;
+    Ok((program, logits, layer_roots))
 }
 
 /// The binding profile key and the registry name: the architecture that lowers this program

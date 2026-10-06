@@ -28,7 +28,8 @@ use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel,
     PromptCacheConfig, ServingConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, gemma4,
     metadata_f32_optional,
-    metadata_str, metadata_u32, profiles::family_profile,
+    metadata_str, metadata_u32, profiles::family_profile, qwen35_architecture_from_metadata,
+    qwen35_descriptor_from_architecture, qwen35moe,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::TensorError;
@@ -541,6 +542,20 @@ fn config_descriptors(
         };
         return vec![("bind", decode), ("verify", verify)];
     }
+    if checkpoint.architecture == "qwen35" {
+        let architecture = qwen35_architecture_from_metadata(parsed)
+            .unwrap_or_else(|error| panic!("{}: qwen35_architecture_from_metadata failed: {error:?}", checkpoint.name));
+        let descriptor = qwen35_descriptor_from_architecture(&architecture)
+            .unwrap_or_else(|error| panic!("{}: the qwen35 descriptor failed: {error:?}", checkpoint.name));
+        return vec![("bind", descriptor)];
+    }
+    if checkpoint.architecture == "qwen35moe" {
+        let architecture = qwen35moe::from_metadata(parsed)
+            .unwrap_or_else(|error| panic!("{}: qwen35moe hparams failed: {error:?}", checkpoint.name));
+        let descriptor = qwen35moe::descriptor_from_architecture(&architecture, None)
+            .unwrap_or_else(|error| panic!("{}: the qwen35moe descriptor failed: {error:?}", checkpoint.name));
+        return vec![("bind", descriptor)];
+    }
     let architecture = architecture_from_metadata(parsed)
         .unwrap_or_else(|error| panic!("{}: architecture_from_metadata failed: {error:?}", checkpoint.name));
     let descriptor = dense_descriptor_from_gguf(parsed, &architecture)
@@ -624,6 +639,16 @@ fn model_config_roundtrip_granite_moe() {
 }
 
 #[test]
+fn model_config_roundtrip_qwen35() {
+    model_config_roundtrip(&QWEN35);
+}
+
+#[test]
+fn model_config_roundtrip_qwen35moe() {
+    model_config_roundtrip(&QWEN35MOE);
+}
+
+#[test]
 fn model_config_text_edit_changes_the_lowered_program() {
     let mapping = GEMMA4_E2B.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
@@ -643,6 +668,38 @@ fn model_config_text_edit_changes_the_lowered_program() {
         edited.layers.iter().map(|layer| layer.ffn.activation).collect::<Vec<_>>(),
         descriptor.layers.iter().map(|layer| layer.ffn.activation).collect::<Vec<_>>(),
     );
+}
+
+fn leaf_names(program: &[Op]) -> Vec<String> {
+    program
+        .iter()
+        .filter_map(|op| match op {
+            Op::Input { name: Some(name), .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn model_config_edit_moves_a_qwen35_attention_layer_to_the_recurrent_mixer() {
+    let mapping = QWEN35.open();
+    let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
+    let architecture = qwen35_architecture_from_metadata(&parsed).expect("the qwen35 header reads");
+    let descriptor = qwen35_descriptor_from_architecture(&architecture).expect("the qwen35 descriptor builds");
+    assert_eq!(descriptor.layers[3].kind, LayerKind::Attention, "the 0.8b checkpoint attends at layers 3, 7, 11, ...");
+    let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
+
+    let mut edited: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+    edited.layers[3].kind = LayerKind::Gdn;
+    let edited: ModelDescriptor = toml::from_str(&toml::to_string(&edited).expect("serializes")).expect("the edited toml parses");
+    let base = build_forward(&descriptor).expect("the header config lowers");
+    let variant = build_forward(&edited).expect("the edited config lowers");
+
+    let (base_leaves, variant_leaves) = (leaf_names(&base.program), leaf_names(&variant.program));
+    assert!(base_leaves.contains(&"blk.3.attn_q.weight".to_string()));
+    assert!(!variant_leaves.contains(&"blk.3.attn_q.weight".to_string()), "layer 3 no longer attends");
+    assert!(variant_leaves.contains(&"ssm_cache.3.state".to_string()), "layer 3 now carries a recurrent state");
+    assert_ne!(base.program.len(), variant.program.len());
 }
 
 #[test]

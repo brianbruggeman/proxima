@@ -32,6 +32,10 @@ const FAMILY_PROFILES: &[(&str, &str)] = &[
     ("qwen3", include_str!("qwen3.toml")),
     ("qwen3moe", include_str!("qwen3moe.toml")),
     ("qwen3_moe", include_str!("qwen3moe.toml")),
+    ("qwen35", include_str!("qwen35.toml")),
+    ("qwen35moe", include_str!("qwen35moe.toml")),
+    ("lfm2", include_str!("lfm2moe.toml")),
+    ("lfm2moe", include_str!("lfm2moe.toml")),
 ];
 
 /// The [`FamilyProfile`] for `family`: a checkpoint's `general.architecture`
@@ -65,7 +69,7 @@ mod tests {
 
     #[test]
     fn every_embedded_profile_parses() {
-        assert_eq!(FAMILY_PROFILES.len(), 9, "one row per embedded family string");
+        assert_eq!(FAMILY_PROFILES.len(), 13, "one row per embedded family string");
         for (family, _) in FAMILY_PROFILES {
             family_profile(family).unwrap_or_else(|error| panic!("{family}: {error}"));
         }
@@ -125,7 +129,9 @@ mod tests {
     }
 
     /// llama.cpp `llama_model_rope_type` (`src/llama-model.cpp:2968-3140`, f1ea20621):
-    /// LLAMA/MISTRAL3 are NORM (adjacent); QWEN2, QWEN3, QWEN3MOE, GEMMA4 are NEOX (split-half).
+    /// LLAMA/MISTRAL3 are NORM (adjacent); QWEN2, QWEN3, QWEN3MOE, GEMMA4, LFM2, LFM2MOE are NEOX
+    /// (split-half). QWEN35/QWEN35MOE lower through the recurrent-hybrid engine, which rotates
+    /// split-half over the partial rotary width.
     /// mixtral GGUFs declare `general.architecture = llama`.
     /// GRANITE_MOE is NORM (`src/llama-model.cpp:3019`, the group returns at :3039).
     #[test]
@@ -140,6 +146,10 @@ mod tests {
             ("qwen3moe", true),
             ("qwen3_moe", true),
             ("gemma4", true),
+            ("qwen35", true),
+            ("qwen35moe", true),
+            ("lfm2", true),
+            ("lfm2moe", true),
         ];
         assert_eq!(table.len(), FAMILY_PROFILES.len(), "one expectation per embedded family string");
         for (family, split_half) in table {
@@ -192,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_headers_carry_the_partial_rotary_width_and_have_no_inferable_profile() {
+    fn qwen35_headers_carry_the_partial_rotary_width_the_profile_pairs_split_half() {
         for fixture in ["qwen35", "qwen35moe"] {
             let kv = fixture_kv(fixture);
             let family = kv_value(&kv, "general.architecture").expect("header names its architecture");
@@ -204,11 +214,30 @@ mod tests {
                 Some("[11, 11, 10]"),
                 "{fixture}"
             );
-            assert!(
-                matches!(family_profile(&family), Err(InteropError::MissingFamilyProfile { .. })),
-                "{fixture}: no profile, so no pairing is guessed from tensors"
-            );
+            let profile = family_profile(&family).expect("the recurrent-hybrid families have a profile");
+            assert_eq!(profile.rope_pairing(64), RopePairing::SplitHalf { pairs: 32 }, "{fixture}");
         }
+    }
+
+    #[test]
+    fn the_shared_expert_family_names_its_ffn_and_the_dense_hybrid_keeps_the_plain_one() {
+        let routed = family_profile("qwen35moe").expect("qwen35moe profile embedded");
+        let dense = family_profile("qwen35").expect("qwen35 profile embedded");
+
+        assert_eq!(routed.layer_ffn(256).combination, FfnCombination::RoutedWithSharedExpert);
+        assert_eq!(dense.layer_ffn(0).combination, FfnCombination::Exclusive);
+    }
+
+    #[test]
+    fn lfm2_profile_routes_with_sigmoid_gating_and_a_selection_bias() {
+        let kv = fixture_kv("lfm2");
+        let family = kv_value(&kv, "general.architecture").expect("header names its architecture");
+        assert_eq!(kv_value(&kv, &format!("{family}.expert_gating_func")).as_deref(), Some("2"));
+        let profile = family_profile(&family).expect("lfm2moe profile embedded");
+
+        assert_eq!(profile.ffn.routed_gating, ExpertGatingFunc::Sigmoid);
+        assert!(profile.ffn.routed_expert_bias);
+        assert_eq!(profile.ffn.combination, FfnCombination::Exclusive);
     }
 
     #[test]

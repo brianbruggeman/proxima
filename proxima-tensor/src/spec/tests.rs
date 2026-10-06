@@ -14935,6 +14935,7 @@ mod gemma4_synthetic_parity {
             v_head_reordered: false,
             expert_shared_feed_forward: 0,
             prefill_width: None,
+            gated_attention: false,
         };
 
         let ForwardProgram { program, logits, .. } = build_forward(&descriptor)
@@ -17580,6 +17581,7 @@ mod head_repeats {
             v_head_reordered: false,
             expert_shared_feed_forward: 0,
             prefill_width: None,
+            gated_attention: false,
         }
     }
 
@@ -18052,6 +18054,7 @@ mod descriptor_config {
             .v_head_reordered(source.v_head_reordered)
             .expert_shared_feed_forward(source.expert_shared_feed_forward)
             .maybe_prefill_width(source.prefill_width)
+            .gated_attention(source.gated_attention)
             .build()
     }
 
@@ -18512,7 +18515,7 @@ mod gdn_layer_kind {
     }
 
     #[test]
-    fn every_attention_engine_refuses_a_gated_delta_net_layer_it_cannot_lower() {
+    fn a_gdn_schedule_reaches_the_recurrent_engine_whatever_cache_fields_the_descriptor_names() {
         for (cache_strategy, cache_mask) in [
             (CacheStrategy::Cacheless, CacheMask::Bounded),
             (CacheStrategy::Cached, CacheMask::Bounded),
@@ -18521,7 +18524,7 @@ mod gdn_layer_kind {
             let outcome = build_forward(&with_gdn_layer(cache_strategy, cache_mask));
 
             assert!(
-                matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+                matches!(outcome, Err(TensorError::UnsupportedInBuilder { builder, .. }) if builder.contains("hybrid")),
                 "{cache_strategy:?} {cache_mask:?}: {outcome:?}"
             );
         }
@@ -18546,7 +18549,7 @@ mod recurrence_fields {
     use super::head_repeats;
     use super::*;
 
-    const RECURRENCE_KEYS: [&str; 8] = [
+    const RECURRENCE_KEYS: [&str; 9] = [
         "ssm_conv_kernel",
         "ssm_state_size",
         "ssm_group_count",
@@ -18555,6 +18558,7 @@ mod recurrence_fields {
         "ssm_epsilon",
         "v_head_reordered",
         "expert_shared_feed_forward",
+        "gated_attention",
     ];
 
     #[test]
@@ -18585,6 +18589,7 @@ mod recurrence_fields {
             v_head_reordered: true,
             expert_shared_feed_forward: 512,
             prefill_width: Some(13),
+            gated_attention: true,
             ..head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1)
         };
         let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
@@ -18656,5 +18661,365 @@ mod layer_roots {
 
         assert!(build_forward(&cacheless).expect("cacheless lowers").layer_roots.is_empty());
         assert_eq!(build_forward(&cached).expect("cached lowers").layer_roots.len(), 2);
+    }
+}
+
+mod hybrid_dense_descriptor {
+    use super::*;
+
+    const VOCAB: u32 = 100;
+    const EMBEDDING: u32 = 8;
+    const ROTARY_DIM: u32 = 4;
+    const ATTN_HEAD_DIM: u32 = 8;
+
+    fn descriptor(kinds: &[LayerKind]) -> ModelDescriptor {
+        let attention = LayerAttentionConfig {
+            head_dim: ATTN_HEAD_DIM,
+            kv_heads: 1,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            key_source_kind: KeySourceKind::ProjectedK,
+            rope_table: RopeTableSel { cos_name: "rope_cos".into(), sin_name: "rope_sin".into() },
+            rope_pairing: RopePairing::SplitHalf { pairs: ROTARY_DIM / 2 },
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(ATTN_HEAD_DIM),
+            value_norm: false,
+        };
+        let layers = kinds
+            .iter()
+            .map(|&kind| LayerSchedule { kind, attention: attention.clone(), ffn: LayerFfnConfig::exclusive() })
+            .collect();
+        ModelDescriptor {
+            vocab: VOCAB,
+            embedding: EMBEDDING,
+            feed_forward: 16,
+            expert_feed_forward: 16,
+            query_heads: 2,
+            block_count: kinds.len() as u32,
+            expert_count: 0,
+            expert_used_count: 0,
+            leading_dense_block_count: kinds.len() as u32,
+            l_cache: 0,
+            embedding_scale: None,
+            logit_softcap: None,
+            logit_scale: None,
+            residual_scale: None,
+            layers,
+            cache_strategy: CacheStrategy::Cached,
+            cache_mask: CacheMask::Bounded,
+            ple_dim: None,
+            sliding_kv_ring: false,
+            qk_norm: false,
+            qkv_biases: false,
+            paired_gate_up_reduce: false,
+            fused_qkv_reduce: false,
+            head_repeats: 1,
+            last_row_only: true,
+            speculative_verify: false,
+            ssm_conv_kernel: 3,
+            ssm_state_size: 2,
+            ssm_group_count: 1,
+            ssm_time_step_rank: 2,
+            ssm_inner_size: 4,
+            ssm_epsilon: 1e-5,
+            v_head_reordered: false,
+            expert_shared_feed_forward: 0,
+            prefill_width: None,
+            gated_attention: true,
+        }
+    }
+
+    fn leaf_names(program: &[Op]) -> Vec<String> {
+        program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input { name: Some(name), .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_schedule_not_an_interval_decides_which_layers_attend_and_which_recur() {
+        let kinds = [LayerKind::Gdn, LayerKind::Attention, LayerKind::Gdn, LayerKind::Gdn, LayerKind::Attention];
+
+        let lowered = build_forward(&descriptor(&kinds)).expect("an off-pattern hybrid schedule lowers");
+
+        let leaves = leaf_names(&lowered.program);
+        for (layer, kind) in kinds.iter().enumerate() {
+            let attends = leaves.contains(&alloc::format!("blk.{layer}.attn_q.weight"));
+            let recurs = leaves.contains(&alloc::format!("ssm_cache.{layer}.state"));
+            assert_eq!((attends, recurs), (*kind == LayerKind::Attention, *kind == LayerKind::Gdn), "layer {layer}");
+        }
+        assert!(matches!(lowered.layer_roots[0], Qwen35LayerRoots::Ssm { .. }));
+        assert!(matches!(lowered.layer_roots[1], Qwen35LayerRoots::DenseAttention(_)));
+        assert!(matches!(lowered.layer_roots[4], Qwen35LayerRoots::DenseAttention(_)));
+        crate::shape::infer(&lowered.program, &[1, 0]).expect("the lowered program infers at a decode step");
+    }
+
+    #[test]
+    fn an_all_attention_stack_that_sets_gated_attention_lowers_the_gated_variant() {
+        let kinds = [LayerKind::Attention, LayerKind::Attention];
+        let plain = ModelDescriptor { gated_attention: false, ..descriptor(&kinds) };
+
+        let gated_leaves = leaf_names(&build_forward(&descriptor(&kinds)).expect("the gated stack lowers").program);
+        let plain_leaves = leaf_names(&build_forward(&plain).expect("the plain stack lowers").program);
+
+        assert!(gated_leaves.contains(&"kv_cache.0.k_pass".to_string()), "the gated variant caches the pass-through channels");
+        assert!(plain_leaves.contains(&"kv_cache.0.k_even".to_string()), "the plain variant caches rotated even and odd halves");
+        assert!(!gated_leaves.iter().any(|leaf| leaf.starts_with("ssm_cache.")), "no layer recurs");
+    }
+
+    #[test]
+    fn a_schedule_of_only_recurrent_layers_lowers_the_leading_stack_of_a_hybrid() {
+        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Gdn])).expect("a recurrent-only prefix lowers");
+
+        assert!(lowered.layer_roots.iter().all(|roots| matches!(roots, Qwen35LayerRoots::Ssm { .. })));
+        crate::shape::infer(&lowered.program, &[1, 0]).expect("the prefix infers at a decode step");
+    }
+
+    #[test]
+    fn the_descriptor_and_the_positional_interval_builder_lower_one_program() {
+        let kinds = [LayerKind::Gdn, LayerKind::Attention, LayerKind::Gdn, LayerKind::Attention];
+        let (positional, logits, _roots) =
+            qwen35_forward_program_with_last_row(VOCAB, EMBEDDING, 16, 2, 1, ROTARY_DIM, ATTN_HEAD_DIM, 4, 2, 2, 2, 1, 4, 3, 1e-5, true)
+                .expect("the positional builder lowers");
+
+        let lowered = build_forward(&descriptor(&kinds)).expect("the descriptor lowers");
+
+        assert_eq!(lowered.program, positional);
+        assert_eq!(lowered.logits, logits);
+    }
+
+    #[test]
+    fn a_hybrid_descriptor_survives_a_toml_round_trip_and_lowers_the_same_program() {
+        let original = descriptor(&[LayerKind::Gdn, LayerKind::Gdn, LayerKind::Attention]);
+        let text = toml::to_string(&original).expect("a descriptor serializes to toml");
+
+        let restored: ModelDescriptor = toml::from_str(&text).expect("the descriptor toml parses");
+
+        assert_eq!(restored, original);
+        assert_eq!(
+            build_forward(&restored).expect("the restored descriptor lowers").program,
+            build_forward(&original).expect("the descriptor lowers").program
+        );
+    }
+
+    #[test]
+    fn the_verify_row_shape_is_data_on_the_hybrid_descriptor() {
+        let decode = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        let verify = ModelDescriptor { last_row_only: false, ..decode.clone() };
+
+        let decode_logits = build_forward(&decode).expect("decode lowers");
+        let verify_logits = build_forward(&verify).expect("verify lowers");
+
+        let rows = |lowered: &ForwardProgram| {
+            *crate::shape::infer(&lowered.program, &[3, 0]).expect("infers for a three row step").of(lowered.logits).first().expect("a row axis")
+        };
+        assert_eq!((rows(&decode_logits), rows(&verify_logits)), (1, 3));
+    }
+
+    #[test]
+    fn the_engine_refuses_what_it_cannot_lower_instead_of_lowering_something_else() {
+        let kinds = [LayerKind::Gdn, LayerKind::Attention];
+        let mut interleaved = descriptor(&kinds);
+        for layer in &mut interleaved.layers {
+            layer.attention.rope_pairing = RopePairing::Interleaved;
+        }
+        let mut routed = descriptor(&kinds);
+        routed.expert_count = 4;
+        let mut short_conv = descriptor(&kinds);
+        short_conv.layers[0].kind = LayerKind::ShortConv;
+        let mut ungated = descriptor(&kinds);
+        ungated.gated_attention = false;
+        let mut no_recurrence = descriptor(&kinds);
+        no_recurrence.ssm_time_step_rank = 0;
+        let mut gemma_sandwich = descriptor(&kinds);
+        gemma_sandwich.layers[1].ffn.post_attention_norm = true;
+        let mut wrong_length = descriptor(&kinds);
+        wrong_length.block_count = 3;
+
+        for (label, refused) in [
+            ("interleaved rope", interleaved),
+            ("routed experts", routed),
+            ("a short convolution layer", short_conv),
+            ("attention that is not gated", ungated),
+            ("a zero recurrence extent", no_recurrence),
+            ("a sandwich norm", gemma_sandwich),
+            ("a schedule that is not block_count long", wrong_length),
+        ] {
+            let outcome = build_forward(&refused);
+
+            assert!(matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })), "{label}: {outcome:?}");
+        }
+    }
+}
+
+mod hybrid_routed_descriptor {
+    use super::*;
+
+    fn descriptor(kinds: &[LayerKind]) -> ModelDescriptor {
+        let attention = LayerAttentionConfig {
+            head_dim: 4,
+            kv_heads: 1,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            key_source_kind: KeySourceKind::ProjectedK,
+            rope_table: RopeTableSel { cos_name: "rope_cos".into(), sin_name: "rope_sin".into() },
+            rope_pairing: RopePairing::SplitHalf { pairs: 1 },
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
+            value_norm: false,
+        };
+        let ffn = LayerFfnConfig {
+            combination: FfnCombination::RoutedWithSharedExpert,
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            ..LayerFfnConfig::exclusive()
+        };
+        let layers = kinds
+            .iter()
+            .map(|&kind| LayerSchedule {
+                kind,
+                attention: LayerAttentionConfig { kv_heads: u32::from(kind == LayerKind::Attention), ..attention.clone() },
+                ffn,
+            })
+            .collect();
+        ModelDescriptor {
+            vocab: 16,
+            embedding: 8,
+            feed_forward: 0,
+            expert_feed_forward: 4,
+            query_heads: 2,
+            block_count: kinds.len() as u32,
+            expert_count: 2,
+            expert_used_count: 1,
+            leading_dense_block_count: 0,
+            l_cache: 0,
+            embedding_scale: None,
+            logit_softcap: None,
+            logit_scale: None,
+            residual_scale: None,
+            layers,
+            cache_strategy: CacheStrategy::Cached,
+            cache_mask: CacheMask::Bounded,
+            ple_dim: None,
+            sliding_kv_ring: false,
+            qk_norm: false,
+            qkv_biases: false,
+            paired_gate_up_reduce: false,
+            fused_qkv_reduce: false,
+            head_repeats: 1,
+            last_row_only: true,
+            speculative_verify: false,
+            ssm_conv_kernel: 2,
+            ssm_state_size: 2,
+            ssm_group_count: 1,
+            ssm_time_step_rank: 2,
+            ssm_inner_size: 4,
+            ssm_epsilon: 1e-6,
+            v_head_reordered: false,
+            expert_shared_feed_forward: 4,
+            prefill_width: None,
+            gated_attention: true,
+        }
+    }
+
+    fn node_depends_on(program: &[Op], node: NodeId, ancestor: NodeId) -> bool {
+        let mut pending = alloc::vec![node];
+        let mut visited = alloc::collections::BTreeSet::new();
+        while let Some(current) = pending.pop() {
+            if current == ancestor {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            match program.get(current.0 as usize) {
+                Some(Op::Elementwise { operands, .. }) => pending.extend(operands.iter().map(|(operand, _)| *operand)),
+                Some(Op::Reduce(reduce)) => pending.push(reduce.operand),
+                Some(Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. }) | None => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn one_gdn_layer_and_one_attention_layer_lower_with_a_diagnostic_boundary_each() {
+        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Attention])).expect("the routed hybrid lowers");
+
+        assert_eq!(lowered.layer_roots.len(), 2, "one cache root per layer");
+        assert_eq!(lowered.moe_sites.0.len(), 2, "one router site per layer");
+        assert_eq!(lowered.layer_diagnostics.len(), 2, "one diagnostic record per layer");
+        let gdn = lowered.layer_diagnostics[0].ssm_taps.clone().expect("the first layer is the gdn layer");
+        assert!(
+            gdn.query_sequence.0 < gdn.state_out.0
+                && gdn.key_sequence.0 < gdn.state_out.0
+                && gdn.value_sequence.0 < gdn.state_out.0
+                && gdn.gate_sequence.0 < gdn.state_out.0
+                && gdn.beta_sequence.0 < gdn.state_out.0,
+            "batched recurrence inputs must precede the state transition"
+        );
+        assert!(
+            gdn.z_head.0 < gdn.delta_out.0 && gdn.state_in.0 < gdn.state_out.0,
+            "the production scan cut must expose its carried inputs before recurrence"
+        );
+        assert!(lowered.layer_diagnostics[1].dense_attention_taps.is_some());
+        assert_ne!(Some(lowered.logits), lowered.hidden, "logits follow the output projection");
+    }
+
+    #[test]
+    fn routed_experts_depend_on_the_diagnostic_router_logits() {
+        let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Attention])).expect("the routed hybrid lowers");
+
+        for (site, diagnostic) in lowered.moe_sites.0.iter().zip(lowered.layer_diagnostics.iter()) {
+            assert!(
+                site.selected.iter().all(|route| node_depends_on(&lowered.program, *route, diagnostic.router_logits)),
+                "layer {} route reductions must consume its diagnostic router logits",
+                site.layer
+            );
+        }
+    }
+
+    #[test]
+    fn a_pinned_prefill_width_makes_the_position_axis_static() {
+        let symbolic = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        let pinned = ModelDescriptor { prefill_width: Some(5), ..symbolic.clone() };
+
+        let leading = |descriptor: &ModelDescriptor| {
+            let lowered = build_forward(descriptor).expect("lowers");
+            lowered.program.iter().find_map(|op| match op {
+                Op::Input { name: Some(name), shape, .. } if name == "ids" => shape.first().copied(),
+                _ => None,
+            })
+        };
+
+        assert_eq!((leading(&symbolic), leading(&pinned)), (Some(Extent::Symbolic(0)), Some(Extent::Static(5))));
+    }
+
+    #[test]
+    fn a_dense_ffn_next_to_a_shared_expert_schedule_is_refused() {
+        let mut mixed = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        mixed.layers[1].ffn.combination = FfnCombination::Exclusive;
+        let mut biased = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        for layer in &mut biased.layers {
+            layer.ffn.routed_expert_bias = true;
+        }
+
+        for (label, refused) in [("a layer that is not routed with a shared expert", mixed), ("a selection bias", biased)] {
+            let outcome = build_forward(&refused);
+
+            assert!(matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })), "{label}: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_shared_expert_ffn_is_refused_by_the_attention_engines() {
+        let mut attention_only = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
+        attention_only.gated_attention = false;
+        attention_only.cache_strategy = CacheStrategy::Cacheless;
+        attention_only.cache_mask = CacheMask::Padded;
+
+        let outcome = build_forward(&attention_only);
+
+        assert!(matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })), "{outcome:?}");
     }
 }

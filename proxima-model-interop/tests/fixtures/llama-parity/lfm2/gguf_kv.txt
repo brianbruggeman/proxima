@@ -1,0 +1,47 @@
+# oracle tool: llama.cpp gguf-py gguf_dump.py (header only, CPU, no tensors) from /Users/brianbruggeman/repos/others/llama.cpp at commit f1ea206218210afb913ae2f5d2c51faed35915da
+# command: cd /Users/brianbruggeman/repos/others/llama.cpp/gguf-py && PYTHONPATH=. uv run --no-project --with numpy --with pyyaml --with tqdm python gguf/scripts/gguf_dump.py --no-tensors /Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf
+# checkpoint: lfm2
+* File is LITTLE endian, script is running on a LITTLE endian host.
+* Dumping 42 key/value pair(s)
+      1: UINT32     |        1 | GGUF.version = 3
+      2: UINT64     |        1 | GGUF.tensor_count = 256
+      3: UINT64     |        1 | GGUF.kv_count = 39
+      4: STRING     |        1 | general.architecture = 'lfm2moe'
+      5: STRING     |        1 | general.type = 'model'
+      6: STRING     |        1 | general.name = 'Feb5E04Da4910Dd56D33F0Cd03747Ff298C1E801'
+      7: STRING     |        1 | general.size_label = '32x959M'
+      8: STRING     |        1 | general.license = 'other'
+      9: STRING     |        1 | general.license.name = 'lfm1.0'
+     10: STRING     |        1 | general.license.link = 'LICENSE'
+     11: UINT32     |        1 | general.base_model.count = 1
+     12: STRING     |        1 | general.base_model.0.name = 'LFM2.5 8B A1B Base'
+     13: STRING     |        1 | general.base_model.0.organization = 'LiquidAI'
+     14: STRING     |        1 | general.base_model.0.repo_url = 'https://huggingface.co/LiquidAI/LFM2.5-8B-A1B-Base'
+     15: [STRING]   |        4 | general.tags = ['liquid', 'lfm2.5', 'edge', 'text-generation']
+     16: [STRING]   |        9 | general.languages = ['en', 'ar', 'zh', 'fr', 'de', 'ja', ...]
+     17: UINT32     |        1 | lfm2moe.block_count = 24
+     18: UINT32     |        1 | lfm2moe.context_length = 128000
+     19: UINT32     |        1 | lfm2moe.embedding_length = 2048
+     20: UINT32     |        1 | lfm2moe.feed_forward_length = 7168
+     21: UINT32     |        1 | lfm2moe.attention.head_count = 32
+     22: [INT32]    |       24 | lfm2moe.attention.head_count_kv = [0, 0, 8, 0, 0, 0, ...]
+     23: FLOAT32    |        1 | lfm2moe.rope.freq_base = 5000000.0
+     24: FLOAT32    |        1 | lfm2moe.attention.layer_norm_rms_epsilon = 9.999999747378752e-06
+     25: UINT32     |        1 | lfm2moe.expert_count = 32
+     26: UINT32     |        1 | lfm2moe.expert_used_count = 4
+     27: UINT32     |        1 | lfm2moe.expert_feed_forward_length = 1792
+     28: UINT32     |        1 | lfm2moe.leading_dense_block_count = 2
+     29: UINT32     |        1 | lfm2moe.expert_gating_func = 2
+     30: UINT32     |        1 | lfm2moe.vocab_size = 128000
+     31: UINT32     |        1 | lfm2moe.shortconv.l_cache = 3
+     32: STRING     |        1 | tokenizer.ggml.model = 'gpt2'
+     33: STRING     |        1 | tokenizer.ggml.pre = 'lfm2'
+     34: [STRING]   |   128000 | tokenizer.ggml.tokens = ['ĊĊĊĊĊĊĊĊĊĊ', 'ĊĊĊĊĊĊĊĊĊ', 'ĊĊĊĊĊĊĊĊ', 'ĊĊĊĊĊĊĊ', 'ĊĊĊĊĊĊ', 'ĊĊĊĊĊ', ...]
+     35: [INT32]    |   128000 | tokenizer.ggml.token_type = [1, 1, 1, 1, 1, 1, ...]
+     36: [STRING]   |   293320 | tokenizer.ggml.merges = ['ĊĊĊĊĊĊĊĊĊ Ċ', 'ĊĊĊĊĊĊĊĊ ĊĊ', 'ĊĊĊĊĊĊĊ ĊĊĊ', 'ĊĊĊĊĊĊ ĊĊĊĊ', 'ĊĊĊĊĊ ĊĊĊĊĊ', 'ĊĊĊĊ ĊĊĊĊĊĊ', ...]
+     37: UINT32     |        1 | tokenizer.ggml.bos_token_id = 124894
+     38: UINT32     |        1 | tokenizer.ggml.eos_token_id = 124900
+     39: UINT32     |        1 | tokenizer.ggml.padding_token_id = 124893
+     40: STRING     |        1 | tokenizer.chat_template = '{{- bos_token -}}\n{%- set preserve_thinking = preserve_th...'
+     41: UINT32     |        1 | general.quantization_version = 2
+     42: UINT32     |        1 | general.file_type = 15

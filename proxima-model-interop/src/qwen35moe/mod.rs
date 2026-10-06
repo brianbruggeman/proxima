@@ -5,11 +5,10 @@ pub mod execution;
 pub mod hparams;
 pub mod layer_boundary;
 mod program;
-mod shared_expert;
 
 pub use bind::{QWEN35MOE, Qwen35MoeArch};
 pub use hparams::{Architecture, LayerKind, from_metadata};
 pub use program::{
-    Qwen35MoeForwardProgram, Qwen35MoeLayerDiagnostics, qwen35moe_forward_program,
+    Qwen35MoeForwardProgram, Qwen35MoeLayerDiagnostics, descriptor_from_architecture, qwen35moe_forward_program,
     qwen35moe_forward_program_at_width,
 };
