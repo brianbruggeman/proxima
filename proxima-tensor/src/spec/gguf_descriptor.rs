@@ -159,6 +159,15 @@ pub fn gemma4_descriptor_from_gguf(
         head_repeats: 1,
         last_row_only: true,
         speculative_verify: profile.speculative_verify,
+        ssm_conv_kernel: 0,
+        ssm_state_size: 0,
+        ssm_group_count: 0,
+        ssm_time_step_rank: 0,
+        ssm_inner_size: 0,
+        ssm_epsilon: 0.0,
+        v_head_reordered: false,
+        expert_shared_feed_forward: 0,
+        prefill_width: None,
     })
 }
 
