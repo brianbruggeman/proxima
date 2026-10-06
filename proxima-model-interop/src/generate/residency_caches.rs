@@ -871,7 +871,7 @@ impl KvPadShape {
 }
 
 /// Copies `source` into `dest`'s own leading rows -- the shared bounds
-/// check every [`KvPadScratch::fill`]/[`Qwen35DenseAttentionPadScratch::fill`]
+/// check every [`KvPadScratch::fill`]/[`DenseAttentionPadScratch::fill`]
 /// leaf copy needs: `dest` was just resized to (at least) `shape`'s own
 /// declared row width, so `source` (this layer's real, unpadded cache)
 /// fitting inside it is the invariant the whole pad-scratch mechanism
@@ -904,21 +904,21 @@ pub(super) fn copy_into_padded(
 }
 
 /// [`LayerCache`]'s 4-wide counterpart for a
-/// [`Qwen35LayerRoots::DenseAttention`] layer -- this checkpoint's own
+/// [`LayerCacheRoots::DenseAttention`] layer -- this checkpoint's own
 /// partial-rotary gap (`proxima_tensor::spec::append_qwen35_dense_attention_layer`'s
 /// own doc) needs a third K component (`k_pass`, the untouched
 /// `rotary_dim..attn_head_dim` remainder) alongside the rotated
 /// `k_first`/`k_second` halves [`LayerCache`]'s `k_even`/`k_odd` already
 /// name for the plain single-section-RoPE checkpoints.
 #[derive(Clone)]
-pub(super) struct Qwen35DenseAttentionCache {
+pub(super) struct DenseAttentionCache {
     pub(super) k_first: Vec<f32>,
     pub(super) k_second: Vec<f32>,
     pub(super) k_pass: Vec<f32>,
     pub(super) v: Vec<f32>,
 }
 
-impl Qwen35DenseAttentionCache {
+impl DenseAttentionCache {
     pub(super) fn new() -> Self {
         Self {
             k_first: Vec::new(),
@@ -936,20 +936,20 @@ impl Qwen35DenseAttentionCache {
     }
 }
 
-/// [`KvPadShape`]'s counterpart for a [`Qwen35DenseAttentionCache`] --
+/// [`KvPadShape`]'s counterpart for a [`DenseAttentionCache`] --
 /// `k_first`/`k_second` share [`KvPadShape::even_odd_len`]'s row width
 /// (both are `pairs`-wide, the same rotary half [`spec::append_qwen35_dense_attention_layer`]'s
 /// `k_first_cache`/`k_second_cache` leaves declare), but `k_pass`/`v` are
 /// `attn_head_dim`-based, not `head_dim`-based, so they need their own
 /// widths rather than reusing [`KvPadShape::v_len`].
-pub(super) struct Qwen35DenseAttentionPadShape {
+pub(super) struct DenseAttentionPadShape {
     pub(super) bound_extent: usize,
     pub(super) even_odd_row: usize,
     pub(super) pass_row: usize,
     pub(super) v_row: usize,
 }
 
-impl Qwen35DenseAttentionPadShape {
+impl DenseAttentionPadShape {
     pub(super) fn even_odd_len(&self) -> usize {
         self.bound_extent * self.even_odd_row
     }
@@ -963,7 +963,7 @@ impl Qwen35DenseAttentionPadShape {
     }
 }
 
-/// [`KvPadScratch`]'s counterpart for a [`Qwen35LayerRoots::DenseAttention`]
+/// [`KvPadScratch`]'s counterpart for a [`LayerCacheRoots::DenseAttention`]
 /// layer -- the same defect [`KvPadScratch`]'s own doc names
 /// (`cached_len` growing 1:1 with the step index defeats
 /// `proxima_tensor::bind::cached_attention_candidates`'s plan-key
@@ -976,14 +976,14 @@ impl Qwen35DenseAttentionPadShape {
 /// works when EVERY layer's bound buffer -- dense-attention included --
 /// is actually that many rows long, zero-padded past the real
 /// `cached_len`.
-pub(super) struct Qwen35DenseAttentionPadScratch {
+pub(super) struct DenseAttentionPadScratch {
     pub(super) k_first: Vec<f32>,
     pub(super) k_second: Vec<f32>,
     pub(super) k_pass: Vec<f32>,
     pub(super) v: Vec<f32>,
 }
 
-impl Qwen35DenseAttentionPadScratch {
+impl DenseAttentionPadScratch {
     pub(super) fn new() -> Self {
         Self {
             k_first: Vec::new(),
@@ -1000,7 +1000,7 @@ impl Qwen35DenseAttentionPadScratch {
     /// `shape` sized that leaf's own scratch buffer to -- see
     /// [`KvPadScratch::fill`]'s own doc for why this can only fire on a
     /// bind whose program under-declares a leaf its own
-    /// [`Qwen35DenseAttentionCache::append`] then over-fills. This is the
+    /// [`DenseAttentionCache::append`] then over-fills. This is the
     /// exact defect measured on the real `qwen3.6:35b-a3b` checkpoint: a
     /// bind's [`crate::lowering::step_state`]
     /// left `attn_head_dim` unset (`None`), which used
@@ -1009,8 +1009,8 @@ impl Qwen35DenseAttentionPadScratch {
     /// mode is gone; the check stays as the general safety net.
     pub(super) fn fill(
         &mut self,
-        source: &Qwen35DenseAttentionCache,
-        shape: &Qwen35DenseAttentionPadShape,
+        source: &DenseAttentionCache,
+        shape: &DenseAttentionPadShape,
         layer: usize,
     ) -> Result<(), InteropError> {
         let even_odd_len = shape.even_odd_len();
@@ -1041,7 +1041,7 @@ impl Qwen35DenseAttentionPadScratch {
         k_second_name: &'cache str,
         k_pass_name: &'cache str,
         v_name: &'cache str,
-        shape: &Qwen35DenseAttentionPadShape,
+        shape: &DenseAttentionPadShape,
     ) -> [(&'cache str, QuantizedBlock<'cache>); 4] {
         [
             (
@@ -1061,7 +1061,7 @@ impl Qwen35DenseAttentionPadScratch {
     }
 }
 
-/// [`LayerCache`]'s counterpart for a [`Qwen35LayerRoots::Ssm`] layer --
+/// [`LayerCache`]'s counterpart for a [`LayerCacheRoots::Ssm`] layer --
 /// `conv_history` is a fixed-size rolling window (the causal conv1d
 /// kernel's own left context, `conv_history_len` elements total, oldest row
 /// dropped as each new one is appended) rather than [`LayerCache`]'s
@@ -1134,15 +1134,15 @@ impl SsmLayerCache {
 /// [`LayerCache::new`]/[`SsmLayerCache::new`] threaded per forward-program
 /// layer, matching [`LoadedModel::layer_roots`]'s own per-layer discriminant
 /// -- an attention layer's cache append/readback shape genuinely differs
-/// from an ssm layer's, the same reason [`Qwen35LayerRoots`] itself is an
+/// from an ssm layer's, the same reason [`LayerCacheRoots`] itself is an
 /// enum rather than a fixed-shape tuple.
 #[derive(Clone)]
 pub(super) enum LayerCacheState {
     Attention(LayerCache),
-    DenseAttention(Qwen35DenseAttentionCache),
+    DenseAttention(DenseAttentionCache),
     Ssm(SsmLayerCache),
     /// gemma4 E2B's cross-layer shared-KV layer
-    /// ([`Qwen35LayerRoots::SharedFromLayer`]'s own doc): no state of its
+    /// ([`LayerCacheRoots::SharedFromLayer`]'s own doc): no state of its
     /// own to grow, fill, or read back -- its `K`/`V` live entirely in the
     /// donor layer's own [`LayerCacheState`] entry.
     SharedFromLayer,
@@ -1252,10 +1252,10 @@ pub(super) enum LayerCacheNames {
 
 /// Which of the three per-layer cache shapes a layer's `Op::Input` leaves
 /// actually declare, at `layer` -- [`LayerCacheNames`]/[`LayerCacheState`]
-/// are now built FROM this, not from [`Qwen35LayerRoots`]'s own
+/// are now built FROM this, not from [`LayerCacheRoots`]'s own
 /// discriminant. A config-edited descriptor can
 /// tag that enum inconsistently with the ops it actually emitted (copy a
-/// [`Qwen35DenseAttentionRoots`] tuple into the wrong variant, drop the
+/// [`DenseAttentionRoots`] tuple into the wrong variant, drop the
 /// `k_pass` leaf); the program's own declared leaf names cannot lie about
 /// what the decode loop must feed, so they are the single source of truth
 /// this type is derived from.
@@ -1265,7 +1265,7 @@ pub(super) enum DeclaredCacheKind {
     DenseAttention,
     Ssm,
     /// gemma4 E2B's cross-layer shared-KV layer
-    /// ([`Qwen35LayerRoots::SharedFromLayer`]'s own doc): this layer
+    /// ([`LayerCacheRoots::SharedFromLayer`]'s own doc): this layer
     /// declares NO `kv_cache.{layer}.*`/`ssm_cache.{layer}.*` `Op::Input`
     /// leaves at all, by design -- its `K`/`V` are a donor layer's
     /// already-declared leaves, read a second time in-graph. The one
@@ -1335,15 +1335,15 @@ pub(super) fn declared_cache_kind(
     }
 }
 
-/// [`Qwen35LayerRoots`]'s own discriminant, read back as a
+/// [`LayerCacheRoots`]'s own discriminant, read back as a
 /// [`DeclaredCacheKind`] so it can be compared against
 /// [`declared_cache_kind`]'s program-derived answer for the same layer.
-pub(super) fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
+pub(super) fn bound_cache_kind(roots: &LayerCacheRoots) -> DeclaredCacheKind {
     match roots {
-        Qwen35LayerRoots::Attention(_) => DeclaredCacheKind::Attention,
-        Qwen35LayerRoots::DenseAttention(_) => DeclaredCacheKind::DenseAttention,
-        Qwen35LayerRoots::Ssm { .. } => DeclaredCacheKind::Ssm,
-        Qwen35LayerRoots::SharedFromLayer(_) => DeclaredCacheKind::SharedFromLayer,
+        LayerCacheRoots::Attention(_) => DeclaredCacheKind::Attention,
+        LayerCacheRoots::DenseAttention(_) => DeclaredCacheKind::DenseAttention,
+        LayerCacheRoots::Ssm { .. } => DeclaredCacheKind::Ssm,
+        LayerCacheRoots::SharedFromLayer(_) => DeclaredCacheKind::SharedFromLayer,
     }
 }
 
@@ -1353,7 +1353,7 @@ pub(super) fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
 /// `[Extent::Symbolic(KV_BOUND), heads, width]`
 /// (`proxima_tensor::spec`'s `append_qwen35_dense_attention_layer`/
 /// `append_mistral_cached_layer` own `input_leaf` calls for these exact
-/// names), so the row width [`KvPadShape`]/[`Qwen35DenseAttentionPadShape`]
+/// names), so the row width [`KvPadShape`]/[`DenseAttentionPadShape`]
 /// need is the PRODUCT of every extent after the leading symbolic
 /// bound-extent slot, not a single dimension. This is the single source of
 /// truth those two shapes size their scratch buffers from -- never
@@ -1443,7 +1443,7 @@ pub(super) fn cache_leaf_total_elements(program: &[Op], name: &str) -> Option<us
         })
 }
 
-/// [`KvPadShape`]/[`Qwen35DenseAttentionPadShape`]'s own row widths for one
+/// [`KvPadShape`]/[`DenseAttentionPadShape`]'s own row widths for one
 /// layer, read once (`self.program` never changes for the lifetime of a
 /// decode call) rather than re-derived from architecture scalars every
 /// step -- see [`cache_leaf_row_elements`]'s own doc for why this is the
@@ -1534,7 +1534,7 @@ pub(super) struct KvStep<'resident> {
 ///
 /// # Errors
 ///
-/// Whatever [`KvPadScratch::fill`]/[`Qwen35DenseAttentionPadScratch::fill`]
+/// Whatever [`KvPadScratch::fill`]/[`DenseAttentionPadScratch::fill`]
 /// can fail with.
 pub(super) fn push_kv_named_blocks<'call>(
     cache_names: &'call [LayerCacheNames],
@@ -1542,7 +1542,7 @@ pub(super) fn push_kv_named_blocks<'call>(
     layer_row_widths: &[LayerPadRowWidths],
     step: KvStep,
     kv_pad_scratch: &'call mut [KvPadScratch],
-    qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
+    qwen35_dense_pad_scratch: &'call mut [DenseAttentionPadScratch],
     named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
 ) -> Result<(), InteropError> {
     let KvStep {
@@ -1573,7 +1573,7 @@ pub(super) fn push_kv_named_blocks<'call>(
                     v_row,
                 },
             ) => {
-                let shape = Qwen35DenseAttentionPadShape {
+                let shape = DenseAttentionPadShape {
                     bound_extent: kv_bound_extent,
                     even_odd_row: *even_odd_row,
                     pass_row: *pass_row,
@@ -1623,7 +1623,7 @@ pub(super) fn push_kv_named_blocks<'call>(
                     v_row,
                 },
             ) => {
-                let shape = Qwen35DenseAttentionPadShape {
+                let shape = DenseAttentionPadShape {
                     bound_extent: kv_bound_extent,
                     even_odd_row: *even_odd_row,
                     pass_row: *pass_row,
@@ -2093,7 +2093,7 @@ pub(super) struct SegmentMetalBindings<'buffers, 'source> {
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-pub(super) struct Qwen35SsmPlacement<'buffers> {
+pub(super) struct SsmPlacement<'buffers> {
     pub(super) input_nodes: &'buffers [Option<NodeId>],
     pub(super) buffers: &'buffers [Option<(PlacedBuffer, PlacedBuffer)>],
     pub(super) maximum_layer: Option<usize>,

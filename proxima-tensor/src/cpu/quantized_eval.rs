@@ -2153,7 +2153,7 @@ pub(super) fn referenced_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
 /// The "traces to a real `Input`" clause is this recognizer's actual axis
 /// guard: reducing the packed weight's own OUTPUT axis instead of its
 /// contraction axis — `per_head_channel_slice`'s former call site against a
-/// packed weight (`spec.rs`'s `Qwen35DenseAttentionTaps` doc, ROW 428) — is
+/// packed weight (`spec.rs`'s `DenseAttentionTaps` doc, ROW 428) — is
 /// NOT distinguishable from a genuine contraction by axis position alone.
 /// This crate's own shipped matmul shapes disagree on which position is
 /// "the" contraction axis (`quantized_matmul_program`'s `[rows, k]` reduces

@@ -37,7 +37,7 @@ use proxima_tensor::op::{Extent, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, CacheMask, CacheStrategy, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
-    ParallelDenseMoeConfig, CachedLayerRoots, ForwardProgram, Qwen35LayerRoots, RopePairing, RopeTableSel,
+    ParallelDenseMoeConfig, CachedLayerRoots, ForwardProgram, LayerCacheRoots, RopePairing, RopeTableSel,
     ValueSourceKind, build_forward,
     SLIDING_KV_SYMBOL, gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
     mistral_cached_forward_program_with_experts_and_layer_taps, mistral_descriptor_from_shape,
@@ -704,11 +704,11 @@ fn model_config_rejects_an_unknown_field() {
     assert!(error.to_string().contains("unknown field"), "got: {error}");
 }
 
-fn owned_cache_roots(layer_roots: &[Qwen35LayerRoots]) -> Vec<CachedLayerRoots> {
+fn owned_cache_roots(layer_roots: &[LayerCacheRoots]) -> Vec<CachedLayerRoots> {
     layer_roots
         .iter()
         .filter_map(|roots| match roots {
-            Qwen35LayerRoots::Attention(cached) => Some(*cached),
+            LayerCacheRoots::Attention(cached) => Some(*cached),
             _ => None,
         })
         .collect()

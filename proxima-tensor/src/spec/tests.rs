@@ -9929,7 +9929,7 @@ async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
     );
     let tail_mixer_out = append_qwen35_gdn_sequence_tail(
         &mut tail_program,
-        Qwen35GdnSequenceTail {
+        GdnSequenceTail {
             x: tail_x,
             delta_out: tail_delta,
             z: tail_z,
@@ -10556,19 +10556,19 @@ fn the_whole_qwen35_forward_pass_infers_at_real_dimensions() {
 
     assert_eq!(roots.len(), 4, "one root set per block");
     assert!(
-        matches!(roots[0], Qwen35LayerRoots::Ssm { .. }),
+        matches!(roots[0], LayerCacheRoots::Ssm { .. }),
         "layer 0 is SSM: (0 + 1) % 2 != 0"
     );
     assert!(
-        matches!(roots[1], Qwen35LayerRoots::DenseAttention(_)),
+        matches!(roots[1], LayerCacheRoots::DenseAttention(_)),
         "layer 1 is dense attention: (1 + 1) % 2 == 0"
     );
     assert!(
-        matches!(roots[2], Qwen35LayerRoots::Ssm { .. }),
+        matches!(roots[2], LayerCacheRoots::Ssm { .. }),
         "layer 2 is SSM: (2 + 1) % 2 != 0"
     );
     assert!(
-        matches!(roots[3], Qwen35LayerRoots::DenseAttention(_)),
+        matches!(roots[3], LayerCacheRoots::DenseAttention(_)),
         "layer 3 is dense attention: (3 + 1) % 2 == 0"
     );
 
@@ -10859,11 +10859,11 @@ fn the_whole_qwen35_forward_pass_infers_at_the_2b_checkpoints_real_dimensions() 
 
     assert_eq!(roots.len(), 24, "one root set per block");
     assert!(
-        matches!(roots[3], Qwen35LayerRoots::DenseAttention(_)),
+        matches!(roots[3], LayerCacheRoots::DenseAttention(_)),
         "layer 3 is dense attention: (3 + 1) % 4 == 0"
     );
     assert!(
-        matches!(roots[0], Qwen35LayerRoots::Ssm { .. }),
+        matches!(roots[0], LayerCacheRoots::Ssm { .. }),
         "layer 0 is SSM: (0 + 1) % 4 != 0"
     );
 
@@ -11142,7 +11142,7 @@ async fn qwen35_gdn_sequence_tail_matches_repeated_one_position_graphs() {
     );
     let output = append_qwen35_gdn_sequence_tail(
         &mut program,
-        Qwen35GdnSequenceTail {
+        GdnSequenceTail {
             x,
             delta_out,
             z,
@@ -15170,7 +15170,7 @@ mod gemma4_synthetic_parity {
         let cache_roots_b: Vec<CachedLayerRoots> = layer_roots_b
             .iter()
             .map(|roots| match roots {
-                Qwen35LayerRoots::Attention(cached) => *cached,
+                LayerCacheRoots::Attention(cached) => *cached,
                 other => panic!("a dense layer carries a plain cache root, got {other:?}"),
             })
             .collect();
@@ -18297,7 +18297,7 @@ mod dense_windows {
             named.push(("kv_cache.0.k_even", cache.k_even.as_slice()));
             named.push(("kv_cache.0.k_odd", cache.k_odd.as_slice()));
             named.push(("kv_cache.0.v", cache.v.as_slice()));
-            let Qwen35LayerRoots::Attention((even, odd, value)) = layer_roots[0] else {
+            let LayerCacheRoots::Attention((even, odd, value)) = layer_roots[0] else {
                 panic!("the one dense layer owns a plain cache root");
             };
             let evaluated = crate::cpu::evaluate_named(
@@ -18630,9 +18630,9 @@ mod layer_roots {
         let rebuilt = layer_roots_from_cache(&schedule, alloc::vec![roots(10), roots(20)])
             .expect("two roots for two owning layers");
 
-        assert!(matches!(rebuilt[0], Qwen35LayerRoots::Attention((NodeId(10), _, _))));
-        assert!(matches!(rebuilt[1], Qwen35LayerRoots::Attention((NodeId(20), _, _))));
-        assert!(matches!(rebuilt[2], Qwen35LayerRoots::SharedFromLayer(1)));
+        assert!(matches!(rebuilt[0], LayerCacheRoots::Attention((NodeId(10), _, _))));
+        assert!(matches!(rebuilt[1], LayerCacheRoots::Attention((NodeId(20), _, _))));
+        assert!(matches!(rebuilt[2], LayerCacheRoots::SharedFromLayer(1)));
         assert_eq!(rebuilt.len(), 4);
     }
 
@@ -18750,9 +18750,9 @@ mod hybrid_dense_descriptor {
             let recurs = leaves.contains(&alloc::format!("ssm_cache.{layer}.state"));
             assert_eq!((attends, recurs), (*kind == LayerKind::Attention, *kind == LayerKind::Gdn), "layer {layer}");
         }
-        assert!(matches!(lowered.layer_roots[0], Qwen35LayerRoots::Ssm { .. }));
-        assert!(matches!(lowered.layer_roots[1], Qwen35LayerRoots::DenseAttention(_)));
-        assert!(matches!(lowered.layer_roots[4], Qwen35LayerRoots::DenseAttention(_)));
+        assert!(matches!(lowered.layer_roots[0], LayerCacheRoots::Ssm { .. }));
+        assert!(matches!(lowered.layer_roots[1], LayerCacheRoots::DenseAttention(_)));
+        assert!(matches!(lowered.layer_roots[4], LayerCacheRoots::DenseAttention(_)));
         crate::shape::infer(&lowered.program, &[1, 0]).expect("the lowered program infers at a decode step");
     }
 
@@ -18773,7 +18773,7 @@ mod hybrid_dense_descriptor {
     fn a_schedule_of_only_recurrent_layers_lowers_the_leading_stack_of_a_hybrid() {
         let lowered = build_forward(&descriptor(&[LayerKind::Gdn, LayerKind::Gdn])).expect("a recurrent-only prefix lowers");
 
-        assert!(lowered.layer_roots.iter().all(|roots| matches!(roots, Qwen35LayerRoots::Ssm { .. })));
+        assert!(lowered.layer_roots.iter().all(|roots| matches!(roots, LayerCacheRoots::Ssm { .. })));
         crate::shape::infer(&lowered.program, &[1, 0]).expect("the prefix infers at a decode step");
     }
 

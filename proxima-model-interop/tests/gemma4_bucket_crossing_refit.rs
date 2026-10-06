@@ -24,7 +24,7 @@ use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{KvLayout, bind_checkpoint_with_kv_layout, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOp, BoundOpKind};
-use proxima_tensor::spec::Qwen35LayerRoots;
+use proxima_tensor::spec::LayerCacheRoots;
 use proxima_tensor::{
     NodeId, NumericPolicy, Op, Shapes, bind_with_fusion, dead_resolved_nodes, infer, prune_dead,
     refit_cached_attention_rows,
@@ -34,10 +34,10 @@ const SLIDING_WINDOW: usize = 512;
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
-fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]) -> Vec<NodeId> {
+fn production_step_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots]) -> Vec<NodeId> {
     let mut outputs = vec![logits_root];
     for roots_for_layer in layer_roots {
-        if let Qwen35LayerRoots::Attention((even, odd, value)) = roots_for_layer {
+        if let LayerCacheRoots::Attention((even, odd, value)) = roots_for_layer {
             outputs.extend([*even, *odd, *value]);
         }
     }

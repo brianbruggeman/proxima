@@ -597,7 +597,7 @@ pub enum InteropError {
     /// names a cache shape (`bound`) that disagrees with what the compiled
     /// program actually declares as `Op::Input` leaves for that layer
     /// (`declared`) -- a bound program whose layer roots tag the wrong
-    /// `proxima_tensor::spec::Qwen35LayerRoots` variant for a layer it built
+    /// `proxima_tensor::spec::LayerCacheRoots` variant for a layer it built
     /// correctly otherwise. Caught once, at decode-loop
     /// setup, instead of surfacing later as a confusing
     /// [`Self::MissingStepInput`] on a leaf the decode loop never even
@@ -687,7 +687,7 @@ pub enum InteropError {
 
     /// A pad-scratch buffer's row width (`expected`, elements) came out
     /// smaller than the growing per-layer cache it was about to copy from
-    /// (`found`) -- `crate::generate::Qwen35DenseAttentionPadScratch::fill`
+    /// (`found`) -- `crate::generate::DenseAttentionPadScratch::fill`
     /// (and its `KvPadScratch` counterpart)'s own row widths are read back
     /// off `layer`'s `kv_cache.{layer}.*` `Op::Input` leaves as declared by
     /// the bound program, which is authoritative; this only fires if a

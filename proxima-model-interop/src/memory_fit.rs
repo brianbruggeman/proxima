@@ -54,7 +54,7 @@ pub fn kv_row_bytes(kv_heads: u32, head_dim: u32) -> u64 {
 /// A checkpoint's own on-disk weight bytes, by class --
 /// [`crate::bind::tensor_bytes_by_class`]'s own three-way split
 /// (dense/experts/tables) plus the SSM recurrent-state bytes a qwen35
-/// hybrid checkpoint's layers hold ([`crate::generate::Qwen35SsmShape`]'s
+/// hybrid checkpoint's layers hold ([`crate::generate::SsmShape`]'s
 /// own doc; `0` for every other architecture). Never a context-dependent
 /// class -- these bytes are fixed once a checkpoint is chosen, unlike
 /// [`MemoryBudget::kv_cache_bytes`].

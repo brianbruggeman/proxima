@@ -894,21 +894,21 @@ pub struct LoadedModel<'file> {
     /// `file_bytes.len()` at load time -- see [`Self::checkpoint_bytes`].
     pub(super) checkpoint_bytes: usize,
     /// One entry per forward-program layer, in layer order --
-    /// [`Qwen35LayerRoots::Attention`] for every layer on the dense path
+    /// [`LayerCacheRoots::Attention`] for every layer on the dense path
     /// (`Self::load`/`Self::load_from_safetensors` wrap
     /// `mistral_cached_forward_program_with_experts`'s own
     /// [`CachedLayerRoots`] in that variant so both checkpoint families
     /// share one cache-threading loop, [`Self::run_decode_loop`]), and a mix
-    /// of [`Qwen35LayerRoots::Attention`]/[`Qwen35LayerRoots::Ssm`] on the
+    /// of [`LayerCacheRoots::Attention`]/[`LayerCacheRoots::Ssm`] on the
     /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
-    pub(super) layer_roots: Vec<Qwen35LayerRoots>,
+    pub(super) layer_roots: Vec<LayerCacheRoots>,
     /// One post-layer residual root per dense layer, when the forward
     /// builder exposes them (`crate::lowering::BoundProgram::residual_roots`'s
     /// own doc) -- empty on the qwen35 hybrid path, which has no single
     /// per-layer residual node. See [`Self::layer_residual_roots`].
     pub(super) residual_roots: Vec<NodeId>,
     /// Graph-level producer boundaries for each qwen35moe layer.
-    pub(super) qwen35moe_layer_diagnostics: Vec<crate::qwen35moe::Qwen35MoeLayerDiagnostics>,
+    pub(super) qwen35moe_layer_diagnostics: Vec<crate::qwen35moe::MoeLayerDiagnostics>,
     /// Router-logit roots aligned with routed layers.  Qwen35MoE fills this
     /// from the same graph nodes used by its gather; other architectures leave
     /// it empty.  These roots are the concrete input to a future per-layer
@@ -969,7 +969,7 @@ pub struct LoadedModel<'file> {
     /// reads back one row per drafted token instead of one row total.
     /// `None` unless the descriptor arms verify -- built once, at load time,
     /// never per step, since the program itself never changes.
-    pub(super) speculative_verify_program: Option<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>)>,
+    pub(super) speculative_verify_program: Option<(Vec<Op>, NodeId, Vec<LayerCacheRoots>)>,
     /// The same `file_bytes` slice [`Self::load`]/[`Self::load_inner`]
     /// registered with `omega::backend::register_checkpoint_mapping` (GGUF
     /// checkpoints only -- [`Self::load_from_safetensors`] never registers
@@ -1041,11 +1041,11 @@ pub struct LoadedModel<'file> {
 /// the dense partitions beside that concrete shape prevents every prompt
 /// position from repeating partitioning, topological ordering, and shape
 /// inference before it can execute the same router/residency/gather phases.
-pub(super) struct Qwen35MoePreGatherPlan {
+pub(super) struct PreGatherPlan {
     pub(super) symbols: Vec<u64>,
     pub(super) gdn_backend: GdnPrefillBackend,
     pub(super) persistent_cuts: bool,
-    pub(super) layers: Vec<Qwen35MoeLayerSegments>,
+    pub(super) layers: Vec<MoeLayerSegments>,
     pub(super) suffix: crate::qwen35moe::execution::MappedLayerSegment,
     pub(super) prefix_carried_nodes: BTreeSet<NodeId>,
     pub(super) global_cut_nodes: BTreeSet<NodeId>,
@@ -1055,13 +1055,13 @@ pub(super) struct Qwen35MoePreGatherPlan {
 
 #[cfg(feature = "qwen35moe-expert-prefetch")]
 #[derive(Clone, Copy)]
-pub(super) struct Qwen35MoeRouteHistory {
+pub(super) struct MoeRouteHistory {
     pub(super) routes: [crate::residency::RoutedExpert; 16],
     pub(super) len: usize,
 }
 
 #[cfg(feature = "qwen35moe-expert-prefetch")]
-impl Default for Qwen35MoeRouteHistory {
+impl Default for MoeRouteHistory {
     fn default() -> Self {
         Self {
             routes: [crate::residency::RoutedExpert {
@@ -1079,7 +1079,7 @@ pub(super) fn qwen35moe_expert_prefetch_requested(value: bool) -> bool {
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-pub(super) struct Qwen35DenseAttentionBuffers {
+pub(super) struct DenseAttentionBuffers {
     pub(super) k_first: PlacedBuffer,
     pub(super) k_second: PlacedBuffer,
     pub(super) k_pass: PlacedBuffer,
@@ -1090,9 +1090,9 @@ pub(super) struct Qwen35DenseAttentionBuffers {
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-pub(super) struct Qwen35DenseAttentionPlacement<'buffers> {
+pub(super) struct DenseAttentionPlacement<'buffers> {
     pub(super) input_nodes: &'buffers [Option<(NodeId, NodeId, NodeId, NodeId)>],
-    pub(super) buffers: &'buffers [Option<Qwen35DenseAttentionBuffers>],
+    pub(super) buffers: &'buffers [Option<DenseAttentionBuffers>],
 }
 
 // device residency is a backend property, not a pre-gather-mode property
@@ -1151,7 +1151,7 @@ pub(super) fn retain_qwen35_segment_readbacks<RouterPlacement>(
     });
 }
 
-pub(super) struct Qwen35MoeLayerSegments {
+pub(super) struct MoeLayerSegments {
     pub(super) router: crate::qwen35moe::execution::MappedLayerSegment,
     pub(super) gather: crate::qwen35moe::execution::MappedLayerSegment,
     /// The graph segment from this layer's router through its gather and the
@@ -1460,7 +1460,7 @@ pub(super) struct PreGatherContext<'context, 'mapping, 'file> {
     pub(super) all_low_expert_scratch:
         &'context mut crate::expert_slab::AllLowExpertSourceScratch<'mapping>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) ssm_placement: Option<&'context Qwen35SsmPlacement<'context>>,
+    pub(super) ssm_placement: Option<&'context SsmPlacement<'context>>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) dense_attention_placement: Option<&'context Qwen35DenseAttentionPlacement<'context>>,
+    pub(super) dense_attention_placement: Option<&'context DenseAttentionPlacement<'context>>,
 }

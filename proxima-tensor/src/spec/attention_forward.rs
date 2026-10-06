@@ -2987,7 +2987,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
 }
 
 /// Per-layer roots [`qwen35_forward_program`]'s own caller threads back in
-/// as next-call cache [`Op::Input`]s -- [`Qwen35DenseAttentionRoots`]'s own
+/// as next-call cache [`Op::Input`]s -- [`DenseAttentionRoots`]'s own
 /// 4-wide KV-cache shape for a dense-attention layer
 /// (`append_qwen35_dense_attention_layer`'s own doc walks through why it
 /// is 4-wide, not [`CachedLayerRoots`]'s 3), or `append_qwen35_ssm_mixer`'s
@@ -3003,9 +3003,9 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
 /// caller's cache-threading loop, and its `LayerCache`, are unaffected by
 /// this checkpoint's own partial-rotary gap.
 #[derive(Debug, Clone, Copy)]
-pub enum Qwen35LayerRoots {
+pub enum LayerCacheRoots {
     Attention(CachedLayerRoots),
-    DenseAttention(Qwen35DenseAttentionRoots),
+    DenseAttention(DenseAttentionRoots),
     Ssm {
         qkv_mixed: NodeId,
         state_out: NodeId,
@@ -3077,7 +3077,7 @@ pub fn qwen35_forward_program(
     ssm_d_inner: u32,
     ssm_d_conv: u32,
     rms_eps: f32,
-) -> Result<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>), TensorError> {
+) -> Result<(Vec<Op>, NodeId, Vec<LayerCacheRoots>), TensorError> {
     qwen35_forward_program_with_last_row(
         vocab,
         embedding,
@@ -3118,7 +3118,7 @@ pub fn qwen35_forward_program_with_last_row(
     ssm_d_conv: u32,
     rms_eps: f32,
     last_row_only: bool,
-) -> Result<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>), TensorError> {
+) -> Result<(Vec<Op>, NodeId, Vec<LayerCacheRoots>), TensorError> {
     if full_attention_interval == 0 {
         return Err(TensorError::InvalidFullAttentionInterval {
             full_attention_interval,

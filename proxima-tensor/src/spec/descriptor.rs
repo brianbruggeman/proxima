@@ -566,11 +566,11 @@ pub struct ForwardProgram {
     /// The root a decode step samples from.
     pub logits: NodeId,
     /// One entry per layer that carries or reads a cache, in layer order:
-    /// [`Qwen35LayerRoots::Attention`] for a layer that owns a KV cache,
-    /// [`Qwen35LayerRoots::SharedFromLayer`] for a gemma4 shared-KV layer that
+    /// [`LayerCacheRoots::Attention`] for a layer that owns a KV cache,
+    /// [`LayerCacheRoots::SharedFromLayer`] for a gemma4 shared-KV layer that
     /// reads another layer's. Empty under [`CacheStrategy::Cacheless`], which
     /// keeps no cache.
-    pub layer_roots: Vec<Qwen35LayerRoots>,
+    pub layer_roots: Vec<LayerCacheRoots>,
     /// One [`MoeSite`] per routed layer; empty for a dense program.
     pub moe_sites: MoeSites,
     /// One residual root per layer, populated only by [`CacheMask::Bounded`]'s
@@ -584,10 +584,10 @@ pub struct ForwardProgram {
     pub duplicate_head_roots: Vec<NodeId>,
     /// One diagnostic boundary per layer, populated only by the recurrent
     /// hybrid engine's routed arm; empty for every other engine.
-    pub layer_diagnostics: Vec<Qwen35MoeLayerDiagnostics>,
+    pub layer_diagnostics: Vec<MoeLayerDiagnostics>,
 }
 
-/// One [`Qwen35LayerRoots`] per layer for a cached program: the engine returns
+/// One [`LayerCacheRoots`] per layer for a cached program: the engine returns
 /// one [`CachedLayerRoots`] per layer whose [`KeySourceKind`] is
 /// [`KeySourceKind::ProjectedK`] (a shared-KV layer owns no cache leaves),
 /// and this zips them back against the schedule so the result has one entry
@@ -596,7 +596,7 @@ pub struct ForwardProgram {
 pub(super) fn layer_roots_from_cache(
     layers: &[LayerSchedule],
     cache_roots: Vec<CachedLayerRoots>,
-) -> Result<Vec<Qwen35LayerRoots>, TensorError> {
+) -> Result<Vec<LayerCacheRoots>, TensorError> {
     let expected = layers
         .iter()
         .filter(|layer| layer.attention.key_source_kind == KeySourceKind::ProjectedK)
@@ -609,9 +609,9 @@ pub(super) fn layer_roots_from_cache(
         .map(|layer| match layer.attention.key_source_kind {
             KeySourceKind::ProjectedK => cache_roots
                 .next()
-                .map(Qwen35LayerRoots::Attention)
+                .map(LayerCacheRoots::Attention)
                 .ok_or_else(mismatch),
-            KeySourceKind::SharedFromLayer(source) => Ok(Qwen35LayerRoots::SharedFromLayer(source)),
+            KeySourceKind::SharedFromLayer(source) => Ok(LayerCacheRoots::SharedFromLayer(source)),
         })
         .collect::<Result<Vec<_>, _>>()?;
     match cache_roots.next() {

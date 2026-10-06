@@ -21,7 +21,7 @@ use omega::PackedOperands;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{KvLayout, bind_checkpoint_with_kv_layout, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOpKind, prune_dead};
-use proxima_tensor::spec::Qwen35LayerRoots;
+use proxima_tensor::spec::LayerCacheRoots;
 use proxima_tensor::{DType, NodeId, NumericPolicy, bind_with_fusion, infer};
 
 const GEMMA4_E2B_DEFAULT_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
@@ -54,10 +54,10 @@ fn require_fixture(path: &str, env_var: &str) {
     );
 }
 
-fn production_step_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]) -> Vec<NodeId> {
+fn production_step_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots]) -> Vec<NodeId> {
     let mut outputs = vec![logits_root];
     for roots_for_layer in layer_roots {
-        if let Qwen35LayerRoots::Attention((even, odd, value)) = roots_for_layer {
+        if let LayerCacheRoots::Attention((even, odd, value)) = roots_for_layer {
             outputs.extend([*even, *odd, *value]);
         }
     }

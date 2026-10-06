@@ -191,7 +191,7 @@ impl<'file> LoadedModel<'file> {
         symbols: &[u64],
         gdn_backend: GdnPrefillBackend,
         persistent_cuts: bool,
-    ) -> Result<Qwen35MoePreGatherPlan, InteropError> {
+    ) -> Result<PreGatherPlan, InteropError> {
         let last_layer_output = self
             .qwen35moe_layer_diagnostics
             .last()
@@ -331,7 +331,7 @@ impl<'file> LoadedModel<'file> {
             } else {
                 None
             };
-            layers.push(Qwen35MoeLayerSegments {
+            layers.push(MoeLayerSegments {
                 router,
                 gather,
                 gather_next_router,
@@ -521,7 +521,7 @@ impl<'file> LoadedModel<'file> {
             BTreeMap::new()
         };
 
-        Ok(Qwen35MoePreGatherPlan {
+        Ok(PreGatherPlan {
             symbols: symbols.to_vec(),
             gdn_backend,
             persistent_cuts,
@@ -537,7 +537,7 @@ impl<'file> LoadedModel<'file> {
     pub(super) fn evaluate_qwen35moe_pre_gather<'mapping, BeforeGather>(
         &self,
         runtime: &mut BackendRuntime,
-        plan: &Qwen35MoePreGatherPlan,
+        plan: &PreGatherPlan,
         symbols: &[u64],
         context: PreGatherContext<'_, 'mapping, 'file>,
         mut before_gather: BeforeGather,
@@ -1067,7 +1067,7 @@ impl<'file> LoadedModel<'file> {
                 let placed_dense_roots = dense_attention_placement
                     .and_then(|placement| placement.buffers[layer].as_ref())
                     .and_then(|_| match self.layer_roots[layer] {
-                        Qwen35LayerRoots::DenseAttention(roots) => Some(roots),
+                        LayerCacheRoots::DenseAttention(roots) => Some(roots),
                         _ => None,
                     });
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1133,7 +1133,7 @@ impl<'file> LoadedModel<'file> {
                 if is_router
                     && let Some(placement) = dense_attention_placement
                     && let (
-                        Qwen35LayerRoots::DenseAttention(roots),
+                        LayerCacheRoots::DenseAttention(roots),
                         Some(input_nodes),
                         Some(buffers),
                     ) = (
@@ -1191,7 +1191,7 @@ impl<'file> LoadedModel<'file> {
                         .maximum_layer
                         .is_none_or(|maximum| layer <= maximum)
                     && let (
-                        Qwen35LayerRoots::Ssm { state_out, .. },
+                        LayerCacheRoots::Ssm { state_out, .. },
                         Some(state_input),
                         Some((first_buffer, second_buffer)),
                     ) = (
@@ -2319,7 +2319,7 @@ impl<'file> LoadedModel<'file> {
     /// Graph-level producer boundaries for every qwen35moe layer, in layer
     /// order. Non-qwen35moe models return an empty slice.
     #[must_use]
-    pub fn qwen35moe_layer_diagnostics(&self) -> &[crate::qwen35moe::Qwen35MoeLayerDiagnostics] {
+    pub fn qwen35moe_layer_diagnostics(&self) -> &[crate::qwen35moe::MoeLayerDiagnostics] {
         &self.qwen35moe_layer_diagnostics
     }
 

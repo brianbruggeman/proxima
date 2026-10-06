@@ -1370,7 +1370,7 @@ mod real_program_names {
     use omega::PackedOperands;
     use proxima_gguf::parse_complete;
     use proxima_model_interop::{bind_checkpoint, bind_symbols};
-    use proxima_tensor::spec::Qwen35LayerRoots;
+    use proxima_tensor::spec::LayerCacheRoots;
     use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
 
     use super::*;
@@ -1378,10 +1378,10 @@ mod real_program_names {
     const NEW_COUNT: usize = 1;
     const KV_BUCKET_EXTENT: usize = 32;
 
-    fn production_outputs(logits_root: NodeId, layer_roots: &[Qwen35LayerRoots]) -> Vec<NodeId> {
+    fn production_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots]) -> Vec<NodeId> {
         let mut outputs = vec![logits_root];
         for roots in layer_roots {
-            if let Qwen35LayerRoots::Attention((even, odd, value)) = roots {
+            if let LayerCacheRoots::Attention((even, odd, value)) = roots {
                 outputs.extend([*even, *odd, *value]);
             }
         }

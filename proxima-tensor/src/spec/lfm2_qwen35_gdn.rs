@@ -1132,7 +1132,7 @@ pub struct SsmMixerTaps {
 /// this algebra applies the checkpoint's per-row RMSNorm, output gate,
 /// projection, and residual without erasing the sequence axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Qwen35GdnSequenceTail {
+pub struct GdnSequenceTail {
     pub x: NodeId,
     pub delta_out: NodeId,
     pub z: NodeId,
@@ -1146,7 +1146,7 @@ pub struct Qwen35GdnSequenceTail {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Qwen35GdnSequenceTailTaps {
+pub struct GdnSequenceTailTaps {
     pub gated_value: NodeId,
     pub projected: NodeId,
     pub output: NodeId,
@@ -1160,15 +1160,15 @@ pub struct Qwen35GdnSequenceTailTaps {
 /// router.
 pub fn append_qwen35_gdn_sequence_tail(
     program: &mut Vec<Op>,
-    tail: Qwen35GdnSequenceTail,
+    tail: GdnSequenceTail,
 ) -> Result<NodeId, TensorError> {
     Ok(append_qwen35_gdn_sequence_tail_with_taps(program, tail)?.output)
 }
 
 pub fn append_qwen35_gdn_sequence_tail_with_taps(
     program: &mut Vec<Op>,
-    tail: Qwen35GdnSequenceTail,
-) -> Result<Qwen35GdnSequenceTailTaps, TensorError> {
+    tail: GdnSequenceTail,
+) -> Result<GdnSequenceTailTaps, TensorError> {
     let squared = elementwise(
         program,
         DType::Float32,
@@ -1276,7 +1276,7 @@ pub fn append_qwen35_gdn_sequence_tail_with_taps(
         ScalarOp::Add,
         &[(tail.x, "sd->sd"), (projected, "sd->sd")],
     )?;
-    Ok(Qwen35GdnSequenceTailTaps {
+    Ok(GdnSequenceTailTaps {
         gated_value: gated,
         projected,
         output,
@@ -1464,7 +1464,7 @@ pub(super) fn qwen35_gdn_sequence_position(
 /// [`append_qwen35_ssm_mixer_with_taps_and_layout`] unrolls -- grouped so the
 /// state-threading loop and the stacked-`delta_out` accumulation share one
 /// call per position instead of two.
-pub(super) struct Qwen35GdnRecurrenceStep {
+pub(super) struct GdnRecurrenceStep {
     pub(super) query: NodeId,
     pub(super) key: NodeId,
     pub(super) value: NodeId,
@@ -1493,7 +1493,7 @@ pub(super) fn qwen35_gdn_recurrence_step(
     state_in: NodeId,
     inv_sqrt_key_dim: NodeId,
     position: u32,
-) -> Result<Qwen35GdnRecurrenceStep, TensorError> {
+) -> Result<GdnRecurrenceStep, TensorError> {
     let query = qwen35_gdn_sequence_position(program, query_sequence, "dug", position)?;
     let key = qwen35_gdn_sequence_position(program, key_sequence, "dug", position)?;
     let value = qwen35_gdn_sequence_position(program, value_sequence, "jug", position)?;
@@ -1511,7 +1511,7 @@ pub(super) fn qwen35_gdn_recurrence_step(
         inv_sqrt_key_dim,
         "ug",
     )?;
-    Ok(Qwen35GdnRecurrenceStep {
+    Ok(GdnRecurrenceStep {
         query,
         key,
         value,
@@ -2016,7 +2016,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         // caller.
         let tail = append_qwen35_gdn_sequence_tail_with_taps(
             program,
-            Qwen35GdnSequenceTail {
+            GdnSequenceTail {
                 x,
                 delta_out,
                 z: z_split,

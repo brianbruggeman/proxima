@@ -21,7 +21,7 @@
 //! [`proxima_tensor::spec::qwen35_forward_program`] instead, interleaving
 //! `append_mistral_cached_layer`'s dense-attention shape with
 //! `append_qwen35_ssm_mixer`'s gated-DeltaNet mixer per
-//! `crate::qwen35::Qwen35LayerKind`. Its dense-attention layers still run
+//! `crate::qwen35::IntervalLayerKind`. Its dense-attention layers still run
 //! `append_mistral_cached_layer`'s single-section RoPE rather than this
 //! checkpoint's real 4-section MRoPE (`qwen35.rope.dimension_sections`) --
 //! a known, documented correctness gap on those layers, not a crash -- this

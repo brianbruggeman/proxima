@@ -3246,7 +3246,7 @@ fn reject_non_float32_still_rejects_a_quantized_node_outside_matmul_shape() {
 }
 
 /// ROW 429's own regression: `per_head_channel_slice`'s former call site
-/// against a packed weight (`spec.rs`'s `Qwen35DenseAttentionTaps` doc,
+/// against a packed weight (`spec.rs`'s `DenseAttentionTaps` doc,
 /// ROW 428) built exactly this shape — a `UInt8` weight `Multiply`-ed
 /// against a one-hot mask built ENTIRELY from `Op::Iota` and `Equal`
 /// (no real data anywhere in its ancestry), feeding an `Add`-reduce.

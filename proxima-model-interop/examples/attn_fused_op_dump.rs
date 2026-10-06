@@ -95,14 +95,14 @@ fn alloc_outputs(bound_program: &proxima_model_interop::BoundProgram<'_>) -> Vec
     outputs.push(bound_program.logits_root);
     for roots_for_layer in &bound_program.layer_roots {
         match roots_for_layer {
-            proxima_tensor::spec::Qwen35LayerRoots::Attention((even, odd, value)) => {
+            proxima_tensor::spec::LayerCacheRoots::Attention((even, odd, value)) => {
                 outputs.push(*even);
                 outputs.push(*odd);
                 outputs.push(*value);
             }
-            proxima_tensor::spec::Qwen35LayerRoots::SharedFromLayer(_) => {}
-            proxima_tensor::spec::Qwen35LayerRoots::DenseAttention(_)
-            | proxima_tensor::spec::Qwen35LayerRoots::Ssm { .. } => {
+            proxima_tensor::spec::LayerCacheRoots::SharedFromLayer(_) => {}
+            proxima_tensor::spec::LayerCacheRoots::DenseAttention(_)
+            | proxima_tensor::spec::LayerCacheRoots::Ssm { .. } => {
                 panic!("gemma4 E2B's own layer schedule is Attention/SharedFromLayer only")
             }
         }

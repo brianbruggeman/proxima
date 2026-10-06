@@ -457,7 +457,7 @@ pub fn append_qwen35_dense_attention_only(
     k_second_cache: NodeId,
     k_pass_cache: NodeId,
     v_cache: NodeId,
-) -> Result<(NodeId, Qwen35DenseAttentionRoots), TensorError> {
+) -> Result<(NodeId, DenseAttentionRoots), TensorError> {
     let (residual1, taps) = append_qwen35_dense_attention_only_with_taps(
         program,
         x,
@@ -528,7 +528,7 @@ pub fn append_qwen35_dense_attention_only(
 /// mathematically identical to a fused-then-chunked projection since matmul
 /// distributes over disjoint output columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Qwen35DenseAttentionTaps {
+pub struct DenseAttentionTaps {
     /// `x_normed`: the RMS-normalized dense-attention input consumed by the
     /// q/gate, key, and value projections.
     pub normed: NodeId,
@@ -562,19 +562,19 @@ pub struct Qwen35DenseAttentionTaps {
     /// `gated_attended @ wo`, reduced, before the residual add.
     pub o_proj_out: NodeId,
     /// new-position rotated-and-passed-through key half, first RoPE half --
-    /// [`Qwen35DenseAttentionRoots`]'s own first element, cached for the
+    /// [`DenseAttentionRoots`]'s own first element, cached for the
     /// next call.
     pub rotated_k_new_first: NodeId,
-    /// [`Qwen35DenseAttentionRoots`]'s own second element.
+    /// [`DenseAttentionRoots`]'s own second element.
     pub rotated_k_new_second: NodeId,
-    /// [`Qwen35DenseAttentionRoots`]'s own third element (untouched pass-through `k`).
+    /// [`DenseAttentionRoots`]'s own third element (untouched pass-through `k`).
     pub k_pass: NodeId,
-    /// [`Qwen35DenseAttentionRoots`]'s own fourth element (new-position `v`).
+    /// [`DenseAttentionRoots`]'s own fourth element (new-position `v`).
     pub v_new: NodeId,
 }
 
 /// [`append_qwen35_dense_attention_only`]'s full implementation, returning
-/// every [`Qwen35DenseAttentionTaps`] intermediate alongside the residual
+/// every [`DenseAttentionTaps`] intermediate alongside the residual
 /// output for a caller that needs to bisect the attention block (q/gate
 /// split, qk-norm, rotary, scores, gate, `o_proj`) against an independent
 /// reference -- a downstream `qwen35moe`-shaped consumer's own layer-3
@@ -607,7 +607,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     k_second_cache: NodeId,
     k_pass_cache: NodeId,
     v_cache: NodeId,
-) -> Result<(NodeId, Qwen35DenseAttentionTaps), TensorError> {
+) -> Result<(NodeId, DenseAttentionTaps), TensorError> {
     let pass_dim = attn_head_dim - rotary_dim;
 
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
@@ -813,7 +813,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     )?;
     // `k_first_cache`/`k_second_cache`/`k_pass_cache`/`v_cache` are bound to
     // the CALLER's own bucketed `kv_extent`, not the real `cached_len`
-    // (`Qwen35DenseAttentionPadScratch::fill`'s own doc) -- rows
+    // (`DenseAttentionPadScratch::fill`'s own doc) -- rows
     // `[cached_len, bound_extent)` are zero-padding, not history. Unlike the
     // `Attention` arm, which excludes that padding via the fused
     // `BoundOpKind::CachedAttention` op's own `cached_key_rows` runtime
@@ -1138,7 +1138,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
 
-    let taps = Qwen35DenseAttentionTaps {
+    let taps = DenseAttentionTaps {
         normed,
         q_split: q_raw,
         gate_split: gate_raw,
@@ -1200,7 +1200,7 @@ pub fn append_qwen35_dense_attention_layer(
     k_second_cache: NodeId,
     k_pass_cache: NodeId,
     v_cache: NodeId,
-) -> Result<(NodeId, Qwen35DenseAttentionRoots), TensorError> {
+) -> Result<(NodeId, DenseAttentionRoots), TensorError> {
     let (residual1, roots) = append_qwen35_dense_attention_only(
         program,
         x,

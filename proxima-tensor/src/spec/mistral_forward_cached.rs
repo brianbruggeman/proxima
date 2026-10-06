@@ -365,7 +365,7 @@ pub enum DuplicateHeadPosition {
 /// `modeling_qwen3_next.py:205-210`), `k_pass` is the untouched remainder
 /// (`k[..., rotary_dim:]`, `modeling_qwen3_next.py:206`, concatenated back
 /// in the oracle, never dropped), `v` the un-rotated projected value.
-pub type Qwen35DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
+pub type DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
 
 /// [`append_mistral_layer`]'s key/value-cached counterpart: `x` carries only
 /// the `new` positions this call introduces (`s`, sized by symbol 0), and
