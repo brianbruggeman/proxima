@@ -1,5 +1,28 @@
 # windows port execution evidence
 
+## client TLS roots, target worktree
+
+Worktree: `proxima-tls-native-roots`, branch `feat/tls-root-settings`.
+These are current-worktree observations from Darwin arm64 plus an MSVC
+cross-target check; none is native Windows runtime evidence.
+
+| contract | observation | raw artifact |
+|---|---|---|
+| AC7/AC9 target defaults and root policy | 9 selected tests passed, 0 failed, 27 skipped by filter | `/private/tmp/proxima-windows-evidence/tls-native-roots/card-6-host.stdout` |
+| AC7 layered file/env configuration | 2 passed, 0 failed, 34 skipped by filter | `/private/tmp/proxima-windows-evidence/tls-native-roots/card-7-host.stdout` |
+| AC8 portable trust handshakes | 4 passed, 0 failed, 32 skipped by filter; native-store test is Windows-only and not selected on Darwin | `/private/tmp/proxima-windows-evidence/tls-native-roots/card-8-handshakes-host.stdout` |
+| AC8 malformed custom bundles | 1 passed, 0 failed, 35 skipped by filter | `/private/tmp/proxima-windows-evidence/tls-native-roots/card-8-bad-bundles-host.stdout` |
+| complete Proxima TLS library suite | 36 passed, 0 failed, 0 skipped | `/private/tmp/proxima-windows-evidence/tls-native-roots/final-host.stdout` |
+| complete TLS connector filter | 14 passed, 0 failed, 0 skipped | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-10-host.stdout` |
+| Windows MSVC compile including Windows-only store fixture | `cargo xwin check -p proxima-tls --features futures-io --all-targets --target x86_64-pc-windows-msvc` finished successfully with no compiler errors | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-10-windows-xwin.stdout` |
+
+The portable round-trip assertions compare exact `b"tls root probe"` replies;
+the untrusted certificate is rejected and malformed bundle errors retain the
+input path. The cross-target command proves compilation only. The
+`tls_trust_native_store_round_trip` fixture has compiled for Windows but has
+not executed on a Windows host. Native Windows runtime remains required before
+AC8/AC10 can be closed.
+
 Worktree: `proxima-windows`, branch `port/windows-support`. Cargo workspace
 membership remained at 47 entries; no new crate or Cargo manifest was created.
 Changes remain uncommitted. Extracted records are in

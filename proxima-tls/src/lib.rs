@@ -31,8 +31,14 @@ mod imp;
 #[cfg(feature = "std")]
 pub use imp::*;
 
+#[cfg(all(test, feature = "futures-io"))]
+#[path = "build_defaults.rs"]
+mod build_defaults;
+
 #[cfg(feature = "futures-io")]
 mod connector;
 
 #[cfg(feature = "futures-io")]
-pub use connector::{TlsClientConfig, TlsConn, TlsStreamUpstream};
+pub use connector::{
+    RootSource, TlsClientConfig, TlsClientLayerBuilder, TlsConn, TlsStreamUpstream,
+};
