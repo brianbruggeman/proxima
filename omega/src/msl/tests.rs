@@ -7591,6 +7591,59 @@ mod epilogue_operand_reuse {
     }
 
     #[test]
+    fn a_round_batched_reduce_carries_its_epilogue_repeats_in_its_identity() {
+        let (reduce, _) = matvec_with_gated_epilogue([7, 7, 7]);
+        let BoundOp {
+            node,
+            dtype,
+            extents,
+            kind,
+        } = reduce;
+        let BoundOpKind::Reduce {
+            element_body,
+            reduce_op,
+            init,
+            keep,
+            operands,
+            output_axes,
+            out_layout,
+            out_scatter,
+            epilogue_body,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+        } = kind
+        else {
+            panic!("packed_row_multi_token_op always builds a Keep::Reduce fold")
+        };
+        let batched = BoundOp {
+            node,
+            dtype,
+            extents,
+            kind: BoundOpKind::RoundBatchedReduce {
+                element_body,
+                reduce_op,
+                init,
+                keep,
+                operands,
+                output_axes,
+                out_layout,
+                out_scatter,
+                epilogue_body,
+                epilogue_operands,
+                epilogue_broadcast_axes,
+                round_count: 2,
+                round_routes: vec![node; 2],
+                round_outputs: vec![node; 2],
+            },
+        };
+
+        assert_eq!(
+            operand_alias_cache_token(&batched).as_deref(),
+            Some("_al_e_0_0_0")
+        );
+    }
+
+    #[test]
     fn a_fused_epilogue_finishes_each_row_of_the_simdgroup_on_its_own_lane() {
         let (bound, packed) = matvec_with_gated_epilogue([7, 8, 9]);
 

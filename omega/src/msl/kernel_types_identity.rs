@@ -2589,9 +2589,12 @@ fn has_duplicate_operand(aliases: &[usize]) -> bool {
 /// keeps the identity of every kernel without a repeat exactly what it was.
 #[must_use]
 pub(crate) fn operand_alias_cache_token(resolved: &BoundOp) -> Option<String> {
-    let BoundOpKind::Reduce {
+    let (BoundOpKind::Reduce {
         epilogue_operands, ..
-    } = &resolved.kind
+    }
+    | BoundOpKind::RoundBatchedReduce {
+        epilogue_operands, ..
+    }) = &resolved.kind
     else {
         return None;
     };
