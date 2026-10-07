@@ -951,10 +951,14 @@ struct LlamaCase {
 }
 
 fn llama_cases(checkpoint: &Checkpoint) -> Vec<LlamaCase> {
+    llama_cases_in(checkpoint, "llama_ids.json")
+}
+
+fn llama_cases_in(checkpoint: &Checkpoint, file_name: &str) -> Vec<LlamaCase> {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/llama-parity")
         .join(checkpoint.name)
-        .join("llama_ids.json");
+        .join(file_name);
     let text = std::fs::read_to_string(&fixture).unwrap_or_else(|error| {
         panic!(
             "{}: no llama.cpp oracle ids at {}: {error}; llama.cpp f1ea20621 has to load this checkpoint to produce them",
@@ -1011,9 +1015,27 @@ fn llama_parity(checkpoint: &Checkpoint) {
 }
 
 fn assert_llama_ids(checkpoint: &Checkpoint, parsed: &proxima_gguf::pipe::ParsedGguf, model: &LoadedModel<'_>) {
-    let cases = llama_cases(checkpoint);
+    assert_llama_ids_for(
+        checkpoint,
+        parsed,
+        model,
+        &llama_cases(checkpoint),
+        LLAMA_GENERATED_TOKENS,
+        ServingConfig::default().ubatch_size,
+    );
+}
+
+fn assert_llama_ids_for(
+    checkpoint: &Checkpoint,
+    parsed: &proxima_gguf::pipe::ParsedGguf,
+    model: &LoadedModel<'_>,
+    cases: &[LlamaCase],
+    generated_tokens: usize,
+    ubatch_size: u32,
+) {
     let config = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
+        ubatch_size,
         ..ServingConfig::default()
     };
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)
@@ -1024,7 +1046,7 @@ fn assert_llama_ids(checkpoint: &Checkpoint, parsed: &proxima_gguf::pipe::Parsed
     let wants_eos = vocab.add_eos_token().unwrap_or(false);
 
     let mut failures = Vec::new();
-    for case in &cases {
+    for case in cases {
         let own_prompt_ids =
             proxima_tokenizer::encode_with_bos_eos(&case.prompt, &vocab, wants_bos, wants_eos)
                 .expect("proxima tokenizes the prompt");
@@ -1037,7 +1059,7 @@ fn assert_llama_ids(checkpoint: &Checkpoint, parsed: &proxima_gguf::pipe::Parsed
         let (generated, _text, _stopped) = model
             .generate_from_ids(
                 &case.prompt_ids,
-                LLAMA_GENERATED_TOKENS,
+                generated_tokens,
                 &config,
                 &mut |_event| ControlFlow::Continue(()),
             )
@@ -1059,6 +1081,32 @@ fn assert_llama_ids(checkpoint: &Checkpoint, parsed: &proxima_gguf::pipe::Parsed
         failures.len(),
         cases.len(),
         failures.join("\n")
+    );
+}
+
+const PREFILL_WIDTH_FLOOR_TOKENS: usize = 160;
+const PREFILL_WIDTH_GENERATED_TOKENS: usize = 128;
+const WHOLE_PROMPT_UBATCH: u32 = 0;
+
+#[test]
+fn prefill_width_parity_with_llama_granite_moe() {
+    let cases = llama_cases_in(&GRANITE_MOE, "long_prompt_llama_ids.json");
+    let shortest_prompt = cases.iter().map(|case| case.prompt_ids.len()).min();
+    assert!(
+        shortest_prompt.is_some_and(|tokens| tokens >= PREFILL_WIDTH_FLOOR_TOKENS),
+        "the fixture must prefill at tiled-gemm width, shortest prompt {shortest_prompt:?} tokens"
+    );
+    let mapping = GRANITE_MOE.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = LoadedModel::load(&parsed, file_bytes).expect("granite moe loads");
+    assert_llama_ids_for(
+        &GRANITE_MOE,
+        &parsed,
+        &model,
+        &cases,
+        PREFILL_WIDTH_GENERATED_TOKENS,
+        WHOLE_PROMPT_UBATCH,
     );
 }
 
