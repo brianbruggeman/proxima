@@ -245,7 +245,7 @@ fn report_pair(
     print_per_type_stats(drafter_types, &result.on_stats);
 
     // the non-control pass rule additionally requires speculation to have
-    // fired at all (AC1's degenerate-control guard); the mismatch control's
+    // fired at all (the degenerate-control guard); the mismatch control's
     // pass rule is `identical == false` alone -- a reseeded ON run that hits
     // EOS after its first, already-diverged token is still a valid control.
     if expect_divergence {
@@ -255,11 +255,11 @@ fn report_pair(
     }
 }
 
-/// AC2's control seed for the sampled block's ON run: distinct from the OFF
+/// The control seed for the sampled block's ON run: distinct from the OFF
 /// run's `seed: 7` below. Both seeds feed the same active top-k/top-p/min-p
 /// filter chain and repeat penalty at `temperature = 0.8`, so a reseeded ON
 /// run samples a different token at the very first step -- verified by the
-/// gate run, not assumed (AC2 requires a pair that provably diverges).
+/// gate run, not assumed (the gate requires a pair that provably diverges).
 const SEED_MISMATCH_CONTROL_ON_SEED: u64 = 4242;
 
 /// A real two-sentence paragraph (Pangrams -- every letter of the alphabet
@@ -287,7 +287,7 @@ fn default_prompt() -> String {
     PARAGRAPH.repeat(4)
 }
 
-/// `ngram-mod`'s own default prompt (SPEC's own R6): [`default_prompt`]'s
+/// `ngram-mod`'s own default prompt (the spec's own): [`default_prompt`]'s
 /// four full repeats make greedy (`temperature = 0.0`) draft well (a real
 /// run measured `speculative_verify_steps = 2 accepted_total = 44`), but the
 /// sampled block (`temperature = 0.8`, `seed: 7`) samples ~15 tokens that
@@ -503,8 +503,8 @@ fn main() {
     // must select every row through this exact config for the ON run to
     // reproduce the OFF run's own seeded draws in order. `seed: 7` -- of
     // 12 seeds `{1,2,3,5,7,11,13,17,19,23,42,99}` this fixture's own
-    // selection swept (scratchpad probe, `speculative-decode-llama-parity`
-    // slice 3), most draw this repeated-paragraph prompt's own first token
+    // selection swept (scratchpad probe, `speculative-decode-llama-parity`),
+    // most draw this repeated-paragraph prompt's own first token
     // as `<end_of_turn>` (id 107) at `temperature = 0.8`, ending generation
     // after one token, before a decode step ever reaches `cached_len > 0` --
     // structurally unable to exercise the speculative branch at all. Of the

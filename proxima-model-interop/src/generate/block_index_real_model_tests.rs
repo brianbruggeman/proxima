@@ -100,7 +100,7 @@ fn sliding_windows(prompt: &[u32], from: usize, entries: &[&Chat], window: usize
         .count()
 }
 
-/// AC18: squash each of the 8 follow-up chats the way a client does -- keep
+/// Squash each of the 8 follow-up chats the way a client does -- keep
 /// the opening turn and the last user turn, replace what lies between with a
 /// short summary -- and ask the cache what is still reusable. The chain finds
 /// the kept opening; the bloom filters are asked for the last user turn's

@@ -1,7 +1,7 @@
 //! A radix trie over fixed token blocks, in a capacity-bounded
 //! [`Arena`](super::arena::Arena), that names the cached entry sharing the
 //! longest prefix with a prompt in one root walk
-//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R13).
+//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`).
 //!
 //! An entry's ids are cut into whole blocks of `block_tokens`; a node holds a
 //! run of blocks that every entry through it shares, a divergence splits a

@@ -1,7 +1,7 @@
 //! The closed `Drafter` enum the decode loop drives (`begin`/`draft`/`accept`)
 //! for every llama.cpp n-gram speculation type enabled in a
 //! [`crate::serving::SpeculativeConfig`], composing `proxima_tokenizer::draft`'s
-//! five sans-IO drafters (`speculative-decode-llama-parity/TASKS.md` slice 9)
+//! five sans-IO drafters
 //! -- box-free per `AGENTS.md`'s workspace default: a closed, compile-time-known
 //! set of implementations is exactly the discriminated-enum-plus-match case,
 //! never a `Box<dyn Trait>`.

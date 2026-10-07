@@ -241,7 +241,7 @@ fn register_pipeline_capture(
 /// kernel on every cache hit and re-hashes it, catching a key-completeness
 /// gap (an axis two structurally-different ops disagree on, but
 /// `kernel_identity` never folded in) as a loud, typed error at the exact hit
-/// that reused the wrong pipeline -- see `c4-7-reduction-literal.md`'s AC6.
+/// that reused the wrong pipeline -- see `c4-7-reduction-literal.md`.
 /// Default off; unset, empty, or any value other than `"1"` skips the
 /// re-emit entirely, so a plain `instrument` build with the audit off pays
 /// one `env::var_os` lookup per hit.

@@ -1,5 +1,5 @@
 //! Determinism and external-oracle harness for gemma4-E2B long-context work
-//! (`proxima-tensor/specs/long-context/SPEC.md` R12, AC12, AC12x, AC13).
+//! (`proxima-tensor/specs/long-context/SPEC.md`).
 //!
 //! Usage:
 //! `cargo run -p proxima-model-interop --example gemma4_ring_parity --features std,metal -- \

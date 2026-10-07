@@ -1,5 +1,5 @@
 //! Where an answer leaves its end-of-answer prewarm until the device is idle
-//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R10).
+//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`).
 //!
 //! A request that has stored its answer submits the prefix the next turn will
 //! share ([`PrewarmQueue::submit`]) and returns; it never runs the prefill.

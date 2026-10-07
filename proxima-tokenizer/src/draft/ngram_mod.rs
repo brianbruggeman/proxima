@@ -57,7 +57,7 @@
 //! added here as plain counters so a caller (or this module's own fixture
 //! test) can observe that both reset paths actually fired, and as the seed
 //! for the `draft_n`/telemetry counters `speculative-decode-llama-parity`
-//! SPEC.md requirement R12 will wire up later.
+//! SPEC.md will wire up later.
 
 use alloc::vec::Vec;
 
@@ -409,7 +409,7 @@ mod tests {
 
     /// [`ngram_mod_draft`]/[`ngram_mod_begin`]/[`ngram_mod_accept`] against
     /// every case in `tests/fixtures/llama-ngram/fixtures/ngram_mod.json`
-    /// (SPEC.md AC8), replaying the SAME single shared `NgramMod` instance
+    /// (SPEC.md), replaying the SAME single shared `NgramMod` instance
     /// across streams, in the SAME order
     /// (`generator/main.cpp`'s `ordered = { streams[5], streams[2],
     /// streams[0], streams[1], streams[3], streams[4] }`) the fixture
@@ -443,7 +443,7 @@ mod tests {
     /// The fixture's own low-acceptance trap (`streams[5]`, documented in
     /// `README.md`) fires a real [`NgramMod::low_accept_resets`] during
     /// this replay. This test's own printed line folds both counts
-    /// together per SPEC.md AC8's literal wording.
+    /// together per SPEC.md's literal wording.
     #[test]
     fn ngram_mod_matches_llama_fixture() {
         let streams: StreamsFile = serde_json::from_str(STREAMS_JSON).expect("streams.json parses");
@@ -515,7 +515,7 @@ mod tests {
             mod_.occupancy_resets(),
             mod_.low_accept_resets()
         );
-        assert!(total >= 200, "fixture must carry at least 200 cases per SPEC.md AC8");
+        assert!(total >= 200, "fixture must carry at least 200 cases per SPEC.md");
         assert!(
             mod_.occupancy_resets() >= 1,
             "the synthetic occupancy warmup replayed against llama.cpp must fire at least one reset"

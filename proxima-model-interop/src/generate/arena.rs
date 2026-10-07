@@ -1,6 +1,6 @@
 //! A capacity-bounded arena: items in one `Vec`, named by `u32` handles, with
 //! a free list so a removed slot is the next one an insert fills
-//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R13).
+//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`).
 //!
 //! No `Box`, no `Rc`, no allocation per item: the `Vec` grows to the
 //! high-water mark of live items and a churn of inserts and removes below it

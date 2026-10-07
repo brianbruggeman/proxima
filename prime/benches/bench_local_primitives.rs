@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! R8 of the runtime-shaped initiative — prime-pinned non-Send primitives.
+//! The runtime-shaped initiative: prime-pinned non-Send primitives.
 //!
 //! Three arms on the same single-core current-thread workload:
 //!

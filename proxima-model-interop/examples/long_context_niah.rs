@@ -1,5 +1,5 @@
 //! Needle-in-a-haystack recall harness for long-context work
-//! (`proxima-tensor/specs/long-context/SPEC.md` R16a1-R16c3, AC13b-AC21).
+//! (`proxima-tensor/specs/long-context/SPEC.md`).
 //!
 //! Usage:
 //! `cargo run -p proxima-model-interop --release --example long_context_niah --features std,metal -- \

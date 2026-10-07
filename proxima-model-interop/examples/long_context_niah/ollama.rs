@@ -1,4 +1,4 @@
-//! The Ollama arm: request body (R16c1, R16c2), a blocking HTTP client, and
+//! The Ollama arm: request body, a blocking HTTP client, and
 //! the digest lookup that maps a GGUF blob to the model name Ollama serves.
 
 use std::fs;

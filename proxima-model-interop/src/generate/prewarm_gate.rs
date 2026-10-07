@@ -1,5 +1,5 @@
 //! Who may use the device: a real request, or an anticipatory prefill
-//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R10).
+//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`).
 //!
 //! A prewarm holds [`PrewarmGate::try_begin`]'s slot for as long as it runs
 //! and looks at [`PrewarmGate::request_waiting`] between chunks; a request

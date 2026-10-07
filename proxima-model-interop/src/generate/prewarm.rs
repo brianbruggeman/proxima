@@ -1,5 +1,5 @@
-//! Anticipatory prefill (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`
-//! R10): prefill token ids into the prompt cache before a request needs them.
+//! Anticipatory prefill (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`):
+//! prefill token ids into the prompt cache before a request needs them.
 //!
 //! [`LoadedModel::prewarm`] is the caller's entry: a system prompt at load,
 //! retrieved documents while a tool call runs, a user's partial input as they

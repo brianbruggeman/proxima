@@ -1,4 +1,4 @@
-//! `c4-7-reduction-literal.md` AC6, on the real gemma4-E2B decode path: with
+//! `c4-7-reduction-literal.md`, on the real gemma4-E2B decode path: with
 //! `PROXIMA_PIPELINE_KEY_AUDIT=1`, every `PIPELINE_CACHE` hit `pipeline_for`
 //! sees during a real prompt re-emits its own source and sha256-compares it
 //! against the hash recorded at compile time. Run once with

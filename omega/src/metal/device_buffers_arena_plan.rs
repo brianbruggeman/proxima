@@ -431,7 +431,7 @@ pub enum MetalError {
     /// was first compiled -- proof one of the 16 non-`reduction_literal`
     /// axes [`crate::identity::kernel_identity`] folds into the key is
     /// missing an axis two structurally-different ops actually differ on
-    /// (`c4-7-reduction-literal.md`'s own AC6). Diagnostic-only, same
+    /// (`c4-7-reduction-literal.md`). Diagnostic-only, same
     /// `instrument`-gated reachability as [`CpuMetalDivergence`](Self::CpuMetalDivergence).
     #[cfg(feature = "instrument")]
     #[error(

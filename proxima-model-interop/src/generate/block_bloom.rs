@@ -1,12 +1,12 @@
 //! A bloom filter per cached entry over its blocks hashed on content alone
-//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R13).
+//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`).
 //!
 //! It answers "does this entry probably hold a block with this content
 //! anywhere", the question a prompt whose history was squashed asks after its
 //! prefix stopped matching; the prefix itself is found by
 //! [`super::prefix_trie::PrefixTrie`], which is exact and position-bound.
 //! [`PromptCache::bloom_candidates`](super::PromptCache) reports the answer;
-//! moving the rows (spec R5) is not built.
+//! moving the rows (the spec) is not built.
 //!
 //! Hashing is `xxh3` (the workspace's `xxhash-rust`) over the block's token
 //! bytes.

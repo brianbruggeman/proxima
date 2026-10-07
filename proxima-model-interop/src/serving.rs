@@ -169,7 +169,7 @@ pub enum GdnPrefillBackend {
 /// -- [`apply_serving_config`] is where an unwired selection is rejected,
 /// not this enum (this crate's own convention: an unimplemented knob is a
 /// per-field validation error, not a smaller enum). This crate's own
-/// `speculative-decode-llama-parity` sub-specs (R11a-d) own the draft-model
+/// `speculative-decode-llama-parity` sub-specs own the draft-model
 /// families' correctness; only the five n-gram types plus `None` run end to
 /// end today (`generate/decode.rs`'s own speculative branch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,7 +375,7 @@ impl Default for NgramModParams {
 /// draft/verify loop for exactly one set member today
 /// (`generate/decode.rs`'s own speculative branch checks
 /// `contains(SpeculativeType::NgramSimple)`; the `Drafter` enum
-/// `speculative-decode-llama-parity/TASKS.md` slice 9 adds wires the rest) --
+/// `speculative-decode-llama-parity/TASKS.md` adds wires the rest) --
 /// [`apply_serving_config`] rejects only the members not yet wired, naming
 /// each. `ngram_cache_lookup_static`/`_dynamic` are borrowed (`&'model str`)
 /// for the same reason `model_path` is -- the caller keeps the owned path
@@ -467,7 +467,7 @@ impl Default for SpeculativeConfig<'static> {
 
 /// [`ServingConfig::prompt_cache`]'s data: the per-model prompt cache that
 /// reuses the longest common token prefix across requests
-/// (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R1, R7). Plain `Copy`
+/// (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`). Plain `Copy`
 /// numbers for the same reason [`SpeculativeConfig`] is: [`ServingConfig`]
 /// stays `Copy` and this module stays free of `serde`/`bon`/`conflaguration`;
 /// `PromptCacheSettings` (`std`-gated) is the env/TOML/builder owner
@@ -493,7 +493,7 @@ pub struct PromptCacheConfig {
     /// than the slack. Applied on top of any speculative-decode slack as a
     /// maximum, never a sum.
     pub ring_rewind_slack: u32,
-    /// Tokens between sliding-window checkpoints (spec R4): a request
+    /// Tokens between sliding-window checkpoints (the spec): a request
     /// stops its prefill at every multiple of this inside the range it
     /// prefills and snapshots the ring layers, so a later rewind past
     /// [`Self::ring_rewind_slack`] restores the nearest one and prefills from
@@ -505,8 +505,8 @@ pub struct PromptCacheConfig {
     /// MiB (12 ring layers x 512 rows x 2,048 bytes), counted against
     /// [`Self::byte_budget`].
     pub max_checkpoints: u32,
-    /// Shortest run of tokens worth shifting after a divergence (spec R5,
-    /// llama.cpp's `n_cache_reuse`): a run of at least this many tokens that the
+    /// Shortest run of tokens worth shifting after a divergence
+    /// (llama.cpp's `n_cache_reuse`): a run of at least this many tokens that the
     /// prompt shares with the entry at another position is moved with its keys
     /// re-rotated by the position delta instead of prefilled, e.g. `256` for
     /// the turns kept after a summary replaced the middle of a conversation.
@@ -519,14 +519,14 @@ pub struct PromptCacheConfig {
     /// rows the entry's ring has overwritten is prefilled instead. `0` keeps
     /// chunk reuse off like llama.cpp's `n_cache_reuse`.
     pub cache_reuse_min: u32,
-    /// Tokens one anticipatory-prefill chunk covers (spec R10): a prewarm
+    /// Tokens one anticipatory-prefill chunk covers (the spec): a prewarm
     /// stops at every multiple of this to check whether a request is waiting,
     /// so a request that arrives mid-prewarm waits at most one chunk. `0`
     /// runs the whole prewarm as one chunk, which a request cannot preempt.
     pub prewarm_chunk_tokens: u32,
     /// How many likely next user turns the model drafts from a finished
     /// answer, each prefilled as a branch entry behind the answer's
-    /// turn-boundary suffix (spec R10, optional deeper anticipation); `0`
+    /// turn-boundary suffix (optional deeper anticipation); `0`
     /// drafts none. Each branch holds a full copy of the entry's rows, so
     /// every one counts against [`Self::byte_budget`] and
     /// [`Self::max_entries`], and an unused branch is evicted before any

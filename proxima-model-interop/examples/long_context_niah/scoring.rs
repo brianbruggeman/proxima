@@ -1,4 +1,4 @@
-//! R16c3: the one scorer both arms share. A needle is found when its number
+//! The one scorer both arms share. A needle is found when its number
 //! appears in the response as a whole digit run, so `4830912` matches inside
 //! prose but not inside `48309120` or `1483091`.
 

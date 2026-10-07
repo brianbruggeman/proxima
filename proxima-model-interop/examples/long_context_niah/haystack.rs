@@ -1,5 +1,5 @@
 //! Haystack, needles and prompt for the needle-in-a-haystack harness
-//! (`proxima-tensor/specs/long-context/SPEC.md` R16a1-R16a3).
+//! (`proxima-tensor/specs/long-context/SPEC.md`).
 //!
 //! Every length here is measured through a caller-supplied `count` closure
 //! (`&str -> tokens`), so the same search runs against the model's own
@@ -226,7 +226,7 @@ pub(crate) fn prefix_for_target(
     }
 }
 
-/// R16a2: the longest word prefix of `words` that is within 1% of
+/// The longest word prefix of `words` that is within 1% of
 /// `requested` tokens and never above it.
 pub(crate) fn trim_haystack(
     words: &[&str],
@@ -243,7 +243,7 @@ pub(crate) fn trim_haystack(
     Ok((kept, tokens))
 }
 
-/// R16a3: needle `i` of `needles` lands at token depth
+/// Needle `i` of `needles` lands at token depth
 /// `(i + 0.5) * requested / needles`, within `needle_tokens`.
 pub(crate) fn place_needles(
     words: &[&str],

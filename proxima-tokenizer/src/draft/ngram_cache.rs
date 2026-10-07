@@ -851,8 +851,7 @@ mod tests {
     ));
 
     /// [`ngram_cache_state_draft`] against every case in
-    /// `tests/fixtures/llama-ngram/fixtures/ngram_cache.json` (SPEC.md
-    /// AC9), replaying a FRESH [`NgramCacheState`] per stream (`nc_dynamic`/
+    /// `tests/fixtures/llama-ngram/fixtures/ngram_cache.json` (SPEC.md), replaying a FRESH [`NgramCacheState`] per stream (`nc_dynamic`/
     /// `nc_static` both empty throughout, matching
     /// `generator/main.cpp:488-489`'s own `nc_static_empty`) -- each
     /// stream's own recorded cases are independent of every other stream's.
@@ -901,10 +900,10 @@ mod tests {
         }
 
         println!("cases = {total} non_empty = {non_empty}");
-        assert!(total >= 200, "fixture must carry at least 200 cases per SPEC.md AC9");
+        assert!(total >= 200, "fixture must carry at least 200 cases per SPEC.md");
     }
 
-    /// SPEC.md AC9's second half, R7's own "loads llama.cpp static/dynamic
+    /// the spec's second half, "loads llama.cpp static/dynamic
     /// cache files": [`load_llama_ngram_cache_bytes`] against the vendored
     /// `ngram_cache_static.bin` (`README.md`'s own recorded provenance: a
     /// real cache built from `streams[2]`, llama.cpp's own

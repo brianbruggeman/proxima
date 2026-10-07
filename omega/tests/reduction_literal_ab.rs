@@ -1,4 +1,4 @@
-//! `c4-7-reduction-literal.md` AC2-AC5: `PROXIMA_REDUCTION_LITERAL=1` bakes a
+//! `c4-7-reduction-literal.md`: `PROXIMA_REDUCTION_LITERAL=1` bakes a
 //! packed-row-blocked op's flattened reduction length as a compiled literal.
 //! Real gemma4-E2B `Q4_0` weight rows from the ollama blob (per
 //! guiding-principles §9, the same file `q4_0_tiled_gemm_batched_run8_parity.rs`
@@ -329,7 +329,7 @@ impl CollisionOperand {
     }
 }
 
-/// AC3: `bit_exact`/`llama_relaxed`/`fast` -- every policy's literal-baked
+/// `bit_exact`/`llama_relaxed`/`fast` -- every policy's literal-baked
 /// output must equal its own runtime-bound output word for word. A nonzero
 /// count is reported, not silently weakened into a looser assertion.
 fn assert_bit_exact_and_oracle_agreement(operand: &CollisionOperand) {
@@ -392,7 +392,7 @@ fn run_on_fresh_thread<F: FnOnce() + Send + 'static>(body: F) {
         .expect("fresh-thread pipeline-cache body panicked");
 }
 
-/// AC2: both insertion orders through ONE `PIPELINE_CACHE` (one per spawned
+/// Both insertion orders through ONE `PIPELINE_CACHE` (one per spawned
 /// thread -- there is no way to reset a thread's own cache from outside it,
 /// so a fresh thread is this test's own cache reset, documented here rather
 /// than assumed) must produce exactly 2 distinct keys and exactly 2 misses
@@ -645,7 +645,7 @@ fn run_multi_row(
     })
 }
 
-/// AC2/AC3 extension (`c4-7-reduction-literal.md`): the `token_total > 1`
+/// Extension (`c4-7-reduction-literal.md`): the `token_total > 1`
 /// family of render sites -- [`crate::msl::push_packed_row_multi_row_body`]'s
 /// own generic arm, its `Q4_0` header-hoist fast arm
 /// (`push_packed_row_multi_row_q4_0_body`, `PROXIMA_Q4_0_MULTI_ROW_HOIST=1`),

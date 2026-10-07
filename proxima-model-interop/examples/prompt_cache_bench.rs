@@ -1,30 +1,30 @@
-//! Prompt-cache oracle and timing harness for `proxima-tensor/specs/prefix-cache-reuse/SPEC.md`
-//! slice S4: AC6 (token ids against llama-server on the same ids), AC7 (time to first token with
-//! the cache on and off, plus llama-server's own), and the cost of splitting a prefill at
+//! Prompt-cache oracle and timing harness for `proxima-tensor/specs/prefix-cache-reuse/SPEC.md`:
+//! token ids against llama-server on the same ids, time to first token with
+//! the cache on and off (plus llama-server's own), and the cost of splitting a prefill at
 //! checkpoints.
 //!
-//! `--mode oracle`: replays the AC2 3-turn extension, the AC3 50-token rewrite and the AC4
+//! `--mode oracle`: replays the 3-turn extension, the 50-token rewrite and the
 //! 2,000-token rewrite through the prompt cache, then sends the same token ids, in the same turn
 //! order, to a fresh llama-server per scenario with `cache_prompt` on, and compares the generated ids.
 //!
-//! `--mode ttft`: a multi-turn transcript (`data/prompt_cache_transcript.jsonl`, or the AC2 one),
+//! `--mode ttft`: a multi-turn transcript (`data/prompt_cache_transcript.jsonl`, or the 3-turn one),
 //! cache on, cache off and a prefix-only arm (the prefill time of the tokens the cache reuses), as
 //! interleaved pairs; then, with `--llama-server-bin`, the same prompt ids against llama-server
 //! with `cache_prompt` on and off.
 //!
-//! `--mode prewarm`: spec S6 AC11. A multi-turn transcript where every turn after the first is
+//! `--mode prewarm`: anticipatory prefill. A multi-turn transcript where every turn after the first is
 //! the previous prompt, its answer, the turn-boundary suffix and new user text. For each turn the
 //! previous turn runs through the cache, then the turn's time to first token is timed with the
 //! end-of-answer prewarm registered and with no suffix registered, as interleaved pairs; ids are
 //! checked against an uncached run.
 //!
-//! `--mode follow_up`: spec S6 AC14. A set of short multi-turn chats
+//! `--mode follow_up`: follow-up drafting. A set of short multi-turn chats
 //! (`data/follow_up_transcripts.jsonl`). After each answer the answer's turn-boundary suffix is
 //! prewarmed and, in the branch arm, the model drafts follow-up user turns as branch entries; the
 //! next real user turn is then sent. Reports the hit rate (requests whose lookup extended into a
 //! branch), the tokens each hit saved, and what the drafting cost, against an arm with no branches.
 //!
-//! `--mode shift`: spec S3 AC5 and R5. A transcript whose middle turns are replaced by a summary
+//! `--mode shift`: chunk reuse. A transcript whose middle turns are replaced by a summary
 //! (or dropped, llama-server's own case), the system prompt and the last turns byte-identical:
 //! through the prompt cache with chunk reuse on and off, then, with `--llama-server-bin`, through
 //! llama-server with `--cache-reuse` with and without `--swa-full`, comparing the tokens each reuses

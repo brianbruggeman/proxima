@@ -1,4 +1,4 @@
-//! R3 of the runtime-shaped initiative: `Mutex<T, R: RuntimeFactory>`
+//! The runtime-shaped initiative: `Mutex<T, R: RuntimeFactory>`
 //! generic over the runtime that supplies the underlying lock.
 //!
 //! Gated behind the `runtime-shaped-mutex` feature so existing
@@ -8,7 +8,7 @@
 //! consumers that want to thread the runtime selection through their
 //! types (`Mutex<T>` defaults to `TokioPerCoreRuntime`).
 //!
-//! Future rows (R4-R7) add the same shape for RwLock / Notify /
+//! Future rows add the same shape for RwLock / Notify /
 //! mpsc / JoinSet / Sleep; this commit establishes the pattern.
 
 use proxima_runtime::tokio::TokioPerCoreRuntime;
@@ -43,7 +43,7 @@ impl<T: Send + 'static, R: RuntimeFactory> Mutex<T, R> {
     }
 }
 
-/// Runtime-parameterized notification primitive (R4).
+/// Runtime-parameterized notification primitive.
 ///
 /// `notify_one()` wakes one parked waiter; `notified().await` parks
 /// until a signal arrives. Default `R = TokioPerCoreRuntime` so
