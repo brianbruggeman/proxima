@@ -35,11 +35,13 @@ const GLOBAL_BUCKET: usize = 1632;
 const DISPATCHES_PER_LAYER: usize = 2;
 
 /// `(new rows, threadgroups of a global layer, threadgroups of a sliding
-/// layer)` of the partial: one per `(row tile, split)` at one kv head. Global:
-/// one row per tile, 26 splits of 1634 / 1640 keys against the 256-threadgroup
-/// target. Sliding (the 512-key ring, 514 / 520 keys, 9 splits): one row per
-/// tile, because two rows per tile would not reach the target.
-const EXPECTED_THREADGROUPS: [(usize, u64, u64); 2] = [(2, 52, 18), (8, 208, 72)];
+/// layer)` of the partial: one per `(row tile, split)` at one kv head, against
+/// a target of 256 simdgroups in flight. Global (8 simdgroups, so 32
+/// threadgroups; 1634 / 1640 keys, up to 26 splits): at 2 rows one row per tile
+/// and 16 splits, at 8 rows two rows per tile and 8 splits. Sliding (4
+/// simdgroups, so 64 threadgroups; the 512-key ring, 514 / 520 keys, 9 splits):
+/// one row per tile, because two rows per tile would not reach the target.
+const EXPECTED_THREADGROUPS: [(usize, u64, u64); 2] = [(2, 32, 18), (8, 32, 64)];
 
 fn gemma4_e2b_gguf_path() -> String {
     std::env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| GEMMA4_E2B_DEFAULT_PATH.to_string())

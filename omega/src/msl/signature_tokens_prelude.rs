@@ -1935,7 +1935,7 @@ fn row_tiled_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAtt
         rows_per_threadgroup(*query_rows, *kv_heads, *query_groups, *head_dim, capacity);
     let tiles = query_rows.div_ceil(rows_per_threadgroup);
     Some(CachedAttentionForm::TwoRangeRowTiled {
-        splits: row_tiled_splits(capacity, *kv_heads, tiles),
+        splits: row_tiled_splits(capacity, *kv_heads, tiles, simdgroups),
         rows_per_threadgroup,
         simdgroups,
     })
@@ -2005,8 +2005,8 @@ pub(crate) fn row_tile_bytes(rows: u64, query_groups: u64, block: u64) -> u64 {
 /// `[cached_attention].threadgroup_memory_bytes` a tile may use, and at least
 /// one unit. A taller tile also halves the threadgroups, so it is taken only
 /// while `kv_heads * row tiles * splits` still reaches
-/// `[attention_rows].target_threadgroups`: a verify of a few rows keeps one
-/// unit per tile, a prefill takes the full height.
+/// [`row_tiled_target_threadgroups`]: a verify of a few rows keeps one unit per
+/// tile, a prefill takes the full height.
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
 pub(crate) fn rows_per_threadgroup(
@@ -2024,10 +2024,11 @@ pub(crate) fn rows_per_threadgroup(
         .unwrap_or(1);
     let by_reuse = crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE / unit_blocks;
     let widest = by_registers.min(by_memory).min(by_reuse).max(1);
+    let simdgroups = row_tiled_simdgroups(head_dim);
     let fills_the_gpu = |units: u64| {
         let tiles = query_rows.div_ceil(units * unit_rows);
-        kv_heads * tiles * row_tiled_splits(context_capacity, kv_heads, tiles)
-            >= crate::sized::ATTENTION_ROWS_TARGET_THREADGROUPS
+        kv_heads * tiles * row_tiled_splits(context_capacity, kv_heads, tiles, simdgroups)
+            >= row_tiled_target_threadgroups(simdgroups)
     };
     let units = (1..=widest).rev().find(|units| fills_the_gpu(*units)).unwrap_or(1);
     units * unit_rows
@@ -2057,20 +2058,34 @@ pub(crate) fn row_tiled_block(head_dim: u64) -> u64 {
     crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK.min(SIMD_WIDTH * row_tiled_simdgroups(head_dim))
 }
 
-/// Splits of the key range per row-tiled threadgroup column: one per
-/// `[attention_rows].keys_per_split` keys of the bucket capacity, capped so
-/// `kv_heads * row_tiles * splits` reaches
-/// `[attention_rows].target_threadgroups` and no further, within
-/// `[attention_splits].max`. The target is the decode split's threadgroup
-/// count at 2048 keys (8 heads x 32 splits), so a small K, with few row
-/// tiles, gets the occupancy the split gives and a large K, with many tiles,
-/// does not pay merge width for threadgroups it already has.
+/// Threadgroups the row-tiled kernel fills the GPU with:
+/// `[attention_rows].target_simdgroups` over the form's `simdgroups` per
+/// threadgroup, so a head dim of 512 (eight simdgroups) takes a quarter of the
+/// threadgroups head dim 64 (two) does. The unit is simdgroups because that is
+/// what the measured optimum held constant across head dims.
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
-pub(crate) fn row_tiled_splits(context_capacity: u64, kv_heads: u64, row_tiles: u64) -> u64 {
+pub(crate) fn row_tiled_target_threadgroups(simdgroups: u64) -> u64 {
+    crate::sized::ATTENTION_ROWS_TARGET_SIMDGROUPS.div_ceil(simdgroups.max(1))
+}
+
+/// Splits of the key range per row-tiled threadgroup column: one per
+/// `[attention_rows].keys_per_split` keys of the bucket capacity, capped so
+/// `kv_heads * row_tiles * splits` reaches [`row_tiled_target_threadgroups`]
+/// and no further, within `[attention_splits].max`. A small K, with few row
+/// tiles, gets the occupancy the split gives; a large K, with many tiles, takes
+/// one split and writes its rows directly.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn row_tiled_splits(
+    context_capacity: u64,
+    kv_heads: u64,
+    row_tiles: u64,
+    simdgroups: u64,
+) -> u64 {
     let by_keys = context_capacity.div_ceil(crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT);
     let by_occupancy =
-        crate::sized::ATTENTION_ROWS_TARGET_THREADGROUPS.div_ceil((kv_heads * row_tiles).max(1));
+        row_tiled_target_threadgroups(simdgroups).div_ceil((kv_heads * row_tiles).max(1));
     by_keys
         .min(by_occupancy)
         .clamp(1, crate::sized::ATTENTION_SPLIT_MAX)
