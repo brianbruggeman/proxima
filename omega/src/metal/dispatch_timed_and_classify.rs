@@ -2046,6 +2046,118 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         }
     }
 
+    /// `MoeProjectionStrategy::Stacked` at granite moe 1b's real expert shape
+    /// (32 experts, 8 used, embedding 1024, expert feed-forward 512, `Q8_0`
+    /// experts): gate, up and down are one reduce each. At a decode step of one
+    /// token each is the packed matvec body, at prefill width each is the
+    /// expert-grouped tiled GEMM, and none of the three materializes the
+    /// `[.., d_in, d_out]` gathered product.
+    #[test]
+    fn granite_shaped_stacked_append_moe_ffn_lowers_each_projection_to_one_reduce() {
+        use proxima_tensor::spec::{Activation, ExpertGatingFunc};
+
+        const EMBEDDING: u32 = 1024;
+        const FEED_FORWARD: u32 = 512;
+        const EXPERT_COUNT: u32 = 32;
+        const EXPERT_USED_COUNT: u32 = 8;
+
+        for (sequence, expected_kind) in [
+            (1_u64, "reduce-packed-row-blocked"),
+            (200, "reduce-tiled-gemm"),
+        ] {
+            let mut program = Vec::new();
+            let x_node = input_leaf(
+                &mut program,
+                DType::Float32,
+                vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
+                "x",
+            );
+            let logits_node = input_leaf(
+                &mut program,
+                DType::Float32,
+                vec![Extent::Symbolic(0), Extent::Static(EXPERT_COUNT)],
+                "logits",
+            );
+            let mut stack = |rows: u32, columns: u32, name: &str| {
+                input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    vec![
+                        Extent::Static(EXPERT_COUNT),
+                        Extent::Static(rows),
+                        Extent::Static(columns),
+                    ],
+                    name,
+                )
+            };
+            let gate_node = stack(EMBEDDING, FEED_FORWARD, "expert_w_gate");
+            let up_node = stack(EMBEDDING, FEED_FORWARD, "expert_w_up");
+            let down_node = stack(FEED_FORWARD, EMBEDDING, "expert_w_down");
+            let ones = scalar_constant(&mut program, 1.0);
+            let moe_spec = proxima_tensor::spec::MoeFfnSpec {
+                router: proxima_tensor::spec::MoeRouter::Logits(logits_node),
+                expert_w_gate: gate_node,
+                expert_w_up: up_node,
+                expert_w_down: down_node,
+                expert_count: EXPERT_COUNT,
+                expert_used_count: EXPERT_USED_COUNT,
+                ones,
+                gating: ExpertGatingFunc::Softmax,
+                expert_bias: None,
+                expert_scale: None,
+                activation: Activation::Silu,
+                strategy: proxima_tensor::spec::MoeProjectionStrategy::Stacked,
+            };
+            let (root, _site) =
+                proxima_tensor::spec::append_moe_ffn(&mut program, 0, x_node, &moe_spec)
+                    .expect("the stacked routed block lowers at granite moe's shape");
+
+            let shapes = infer(&program, &[sequence]).expect("the stacked block infers");
+            let mut resolved =
+                bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
+                    .expect("the stacked block binds");
+            let mut packed_operands: PackedOperands = BTreeMap::new();
+            for node in [gate_node, up_node, down_node] {
+                packed_operands.insert(node, Codec::Q8_0);
+            }
+            proxima_tensor::correct_packed_matmul_layouts(
+                &mut resolved,
+                &packed_operands.keys().copied().collect(),
+            );
+
+            let mut expert_reduce_kinds = Vec::new();
+            for bound in &resolved {
+                let touches_expert_weight = bound.operands().iter().any(|(node, _, _)| {
+                    *node == gate_node || *node == up_node || *node == down_node
+                });
+                if !touches_expert_weight {
+                    continue;
+                }
+                match &bound.kind {
+                    proxima_tensor::BoundOpKind::Reduce {
+                        keep: proxima_tensor::Keep::Reduce,
+                        ..
+                    } => expert_reduce_kinds.push(classify_kind(bound, &packed_operands)),
+                    proxima_tensor::BoundOpKind::Elementwise { .. } => panic!(
+                        "{sequence} tokens: an unfused elementwise op (node {:?}, extents {:?}) \
+                         still reads an expert weight stack",
+                        bound.node, bound.extents
+                    ),
+                    _ => {}
+                }
+            }
+
+            assert_eq!(
+                expert_reduce_kinds.len(),
+                3,
+                "{sequence} tokens: gate, up and down are one reduce each, got {expert_reduce_kinds:?}"
+            );
+            for kind in expert_reduce_kinds {
+                assert_eq!(kind, expected_kind, "{sequence} tokens");
+            }
+        }
+    }
+
     /// ROW 543: `proxima_tensor::spec::append_moe_ffn` with
     /// `MoeProjectionStrategy::GroupedGateUp` (the production entry point
     /// for the grouped strategy this landing investigates -- `append_moe_ffn`
