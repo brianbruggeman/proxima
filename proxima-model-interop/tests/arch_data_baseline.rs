@@ -1088,26 +1088,36 @@ const PREFILL_WIDTH_FLOOR_TOKENS: usize = 160;
 const PREFILL_WIDTH_GENERATED_TOKENS: usize = 128;
 const WHOLE_PROMPT_UBATCH: u32 = 0;
 
-#[test]
-fn prefill_width_parity_with_llama_granite_moe() {
-    let cases = llama_cases_in(&GRANITE_MOE, "long_prompt_llama_ids.json");
+fn prefill_width_parity_with_llama(checkpoint: &Checkpoint) {
+    let cases = llama_cases_in(checkpoint, "long_prompt_llama_ids.json");
     let shortest_prompt = cases.iter().map(|case| case.prompt_ids.len()).min();
     assert!(
         shortest_prompt.is_some_and(|tokens| tokens >= PREFILL_WIDTH_FLOOR_TOKENS),
         "the fixture must prefill at tiled-gemm width, shortest prompt {shortest_prompt:?} tokens"
     );
-    let mapping = GRANITE_MOE.open();
+    let mapping = checkpoint.open();
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
-    let model = LoadedModel::load(&parsed, file_bytes).expect("granite moe loads");
+    let model = LoadedModel::load(&parsed, file_bytes)
+        .unwrap_or_else(|error| panic!("{} loads: {error:?}", checkpoint.name));
     assert_llama_ids_for(
-        &GRANITE_MOE,
+        checkpoint,
         &parsed,
         &model,
         &cases,
         PREFILL_WIDTH_GENERATED_TOKENS,
         WHOLE_PROMPT_UBATCH,
     );
+}
+
+#[test]
+fn prefill_width_parity_with_llama_granite_moe() {
+    prefill_width_parity_with_llama(&GRANITE_MOE);
+}
+
+#[test]
+fn prefill_width_parity_with_llama_gemma4_e2b() {
+    prefill_width_parity_with_llama(&GEMMA4_E2B);
 }
 
 #[test]
