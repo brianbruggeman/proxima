@@ -228,6 +228,11 @@ moe-topk-fusion = [
     "proxima-tensor/moe-topk-fusion",
     "omega?/moe-topk-fusion",
 ]
+# Passthrough to `proxima-tensor/moe-stacked-experts`: the routed feed-forward blocks the
+# model builders emit run gate, up and down once over every selected expert
+# (`MoeProjectionStrategy::Stacked`) instead of once per selected expert. Default-off until
+# a real-model A/B lands; it needs `moe-topk-fusion` to fuse the route stacks.
+moe-stacked-experts = ["proxima-tensor/moe-stacked-experts"]
 # Passthrough to `proxima-tensor/reduce-epilogue-fusion` and
 # `omega/reduce-epilogue-fusion` -- folded into `metal`'s default shape above
 # but kept individually selectable so this crate's own harness can exercise
