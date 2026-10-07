@@ -2192,7 +2192,7 @@ fn multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width() {
     );
 }
 
-/// `c4-7-reduction-literal.md` AC1: with `PROXIMA_REDUCTION_LITERAL` unset
+/// `c4-7-reduction-literal.md`: with `PROXIMA_REDUCTION_LITERAL` unset
 /// (today's default posture, whether or not `metal-reduction-literal` is
 /// even compiled in), [`MetalOnlyExtras::reduction_literal`] must stay
 /// `None` and the cache key must carry no `_rl` token -- the unset-env
@@ -2215,7 +2215,7 @@ fn reduction_literal_default_is_none_and_key_carries_no_rl_token() {
     );
 }
 
-/// `c4-7-reduction-literal.md` AC5's negative boundary: `K=288` is not a
+/// `c4-7-reduction-literal.md`'s negative boundary: `K=288` is not a
 /// whole multiple of `Q4K_BLOCK_ELEMENTS` (256), so
 /// `classify_packed_row_block` rejects it (`ExtentNotBlockMultiple`) and
 /// [`packed_row_block`] returns `None` -- `reduction_literal_value`'s own
@@ -2240,7 +2240,7 @@ fn reduction_literal_is_none_for_a_non_block_multiple_extent() {
     );
 }
 
-/// `c4-7-reduction-literal.md` AC5's positive boundary set: `K=256`
+/// `c4-7-reduction-literal.md`'s positive boundary set: `K=256`
 /// (minimum admitted length) and `K=12288` each yield `Some` and a distinct
 /// `_rl{K}` token -- proven directly against [`matmul_op`]'s own synthetic
 /// shape rather than only through the real-checkpoint device test, so this

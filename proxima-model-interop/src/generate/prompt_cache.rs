@@ -1,8 +1,7 @@
 //! The per-model prompt cache: a bounded, least-recently-used set of
 //! [`PrefixState`]s keyed by the token ids they cover, so a request whose
 //! prompt shares a prefix with an earlier one prefills only the tokens past
-//! the shared part (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R1, R2,
-//! R8).
+//! the shared part (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`).
 //!
 //! This composes [`PrefixState`] (the `(ids, layer_caches, cached_len)` triple
 //! [`LoadedModel::prefill_prefix`] already returns) and the seeded decode loop
@@ -89,7 +88,7 @@ fn rule_victim(
         .map(|(stamp, _)| stamp)
 }
 
-/// How a request used the cache (spec R8's `cache_path`).
+/// How a request used the cache (the spec's `cache_path`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePath {
     /// The whole stored sequence is a prefix of the prompt: nothing rewound.
@@ -103,7 +102,7 @@ pub enum CachePath {
     Checkpoint,
     /// Runs of the prompt past the shared prefix were found elsewhere in the
     /// entry and moved to their new positions with their keys re-rotated
-    /// ([`crate::PromptCacheConfig::cache_reuse_min`], spec R5); the tokens
+    /// ([`crate::PromptCacheConfig::cache_reuse_min`]); the tokens
     /// between them were prefilled.
     Shift,
     /// The entry that served the request came back from a cold tier;
@@ -185,7 +184,7 @@ impl MissReason {
     }
 }
 
-/// What one request took from the cache: the numbers behind spec R8's
+/// What one request took from the cache: the numbers behind the spec's
 /// `cache_lcp`, `cache_reused_tokens`, `cache_prefilled_tokens`,
 /// `cache_path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1388,7 +1387,7 @@ impl LoadedModel<'_> {
         )
     }
 
-    /// Looks `prompt_ids` up in the cache and emits spec R8's per-request
+    /// Looks `prompt_ids` up in the cache and emits the spec's per-request
     /// telemetry for the outcome. `waited` is how long the request waited for
     /// a running prewarm; the entry it takes is no longer a prewarm's, so its
     /// prewarmed range is spent.
@@ -2558,7 +2557,7 @@ mod tests {
         }
     }
 
-    /// R3: a rewind inside the ring's slack truncates the full layer to the
+    /// A rewind inside the ring's slack truncates the full layer to the
     /// shared prefix and leaves the ring layer's rows untouched.
     #[test]
     fn rewind_within_ring_slack_truncates_the_full_layer_and_keeps_the_ring() {
@@ -2581,7 +2580,7 @@ mod tests {
         }
     }
 
-    /// R3: past the slack the ring has overwritten rows the window needs, so
+    /// Past the slack the ring has overwritten rows the window needs, so
     /// the rewind is refused with the numbers, and the state is untouched.
     #[test]
     fn rewind_beyond_ring_slack_is_refused_and_leaves_the_state_untouched() {
@@ -2745,7 +2744,7 @@ mod tests {
         state.cached_len = to;
     }
 
-    /// R4: a rewind of 20 tokens does not fit the 4-row slack, so the entry
+    /// A rewind of 20 tokens does not fit the 4-row slack, so the entry
     /// restores the newest checkpoint at or before the shared prefix (32 of
     /// 16, 32, 48 for a prefix of 40) and the request prefills from there.
     #[test]
@@ -2956,7 +2955,7 @@ mod tests {
         shared
     }
 
-    /// AC1: over 10,000 generated pairs the prefix length equals a plain
+    /// Over 10,000 generated pairs the prefix length equals a plain
     /// index scan. A six-token vocabulary and a generated shared head make
     /// every case a near-collision, the shape real prompts that differ late
     /// have; the case count is asserted so a zero-case run cannot pass.
@@ -3224,7 +3223,7 @@ mod tests {
             .map(|(position, lcp, _)| (position, lcp))
     }
 
-    /// AC17: over 10,000 generated caches and prompts the block index nominates
+    /// Over 10,000 generated caches and prompts the block index nominates
     /// the same entry, at the same prefix length, as the scan it replaced. A
     /// four-token vocabulary and four-token blocks make most cases share
     /// several whole blocks and diverge inside one, which is where an index
@@ -3312,7 +3311,7 @@ mod tests {
         }
     }
 
-    /// R13: stores, evictions, takes and store-backs in one long random run
+    /// Stores, evictions, takes and store-backs in one long random run
     /// leave the trie answering what the scan over the entries the cache holds
     /// answers, holding one trie entry per cache entry, and an emptied cache
     /// holds no node.
@@ -3439,7 +3438,7 @@ mod tests {
         samples[samples.len() / 2]
     }
 
-    /// AC17, cost: the time one lookup takes with 4, 64, 256 and 1,024 cached
+    /// Cost: the time one lookup takes with 4, 64, 256 and 1,024 cached
     /// 1,024-token conversations (every one opening with the same BOS token),
     /// for a prompt that extends one of them, for one that shares nothing past
     /// BOS, and for the scan the index replaced. `lookup` is the candidate

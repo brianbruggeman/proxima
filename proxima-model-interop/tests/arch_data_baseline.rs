@@ -355,7 +355,7 @@ fn bound_record(checkpoint: &Checkpoint) -> String {
     record
 }
 
-/// The AC3 comparison drops the storage class of an `f32` tensor (a borrowed view of the mapping
+/// The comparison drops the storage class of an `f32` tensor (a borrowed view of the mapping
 /// or an owned buffer): every consumer reads the two the same, and the bytes and sha256 beside
 /// it still have to match. Every other column is compared as captured, and the weight lines are
 /// re-sorted because the capture sorted them on the storage class this drops.

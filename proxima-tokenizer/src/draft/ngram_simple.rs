@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 
 /// llama.cpp's `common_ngram_simple_config` (`common/ngram-map.h:24`),
 /// renamed to the field names `speculative-decode-llama-parity/SPEC.md`
-/// (requirement R4) uses: `size_n` is llama.cpp's `size_ngram` (the n-gram
+/// uses: `size_n` is llama.cpp's `size_ngram` (the n-gram
 /// looked up in the token history), `size_m` is llama.cpp's `size_mgram` (how
 /// many tokens after a match are drafted). llama.cpp's own default for
 /// `ngram-simple` is `size_n = 12, size_m = 48`
@@ -233,7 +233,7 @@ mod tests {
     /// `tests/fixtures/llama-ngram/fixtures/ngram_simple.json`, whose
     /// `draft` field was produced by calling llama.cpp's own
     /// `common_ngram_simple_draft` directly (`README.md`,
-    /// `speculative-decode-llama-parity/SPEC.md` AC5) -- never by
+    /// `speculative-decode-llama-parity/SPEC.md`) -- never by
     /// re-deriving the expected output from reading the C++ (guiding
     /// principle 14). Each case replays one decode step: `history =
     /// stream[..position]`, `sampled = stream[position]`.
@@ -272,7 +272,7 @@ mod tests {
         println!("cases = {} non_empty = {non_empty}", fixture.cases.len());
         assert!(
             fixture.cases.len() >= 200,
-            "fixture must carry at least 200 cases per SPEC.md AC5"
+            "fixture must carry at least 200 cases per SPEC.md"
         );
     }
 

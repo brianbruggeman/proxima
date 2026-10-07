@@ -1,4 +1,4 @@
-//! R7 of the runtime-shaped initiative: `RuntimeFactory` impl for
+//! The runtime-shaped initiative: `RuntimeFactory` impl for
 //! `PrimeRuntime` plus the `*Like` adapters for prime's per-session
 //! primitives.
 //!
@@ -154,7 +154,7 @@ impl RuntimeFactory for PrimeRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// R8: prime-pinned (non-Send) primitives via LocalRuntimeFactory.
+// prime-pinned (non-Send) primitives via LocalRuntimeFactory.
 // ---------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
@@ -176,7 +176,7 @@ struct LocalMutexInner<T> {
     value: RefCell<T>,
 }
 
-/// R8 prime-pinned non-Send async mutex. Uses `Rc<RefCell<T>>` shape
+/// prime-pinned non-Send async mutex. Uses `Rc<RefCell<T>>` shape
 /// without any atomic operations on the lock state — valid because
 /// every clone stays on the same core (`!Send` guard contract).
 ///
@@ -265,7 +265,7 @@ struct WaiterEntry {
     woken: Rc<Cell<bool>>,
 }
 
-/// R8 prime-pinned non-Send notify. `Cell<usize>` permit counter +
+/// prime-pinned non-Send notify. `Cell<usize>` permit counter +
 /// `RefCell<VecDeque<WaiterEntry>>` waiter queue. No atomic operations.
 pub struct PrimeLocalNotify {
     permits: Cell<usize>,
@@ -434,7 +434,7 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_millis(8));
     }
 
-    // ---- R8 — LocalRuntimeFactory parity tests ----
+    // ---- LocalRuntimeFactory parity tests ----
     //
     // `LocalRuntimeFactory` itself (PrimeLocalMutex/PrimeLocalNotify above)
     // is tokio-free; these tests use `#[proxima::test(flavor = "current_thread")]`

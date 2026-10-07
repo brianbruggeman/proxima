@@ -1,4 +1,4 @@
-//! slice 20 (`speculative-decode-llama-parity/TASKS.md`): the performance
+//! The performance
 //! harness the SPEC's own "performance harness" and "measurement protocol"
 //! paragraphs name. THIS RUN IS A HARNESS-CORRECTNESS CHECK, NOT A
 //! MEASUREMENT -- every number this binary prints while the host is not
@@ -16,7 +16,7 @@
 //! (`speculative_decode_parity.rs`'s own doc on that ring silently dropping
 //! events under metal's per-dispatch `debug!` volume).
 //!
-//! slice 24: `--incumbent llama-server [--llama-server-bin <path>]` (default
+//! `--incumbent llama-server [--llama-server-bin <path>]` (default
 //! `llama-server` off `PATH`) spawns TWO llama-server child processes --
 //! `--spec-type none` and `--spec-type <drafter>`, parameters read off the
 //! SAME [`ServingConfig`]/[`SpeculativeConfig`] proxima's own ON arm uses
@@ -101,7 +101,7 @@ const GPU_IDLE_BASELINE_DURATION: Duration = Duration::from_secs(5);
 
 /// `--verify-width-sweep` is a distinct mode from the interleaved-pair bench
 /// -- both read a `--gpu-layers`, but the sweep needs no corpus/drafter/
-/// incumbent flags at all (SPEC AC23's own command line omits them).
+/// incumbent flags at all (the spec's own command line omits them).
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 enum BenchMode {
     Pairs,
@@ -942,7 +942,7 @@ fn base_llama_server_args(config: &ServingConfig, llama_context_length: u32) -> 
 /// decode loop reads for the ON arm -- so a parameter drift on either side
 /// shows up as a real speedup difference, not a silent mismatch.
 /// `ngram-cache` has no size/hit-count CLI flags upstream (it only takes
-/// `--lookup-cache-static`/`--lookup-cache-dynamic` file paths, R7's own
+/// `--lookup-cache-static`/`--lookup-cache-dynamic` file paths, a separate
 /// concern, not wired here); the empty-args branch runs it at llama's own
 /// in-memory-dynamic-cache default, same as omitting both cache flags on
 /// llama's own CLI.

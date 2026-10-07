@@ -1,4 +1,4 @@
-//! `speculative-decode-llama-parity/SPEC.md` AC22 (R18): a drafter's
+//! `speculative-decode-llama-parity/SPEC.md`: a drafter's
 //! `draft()` call allocates nothing once constructed. [`proxima_test`]'s
 //! [`CountingAllocator`] is the workspace's own shared zero-allocation proof
 //! gate (`proxima-test/src/alloc_count.rs`) -- reused here rather than
@@ -12,7 +12,7 @@
 //! independent allocation profiles worth proving separately, matching
 //! `README.md`'s own "ngram-map key_only vs k4v divergence" framing of the
 //! two as distinct configurations of one port. The `Drafter` enum dispatch
-//! itself (slice 9) joins once it exists.
+//! itself joins once it exists.
 //!
 //! `drafter_zero_alloc_ngram_cache` measures the PER-STEP path a real
 //! decode loop drives: [`NgramCacheState`], presized via

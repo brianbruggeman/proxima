@@ -141,7 +141,7 @@ mod tests {
             .collect()
     }
 
-    /// AC8: the fluent builder, the TOML loader and the env loader produce
+    /// The fluent builder, the TOML loader and the env loader produce
     /// one identical config for the same values, and that config lowers into
     /// the `Copy` shape `ServingConfig` carries.
     #[test]

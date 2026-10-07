@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! R3 + R4 of the runtime-shaped initiative.
+//! The runtime-shaped initiative: Mutex and Notify.
 //!
 //! Compares three arms on a current-thread tokio runtime:
 //!
@@ -8,11 +8,11 @@
 //!   the workspace's already-imported async-lock-shaped baseline.
 //! - `async_lock_direct` — `async_lock::Mutex` / `event_listener` —
 //!   the backing crate used by the workspace-default `proxima_primitives::sync::Mutex`
-//!   and `proxima_primitives::sync::Notify`. R3's "vs async-lock" Compare-bench
+//!   and `proxima_primitives::sync::Notify`. The "vs async-lock" Compare-bench
 //!   target per discipline.md.
 //! - `runtime_shaped_tokio` — `proxima_primitives::sync::runtime_shaped::Mutex<T,
 //!   TokioPerCoreRuntime>` / `Notify<TokioPerCoreRuntime>` —
-//!   trait-routed via R1's `RuntimeFactory`. Should match
+//!   trait-routed via `RuntimeFactory`. Should match
 //!   `tokio_direct` within CoV because it forwards to the same
 //!   underlying `tokio::sync` primitive.
 //!

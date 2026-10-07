@@ -172,7 +172,7 @@ use omega::{
 // `proxima-telemetry/emit` unconditionally (Cargo.toml's own doc) because
 // `decode.rs`/`pregather.rs` call these macros outside any `instrument`/
 // `metal` gate. `info` is unconditional alongside them: `decode.rs`'s
-// per-request `draft_n`/`draft_n_accepted` event (SPEC R12) is a
+// per-request `draft_n`/`draft_n_accepted` event (the spec) is a
 // business-meaningful workflow fact, not an `instrument`-gated diagnostic,
 // so it must compile and fire under plain `--features std`.
 use proxima_telemetry::{debug, info, trace, warn};

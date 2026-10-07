@@ -1,7 +1,7 @@
 //! Chunk reuse after a divergence: a request whose prompt stopped matching an
 //! entry's ids still finds runs of its later tokens that the entry holds at
 //! another position, and moves those rows instead of recomputing them
-//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R5, llama-server's
+//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`, llama-server's
 //! `n_cache_reuse`).
 //!
 //! llama-server walks the cache pointer forward from the common prefix and,

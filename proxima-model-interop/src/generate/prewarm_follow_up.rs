@@ -1,5 +1,5 @@
-//! Deeper anticipation (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`
-//! R10, AC14): after an answer, the model drafts a few likely next user turns
+//! Deeper anticipation (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`):
+//! after an answer, the model drafts a few likely next user turns
 //! and each is prefilled as a branch entry sharing the answer's prefix.
 //!
 //! A branch is an ordinary [`CacheEntry`] -- the prompt cache's own

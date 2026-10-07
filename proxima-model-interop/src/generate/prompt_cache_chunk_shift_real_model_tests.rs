@@ -370,7 +370,7 @@ struct SquashRun {
     new_prompt: Vec<u32>,
 }
 
-/// AC5: a transcript whose middle turns were replaced by a short summary,
+/// A transcript whose middle turns were replaced by a short summary,
 /// the system prompt in front and the last turns (and the answer the cache
 /// holds) byte-identical. `cache_reuse_min` is the config under test.
 fn squashed_history(model: &LoadedModel<'_>, cache_reuse_min: u32) -> SquashRun {
@@ -435,7 +435,7 @@ fn stored_lengths(model: &LoadedModel<'_>) -> Vec<usize> {
         .collect()
 }
 
-/// AC5's counts: the system prompt is restored from its checkpoint, the kept
+/// The counts: the system prompt is restored from its checkpoint, the kept
 /// turns, the last user turn and the answer the entry holds are moved (with
 /// the end-of-turn tokens that close both the summary and the turn before the
 /// kept ones, which match), and only the rest of the summary, the unforwarded

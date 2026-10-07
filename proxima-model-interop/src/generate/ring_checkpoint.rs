@@ -1,6 +1,6 @@
 //! Sliding-window checkpoints: the ring rows a window needs at one position,
 //! kept so a prompt cache entry can rewind past its ring's slack
-//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md` R4).
+//! (`proxima-tensor/specs/prefix-cache-reuse/SPEC.md`).
 //!
 //! A full-attention layer stores every position, so rewinding it is a
 //! truncate. A ring layer keeps only `window + slack` recent rows and

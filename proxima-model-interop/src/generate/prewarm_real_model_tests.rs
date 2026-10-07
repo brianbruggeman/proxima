@@ -77,7 +77,7 @@ fn assert_prefilled_only_the_user_turn(
     );
 }
 
-/// AC13: with the turn-boundary suffix registered once, no call after the
+/// With the turn-boundary suffix registered once, no call after the
 /// answer ends is needed -- the next request prefills only the user's new
 /// tokens and its ids equal a full prefill's. The control turn, run first
 /// with no suffix registered, prefills the answer's unforwarded tail and the
@@ -127,7 +127,7 @@ fn end_of_answer_trigger(speculative: SpeculativeConfig<'static>) {
             opening.len(),
         );
         println!(
-            "AC13 held_after_answer={held} prewarmed={} user_tokens={} prefilled={} control_prefilled={control_prefilled}",
+            "held_after_answer={held} prewarmed={} user_tokens={} prefilled={} control_prefilled={control_prefilled}",
             turn.report.prewarm_hit_tokens, next.user_tokens, turn.report.prefilled_tokens,
         );
     });
@@ -145,7 +145,7 @@ fn the_end_of_answer_trigger_prewarms_the_next_turn_with_speculation_on() {
     end_of_answer_trigger(SpeculativeConfig::default());
 }
 
-/// AC11: a caller-driven `prewarm` of the next turn's prefix (answer plus
+/// A caller-driven `prewarm` of the next turn's prefix (answer plus
 /// suffix) leaves the next request only the user's new tokens, ids identical
 /// to a full prefill.
 #[test]
@@ -178,7 +178,7 @@ fn a_caller_prewarm_of_the_next_prefix_leaves_only_the_user_turn_to_prefill() {
             first.generated.len(),
             opening.len(),
         );
-        println!("AC11 prewarm={warmed:?} turn={:?}", turn.report);
+        println!("prewarm={warmed:?} turn={:?}", turn.report);
     });
 }
 
@@ -192,7 +192,7 @@ fn chunked_config() -> ServingConfig<'static> {
     }
 }
 
-/// AC12: a request that arrives after the prewarm's first chunk waits for the
+/// A request that arrives after the prewarm's first chunk waits for the
 /// chunk in flight only, then reuses the rows prefilled so far.
 #[test]
 #[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo, and a real Metal device"]
@@ -261,7 +261,7 @@ fn a_request_arriving_mid_prewarm_waits_one_chunk_and_reuses_the_partial_prewarm
             .map(|pair| format!("{:.1}", millis(pair[1] - pair[0])))
             .collect();
         println!(
-            "AC12 chunk_tokens={chunk} chunk_ms={chunk_ms:?} prefix_tokens={} prewarmed_tokens={} chunks={} longest_chunk_ms={:.1} request_wait_ms={:.1} hit_tokens={} prefilled={}",
+            "chunk_tokens={chunk} chunk_ms={chunk_ms:?} prefix_tokens={} prewarmed_tokens={} chunks={} longest_chunk_ms={:.1} request_wait_ms={:.1} hit_tokens={} prefilled={}",
             prefix.len(),
             warmed.prefilled_tokens,
             warmed.chunks,
@@ -313,7 +313,7 @@ fn answered_turn(model: &LoadedModel<'_>) -> AnsweredTurn {
     }
 }
 
-/// AC14: the model drafts follow-up user turns behind an answer; a request
+/// The model drafts follow-up user turns behind an answer; a request
 /// whose user turn begins like a draft reuses the rows of the matching
 /// branch past the answer, and the ids still equal a full prefill's.
 #[test]
@@ -334,7 +334,7 @@ fn a_user_turn_that_begins_like_a_drafted_follow_up_reuses_the_branch_past_the_a
         assert!(!drafts.is_empty(), "the model drafted no follow-up");
         for (index, draft) in drafts.iter().enumerate() {
             let text = proxima_tokenizer::decode(draft, &model.vocab).expect("decode a draft");
-            println!("AC14 draft {index} tokens={} text={text:?}", draft.len());
+            println!("draft {index} tokens={} text={text:?}", draft.len());
         }
         let matched = &drafts[0];
         let half = matched.len().div_ceil(2);
@@ -354,7 +354,7 @@ fn a_user_turn_that_begins_like_a_drafted_follow_up_reuses_the_branch_past_the_a
         );
         assert_eq!(outcome.report.reused_tokens, turn.base.len() + half);
         println!(
-            "AC14 branches={} draft0_tokens={} shared={half} report={:?}",
+            "branches={} draft0_tokens={} shared={half} report={:?}",
             drafts.len(),
             matched.len(),
             outcome.report
@@ -362,7 +362,7 @@ fn a_user_turn_that_begins_like_a_drafted_follow_up_reuses_the_branch_past_the_a
     });
 }
 
-/// AC14, trigger: with follow-up drafting on, the end-of-answer prewarm leaves
+/// Trigger: with follow-up drafting on, the end-of-answer prewarm leaves
 /// the answer entry and a branch per draft behind, where the same request
 /// with it off leaves the answer entry alone.
 #[test]
@@ -390,10 +390,10 @@ fn the_end_of_answer_trigger_leaves_a_branch_entry_per_drafted_follow_up() {
         with_branches > answer_only * 2,
         "{FOLLOW_UP_BRANCHES} branches left {with_branches} bytes against {answer_only} for the answer alone"
     );
-    println!("AC14 trigger answer_only_bytes={answer_only} with_branches_bytes={with_branches}");
+    println!("trigger answer_only_bytes={answer_only} with_branches_bytes={with_branches}");
 }
 
-/// AC14, preemption: a request arriving while a later branch is drafting
+/// Preemption: a request arriving while a later branch is drafting
 /// waits for the forward in flight and the one-token restore of the answer
 /// entry, less than one prewarm chunk, and reuses the answer entry whole.
 #[test]
@@ -449,7 +449,7 @@ fn a_request_arriving_mid_follow_up_drafting_waits_less_than_one_prewarm_chunk()
             reference_chunk
         );
         println!(
-            "AC14 preempt branches_kept={} request_wait_ms={:.1} reference_chunk_ms={:.1} report={:?}",
+            "preempt branches_kept={} request_wait_ms={:.1} reference_chunk_ms={:.1} report={:?}",
             drafts.len(),
             millis(outcome.report.prewarm_wait),
             millis(reference_chunk),

@@ -130,7 +130,7 @@ pub(super) fn cached_tokens_after(prompt_len: usize, outcome: &TurnOutcome) -> u
     prompt_len + outcome.generated.len() - unforwarded.min(outcome.generated.len())
 }
 
-/// AC2: a 3-turn transcript where each turn's prompt is the previous turn's
+/// A 3-turn transcript where each turn's prompt is the previous turn's
 /// prompt plus its generated tokens plus new tokens. Every turn's greedy ids
 /// equal the ids of a full prefill of the same prompt, the path is `extend`
 /// from turn 2, and the prefilled tokens are the tokens past what the cache
@@ -369,7 +369,7 @@ fn rewrite_last_tokens(
     })
 }
 
-/// AC3: a 50-token rewrite sits inside the ring's 256-row slack, so the path
+/// A 50-token rewrite sits inside the ring's 256-row slack, so the path
 /// is `rewind` and the prefilled tokens are the 50 replaced ones plus the new
 /// tokens.
 fn rewrite_within_slack(speculative: SpeculativeConfig<'static>) {
@@ -394,7 +394,7 @@ fn rewrite_within_slack(speculative: SpeculativeConfig<'static>) {
     assert_eq!(rewrite.report.prefilled_tokens, rewrite.tail_tokens);
 }
 
-/// R3's other half, now served by R4: a 300-token rewrite on a roughly
+/// The other half of the slack case, served by checkpoints: a 300-token rewrite on a roughly
 /// 1,000-token transcript is past the 256-row slack, but turn 1 stopped its
 /// prefill every 256 tokens to snapshot the rings, so the request restores the
 /// checkpoint at or before the shared prefix instead of prefilling in full.
@@ -410,7 +410,7 @@ fn rewrite_beyond_slack(speculative: SpeculativeConfig<'static>) {
     assert_restored_nearest_checkpoint(&rewrite, INTERVAL as usize);
 }
 
-/// AC4: a 2,000-token rewrite on a transcript of more than 3,000 tokens is
+/// A 2,000-token rewrite on a transcript of more than 3,000 tokens is
 /// far past the ring's slack. Turn 1 snapshotted the rings every 512 tokens,
 /// so the request restores the newest snapshot at or before the shared prefix
 /// and prefills the gap to the prefix plus the new tokens. Whatever it does,

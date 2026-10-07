@@ -2786,7 +2786,7 @@ impl<'file> LoadedModel<'file> {
     /// event carrying `draft_n`/`draft_n_accepted` -- llama-server's own
     /// per-request field names (`tools/server/server-common.cpp:96-101`'s
     /// `if (n_draft_tokens > 0) { base["draft_n"] = ...; }`), read straight
-    /// off `speculative_stats` (SPEC R12), never a second counter -- plus
+    /// off `speculative_stats` (the spec), never a second counter -- plus
     /// each n-gram type's own drafted/accepted split
     /// ([`SpeculativeDecodeStats::per_type`]'s own doc). A request that
     /// never drafted emits nothing, matching llama-server's own gate.
@@ -5745,7 +5745,7 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(feature = "instrument")]
                     let pre_logits_started = read_ticks();
                     let cached_len_before_step = cached_len;
-                    // attribution slice 2 (2026-09-22, OWNER_BRIEF_dominant_cost):
+                    // attribution (2026-09-22):
                     // splits pre_logits into the cache-checksum debug! block,
                     // the logits-fetch + shape-check debug! block, and the
                     // unconditional argmax debug! block, to find which

@@ -390,7 +390,7 @@ mod tests {
 
     use super::*;
 
-    /// R9: the fluent builder and the conflaguration loader (TOML file, then
+    /// The fluent builder and the conflaguration loader (TOML file, then
     /// env vars) produce identical configs for the same values -- AC12. A
     /// genuine multi-type SET (`ngram-simple,ngram-map-k`), not a single
     /// active type, proving the set (not scalar) semantics round-trip
@@ -663,7 +663,7 @@ mod tests {
         });
     }
 
-    /// R9: llama.cpp's own `--spec-type` strings round-trip through
+    /// Llama.cpp's own `--spec-type` strings round-trip through
     /// [`SpeculativeTypeName`]'s `FromStr`/`Display`.
     #[test]
     fn llama_type_names_round_trip() {
@@ -694,7 +694,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// R9: llama.cpp's own multi-type `--spec-type` string form
+    /// Llama.cpp's own multi-type `--spec-type` string form
     /// (`ngram-simple,ngram-map-k,ngram-mod`) round-trips through
     /// [`SpeculativeTypeNameSet`]'s `FromStr`/`Display` -- proving the SET
     /// (not a single active type) is what this crate's config carries, and

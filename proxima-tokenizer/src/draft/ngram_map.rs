@@ -665,19 +665,19 @@ mod tests {
 
     /// [`ngram_map_draft`] against every case in
     /// `tests/fixtures/llama-ngram/fixtures/ngram_map_k.json`
-    /// (SPEC.md AC6), produced by calling llama.cpp's own
+    /// (SPEC.md), produced by calling llama.cpp's own
     /// `common_ngram_map_begin`/`_draft`/`_accept` with `key_only = true`
     /// directly.
     #[test]
     fn ngram_map_k_matches_llama_fixture() {
         let (cases, non_empty) = run_fixture(NGRAM_MAP_K_JSON, true);
         println!("cases = {cases} non_empty = {non_empty}");
-        assert!(cases >= 200, "fixture must carry at least 200 cases per SPEC.md AC6");
+        assert!(cases >= 200, "fixture must carry at least 200 cases per SPEC.md");
     }
 
     /// [`ngram_map_draft`] against every case in
     /// `tests/fixtures/llama-ngram/fixtures/ngram_map_k4v.json`
-    /// (SPEC.md AC7), `key_only = false`. Includes the 24 cases where
+    /// (SPEC.md), `key_only = false`. Includes the 24 cases where
     /// `ngram-map-k` and `ngram-map-k4v` draft differently
     /// (`README.md`'s own "key_only vs k4v divergence" section) -- both
     /// fixtures must pass with the SAME port, differing only in
@@ -686,7 +686,7 @@ mod tests {
     fn ngram_map_k4v_matches_llama_fixture() {
         let (cases, non_empty) = run_fixture(NGRAM_MAP_K4V_JSON, false);
         println!("cases = {cases} non_empty = {non_empty}");
-        assert!(cases >= 200, "fixture must carry at least 200 cases per SPEC.md AC7");
+        assert!(cases >= 200, "fixture must carry at least 200 cases per SPEC.md");
     }
 
     /// Happy path, hand-computed key_only: `history`'s first four tokens are

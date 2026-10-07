@@ -4832,7 +4832,7 @@ pub(super) mod memory_fit_gate_tests {
             );
         }
 
-        /// Per-position accounting of slice 2b's own `refresh_bound_ops`
+        /// Per-position accounting of `refresh_bound_ops`
         /// (local window recomposition) against a fresh `bind_with_fusion`,
         /// at one real-checkpoint crossing. Calls `refresh_bound_ops` once
         /// PER MASKED POSITION (a mask array with only that position set)

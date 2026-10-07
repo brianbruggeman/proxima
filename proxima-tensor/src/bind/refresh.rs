@@ -4,7 +4,7 @@
 //! matchers ([`super::bind_cached_attention_fusion`], reduce-epilogue-fusion,
 //! round-batching).
 //!
-//! The owner's classification (slice 2b brief): a masked position's fusion
+//! The owner's classification (brief): a masked position's fusion
 //! DECISION does not change across a symbol crossing, only its extents,
 //! layouts and kernel scalars do. This module keeps that decision fixed and
 //! re-derives the numbers:
