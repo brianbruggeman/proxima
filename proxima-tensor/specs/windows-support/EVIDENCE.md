@@ -42,6 +42,7 @@ Root policy, verifier, and protocol versions remain the configured rustls values
 | AC12a Windows `http-hyper` + Prime alias cfg | `cargo xwin check -p proxima --lib --features http-hyper --target x86_64-pc-windows-msvc` finished with exit 0; compiles the Windows alias registration and its factory type | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-alias-xwin.stdout` |
 | AC12b Hyper TLS ALPN ownership | 1 regression test passed; URL-aware TLS config starts with ALPN set and `with_client_tls_config` constructs `hyper-rustls` successfully after clearing it | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-hyper-alpn.stdout` |
 | AC12b Hyper without TLS feature | `cargo check -p proxima-http --lib --features http1` finished with exit 0, with no unused-field or unused-mut diagnostics | `/private/tmp/proxima-windows-evidence/tls-native-roots/ac-12-hyper-no-tls.stdout` |
+| Native Windows CI for `f2e26b1bf0080fcad8080e3102a744c1e501084d` | GitHub Actions run [37542940589](https://github.com/brianbruggeman/proxima/actions/runs/37542940589) completed with failure in `windows-port` at “compile every workspace target” (exit 1). Public annotations identify the failed step but provide no compiler diagnostic; fetching job logs returned HTTP 403 (`Must have admin rights to Repository`), and the Actions page requires sign-in. The compile failure mechanism is therefore unexplained by accessible artifacts. | https://api.github.com/repos/brianbruggeman/proxima/actions/runs/37542940589/jobs |
 
 The universal facade acceptance commands are:
 

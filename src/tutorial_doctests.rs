@@ -213,3 +213,7 @@ mod tutorial_build_an_observability_pipeline {}
 #[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-delivery-guarantees.md")]
 mod tutorial_build_delivery_guarantees {}
+
+#[cfg(all(doctest, tutorial_gate))]
+#[doc = include_str!("../.tutorial-gate-generated/outbound-tls-roots.md")]
+mod tutorial_outbound_tls_roots {}
