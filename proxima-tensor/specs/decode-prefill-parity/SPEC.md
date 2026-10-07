@@ -70,7 +70,9 @@ granite 65 s, qwen2 23 s. Owner: "if these were ms not s, I'd be happy."
 - AC3 decode bound line `metric=ms_per_token arm=tip vs=llama` within=true on gemma4 E2B, then the
   7 ms line.
 - AC4 the same two for granite moe.
-- AC5 `llama_parity_` 6 passed and `generic_verify_llama_parity_` 5 passed after every slice.
+- AC5 `llama_parity_` 7 passed (the file defines gemma4_26b, gemma4_e2b, granite_moe, openchat, qwen2,
+  lfm2, qwen3) and `generic_verify_llama_parity_` 5 passed after every slice. This line read 6 until
+  slice 1; the count came from memory, not from `cargo nextest list`.
 
 ## slices
 
@@ -374,7 +376,8 @@ Mechanism removed, traced in `census_groups.csv`: each of the 576 gathered exper
 cooperative gather kernel, `grid_threads=131072000` at threadgroup width 256 or 128, one threadgroup per
 output element (1000 tokens x 512 rows), re-reading the expert row once per token: 9.67 ms (gate), 10.08 ms
 (up with its silu epilogue), 9.77 ms (down), 15.62 ms (last round of down with the 25-step combine epilogue),
-cold own-cb per dispatch. `classify_tiled_gemm` rejected all of them with `GatheredOperand`
+warm own-cb per dispatch (`warm_ns`; the cold column differs by at most 0.001 ms on these four rows,
+`census_head_granite_prefill/census_groups.csv`). `classify_tiled_gemm` rejected all of them with `GatheredOperand`
 (`timeline/granite_tiled_gemm_classification_first_plan.log`, slice 0).
 
 ### before and after
@@ -384,8 +387,10 @@ Interleaved final run, `evidence/slice1/interleaved/decode_arms.out`: 3 processe
 prompt and 971-token E2B prompt (`prompt1k.txt`), 128 new tokens. Arms: `base` =
 `decode_gbps_baseline_f76b4a97` (sha256 `9c2dca1a...3619`), `tip` = the final tree, `tipcopy` = a byte copy of
 `tip` (sha256 `e3db0a4b...f21`, both), llama-server `f1ea20621`. Box: load average 4.27 before and 3.75 after;
-`suggestd` 90.6% CPU and a background daemon in `~/.local/bin` 89.8% CPU before, `mds_stores` 108.3% and
-the same daemon 78.9% after (`box_load_before.txt`, `box_load_after.txt`); no cargo, GPU or Ollama process
+`suggestd` 90.6% CPU and a background daemon in `~/.local/bin` 89.8% CPU before (`box_load_before.txt`).
+After the run only the date and the load averages were captured (`box_load_after.txt`, 93 bytes, no process
+list), so the per-process CPU of the box during and after the run has no artifact; the 4.27 and 3.75 load
+averages are the only recorded loadout figures beyond the before-run list. No cargo, GPU or Ollama process
 of mine ran during it.
 
 | arm | prefill ms (median, CoV, range) | TTFT ms | decode ms/token (median, CoV, range) | peak RSS (median of 3) | peak footprint | peak GPU bytes |
@@ -400,7 +405,11 @@ of mine ran during it.
 | E2B llama-server | 573.53, 7.99% | 576.9 | 9.002, 4.82% | 3.746 GB | 216.2 MB | n/a |
 
 Bound lines (`bound metric=... arm=tip vs=base`, limit = max(2% of the base median, twin gap), printed by the
-driver): granite prefill delta -5626.50 ms within=true; TTFT -5626.00 within=true; decode -0.044 ms/token,
+driver, computed from the outlier-filtered `median_kept` values of the `summary` lines, not from the
+`median_all` figures in the table above: granite prefill kept medians 830.5205 against 6457.0170 give -5626.50
+ms, where the table medians 831.94 and 6458.99 give -5627.05; ms/token tip 14.9570 against base 15.0010
+gives -0.044, where the table gives -0.050; the llama-server figures below use kept medians as well
+(prefill 151.375, ms/token 5.2359)): granite prefill delta -5626.50 ms within=true; TTFT -5626.00 within=true; decode -0.044 ms/token,
 limit 0.300, within=true; RSS +30.8 MB, limit 49.4 MB, within=true; footprint -14.1 MB within=true; GPU bytes
 delta 0. E2B (code path unchanged by this slice): prefill -1.93 ms, decode -0.040 ms/token, within=true on
 all. Twin gap `tipcopy` vs `tip`: granite prefill -1.50 ms (limit 16.61), E2B prefill -2.98 ms. Against
@@ -408,7 +417,20 @@ llama-server, granite `tip` is `within=false` on every metric: prefill +679.1 ms
 ms/token +9.72, RSS +736 MB, footprint +318 MB (the AC4 prefill line of the spec: not reached).
 
 Per-kernel, same census method as slice 0 (`evidence/slice1/census_tip_granite_prefill/`, final tree,
-`rank.md`; cold own-cb of one representative dispatch per kernel group, `census_groups.csv`):
+`rank.md`; warm own-cb (`warm_ns`) of one representative dispatch per kernel group, `census_groups.csv`;
+the class total 599.36 reproduces on `warm_ns` (192 x 1.0347 + 192 x 1.0859 + 168 x 0.5907 + 24 x 1.1960 +
+48 x 1.3390 = 599.36 ms) and not on `cold_ns`). The cold column and its CoV for the same dispatches:
+
+| tip dispatch group | warm own-cb ms (table below) | cold own-cb ms | cold CoV |
+|---|---|---|---|
+| gate (192) | 1.0347 | 1.0211 | 10.99% |
+| up + silu epilogue (192) | 1.0859 | 1.0786 | 6.69% |
+| down (168) | 0.5907 | 0.5858 | 1.75% |
+| down + combine epilogue (24) | 1.1960 | 1.2034 | 24.45% |
+
+Three of the four cold CoVs exceed 5% (`cold_cov_pct` of the census), so the cold medians of those three groups
+are not stable point estimates; the warm and cold values differ by 0.005 to 0.014 ms (0.6% to 1.3%) on each group. The
+HEAD figures below agree between the two columns to 0.001 ms (cold CoV 8.05%, 0.01%, 0.01%, 0.03%).
 
 | quantity | HEAD | tip | llama |
 |---|---|---|---|
@@ -439,7 +461,7 @@ derived 790 ms; not met (+42 ms), and 5.49x llama.
   models (`ids arm=... equal=true` lines, 128 ids, `common_prefix=128`); the owner gate sets on the final
   tree: `llama_parity_` 7 passed, `generic_verify_llama_parity_` 5 passed, and the new
   `prefill_width_parity_with_llama_granite_moe` 1 passed (13 run, `gate/7_ac5_llama_parity.tail`; the spec's
-  AC5 says 6 for `llama_parity_`, the file defines 7). The existing llama fixtures carry prompts of 4 to 72
+  AC5 read 6 for `llama_parity_` before this slice; the file defines 7 and the line now says 7). The existing llama fixtures carry prompts of 4 to 72
   tokens, below the 160 rows the tiled paths need, so none of them reaches this kernel; the new fixture is
   the 1000-token prompt with llama's own prompt ids. The new test takes 9.45 s with the feature off and
   3.86 s on (`evidence/slice1/parity/prefill_width_parity_grouped_off.log`, `..._on.log`): the 5.6 s
@@ -527,6 +549,21 @@ other bench of mine active.
   199 to 513 us per slot against about 1.55 ms for the generic path scaled linearly from its 9.67 ms at
   1000 tokens (derived, not measured).
 - Q4_K, Q6_K and Q4_0 experts (qwen35moe, gemma4 26B) were not run through this kernel and are not admitted.
+
+### corrections after verification
+
+- The per-kernel tables were labelled cold own-cb; the figures are `warm_ns`. Relabelled, cold column and cold
+  CoV added beside them (above).
+- The after-run process list quoted for the interleaved run had no artifact; the sentence now states only
+  what `box_load_after.txt` holds (date and load averages).
+- AC5 said 6 for `llama_parity_`; `cargo nextest` lists 7 (13 with the other two sets), the line now says 7.
+- The driver's bound lines use `median_kept`; the headline table uses `median_all`. Both bases are now named
+  next to the bound lines.
+- `expert_grouped_gemm_speed_probe.rs` imports moved from the body of `run()` to module scope behind the
+  same cfg gate; the `metal-grouped-gemm` comment in `omega/Cargo.toml` no longer cites a slice number.
+  Clippy `-D warnings` on the example exits 0 with and without the probe features
+  (`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice1/fix/`); the probe still runs
+  (44 output lines, 40 measurements, box not quiet: smoke run, not a timing record).
 
 ### re-prove
 
