@@ -3084,7 +3084,9 @@ fn mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed
     };
 
     let mm_layout = render("1");
-    assert!(mm_layout.contains("simdgroup_multiply_accumulate(acc[i * 2 + j], b_frag[j], a_frag[i], acc[i * 2 + j])"));
+    assert!(mm_layout.contains(
+        "simdgroup_multiply_accumulate(acc[(i % 4) * 2 + i / 4], mb[i / 4], ma[i % 4], acc[(i % 4) * 2 + i / 4])"
+    ));
     assert!(
         mm_layout
             .lines()
@@ -3132,7 +3134,8 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
     };
 
     let unit_stride = render(&unit_bound, &unit_codecs, "1");
-    assert!(unit_stride.contains("long mm_act_offset = mm_act_base + k0;"), "{unit_stride}");
+    assert!(unit_stride.contains("device const float *mm_act_ptr = in"), "{unit_stride}");
+    assert!(unit_stride.contains("mm_act_ptr += 32;"), "{unit_stride}");
     assert!(unit_stride.contains("q4k_run8(wws_blk0"), "{unit_stride}");
 
     for (label, source) in [
@@ -3145,6 +3148,45 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
         );
         assert!(source.contains("float act_scalar[8];"), "{label}:\n{source}");
     }
+}
+
+/// `kernel_mul_mm`'s schedule: the weight half-block is decoded (its device reads
+/// issued) before the barrier that fences the previous step's multiplies, the
+/// tile is stored after it, the loop ends on the multiplies with no trailing
+/// barrier, and one barrier follows the loop so the epilogue may reuse the tile.
+/// The multiply's loops are fully unrolled and its loads grouped by simdgroup
+/// barriers.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn mm_layout_decodes_before_the_first_barrier_and_ends_the_loop_on_the_multiplies() {
+    let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
+    let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
+    let source = emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source;
+    let position = |needle: &str, from: usize| {
+        source[from..]
+            .find(needle)
+            .map(|found| from + found)
+            .unwrap_or_else(|| panic!("`{needle}` not found after byte {from}:\n{source}"))
+    };
+
+    let decode = position("q4_0_dequant_half16(wws_blk0", 0);
+    let first_barrier = position("threadgroup_barrier(mem_flags::mem_threadgroup);", decode);
+    let store = position("weight_tile[mm_weight_store", decode);
+    assert!(decode < first_barrier && first_barrier < store, "decode, barrier, store:\n{source}");
+
+    let multiply = position("simdgroup_multiply_accumulate(", store);
+    let loop_end = position("\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n", multiply);
+    assert!(
+        !source[multiply..loop_end].contains("threadgroup_barrier("),
+        "no threadgroup barrier may sit between the multiplies and the end of the loop:\n{source}"
+    );
+    let unrolled = source.matches("_Pragma(\"clang loop unroll(full)\")").count();
+    assert_eq!(unrolled, 4, "the multiply step has four fully unrolled loops:\n{source}");
+    assert_eq!(
+        source.matches("simdgroup_barrier(mem_flags::mem_none);").count(),
+        3,
+        "the loads are fenced from the multiplies by three simdgroup barriers:\n{source}"
+    );
 }
 
 /// The dense-batched-gemm path (`push_dense_batched_gemm_body`) has no

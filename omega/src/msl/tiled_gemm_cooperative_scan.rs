@@ -648,9 +648,47 @@ fn push_mm_layout_k_loop(
     source.push_str(
         "    long mm_act_store = 64 * (4 * (tiitg % 4) + (tiitg / 4) / 8) + 8 * ((tiitg / 4) % 8);\n",
     );
+    if unit_stride {
+        source.push_str(&format!(
+            "    device const float *mm_act_ptr = in{other} + mm_act_base;\n"
+        ));
+    }
+    source.push_str("    simdgroup_half8x8 ma[4];\n");
+    source.push_str("    simdgroup_float8x8 mb[2];\n");
     source.push_str(&format!(
         "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
+    push_mm_layout_weight_decode(source, codec, half_width);
+    push_wide_weight_stage_advance(
+        source,
+        0,
+        block_k,
+        1,
+        chunk_width,
+        block_elements,
+        block_bytes,
+    );
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    for run in 0..half_width / 8 {
+        source.push_str(&format!(
+            "        for (int j = 0; j < 8; ++j) {{ weight_tile[mm_weight_store + {} + 8 * j] = decoded[{} + j]; }}\n",
+            512 * run,
+            run * 8
+        ));
+    }
+    push_mm_layout_activation_stage(source, block, unit_stride);
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    push_mm_layout_multiply(source);
+    source.push_str("    }\n");
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+}
+
+/// Decodes this thread's half-block of the current K-step into `decoded[16]`,
+/// ahead of the barrier that fences the previous step's multiplies (ggml's own
+/// order: `kernel_mul_mm` dequantizes, then waits, then stores), so the
+/// device reads of one simdgroup overlap the multiplies of its slower peers.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_mm_layout_weight_decode(source: &mut String, codec: Codec, half_width: u64) {
     source.push_str("        half decoded[16];\n");
     match codec {
         Codec::Q4_0 => {
@@ -673,29 +711,22 @@ fn push_mm_layout_k_loop(
             }
         }
     }
-    push_wide_weight_stage_advance(
-        source,
-        0,
-        block_k,
-        1,
-        chunk_width,
-        block_elements,
-        block_bytes,
-    );
-    for run in 0..half_width / 8 {
-        source.push_str(&format!(
-            "        for (int j = 0; j < 8; ++j) {{ weight_tile[mm_weight_store + {} + 8 * j] = decoded[{} + j]; }}\n",
-            512 * run,
-            run * 8
-        ));
-    }
+}
+
+/// Reads this thread's 8 activation floats of the current K-step and stores them
+/// into `act_tile`. A unit-stride activation walks one carried pointer, 32
+/// floats per step; any other layout reads each element through the operand
+/// accessor at the runtime stride.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_mm_layout_activation_stage(source: &mut String, block: &TiledGemmBlock, unit_stride: bool) {
+    let other = block.other;
+    let reduce_dim = block.reduce_dim;
     if unit_stride {
-        source.push_str("        long mm_act_offset = mm_act_base + k0;\n");
+        source.push_str("        float4 act_low = *(const device float4 *)(mm_act_ptr);\n");
+        source.push_str("        float4 act_high = *(const device float4 *)(mm_act_ptr + 4);\n");
         source.push_str(&format!(
-            "        float4 act_low = *(const device float4 *)(in{other} + mm_act_offset);\n"
-        ));
-        source.push_str(&format!(
-            "        float4 act_high = *(const device float4 *)(in{other} + mm_act_offset + 4);\n"
+            "        mm_act_ptr += {};\n",
+            crate::sized::TILED_GEMM_BLOCK_K
         ));
     } else {
         source.push_str(&format!(
@@ -715,31 +746,36 @@ fn push_mm_layout_k_loop(
     }
     source.push_str("        *(threadgroup float4 *)&act_tile[mm_act_store] = act_low;\n");
     source.push_str("        *(threadgroup float4 *)&act_tile[mm_act_store + 4] = act_high;\n");
-    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    source.push_str("        for (int sub_k = 0; sub_k < 4; ++sub_k) {\n");
-    source.push_str("            simdgroup_half8x8 a_frag[4];\n");
-    source.push_str("            for (int i = 0; i < 4; ++i) {\n");
-    source.push_str(
-        "                simdgroup_load(a_frag[i], weight_tile + 64 * (8 * sub_k + 4 * row_half + i), 8);\n",
-    );
+}
+
+/// The four 8-deep multiply steps of one K-step, in `kernel_mul_mm`'s own
+/// form (`mul_mm.metal:288-310`): fragment pointers walked by addition, the
+/// loads grouped ahead of the multiplies by `simdgroup_barrier`s, every loop
+/// fully unrolled. `acc[(i % 4) * 2 + i / 4]` is ggml's flat `mc[i]` renamed to
+/// the `[feature][token]` index the write-back reads.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_mm_layout_multiply(source: &mut String) {
+    let unroll = "_Pragma(\"clang loop unroll(full)\")";
+    source.push_str("        threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n");
+    source.push_str("        threadgroup const float *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n");
+    source.push_str(&format!("        {unroll} for (short ik = 0; ik < 4; ik++) {{\n"));
+    source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
+    source.push_str(&format!("            {unroll} for (short i = 0; i < 4; i++) {{\n"));
+    source.push_str("                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);\n");
     source.push_str("            }\n");
     source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
-    source.push_str("            simdgroup_float8x8 b_frag[2];\n");
-    source.push_str("            for (int j = 0; j < 2; ++j) {\n");
+    source.push_str(&format!("            {unroll} for (short i = 0; i < 2; i++) {{\n"));
+    source.push_str("                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);\n");
+    source.push_str("            }\n");
+    source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
+    source.push_str(&format!("            {unroll} for (short i = 0; i < 8; i++) {{\n"));
     source.push_str(
-        "                simdgroup_load(b_frag[j], act_tile + 64 * (4 * sub_k + 2 * col_half + j), 8);\n",
+        "                simdgroup_multiply_accumulate(acc[(i % 4) * 2 + i / 4], mb[i / 4], ma[i % 4], acc[(i % 4) * 2 + i / 4]);\n",
     );
     source.push_str("            }\n");
-    source.push_str("            for (int i = 0; i < 4; ++i) {\n");
-    source.push_str("                for (int j = 0; j < 2; ++j) {\n");
-    source.push_str(
-        "                    simdgroup_multiply_accumulate(acc[i * 2 + j], b_frag[j], a_frag[i], acc[i * 2 + j]);\n",
-    );
-    source.push_str("                }\n");
-    source.push_str("            }\n");
+    source.push_str("            lsma += 8 * 64;\n");
+    source.push_str("            lsmb += 4 * 64;\n");
     source.push_str("        }\n");
-    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    source.push_str("    }\n");
 }
 
 /// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s setup half: computed ONCE, before
