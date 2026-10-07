@@ -19,6 +19,10 @@
 //! size sampled at every token) adds the peak GPU allocation. `--model` names
 //! the checkpoint for children that read `PROXIMA_DECODE_MODEL_GGUF`.
 //!
+//! `--arm-env LABEL:KEY=VALUE` adds one environment variable to the proxima arm named LABEL, so the
+//! same binary registered under two labels is an env A/B (`--arm k1=bin --arm k8=bin --arm-env
+//! k8:PROXIMA_COMMAND_BUFFER_CHUNKS=8`).
+//!
 //! `--dump-llama-ids DIR` writes, per case, the first llama-server process's last run as one
 //! record (`prompt`, llama's `prompt_ids`, greedy `generated_ids`) in the shape
 //! `tests/arch_data_baseline.rs` reads, so a long-prompt oracle fixture is a run of this driver.
@@ -95,6 +99,7 @@ struct Arguments {
     processes: usize,
     runs: usize,
     arms: Vec<(String, PathBuf)>,
+    arm_envs: Vec<(String, String, String)>,
     llama_server: Option<PathBuf>,
     model: String,
     cases: Vec<Case>,
@@ -115,6 +120,7 @@ fn parse_arguments() -> Arguments {
         processes: 2,
         runs: 7,
         arms: Vec::new(),
+        arm_envs: Vec::new(),
         llama_server: None,
         model: MODEL_PATH.to_string(),
         cases: Vec::new(),
@@ -147,6 +153,14 @@ fn parse_arguments() -> Arguments {
                 arguments
                     .arms
                     .push((label.to_string(), PathBuf::from(path)));
+            }
+            "--arm-env" => {
+                let spec = value();
+                let (label, assignment) = spec.split_once(':').expect("--arm-env label:KEY=VALUE");
+                let (key, setting) = assignment.split_once('=').expect("--arm-env label:KEY=VALUE");
+                arguments
+                    .arm_envs
+                    .push((label.to_string(), key.to_string(), setting.to_string()));
             }
             other => panic!("unknown flag {other}"),
         }
@@ -519,6 +533,13 @@ fn run_proxima_process(
         .env("PROXIMA_PROMPT", prompt)
         .env("PROXIMA_MAX_TOKENS", new_tokens().to_string())
         .env("PROXIMA_RUNS", (arguments.runs + 1).to_string())
+        .envs(
+            arguments
+                .arm_envs
+                .iter()
+                .filter(|(label, _, _)| *label == arm.label)
+                .map(|(_, key, setting)| (key, setting)),
+        )
         .output()
         .expect("spawn decode_gbps_baseline");
     log_line(
