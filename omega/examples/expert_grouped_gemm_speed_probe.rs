@@ -119,6 +119,8 @@ fn run() -> anyhow::Result<()> {
 
     struct Shape {
         tokens: usize,
+        selected: usize,
+        per_selected_activation: bool,
         rows: usize,
         k: usize,
     }
@@ -170,7 +172,94 @@ fn run() -> anyhow::Result<()> {
             .collect()
     }
 
+    fn top_k_route(tokens: usize, selected: usize) -> Vec<f32> {
+        let mut lcg = Lcg(5);
+        let mut route = Vec::with_capacity(tokens * selected);
+        for _ in 0..tokens {
+            let mut pool: Vec<usize> = (0..EXPERTS).collect();
+            for slot in 0..selected {
+                let draw = ((lcg.next_unit() + 1.0) * 0.5 * (EXPERTS - slot) as f32) as usize;
+                route.push(pool.remove(draw.min(pool.len() - 1)) as f32);
+            }
+        }
+        route
+    }
+
+    fn stacked_program(shape: &Shape) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let input = |program: &mut Vec<Op>, dtype: DType, extents: &[usize], name: &str| {
+            append(
+                program,
+                Op::Input {
+                    dtype,
+                    shape: extents.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+                    name: Some(name.into()),
+                },
+            )
+        };
+        let weight = input(&mut program, DType::UInt8, &[EXPERTS, shape.rows, shape.k], "weight");
+        let route_node = input(&mut program, DType::Float32, &[shape.tokens, shape.selected], "route");
+        let (activation, activation_map) = if shape.per_selected_activation {
+            (
+                input(&mut program, DType::Float32, &[shape.tokens, shape.selected, shape.k], "activation"),
+                map::projection(4, &[0, 1, 3]),
+            )
+        } else {
+            (
+                input(&mut program, DType::Float32, &[shape.tokens, shape.k], "activation"),
+                map::projection(4, &[0, 3]),
+            )
+        };
+        let gather = IndexMap::Computed {
+            indices: route_node,
+            index_map: map::projection(4, &[0, 1]),
+            base: map::IndexPattern {
+                iter_rank: 4,
+                axes: vec![
+                    AxisIndex::default(),
+                    AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                        offset: 0,
+                        len: None,
+                    },
+                    AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                        offset: 0,
+                        len: None,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![(weight, gather), (activation, IndexMap::Affine(activation_map))],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 1, 2])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, sum)
+    }
+
     fn program(shape: &Shape) -> (Vec<Op>, NodeId) {
+        if shape.selected > 1 {
+            return stacked_program(shape);
+        }
         let mut program = Vec::new();
         let input = |program: &mut Vec<Op>, dtype: DType, extents: &[usize], name: &str| {
             append(
@@ -253,14 +342,30 @@ fn run() -> anyhow::Result<()> {
     let token_counts = env_list("PROBE_TOKEN_COUNTS", DEFAULT_TOKEN_COUNTS.to_vec());
     let routings = env_list("PROBE_ROUTINGS", ROUTINGS.iter().map(|routing| (*routing).to_string()).collect());
     let shape_names = env_list("PROBE_SHAPES", SHAPES.iter().map(|shape| shape.0.to_string()).collect());
+    let selected = env_list("PROBE_SELECTED", vec![1_usize]).first().copied().unwrap_or(1).max(1);
     for (name, rows, k) in SHAPES.into_iter().filter(|shape| shape_names.iter().any(|wanted| wanted == shape.0)) {
         for &tokens in &token_counts {
-            let shape = Shape { tokens, rows, k };
+            let shape = Shape {
+                tokens,
+                selected,
+                per_selected_activation: selected > 1 && name == "down",
+                rows,
+                k,
+            };
             let stack = expert_stack(&shape)?;
-            let activation = unit_values(23, tokens * k);
+            let activation_len = if shape.per_selected_activation {
+                tokens * selected * k
+            } else {
+                tokens * k
+            };
+            let activation = unit_values(23, activation_len);
             let (program, root) = program(&shape);
             for routing in routings.iter().map(String::as_str) {
-                let route_values = route(routing, tokens);
+                let route_values = if selected > 1 {
+                    top_k_route(tokens, selected)
+                } else {
+                    route(routing, tokens)
+                };
                 let named = [
                     ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }),
                     ("route", QuantizedBlock::Float32(&route_values)),
@@ -278,10 +383,10 @@ fn run() -> anyhow::Result<()> {
                         .context("metal executes on a real device")?;
                     samples.push(timings.iter().map(|timing| timing.gpu_ns).sum::<u64>());
                 }
-                let gflop = 2.0 * tokens as f64 * rows as f64 * k as f64 / 1.0e9;
+                let gflop = 2.0 * (tokens * selected) as f64 * rows as f64 * k as f64 / 1.0e9;
                 let microseconds = median(samples.clone()) as f64 / 1000.0;
                 println!(
-                    "shape={name} tokens={tokens} routing={routing} median_us={microseconds:.1} cov_pct={:.2} useful_tflops={:.3}",
+                    "shape={name} tokens={tokens} selected={selected} routing={routing} median_us={microseconds:.1} cov_pct={:.2} useful_tflops={:.3}",
                     coefficient_of_variation_percent(&samples),
                     gflop / microseconds * 1.0e3
                 );
