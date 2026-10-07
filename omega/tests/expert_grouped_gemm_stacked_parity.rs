@@ -415,3 +415,65 @@ fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
         "a metal result compared against an oracle routed elsewhere must not pass: {gross:e}"
     );
 }
+
+const DECODE_AND_VERIFY_WIDTHS: [usize; 4] = [1, 2, 3, 4];
+
+fn assert_matches_oracle_below_the_tile_minimum(case: &Case) -> Vec<String> {
+    let outputs = run(case);
+    let Shape { sequence, selected, rows, .. } = case.shape;
+    assert_eq!(outputs.oracle.len(), sequence * selected * rows, "degenerate: oracle produced no output");
+    assert_eq!(outputs.metal.len(), sequence * selected * rows, "degenerate: metal produced no output");
+    assert!(
+        !stacked_grouped_kernel_ran(&outputs.kernel_keys),
+        "{sequence} tokens: a decode or verify width must not take the prefill tile kernel: {:?}",
+        outputs.kernel_keys
+    );
+    let worst = worst_relative_row_error(&outputs.oracle, &outputs.metal, rows);
+    assert!(
+        worst <= RELATIVE_TOLERANCE,
+        "{sequence} tokens, per_selected_activation={}: stacked result drifted from the f32 oracle by {worst:e}",
+        case.activation_per_selected
+    );
+    outputs.kernel_keys
+}
+
+#[test]
+fn a_stacked_projection_at_decode_and_verify_widths_matches_the_f32_oracle() {
+    for sequence in DECODE_AND_VERIFY_WIDTHS {
+        for activation_per_selected in [false, true] {
+            let shape = Shape { sequence, selected: 8, rows: 192, k: 512, experts: 32 };
+            let route = top_k_route(shape.sequence, shape.selected, shape.experts, 50 + sequence as u64);
+            assert_matches_oracle_below_the_tile_minimum(&Case {
+                shape,
+                route,
+                activation_per_selected,
+                fuse_gate: false,
+            });
+        }
+    }
+}
+
+#[test]
+fn a_stacked_down_at_a_decode_step_takes_the_packed_matvec_not_the_dense_gather() {
+    let shape = Shape { sequence: 1, selected: 8, rows: 192, k: 512, experts: 32 };
+    let route = top_k_route(shape.sequence, shape.selected, shape.experts, 61);
+    let per_selected = assert_matches_oracle_below_the_tile_minimum(&Case {
+        shape: Shape { ..shape },
+        route: route.clone(),
+        activation_per_selected: true,
+        fuse_gate: false,
+    });
+    let shared = assert_matches_oracle_below_the_tile_minimum(&Case {
+        shape,
+        route,
+        activation_per_selected: false,
+        fuse_gate: false,
+    });
+    let grouped_matvec_keys = |keys: &[String]| keys.iter().filter(|key| key.contains("_dg")).count();
+    assert!(grouped_matvec_keys(&shared) > 0, "the shared-activation form runs the packed matvec: {shared:?}");
+    assert_eq!(
+        grouped_matvec_keys(&per_selected),
+        grouped_matvec_keys(&shared),
+        "the per-selected-activation form must take the same kernel family as the shared one: {per_selected:?} vs {shared:?}"
+    );
+}
