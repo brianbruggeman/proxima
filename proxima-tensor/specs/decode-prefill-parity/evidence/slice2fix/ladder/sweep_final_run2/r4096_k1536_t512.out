@@ -1,0 +1,6 @@
+FACTS arm=prod max_threads_per_threadgroup=832 static_threadgroup_bytes=0
+FACTS arm=ggml max_threads_per_threadgroup=896 static_threadgroup_bytes=0
+CHECK arm=ggml differing_words=2096812/2097152 rms_relative_error=1.806e-4
+SHAPE rows=4096 k=1536 tokens=512 rounds=21
+TIME arm=prod p25_us=826.6 median_us=827.0 min_us=826.0 cov_pct=0.11 tflops_p25=7.79 vs_ref_p25=1.0461 n=21
+TIME arm=ggml p25_us=790.1 median_us=790.4 min_us=789.2 cov_pct=0.07 tflops_p25=8.15 vs_ref_p25=1.0000 n=21

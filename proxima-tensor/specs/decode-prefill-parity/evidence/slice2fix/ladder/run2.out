@@ -1,0 +1,12 @@
+FACTS arm=prod max_threads_per_threadgroup=896 static_threadgroup_bytes=8192
+FACTS arm=g_grestage max_threads_per_threadgroup=832 static_threadgroup_bytes=0
+FACTS arm=g_gnounroll max_threads_per_threadgroup=896 static_threadgroup_bytes=0
+FACTS arm=ggml max_threads_per_threadgroup=832 static_threadgroup_bytes=0
+CHECK arm=g_grestage differing_words=0/11931648 rms_relative_error=0.000e0
+CHECK arm=g_gnounroll differing_words=0/11931648 rms_relative_error=0.000e0
+CHECK arm=ggml differing_words=11929792/11931648 rms_relative_error=1.834e-4
+SHAPE rows=12288 k=1536 tokens=971 rounds=21
+TIME arm=prod p25_us=5607.8 median_us=5608.7 min_us=5604.4 cov_pct=0.03 tflops_p25=6.54 vs_ref_p25=1.2404 n=21
+TIME arm=g_grestage p25_us=4561.1 median_us=4561.7 min_us=4559.0 cov_pct=0.04 tflops_p25=8.04 vs_ref_p25=1.0089 n=21
+TIME arm=g_gnounroll p25_us=4920.6 median_us=4921.8 min_us=4918.5 cov_pct=0.03 tflops_p25=7.45 vs_ref_p25=1.0884 n=21
+TIME arm=ggml p25_us=4521.0 median_us=4521.4 min_us=4519.6 cov_pct=0.03 tflops_p25=8.11 vs_ref_p25=1.0000 n=21

@@ -1,0 +1,77 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.ggml.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/gwa.metal	2026-10-07 04:26:48
+@@ -4168,6 +4168,21 @@
+ constant constexpr short FC_mul_mm_r3 = 1;
+ constant constexpr bool FC_mul_mm_id_amax = false;
+ 
++static inline void q4_0_dequant_half16(device const uchar *block, uint il, thread half *out) {
++    device const ushort *qs = (device const ushort *)(block + 2);
++    float d = (float)as_type<half>(((device const ushort *)block)[0]);
++    float d1 = il != 0u ? d * 0.0625f : d;
++    float d2 = d1 * 0.00390625f;
++    float md = -8.0f * d;
++    ushort mask0 = il != 0u ? (ushort)0x00F0 : (ushort)0x000F;
++    ushort mask1 = (ushort)(mask0 << 8);
++    for (uint i = 0u; i < 8u; ++i) {
++        ushort word = qs[i];
++        out[2u * i] = (half)fma(d1, (float)(word & mask0), md);
++        out[2u * i + 1u] = (half)fma(d2, (float)(word & mask1), md);
++    }
++}
++
+ // each block_q contains 16*nl weights
+ #ifdef GGML_METAL_HAS_TENSOR
+ template<
+@@ -4388,27 +4403,14 @@
+                 *(sa + 64*ib + 8*ly + lx) = loop_k + 16*il + i < args.ne00 ? *((device T0 *) x + i) : 0;
+             }
+         } else {
+-            S0_4x4 temp_a;
+-            dequantize_func(x, il, temp_a);
++            half decoded[16];
++            q4_0_dequant_half16((device const uchar *)x, (uint)il, decoded);
+ 
+             threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+-            FOR_UNROLL (short i = 0; i < 16; i++) {
+-                const short sx = 2*il0 + i/8;
+-                const short sy = (tiitg/NL0)/8;
+-
+-              //const short lx = i%8;
+-              //const short ly = (tiitg/NL0)%8;
+-                const short lx = (tiitg/NL0)%8;
+-                const short ly = i%8;
+-
+-                const short ib = 8*sx + sy;
+-
+-                // NOTE: this is massively slower.. WTF?
+-                //sa[64*ib + 8*ly + lx] = temp_a[i/4][i%4];
+-
+-                *(sa + 64*ib + 8*ly + lx) = temp_a[i/4][i%4];
+-            }
++            long mm_weight_store = 64 * (16 * il0 + ((short)tiitg/NL0)/8) + ((short)tiitg/NL0)%8;
++            FOR_UNROLL (int j = 0; j < 8; j++) { sa[mm_weight_store + 8 * j] = decoded[j]; }
++            FOR_UNROLL (int j = 0; j < 8; j++) { sa[mm_weight_store + 512 + 8 * j] = decoded[8 + j]; }
+         }
+ 
+         if (FC_mul_mm_bc_inp) {
+@@ -4436,7 +4438,10 @@
+ 
+             const short ib = 4*sx + sy;
+ 
+-            *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
++            float4 act_low = *(device const float4 *)y;
++            float4 act_high = *((device const float4 *)y + 1);
++            *(threadgroup float4 *)(sb + 64*ib + 8*ly) = act_low;
++            *(threadgroup float4 *)(sb + 64*ib + 8*ly + 4) = act_high;
+         }
+ 
+         il = (il + 2 < nl) ? il + 2 : il % 2;
+@@ -4519,5 +4524,5 @@
+ 
+ #endif // GGML_METAL_HAS_TENSOR
+ 
+-typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
+-template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
++typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, float, float2x4, simdgroup_float8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
++template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   float,   float2x4,   simdgroup_float8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;

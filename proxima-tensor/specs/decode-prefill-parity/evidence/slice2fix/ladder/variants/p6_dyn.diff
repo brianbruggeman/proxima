@@ -1,0 +1,74 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/p6_dyn.metal	2026-10-07 04:27:53
+@@ -1,5 +1,6 @@
+ #include <metal_stdlib>
+ using namespace metal;
++#define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
+ 
+ inline float proxima_erf(float x) {
+     float sign = x < 0.0f ? -1.0f : 1.0f;
+@@ -891,6 +892,7 @@
+     device const float* in1 [[buffer(1)]],
+     device float* out [[buffer(2)]],
+     constant Uniforms& u [[buffer(3)]],
++    threadgroup uchar *tg_shared [[threadgroup(0)]],
+     uint3 tgpig [[threadgroup_position_in_grid]],
+     ushort tiitg [[thread_index_in_threadgroup]],
+     ushort sgitg [[simdgroup_index_in_threadgroup]])
+@@ -901,10 +903,11 @@
+     long col_tile = (long)tgpig.x;
+     long row_half = sgitg & 1;
+     long col_half = sgitg >> 1;
+-    threadgroup uchar tg_shared[8192];
+     threadgroup half *weight_tile = (threadgroup half *)tg_shared;
+     threadgroup float *act_tile = (threadgroup float *)(tg_shared + 4096);
+     simdgroup_float8x8 acc[8];
++    simdgroup_half8x8 ma[4];
++    simdgroup_float8x8 mb[2];
+     for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
+     long mm_row = tiitg / 2;
+     long mm_half = tiitg % 2;
+@@ -928,28 +931,30 @@
+         *(threadgroup float4 *)&act_tile[mm_act_store] = act_low;
+         *(threadgroup float4 *)&act_tile[mm_act_store + 4] = act_high;
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+-        for (int sub_k = 0; sub_k < 4; ++sub_k) {
+-            simdgroup_half8x8 a_frag[4];
+-            for (int i = 0; i < 4; ++i) {
+-                simdgroup_load(a_frag[i], weight_tile + 64 * (8 * sub_k + 4 * row_half + i), 8);
+-            }
++        threadgroup const half *lsma = weight_tile + 4*64*(sgitg%2);
++        threadgroup const float *lsmb = act_tile + 2*64*(sgitg/2);
++        FOR_UNROLL (short ik = 0; ik < 4; ik++) {
+             simdgroup_barrier(mem_flags::mem_none);
+-            simdgroup_float8x8 b_frag[2];
+-            for (int j = 0; j < 2; ++j) {
+-                simdgroup_load(b_frag[j], act_tile + 64 * (4 * sub_k + 2 * col_half + j), 8);
++            FOR_UNROLL (short i = 0; i < 4; i++) {
++                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
+             }
+-            for (int i = 0; i < 4; ++i) {
+-                for (int j = 0; j < 2; ++j) {
+-                    simdgroup_multiply_accumulate(acc[i * 2 + j], b_frag[j], a_frag[i], acc[i * 2 + j]);
+-                }
++            simdgroup_barrier(mem_flags::mem_none);
++            FOR_UNROLL (short i = 0; i < 2; i++) {
++                simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+             }
++            simdgroup_barrier(mem_flags::mem_none);
++            FOR_UNROLL (short i = 0; i < 8; i++) {
++                simdgroup_multiply_accumulate(acc[i], mb[i/4], ma[i%4], acc[i]);
++            }
++            lsma += 8*64;
++            lsmb += 4*64;
+         }
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+     }
+     threadgroup float *out_tile = (threadgroup float *)tg_shared;
+     for (int i = 0; i < 4; ++i) {
+         for (int j = 0; j < 2; ++j) {
+-            simdgroup_store(acc[i * 2 + j], out_tile + (row_half * 4 + i) * 8 * 32 + (col_half * 2 + j) * 8, 32, ulong2(0), true);
++            simdgroup_store(acc[j * 4 + i], out_tile + (row_half * 4 + i) * 8 * 32 + (col_half * 2 + j) * 8, 32, ulong2(0), true);
+         }
+     }
+     threadgroup_barrier(mem_flags::mem_threadgroup);

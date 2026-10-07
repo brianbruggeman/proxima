@@ -1,0 +1,29 @@
+ 4:59  up 6 days, 15:03, 5 users, load averages: 5.73 7.10 7.72
+Processes: 757 total, 5 running, 752 sleeping, 4318 threads 
+2026/10/07 04:59:22
+Load Avg: 5.73, 7.10, 7.72 
+CPU usage: 22.85% user, 11.78% sys, 65.35% idle 
+SharedLibs: 947M resident, 169M data, 251M linkedit.
+MemRegions: 266290 total, 6781M resident, 699M private, 2757M shared.
+PhysMem: 52G used (3650M wired, 3524M compressor), 11G unused.
+VM: 312T vsize, 5703M framework vsize, 786837(0) swapins, 1172497(0) swapouts.
+Networks: packets: 60594078/50G in, 44191047/35G out.
+Disks: 266508352/6427G read, 484731734/20T written.
+
+PID    COMMAND          %CPU
+99617  extensionkitserv 0.0 
+97330  intents_helper   0.0 
+97329  intents_helper   0.0 
+97328  webprivacyd      0.0 
+96644  ssh              0.0 
+94702  DataDetectorsSou 0.0 
+94690  mbuseragent      0.0 
+94639  VTEncoderXPCServ 0.0 
+  PID  %CPU COMM
+17029  69.3 a background daemon in ~/.local/bin
+ 1418  61.0 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  587  52.6 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+  716  30.7 /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461   6.9 claude
+29286   6.0 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access.xpc/Contents/MacOS/mediaanalysisd-access
+  936   1.3 /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent

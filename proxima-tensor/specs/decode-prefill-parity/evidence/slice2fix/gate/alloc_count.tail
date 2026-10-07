@@ -1,0 +1,10 @@
+ Nextest run ID ea48c191-7fbe-490e-ada2-6b79f9a092a0 with nextest profile: default
+    Starting 6 tests across 2 binaries (95 binaries skipped)
+        PASS [   0.195s] (1/6) omega::plan_pipeline_alloc_count a_warm_plan_hit_reuses_a_resident_block_s_device_buffer
+        PASS [   0.308s] (2/6) omega::plan_pipeline_alloc_count a_warm_call_s_allocation_count_does_not_grow_with_extra_steps
+        PASS [   0.311s] (3/6) omega::plan_pipeline_alloc_count a_warm_plan_hit_allocates_the_same_amount_every_call
+        PASS [   0.312s] (4/6) omega::plan_pipeline_alloc_count a_warm_plan_hit_s_allocations_are_named_by_size
+        PASS [   0.342s] (5/6) omega::plan_pipeline_alloc_count narrowing_the_math_mode_re_resolves_the_plans_pipelines
+        PASS [   0.553s] (6/6) omega::named_placement_alloc_count a_named_placed_input_does_not_allocate_a_tensor_sized_placeholder
+────────────
+     Summary [   0.553s] 6 tests run: 6 passed, 0 skipped

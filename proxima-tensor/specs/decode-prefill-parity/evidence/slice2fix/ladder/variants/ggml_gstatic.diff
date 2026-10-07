@@ -1,0 +1,22 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.ggml.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/gstatic.metal	2026-10-07 04:25:35
+@@ -4312,10 +4312,10 @@
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+-        threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiitg[[thread_index_in_threadgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    threadgroup char shmem[8192];
+ 
+     threadgroup S0 * sa = (threadgroup S0 *)(shmem);
+     threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
+@@ -4519,5 +4519,5 @@
+ 
+ #endif // GGML_METAL_HAS_TENSOR
+ 
+-typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
+-template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
++typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, float, float2x4, simdgroup_float8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
++template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   float,   float2x4,   simdgroup_float8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;

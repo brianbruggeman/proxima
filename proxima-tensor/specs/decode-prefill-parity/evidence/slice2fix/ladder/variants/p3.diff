@@ -1,0 +1,37 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/p3.metal	2026-10-07 04:24:59
+@@ -928,19 +928,19 @@
+         *(threadgroup float4 *)&act_tile[mm_act_store] = act_low;
+         *(threadgroup float4 *)&act_tile[mm_act_store + 4] = act_high;
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+-        for (int sub_k = 0; sub_k < 4; ++sub_k) {
++        _Pragma("clang loop unroll(full)") for (int sub_k = 0; sub_k < 4; ++sub_k) {
+             simdgroup_half8x8 a_frag[4];
+-            for (int i = 0; i < 4; ++i) {
++            _Pragma("clang loop unroll(full)") for (int i = 0; i < 4; ++i) {
+                 simdgroup_load(a_frag[i], weight_tile + 64 * (8 * sub_k + 4 * row_half + i), 8);
+             }
+             simdgroup_barrier(mem_flags::mem_none);
+             simdgroup_float8x8 b_frag[2];
+-            for (int j = 0; j < 2; ++j) {
++            _Pragma("clang loop unroll(full)") for (int j = 0; j < 2; ++j) {
+                 simdgroup_load(b_frag[j], act_tile + 64 * (4 * sub_k + 2 * col_half + j), 8);
+             }
+-            for (int i = 0; i < 4; ++i) {
+-                for (int j = 0; j < 2; ++j) {
+-                    simdgroup_multiply_accumulate(acc[i * 2 + j], b_frag[j], a_frag[i], acc[i * 2 + j]);
++            _Pragma("clang loop unroll(full)") for (int j = 0; j < 2; ++j) {
++                _Pragma("clang loop unroll(full)") for (int i = 0; i < 4; ++i) {
++                    simdgroup_multiply_accumulate(acc[j * 4 + i], b_frag[j], a_frag[i], acc[j * 4 + i]);
+                 }
+             }
+         }
+@@ -949,7 +949,7 @@
+     threadgroup float *out_tile = (threadgroup float *)tg_shared;
+     for (int i = 0; i < 4; ++i) {
+         for (int j = 0; j < 2; ++j) {
+-            simdgroup_store(acc[i * 2 + j], out_tile + (row_half * 4 + i) * 8 * 32 + (col_half * 2 + j) * 8, 32, ulong2(0), true);
++            simdgroup_store(acc[j * 4 + i], out_tile + (row_half * 4 + i) * 8 * 32 + (col_half * 2 + j) * 8, 32, ulong2(0), true);
+         }
+     }
+     threadgroup_barrier(mem_flags::mem_threadgroup);

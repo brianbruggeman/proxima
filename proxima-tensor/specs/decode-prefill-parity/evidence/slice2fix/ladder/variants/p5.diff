@@ -1,0 +1,42 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/p5.metal	2026-10-07 04:25:19
+@@ -916,30 +916,31 @@
+     long mm_token = min(col_tile * 32 + tiitg / 4, token_extent - 1);
+     long mm_act_base = u.operand_base[1] + mm_token * u.operand_strides[1][0] + (tiitg % 4) * 8 * u.operand_strides[1][1];
+     long mm_act_store = 64 * (4 * (tiitg % 4) + (tiitg / 4) / 8) + 8 * ((tiitg / 4) % 8);
++    device const float *act_ptr = in1 + mm_act_base;
+     for (int k0 = 0; k0 < u.reduction_total; k0 += 32) {
+         half decoded[16];
+         q4_0_dequant_half16(wws_blk0, (uint)mm_half, decoded);
+             wws_blk0 += 1u * 18;
+         for (int j = 0; j < 8; ++j) { weight_tile[mm_weight_store + 0 + 8 * j] = decoded[0 + j]; }
+         for (int j = 0; j < 8; ++j) { weight_tile[mm_weight_store + 512 + 8 * j] = decoded[8 + j]; }
+-        long mm_act_offset = mm_act_base + k0;
+-        float4 act_low = *(const device float4 *)(in1 + mm_act_offset);
+-        float4 act_high = *(const device float4 *)(in1 + mm_act_offset + 4);
++        float4 act_low = *(const device float4 *)(act_ptr);
++        float4 act_high = *(const device float4 *)(act_ptr + 4);
++        act_ptr += 32;
+         *(threadgroup float4 *)&act_tile[mm_act_store] = act_low;
+         *(threadgroup float4 *)&act_tile[mm_act_store + 4] = act_high;
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+-        for (int sub_k = 0; sub_k < 4; ++sub_k) {
++        _Pragma("clang loop unroll(full)") for (int sub_k = 0; sub_k < 4; ++sub_k) {
+             simdgroup_half8x8 a_frag[4];
+-            for (int i = 0; i < 4; ++i) {
++            _Pragma("clang loop unroll(full)") for (int i = 0; i < 4; ++i) {
+                 simdgroup_load(a_frag[i], weight_tile + 64 * (8 * sub_k + 4 * row_half + i), 8);
+             }
+             simdgroup_barrier(mem_flags::mem_none);
+             simdgroup_float8x8 b_frag[2];
+-            for (int j = 0; j < 2; ++j) {
++            _Pragma("clang loop unroll(full)") for (int j = 0; j < 2; ++j) {
+                 simdgroup_load(b_frag[j], act_tile + 64 * (4 * sub_k + 2 * col_half + j), 8);
+             }
+-            for (int i = 0; i < 4; ++i) {
+-                for (int j = 0; j < 2; ++j) {
++            _Pragma("clang loop unroll(full)") for (int i = 0; i < 4; ++i) {
++                _Pragma("clang loop unroll(full)") for (int j = 0; j < 2; ++j) {
+                     simdgroup_multiply_accumulate(acc[i * 2 + j], b_frag[j], a_frag[i], acc[i * 2 + j]);
+                 }
+             }
