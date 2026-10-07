@@ -806,12 +806,25 @@ pub(super) fn replace_whole_word(text: &str, identifier: &str, replacement: &str
     output
 }
 
-/// 'E' for the expert-grouped tiled form, 'G' for the dense-weight one. A
-/// gathered op's identity already carries its `_g` operand bits; the letter
-/// states which body rendered, so the two cannot be mistaken for each other
-/// by a reader of the pipeline cache.
+/// 'G' for the dense-weight tiled form. The expert-grouped form names how its
+/// token group renders: 'E' for one token axis, 'F'/'H' for two/three axes
+/// whose route index folds to one flat stride, 'f'/'h' for the same axes with a
+/// route that needs the per-axis decomposition. A gathered op's identity
+/// already carries its `_g` operand bits; the letter states which body
+/// rendered, so two bodies with different token addressing cannot share a
+/// pipeline cache entry.
 fn expert_group_shape_token(block: &TiledGemmBlock) -> char {
-    if is_expert_grouped(block) { 'E' } else { 'G' }
+    #[cfg(feature = "metal-tiled-gemm")]
+    if let Some(gather) = &block.gathered {
+        return match (block.token_axes.len(), gather.route_flat) {
+            (0 | 1, _) => 'E',
+            (2, true) => 'F',
+            (2, false) => 'f',
+            (_, true) => 'H',
+            (_, false) => 'h',
+        };
+    }
+    'G'
 }
 
 /// Whether `block` takes the expert-grouped form -- always `false` in a build
@@ -2751,11 +2764,11 @@ pub enum TiledGemmRejection {
     GatheredOperandCount { gathered: usize },
     /// The ACTIVATION is the gathered operand, not the weight.
     GatheredActivation,
-    /// The token group holds more than one axis: the expert scan walks one
-    /// flat token index and reads the route with one stride.
-    GatheredTokenAxesNotSingle { axes: usize },
-    /// The route index has a nonzero stride on an axis other than the token
-    /// axis, so one token would name several experts.
+    /// The token group holds more axes than the grouped kernel decomposes a
+    /// flat token index into (`GROUPED_MAX_TOKEN_AXES`).
+    GatheredTokenAxesTooMany { axes: usize },
+    /// The route index has a nonzero stride on an axis outside the token
+    /// group, so one token would name several experts.
     GatheredIndexNotTokenOnly,
     /// The activation is not unit-stride along the reduction axis, which the
     /// grouped kernel's vector loads of an activation row assume.
@@ -2769,6 +2782,9 @@ pub enum TiledGemmRejection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ExpertGather {
     pub(super) slot: usize,
+    /// The route index folds over the token axes into one flat stride, so the
+    /// scan reads a route entry by flat token index with no decomposition.
+    pub(super) route_flat: bool,
 }
 
 /// The additional narrowing [`push_tiled_gemm_body`]'s `simdgroup_matrix`
@@ -2855,7 +2871,7 @@ pub(super) fn classify_tiled_gemm(
             tiled_gemm_extent_multiple,
         )
         .map_err(TiledGemmRejection::NotPackedRowBlock)?;
-        let gathered = classify_expert_gather(resolved, weight)?;
+        let mut gathered = classify_expert_gather(resolved, weight)?;
         // Every codec with a `tiled_decode` description is admitted by the
         // gate above (that table is the whitelist). The runtime switches are
         // same-binary A/B controls: `PROXIMA_TILED_GEMM_Q4_0` (default ON:
@@ -2889,12 +2905,14 @@ pub(super) fn classify_tiled_gemm(
         let mut token_axes: Vec<u16> = Vec::new();
         let mut feature_axes: Vec<u16> = Vec::new();
         for &axis in output_axes {
+            let routed = gathered.is_some() && expert_route_stride(resolved, weight, axis) != 0;
             match (
                 weight_layout.stride(axis) == 0,
                 other_layout.stride(axis) == 0,
+                routed,
             ) {
-                (true, false) => token_axes.push(axis),
-                (false, true) => feature_axes.push(axis),
+                (true, false, _) | (true, true, true) => token_axes.push(axis),
+                (false, true, false) => feature_axes.push(axis),
                 _ => return Err(TiledGemmRejection::AxisOwnershipAmbiguous),
             }
         }
@@ -2935,16 +2953,20 @@ pub(super) fn classify_tiled_gemm(
         if !epilogue_broadcast_axes.is_empty() {
             return Err(TiledGemmRejection::BroadcastEpilogueNotSupported);
         }
-        let groups_contiguous =
-            axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
-                && axes_fold_contiguously(&feature_axes, &resolved.extents, weight_layout)
-                && axes_fold_contiguously(&token_axes, &resolved.extents, out_layout)
-                && axes_fold_contiguously(&feature_axes, &resolved.extents, out_layout);
+        let token_groups_contiguous = gathered.is_some()
+            || (axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
+                && axes_fold_contiguously(&token_axes, &resolved.extents, out_layout));
+        let groups_contiguous = token_groups_contiguous
+            && axes_fold_contiguously(&feature_axes, &resolved.extents, weight_layout)
+            && axes_fold_contiguously(&feature_axes, &resolved.extents, out_layout);
         if !groups_contiguous {
             return Err(TiledGemmRejection::AxisGroupNotContiguous);
         }
-        if gathered.is_some() {
-            expert_route_follows_single_token_axis(resolved, weight, &token_axes)?;
+        if let Some(gather) = gathered.as_mut() {
+            expert_route_follows_token_axes(resolved, weight, &token_axes)?;
+            gather.route_flat = resolved.operands()[weight].2.as_ref().is_some_and(|lookup| {
+                axes_fold_contiguously(&token_axes, &resolved.extents, &lookup.index_layout)
+            });
             if other_layout.stride(reduce_dim as u16) != 1 {
                 return Err(TiledGemmRejection::GatheredActivationNotUnitStride);
             }
@@ -3009,28 +3031,43 @@ fn classify_expert_gather(
     if gathered != 1 {
         return Err(TiledGemmRejection::GatheredOperandCount { gathered });
     }
-    Ok(Some(ExpertGather { slot }))
+    Ok(Some(ExpertGather {
+        slot,
+        route_flat: true,
+    }))
 }
 
-/// The grouped scan reads one route entry per flat token, so the route index
-/// must move along exactly one token axis and be constant along every other
-/// axis (feature and reduce included).
+/// The route index stride of output axis `axis` for the gathered weight
+/// operand `weight`: nonzero when the expert a token names changes along that
+/// axis. Zero for an operand with no gather.
 #[cfg(feature = "metal-tiled-gemm")]
-fn expert_route_follows_single_token_axis(
+fn expert_route_stride(resolved: &BoundOp, weight: usize, axis: u16) -> i64 {
+    resolved.operands()[weight]
+        .2
+        .as_ref()
+        .map_or(0, |lookup| lookup.index_layout.stride(axis))
+}
+
+/// The grouped scan names one expert per flat token, so the route index may
+/// move along the token axes only and must be constant along every other axis
+/// (feature and reduce included). Token axes beyond `GROUPED_MAX_TOKEN_AXES`
+/// are refused: the kernel decomposes a flat token into one coordinate each.
+#[cfg(feature = "metal-tiled-gemm")]
+fn expert_route_follows_token_axes(
     resolved: &BoundOp,
     weight: usize,
     token_axes: &[u16],
 ) -> Result<(), TiledGemmRejection> {
-    let [token_axis] = token_axes else {
-        return Err(TiledGemmRejection::GatheredTokenAxesNotSingle {
+    if token_axes.len() > GROUPED_MAX_TOKEN_AXES {
+        return Err(TiledGemmRejection::GatheredTokenAxesTooMany {
             axes: token_axes.len(),
         });
-    };
-    let Some(lookup) = &resolved.operands()[weight].2 else {
+    }
+    if resolved.operands()[weight].2.is_none() {
         return Err(TiledGemmRejection::GatheredIndexNotTokenOnly);
-    };
+    }
     let follows_token_only = (0..resolved.extents.len() as u16)
-        .all(|axis| axis == *token_axis || lookup.index_layout.stride(axis) == 0);
+        .all(|axis| token_axes.contains(&axis) || expert_route_stride(resolved, weight, axis) == 0);
     if follows_token_only {
         Ok(())
     } else {
