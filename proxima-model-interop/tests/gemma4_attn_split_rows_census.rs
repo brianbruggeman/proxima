@@ -37,8 +37,9 @@ const DISPATCHES_PER_LAYER: usize = 2;
 /// `(new rows, threadgroups of a global layer, threadgroups of a sliding
 /// layer)` of the partial: one per `(row tile, split)` at one kv head. Global:
 /// one row per tile, 26 splits of 1634 / 1640 keys against the 256-threadgroup
-/// target. Sliding (the 512-key ring, three rows per tile): 9 splits.
-const EXPECTED_THREADGROUPS: [(usize, u64, u64); 2] = [(2, 52, 9), (8, 208, 27)];
+/// target. Sliding (the 512-key ring, 514 / 520 keys, 9 splits): one row per
+/// tile, because two rows per tile would not reach the target.
+const EXPECTED_THREADGROUPS: [(usize, u64, u64); 2] = [(2, 52, 18), (8, 208, 72)];
 
 fn gemma4_e2b_gguf_path() -> String {
     std::env::var("PROXIMA_GEMMA4_E2B_GGUF").unwrap_or_else(|_| GEMMA4_E2B_DEFAULT_PATH.to_string())

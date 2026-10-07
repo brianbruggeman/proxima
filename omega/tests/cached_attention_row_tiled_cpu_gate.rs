@@ -3,11 +3,15 @@
 //! the CPU so a Metal run is never the first time they are checked.
 //!
 //! On the gemma4-shaped two-layer program (`gemma4_rows_support`) at the
-//! speculative-verify shapes, with the production policy:
+//! speculative-verify and prefill shapes, and on granite's two-group shape,
+//! with the production policy:
 //! - both attention ops bind as `CachedAttention` and emit the row-tiled kernel
 //!   (entry `_rt`), with the form's split count and threadgroup count;
-//! - the CPU evaluator's relaxed `CachedAttention` over those ops agrees with
-//!   the unfused chain the same evaluator runs under `bit_exact`;
+//! - the CPU interpreter's relaxed `CachedAttention` over those ops agrees with
+//!   the unfused chain it runs when the fusion is off;
+//! - the scalar transcription of the kernel (`row_tiled_kernel_model`)
+//!   reproduces the CPU oracle on the program's own activations, at the tile
+//!   geometry the emitted entry name carries;
 //! - forcing `new_upper_inclusive = 1` into those ops moves the logits far past
 //!   that agreement, which is what makes the Metal comparison's wrong-mask
 //!   control a control.
@@ -20,7 +24,6 @@ use core::task::{Context, Poll, Waker};
 
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::{READY_BATCH_CAPACITY, ReadyBatch};
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::{
     BoundOp, BoundOpKind, Interpreter, Op, bind_with_fusion, block_node_ids, infer,
 };
@@ -28,13 +31,59 @@ use proxima_tensor::{
 mod gemma4_rows_support;
 mod row_tiled_kernel_model;
 mod support;
-use gemma4_rows_support::{Fixture, bucket_for, fixture};
+use gemma4_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
 use row_tiled_kernel_model::{Inputs, Shape, Tiling, model};
-use support::{as_named_blocks, production_numeric_policy};
+use support::production_numeric_policy;
 
 /// `(new rows, live cached rows)`: a short verify over a short cache, and a
 /// long verify over a cache past the sliding window.
-const CELLS: [(usize, usize); 4] = [(2, 33), (5, 199), (17, 511), (49, 1099)];
+/// One attention geometry at `rows` new rows over `cached_len` live rows.
+struct Cell {
+    label: &'static str,
+    geometry: Geometry,
+    rows: usize,
+    cached_len: usize,
+}
+
+/// The verify cells, then the prefill cells: rows past the old 64-row limit, a
+/// row count that leaves a scalar tail of new keys past the last whole
+/// fragment, and granite's two query groups, which put eight rows of one head
+/// in a fragment.
+fn all_cells() -> Vec<Cell> {
+    let e2b = Geometry::GEMMA4_E2B;
+    let granite = Geometry::GRANITE_MOE;
+    let verify = [(2, 33), (5, 199), (17, 511), (49, 1099)].map(|(rows, cached_len)| Cell {
+        label: "e2b verify",
+        geometry: e2b,
+        rows,
+        cached_len,
+    });
+    let prefill = [
+        ("e2b past the old row limit", e2b, 70, 33),
+        ("granite eight rows", granite, 8, 33),
+        ("granite ragged rows", granite, 37, 100),
+    ]
+    .map(|(label, geometry, rows, cached_len)| Cell {
+        label,
+        geometry,
+        rows,
+        cached_len,
+    });
+    verify.into_iter().chain(prefill).collect()
+}
+
+fn entry_number(entry: &str, marker: &str) -> i64 {
+    let start = entry
+        .find(marker)
+        .unwrap_or_else(|| panic!("entry {entry} has no `{marker}`"))
+        + marker.len();
+    entry[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|error| panic!("entry {entry}: {error}"))
+}
 const TOLERANCE: f32 = 1e-4;
 
 fn relative_difference(expected: &[f32], actual: &[f32]) -> f32 {
@@ -102,12 +151,17 @@ fn the_verify_program_binds_row_tiled_attention_and_the_cpu_oracle_agrees_with_t
     let policy = production_numeric_policy();
     let mut cells = 0_usize;
 
-    for (rows, cached_len) in CELLS {
-        let fixture = fixture(rows, cached_len);
-        let named = as_named_blocks(&fixture.named);
+    for Cell {
+        label,
+        geometry,
+        rows,
+        cached_len,
+    } in all_cells()
+    {
+        let fixture = fixture_with(rows, cached_len, geometry);
         let roots = [fixture.logits];
         let cell = format!(
-            "rows {rows} cached_len {cached_len} bucket {}",
+            "{label}: rows {rows} cached_len {cached_len} bucket {}",
             bucket_for(cached_len)
         );
 
@@ -128,25 +182,18 @@ fn the_verify_program_binds_row_tiled_attention_and_the_cpu_oracle_agrees_with_t
                 .grid
                 .threadgroup_width
                 .expect("the row-tiled form fixes its threadgroup width");
-            assert!(
-                width == 128 || width == 256,
-                "{cell}: {width} threads is neither the head_dim 256 nor the 512 width"
+            assert_eq!(
+                width as i64,
+                32 * entry_number(&kernel.entry, "_n"),
+                "{cell}: the width is the entry's simdgroup count"
             );
         }
 
-        let mut free_buffers = Vec::new();
-        let mut validated = None;
-        let reference = evaluate_quantized_named_with_scratch(
-            &fixture.program,
-            &fixture.symbols,
-            &named,
-            &roots,
-            &mut free_buffers,
-            &mut validated,
-        )
-        .expect("the unfused chain evaluates");
+        let unfused = bind_with_fusion(&fixture.program, &shapes, &roots, false, policy)
+            .expect("the unfused program binds");
+        let reference = run_resolved_on_cpu(&fixture, &unfused);
         let fused = run_resolved_on_cpu(&fixture, &resolved);
-        let relative = relative_difference(reference.root(), &fused);
+        let relative = relative_difference(&reference, &fused);
         assert!(
             relative < TOLERANCE,
             "{cell}: the relaxed cached-attention oracle differs from the unfused chain by {relative}"
@@ -169,7 +216,7 @@ fn the_verify_program_binds_row_tiled_attention_and_the_cpu_oracle_agrees_with_t
             "{cell}: the control must reach both attention ops"
         );
         let control = run_resolved_on_cpu(&fixture, &wrong_mask);
-        let control_relative = relative_difference(reference.root(), &control);
+        let control_relative = relative_difference(&reference, &control);
         assert!(
             control_relative > 10.0 * TOLERANCE,
             "{cell}: a mask that lets a row see one future key moved the logits only {control_relative}"
@@ -177,7 +224,7 @@ fn the_verify_program_binds_row_tiled_attention_and_the_cpu_oracle_agrees_with_t
         eprintln!("row_tiled cpu gate: {cell} oracle={relative} wrong_mask={control_relative}");
         cells += 1;
     }
-    assert_eq!(cells, CELLS.len(), "every cell must have run");
+    assert_eq!(cells, all_cells().len(), "every cell must have run");
 }
 
 fn finite_garbage(count: usize, seed: usize) -> Vec<f32> {
@@ -205,8 +252,14 @@ fn the_kernel_transcription_reproduces_the_cpu_oracle_on_the_programs_own_activa
     let policy = production_numeric_policy();
     let mut compared = 0_usize;
 
-    for (rows, cached_len) in CELLS {
-        let fixture = fixture(rows, cached_len);
+    for Cell {
+        label,
+        geometry,
+        rows,
+        cached_len,
+    } in all_cells()
+    {
+        let fixture = fixture_with(rows, cached_len, geometry);
         let shapes = infer(&fixture.program, &fixture.symbols).expect("the program infers");
         let resolved = bind_with_fusion(&fixture.program, &shapes, &[fixture.logits], true, policy)
             .expect("the program binds");
@@ -240,9 +293,8 @@ fn the_kernel_transcription_reproduces_the_cpu_oracle_on_the_programs_own_activa
             let kernel = omega::emit(bound, &omega::PackedOperands::new(), policy)
                 .expect("the bound attention op emits");
             let width = kernel.grid.threadgroup_width.expect("a fixed width");
-            let tile_rows = omega::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
-                / (4 * query_groups * (head_dim + omega::sized::ATTENTION_ROWS_KEYS_PER_BLOCK + 3));
-            let tile_rows = tile_rows.clamp(1, omega::sized::ATTENTION_ROWS_MAX_QUERY_ROWS) as i64;
+            let tile_rows = entry_number(&kernel.entry, "_r");
+            let block = entry_number(&kernel.entry, "_b");
             let tiles = (*query_rows as i64 + tile_rows - 1) / tile_rows;
             let threadgroups = (kernel.grid.threads / width) as i64;
             assert_eq!(threadgroups % (*kv_heads as i64 * tiles), 0);
@@ -282,39 +334,39 @@ fn the_kernel_transcription_reproduces_the_cpu_oracle_on_the_programs_own_activa
             };
             let tiling = Tiling {
                 tile_rows,
-                block: omega::sized::ATTENTION_ROWS_KEYS_PER_BLOCK as i64,
+                block,
+                split_keys: omega::sized::ATTENTION_ROWS_KEYS_PER_SPLIT as i64,
                 splits,
             };
             let modelled = model(&inputs, &shape, &tiling);
             let relative = relative_difference(oracle, &modelled);
             eprintln!(
-                "row_tiled model: rows {rows} cached_len {cached_len} head_dim {head_dim} splits {splits} tiles {tiles} relative={relative}"
+                "row_tiled model: {label} rows {rows} cached_len {cached_len} head_dim {head_dim} tile_rows {tile_rows} splits {splits} tiles {tiles} relative={relative}"
             );
             assert!(
                 relative < TOLERANCE,
-                "rows {rows} cached_len {cached_len} head_dim {head_dim}: the transcription differs from the oracle by {relative}"
+                "{label} rows {rows} cached_len {cached_len} head_dim {head_dim}: the transcription differs from the oracle by {relative}"
             );
             compared += 1;
         }
     }
     assert_eq!(
         compared,
-        CELLS.len() * 2,
+        all_cells().len() * 2,
         "every cell's two attention ops must have been compared"
     );
 }
 
-/// Past `[attention_rows].max_query_rows` the recognizer still fuses the
-/// candidate (the one-row decline is compiled out) and the form falls back to
+/// Fewer rows than one fragment of a group count that does not fill whole 8-row
+/// blocks: the recognizer still fuses the candidate and the form falls back to
 /// the one-dispatch kernel; the CPU oracle over that op must still equal the
 /// unfused chain, so the fused op carries the right fields at any K.
 #[test]
-fn rows_past_the_tile_limit_keep_the_one_dispatch_kernel_and_the_cpu_oracle_agrees() {
+fn rows_under_one_fragment_of_a_two_group_head_keep_the_one_dispatch_kernel_and_the_cpu_oracle_agrees() {
     let policy = production_numeric_policy();
-    let rows = omega::sized::ATTENTION_ROWS_MAX_QUERY_ROWS as usize + 6;
+    let rows = 5;
     let cached_len = 33;
-    let fixture = fixture(rows, cached_len);
-    let named = as_named_blocks(&fixture.named);
+    let fixture = fixture_with(rows, cached_len, Geometry::GRANITE_MOE);
     let roots = [fixture.logits];
     let shapes = infer(&fixture.program, &fixture.symbols).expect("the program infers");
     let resolved = bind_with_fusion(&fixture.program, &shapes, &roots, true, policy)
@@ -327,24 +379,16 @@ fn rows_past_the_tile_limit_keep_the_one_dispatch_kernel_and_the_cpu_oracle_agre
             .expect("the bound attention op emits");
         assert!(
             !kernel.entry.ends_with("_rt") && !kernel.entry.ends_with("_ds"),
-            "rows {rows}: past the tile limit the op keeps the one-dispatch kernel, got {}",
+            "rows {rows}: under eight rows the op keeps the one-dispatch kernel, got {}",
             kernel.entry
         );
     }
 
-    let mut free_buffers = Vec::new();
-    let mut validated = None;
-    let reference = evaluate_quantized_named_with_scratch(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("the unfused chain evaluates");
+    let unfused = bind_with_fusion(&fixture.program, &shapes, &roots, false, policy)
+        .expect("the unfused program binds");
+    let reference = run_resolved_on_cpu(&fixture, &unfused);
     let fused = run_resolved_on_cpu(&fixture, &resolved);
-    let relative = relative_difference(reference.root(), &fused);
+    let relative = relative_difference(&reference, &fused);
     assert!(
         relative < TOLERANCE,
         "rows {rows}: the relaxed cached-attention oracle differs from the unfused chain by {relative}"

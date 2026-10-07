@@ -2,8 +2,9 @@
 //! (`CachedAttentionForm::TwoRangeRowTiled`: `omega/src/msl/
 //! cached_attention_row_tiled.rs` plus the interleaved merge in
 //! `cached_attention_render.rs`). Internal consistency only: the CPU reference
-//! is this repo's own unfused chain, never llama.cpp's; the llama.cpp greedy-id
-//! gate is `proxima-model-interop/tests/gemma4_attn_split_decode_oracle.rs`.
+//! is this repo's own unfused chain run on the CPU interpreter, never
+//! llama.cpp's; the llama.cpp greedy-id gate is
+//! `proxima-model-interop/tests/gemma4_attn_split_decode_oracle.rs`.
 //!
 //! The program is the gemma4-shaped two-layer two-range cached forward
 //! (`gemma4_rows_support`): a sliding layer (head_dim 256, window 512) and a
@@ -38,14 +39,13 @@ use core::task::{Context, Poll, Waker};
 
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::{READY_BATCH_CAPACITY, ReadyBatch};
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::{
     BoundOp, BoundOpKind, Interpreter, NumericPolicy, Op, bind_with_fusion, block_node_ids, infer,
 };
 
 mod gemma4_rows_support;
 mod support;
-use gemma4_rows_support::{Fixture, bucket_for, fixture};
+use gemma4_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
 use support::{as_named_blocks, production_numeric_policy};
 
 const VERIFY_ROWS: [usize; 4] = [2, 5, 17, 49];
@@ -108,13 +108,13 @@ fn run_resolved_on_cpu(fixture: &Fixture, resolved: &[BoundOp]) -> Vec<f32> {
         .expect("the logits root was computed")
 }
 
-fn one_cell(rows: usize, cached_len: usize) -> (f32, f32) {
+fn one_cell(label: &str, geometry: Geometry, rows: usize, cached_len: usize) -> (f32, f32) {
     let policy = production_numeric_policy();
-    let fixture = fixture(rows, cached_len);
+    let fixture = fixture_with(rows, cached_len, geometry);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let cell = format!(
-        "rows {rows} cached_len {cached_len} bucket {}",
+        "{label}: rows {rows} cached_len {cached_len} bucket {}",
         bucket_for(cached_len)
     );
 
@@ -138,21 +138,14 @@ fn one_cell(rows: usize, cached_len: usize) -> (f32, f32) {
         );
     }
 
-    let mut free_buffers = Vec::new();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the program");
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the program infers");
+    let unfused = bind_with_fusion(&fixture.program, &shapes, &roots, false, policy)
+        .expect("the unfused program binds");
+    let cpu = run_resolved_on_cpu(&fixture, &unfused);
     let plan = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
         .expect("metal plans the program");
     let metal = omega::execute_plan_named(&plan, &named).expect("metal runs the program");
-    let relative = relative_difference(cpu.root(), metal.root());
+    let relative = relative_difference(&cpu, metal.root());
 
     let mut wrong_mask = resolved.clone();
     let mut forced = 0_usize;
@@ -184,7 +177,8 @@ fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_across_rows_and_cach
     let mut cells = 0_usize;
     for rows in VERIFY_ROWS {
         for cached_len in CACHED_LENGTHS {
-            let (relative, control_relative) = one_cell(rows, cached_len);
+            let (relative, control_relative) =
+                one_cell("e2b verify", Geometry::GEMMA4_E2B, rows, cached_len);
             assert!(
                 relative < TOLERANCE,
                 "rows {rows} cached_len {cached_len}: metal disagrees with cpu: relative={relative}"
@@ -203,17 +197,42 @@ fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_across_rows_and_cach
     );
 }
 
-/// Rows past the tile limit keep the one-dispatch kernel, which the
-/// recognizer now reaches for gemma masks it never saw before: hold it to the
-/// same CPU reference, with the same entry-name check that it is not the
-/// row-tiled kernel.
+/// Prefill-width cells: rows past the old 64-row limit, a ragged tail of new
+/// keys past the last whole fragment, and granite's two query groups, whose
+/// fragments are eight rows of one head.
 #[test]
-fn rows_past_the_tile_limit_hold_one_dispatch_parity_with_the_cpu_evaluator() {
+fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_at_prefill_widths() {
+    let e2b = Geometry::GEMMA4_E2B;
+    let granite = Geometry::GRANITE_MOE;
+    let cells = [
+        ("e2b past the old row limit", e2b, 70, 33),
+        ("granite eight rows", granite, 8, 33),
+        ("granite ragged rows", granite, 37, 100),
+    ];
+    for (label, geometry, rows, cached_len) in cells {
+        let (relative, control_relative) = one_cell(label, geometry, rows, cached_len);
+        assert!(
+            relative < TOLERANCE,
+            "{label} rows {rows} cached_len {cached_len}: metal disagrees with cpu: relative={relative}"
+        );
+        assert!(
+            control_relative > 10.0 * TOLERANCE,
+            "{label} rows {rows} cached_len {cached_len}: the forced wrong mask must disagree with \
+             metal (relative={control_relative}), or this comparison cannot see the mask"
+        );
+    }
+}
+
+/// Fewer rows than one fragment of a two-group head keep the one-dispatch
+/// kernel, held to the same CPU reference with the entry-name check that it is
+/// not the row-tiled kernel.
+#[test]
+fn rows_under_one_fragment_of_a_two_group_head_hold_one_dispatch_parity_with_the_cpu_evaluator() {
     let policy = production_numeric_policy();
-    let rows = omega::sized::ATTENTION_ROWS_MAX_QUERY_ROWS as usize + 6;
+    let rows = 5;
     let mut cells = 0_usize;
     for cached_len in [33_usize, 511] {
-        let fixture = fixture(rows, cached_len);
+        let fixture = fixture_with(rows, cached_len, Geometry::GRANITE_MOE);
         let named = as_named_blocks(&fixture.named);
         let roots = [fixture.logits];
         let cell = format!("rows {rows} cached_len {cached_len}");
@@ -227,21 +246,14 @@ fn rows_past_the_tile_limit_hold_one_dispatch_parity_with_the_cpu_evaluator() {
             assert!(!kernel.entry.ends_with("_rt"), "{cell}: {}", kernel.entry);
         }
 
-        let mut free_buffers = Vec::new();
-        let mut validated = None;
-        let cpu = evaluate_quantized_named_with_scratch(
-            &fixture.program,
-            &fixture.symbols,
-            &named,
-            &roots,
-            &mut free_buffers,
-            &mut validated,
-        )
-        .expect("cpu runs the program");
+        let shapes = infer(&fixture.program, &fixture.symbols).expect("the program infers");
+        let unfused = bind_with_fusion(&fixture.program, &shapes, &roots, false, policy)
+            .expect("the unfused program binds");
+        let cpu = run_resolved_on_cpu(&fixture, &unfused);
         let plan = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
             .expect("metal plans the program");
         let metal = omega::execute_plan_named(&plan, &named).expect("metal runs the program");
-        let relative = relative_difference(cpu.root(), metal.root());
+        let relative = relative_difference(&cpu, metal.root());
         assert!(relative < TOLERANCE, "{cell}: relative={relative}");
         cells += 1;
     }

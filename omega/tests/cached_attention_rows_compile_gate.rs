@@ -22,11 +22,18 @@ fn layout(strides: &[i64]) -> Layout {
     }
 }
 
-fn row_tiled_attention(head_dim: u64, cached_key_rows: u64, rows: u64, lower: i64) -> BoundOp {
+fn row_tiled_attention(
+    kv_heads: u64,
+    query_groups: u64,
+    head_dim: u64,
+    cached_key_rows: u64,
+    rows: u64,
+    lower: i64,
+) -> BoundOp {
     BoundOp {
         node: NodeId(9),
         dtype: DType::Float32,
-        extents: vec![rows, 1, 8, head_dim],
+        extents: vec![rows, kv_heads, query_groups, head_dim],
         kind: BoundOpKind::CachedAttention {
             operands: (0..9)
                 .map(|index| (NodeId(index), layout(&[1]), None))
@@ -34,8 +41,8 @@ fn row_tiled_attention(head_dim: u64, cached_key_rows: u64, rows: u64, lower: i6
             query_rows: rows,
             cached_key_rows,
             new_key_rows: rows,
-            kv_heads: 1,
-            query_groups: 8,
+            kv_heads,
+            query_groups,
             head_dim,
             rotary_dim: head_dim,
             scale: 1.0,
@@ -95,20 +102,31 @@ fn compile(label: &str, kernel: &Kernel) {
 fn the_row_tiled_partial_compiles_with_the_metal_toolchain() {
     let policy = NumericPolicy::llama_relaxed();
     let mut compiled = 0_usize;
-    for (label, head_dim, cached_key_rows, lower) in [
-        ("sliding", 256_u64, 512_u64, -511_i64),
-        ("global", 512, 2048, i64::MIN),
-        ("sliding_one_split", 256, 32, -511),
+    for (label, kv_heads, query_groups, head_dim, cached_key_rows, rows, lower) in [
+        ("sliding", 1_u64, 8_u64, 256_u64, 512_u64, 17_u64, -511_i64),
+        ("global", 1, 8, 512, 2048, 17, i64::MIN),
+        ("sliding_one_split", 1, 8, 256, 32, 17, -511),
+        ("sliding_prefill", 1, 8, 256, 512, 971, -511),
+        ("global_prefill", 1, 8, 512, 992, 971, i64::MIN),
+        ("granite_prefill", 8, 2, 64, 1024, 1000, i64::MIN),
+        ("granite_one_fragment", 8, 2, 64, 32, 8, i64::MIN),
     ] {
-        let op = row_tiled_attention(head_dim, cached_key_rows, 17, lower);
+        let op = row_tiled_attention(
+            kv_heads,
+            query_groups,
+            head_dim,
+            cached_key_rows,
+            rows,
+            lower,
+        );
         let partial = omega::emit(&op, &PackedOperands::new(), policy).expect("the partial emits");
         assert!(partial.entry.ends_with("_rt"), "{label}: {}", partial.entry);
         compile(label, &partial);
         compiled += 1;
     }
     assert_eq!(
-        compiled, 3,
-        "the two layer shapes and the one-split direct-output store"
+        compiled, 7,
+        "the two layer shapes, the one-split direct-output store, prefill widths and granite's two groups"
     );
 }
 
