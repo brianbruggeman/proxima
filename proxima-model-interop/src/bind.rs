@@ -415,12 +415,12 @@ pub struct ModelHparams {
     /// GGUF path ([`architecture_from_metadata`]), `model_type` on the HF path
     /// ([`crate::hf_config::architecture_from_hf_config`]). Carried whole rather
     /// than as a per-family flag so both paths key the same
-    /// `crate::profiles::family_profile` lookup; nothing else reads it.
+    /// `crate::profiles::family_profile` lookup when the `std` feature is enabled; nothing else reads it.
     pub family: String,
     /// `{architecture}.rope.freq_base_swa` / `rope.dimension_count_swa` for a
     /// checkpoint whose sliding-window layers rotate with their own table;
     /// `None` when every layer shares the builtin one.
-    /// [`crate::lowering::sliding_rope_inputs`] reads it per step.
+    /// `crate::lowering::sliding_rope_inputs` reads it per step when the `std` feature is enabled.
     pub sliding_rope: Option<SlidingRope>,
 }
 

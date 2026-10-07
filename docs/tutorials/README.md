@@ -15,6 +15,13 @@ Sections are **self-contained**: each states its prerequisites up front and can 
 - **[Foundations, part 3: the Listener builder, mirrored from the Client](./02-listener-builder.md)** — `Listener::builder()`/`Listener::http(bind)`, the serve-side mirror of `Client::builder()`/`Client::http(url)`, built from the same `SpecBuilder` seam, each side's own TYPE-SPECIFIC axis traits on top (`ListenerTransportExt`/`ListenerProtocolExt` vs. `ClientTransportExt`/`ClientProtocolExt`/`ClientSecurityExt` — no blanket impl over every `SpecBuilder`) · `resolve_listen_protocol` (`.tcp()`/`.udp()`/`.quic()`/`.grpc()`/`.h2()`/`.pgwire(query)` resolved to one concrete `ListenProtocol`) · `TlsListenProtocol`, TLS as a composed decorator instead of a spec field · `.protocol(impl AnyProtocol)`, the escape hatch for an out-of-crate wire · the two places a listener's builder honestly cannot mirror the client's. Read after Foundations part 2 if you are about to hand-roll `App::new()` + manual `RunConfig` wiring more than once.
 - **[The native runtime: serving real HTTP with zero tokio](./03-native-runtime.md)** — the `Runtime` trait · `http1` vs. `http1-native` (tokio-coupled vs. tokio-free h1) · `#[proxima::main]`'s ambient-runtime seam and the collapse it causes if you don't opt out with `.with_runtime`/`.with_acceptor_factory` (both flagged a HAZARD in their own doc comments, since nothing stops mismatching them) or, in new code, the mismatch-proof matched-bundle surface `RuntimeSelection` via `AppBuilder::runtime(selection)`/`App::with_runtime_selection(selection)` · `ShutdownBarrier` · a runtime shared on purpose (`deferred_runtime`) vs. adopted by accident. Walks `proxy` → `gateway` → `load-balance` → `integration` → `distributed_trace`, all served tokio-free, then contrasts `multi_runtime`/`runtime_select` where tokio is deliberately opted into.
 
+## Standalone topics
+
+These explain focused configuration and transport behavior without adding nodes
+to the pipe-algebra learning graph.
+
+- **[TLS roots for clients and listeners](./outbound-tls-roots.md)** — follow a TLS root policy from the universal `Client` into HTTP/gRPC verification, compare outbound server roots with listener mTLS client-CA roots, and see where Hyper takes ownership of ALPN.
+
 ## Listener on-ramp (a faster path to a running listener)
 
 A standalone, self-contained 8-page series for a reader who wants to stand up and grow a real listener WITHOUT first reading Foundations end to end — the reader only needs to be comfortable with Rust and `async`/`.await`, and to have built an HTTP server in some other framework before. Cross-links to Foundations and to [02-listener-builder.md](./02-listener-builder.md) where the deeper story lives, but does not require reading them first.

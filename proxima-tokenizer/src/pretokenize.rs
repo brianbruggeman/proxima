@@ -15,7 +15,7 @@
 //!
 //! No regex engine ships in this no_std+alloc crate, so this is a
 //! hand-rolled scanner implementing the same alternation order. `\p{L}`,
-//! `\p{N}`, `\p{M}` and `\s` are answered by [`crate::unicode_tables`], the
+//! `\p{N}`, `\p{M}` and `\s` are answered by `crate::unicode_tables`, the
 //! tables llama.cpp's own matchers read, so the class boundaries agree with
 //! it codepoint for codepoint.
 
@@ -39,7 +39,7 @@ pub enum PreType {
     /// joins `\p{L}` in words.
     SingleDigitMarks,
     /// `LLAMA_VOCAB_PRE_TYPE_DEFAULT`: four successive splits, see
-    /// [`crate::pretokenize_passes`]. What llama.cpp uses for `tokenizer.ggml.pre =
+    /// `crate::pretokenize_passes`. What llama.cpp uses for `tokenizer.ggml.pre =
     /// "default"` and, with a warning, when the key is missing.
     Default,
     /// `LLAMA_VOCAB_PRE_TYPE_GPT2`: the single gpt2 word regex (gpt-2, mpt,

@@ -124,23 +124,23 @@ pub enum InteropError {
         sealed_end: usize,
     },
 
-    /// [`crate::profiles::family_profile`]: no embedded profile file exists for
+    /// `crate::profiles::family_profile`: no embedded profile file exists for
     /// this family string. Never defaulted: a family whose profile is absent
     /// would lower with another family's activation, scales and norm shifts.
     #[error("no family profile for general.architecture or model_type = {family:?}")]
     MissingFamilyProfile { family: String },
 
-    /// [`crate::profiles::family_profile`]: the embedded profile file for this
+    /// `crate::profiles::family_profile`: the embedded profile file for this
     /// family did not parse into a [`proxima_tensor::spec::FamilyProfile`].
     #[error("family profile for {family:?} does not parse: {message}")]
     InvalidFamilyProfile { family: String, message: String },
 
-    /// [`crate::profiles::binding_profile`]: an embedded binding file did not
-    /// parse into a [`crate::profiles::BindingProfile`].
+    /// `crate::profiles::binding_profile`: an embedded binding file did not
+    /// parse into `crate::profiles::BindingProfile`.
     #[error("binding profile for {family:?} does not parse: {message}")]
     InvalidBindingProfile { family: String, message: String },
 
-    /// [`crate::bind_leaves::bind_program_leaves`]: a program leaf and the
+    /// `crate::bind_leaves::bind_program_leaves`: a program leaf and the
     /// tensor that satisfies it disagree on how many elements the weight has.
     #[error(
         "leaf {leaf:?} declares {leaf_elements} elements but tensor {tensor:?} holds {tensor_elements}"
@@ -152,13 +152,13 @@ pub enum InteropError {
         tensor_elements: u64,
     },
 
-    /// [`crate::bind_leaves::bind_program_leaves`]: the program contracts some
+    /// `crate::bind_leaves::bind_program_leaves`: the program contracts some
     /// of a leaf's axes and keeps others, interleaved, so no single byte order
     /// of the stored matrix is the one the program reads.
     #[error("leaf {leaf:?} interleaves its contracted and kept axes; a stored matrix cannot match that order")]
     LeafAxesInterleaved { leaf: String },
 
-    /// [`crate::bind_leaves::bind_program_leaves`]: a `part` alias cannot cut
+    /// `crate::bind_leaves::bind_program_leaves`: a `part` alias cannot cut
     /// `tensor` into equal whole-block row slices.
     #[error("tensor {tensor:?} has {rows} rows, which do not split into {of} whole-block parts")]
     TensorPartInvalid {
