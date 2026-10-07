@@ -1387,6 +1387,21 @@ static inline void q4_0_run8(device const uchar *block, uint index, thread float
 /// assigns each nibble half to its OWN thread, so this function only ever
 /// reads its half's 16 bytes once.
 pub const Q4_0_RUN8_WIDE_MSL: &str = r#"
+static inline void q4_0_dequant_half16(device const uchar *block, uint il, thread half *out) {
+    device const ushort *qs = (device const ushort *)(block + 2);
+    float d = (float)as_type<half>(((device const ushort *)block)[0]);
+    float d1 = il != 0u ? d * 0.0625f : d;
+    float d2 = d1 * 0.00390625f;
+    float md = -8.0f * d;
+    ushort mask0 = il != 0u ? (ushort)0x00F0 : (ushort)0x000F;
+    ushort mask1 = (ushort)(mask0 << 8);
+    for (uint i = 0u; i < 8u; ++i) {
+        ushort word = qs[i];
+        out[2u * i] = (half)fma(d1, (float)(word & mask0), md);
+        out[2u * i + 1u] = (half)fma(d2, (float)(word & mask1), md);
+    }
+}
+
 static inline void q4_0_run8_wide(device const uchar *block, uint index, thread float *out) {
     device const ushort *qs = (device const ushort *)(block + 2);
     uint shift = (index < 16u) ? 0u : 4u;
@@ -2213,6 +2228,37 @@ fn log_tiled_gemm_grid2d_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn tiled_gemm_grid2d_override() -> bool {
+    true
+}
+
+/// `PROXIMA_TILED_GEMM_MM_LAYOUT` (see
+/// [`crate::identity::MetalOnlyExtras::tiled_gemm_mm_layout`]'s own doc for
+/// what this switch changes). Default ON: unset admits, and only an explicit
+/// `"0"` keeps the row-major tile layout.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_mm_layout_override() -> bool {
+    let active = !matches!(
+        std::env::var("PROXIMA_TILED_GEMM_MM_LAYOUT"),
+        Ok(value) if value.trim() == "0"
+    );
+    log_tiled_gemm_mm_layout_once(active);
+    active
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_tiled_gemm_mm_layout_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_mm_layout");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_tiled_gemm_mm_layout_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_mm_layout_override() -> bool {
     true
 }
 

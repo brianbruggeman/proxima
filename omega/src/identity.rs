@@ -319,6 +319,20 @@ pub(crate) struct MetalOnlyExtras {
     /// render, and dispatch, as distinct kernels. Feeds the `_grid2d`
     /// suffix.
     pub tiled_gemm_grid2d: bool,
+    /// `PROXIMA_TILED_GEMM_MM_LAYOUT`: `true` when
+    /// [`crate::msl::push_tiled_gemm_body`] stages and multiplies in ggml's
+    /// own `kernel_mul_mm` tile layout (`mul_mm.metal:164-316`) instead of
+    /// row-major tiles read through a transposed fragment load: the weight tile
+    /// in 8x8 `[k][feature]` blocks, the activation tile in 8x8 `[token][k]`
+    /// blocks, `token x feature` accumulators, and a Q4_0 half-block decoded
+    /// with ggml's fused multiply-add form. Applies where the wide weight stage
+    /// applies and the tile sizing is ggml's `64 x 32 x 32`. Never changes a
+    /// decoded or accumulated value (every output is bit-identical to the
+    /// row-major layout), only which threadgroup address each element lives
+    /// at; the EMITTED SOURCE differs, so it must never share a cache entry
+    /// with the row-major kernel. Default ON (unset admits; only explicit
+    /// `"0"` keeps the row-major tile). Feeds the `_mml` suffix.
+    pub tiled_gemm_mm_layout: bool,
     /// `true` when `msl::grid2d_for` chose the flat 2D form
     /// ([`crate::msl::Grid2DForm::FlatThreadgroupIndex`]) because the grid is
     /// wider than the 32 bits a `uint gid [[thread_position_in_grid]]` kernel
@@ -888,6 +902,9 @@ mod gated {
         }
         if metal.tiled_gemm_grid2d {
             identity.push_str("_grid2d");
+        }
+        if metal.tiled_gemm_mm_layout {
+            identity.push_str("_mml");
         }
         if metal.wide_grid {
             identity.push_str("_wg");

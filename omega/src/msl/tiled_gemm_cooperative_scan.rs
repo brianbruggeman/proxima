@@ -282,6 +282,27 @@ pub(super) fn push_tiled_gemm_body(
     let total_halves = block_m * num_chunks * 2;
     let half_units = total_halves.div_ceil(block_threads);
 
+    if metal.tiled_gemm_mm_layout
+        && wide_weight_stage_eligible
+        && mm_layout_geometry_supported()
+        && half_width == 16
+    {
+        push_mm_layout_k_loop(source, block, token_axis, feature_axis, metal, grid2d_active);
+        push_tiled_gemm_tile_writeback(
+            source,
+            rank,
+            output_axes,
+            feature_axis,
+            token_axis,
+            element_type,
+            epilogue_body,
+            epilogue_operands,
+            metal,
+            true,
+        );
+        return Ok(());
+    }
+
     if wide_weight_stage_eligible {
         push_wide_weight_stage_setup(
             source,
@@ -510,7 +531,219 @@ pub(super) fn push_tiled_gemm_body(
     source.push_str("        }\n");
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("    }\n");
-    if slim_tgmem_active {
+    push_tiled_gemm_tile_writeback(
+        source,
+        rank,
+        output_axes,
+        feature_axis,
+        token_axis,
+        element_type,
+        epilogue_body,
+        epilogue_operands,
+        metal,
+        false,
+    );
+    Ok(())
+}
+
+/// `true` when the build-time tile sizing is the geometry ggml's
+/// `kernel_mul_mm` is written for (`mul_mm.metal:164-170`: `NR0` 64 weight
+/// rows, `NR1` 32 tokens, `NK` 32 deep, four simdgroups): the weight and
+/// activation tile layouts [`push_mm_layout_k_loop`] emits hard-code the
+/// `64 x 32 x 32` tile and 128 threads, so any other sizing keeps the
+/// row-major tile path.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) const fn mm_layout_geometry_supported() -> bool {
+    crate::sized::TILED_GEMM_BLOCK_M == 64
+        && crate::sized::TILED_GEMM_BLOCK_N == 32
+        && crate::sized::TILED_GEMM_BLOCK_K == 32
+        && (TILED_GEMM_NSG as u64) * SIMD_WIDTH == 128
+}
+
+/// The K-reduction loop of [`push_tiled_gemm_body`] in ggml's own tile layout
+/// (`kernel_mul_mm`, `mul_mm.metal:164-316`), for a packed weight on the wide
+/// weight stage's schedule (two threads per weight row, one half-block each):
+///
+/// - the weight tile is 4 x 8 blocks of 8x8 `half`, each block `[k][feature]`
+///   (feature fastest), so a fragment loads untransposed as the `k x feature`
+///   operand; the activation tile is 4 x 4 blocks of 8x8, each `[token][k]`,
+///   loaded untransposed as the `token x k` operand;
+/// - the multiply is `acc += act_frag * weight_frag`, so every accumulator
+///   fragment is `token x feature` and the writeback stores it transposed into
+///   the `[feature][token]` `out_tile` the copy-out loop already reads;
+/// - rows and tokens past the extents are clamped to the last valid one
+///   instead of zero-filled; their results are masked at the write.
+///
+/// A Q4_0 half-block decodes through `q4_0_dequant_half16` (ggml's
+/// `dequantize_q4_0` form: one fused multiply-add per element), which rounds
+/// to the same `half` as the `(level - 8) * d` expression of the row-major
+/// path -- the product is exact in `float`, so the output is bit-identical.
+/// With a unit-stride activation the K offset is `k0` itself, not `k0 *
+/// stride`.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_mm_layout_k_loop(
+    source: &mut String,
+    block: &TiledGemmBlock,
+    token_axis: u16,
+    feature_axis: u16,
+    metal: &crate::identity::MetalOnlyExtras,
+    grid2d_active: bool,
+) {
+    let weight = block.weight;
+    let other = block.other;
+    let reduce_dim = block.reduce_dim;
+    let codec = block.codec;
+    let block_k = crate::sized::TILED_GEMM_BLOCK_K;
+    let block_elements = u64::try_from(codec_block_elements(codec)).unwrap_or(u64::MAX);
+    let block_bytes = u64::try_from(codec_block_bytes(codec)).unwrap_or(u64::MAX);
+    let chunk_width = tiled_gemm_codec_chunk_width(codec).min(block_k);
+    let half_width = chunk_width / 2;
+    let unit_stride = metal.tiled_gemm_wide_act_load;
+    let k0_counter_type = if grid2d_active { "int" } else { "long" };
+
+    source.push_str("    long mm_row = tiitg / 2;\n");
+    source.push_str("    long mm_half = tiitg % 2;\n");
+    source.push_str("    long mm_feat = min(row_tile * 64 + mm_row, feature_extent - 1);\n");
+    source.push_str(&format!(
+        "    long mm_wbase = u.operand_base[{weight}] + mm_feat * u.operand_strides[{weight}][{feature_axis}] + mm_half * {half_width};\n"
+    ));
+    source.push_str(&format!(
+        "    device const uchar *wws_blk0 = in{weight} + (mm_wbase / {block_elements}) * {block_bytes};\n"
+    ));
+    source.push_str(&format!(
+        "    uint wws_slot0 = (uint)(mm_wbase % {block_elements});\n"
+    ));
+    source.push_str("    long mm_weight_store = 64 * (16 * mm_half + mm_row / 8) + mm_row % 8;\n");
+    source.push_str("    long mm_token = min(col_tile * 32 + tiitg / 4, token_extent - 1);\n");
+    source.push_str(&format!(
+        "    long mm_act_base = u.operand_base[{other}] + mm_token * u.operand_strides[{other}][{token_axis}] + (tiitg % 4) * 8 * u.operand_strides[{other}][{reduce_dim}];\n"
+    ));
+    source.push_str(
+        "    long mm_act_store = 64 * (4 * (tiitg % 4) + (tiitg / 4) / 8) + 8 * ((tiitg / 4) % 8);\n",
+    );
+    source.push_str(&format!(
+        "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
+    ));
+    source.push_str("        half decoded[16];\n");
+    match codec {
+        Codec::Q4_0 => {
+            source.push_str("        q4_0_dequant_half16(wws_blk0, (uint)mm_half, decoded);\n");
+        }
+        _ => {
+            source.push_str("        q4k_header mm_header = q4k_header_for(wws_blk0, wws_slot0);\n");
+            for run in 0..half_width / 8 {
+                source.push_str("        {\n");
+                source.push_str("            float levels[8];\n");
+                source.push_str(&format!(
+                    "            q4k_run8(wws_blk0, wws_slot0 + {}u, levels);\n",
+                    run * 8
+                ));
+                source.push_str(&format!(
+                    "            for (int j = 0; j < 8; ++j) {{ decoded[{} + j] = (half)(mm_header.scale * levels[j] - mm_header.minimum); }}\n",
+                    run * 8
+                ));
+                source.push_str("        }\n");
+            }
+        }
+    }
+    push_wide_weight_stage_advance(
+        source,
+        0,
+        block_k,
+        1,
+        chunk_width,
+        block_elements,
+        block_bytes,
+    );
+    for run in 0..half_width / 8 {
+        source.push_str(&format!(
+            "        for (int j = 0; j < 8; ++j) {{ weight_tile[mm_weight_store + {} + 8 * j] = decoded[{} + j]; }}\n",
+            512 * run,
+            run * 8
+        ));
+    }
+    if unit_stride {
+        source.push_str("        long mm_act_offset = mm_act_base + k0;\n");
+        source.push_str(&format!(
+            "        float4 act_low = *(const device float4 *)(in{other} + mm_act_offset);\n"
+        ));
+        source.push_str(&format!(
+            "        float4 act_high = *(const device float4 *)(in{other} + mm_act_offset + 4);\n"
+        ));
+    } else {
+        source.push_str(&format!(
+            "        long mm_act_offset = mm_act_base + k0 * u.operand_strides[{other}][{reduce_dim}];\n"
+        ));
+        source.push_str("        float act_scalar[8];\n");
+        source.push_str(&format!(
+            "        for (int e = 0; e < 8; ++e) {{ long element_offset = mm_act_offset + e * u.operand_strides[{other}][{reduce_dim}]; act_scalar[e] = {}; }}\n",
+            operand_read(other, "element_offset", None)
+        ));
+        source.push_str(
+            "        float4 act_low = float4(act_scalar[0], act_scalar[1], act_scalar[2], act_scalar[3]);\n",
+        );
+        source.push_str(
+            "        float4 act_high = float4(act_scalar[4], act_scalar[5], act_scalar[6], act_scalar[7]);\n",
+        );
+    }
+    source.push_str("        *(threadgroup float4 *)&act_tile[mm_act_store] = act_low;\n");
+    source.push_str("        *(threadgroup float4 *)&act_tile[mm_act_store + 4] = act_high;\n");
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("        for (int sub_k = 0; sub_k < 4; ++sub_k) {\n");
+    source.push_str("            simdgroup_half8x8 a_frag[4];\n");
+    source.push_str("            for (int i = 0; i < 4; ++i) {\n");
+    source.push_str(
+        "                simdgroup_load(a_frag[i], weight_tile + 64 * (8 * sub_k + 4 * row_half + i), 8);\n",
+    );
+    source.push_str("            }\n");
+    source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
+    source.push_str("            simdgroup_float8x8 b_frag[2];\n");
+    source.push_str("            for (int j = 0; j < 2; ++j) {\n");
+    source.push_str(
+        "                simdgroup_load(b_frag[j], act_tile + 64 * (4 * sub_k + 2 * col_half + j), 8);\n",
+    );
+    source.push_str("            }\n");
+    source.push_str("            for (int i = 0; i < 4; ++i) {\n");
+    source.push_str("                for (int j = 0; j < 2; ++j) {\n");
+    source.push_str(
+        "                    simdgroup_multiply_accumulate(acc[i * 2 + j], b_frag[j], a_frag[i], acc[i * 2 + j]);\n",
+    );
+    source.push_str("                }\n");
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("    }\n");
+}
+
+/// The accumulator-to-device tail shared by both tile layouts of
+/// [`push_tiled_gemm_body`]: aliases or declares `out_tile`, takes the direct
+/// device store for an interior tile when [`MetalOnlyExtras::tiled_gemm_direct_store`]
+/// admits, and otherwise restages through `out_tile` and the fused epilogue.
+/// `acc_token_major` is true for the layout whose accumulator fragments are
+/// `token x feature`.
+///
+/// [`MetalOnlyExtras::tiled_gemm_direct_store`]: crate::identity::MetalOnlyExtras::tiled_gemm_direct_store
+#[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
+fn push_tiled_gemm_tile_writeback(
+    source: &mut String,
+    rank: usize,
+    output_axes: &[u16],
+    feature_axis: u16,
+    token_axis: u16,
+    element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    metal: &crate::identity::MetalOnlyExtras,
+    acc_token_major: bool,
+) {
+    let block_m = crate::sized::TILED_GEMM_BLOCK_M;
+    let block_n = crate::sized::TILED_GEMM_BLOCK_N;
+    let block_threads = (TILED_GEMM_NSG as u64) * SIMD_WIDTH;
+    let thread_mat_m = block_m / (TILE_DIM as u64 * 2);
+    let thread_mat_n = block_n / (TILE_DIM as u64 * 2);
+    let out_tile_elems = block_m * block_n;
+    if metal.tiled_gemm_slim_tgmem {
         source.push_str("    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n");
     } else {
         source.push_str(&format!(
@@ -535,6 +768,7 @@ pub(super) fn push_tiled_gemm_body(
             block_n,
             thread_mat_m,
             thread_mat_n,
+            acc_token_major,
         );
         source.push_str("    } else {\n");
     }
@@ -554,11 +788,11 @@ pub(super) fn push_tiled_gemm_body(
         element_type,
         epilogue_body,
         epilogue_operands,
+        acc_token_major,
     );
     if direct_store_eligible {
         source.push_str("    }\n");
     }
-    Ok(())
 }
 
 /// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s setup half: computed ONCE, before
@@ -744,36 +978,56 @@ fn push_wide_weight_stage_body(
                 }
             }
         }
-        // Case A: this unit's chunk is exactly one codec block wide
-        // (`chunk_width == block_elements`) -- the whole `block_k`-wide
-        // K-step advances the row window by `num_chunks` whole blocks, and
-        // a unit's own slot-within-its-block (`0` for the low half, `half_
-        // width` for the high half) never changes across `k0` steps: the
-        // window shift always lands this unit back at the SAME relative
-        // position in a new block, never a fraction of one.
-        // Case B: the codec's block is wider than one K-step
-        // (`chunk_width == block_k`, `num_chunks == 1`) -- `wws_slot`
-        // accumulates by `block_k` each step. A unit's own starting slot is
-        // NOT necessarily `0` (the `half == 1` unit of a chunk starts at
-        // `half_width`, not the block origin), so wrapping compares `>=`
-        // and SUBTRACTS `block_elements` rather than resetting to `0` --
-        // `wws_slot < block_elements` is a loop invariant and `block_k <=
-        // block_elements` in this branch, so `wws_slot + block_k` never
-        // exceeds `2 * block_elements` and one subtraction always suffices
-        // (never a division, never a second subtraction).
-        if chunk_width == block_elements {
-            source.push_str(&format!(
-                "            wws_blk{unit} += {num_chunks}u * {block_bytes};\n"
-            ));
-        } else {
-            source.push_str(&format!(
-                "            wws_slot{unit} += {block_k}u;\n"
-            ));
-            source.push_str(&format!(
-                "            if (wws_slot{unit} >= {block_elements}u) {{ wws_slot{unit} -= {block_elements}u; wws_blk{unit} += {block_bytes}u; }}\n"
-            ));
-        }
+        push_wide_weight_stage_advance(
+            source,
+            unit,
+            block_k,
+            num_chunks,
+            chunk_width,
+            block_elements,
+            block_bytes,
+        );
         source.push_str("        }\n");
+    }
+}
+
+/// The pointer/slot advance every schedule of the wide weight stage shares:
+/// exactly one addition per K-step (plus one compare in the narrow-block
+/// case), never a division.
+///
+/// Case A: this unit's chunk is exactly one codec block wide
+/// (`chunk_width == block_elements`) -- the whole `block_k`-wide K-step
+/// advances the row window by `num_chunks` whole blocks, and a unit's own
+/// slot-within-its-block (`0` for the low half, `half_width` for the high half)
+/// never changes across `k0` steps: the window shift always lands this unit
+/// back at the SAME relative position in a new block, never a fraction of one.
+/// Case B: the codec's block is wider than one K-step (`chunk_width ==
+/// block_k`, `num_chunks == 1`) -- `wws_slot` accumulates by `block_k` each
+/// step. A unit's own starting slot is NOT necessarily `0` (the `half == 1`
+/// unit of a chunk starts at `half_width`, not the block origin), so wrapping
+/// compares `>=` and SUBTRACTS `block_elements` rather than resetting to `0` --
+/// `wws_slot < block_elements` is a loop invariant and `block_k <=
+/// block_elements` in this branch, so `wws_slot + block_k` never exceeds
+/// `2 * block_elements` and one subtraction always suffices.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_wide_weight_stage_advance(
+    source: &mut String,
+    unit: u64,
+    block_k: u64,
+    num_chunks: u64,
+    chunk_width: u64,
+    block_elements: u64,
+    block_bytes: u64,
+) {
+    if chunk_width == block_elements {
+        source.push_str(&format!(
+            "            wws_blk{unit} += {num_chunks}u * {block_bytes};\n"
+        ));
+    } else {
+        source.push_str(&format!("            wws_slot{unit} += {block_k}u;\n"));
+        source.push_str(&format!(
+            "            if (wws_slot{unit} >= {block_elements}u) {{ wws_slot{unit} -= {block_elements}u; wws_blk{unit} += {block_bytes}u; }}\n"
+        ));
     }
 }
 
@@ -834,8 +1088,10 @@ fn push_tiled_gemm_direct_store_arm(
     block_n: u64,
     thread_mat_m: u64,
     thread_mat_n: u64,
+    acc_token_major: bool,
 ) {
     let rank_len = rank.max(1);
+    let store_tail = if acc_token_major { "" } else { ", ulong2(0), true" };
     // A tile is safe to store directly only when NO row or column of it
     // falls outside the real extents (no mask needed) AND the output's own
     // FEATURE axis is unit-stride: `acc`'s fragment is [row=feature,
@@ -884,7 +1140,7 @@ fn push_tiled_gemm_direct_store_arm(
         "            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
     source.push_str(&format!(
-        "                simdgroup_store(acc[i * {thread_mat_n} + j], out + direct_offset + (row_half * {thread_mat_m} + i) * 8 * u.out_strides[{feature_axis}] + (col_half * {thread_mat_n} + j) * 8 * u.out_strides[{token_axis}], u.out_strides[{token_axis}], ulong2(0), true);\n"
+        "                simdgroup_store(acc[i * {thread_mat_n} + j], out + direct_offset + (row_half * {thread_mat_m} + i) * 8 * u.out_strides[{feature_axis}] + (col_half * {thread_mat_n} + j) * 8 * u.out_strides[{token_axis}], u.out_strides[{token_axis}]{store_tail});\n"
     ));
     source.push_str("            }\n");
     source.push_str("        }\n");
@@ -914,8 +1170,10 @@ fn push_tiled_gemm_restage_writeback(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    acc_token_major: bool,
 ) {
     let rank_len = rank.max(1);
+    let store_tail = if acc_token_major { ", ulong2(0), true" } else { "" };
     source.push_str(&format!(
         "    for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
@@ -923,7 +1181,7 @@ fn push_tiled_gemm_restage_writeback(
         "        for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
     source.push_str(&format!(
-        "            simdgroup_store(acc[i * {thread_mat_n} + j], out_tile + (row_half * {thread_mat_m} + i) * 8 * {block_n} + (col_half * {thread_mat_n} + j) * 8, {block_n});\n"
+        "            simdgroup_store(acc[i * {thread_mat_n} + j], out_tile + (row_half * {thread_mat_m} + i) * 8 * {block_n} + (col_half * {thread_mat_n} + j) * 8, {block_n}{store_tail});\n"
     ));
     source.push_str("        }\n");
     source.push_str("    }\n");
@@ -1389,6 +1647,7 @@ pub(super) fn push_dense_batched_gemm_body(
             block_n,
             thread_mat_m,
             thread_mat_n,
+            false,
         );
         source.push_str("    } else {\n");
     }
@@ -1408,6 +1667,7 @@ pub(super) fn push_dense_batched_gemm_body(
         element_type,
         epilogue_body,
         epilogue_operands,
+        false,
     );
     if direct_store_eligible {
         source.push_str("    }\n");

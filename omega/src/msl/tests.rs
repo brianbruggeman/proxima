@@ -2779,6 +2779,7 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
         [
             ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
             ("PROXIMA_TILED_GEMM_SLIM_TGMEM", Some("0")),
+            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
         ],
         || emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source,
     );
@@ -2786,6 +2787,7 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
         [
             ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
             ("PROXIMA_TILED_GEMM_SLIM_TGMEM", Some("0")),
+            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
         ],
         || kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key derives"),
     );
@@ -2815,12 +2817,12 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
     ];
     for &(var, other_var, marker) in cases {
         let source_with = |value: Option<&str>| {
-            temp_env::with_vars([(var, value), (other_var, Some("0"))], || {
+            temp_env::with_vars([(var, value), (other_var, Some("0")), ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0"))], || {
                 emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
             })
         };
         let key_with = |value: Option<&str>| {
-            temp_env::with_vars([(var, value), (other_var, Some("0"))], || {
+            temp_env::with_vars([(var, value), (other_var, Some("0")), ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0"))], || {
                 kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key derives")
             })
         };
@@ -2902,9 +2904,13 @@ fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
         "the explicitly disabled path must not emit the wide-weight-stage schedule:\n{off_source}"
     );
 
-    let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>, || {
-        emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
-    });
+    let on_source = temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>),
+            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
+        ],
+        || emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source,
+    );
     assert!(
         on_source.contains("wws_blk0") && on_source.contains("half4("),
         "PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE=1 must emit the per-thread block pointer and half4 \
@@ -2928,11 +2934,15 @@ fn wide_weight_stage_emits_ushort_wide_q4_0_decode_when_switch_on() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1"), || {
-        emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source
-    });
+    let on_source = temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1")),
+            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
+        ],
+        || emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source,
+    );
     assert!(
-        on_source.contains("q4_0_run8_wide") && on_source.contains("wws_blk0"),
+        on_source.contains("q4_0_run8_wide(wws_blk0") && on_source.contains("wws_blk0"),
         "a Q4_0 weight with the switch on must decode through q4_0_run8_wide's ushort loads:\n{on_source}"
     );
 }
@@ -2956,11 +2966,17 @@ fn wide_weight_stage_unset_renders_the_wide_decoder_for_tiled_q4_0_and_never_for
     tiled_q4_0.insert(tiled_weight, Codec::Q4_0);
     temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
         let render = |value: Option<&str>| {
-            temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", value, || {
-                emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default())
-                    .expect("emits")
-                    .source
-            })
+            temp_env::with_vars(
+                [
+                    ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", value),
+                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
+                ],
+                || {
+                    emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default())
+                        .expect("emits")
+                        .source
+                },
+            )
         };
         let unset_source = render(None);
         assert_eq!(
@@ -2970,7 +2986,7 @@ fn wide_weight_stage_unset_renders_the_wide_decoder_for_tiled_q4_0_and_never_for
              explicitly enabled"
         );
         assert!(
-            unset_source.contains("q4_0_run8_wide"),
+            unset_source.contains("q4_0_run8_wide(wws_blk0"),
             "the default must decode Q4_0 through the wide decoder:\n{unset_source}"
         );
         let disabled_source = render(Some("0"));
@@ -3003,6 +3019,132 @@ fn wide_weight_stage_unset_renders_the_wide_decoder_for_tiled_q4_0_and_never_for
         !unset_source.contains("q4_0_run8_wide"),
         "a packed-row (non-tiled) Q4_0 kernel must never carry the wide decoder's text at all:\n{unset_source}"
     );
+}
+
+/// `PROXIMA_TILED_GEMM_MM_LAYOUT` default ON: unset renders byte-identically to
+/// explicit `"1"` under the same cache key, explicit `"0"` renders the
+/// row-major tile under a different one, and the layout needs the wide weight
+/// stage (it reuses its two-threads-per-row schedule): with that switch off the
+/// row-major tile renders whatever `MM_LAYOUT` says.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn mm_layout_default_on_renders_unless_explicitly_disabled_or_the_weight_stage_is_off() {
+    let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
+    let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
+    let render = |mm_layout: Option<&str>, weight_stage: Option<&str>, packed: &BTreeMap<NodeId, Codec>| {
+        temp_env::with_vars(
+            [
+                ("PROXIMA_TILED_GEMM_MM_LAYOUT", mm_layout),
+                ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", weight_stage),
+            ],
+            || {
+                let source = emit(&bound, packed, NumericPolicy::default()).expect("emits").source;
+                let key = kernel_cache_key(&bound, packed, NumericPolicy::default()).expect("cache key derives");
+                (source, key)
+            },
+        )
+    };
+
+    let (unset_source, unset_key) = render(None, None, &q4_0);
+    let (enabled_source, enabled_key) = render(Some("1"), None, &q4_0);
+    let (disabled_source, disabled_key) = render(Some("0"), None, &q4_0);
+    assert_eq!(unset_source, enabled_source, "unset must render exactly what explicit \"1\" renders");
+    assert_eq!(unset_key, enabled_key, "unset must share explicit \"1\"'s cache key");
+    assert_ne!(unset_key, disabled_key, "the two tile layouts must never share a pipeline cache entry");
+    assert!(
+        unset_source.contains("mm_weight_store") && unset_source.contains("q4_0_dequant_half16(wws_blk0"),
+        "the default must stage the weight in the mm layout and decode with the fused form:\n{unset_source}"
+    );
+    assert!(
+        !disabled_source.contains("mm_weight_store") && disabled_source.contains("*(threadgroup half4 *)&weight_tile["),
+        "an explicit \"0\" must keep the row-major tile:\n{disabled_source}"
+    );
+
+    let (without_stage, _) = render(None, Some("0"), &q4_0);
+    assert!(
+        !without_stage.contains("mm_weight_store"),
+        "without the wide weight stage the mm layout has no schedule to ride and must not render:\n{without_stage}"
+    );
+}
+
+/// The mm layout never loads a fragment transposed (that is its point: the
+/// operands are stored in the orientation the multiply reads), multiplies in
+/// the `token x k` by `k x feature` order, and stores its `token x feature`
+/// accumulators transposed into the `[feature][token]` tile the copy-out
+/// reads; the row-major layout keeps its transposed activation load.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed() {
+    let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
+    let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
+    let render = |mm_layout: &str| {
+        temp_env::with_var("PROXIMA_TILED_GEMM_MM_LAYOUT", Some(mm_layout), || {
+            emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source
+        })
+    };
+
+    let mm_layout = render("1");
+    assert!(mm_layout.contains("simdgroup_multiply_accumulate(acc[i * 2 + j], b_frag[j], a_frag[i], acc[i * 2 + j])"));
+    assert!(
+        mm_layout
+            .lines()
+            .filter(|line| line.contains("simdgroup_load("))
+            .all(|line| !line.contains("true")),
+        "no fragment load may be transposed in the mm layout:\n{mm_layout}"
+    );
+    assert!(
+        mm_layout
+            .lines()
+            .any(|line| line.contains("simdgroup_store(acc[") && line.contains("ulong2(0), true")),
+        "the accumulators are token x feature and must be stored transposed:\n{mm_layout}"
+    );
+
+    let row_major = render("0");
+    assert!(
+        row_major
+            .lines()
+            .any(|line| line.contains("simdgroup_load(b_frag[j]") && line.contains("ulong2(0), true")),
+        "the row-major layout keeps the transposed activation fragment load:\n{row_major}"
+    );
+}
+
+/// A unit-stride activation reads its K offset as `k0` itself; a strided one
+/// reads each element through the operand accessor at the runtime stride --
+/// both when the activation's K axis is not the contiguous one
+/// (`tiled_gemm_op`'s `[k, token]` operand) and when the wide activation load
+/// is switched off. Both arms stay behind the same layout, and the Q4_K decode
+/// keeps its header-and-run form.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_accessor() {
+    let (unit_bound, unit_weight) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
+    let unit_codecs = BTreeMap::from([(unit_weight, Codec::Q4K)]);
+    let strided_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+    let strided_codecs = BTreeMap::from([(strided_bound.operands()[0].0, Codec::Q4K)]);
+    let render = |bound: &BoundOp, codecs: &BTreeMap<NodeId, Codec>, wide_activation: &str| {
+        temp_env::with_vars(
+            [
+                ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("1")),
+                ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some(wide_activation)),
+            ],
+            || emit(bound, codecs, NumericPolicy::default()).expect("emits").source,
+        )
+    };
+
+    let unit_stride = render(&unit_bound, &unit_codecs, "1");
+    assert!(unit_stride.contains("long mm_act_offset = mm_act_base + k0;"), "{unit_stride}");
+    assert!(unit_stride.contains("q4k_run8(wws_blk0"), "{unit_stride}");
+
+    for (label, source) in [
+        ("wide activation load off", render(&unit_bound, &unit_codecs, "0")),
+        ("activation K axis not contiguous", render(&strided_bound, &strided_codecs, "1")),
+    ] {
+        assert!(
+            source.contains("mm_act_offset = mm_act_base + k0 * u.operand_strides["),
+            "{label}:\n{source}"
+        );
+        assert!(source.contains("float act_scalar[8];"), "{label}:\n{source}");
+    }
 }
 
 /// The dense-batched-gemm path (`push_dense_batched_gemm_body`) has no
