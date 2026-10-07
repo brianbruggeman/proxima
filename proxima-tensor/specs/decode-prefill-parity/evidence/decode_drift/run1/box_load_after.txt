@@ -1,0 +1,16 @@
+Wed Oct  7 12:26:15 UTC 2026
+ 7:26  up 6 days, 17:30, 5 users, load averages: 4.30 5.68 5.85
+  PID  %CPU STAT COMM
+17029  69.8 R    a background daemon in ~/.local/bin
+  792  69.5 R    /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd
+  476  35.8 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  16.5 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461   0.9 S+   claude
+  936   0.8 S    /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent
+  467   0.6 Ss   /usr/sbin/bluetoothd
+  865   0.5 Ss   /Library/Application Support/Objective Development/Little Snitch/Components/at.obdev.littlesnitch.daemon.bundle/Contents/MacOS/at.obdev.littlesnitch.daemon
+ 1010   0.5 S    /Applications/Docker.app/Contents/MacOS/com.docker.backend
+ 1000   0.4 S    /Applications/ToothFairy.app/Contents/MacOS/ToothFairy
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

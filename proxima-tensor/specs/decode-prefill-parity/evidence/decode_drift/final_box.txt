@@ -1,0 +1,15 @@
+Wed Oct  7 13:06:50 UTC 2026
+ 8:06  up 6 days, 18:11, 5 users, load averages: 4.76 4.72 5.23
+  PID  %CPU STAT COMM
+17029  65.3 R    a background daemon in ~/.local/bin
+  476  45.7 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  11.9 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  593  11.9 Rs   /usr/libexec/AssetCache/AssetCache
+  851   2.7 Ss   /Library/SystemExtensions/21F1E42E-E283-49B4-8071-6B9F3228D05F/at.obdev.littlesnitch.networkextension.systemextension/Contents/MacOS/at.obdev.littlesnitch.networkextension
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ollama_api_curl_rc=7
+ollama_ps_grep_rc=1
+  PID STAT ARGS
+17029 R    a background daemon in ~/.local/bin

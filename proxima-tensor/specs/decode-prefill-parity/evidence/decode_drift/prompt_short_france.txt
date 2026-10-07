@@ -1,0 +1,3 @@
+<|turn>user
+What is the capital of France, and what is it known for?<turn|>
+<|turn>model

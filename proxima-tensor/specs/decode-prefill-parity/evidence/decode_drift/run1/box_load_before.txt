@@ -1,0 +1,58 @@
+Wed Oct  7 11:49:36 UTC 2026
+ 6:49  up 6 days, 16:53, 5 users, load averages: 4.47 4.17 4.44
+
+Processes: 763 total, 6 running, 757 sleeping, 4379 threads 
+2026/10/07 06:49:36
+Load Avg: 4.47, 4.17, 4.44 
+CPU usage: 15.7% user, 12.50% sys, 72.42% idle 
+SharedLibs: 935M resident, 166M data, 250M linkedit.
+MemRegions: 268618 total, 7151M resident, 683M private, 3602M shared.
+PhysMem: 43G used (3825M wired, 3414M compressor), 20G unused.
+VM: 315T vsize, 5703M framework vsize, 787005(0) swapins, 1172497(0) swapouts.
+Networks: packets: 61587174/51G in, 45103597/36G out.
+Disks: 268705710/6515G read, 485106148/20T written.
+
+PID    COMMAND          %CPU
+99617  extensionkitserv 0.0 
+97330  intents_helper   0.0 
+97329  intents_helper   0.0 
+97328  webprivacyd      0.0 
+96644  ssh              0.0 
+94702  DataDetectorsSou 0.0 
+94690  mbuseragent      0.0 
+94639  VTEncoderXPCServ 0.0 
+93580  codex            0.0 
+93579  node             0.0 
+
+  PID  PPID STAT  %CPU     ELAPSED STARTED                      ARGS
+17029     1 R     68.3 06-12:53:23 Wed Sep 30 17:56:13 2026     a background daemon in ~/.local/bin
+
+COMMAND   PID           USER   FD   TYPE DEVICE   SIZE/OFF                NODE NAME
+daemon    17029 brianbruggeman  cwd    DIR   1,14        704                   2 /
+daemon    17029 brianbruggeman  txt    REG   1,14  363487032          1094144182 a background daemon in ~/.local/bin
+daemon    17029 brianbruggeman  txt    REG   1,14      32768          1094164619 /Users/brianbruggeman/.local/share/daemon/cdb/lsm/cluster/keydir.heads.17029.11
+daemon    17029 brianbruggeman  txt    REG   1,14      32768          1094164623 /Users/brianbruggeman/.local/share/daemon/cdb/lsm/meta/keydir.heads.17029.15
+
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=27263075)	76%; AC attached; not charging present: true
+
+ollama api:
+curl_rc=7
+ollama procs:
+pgrep_rc=1
+peers:
+1
+  PID  %CPU STAT COMM
+17029  74.2 R    a background daemon in ~/.local/bin
+  476  52.0 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  10.6 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461   5.4 S+   claude
+  467   3.0 Ss   /usr/sbin/bluetoothd
+57891   2.6 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  971   1.3 S    /Applications/Bartender 5.app/Contents/MacOS/Bartender 5
+  936   1.1 S    /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent
+ 1010   0.8 S    /Applications/Docker.app/Contents/MacOS/com.docker.backend
+  735   0.6 S    /usr/libexec/sharingd

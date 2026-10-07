@@ -1,0 +1,112 @@
+--- 2026-10-07T13:16:18Z
+8:16  up 6 days, 18:20, 5 users, load averages: 5.23 5.56 5.49
+  PID  %CPU STAT COMM
+17029  62.0 R    a background daemon in ~/.local/bin
+  476  47.8 Us   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67270  17.1 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+31461  15.7 S+   claude
+  495  13.1 Ss   /usr/sbin/coreaudiod
+  716  12.8 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  714   8.9 S    /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+80183   5.0 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:17:18Z
+8:17  up 6 days, 18:21, 5 users, load averages: 4.52 5.34 5.41
+  PID  %CPU STAT COMM
+17029  71.9 R    a background daemon in ~/.local/bin
+  476  47.8 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67270  24.9 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+  495  14.2 Ss   /usr/sbin/coreaudiod
+  714   9.5 S    /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+80183   3.7 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  762   2.3 S    /Applications/Firefox.app/Contents/MacOS/firefox
+  911   2.2 S    /Applications/Firefox.app/Contents/MacOS/gpu-helper.app/Contents/MacOS/Firefox GPU Helper
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:18:18Z
+8:18  up 6 days, 18:22, 5 users, load averages: 4.16 5.11 5.32
+  PID  %CPU STAT COMM
+17029  72.9 R    a background daemon in ~/.local/bin
+  476  44.7 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+68123   5.8 SN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a19_0b_probe_9f0647da
+68135   4.8 S    /Users/brianbruggeman/.wakatime/wakatime-cli
+80183   4.4 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  716   4.4 R    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  467   1.8 Ss   /usr/sbin/bluetoothd
+  936   1.4 S    /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:19:18Z
+8:19  up 6 days, 18:23, 5 users, load averages: 3.83 4.85 5.21
+  PID  %CPU STAT COMM
+17029  78.8 R    a background daemon in ~/.local/bin
+  476  28.4 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+68454  18.0 SN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a00_0b_9f0647da
+80183   6.2 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  774   4.7 S    /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+  716   4.0 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  936   2.1 S    /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent
+  851   1.8 Ss   /Library/SystemExtensions/21F1E42E-E283-49B4-8071-6B9F3228D05F/at.obdev.littlesnitch.networkextension.systemextension/Contents/MacOS/at.obdev.littlesnitch.networkextension
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:20:18Z
+8:20  up 6 days, 18:24, 5 users, load averages: 4.09 4.77 5.15
+  PID  %CPU STAT COMM
+67270 116.5 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+17029  46.2 R    a background daemon in ~/.local/bin
+68586  32.5 SN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a01_0c_152467a9
+  476  29.3 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  762  24.4 S    /Applications/Firefox.app/Contents/MacOS/firefox
+50184  22.1 R    /Applications/ExpressVPN.app/Contents/MacOS/lightway
+80183  21.6 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  495  10.2 Ss   /usr/sbin/coreaudiod
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:21:18Z
+8:21  up 6 days, 18:25, 5 users, load averages: 3.24 4.43 5.00
+  PID  %CPU STAT COMM
+  476  27.5 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67270  24.2 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+80183  20.3 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  495  12.5 Ss   /usr/sbin/coreaudiod
+17029  10.5 R    a background daemon in ~/.local/bin
+  714   8.3 S    /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+  716   5.6 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  762   3.7 S    /Applications/Firefox.app/Contents/MacOS/firefox
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:22:18Z
+8:22  up 6 days, 18:26, 5 users, load averages: 3.28 4.17 4.86
+  PID  %CPU STAT COMM
+69175  99.9 RN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a19_0b_probe_9f0647da
+17029  75.2 R    a background daemon in ~/.local/bin
+67270  30.6 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+  476  25.4 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+80183  17.7 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  495  12.1 Rs   /usr/sbin/coreaudiod
+69181   8.7 Ss   /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo
+  714   6.3 S    /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:23:18Z
+8:23  up 6 days, 18:27, 5 users, load averages: 7.10 5.08 5.15
+  PID  %CPU STAT COMM
+17029  58.0 R    a background daemon in ~/.local/bin
+  542  44.1 Rs   /usr/libexec/syspolicyd
+67270  21.1 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+69591  20.5 U    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+69589  20.5 U    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+69587  20.3 U    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+69586  20.0 R    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+69592  19.9 U    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

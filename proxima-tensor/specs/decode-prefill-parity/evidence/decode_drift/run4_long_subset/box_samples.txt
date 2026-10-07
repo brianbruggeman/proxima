@@ -1,0 +1,126 @@
+--- 2026-10-07T13:07:05Z
+8:07  up 6 days, 18:11, 5 users, load averages: 4.60 4.69 5.21
+  PID  %CPU STAT COMM
+17029  79.3 R    a background daemon in ~/.local/bin
+87522  37.9 Ss   /usr/libexec/PerfPowerServices
+  476  29.4 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+66181  19.4 SN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a00_0b_9f0647da
+31461  10.2 R+   claude
+  716   6.6 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  481   3.0 Rs   /usr/libexec/runningboardd
+    1   1.8 Ss   /sbin/launchd
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:08:05Z
+8:08  up 6 days, 18:12, 5 users, load averages: 4.00 4.50 5.10
+  PID  %CPU STAT COMM
+ 1418 171.2 R    /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+17029  43.5 R    a background daemon in ~/.local/bin
+  476  38.2 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+66382  22.7 RN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+  716  20.0 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  403   1.4 Ss   /usr/libexec/logd
+  408   1.0 Ss   /System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted
+31461   1.0 S+   claude
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:09:05Z
+8:09  up 6 days, 18:13, 5 users, load averages: 4.60 4.62 5.10
+  PID  %CPU STAT COMM
+17029  81.8 R    a background daemon in ~/.local/bin
+  476  42.6 Rs   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+66575  12.2 SN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+  716  11.2 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+80183   1.6 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  762   1.5 S    /Applications/Firefox.app/Contents/MacOS/firefox
+  467   1.4 Ss   /usr/sbin/bluetoothd
+ 1023   1.0 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:10:05Z
+8:10  up 6 days, 18:14, 5 users, load averages: 5.51 4.94 5.19
+  PID  %CPU STAT COMM
+66715 100.9 RN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a18_head_copy
+ 1418  96.5 R    /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+17029  72.9 R    a background daemon in ~/.local/bin
+  476  26.4 Rs   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716   7.6 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 1000   1.3 S    /Applications/ToothFairy.app/Contents/MacOS/ToothFairy
+ 1023   0.9 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  680   0.9 S    /System/Library/CoreServices/WindowManager.app/Contents/MacOS/WindowManager
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:11:05Z
+8:11  up 6 days, 18:15, 5 users, load averages: 5.93 5.20 5.27
+  PID  %CPU STAT COMM
+66909 150.5 RN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a17_head_8ef12e94
+  587  76.2 Rs   /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+17029  44.9 R    a background daemon in ~/.local/bin
+  476  29.2 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 1418  19.2 S    /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+ 1023   4.3 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  350   3.2 S    /usr/libexec/remindd
+  716   3.2 R    /Applications/iTerm.app/Contents/MacOS/iTerm2
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:12:05Z
+8:12  up 6 days, 18:16, 5 users, load averages: 7.49 5.90 5.54
+  PID  %CPU STAT COMM
+  587  56.8 Ss   /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 1418  37.1 R    /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+29286  33.2 Ss   /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access.xpc/Contents/MacOS/mediaanalysisd-access
+17029  32.4 R    a background daemon in ~/.local/bin
+  476  28.7 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67079  27.1 Ss   /usr/sbin/cupsd
+  716   2.2 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 1023   1.1 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:13:05Z
+8:13  up 6 days, 18:17, 5 users, load averages: 6.13 5.98 5.60
+  PID  %CPU STAT COMM
+17029  71.1 R    a background daemon in ~/.local/bin
+  476  45.8 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67166  16.1 RN   /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+  470   3.8 Ss   /usr/libexec/corebrightnessd
+  716   3.2 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+  774   2.8 S    /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+87522   1.7 Ss   /usr/libexec/PerfPowerServices
+ 9488   1.4 Ss   /System/Library/PrivateFrameworks/AmbientDisplay.framework/Versions/A/XPCServices/com.apple.AmbientDisplayAgent.xpc/Contents/MacOS/com.apple.AmbientDisplayAgent
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:14:05Z
+8:14  up 6 days, 18:18, 5 users, load averages: 5.08 5.66 5.50
+  PID  %CPU STAT COMM
+17029  53.1 R    a background daemon in ~/.local/bin
+  476  44.8 Rs   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67270  27.1 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+67291  16.0 R    /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared
+  495  12.5 Ss   /usr/sbin/coreaudiod
+  714   7.7 S    /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+  716   5.7 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+80183   3.9 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+--- 2026-10-07T13:15:05Z
+8:15  up 6 days, 18:19, 5 users, load averages: 4.88 5.58 5.49
+  PID  %CPU STAT COMM
+17029  62.0 R    a background daemon in ~/.local/bin
+  476  47.3 Rs   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67270  26.8 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+  495  13.4 Ss   /usr/sbin/coreaudiod
+  714   9.5 R    /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+  716   6.4 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+80183   4.6 S    /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  762   2.9 S    /Applications/Firefox.app/Contents/MacOS/firefox
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

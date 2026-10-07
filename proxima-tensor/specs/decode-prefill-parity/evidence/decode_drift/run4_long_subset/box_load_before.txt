@@ -1,0 +1,8 @@
+Wed Oct  7 13:07:00 UTC 2026
+ 8:07  up 6 days, 18:11, 5 users, load averages: 4.48 4.66 5.20
+  PID  %CPU STAT COMM
+  476  37.3 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+66151  21.6 S    /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared
+  716  20.9 S    /Applications/iTerm.app/Contents/MacOS/iTerm2
+66150  16.3 S    /System/Library/Frameworks/Contacts.framework/Support/contactsd
+  748  15.7 R    /System/Library/PrivateFrameworks/PhotoLibraryServices.framework/Versions/A/Support/photolibraryd

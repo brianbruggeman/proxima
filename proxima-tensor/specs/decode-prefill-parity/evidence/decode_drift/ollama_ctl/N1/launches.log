@@ -1,0 +1,12 @@
+2026-10-07T12:48:39Z LAUNCH decode_arms proxima arm=a13_f76b4a97 process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+2026-10-07T12:49:14Z EXIT decode_arms proxima arm=a13_f76b4a97 process=0 status=exit status: 0
+2026-10-07T12:49:14Z LAUNCH decode_arms llama-server arm=llama-server process=0 port=8097 requests=8
+2026-10-07T12:49:30Z EXIT decode_arms llama-server arm=llama-server process=0
+2026-10-07T12:49:30Z LAUNCH decode_arms llama-server arm=llama-server process=1 port=8097 requests=8
+2026-10-07T12:49:45Z EXIT decode_arms llama-server arm=llama-server process=1
+2026-10-07T12:49:45Z LAUNCH decode_arms proxima arm=a13_f76b4a97 process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+2026-10-07T12:50:20Z EXIT decode_arms proxima arm=a13_f76b4a97 process=1 status=exit status: 0
+2026-10-07T12:50:20Z LAUNCH decode_arms proxima arm=a13_f76b4a97 process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+2026-10-07T12:50:56Z EXIT decode_arms proxima arm=a13_f76b4a97 process=2 status=exit status: 0
+2026-10-07T12:50:56Z LAUNCH decode_arms llama-server arm=llama-server process=2 port=8097 requests=8
+2026-10-07T12:51:11Z EXIT decode_arms llama-server arm=llama-server process=2

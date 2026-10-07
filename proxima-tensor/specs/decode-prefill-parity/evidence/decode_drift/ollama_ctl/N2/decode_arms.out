@@ -1,0 +1,257 @@
+raw arm=a13_f76b4a97 process=0 run=0 ms_per_token=12.6290
+raw arm=a13_f76b4a97 process=0 run=1 ms_per_token=12.0480
+raw arm=a13_f76b4a97 process=0 run=2 ms_per_token=12.1360
+raw arm=a13_f76b4a97 process=0 run=3 ms_per_token=13.6440
+raw arm=a13_f76b4a97 process=0 run=4 ms_per_token=14.5510
+raw arm=a13_f76b4a97 process=0 run=5 ms_per_token=12.7310
+raw arm=a13_f76b4a97 process=0 run=6 ms_per_token=13.1660
+raw arm=a13_f76b4a97 process=0 run=7 ms_per_token=13.4530
+raw arm=llama-server process=0 run=0 ms_per_token=9.1613
+raw arm=llama-server process=0 run=1 ms_per_token=9.1901
+raw arm=llama-server process=0 run=2 ms_per_token=9.1801
+raw arm=llama-server process=0 run=3 ms_per_token=9.4675
+raw arm=llama-server process=0 run=4 ms_per_token=9.6231
+raw arm=llama-server process=0 run=5 ms_per_token=9.2728
+raw arm=llama-server process=0 run=6 ms_per_token=9.2494
+raw arm=llama-server process=0 run=7 ms_per_token=9.2904
+raw arm=llama-server process=1 run=0 ms_per_token=9.1157
+raw arm=llama-server process=1 run=1 ms_per_token=9.2047
+raw arm=llama-server process=1 run=2 ms_per_token=9.1035
+raw arm=llama-server process=1 run=3 ms_per_token=9.1944
+raw arm=llama-server process=1 run=4 ms_per_token=9.1751
+raw arm=llama-server process=1 run=5 ms_per_token=9.0876
+raw arm=llama-server process=1 run=6 ms_per_token=9.3079
+raw arm=llama-server process=1 run=7 ms_per_token=9.2133
+raw arm=a13_f76b4a97 process=1 run=0 ms_per_token=12.7180
+raw arm=a13_f76b4a97 process=1 run=1 ms_per_token=13.4700
+raw arm=a13_f76b4a97 process=1 run=2 ms_per_token=12.8230
+raw arm=a13_f76b4a97 process=1 run=3 ms_per_token=12.6410
+raw arm=a13_f76b4a97 process=1 run=4 ms_per_token=12.2690
+raw arm=a13_f76b4a97 process=1 run=5 ms_per_token=12.5880
+raw arm=a13_f76b4a97 process=1 run=6 ms_per_token=12.5630
+raw arm=a13_f76b4a97 process=1 run=7 ms_per_token=12.1920
+raw arm=a13_f76b4a97 process=2 run=0 ms_per_token=12.9030
+raw arm=a13_f76b4a97 process=2 run=1 ms_per_token=12.4170
+raw arm=a13_f76b4a97 process=2 run=2 ms_per_token=12.6340
+raw arm=a13_f76b4a97 process=2 run=3 ms_per_token=12.4580
+raw arm=a13_f76b4a97 process=2 run=4 ms_per_token=12.1000
+raw arm=a13_f76b4a97 process=2 run=5 ms_per_token=12.2150
+raw arm=a13_f76b4a97 process=2 run=6 ms_per_token=12.1880
+raw arm=a13_f76b4a97 process=2 run=7 ms_per_token=12.1320
+raw arm=llama-server process=2 run=0 ms_per_token=9.0673
+raw arm=llama-server process=2 run=1 ms_per_token=9.1026
+raw arm=llama-server process=2 run=2 ms_per_token=9.1914
+raw arm=llama-server process=2 run=3 ms_per_token=9.1210
+raw arm=llama-server process=2 run=4 ms_per_token=9.5084
+raw arm=llama-server process=2 run=5 ms_per_token=9.8310
+raw arm=llama-server process=2 run=6 ms_per_token=9.5485
+raw arm=llama-server process=2 run=7 ms_per_token=9.5649
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=1 value=12.0480 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=2 value=12.1360 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=3 value=13.6440 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=4 value=14.5510 outlier=true
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=5 value=12.7310 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=6 value=13.1660 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=7 value=13.4530 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=1 value=13.4700 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=2 value=12.8230 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=3 value=12.6410 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=4 value=12.2690 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=5 value=12.5880 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=6 value=12.5630 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=7 value=12.1920 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=1 value=12.4170 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=2 value=12.6340 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=3 value=12.4580 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=4 value=12.1000 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=5 value=12.2150 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=6 value=12.1880 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=7 value=12.1320 outlier=false
+summary arm=a13_f76b4a97 metric=ms_per_token n_all=21 median_all=12.5630 cov_all_pct=4.94 min_all=12.0480 max_all=14.5510 | n_kept=20 median_kept=12.5105 mad_kept=0.3155 cov_kept_pct=3.81 min_kept=12.0480 max_kept=13.6440
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=1 value=2552.9560 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=2 value=2568.9980 outlier=true
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=3 value=2540.9990 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=4 value=2537.9460 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=5 value=2538.0200 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=6 value=2535.9590 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=7 value=2542.9700 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=1 value=2544.0000 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=2 value=2542.9680 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=3 value=2546.0570 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=4 value=2540.9910 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=5 value=2536.9720 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=6 value=2539.9380 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=7 value=2536.0330 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=1 value=2527.9770 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=2 value=2529.9830 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=3 value=2530.0630 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=4 value=2538.0630 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=5 value=2532.0580 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=6 value=2529.9950 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=7 value=2534.0150 outlier=false
+summary arm=a13_f76b4a97 metric=prefill_ms n_all=21 median_all=2538.0200 cov_all_pct=0.35 min_all=2527.9770 max_all=2568.9980 | n_kept=20 median_kept=2537.9830 mad_kept=4.4765 cov_kept_pct=0.24 min_kept=2527.9770 max_kept=2552.9560
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=1 value=2553.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=2 value=2569.0000 outlier=true
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=3 value=2541.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=4 value=2538.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=5 value=2538.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=6 value=2536.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=7 value=2543.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=1 value=2544.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=2 value=2543.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=3 value=2546.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=4 value=2541.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=5 value=2537.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=6 value=2540.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=7 value=2536.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=1 value=2528.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=2 value=2530.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=3 value=2530.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=4 value=2538.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=5 value=2532.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=6 value=2530.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=7 value=2534.0000 outlier=false
+summary arm=a13_f76b4a97 metric=ttft_ms n_all=21 median_all=2538.0000 cov_all_pct=0.35 min_all=2528.0000 max_all=2569.0000 | n_kept=20 median_kept=2538.0000 mad_kept=4.5000 cov_kept_pct=0.24 min_kept=2528.0000 max_kept=2553.0000
+memory arm=a13_f76b4a97 metric=peak_rss_bytes process=0 value=4047339520
+memory arm=a13_f76b4a97 metric=peak_rss_bytes process=1 value=3950313472
+memory arm=a13_f76b4a97 metric=peak_rss_bytes process=2 value=3980722176
+summary arm=a13_f76b4a97 metric=peak_rss_bytes n=3 median=3980722176 max=4047339520
+memory arm=a13_f76b4a97 metric=peak_footprint_bytes process=0 value=733867392
+memory arm=a13_f76b4a97 metric=peak_footprint_bytes process=1 value=727051456
+memory arm=a13_f76b4a97 metric=peak_footprint_bytes process=2 value=725445760
+summary arm=a13_f76b4a97 metric=peak_footprint_bytes n=3 median=727051456 max=733867392
+memory arm=a13_f76b4a97 metric=peak_gpu_bytes process=0 value=5608554496
+memory arm=a13_f76b4a97 metric=peak_gpu_bytes process=1 value=5608554496
+memory arm=a13_f76b4a97 metric=peak_gpu_bytes process=2 value=5608554496
+summary arm=a13_f76b4a97 metric=peak_gpu_bytes n=3 median=5608554496 max=5608554496
+extra arm=a13_f76b4a97 process=0 peers_present_at_exit=[]
+extra arm=a13_f76b4a97 process=1 peers_present_at_exit=[]
+extra arm=a13_f76b4a97 process=2 peers_present_at_exit=[]
+arm=llama-server metric=ms_per_token process=0 run=1 value=9.1901 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=2 value=9.1801 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=3 value=9.4675 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=4 value=9.6231 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=5 value=9.2728 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=6 value=9.2494 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=7 value=9.2904 outlier=false
+arm=llama-server metric=ms_per_token process=1 run=1 value=9.2047 outlier=false
+arm=llama-server metric=ms_per_token process=1 run=2 value=9.1035 outlier=false
+arm=llama-server metric=ms_per_token process=1 run=3 value=9.1944 outlier=false
+arm=llama-server metric=ms_per_token process=1 run=4 value=9.1751 outlier=false
+arm=llama-server metric=ms_per_token process=1 run=5 value=9.0876 outlier=false
+arm=llama-server metric=ms_per_token process=1 run=6 value=9.3079 outlier=false
+arm=llama-server metric=ms_per_token process=1 run=7 value=9.2133 outlier=false
+arm=llama-server metric=ms_per_token process=2 run=1 value=9.1026 outlier=false
+arm=llama-server metric=ms_per_token process=2 run=2 value=9.1914 outlier=false
+arm=llama-server metric=ms_per_token process=2 run=3 value=9.1210 outlier=false
+arm=llama-server metric=ms_per_token process=2 run=4 value=9.5084 outlier=false
+arm=llama-server metric=ms_per_token process=2 run=5 value=9.8310 outlier=true
+arm=llama-server metric=ms_per_token process=2 run=6 value=9.5485 outlier=false
+arm=llama-server metric=ms_per_token process=2 run=7 value=9.5649 outlier=false
+summary arm=llama-server metric=ms_per_token n_all=21 median_all=9.2133 cov_all_pct=2.13 min_all=9.0876 max_all=9.8310 | n_kept=20 median_kept=9.2090 mad_kept=0.0847 cov_kept_pct=1.77 min_kept=9.0876 max_kept=9.6231
+arm=llama-server metric=prefill_ms process=0 run=1 value=570.9170 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=2 value=570.9660 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=3 value=578.3740 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=4 value=602.7670 outlier=true
+arm=llama-server metric=prefill_ms process=0 run=5 value=590.4750 outlier=true
+arm=llama-server metric=prefill_ms process=0 run=6 value=585.5530 outlier=true
+arm=llama-server metric=prefill_ms process=0 run=7 value=580.3580 outlier=true
+arm=llama-server metric=prefill_ms process=1 run=1 value=577.9830 outlier=false
+arm=llama-server metric=prefill_ms process=1 run=2 value=569.6000 outlier=false
+arm=llama-server metric=prefill_ms process=1 run=3 value=569.8860 outlier=false
+arm=llama-server metric=prefill_ms process=1 run=4 value=569.6250 outlier=false
+arm=llama-server metric=prefill_ms process=1 run=5 value=569.5980 outlier=false
+arm=llama-server metric=prefill_ms process=1 run=6 value=568.9360 outlier=false
+arm=llama-server metric=prefill_ms process=1 run=7 value=570.3510 outlier=false
+arm=llama-server metric=prefill_ms process=2 run=1 value=574.1680 outlier=false
+arm=llama-server metric=prefill_ms process=2 run=2 value=570.6010 outlier=false
+arm=llama-server metric=prefill_ms process=2 run=3 value=570.2820 outlier=false
+arm=llama-server metric=prefill_ms process=2 run=4 value=573.2650 outlier=false
+arm=llama-server metric=prefill_ms process=2 run=5 value=573.0980 outlier=false
+arm=llama-server metric=prefill_ms process=2 run=6 value=571.9530 outlier=false
+arm=llama-server metric=prefill_ms process=2 run=7 value=571.2750 outlier=false
+summary arm=llama-server metric=prefill_ms n_all=21 median_all=571.2750 cov_all_pct=1.44 min_all=568.9360 max_all=602.7670 | n_kept=17 median_kept=570.9170 mad_kept=1.2920 cov_kept_pct=0.47 min_kept=568.9360 max_kept=578.3740
+arm=llama-server metric=ttft_ms process=0 run=1 value=573.2830 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=2 value=573.5202 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=3 value=580.8349 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=4 value=605.5480 outlier=true
+arm=llama-server metric=ttft_ms process=0 run=5 value=593.1422 outlier=true
+arm=llama-server metric=ttft_ms process=0 run=6 value=588.0410 outlier=true
+arm=llama-server metric=ttft_ms process=0 run=7 value=582.8818 outlier=true
+arm=llama-server metric=ttft_ms process=1 run=1 value=580.4106 outlier=false
+arm=llama-server metric=ttft_ms process=1 run=2 value=572.0906 outlier=false
+arm=llama-server metric=ttft_ms process=1 run=3 value=572.3097 outlier=false
+arm=llama-server metric=ttft_ms process=1 run=4 value=572.1308 outlier=false
+arm=llama-server metric=ttft_ms process=1 run=5 value=572.0500 outlier=false
+arm=llama-server metric=ttft_ms process=1 run=6 value=571.4515 outlier=false
+arm=llama-server metric=ttft_ms process=1 run=7 value=572.9025 outlier=false
+arm=llama-server metric=ttft_ms process=2 run=1 value=576.6706 outlier=false
+arm=llama-server metric=ttft_ms process=2 run=2 value=572.9975 outlier=false
+arm=llama-server metric=ttft_ms process=2 run=3 value=572.7601 outlier=false
+arm=llama-server metric=ttft_ms process=2 run=4 value=575.7906 outlier=false
+arm=llama-server metric=ttft_ms process=2 run=5 value=575.6389 outlier=false
+arm=llama-server metric=ttft_ms process=2 run=6 value=574.4859 outlier=false
+arm=llama-server metric=ttft_ms process=2 run=7 value=573.7251 outlier=false
+summary arm=llama-server metric=ttft_ms n_all=21 median_all=573.7251 cov_all_pct=1.45 min_all=571.4515 max_all=605.5480 | n_kept=17 median_kept=573.2830 mad_kept=1.1925 cov_kept_pct=0.47 min_kept=571.4515 max_kept=580.8349
+memory arm=llama-server metric=peak_rss_bytes process=0 value=3756589056
+memory arm=llama-server metric=peak_rss_bytes process=1 value=3770384384
+memory arm=llama-server metric=peak_rss_bytes process=2 value=3758571520
+summary arm=llama-server metric=peak_rss_bytes n=3 median=3758571520 max=3770384384
+memory arm=llama-server metric=peak_footprint_bytes process=0 value=211445952
+memory arm=llama-server metric=peak_footprint_bytes process=1 value=221604160
+memory arm=llama-server metric=peak_footprint_bytes process=2 value=213117312
+summary arm=llama-server metric=peak_footprint_bytes n=3 median=213117312 max=221604160
+extra arm=llama-server process=0 request=0 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=593.2230 ttft_ms=601.3679 ms_per_token=9.1613
+extra arm=llama-server process=0 request=1 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=570.9170 ttft_ms=573.2830 ms_per_token=9.1901
+extra arm=llama-server process=0 request=2 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=570.9660 ttft_ms=573.5202 ms_per_token=9.1801
+extra arm=llama-server process=0 request=3 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=578.3740 ttft_ms=580.8349 ms_per_token=9.4675
+extra arm=llama-server process=0 request=4 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=602.7670 ttft_ms=605.5480 ms_per_token=9.6231
+extra arm=llama-server process=0 request=5 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=590.4750 ttft_ms=593.1422 ms_per_token=9.2728
+extra arm=llama-server process=0 request=6 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=585.5530 ttft_ms=588.0410 ms_per_token=9.2494
+extra arm=llama-server process=0 request=7 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=580.3580 ttft_ms=582.8818 ms_per_token=9.2904
+extra arm=llama-server process=1 request=0 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=606.0250 ttft_ms=610.8540 ms_per_token=9.1157
+extra arm=llama-server process=1 request=1 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=577.9830 ttft_ms=580.4106 ms_per_token=9.2047
+extra arm=llama-server process=1 request=2 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=569.6000 ttft_ms=572.0906 ms_per_token=9.1035
+extra arm=llama-server process=1 request=3 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=569.8860 ttft_ms=572.3097 ms_per_token=9.1944
+extra arm=llama-server process=1 request=4 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=569.6250 ttft_ms=572.1308 ms_per_token=9.1751
+extra arm=llama-server process=1 request=5 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=569.5980 ttft_ms=572.0500 ms_per_token=9.0876
+extra arm=llama-server process=1 request=6 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=568.9360 ttft_ms=571.4515 ms_per_token=9.3079
+extra arm=llama-server process=1 request=7 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=570.3510 ttft_ms=572.9025 ms_per_token=9.2133
+extra arm=llama-server process=2 request=0 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=585.2690 ttft_ms=588.1776 ms_per_token=9.0673
+extra arm=llama-server process=2 request=1 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=574.1680 ttft_ms=576.6706 ms_per_token=9.1026
+extra arm=llama-server process=2 request=2 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=570.6010 ttft_ms=572.9975 ms_per_token=9.1914
+extra arm=llama-server process=2 request=3 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=570.2820 ttft_ms=572.7601 ms_per_token=9.1210
+extra arm=llama-server process=2 request=4 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=573.2650 ttft_ms=575.7906 ms_per_token=9.5084
+extra arm=llama-server process=2 request=5 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=573.0980 ttft_ms=575.6389 ms_per_token=9.8310
+extra arm=llama-server process=2 request=6 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=571.9530 ttft_ms=574.4859 ms_per_token=9.5485
+extra arm=llama-server process=2 request=7 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=571.2750 ttft_ms=573.7251 ms_per_token=9.5649
+bound metric=ms_per_token arm=a13_f76b4a97 vs=llama-server arm_median=12.5105 reference_median=9.2090 delta=3.3015 limit=0.1842 within=false
+bound metric=prefill_ms arm=a13_f76b4a97 vs=llama-server arm_median=2537.9830 reference_median=570.9170 delta=1967.0660 limit=11.4183 within=false
+bound metric=ttft_ms arm=a13_f76b4a97 vs=llama-server arm_median=2538.0000 reference_median=573.2830 delta=1964.7170 limit=11.4657 within=false
+bound metric=peak_rss_bytes arm=a13_f76b4a97 vs=llama-server arm_median=3980722176 reference_median=3758571520 delta=222150656 limit=75171430 within=false
+bound metric=peak_footprint_bytes arm=a13_f76b4a97 vs=llama-server arm_median=727051456 reference_median=213117312 delta=513934144 limit=4262346 within=false
+bound metric=peak_gpu_bytes arm=a13_f76b4a97 vs=llama-server n=0
+ids arm=a13_f76b4a97 run=0 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=1 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=2 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=3 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=4 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=5 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=6 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=7 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=8 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=9 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=10 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=11 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=12 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=13 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=14 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=15 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=16 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=17 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=18 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=19 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=20 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=21 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=22 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=a13_f76b4a97 run=23 len=128 llama_len=128 common_prefix=128 equal=true
