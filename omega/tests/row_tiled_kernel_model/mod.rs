@@ -1,15 +1,18 @@
 //! A scalar transcription of the row-tiled partial kernel
 //! (`omega/src/msl/cached_attention_row_tiled.rs`) and of the interleaved
-//! merge, statement for statement: the threadgroup grid decoded from `tgid`,
-//! the band and split slices, the per-block Q.K^T over 8-key fragments with
-//! the per-row window mask, the online softmax with its rescale, P.V over
-//! fragments into the f32 output tile, the scalar causal pass over the new
-//! range in the last split, and the normalized or interleaved store. Simdgroup
-//! parallelism and the barriers between phases are sequential loops here, and
-//! each 8x8 `simdgroup_matrix` product is a plain 8-term sum, so the model
-//! checks the kernel's algorithm -- indexing, masks, band partition, softmax
-//! state, store layout -- on the CPU, against the CPU oracle, without a device.
-//! What it cannot check is the Metal text itself.
+//! merge, statement for statement: the threadgroup grid decoded from `tgid`
+//! (heaviest tile first), the vector map of a tile for both fragment layouts
+//! (eight heads of one row, or eight rows of one head), the band and split
+//! slices, the per-block Q.K^T over 8-key fragments with the per-row window
+//! mask, the online softmax with its rescale, P.V over fragments, the new range
+//! in the last split (8-key fragments over the whole fragments of the range, the
+//! causal and window skip of blocks no row of the tile can see, a scalar tail
+//! for the keys past the last whole fragment), and the normalized or
+//! interleaved store. Simdgroup parallelism and the barriers between phases are
+//! sequential loops here, and each 8x8 `simdgroup_matrix` product is a plain
+//! 8-term sum, so the model checks the kernel's algorithm -- indexing, masks,
+//! band partition, softmax state, store layout -- on the CPU, against the CPU
+//! oracle, without a device. What it cannot check is the Metal text itself.
 
 pub struct Inputs<'a> {
     pub query_even: &'a [f32],
@@ -36,13 +39,64 @@ pub struct Shape {
 pub struct Tiling {
     pub tile_rows: i64,
     pub block: i64,
+    pub split_keys: i64,
     pub splits: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Cached,
+    NewFragments,
+    NewTail,
+}
+
+#[derive(Clone, Copy)]
+struct Vector {
+    row: i64,
+    head: i64,
+    owned: bool,
 }
 
 struct Partial {
     output_tile: Vec<f32>,
     row_maximum: Vec<f32>,
     row_sum: Vec<f32>,
+    vectors: Vec<Vector>,
+}
+
+/// The kernel's `vector_row`/`vector_head`/`vector_live` of one tile. Query
+/// groups that fill whole 8-row blocks put the eight heads of one row in a
+/// block; any other group count puts eight consecutive rows of one head in a
+/// block, the last block of a tile shifted back so it ends on the last row.
+fn tile_vectors(shape: &Shape, tiling: &Tiling, row0: i64) -> Vec<Vector> {
+    let query_groups = shape.query_groups;
+    let rows_in_fragment = query_groups % 8 != 0;
+    let blocks = if rows_in_fragment {
+        tiling.tile_rows / 8 * query_groups
+    } else {
+        tiling.tile_rows * query_groups / 8
+    };
+    (0..blocks * 8)
+        .map(|index| {
+            if rows_in_fragment {
+                let block_index = index / 8;
+                let owned_from = row0 + block_index / query_groups * 8;
+                let row = owned_from.min(shape.rows - 8) + index % 8;
+                Vector {
+                    row,
+                    head: block_index % query_groups,
+                    owned: row >= owned_from && row < shape.rows,
+                }
+            } else {
+                let row = row0 + index / query_groups;
+                Vector {
+                    row,
+                    head: index % query_groups,
+                    owned: row < shape.rows,
+                }
+            }
+        })
+        .collect()
 }
 
 fn threadgroup(
@@ -52,7 +106,7 @@ fn threadgroup(
     split: i64,
     tile: i64,
     kv_head: i64,
-) -> (i64, i64, Partial) {
+) -> Partial {
     let Shape {
         kv_heads,
         query_groups,
@@ -66,20 +120,28 @@ fn threadgroup(
     let Tiling {
         tile_rows,
         block,
+        split_keys,
         splits,
     } = *tiling;
     let half_dim = head_dim / 2;
     let row0 = tile * tile_rows;
     let rows_here = tile_rows.min(total_rows - row0);
-    let vectors = rows_here * query_groups;
-    let mut output_tile = vec![0.0f32; (vectors * head_dim) as usize];
-    let mut score_tile = vec![0.0f32; (vectors * block) as usize];
-    let mut row_maximum = vec![f32::NEG_INFINITY; vectors as usize];
-    let mut row_sum = vec![0.0f32; vectors as usize];
+    let vectors = tile_vectors(shape, tiling, row0);
+    let count = vectors.len() as i64;
+    let load_row = |vector: i64| vectors[vector as usize].row.min(total_rows - 1);
+    let query_index_of = |vector: i64| {
+        load_row(vector) * (kv_heads * query_groups)
+            + kv_head * query_groups
+            + vectors[vector as usize].head
+    };
+    let mut output_tile = vec![0.0f32; (count * head_dim) as usize];
+    let mut score_tile = vec![0.0f32; (count * block) as usize];
+    let mut row_maximum = vec![f32::NEG_INFINITY; count as usize];
+    let mut row_sum = vec![0.0f32; count as usize];
 
     let first_key = (live + cached_lower + row0).max(0) & !7;
     let band = (live - first_key).max(0);
-    let slice = (((band + splits - 1) / splits) + block - 1) / block * block;
+    let slice = (((band + splits - 1) / splits) + split_keys - 1) / split_keys * split_keys;
     let slice_start = first_key + split * slice;
     let slice_end = (slice_start + slice).min(live);
     let cached_blocks = if slice_start < slice_end {
@@ -87,32 +149,47 @@ fn threadgroup(
     } else {
         0
     };
-    let new_blocks = if split == splits - 1 {
-        (total_rows + block - 1) / block
+    let total_aligned = total_rows & !7;
+    let last_row = row0 + rows_here - 1;
+    let new_first = (row0 + cached_lower).max(0);
+    let new_end = total_rows.min(last_row + new_upper + 1);
+    let new_start = new_first & !7;
+    let mma_end = new_end.min(total_aligned);
+    let last_split = split == splits - 1;
+    let new_blocks = if last_split && mma_end > new_start {
+        (mma_end - new_start + block - 1) / block
     } else {
         0
     };
+    let tail_steps = i64::from(last_split && new_end > total_aligned && new_first < total_rows);
 
-    for step in 0..cached_blocks + new_blocks {
-        let new_block = step >= cached_blocks;
-        let key0 = if new_block {
-            (step - cached_blocks) * block
+    for step in 0..cached_blocks + new_blocks + tail_steps {
+        let mode = if step < cached_blocks {
+            Mode::Cached
+        } else if step < cached_blocks + new_blocks {
+            Mode::NewFragments
         } else {
-            slice_start + step * block
+            Mode::NewTail
         };
-        let columns = if new_block {
-            block.min(total_rows - key0)
-        } else {
-            block.min(slice_end - key0)
+        let key0 = match mode {
+            Mode::Cached => slice_start + step * block,
+            Mode::NewFragments => new_start + (step - cached_blocks) * block,
+            Mode::NewTail => total_aligned,
         };
-        if !new_block {
+        let columns = match mode {
+            Mode::Cached => block.min(slice_end - key0),
+            Mode::NewFragments => block.min(mma_end - key0),
+            Mode::NewTail => total_rows - total_aligned,
+        };
+        if mode != Mode::NewTail {
+            let (key_even, key_odd) = match mode {
+                Mode::Cached => (inputs.cached_key_even, inputs.cached_key_odd),
+                _ => (inputs.new_key_even, inputs.new_key_odd),
+            };
             let fragments = (columns + 7) / 8;
             for key_tile in 0..fragments {
-                for vector in 0..vectors {
-                    let query_row = row0 + vector / query_groups;
-                    let query_index = query_row * (kv_heads * query_groups)
-                        + kv_head * query_groups
-                        + vector % query_groups;
+                for vector in 0..count {
+                    let query_index = query_index_of(vector);
                     for lane_key in 0..8 {
                         let key = key0 + key_tile * 8 + lane_key;
                         let key_offset = key * (kv_heads * half_dim) + kv_head * half_dim;
@@ -120,10 +197,10 @@ fn threadgroup(
                         for depth in 0..half_dim {
                             accumulated += inputs.query_even
                                 [(query_index * half_dim + depth) as usize]
-                                * inputs.cached_key_even[(key_offset + depth) as usize];
+                                * key_even[(key_offset + depth) as usize];
                             accumulated += inputs.query_odd
                                 [(query_index * half_dim + depth) as usize]
-                                * inputs.cached_key_odd[(key_offset + depth) as usize];
+                                * key_odd[(key_offset + depth) as usize];
                         }
                         score_tile[(vector * block + key_tile * 8 + lane_key) as usize] =
                             accumulated;
@@ -131,14 +208,13 @@ fn threadgroup(
                 }
             }
         } else {
-            for vector in 0..vectors {
-                let query_row = row0 + vector / query_groups;
+            for vector in 0..count {
+                let member = vectors[vector as usize];
                 for column in 0..columns {
-                    let valid = key0 + column - query_row <= new_upper;
+                    let relative = key0 + column - member.row;
+                    let valid = member.owned && relative <= new_upper && relative >= cached_lower;
                     if valid {
-                        let query_index = query_row * (kv_heads * query_groups)
-                            + kv_head * query_groups
-                            + vector % query_groups;
+                        let query_index = query_index_of(vector);
                         let key_offset =
                             (key0 + column) * (kv_heads * half_dim) + kv_head * half_dim;
                         let mut partial_score = 0.0f32;
@@ -155,19 +231,28 @@ fn threadgroup(
                 }
             }
         }
-        for vector in 0..vectors {
-            let query_row = row0 + vector / query_groups;
+        for vector in 0..count {
+            let query_row = vectors[vector as usize].row;
             let mut block_maximum = f32::NEG_INFINITY;
             for column in 0..block {
                 let mut raw_score = f32::NEG_INFINITY;
-                if new_block {
-                    if column < columns {
-                        raw_score = score_tile[(vector * block + column) as usize];
+                match mode {
+                    Mode::NewTail => {
+                        if column < columns {
+                            raw_score = score_tile[(vector * block + column) as usize];
+                        }
                     }
-                } else {
-                    let key = key0 + column;
-                    if key < slice_end && key - live - query_row >= cached_lower {
-                        raw_score = score_tile[(vector * block + column) as usize] * scale;
+                    Mode::NewFragments => {
+                        let relative = key0 + column - query_row;
+                        if column < columns && relative <= new_upper && relative >= cached_lower {
+                            raw_score = score_tile[(vector * block + column) as usize] * scale;
+                        }
+                    }
+                    Mode::Cached => {
+                        let key = key0 + column;
+                        if key < slice_end && key - live - query_row >= cached_lower {
+                            raw_score = score_tile[(vector * block + column) as usize] * scale;
+                        }
                     }
                 }
                 score_tile[(vector * block + column) as usize] = raw_score;
@@ -197,14 +282,18 @@ fn threadgroup(
                 output_tile[(vector * head_dim + dimension) as usize] *= rescale;
             }
         }
-        if !new_block {
+        if mode != Mode::NewTail {
+            let value_rows = match mode {
+                Mode::Cached => inputs.cached_value,
+                _ => inputs.new_value,
+            };
             let fragments = (columns + 7) / 8;
-            for vector in 0..vectors {
+            for vector in 0..count {
                 for dimension in 0..head_dim {
                     for key_tile in 0..fragments {
                         for lane_key in 0..8 {
                             let key = key0 + key_tile * 8 + lane_key;
-                            let value = inputs.cached_value[(key * (kv_heads * head_dim)
+                            let value = value_rows[(key * (kv_heads * head_dim)
                                 + kv_head * head_dim
                                 + dimension)
                                 as usize];
@@ -217,7 +306,7 @@ fn threadgroup(
             }
         } else {
             for dimension in 0..head_dim {
-                for vector in 0..vectors {
+                for vector in 0..count {
                     let mut accumulated = 0.0f32;
                     for column in 0..columns {
                         let value = inputs.new_value[((key0 + column) * (kv_heads * head_dim)
@@ -231,15 +320,12 @@ fn threadgroup(
             }
         }
     }
-    (
-        row0,
+    Partial {
+        output_tile,
+        row_maximum,
+        row_sum,
         vectors,
-        Partial {
-            output_tile,
-            row_maximum,
-            row_sum,
-        },
-    )
+    }
 }
 
 /// The whole op: every threadgroup, then the merge when `splits > 1`. Returns
@@ -259,36 +345,39 @@ pub fn model(inputs: &Inputs, shape: &Shape, tiling: &Tiling) -> Vec<f32> {
     } = *tiling;
     let total_elements = total_rows * kv_heads * query_groups;
     let tiles = (total_rows + tile_rows - 1) / tile_rows;
-    let mut output = vec![0.0f32; (total_elements * head_dim) as usize];
+    let mut output = vec![f32::NAN; (total_elements * head_dim) as usize];
     let scratch_values = (total_elements * head_dim * splits) as usize;
-    let mut scratch = vec![0.0f32; scratch_values + (total_elements * splits * 2) as usize];
+    let mut scratch = vec![f32::NAN; scratch_values + (total_elements * splits * 2) as usize];
 
     for tgid in 0..kv_heads * tiles * splits {
         let split = tgid % splits;
-        let tile = (tgid / splits) % tiles;
+        let tile = tiles - 1 - (tgid / splits) % tiles;
         let kv_head = tgid / (splits * tiles);
-        let (row0, vectors, partial) = threadgroup(inputs, shape, tiling, split, tile, kv_head);
-        for vector in 0..vectors {
-            let query_index = (row0 + vector / query_groups) * (kv_heads * query_groups)
-                + kv_head * query_groups
-                + vector % query_groups;
+        let partial = threadgroup(inputs, shape, tiling, split, tile, kv_head);
+        for (index, member) in partial.vectors.iter().enumerate() {
+            if !member.owned {
+                continue;
+            }
+            let vector = index as i64;
+            let query_index =
+                member.row * (kv_heads * query_groups) + kv_head * query_groups + member.head;
             for dimension in 0..head_dim {
                 let value = partial.output_tile[(vector * head_dim + dimension) as usize];
                 if splits == 1 {
-                    let sum = partial.row_sum[vector as usize];
+                    let sum = partial.row_sum[index];
                     output[(query_index * head_dim + dimension) as usize] =
                         if sum == 0.0 { 0.0 } else { value / sum };
                 } else {
-                    let index =
+                    let slot =
                         ((query_index * (head_dim / 4) + (dimension >> 2)) * splits + split) * 4
                             + (dimension & 3);
-                    scratch[index as usize] = value;
+                    scratch[slot as usize] = value;
                 }
             }
             if splits > 1 {
                 let stats_index = scratch_values as i64 + (query_index * splits + split) * 2;
-                scratch[stats_index as usize] = partial.row_maximum[vector as usize];
-                scratch[stats_index as usize + 1] = partial.row_sum[vector as usize];
+                scratch[stats_index as usize] = partial.row_maximum[index];
+                scratch[stats_index as usize + 1] = partial.row_sum[index];
             }
         }
     }

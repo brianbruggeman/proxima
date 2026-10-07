@@ -1597,15 +1597,15 @@ pub(crate) enum CachedAttentionForm {
     #[cfg(feature = "metal-attn-split-decode")]
     TwoRangeDecodeSplit { splits: u64, chunks: u64 },
     /// The two-range op at `K = query_rows = new_key_rows` rows
-    /// (`mma_min_query_rows <= K <= max_query_rows`, speculative verify and
-    /// small prefill chunks) as one threadgroup per `(kv_head, row tile,
-    /// split)`: each stages a 64-key block of the cache once and scores it
-    /// against `rows_per_threadgroup * query_groups` query vectors with
-    /// `simdgroup_matrix` MMA, where [`Self::TwoRangeDecodeSplit`] re-reads
-    /// every K and V byte once per query row. `simdgroups` is the
-    /// threadgroup width in simdgroups. `splits == 1` writes the normalized
-    /// rows directly; above that the same merge dispatch as the decode split
-    /// follows.
+    /// (`K >= mma_min_query_rows`, speculative verify through whole-prompt
+    /// prefill) as one threadgroup per `(kv_head, row tile, split)`: each walks
+    /// the cached range and then the new range in `keys_per_block` key blocks
+    /// and scores every block against `rows_per_threadgroup * query_groups`
+    /// query vectors with `simdgroup_matrix` MMA, where
+    /// [`Self::TwoRangeDecodeSplit`] re-reads every K and V byte once per query
+    /// row. `simdgroups` is the threadgroup width in simdgroups. `splits == 1`
+    /// writes the normalized rows directly; above that the same merge dispatch
+    /// as the decode split follows.
     #[cfg(feature = "metal-attn-split-rows")]
     TwoRangeRowTiled {
         splits: u64,
@@ -1728,7 +1728,7 @@ fn row_tiled_entry_name(
         "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{}_rt",
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
-        crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK,
+        row_tiled_block(*head_dim),
     ))
 }
 
@@ -1884,15 +1884,16 @@ fn decode_split_serves_rows(query_rows: u64) -> bool {
 }
 
 /// The row-tiled form of a two-range cached-bound op, when the op and the
-/// policy both admit it: `K = query_rows = new_key_rows` rows inside
-/// `[attention_rows].mma_min_query_rows..=max_query_rows`, a full-rotary head
-/// whose width is a whole number of 8-wide MMA fragments per simdgroup, query
-/// groups that fill whole 8-row MMA blocks (so every block is eight heads of
-/// one query row, with one causal and one window boundary), a bucket extent
-/// that is a whole number of 8-key fragments (so no fragment read leaves the
-/// cache buffer), a single row's tile that fits the threadgroup memory budget,
-/// and a policy granting both the cross-threadgroup merge and the in-block
-/// tree reduce. Anything else falls through to
+/// policy both admit it: `K = query_rows = new_key_rows` rows from
+/// `[attention_rows].mma_min_query_rows` up, a full-rotary head whose width is
+/// a whole number of 8-wide MMA fragments per simdgroup, a bucket extent that
+/// is a whole number of 8-key fragments (so no fragment read leaves the cache
+/// buffer), a key block that is a whole number of fragments per simdgroup,
+/// eight rows at least when the query groups do not fill whole 8-row MMA
+/// blocks (so a fragment can be eight rows of one head), one tile unit that
+/// fits the register and threadgroup memory budgets ([`tile_unit_fragments`],
+/// [`row_tile_bytes`]), and a policy granting both the cross-threadgroup merge
+/// and the in-block tree reduce. Anything else falls through to
 /// [`decode_split_form`] or [`CachedAttentionForm::TwoRangeCachedBound`].
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
@@ -1913,24 +1914,28 @@ fn row_tiled_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAtt
     let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
         && admit(policy, NumericRewrite::TreeReduce).is_ok();
     let simdgroups = row_tiled_simdgroups(*head_dim);
+    let (unit_rows, _) = tile_unit(*query_groups);
     let shape_fits = *query_rows == *new_key_rows
-        && (crate::sized::ATTENTION_ROWS_MMA_MIN_QUERY_ROWS
-            ..=crate::sized::ATTENTION_ROWS_MAX_QUERY_ROWS)
-            .contains(query_rows)
+        && *query_rows >= crate::sized::ATTENTION_ROWS_MMA_MIN_QUERY_ROWS
+        && *query_rows >= unit_rows
         && rotary_dim == head_dim
-        && query_groups.is_multiple_of(8)
         && head_dim.is_multiple_of(16)
         && head_dim.is_multiple_of(8 * simdgroups)
         && cached_key_rows.is_multiple_of(8)
-        && row_tile_bytes(*query_groups, *head_dim)
+        && (row_tiled_block(*head_dim) / 8).is_multiple_of(simdgroups)
+        && tile_unit_fragments(*query_groups, *head_dim)
+            <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
+        && row_tile_bytes(unit_rows, *query_groups, row_tiled_block(*head_dim))
             <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES;
     if !admitted || !shape_fits {
         return None;
     }
-    let rows_per_threadgroup = rows_per_threadgroup(*query_groups, *head_dim);
+    let capacity = cached_key_rows + new_key_rows;
+    let rows_per_threadgroup =
+        rows_per_threadgroup(*query_rows, *kv_heads, *query_groups, *head_dim, capacity);
     let tiles = query_rows.div_ceil(rows_per_threadgroup);
     Some(CachedAttentionForm::TwoRangeRowTiled {
-        splits: row_tiled_splits(cached_key_rows + new_key_rows, *kv_heads, tiles),
+        splits: row_tiled_splits(capacity, *kv_heads, tiles),
         rows_per_threadgroup,
         simdgroups,
     })
@@ -1957,32 +1962,80 @@ pub(crate) fn row_tiled_threadgroups(
     kv_heads * query_rows.div_ceil(rows_per_threadgroup) * splits
 }
 
-/// Threadgroup bytes of one query row's tile in the row-tiled partial: the f32
-/// output accumulator (`head_dim` per query vector), the score block
-/// (`[attention_rows].keys_per_block` per query vector) and the running
-/// maximum and sum (two f32 per query vector), over the row's `query_groups`
-/// vectors.
+/// The smallest tile the row-tiled kernel forms, as `(query rows, 8x8 vector
+/// blocks)`. Query groups that fill whole 8-row MMA blocks put the eight heads
+/// of one query row in a block, so the unit is one row; any other group count
+/// puts eight consecutive rows of one head in a block, so the unit is eight rows
+/// of every head of the kv head.
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
-pub(crate) fn row_tile_bytes(query_groups: u64, head_dim: u64) -> u64 {
-    4 * query_groups * (head_dim + crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK + 2)
+pub(crate) fn tile_unit(query_groups: u64) -> (u64, u64) {
+    if query_groups.is_multiple_of(8) {
+        (1, query_groups / 8)
+    } else {
+        (8, query_groups)
+    }
 }
 
-/// Query rows one row-tiled threadgroup carries: as many as the
-/// `[cached_attention].threadgroup_memory_bytes` budget holds a tile for
-/// ([`row_tile_bytes`]), at least one, at most `[attention_rows].max_query_rows`.
-/// The f32 output accumulator is what bounds it: 1 row at head_dim 512, 3 at 256.
+/// Output fragments one simdgroup keeps in registers for one [`tile_unit`]:
+/// `head_dim / 8 / simdgroups` columns of 8x8 fragments per vector block, over
+/// the unit's vector blocks.
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
-pub(crate) fn rows_per_threadgroup(query_groups: u64, head_dim: u64) -> u64 {
-    crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
-        .checked_div(row_tile_bytes(query_groups, head_dim))
-        .unwrap_or(1)
-        .clamp(1, crate::sized::ATTENTION_ROWS_MAX_QUERY_ROWS)
+pub(crate) fn tile_unit_fragments(query_groups: u64, head_dim: u64) -> u64 {
+    let (_, unit_blocks) = tile_unit(query_groups);
+    (head_dim / 8 / row_tiled_simdgroups(head_dim)).max(1) * unit_blocks
+}
+
+/// Threadgroup bytes of a row-tiled tile of `rows` query rows with a `block`-key
+/// score tile: per query vector the score block (`block` f32), the running
+/// maximum, sum and rescale (three f32) and the row, head and ownership of the
+/// vector (three i32). The output accumulator is not here: it lives in
+/// simdgroup registers.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn row_tile_bytes(rows: u64, query_groups: u64, block: u64) -> u64 {
+    4 * rows * query_groups * (block + 6)
+}
+
+/// Query rows one row-tiled threadgroup carries: a whole number of
+/// [`tile_unit`]s, at most `[attention_rows].vector_blocks_per_tile` vector
+/// blocks (the K and V fragment loads one tile shares), within the
+/// `[attention_rows].accumulator_fragments` registers and the
+/// `[cached_attention].threadgroup_memory_bytes` a tile may use, and at least
+/// one unit. A taller tile also halves the threadgroups, so it is taken only
+/// while `kv_heads * row tiles * splits` still reaches
+/// `[attention_rows].target_threadgroups`: a verify of a few rows keeps one
+/// unit per tile, a prefill takes the full height.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn rows_per_threadgroup(
+    query_rows: u64,
+    kv_heads: u64,
+    query_groups: u64,
+    head_dim: u64,
+    context_capacity: u64,
+) -> u64 {
+    let (unit_rows, unit_blocks) = tile_unit(query_groups);
+    let by_registers = crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
+        / tile_unit_fragments(query_groups, head_dim);
+    let by_memory = crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES
+        .checked_div(row_tile_bytes(unit_rows, query_groups, row_tiled_block(head_dim)))
+        .unwrap_or(1);
+    let by_reuse = crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE / unit_blocks;
+    let widest = by_registers.min(by_memory).min(by_reuse).max(1);
+    let fills_the_gpu = |units: u64| {
+        let tiles = query_rows.div_ceil(units * unit_rows);
+        kv_heads * tiles * row_tiled_splits(context_capacity, kv_heads, tiles)
+            >= crate::sized::ATTENTION_ROWS_TARGET_THREADGROUPS
+    };
+    let units = (1..=widest).rev().find(|units| fills_the_gpu(*units)).unwrap_or(1);
+    units * unit_rows
 }
 
 /// Simdgroups per row-tiled threadgroup: `head_dim` over
-/// `[attention_rows].head_dims_per_simdgroup`, within 1 to 8 -- llama.cpp's
+/// `[attention_rows].head_dims_per_simdgroup`, within
+/// `[attention_rows].min_simdgroups` to 8 -- llama.cpp's
 /// `nsg = ne00 >= 512 ? 8 : 4` (`ggml-metal-ops.cpp:3406`) at head dims 256
 /// and 512.
 #[cfg(feature = "metal-attn-split-rows")]
@@ -1991,11 +2044,21 @@ pub(crate) fn row_tiled_simdgroups(head_dim: u64) -> u64 {
     head_dim
         .checked_div(crate::sized::ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP)
         .unwrap_or(1)
-        .clamp(1, 8)
+        .clamp(crate::sized::ATTENTION_ROWS_MIN_SIMDGROUPS.min(8), 8)
+}
+
+/// Keys per staged block of the row-tiled partial:
+/// `[attention_rows].keys_per_block`, or 32 per simdgroup when the form has
+/// fewer than four, so no simdgroup scores more than four key fragments per
+/// query fragment load (more spills the score accumulators).
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn row_tiled_block(head_dim: u64) -> u64 {
+    crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK.min(SIMD_WIDTH * row_tiled_simdgroups(head_dim))
 }
 
 /// Splits of the key range per row-tiled threadgroup column: one per
-/// `[attention_rows].keys_per_block` keys of the bucket capacity, capped so
+/// `[attention_rows].keys_per_split` keys of the bucket capacity, capped so
 /// `kv_heads * row_tiles * splits` reaches
 /// `[attention_rows].target_threadgroups` and no further, within
 /// `[attention_splits].max`. The target is the decode split's threadgroup
@@ -2005,7 +2068,7 @@ pub(crate) fn row_tiled_simdgroups(head_dim: u64) -> u64 {
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
 pub(crate) fn row_tiled_splits(context_capacity: u64, kv_heads: u64, row_tiles: u64) -> u64 {
-    let by_keys = context_capacity.div_ceil(crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK);
+    let by_keys = context_capacity.div_ceil(crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT);
     let by_occupancy =
         crate::sized::ATTENTION_ROWS_TARGET_THREADGROUPS.div_ceil((kv_heads * row_tiles).max(1));
     by_keys

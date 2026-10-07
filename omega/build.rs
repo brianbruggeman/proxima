@@ -177,9 +177,8 @@ fn require_split_k_headroom(max_split: usize) -> usize {
     max_split
 }
 
-/// `[attention_rows]`'s two row-count bounds: `mma_min_query_rows` below 2
-/// would route K = 1 off the decode split form, and `max_query_rows` below
-/// `mma_min_query_rows` would admit no K at all.
+/// `[attention_rows].mma_min_query_rows` below 2 would route K = 1 off the
+/// decode split form.
 fn require_at_least(name: &str, minimum: usize, value: i64) -> usize {
     let value = usize::try_from(value)
         .unwrap_or_else(|_| panic!("{name} must be a non-negative integer; got {value}"));
@@ -556,13 +555,36 @@ fn emit_sizing_consts() {
     out.push_str(&format!(
         "pub const ATTENTION_ROWS_MMA_MIN_QUERY_ROWS: u64 = {attention_rows_mma_min_query_rows};\n"
     ));
-    let attention_rows_max_query_rows = require_at_least(
-        "attention_rows.max_query_rows",
-        attention_rows_mma_min_query_rows,
-        resolve_int(&root, "attention_rows", "max_query_rows"),
+    let attention_rows_keys_per_split = require_multiple_of_eight(
+        "attention_rows.keys_per_split",
+        require_nonzero(
+            "attention_rows.keys_per_split",
+            resolve_int(&root, "attention_rows", "keys_per_split"),
+        ),
     );
     out.push_str(&format!(
-        "pub const ATTENTION_ROWS_MAX_QUERY_ROWS: u64 = {attention_rows_max_query_rows};\n"
+        "pub const ATTENTION_ROWS_KEYS_PER_SPLIT: u64 = {attention_rows_keys_per_split};\n"
+    ));
+    let attention_rows_min_simdgroups = require_nonzero(
+        "attention_rows.min_simdgroups",
+        resolve_int(&root, "attention_rows", "min_simdgroups"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_MIN_SIMDGROUPS: u64 = {attention_rows_min_simdgroups};\n"
+    ));
+    let attention_rows_vector_blocks_per_tile = require_nonzero(
+        "attention_rows.vector_blocks_per_tile",
+        resolve_int(&root, "attention_rows", "vector_blocks_per_tile"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE: u64 = {attention_rows_vector_blocks_per_tile};\n"
+    ));
+    let attention_rows_accumulator_fragments = require_nonzero(
+        "attention_rows.accumulator_fragments",
+        resolve_int(&root, "attention_rows", "accumulator_fragments"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS: u64 = {attention_rows_accumulator_fragments};\n"
     ));
     let attention_rows_target_threadgroups = require_nonzero(
         "attention_rows.target_threadgroups",

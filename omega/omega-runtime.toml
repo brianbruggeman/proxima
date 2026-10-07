@@ -372,25 +372,41 @@ keys_per_simdgroup = 8
 simdgroups_max = 4
 
 [attention_rows]
-# row-tiled cached attention (`msl::CachedAttentionForm::TwoRangeRowTiled`, K > 1 query rows):
-# keys per staged block, llama.cpp's OP_FLASH_ATTN_EXT_NCPSG = 64 (ggml-metal-impl.h:114).
-# split slices are whole blocks. raising it grows the score tile (threadgroup memory) and
-# lowers the barriers per key. must be a multiple of 32. override via
-# OMEGA_ATTENTION_ROWS_KEYS_PER_BLOCK.
-keys_per_block = 64
-# head dims per simdgroup: simdgroups = clamp(head_dim / this, 1, 8), llama.cpp's
-# `ne00 >= 512 ? 8 : 4` (ggml-metal-ops.cpp:3406) for head dims 256 and 512. raising it
-# runs fewer, longer simdgroups. must be a multiple of 8. override via
-# OMEGA_ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP.
+# row-tiled cached attention (`msl::CachedAttentionForm::TwoRangeRowTiled`, K > 1 query rows,
+# speculative verify through whole-prompt prefill): the widest key block a threadgroup stages
+# at once. llama.cpp's OP_FLASH_ATTN_EXT_NCPSG is 64 (ggml-metal-impl.h:114); 128 halves the
+# barriers per key and lets a simdgroup score several key tiles against one query fragment
+# load, at the cost of a score tile twice as wide. a form with fewer than 4 simdgroups takes
+# 32 keys per simdgroup instead (`crate::msl::row_tiled_block`). must be a multiple of 32.
+# override via OMEGA_ATTENTION_ROWS_KEYS_PER_BLOCK.
+keys_per_block = 128
+# keys one split of the cached range holds, at least: the bucket capacity over this is the
+# split count a small K fans out to, up to `target_threadgroups`. smaller than the block, so
+# a verify of a few rows keeps the occupancy a 64-key slice gives while a prefill walks whole
+# blocks. must be a multiple of 8. override via OMEGA_ATTENTION_ROWS_KEYS_PER_SPLIT.
+keys_per_split = 64
+# head dims per simdgroup: simdgroups = clamp(head_dim / this, min_simdgroups, 8), llama.cpp's
+# `ne00 >= 512 ? 8 : 4` (ggml-metal-ops.cpp:3406) for head dims 256 and 512. must be a
+# multiple of 8. override via OMEGA_ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP.
 head_dims_per_simdgroup = 64
+# fewest simdgroups a row-tiled threadgroup carries. one simdgroup walks the whole key block
+# alone; two halve it at no cost in accumulators (head dim 64: 1454 us against 1094 us per
+# layer at 1000 rows). override via OMEGA_ATTENTION_ROWS_MIN_SIMDGROUPS.
+min_simdgroups = 2
 # smallest K that takes the MMA form; below it K rows replicate the decode split body.
 # must be >= 2 (K = 1 is always the decode split form). the crossover sweep moves this, not
 # code. override via OMEGA_ATTENTION_ROWS_MMA_MIN_QUERY_ROWS.
 mma_min_query_rows = 2
-# largest K the form admits; above it the op stays TwoRangeCachedBound. the new range is
-# scalar, so a prefill-sized causal triangle is not this kernel's design point. must be >=
-# mma_min_query_rows. override via OMEGA_ATTENTION_ROWS_MAX_QUERY_ROWS.
-max_query_rows = 64
+# 8x8 vector blocks a threadgroup shares each K and V fragment load across, when its query
+# rows can fill the GPU with them. 2 is the measured knee on head dims 64, 256 and 512; one
+# is faster at a verify of a few rows, where the extra block halves the threadgroups.
+# override via OMEGA_ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE.
+vector_blocks_per_tile = 2
+# 8x8 output fragments one simdgroup keeps in registers across the whole key loop (head dims
+# per simdgroup / 8 per vector block, times the vector blocks of a tile): the most a tile
+# unit may need before the accumulators spill. override via
+# OMEGA_ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS.
+accumulator_fragments = 16
 # threadgroups the split rule fills to: the decode split form's count at 2048 keys
 # (8 heads x 32 splits). raising it adds splits (scratch, merge width) at large K.
 # override via OMEGA_ATTENTION_ROWS_TARGET_THREADGROUPS.
