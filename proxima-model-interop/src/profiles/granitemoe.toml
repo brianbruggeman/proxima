@@ -1,6 +1,7 @@
 score_scale_inverse_sqrt_head_dim = true
 value_norm = false
 rope_layout = "adjacent"
+command_buffer_chunks = 8
 
 [ffn]
 post_attention_norm = false

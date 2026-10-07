@@ -2283,6 +2283,10 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // single-row arm above), so it needs its own, distinct marker text.
     "q4_0_element(in",
     "q8_0_element(in",
+    // `push_q4_0_native_body` (`metal-q4_0-native`, on in `metal`) decodes the
+    // nibbles inline with the fixed masks and calls no helper by name, so none
+    // of the markers above reach it; this word-mask accumulation is unique to it.
+    "(word & (ushort)0x000Fu)",
     // index32 multi-row reads the weight from the block-origin pointer, which
     // renders `<codec>_element(wblk0` for every codec instead of `(in`/`(blk`
     "_element(wblk0",
