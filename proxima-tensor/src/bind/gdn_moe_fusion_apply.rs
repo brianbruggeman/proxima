@@ -829,6 +829,7 @@ pub(super) fn moe_match_round(
     selection_scores: NodeId,
     max_selection_0: Option<NodeId>,
     expert_index: NodeId,
+    route_dtype: DType,
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
 ) -> Option<MoeRound> {
     let max_selection = consumers
@@ -860,7 +861,7 @@ pub(super) fn moe_match_round(
         moe_reduce_operand(
             program,
             *route,
-            DType::Int32,
+            route_dtype,
             ScalarOp::Maximum,
             ReduceInit::Zero,
         ) == Some(candidate)
@@ -897,6 +898,7 @@ pub(super) fn moe_match_round(
 /// fusion consumes and must therefore drop from `resolved` once it fires.
 #[cfg(feature = "moe-topk-fusion")]
 pub(super) struct MoeTopKMatch {
+    pub(super) route_dtype: DType,
     pub(super) scores: NodeId,
     pub(super) expert_count: u64,
     pub(super) routes: Vec<NodeId>,
@@ -920,10 +922,14 @@ pub(super) fn match_moe_topk(
     route0: NodeId,
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
 ) -> Option<MoeTopKMatch> {
+    let route_dtype = program.get(route0.0 as usize)?.dtype();
+    if !matches!(route_dtype, DType::Int32 | DType::Float32) {
+        return None;
+    }
     let candidate0 = moe_reduce_operand(
         program,
         route0,
-        DType::Int32,
+        route_dtype,
         ScalarOp::Maximum,
         ReduceInit::Zero,
     )?;
@@ -982,6 +988,7 @@ pub(super) fn match_moe_topk(
             selection_scores,
             max_selection_0_node,
             expert_index,
+            route_dtype,
             consumers,
         )?;
         if round == 0 {
@@ -1053,6 +1060,7 @@ pub(super) fn match_moe_topk(
     }
     let weight_total = weight_total_running?;
     Some(MoeTopKMatch {
+        route_dtype,
         scores,
         expert_count,
         routes,
@@ -1114,7 +1122,7 @@ pub(super) fn moe_topk_candidates(
         let top_k = found.routes.len() as u64;
         let fused = BoundOp {
             node: route0,
-            dtype: DType::Int32,
+            dtype: found.route_dtype,
             extents: shapes.of(route0).to_vec(),
             kind: BoundOpKind::MoeTopK {
                 operands: vec![(found.scores, layout.clone(), None)],
