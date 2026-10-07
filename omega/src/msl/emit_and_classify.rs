@@ -2646,6 +2646,13 @@ pub(super) fn classify_packed_row_block_with(
         &resolved.extents,
     )
     .unwrap_or_else(|| (Vec::new(), output_axes.to_vec()));
+    let (candidate_token_axes, candidate_feature_axes) = routed_axes_leave_one_token_row(
+        resolved,
+        weight,
+        candidate_token_axes,
+        candidate_feature_axes,
+        output_axes,
+    );
     let gathered_token_total = candidate_token_axes
         .iter()
         .map(|&axis| resolved.extents[axis as usize])
@@ -2671,6 +2678,60 @@ pub(super) fn classify_packed_row_block_with(
         token_axes,
         feature_axes,
     })
+}
+
+/// A stacked down projection reads its own activation row per selected expert,
+/// so the selected axis looks like a token axis (the activation varies along it)
+/// even though the route index varies along it too: each (sequence, selected)
+/// pair is one matvec against one expert, not a row group sharing a weight row.
+/// When removing the axes the route index varies along leaves a single token
+/// row (a decode step or a speculative verify), the op is that many single-row
+/// matvecs and takes the single-row body exactly as a shared-activation gate or
+/// up does. Rows that fill the expert-grouped tiles keep the split as
+/// classified, because the tiled path reads its own classification and a
+/// packed-row identity here would replace it.
+fn routed_axes_leave_one_token_row(
+    resolved: &BoundOp,
+    weight: usize,
+    token_axes: Vec<u16>,
+    feature_axes: Vec<u16>,
+    output_axes: &[u16],
+) -> (Vec<u16>, Vec<u16>) {
+    let token_total = |axes: &[u16]| -> u64 {
+        axes.iter().map(|&axis| resolved.extents[axis as usize]).product()
+    };
+    let weight_layout = &resolved.operands()[weight].1;
+    let routed_rows: Vec<u16> = output_axes
+        .iter()
+        .copied()
+        .filter(|&axis| weight_layout.stride(axis) == 0)
+        .collect();
+    if gather_count(resolved) == 0
+        || token_total(&token_axes) <= 1
+        || !below_tiled_minimum(token_total(&routed_rows))
+    {
+        return (token_axes, feature_axes);
+    }
+    let unrouted: Vec<u16> = token_axes
+        .iter()
+        .copied()
+        .filter(|&axis| expert_route_stride(resolved, weight, axis) == 0)
+        .collect();
+    if token_total(&unrouted) == 1 {
+        (Vec::new(), output_axes.to_vec())
+    } else {
+        (token_axes, feature_axes)
+    }
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+fn below_tiled_minimum(token_rows: u64) -> bool {
+    token_rows < crate::sized::TILED_GEMM_MIN_TOKENS
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+fn below_tiled_minimum(_token_rows: u64) -> bool {
+    false
 }
 
 pub(crate) fn packed_row_block(
@@ -3040,7 +3101,6 @@ fn classify_expert_gather(
 /// The route index stride of output axis `axis` for the gathered weight
 /// operand `weight`: nonzero when the expert a token names changes along that
 /// axis. Zero for an operand with no gather.
-#[cfg(feature = "metal-tiled-gemm")]
 fn expert_route_stride(resolved: &BoundOp, weight: usize, axis: u16) -> i64 {
     resolved.operands()[weight]
         .2
