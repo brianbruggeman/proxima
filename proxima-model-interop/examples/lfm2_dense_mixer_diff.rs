@@ -28,7 +28,7 @@
 //! the same rmsnorm-then-residual pattern
 //! [`lfm2_moe_route_diff::mixer_pipeline_node_ids`] already established for
 //! layer 5, then one layer further back through the conv-mixer's own
-//! `out_proj`/gate/`branch_c` chain (`append_lfm2_conv_mixer`, `spec.rs`) to
+//! `out_proj`/gate/`branch_c` chain (`append_short_conv_mixer`, `spec.rs`) to
 //! reach `normed`. Every hop is asserted by `reduce_operand`/
 //! `elementwise_operand`, so a wrong offset fails the walk instead of
 //! silently reading an unrelated node's value -- the same discipline
@@ -41,10 +41,10 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_forward_values,
+    ShortConvHparams, short_conv_architecture_from_metadata, short_conv_forward_values,
 };
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
-use proxima_tensor::spec::lfm2_forward_program_with_experts;
+use proxima_tensor::spec::scheduled_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path)
@@ -195,7 +195,7 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Hparams = lfm2_architecture_from_metadata(&parsed)
+    let architecture: ShortConvHparams = short_conv_architecture_from_metadata(&parsed)
         .expect("derive lfm2 architecture from gguf metadata");
     assert!(
         layer < architecture.leading_dense_block_count,
@@ -209,7 +209,7 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
         .expect("tokenize prompt");
 
-    let (full_program, _logits_root, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
+    let (full_program, _logits_root, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -245,14 +245,14 @@ fn main() {
     let normed_id =
         elementwise_first_operand(&full_program, branch_c_product_id, ScalarOp::Multiply);
     // deeper still: `convolved` (post causal-conv, pre-C-gate --
-    // `append_lfm2_conv_mixer`'s own `convolved` variable) and
+    // `append_short_conv_mixer`'s own `convolved` variable) and
     // `branch_b`/`branch_x` (the B/x streams feeding the conv), walked
     // BACKWARD through `causal_conv1d`'s own tail
     // (`masked_tap = Select([is_valid, tap_product, zero_tap])`,
     // `tap_product = Multiply([windowed, weight])`,
     // `windowed = Identity([(gated_input, gathered_map)])`,
     // `gated_input = Multiply([branch_b, branch_x])` -- `spec.rs`'s own
-    // `causal_conv1d`/`append_lfm2_conv_mixer` bodies).
+    // `causal_conv1d`/`append_short_conv_mixer` bodies).
     let convolved_id =
         elementwise_first_operand(&full_program, gated_output_id, ScalarOp::Multiply);
     let masked_tap_id =
@@ -278,7 +278,7 @@ fn main() {
         normed2_id,
     ];
     let (_logits, values) =
-        lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids)
+        short_conv_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids)
             .expect("evaluate this layer's own bisection node values");
     let ours_normed = values[0].as_slice();
     let ours_branch_b = values[1].as_slice();

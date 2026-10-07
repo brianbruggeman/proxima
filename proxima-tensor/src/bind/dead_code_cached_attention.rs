@@ -521,7 +521,7 @@ pub(super) fn local_causal_mask_new_row_bound(program: &[Op], node: NodeId) -> O
     (1..=(1u64 << 24)).contains(&window).then_some(window)
 }
 
-/// [`lfm2_single_range_cached::causal_mask_cached_windowed`]'s own
+/// [`scheduled_cached::causal_mask_cached_windowed`]'s own
 /// `is_padding` shape: `Greater(Iota_t, Subtract(Subtract(Add(Iota_s, C),
 /// Iota_s), 1.0))`, value-equal to [`cached_len_padding_bound`]'s bare
 /// `Greater(Iota_t, Subtract(C, 1.0))` (`(s+c)-s == c` bit-exact in f32

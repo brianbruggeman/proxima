@@ -16,7 +16,7 @@ Legend: **variant** = the future config enum variant · *paper* = source ·
 |---|---|---|---|
 | `Gqa { kv_heads }` | Ainslie et al. 2023, **GQA** | fewer KV heads than Q heads, shared across a group | `LayerAttentionConfig.kv_heads`, qwen35/gemma4 |
 | `SlidingWindow { window }` | Beltagy 2020 **Longformer**; Jiang 2023 **Mistral** | attend only the last W tokens | `causal_mask_windowed`, gemma4 `sliding_window_pattern` |
-| `FlashOnlineSoftmax` | Milakov & Gimelshein 2018 **online softmax**; Dao 2022 **FlashAttention** | combine score blocks without materializing the full matrix | the two-range combine `append_lfm2_two_range_cached_attention` |
+| `FlashOnlineSoftmax` | Milakov & Gimelshein 2018 **online softmax**; Dao 2022 **FlashAttention** | combine score blocks without materializing the full matrix | the two-range combine `append_two_range_cached_attention` |
 | `ScoreScale::Unscaled` | **Gemma** (scale folded / =1.0) | no `1/sqrt(d)` term | `AttentionScoreScale::Unscaled` |
 | `ValueNorm` | Gemma / QK-norm lineage | per-kv-head RMSNorm on V (or Q/K) post-projection | `value_norm` |
 | `ValueSource::SharedWithKey` | **Gemma** (full layers) | V derived from K, no separate `attn_v` | `ValueSourceKind::SharedWithKey` |

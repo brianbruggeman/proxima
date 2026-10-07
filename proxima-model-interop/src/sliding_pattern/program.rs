@@ -1,5 +1,5 @@
 //! The one piece of Gemma 4's forward pass the generic
-//! [`proxima_tensor::spec::lfm2_forward_program_with_experts`] engine cannot
+//! [`proxima_tensor::spec::scheduled_forward_program_with_experts`] engine cannot
 //! build itself: the sliding-window RoPE table's own values. Every other
 //! node this checkpoint needs (attention mixer, dense/routed FFN, per-layer
 //! norms, embedding scale, logit softcap) is now a config value
@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 /// Builds the sliding-window layers' own RoPE `cos`/`sin` table --
 /// [`crate::lowering::sliding_rope_inputs`] feeds this
 /// into the `rope_cos_swa`/`rope_sin_swa` leaves
-/// [`proxima_tensor::spec::lfm2_forward_program_with_experts`] declares once
+/// [`proxima_tensor::spec::scheduled_forward_program_with_experts`] declares once
 /// a sliding layer's [`proxima_tensor::spec::RopeTableSel`] names them,
 /// since the FULL-layer table those leaves' own `rope_cos`/`rope_sin`
 /// siblings read comes from the decode loop's builtin per-position table at

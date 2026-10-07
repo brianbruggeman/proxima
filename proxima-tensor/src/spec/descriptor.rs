@@ -2,7 +2,7 @@ use super::*;
 
 /// Whether a forward program keeps a KV cache, as data on
 /// [`ModelDescriptor::cache_strategy`]. [`CacheStrategy::Cacheless`] is
-/// [`lfm2_forward_program_with_experts`] (full reprefill every call);
+/// [`scheduled_forward_program_with_experts`] (full reprefill every call);
 /// [`CacheStrategy::Cached`] is the two-block cached engine, whose cached-block
 /// mask [`ModelDescriptor::cache_mask`] selects.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -34,12 +34,12 @@ pub enum CacheMask {
     /// (`causal_mask_cached_windowed`): padding at or past `cached_len` is
     /// excluded by a node, and a window composes onto the same mask. The
     /// lowering for a schedule with shared KV or per-layer widths
-    /// ([`lfm2_two_range_cached_forward_program_with_experts`]).
+    /// ([`scheduled_two_range_cached_forward_program_with_experts`]).
     Padded,
 }
 
 /// A whole model's build-time shape as DATA: the global hyperparameters
-/// [`lfm2_forward_program_with_experts`] already takes as loose positional
+/// [`scheduled_forward_program_with_experts`] already takes as loose positional
 /// arguments (`vocab`, `embedding`, `block_count`, `expert_count`,
 /// `expert_used_count`, `leading_dense_block_count`, `embedding_scale`,
 /// `logit_softcap`), one [`LayerSchedule`] per block, and which cache engine
@@ -67,13 +67,13 @@ pub enum CacheMask {
 pub struct ModelDescriptor {
     pub vocab: u32,
     pub embedding: u32,
-    /// Dense-branch FFN hidden width (`append_lfm2_layer_ffn`'s own
+    /// Dense-branch FFN hidden width (`append_layer_ffn`'s own
     /// `feed_forward`) -- every layer's dense-FFN weight shapes derive from
     /// this, same as `expert_feed_forward` does for the routed branch.
     pub feed_forward: u32,
     /// Routed-expert FFN hidden width, distinct from `feed_forward` because
     /// the sliding-pattern family's dense and routed branches run at different widths
-    /// (`append_lfm2_layer_ffn`'s own `expert_feed_forward` parameter).
+    /// (`append_layer_ffn`'s own `expert_feed_forward` parameter).
     pub expert_feed_forward: u32,
     /// Query head count, shared by every layer's attention sub-block
     /// (`build_attention_layer_resources`'s own `query_heads` parameter) --
@@ -84,7 +84,7 @@ pub struct ModelDescriptor {
     pub expert_used_count: u32,
     pub leading_dense_block_count: u32,
     /// Short-conv kernel width, consulted only by a [`LayerKind::ShortConv`]
-    /// entry's `append_lfm2_conv_mixer` call
+    /// entry's `append_short_conv_mixer` call
     /// (`proxima-tensor/src/spec/attention_forward.rs`'s own `l_cache`
     /// parameter doc) -- unused and safe to leave at any value when
     /// `layers` holds no `ShortConv` entry, as every sliding-pattern layer is
@@ -115,7 +115,7 @@ pub struct ModelDescriptor {
     #[serde(default)]
     pub cache_mask: CacheMask,
     /// the E2B/E4B checkpoint's per-layer-embedding preamble width
-    /// (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc,
+    /// (`scheduled_forward_program_with_experts`'s own `ple_dim` parameter doc,
     /// `Some(256)` for E2B) -- consulted by [`CacheStrategy::Cacheless`] and
     /// [`CacheMask::Padded`] alike (both route to a PLE-aware
     /// builder); `None` for every checkpoint with no PLE tensors, and inert
@@ -631,9 +631,9 @@ pub(super) fn refuse_when(
     Ok(())
 }
 
-/// Generalizes [`lfm2_two_range_cached_forward_program_with_experts`] (the
+/// Generalizes [`scheduled_two_range_cached_forward_program_with_experts`] (the
 /// working sliding-pattern two-range engine, already schedule-driven rather than
-/// sliding-pattern-hardcoded internally) and [`lfm2_forward_program_with_experts`]
+/// sliding-pattern-hardcoded internally) and [`scheduled_forward_program_with_experts`]
 /// (the cacheless engine) behind one [`ModelDescriptor`]-shaped entry point:
 /// plain sync data->op-graph construction, no async/`Future`/`Box<dyn>`
 /// anywhere, dispatching purely on [`ModelDescriptor::cache_strategy`] and
@@ -689,7 +689,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 "a residual scale",
             )?;
             let (program, logits, cache_roots, moe_sites, duplicate_head_roots) =
-                lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
+                scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
                     descriptor.vocab,
                     descriptor.embedding,
                     descriptor.feed_forward,
@@ -729,7 +729,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 "build_forward(CacheStrategy::Cacheless)",
                 "a residual scale",
             )?;
-            let (program, logits, moe_sites, duplicate_head_roots) = lfm2_forward_program_with_experts_and_head_repeats(
+            let (program, logits, moe_sites, duplicate_head_roots) = scheduled_forward_program_with_experts_and_head_repeats(
                 descriptor.vocab,
                 descriptor.embedding,
                 descriptor.feed_forward,

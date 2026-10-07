@@ -15,8 +15,8 @@
 //! which subsystem (conv mixer / attention / MoE routing) is wrong, without
 //! needing to inspect a single weight value first.
 //!
-//! [`lfm2_forward_values`]'s own doc explains the derivation:
-//! [`lfm2_forward_program_with_experts`] built at a shorter `block_count`
+//! [`short_conv_forward_values`]'s own doc explains the derivation:
+//! [`scheduled_forward_program_with_experts`] built at a shorter `block_count`
 //! against the SAME architecture shares every `NodeId` up to where it stops
 //! (`NodeId`'s id-is-index invariant, `smollm2_layer_oracle_diff.rs`'s own
 //! technique), so the last id two consecutive-depth throwaway builds still
@@ -29,13 +29,13 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_forward_values,
+    ShortConvHparams, short_conv_architecture_from_metadata, short_conv_forward_values,
 };
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
 use proxima_telemetry::recorder::Recorder;
 use proxima_tensor::op::NodeId;
-use proxima_tensor::spec::lfm2_forward_program_with_experts;
+use proxima_tensor::spec::scheduled_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path)
@@ -56,7 +56,7 @@ fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
 ///
 /// Both builds are pure throwaways, never evaluated: only their `Op`
 /// sequence's shared prefix matters, and
-/// [`lfm2_forward_program_with_experts`]'s per-layer loop body (`spec.rs`)
+/// [`scheduled_forward_program_with_experts`]'s per-layer loop body (`spec.rs`)
 /// depends only on that layer's own index and kind, never on the total
 /// `block_count`/`layer_kinds` length it was called with -- so the deeper
 /// build's imaginary extra layer can reuse ANY real `LayerKind` (this
@@ -65,16 +65,16 @@ fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
 /// safe here even though this checkpoint has no real `block_count + 1`th
 /// layer to slice: the "deep" build's extra layer is a structural stand-in,
 /// its weight names are never bound or evaluated.
-fn layer_boundary_node_id(architecture: &Lfm2Hparams, depth: u32) -> NodeId {
+fn layer_boundary_node_id(architecture: &ShortConvHparams, depth: u32) -> NodeId {
     if depth == 0 {
         // `ids`, `token_embd.weight`, then the embedding gather itself --
         // always the 3rd op any depth of this program appends, matching
-        // `lfm2_forward_program_with_experts`'s own opening three ops.
+        // `scheduled_forward_program_with_experts`'s own opening three ops.
         return NodeId(2);
     }
     let full_schedule = &architecture.layers;
     let shallow_schedule = &full_schedule[..depth as usize];
-    let (shallow, _, _, _) = lfm2_forward_program_with_experts(
+    let (shallow, _, _, _) = scheduled_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -95,7 +95,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Hparams, depth: u32) -> NodeId {
 
     let mut deep_schedule = shallow_schedule.to_vec();
     deep_schedule.push(full_schedule[(depth - 1) as usize].clone());
-    let (deep, _, _, _) = lfm2_forward_program_with_experts(
+    let (deep, _, _, _) = scheduled_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -122,7 +122,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Hparams, depth: u32) -> NodeId {
     NodeId((first_diff - 1) as u32)
 }
 
-fn layer_kind_label(architecture: &Lfm2Hparams, layer: usize) -> &'static str {
+fn layer_kind_label(architecture: &ShortConvHparams, layer: usize) -> &'static str {
     match architecture.layers[layer].kind {
         proxima_tensor::spec::LayerKind::Attention => "attention",
         proxima_tensor::spec::LayerKind::ShortConv => "shortconv",
@@ -183,7 +183,7 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Hparams = lfm2_architecture_from_metadata(&parsed)
+    let architecture: ShortConvHparams = short_conv_architecture_from_metadata(&parsed)
         .expect("derive lfm2 architecture from gguf metadata");
 
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
@@ -208,7 +208,7 @@ fn main() {
     }
 
     let (_logits, activations) =
-        lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &node_ids)
+        short_conv_forward_values(&parsed, &file_bytes, &architecture, &ids, &node_ids)
             .expect("compute our own layer activations");
 
     // `oracle_dump.cpp`'s `build_inp_embd`-path leaf, `"inp_embd"`, is a

@@ -1,14 +1,14 @@
-//! the 8B-A1B short-conv checkpoint's hybrid checkpoint as data: [`Lfm2Hparams`] reads this
+//! the 8B-A1B short-conv checkpoint's hybrid checkpoint as data: [`ShortConvHparams`] reads this
 //! architecture's own metadata shape -- a per-layer `head_count_kv` array whose
 //! zero entries mark short-convolution layers ([`crate::bind::architecture_from_metadata`]
 //! reads the array; the dense descriptor builder
 //! ([`crate::dense::descriptor_from_gguf`]) turns the zero entries into
 //! [`proxima_tensor::spec::LayerKind::ShortConv`] layers from the tensor
-//! directory). [`lfm2_descriptor`] is that whole pre-lowering program as one
+//! directory). [`short_conv_descriptor`] is that whole pre-lowering program as one
 //! config, and [`proxima_tensor::spec::build_forward`] over it is the entire
 //! lowering: `LoadedModel::load` runs this family through the same decode loop
 //! every other checkpoint takes (a cacheless program, one re-prefill per
-//! token), and [`lfm2_forward_values`] evaluates the same lowering once for the
+//! token), and [`short_conv_forward_values`] evaluates the same lowering once for the
 //! cross-oracle diff tools.
 
 use alloc::collections::BTreeSet;
@@ -40,7 +40,7 @@ use crate::rope_scaling::{RopeScaling, f32_from_u32};
 /// `layer_kinds`/`leading_dense_block_count`/`l_cache` field mean it cannot
 /// describe this architecture at all, not even partially.
 #[derive(Debug, Clone)]
-pub struct Lfm2Hparams {
+pub struct ShortConvHparams {
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
@@ -75,9 +75,9 @@ pub struct Lfm2Hparams {
 /// `{architecture}.attention.layer_norm_rms_epsilon` key is absent -- on
 /// the one real checkpoint this module has been run against, the key IS
 /// present (`0.00001`), so this fallback is unexercised there.
-const LFM2_RMS_EPSILON_DEFAULT: f32 = 1e-5;
+const SHORT_CONV_RMS_EPSILON_DEFAULT: f32 = 1e-5;
 
-/// Derives [`Lfm2Hparams`] from `parsed`'s own metadata --
+/// Derives [`ShortConvHparams`] from `parsed`'s own metadata --
 /// [`crate::bind::architecture_from_metadata`]'s hybrid-checkpoint
 /// counterpart. Reads `general.architecture` itself (`lfm2moe` on the real
 /// checkpoint, not `short-conv`) rather than assuming it, the same "read the
@@ -93,9 +93,9 @@ const LFM2_RMS_EPSILON_DEFAULT: f32 = 1e-5;
 /// [`proxima_tensor::spec::LayerKind::from_tensor_names`] fails with if a
 /// layer's tensor directory carries neither an attention nor a
 /// short-convolution marker.
-pub fn lfm2_architecture_from_metadata(
+pub fn short_conv_architecture_from_metadata(
     parsed: &ParsedGguf,
-) -> Result<Lfm2Hparams, InteropError> {
+) -> Result<ShortConvHparams, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &format!("{architecture}.embedding_length"))?;
     let feed_forward = metadata_u32(parsed, &format!("{architecture}.feed_forward_length"))?;
@@ -129,12 +129,12 @@ pub fn lfm2_architecture_from_metadata(
     let rms_epsilon = metadata_f32_optional(
         parsed,
         &format!("{architecture}.attention.layer_norm_rms_epsilon"),
-        LFM2_RMS_EPSILON_DEFAULT,
+        SHORT_CONV_RMS_EPSILON_DEFAULT,
     );
 
-    let layers = lfm2_descriptor(parsed)?.layers;
+    let layers = short_conv_descriptor(parsed)?.layers;
 
-    Ok(Lfm2Hparams {
+    Ok(ShortConvHparams {
         vocab,
         embedding,
         feed_forward,
@@ -207,20 +207,20 @@ fn nonzero_uniform_u32_array(
 /// counterpart: this program has no key/value cache to offset positions
 /// against, so every call re-derives RoPE angles for absolute positions
 /// `0..ids.len()`, never a `start_position` offset.
-struct Lfm2PositionInputs {
+struct ShortConvPositionInputs {
     ids_f32: Vec<f32>,
     epsilon: Vec<f32>,
     cos: Vec<f32>,
     sin: Vec<f32>,
 }
 
-fn build_lfm2_position_inputs(
+fn build_short_conv_position_inputs(
     ids: &[u32],
     head_dim: u32,
     rope_freq_base: f32,
     rms_epsilon: f32,
     rope_scaling: RopeScaling,
-) -> Lfm2PositionInputs {
+) -> ShortConvPositionInputs {
     let shared = build_position_inputs(
         ids,
         0,
@@ -230,7 +230,7 @@ fn build_lfm2_position_inputs(
         None,
         rope_scaling,
     );
-    Lfm2PositionInputs {
+    ShortConvPositionInputs {
         ids_f32: ids.iter().map(|&id| f32_from_u32(id)).collect(),
         epsilon: shared.epsilon,
         cos: shared.cos,
@@ -248,7 +248,7 @@ fn build_lfm2_position_inputs(
 ///
 /// Whatever [`architecture_from_metadata`] and
 /// [`crate::dense::descriptor_from_gguf`] can fail with.
-pub fn lfm2_descriptor(parsed: &ParsedGguf) -> Result<ModelDescriptor, InteropError> {
+pub fn short_conv_descriptor(parsed: &ParsedGguf) -> Result<ModelDescriptor, InteropError> {
     let architecture = architecture_from_metadata(parsed)?;
     Ok(ModelDescriptor {
         last_row_only: false,
@@ -256,14 +256,14 @@ pub fn lfm2_descriptor(parsed: &ParsedGguf) -> Result<ModelDescriptor, InteropEr
     })
 }
 
-/// [`lfm2_descriptor`] lowered by [`build_forward`], with the weights its
+/// [`short_conv_descriptor`] lowered by [`build_forward`], with the weights its
 /// `Input` leaves name bound from `parsed` ([`bind_program_leaves`]) --
 /// lowering first, so the program decides what binds.
 fn lower_and_bind<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
 ) -> Result<(Vec<Op>, NodeId, BoundWeights<'file>), InteropError> {
-    let ForwardProgram { program, logits, .. } = build_forward(&lfm2_descriptor(parsed)?)?;
+    let ForwardProgram { program, logits, .. } = build_forward(&short_conv_descriptor(parsed)?)?;
     let weights = bind_program_leaves(
         parsed,
         file_bytes,
@@ -295,16 +295,16 @@ fn lower_and_bind<'file>(
 /// missing the logits root or one of `extra_node_ids` -- an
 /// interpreter/program-construction invariant violation, never a caller
 /// mistake.
-pub fn lfm2_forward_values(
+pub fn short_conv_forward_values(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
-    architecture: &Lfm2Hparams,
+    architecture: &ShortConvHparams,
     ids: &[u32],
     extra_node_ids: &[NodeId],
 ) -> Result<(Vec<f32>, Vec<Vec<f32>>), InteropError> {
     let (program, logits_root, weights) = lower_and_bind(parsed, file_bytes)?;
 
-    let inputs = build_lfm2_position_inputs(
+    let inputs = build_short_conv_position_inputs(
         ids,
         architecture.head_dim,
         architecture.rope_freq_base,

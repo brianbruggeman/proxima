@@ -67,7 +67,7 @@ impl IntervalLayerKind {
 
 /// Every hparam this checkpoint's own metadata carries -- bind-scoped
 /// today, but the `ssm_*` fields are read now so a later forward-op session
-/// does not have to re-derive them: [`crate::short_conv::Lfm2Hparams`]'s own
+/// does not have to re-derive them: [`crate::short_conv::ShortConvHparams`]'s own
 /// precedent for holding hparams a bind-only pass does not yet consume.
 #[derive(Debug, Clone)]
 pub struct Qwen35Hparams {
@@ -102,11 +102,11 @@ pub struct Qwen35Hparams {
 
 /// llama.cpp's own RMSNorm epsilon default, used only when
 /// `{architecture}.attention.layer_norm_rms_epsilon` is absent -- the same
-/// fallback shape [`crate::short_conv::LFM2_RMS_EPSILON_DEFAULT`] uses.
+/// fallback shape [`crate::short_conv::SHORT_CONV_RMS_EPSILON_DEFAULT`] uses.
 const QWEN35_RMS_EPSILON_DEFAULT: f32 = 1e-6;
 
 /// Derives [`Qwen35Hparams`] from `parsed`'s own metadata --
-/// [`crate::short_conv::lfm2_architecture_from_metadata`]'s scalar-interval
+/// [`crate::short_conv::short_conv_architecture_from_metadata`]'s scalar-interval
 /// counterpart.
 ///
 /// # Errors
@@ -240,7 +240,7 @@ pub fn bind_qwen35_checkpoint(
 }
 
 /// This checkpoint's forward-program seam -- [`crate::short_conv::run_lfm2_prefill`]'s
-/// call into [`proxima_tensor::spec::lfm2_forward_program_with_experts`]
+/// call into [`proxima_tensor::spec::scheduled_forward_program_with_experts`]
 /// counterpart, minus the builder itself: every op-graph primitive that
 /// builder composes (`append_attention_mixer`, `rmsnorm`, `elementwise`,
 /// `reduce`, ...) is module-private to `proxima_tensor::spec`
@@ -254,14 +254,14 @@ pub fn bind_qwen35_checkpoint(
 /// them into something this crate can call.
 ///
 /// The program this checkpoint needs, once that lands, is
-/// [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s shape with
+/// [`proxima_tensor::spec::scheduled_forward_program_with_experts`]'s shape with
 /// no MoE branch (the oracle asserts `ffn_gate_inp == nullptr` on every
 /// layer of this checkpoint): per [`IntervalLayerKind::Attention`] layer,
 /// `append_attention_mixer`; per [`IntervalLayerKind::Ssm`] layer, the
 /// still-unwritten state-space mixer; both kinds then `attn_norm`/
 /// `post_attention_norm` and a dense SwiGLU FFN
 /// (`ffn_gate`/`ffn_up`/`ffn_down`), the same shape
-/// `lfm2_forward_program_with_experts`'s own leading-dense-block branch
+/// `scheduled_forward_program_with_experts`'s own leading-dense-block branch
 /// already builds.
 ///
 /// # Errors

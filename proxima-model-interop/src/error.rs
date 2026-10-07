@@ -453,15 +453,15 @@ pub enum InteropError {
     )]
     HfMoeWeightsUnsupported { expert_count: u32 },
 
-    /// `crate::short_conv::lfm2_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
+    /// `crate::short_conv::short_conv_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
     /// nonzero entries (the real attention layers' own kv head count)
     /// disagree with each other -- the zero entries (convolution layers)
     /// are expected and skipped, but every attention layer must still
-    /// share one real kv head count for `crate::short_conv::Lfm2Hparams::kv_heads`
+    /// share one real kv head count for `crate::short_conv::ShortConvHparams::kv_heads`
     /// to mean anything.
     #[error(
-        "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Hparams cannot represent per-layer variation"
+        "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; ShortConvHparams cannot represent per-layer variation"
     )]
     HeterogeneousNonzeroMetadataArray { key: String, distinct_values: usize },
 

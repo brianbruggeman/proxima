@@ -2,7 +2,7 @@
 //! selects the `sliding_pattern` schedule source, the reader that source names
 //! ([`proxima_tensor::spec::ScheduleSource::SlidingPattern`]). `bind.rs` is a
 //! descriptor over the generic
-//! `proxima_tensor::spec::lfm2_forward_program_with_experts` engine -- there is
+//! `proxima_tensor::spec::scheduled_forward_program_with_experts` engine -- there is
 //! no bespoke sliding-pattern forward-graph module here.
 
 mod bind;

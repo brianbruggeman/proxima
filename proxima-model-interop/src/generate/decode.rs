@@ -4208,7 +4208,7 @@ impl<'file> LoadedModel<'file> {
                     }
                     // attn_parity followon (2026-09-22, OWNER_BRIEF_gemma_head):
                     // `PROXIMA_HEAD_REPEATS=1|2|3` head-cost measurement knob.
-                    // `lfm2_two_range_cached_forward_program_with_experts`
+                    // `scheduled_two_range_cached_forward_program_with_experts`
                     // (the builder the sliding-pattern family's `CacheMask::Padded` production
                     // path calls) appends its `repeats - 1` duplicate head
                     // chains when the same env var is set at build time

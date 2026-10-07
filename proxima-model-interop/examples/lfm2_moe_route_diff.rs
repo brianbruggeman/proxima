@@ -23,7 +23,7 @@
 //! the ONLY node in this whole program built with that dtype/body/init
 //! triple; `spec.rs`'s own doc on `append_moe_ffn` names this) rather than
 //! by threading a new parameter through the public
-//! `lfm2_forward_program_with_experts` signature -- a signature every other
+//! `scheduled_forward_program_with_experts` signature -- a signature every other
 //! checkpoint (openchat-3.5, SmolLM2, Mixtral) shares no part of, so adding
 //! an output-collection parameter there would touch code paths this bug has
 //! nothing to do with. Restricting the scan to layer 5's own node-id range
@@ -38,11 +38,11 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_forward_values,
+    ShortConvHparams, short_conv_architecture_from_metadata, short_conv_forward_values,
 };
 use proxima_tensor::dtype::DType;
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
-use proxima_tensor::spec::lfm2_forward_program_with_experts;
+use proxima_tensor::spec::scheduled_forward_program_with_experts;
 
 fn read_oracle_route(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path)
@@ -57,13 +57,13 @@ fn read_oracle_route(path: &PathBuf) -> Vec<f32> {
 
 /// [`lfm2_layer_oracle_diff.rs`]'s own `layer_boundary_node_id`, duplicated
 /// rather than shared -- see this file's own doc.
-fn layer_boundary_node_id(architecture: &Lfm2Hparams, depth: u32) -> NodeId {
+fn layer_boundary_node_id(architecture: &ShortConvHparams, depth: u32) -> NodeId {
     if depth == 0 {
         return NodeId(2);
     }
     let full_schedule = &architecture.layers;
     let shallow_schedule = &full_schedule[..depth as usize];
-    let (shallow, _, _, _) = lfm2_forward_program_with_experts(
+    let (shallow, _, _, _) = scheduled_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -84,7 +84,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Hparams, depth: u32) -> NodeId {
 
     let mut deep_schedule = shallow_schedule.to_vec();
     deep_schedule.push(full_schedule[(depth - 1) as usize].clone());
-    let (deep, _, _, _) = lfm2_forward_program_with_experts(
+    let (deep, _, _, _) = scheduled_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -188,13 +188,13 @@ fn gate_pipeline_node_ids(program: &[Op], route_round_0: NodeId) -> [NodeId; 3] 
 
 /// The MoE gate's own `x` input (`normed2` in `spec.rs`'s naming: `rmsnorm`'s
 /// output, so `append_moe_ffn`'s own `x` parameter) and the mixer's own
-/// pre-residual output (`mixer_out` in `append_lfm2_conv_mixer`'s own
+/// pre-residual output (`mixer_out` in `append_short_conv_mixer`'s own
 /// naming) -- walked BACKWARD from `logits_id` (`logits = Reduce(Add,
 /// gate_product)`, `gate_product = Elementwise(Multiply, [x, gate_inp])` so
 /// `x` is `gate_product`'s own first operand) through `rmsnorm`'s own
 /// two-multiply tail (`spec.rs:682-693`: `gamma * (x * inv_rms)`, so `x`'s
 /// own first operand two hops back is the norm's INPUT) and
-/// `append_lfm2_conv_mixer`'s own residual add
+/// `append_short_conv_mixer`'s own residual add
 /// (`spec.rs:1991`: `mixer_out + x`) -- bisects WITHIN layer 5 whether the
 /// divergence is already present before `ffn_norm` (mixer bug) or enters at
 /// the norm/gate projection itself.
@@ -267,7 +267,7 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Hparams = lfm2_architecture_from_metadata(&parsed)
+    let architecture: ShortConvHparams = short_conv_architecture_from_metadata(&parsed)
         .expect("derive lfm2 architecture from gguf metadata");
 
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
@@ -276,7 +276,7 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
         .expect("tokenize prompt");
 
-    let (full_program, _logits_root, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
+    let (full_program, _logits_root, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -327,7 +327,7 @@ fn main() {
     ]);
 
     let (_logits, extras) =
-        lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids)
+        short_conv_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids)
             .expect("evaluate our own route node values");
     let (route_values, rest) = extras.split_at(route_ids.len());
     let (ours_logits, rest) = rest.split_at(1);

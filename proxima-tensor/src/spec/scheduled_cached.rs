@@ -1,9 +1,9 @@
-//! [`lfm2_forward_program_with_experts`]'s single-range-cached counterpart
+//! [`scheduled_forward_program_with_experts`]'s single-range-cached counterpart
 //! for a schedule of ONLY [`LayerKind::Attention`] entries -- Gemma 4's own
 //! shape (no `LayerKind::ShortConv`). Shares that function's own
 //! [`build_attention_layer_resources`] pre-pass and
-//! [`append_lfm2_layer_ffn`] post-attention/FFN composition verbatim;
-//! [`append_lfm2_single_range_cached_attention`] is the one new piece,
+//! [`append_layer_ffn`] post-attention/FFN composition verbatim;
+//! [`append_single_range_cached_attention`] is the one new piece,
 //! [`single_range_moe_cached::append_gqa_single_range_cached_layer_with_biases`]'s
 //! own merged-cache scoring generalized the same way
 //! [`append_attention_mixer`] generalized the prefill mixer -- windowed
@@ -34,7 +34,7 @@ use super::*;
 /// cache, the same 3-wide contract every other single-range cached layer
 /// in this crate returns.
 #[allow(clippy::too_many_arguments)]
-pub fn append_lfm2_single_range_cached_attention(
+pub fn append_single_range_cached_attention(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -303,7 +303,7 @@ pub fn append_lfm2_single_range_cached_attention(
 }
 
 /// [`causal_mask_merged_windowed`]'s cache-only counterpart:
-/// [`append_lfm2_single_range_cached_attention`]'s own doc names the defect
+/// [`append_single_range_cached_attention`]'s own doc names the defect
 /// this exists to close -- a merged single softmax has no way to tell "this
 /// cache row is real history" apart from "this cache row is
 /// `KvPadShape`-style zero-padding past `cached_len`, up to whatever bucket
@@ -315,7 +315,7 @@ pub fn append_lfm2_single_range_cached_attention(
 /// cache boundary UNCONDITIONALLY, independent of the query -- unlike
 /// [`causal_mask_merged`]'s own `is_future`, which admits `t ==
 /// query_absolute` (this call's own row) precisely because a single merged
-/// softmax needs that row real. [`append_lfm2_two_range_cached_attention`]
+/// softmax needs that row real. [`append_two_range_cached_attention`]
 /// never needs `t == query_absolute` admitted here: that self/local range
 /// is scored separately, against this call's own in-graph
 /// `rotated_k_new_even`/`rotated_k_new_odd`/`v_new` (never round-tripped
@@ -405,7 +405,7 @@ pub(super) fn causal_mask_cached_windowed(
     Ok((is_invalid, neg_infinity))
 }
 
-/// [`append_lfm2_single_range_cached_attention`]'s two-range counterpart:
+/// [`append_single_range_cached_attention`]'s two-range counterpart:
 /// the merged single-softmax read this module's own header doc names as
 /// this crate's `sliding-pattern-kv-cache` root cause (a single softmax has no
 /// self-consistent way to include this call's own new positions in
@@ -414,7 +414,7 @@ pub(super) fn causal_mask_cached_windowed(
 /// it --
 /// [`single_range_moe_cached::append_gqa_cached_routed_layer`]'s own
 /// two-block online-softmax combine, generalized with the exact same
-/// per-layer knobs [`append_lfm2_single_range_cached_attention`] already
+/// per-layer knobs [`append_single_range_cached_attention`] already
 /// threads ([`ValueSource`], [`RopePairing`], `post_attention_norm`,
 /// `value_norm`, `causal_mask_cached_windowed` for the SWA cache-side
 /// bound). The cache block scores ONLY genuine history
@@ -428,7 +428,7 @@ pub(super) fn causal_mask_cached_windowed(
 /// provides (real history for `[0, cached_len)`, zero padding past it),
 /// with no caller-side pre-fold and no decode-loop change.
 #[allow(clippy::too_many_arguments)]
-pub fn append_lfm2_two_range_cached_attention(
+pub fn append_two_range_cached_attention(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -598,7 +598,7 @@ pub fn append_lfm2_two_range_cached_attention(
     Ok((post_mixer, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
 
-/// [`lfm2_forward_program_with_experts`]'s single-range-cached counterpart.
+/// [`scheduled_forward_program_with_experts`]'s single-range-cached counterpart.
 /// `ids`/`rope_cos`/`rope_sin` carry only the NEW positions this call
 /// introduces (symbol 0); attention draws on a per-layer already-rotated
 /// key/value cache sized by symbol 1 (`kv_cache.{layer}.k_even`/`k_odd`/`v`,
@@ -614,10 +614,10 @@ pub fn append_lfm2_two_range_cached_attention(
 /// [`LayerKind::ShortConv`] entry has no cache-state contract this builder
 /// defines (see this module's own doc on why a conv-cached counterpart is
 /// a further step neither this function nor
-/// [`lfm2_forward_program_with_experts`] claims) and is rejected with
+/// [`scheduled_forward_program_with_experts`] claims) and is rejected with
 /// [`TensorError::UnsupportedInBuilder`] rather than silently mishandled.
 #[allow(clippy::too_many_arguments)]
-pub fn lfm2_single_range_cached_forward_program_with_experts(
+pub fn scheduled_single_range_cached_forward_program_with_experts(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -640,7 +640,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
     }
     if schedule.iter().any(|entry| entry.kind != LayerKind::Attention) {
         return Err(TensorError::UnsupportedInBuilder {
-            builder: "lfm2_single_range_cached_forward_program_with_experts",
+            builder: "scheduled_single_range_cached_forward_program_with_experts",
             feature: "LayerKind::ShortConv (no single-range cache-state contract yet)",
         });
     }
@@ -807,7 +807,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
             &alloc::format!("kv_cache.{layer}.v"),
         );
 
-        let (post_mixer, layer_roots) = append_lfm2_single_range_cached_attention(
+        let (post_mixer, layer_roots) = append_single_range_cached_attention(
             &mut program,
             x,
             inv_dim,
@@ -835,7 +835,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
             v_cache,
         )?;
 
-        x = append_lfm2_layer_ffn(
+        x = append_layer_ffn(
             &mut program,
             layer,
             post_mixer,
@@ -852,7 +852,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
             ffn_config,
             // No `LayerKind::Attention`-only cached engine has ever needed
             // PLE (`FfnCombination::Exclusive` is this schedule kind's own
-            // shape) -- `lfm2_forward_program_with_experts`'s own preamble
+            // shape) -- `scheduled_forward_program_with_experts`'s own preamble
             // is the one caller that builds `ple_dim`/per-layer PLE input.
             None,
             0,
@@ -937,7 +937,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
     Ok((program, logits, cache_roots, MoeSites(moe_sites)))
 }
 
-/// [`lfm2_two_range_cached_forward_program_with_experts`]'s own per-layer
+/// [`scheduled_two_range_cached_forward_program_with_experts`]'s own per-layer
 /// `stored_kv` entry: a donor (real cache-owning) layer's post-rope `K`
 /// halves and post-norm `V` (the exact nodes the E2B checkpoint's
 /// `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
@@ -955,12 +955,12 @@ struct StoredSharedKv {
     v_cache: NodeId,
 }
 
-/// [`lfm2_single_range_cached_forward_program_with_experts`]'s two-range
+/// [`scheduled_single_range_cached_forward_program_with_experts`]'s two-range
 /// counterpart -- the fix for the divergence that function's OWN merged
 /// single softmax cannot express (this module's own header doc): every
 /// per-layer attention call here scores this call's own new positions
 /// against its own in-graph `rotated_k_new_even`/`rotated_k_new_odd`/
-/// `v_new` (see [`append_lfm2_two_range_cached_attention`]), never against
+/// `v_new` (see [`append_two_range_cached_attention`]), never against
 /// a cache leaf that does not hold them yet, so `kv_cache.{layer}.k_even`/
 /// `k_odd`/`v` may be fed EXACTLY what `proxima-model-interop`'s existing
 /// growing-cache decode loop already provides -- real history for
@@ -969,7 +969,7 @@ struct StoredSharedKv {
 /// contract as the single-range builder (every entry must be
 /// [`LayerKind::Attention`]); the returned roots are the same
 /// `(logits, per_layer_cache_roots, moe_sites)` shape.
-/// [`lfm2_two_range_cached_forward_program_with_experts`]'s own return
+/// [`scheduled_two_range_cached_forward_program_with_experts`]'s own return
 /// shape: the lowered program, its `logits` root, one [`CachedLayerRoots`]
 /// per real cache-owning layer, one [`MoeSite`] per MoE layer, and
 /// the `head_repeats - 1` duplicate head roots
@@ -983,7 +983,7 @@ pub(super) type TwoRangeForwardProgram = (
 );
 
 #[allow(clippy::too_many_arguments)]
-pub fn lfm2_two_range_cached_forward_program_with_experts(
+pub fn scheduled_two_range_cached_forward_program_with_experts(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -998,7 +998,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     logit_softcap: Option<f32>,
     last_row_only: bool,
     // the E2B/E4B checkpoint's per-layer-embedding preamble
-    // (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc) --
+    // (`scheduled_forward_program_with_experts`'s own `ple_dim` parameter doc) --
     // `None` for every checkpoint with no PLE tensors (12B/26B/31B), so this
     // builder's prior callers (none of whom ever passed a PLE-bearing
     // schedule) see no change in the emitted program.
@@ -1010,7 +1010,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     // leaves the program node-for-node what it was before the ring existed.
     sliding_kv_ring: bool,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
-    lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
+    scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
         vocab,
         embedding,
         feed_forward,
@@ -1030,11 +1030,11 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     )
 }
 
-/// [`lfm2_two_range_cached_forward_program_with_experts`] with the LM-head
+/// [`scheduled_two_range_cached_forward_program_with_experts`] with the LM-head
 /// repeat count ([`super::ModelDescriptor::head_repeats`]) as an explicit
-/// argument; see [`lfm2_forward_program_with_experts_and_head_repeats`].
+/// argument; see [`scheduled_forward_program_with_experts_and_head_repeats`].
 #[allow(clippy::too_many_arguments)]
-pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
+pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -1060,7 +1060,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     }
     if schedule.iter().any(|entry| entry.kind != LayerKind::Attention) {
         return Err(TensorError::UnsupportedInBuilder {
-            builder: "lfm2_two_range_cached_forward_program_with_experts",
+            builder: "scheduled_two_range_cached_forward_program_with_experts",
             feature: "LayerKind::ShortConv (no two-range cache-state contract yet)",
         });
     }
@@ -1072,7 +1072,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
             && windows.any(|width| width != first)
         {
             return Err(TensorError::UnsupportedInBuilder {
-                builder: "lfm2_two_range_cached_forward_program_with_experts",
+                builder: "scheduled_two_range_cached_forward_program_with_experts",
                 feature: "sliding_kv_ring with differing window widths (one sliding slot)",
             });
         }
@@ -1102,7 +1102,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     let ones = scalar_constant(&mut program, 1.0);
     let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
-    // Stage A preamble (`lfm2_forward_program_with_experts`'s own doc on
+    // Stage A preamble (`scheduled_forward_program_with_experts`'s own doc on
     // `ple_shared`/`ple_layer_inputs`, mirrored verbatim here): `x` is still
     // `h0`, the post-embedding-scale hidden state BEFORE the layer loop
     // below reassigns it -- the real input `append_ple_shared_projections`
@@ -1182,7 +1182,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     // schedule entry (the E2B checkpoint's cross-layer shared-KV) reads
     // `stored_kv[source]` instead of declaring its own leaves at all, the
     // same "never re-project, never re-declare a leaf" contract
-    // `lfm2_forward_program_with_experts`'s own `stored_kv` already uses for
+    // `scheduled_forward_program_with_experts`'s own `stored_kv` already uses for
     // the cacheless path (`attention_forward.rs`'s own doc on it). See
     // [`StoredSharedKv`] for what each field carries.
     let mut stored_kv: Vec<Option<StoredSharedKv>> = alloc::vec![None; block_count as usize];
@@ -1366,7 +1366,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
             &alloc::format!("blk.{layer}.attn_q_norm.weight"),
         );
 
-        let (post_mixer, layer_roots) = append_lfm2_two_range_cached_attention(
+        let (post_mixer, layer_roots) = append_two_range_cached_attention(
             &mut program,
             x,
             inv_dim,
@@ -1407,7 +1407,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
             });
         }
 
-        x = append_lfm2_layer_ffn(
+        x = append_layer_ffn(
             &mut program,
             layer,
             post_mixer,
@@ -1466,7 +1466,7 @@ pub fn lfm2_two_range_cached_forward_program_with_experts_and_head_repeats(
     );
 
     // attn_parity followon (2026-09-22): the same factor-out
-    // `lfm2_forward_program_with_experts` carries -- see that function's own
+    // `scheduled_forward_program_with_experts` carries -- see that function's own
     // doc on `append_head`/`head_repeats`/`duplicate_head_roots`.
     // This is the builder the sliding-pattern family's real production decode path actually
     // calls (`CacheMask::Padded`, `bind_gemma4_with_last_row_only`),

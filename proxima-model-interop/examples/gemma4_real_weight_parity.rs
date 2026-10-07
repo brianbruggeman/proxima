@@ -22,7 +22,7 @@ use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
     ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
-    lfm2_forward_program_with_experts,
+    scheduled_forward_program_with_experts,
 };
 
 /// Finds the [`NodeId`] of the `Op::Input` leaf named `name` -- `op::append`'s
@@ -38,7 +38,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 
 /// Reproduces `gemma4_descriptor_from_gguf`
 /// (`proxima-model-interop/src/sliding_pattern/bind.rs`, private to that crate)
-/// so this diagnostic can call `lfm2_forward_program_with_experts` directly
+/// so this diagnostic can call `scheduled_forward_program_with_experts` directly
 /// -- pure graph construction, no weight bytes touched, so it is
 /// near-instant next to the real `bind_checkpoint`'s full weight bind
 /// (proven too slow for this checkpoint's size in this same session: a
@@ -115,7 +115,7 @@ fn gemma4_program(architecture: &proxima_model_interop::sliding_pattern::Gemma4H
         .collect();
     let logit_softcap = (architecture.final_logit_softcapping > 0.0)
         .then_some(architecture.final_logit_softcapping);
-    let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
+    let (program, logits, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -297,7 +297,7 @@ fn main() {
     println!(
         "== deriving layer-0 attention-mixer NodeIds from the SAME program builder bind_checkpoint lowers through =="
     );
-    // `gemma4_program` calls `lfm2_forward_program_with_experts` with the
+    // `gemma4_program` calls `scheduled_forward_program_with_experts` with the
     // same args `bind_checkpoint` does -- pure graph
     // construction, no weight bytes touched, so this reproduces the exact
     // `NodeId` numbering `LoadedModel::load` built internally without paying
@@ -512,7 +512,7 @@ fn main() {
     );
 
     println!("\n== stage A: engine forward, node 4 = post-sqrt-scale embedding ==");
-    // traced from `proxima_tensor::spec::attention_forward::lfm2_forward_program_with_experts`:
+    // traced from `proxima_tensor::spec::attention_forward::scheduled_forward_program_with_experts`:
     // ids=NodeId(0), token_embd.weight=NodeId(1), embedding_lookup=NodeId(2),
     // sqrt(embedding) scalar_constant=NodeId(3), elementwise multiply=NodeId(4).
     // gemma4 binds `EmbeddingScale::Sqrt` (`gemma4/bind.rs`), so NodeId(4) is

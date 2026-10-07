@@ -71,11 +71,11 @@ mod hyperconn_qwen35_dense;
 #[macro_use]
 mod single_range_moe_cached;
 #[macro_use]
-mod lfm2_qwen35_gdn;
+mod short_conv_delta_net;
 #[macro_use]
 mod attention_forward;
 #[macro_use]
-mod lfm2_single_range_cached;
+mod scheduled_cached;
 mod two_block_attention;
 mod descriptor;
 mod hybrid_forward;
@@ -90,8 +90,8 @@ pub use gguf_descriptor::*;
 pub use hybrid_forward::{MoeLayerDiagnostics, append_sigmoid_gated_shared_expert};
 use hybrid_forward::{hybrid_dense_forward, hybrid_routed_forward};
 pub use hyperconn_qwen35_dense::*;
-pub use lfm2_qwen35_gdn::*;
-pub use lfm2_single_range_cached::*;
+pub use short_conv_delta_net::*;
+pub use scheduled_cached::*;
 pub use gqa_forward_cached::*;
 pub use gqa_layer_routed::*;
 #[cfg(feature = "config")]

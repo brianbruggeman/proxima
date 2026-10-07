@@ -548,7 +548,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
 
             // Unlike `append_gqa_cached_layer` (bundles FFN internally),
             // `append_qwen35_ssm_mixer` is mixer-plus-residual only -- the
-            // same scope `append_lfm2_conv_mixer` has -- so the SSM branch
+            // same scope `append_short_conv_mixer` has -- so the SSM branch
             // runs its own dense FFN pass here, matching
             // `gqa_cached_forward_program_with_experts`'s own
             // `expert_count == 0` FFN math exactly (Qwen3.5 never routes FFN
