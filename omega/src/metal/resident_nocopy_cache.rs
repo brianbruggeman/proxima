@@ -980,6 +980,8 @@ pub(super) fn allocate_fault_buffer(
     gather_count: usize,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
     let byte_length = gather_count.max(1) * size_of::<u32>();
+    counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
+    counter!(OUTPUT_BUFFER_ALLOCATED_BYTES, byte_length as u64);
     let buffer = device
         .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
@@ -1027,7 +1029,7 @@ thread_local! {
 pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.reuse");
 
 /// CARD 6.5's census counter: every genuinely fresh device buffer
-/// `allocate_buffer` hands out, on ANY path (the classic per-op-per-call
+/// `allocate_buffer` and `allocate_fault_buffer` hand out, on ANY path (the classic per-op-per-call
 /// path below, or `build_buffer_arena`'s own size-class-miss path). Not
 /// gated behind `metal-plan-stable-buffers` -- this counter's whole point is
 /// to read the SAME number on both arms of the bake-off: `op_count` every
