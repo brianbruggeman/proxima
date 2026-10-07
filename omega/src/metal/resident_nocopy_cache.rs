@@ -972,13 +972,31 @@ pub(super) fn upload_block_as_half(
     upload_block_copy(device, pointer, byte_length)
 }
 
-/// Allocates a `gather_count`-long `uint` buffer for a dispatch's gather
-/// faults and zero-fills it — a freshly allocated `MTLBuffer`'s contents are
-/// undefined, and a slot left as garbage would read as a spurious fault.
+thread_local! {
+    /// Fault buffers whose step has completed, keyed by gather count. A gathered
+    /// dispatch takes one per call, zero-fills it and hands it back once
+    /// [`check_gather_fault`] has read it, so a steady decode step allocates none:
+    /// 576 gathered expert dispatches per granite step were 576 `newBuffer`
+    /// calls. Bounded by the largest count of gathered dispatches in one program.
+    static FAULT_BUFFER_POOL: RefCell<BTreeMap<usize, Vec<MetalBuffer>>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+/// A zero-filled `gather_count`-long `uint` buffer for a dispatch's gather
+/// faults: a recycled one when [`recycle_fault_buffer`] returned one for this
+/// count, else a fresh allocation. A buffer's contents are undefined after
+/// `newBuffer` and hold the previous step's faults after a recycle, and a slot
+/// left as garbage would read as a spurious fault, so both paths zero-fill.
 pub(super) fn allocate_fault_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     gather_count: usize,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    let recycled = FAULT_BUFFER_POOL
+        .with(|pool| pool.borrow_mut().get_mut(&gather_count).and_then(Vec::pop));
+    if let Some(buffer) = recycled {
+        zero_fault_buffer(&buffer, gather_count);
+        return Ok(buffer);
+    }
     let byte_length = gather_count.max(1) * size_of::<u32>();
     counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
     counter!(OUTPUT_BUFFER_ALLOCATED_BYTES, byte_length as u64);
@@ -989,6 +1007,12 @@ pub(super) fn allocate_fault_buffer(
         })?;
     zero_fault_buffer(&buffer, gather_count);
     Ok(buffer)
+}
+
+/// Returns a fault buffer to [`allocate_fault_buffer`]'s pool. Call only once
+/// the command buffers that wrote it have completed.
+pub(super) fn recycle_fault_buffer(buffer: MetalBuffer, gather_count: usize) {
+    FAULT_BUFFER_POOL.with(|pool| pool.borrow_mut().entry(gather_count).or_default().push(buffer));
 }
 
 pub(super) fn zero_fault_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize) {
@@ -1029,7 +1053,7 @@ thread_local! {
 pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.reuse");
 
 /// CARD 6.5's census counter: every genuinely fresh device buffer
-/// `allocate_buffer` and `allocate_fault_buffer` hand out, on ANY path (the classic per-op-per-call
+/// `allocate_buffer` hands out, on ANY path (the classic per-op-per-call
 /// path below, or `build_buffer_arena`'s own size-class-miss path). Not
 /// gated behind `metal-plan-stable-buffers` -- this counter's whole point is
 /// to read the SAME number on both arms of the bake-off: `op_count` every

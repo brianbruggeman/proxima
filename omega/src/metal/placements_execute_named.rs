@@ -1778,9 +1778,7 @@ pub(super) fn execute_plan_with_placements_inner(
         "substitute summary"
     );
 
-    for (bound, fault_buffer, gathers) in &pending_faults {
-        check_gather_fault(bound, fault_buffer, *gathers)?;
-    }
+    check_pending_faults(pending_faults)?;
 
     let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
     let evaluated = finish(plan, &device_buffers, &placed_output_nodes, recycle.pop())?;
@@ -2116,9 +2114,7 @@ pub fn execute_plan_timed(
     let gpu_ns =
         ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
 
-    for (bound, fault_buffer, gathers) in &pending_faults {
-        check_gather_fault(bound, fault_buffer, *gathers)?;
-    }
+    check_pending_faults(pending_faults)?;
 
     let evaluated = finish(plan, &device_buffers, &BTreeSet::new(), None)?;
     Ok((evaluated, gpu_ns))
