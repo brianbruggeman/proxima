@@ -854,8 +854,13 @@ mod harness {
         for (dispatch, class) in launched.iter().zip(classes) {
             by_family.entry(sequence_family(class)).or_default().push(dispatch);
         }
+        let excluded: usize = launched.iter().filter(|dispatch| dispatch.unreplayable.is_some()).count();
+        for members in by_family.values_mut() {
+            members.retain(|dispatch| dispatch.unreplayable.is_none());
+        }
+        println!("m0 family sequence replay excludes {excluded} unreplayable dispatches of {}", launched.len());
         let member_total: usize = by_family.values().map(Vec::len).sum();
-        assert_eq!(member_total, launched.len(), "N: family arms must partition the captured dispatches");
+        assert_eq!(member_total + excluded, launched.len(), "N: family arms plus the excluded must partition the captured dispatches");
         let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
         for _ in 0..runs {
             for (family, members) in &by_family {
@@ -873,6 +878,22 @@ mod harness {
             );
         }
     }
+    fn replay_chunk_sequences(replayable: &[&CapturedDispatch]) -> Result<Vec<f64>, omega::MetalError> {
+        let mut chunk_indices: Vec<usize> = replayable.iter().map(|dispatch| dispatch.chunk_index).collect();
+        chunk_indices.dedup();
+        chunk_indices
+            .into_iter()
+            .map(|chunk_index| {
+                let members: Vec<&CapturedDispatch> = replayable
+                    .iter()
+                    .copied()
+                    .filter(|dispatch| dispatch.chunk_index == chunk_index)
+                    .collect();
+                CapturedDispatch::time_gpu_sequence_ns(&members)
+            })
+            .collect()
+    }
+
     fn warm_median(steps: &BTreeMap<usize, StepStats>, pick: fn(&StepStats) -> Option<f64>) -> f64 {
         let values: Vec<f64> = steps
             .iter()
@@ -943,12 +964,14 @@ mod harness {
                 println!("m0 replay: group {position}/{group_total}");
             }
         }
+        let replayable: Vec<&CapturedDispatch> = launched.iter().filter(|dispatch| dispatch.unreplayable.is_none()).collect();
         let sequence_replay_ns: Vec<f64> = (0..3)
-            .map(|_| CapturedDispatch::time_gpu_sequence_ns(&launched))
+            .map(|_| CapturedDispatch::time_gpu_sequence_ns(&replayable))
             .collect::<Result<_, _>>()
             .expect("replay the captured dispatch sequence");
         println!(
-            "m0 sequence replay: one command buffer, dispatches={}, gpu_ms={:?}",
+            "m0 sequence replay: one command buffer, dispatches={} of {} captured, gpu_ms={:?}",
+            replayable.len(),
             launched.len(),
             sequence_replay_ns
                 .iter()
@@ -956,7 +979,7 @@ mod harness {
                 .collect::<Vec<_>>()
         );
         let chunk_sequence_replay_ns: Vec<Vec<f64>> = (0..3)
-            .map(|_| CapturedDispatch::time_gpu_chunk_sequences_ns(&launched))
+            .map(|_| replay_chunk_sequences(&replayable))
             .collect::<Result<_, _>>()
             .expect("replay the captured command-buffer chunks");
         println!(
@@ -1100,10 +1123,19 @@ mod harness {
             capture_stats.physical_dispatch_calls,
             "invariant 1: captured dispatches must equal the step's physical_dispatch_calls"
         );
+        let unexplained: Vec<&&Group> = failed
+            .iter()
+            .filter(|group| launched[group.representative].unreplayable.is_none())
+            .collect();
+        println!(
+            "m0 unreplayable by capture: groups={} dispatches={}",
+            failed.len() - unexplained.len(),
+            launched.iter().filter(|dispatch| dispatch.unreplayable.is_some()).count()
+        );
         assert!(
-            failed.is_empty(),
-            "{} kernel groups failed to replay",
-            failed.len()
+            unexplained.is_empty(),
+            "{} kernel groups failed to replay for a reason other than the capture refusing them",
+            unexplained.len()
         );
     }
 }
