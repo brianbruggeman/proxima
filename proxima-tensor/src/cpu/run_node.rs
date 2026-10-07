@@ -801,7 +801,7 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
                     upper_inclusive: i64::MAX,
                 },
                 crate::physical::CausalBand {
-                    lower_inclusive: i64::MIN,
+                    lower_inclusive: *cached_lower_inclusive,
                     upper_inclusive: new_upper_inclusive,
                 },
             ],
