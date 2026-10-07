@@ -2431,39 +2431,57 @@ pub(super) fn check_gather_fault(
     fault_buffer: &ProtocolObject<dyn MTLBuffer>,
     gather_count: usize,
 ) -> Result<(), MetalError> {
-    let slots = read_fault_slots(fault_buffer, gather_count);
-    let gathers: Vec<&Lookup> = bound
+    let Some((slot, recorded)) = fault_slots(fault_buffer, gather_count)
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, recorded)| *recorded != 0)
+    else {
+        return Ok(());
+    };
+    if recorded & 0x8000_0000 != 0 {
+        let encoded_expert = recorded & 0x7fff_ffff;
+        return Err(MetalError::ExpertSourceMiss {
+            node: bound.node,
+            expert: encoded_expert.saturating_sub(1),
+        });
+    }
+    let lookup = bound
         .operands()
         .iter()
         .filter_map(|(_, _, gather)| gather.as_ref())
-        .collect();
-    for (slot, recorded) in slots.iter().enumerate() {
-        if *recorded != 0 {
-            if recorded & 0x8000_0000 != 0 {
-                let encoded_expert = recorded & 0x7fff_ffff;
-                return Err(MetalError::ExpertSourceMiss {
-                    node: bound.node,
-                    expert: encoded_expert.saturating_sub(1),
-                });
-            }
-            return Err(TensorError::GatherIndexOutOfRange {
-                node: bound.node,
-                index: i64::from(*recorded - 1),
-                extent: gathers[slot].extent,
-            }
-            .into());
-        }
+        .nth(slot)
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: format!(
+                "node {:?} recorded a gather fault in slot {slot} but has no gather operand there",
+                bound.node
+            ),
+        })?;
+    Err(TensorError::GatherIndexOutOfRange {
+        node: bound.node,
+        index: i64::from(recorded - 1),
+        extent: lookup.extent,
+    }
+    .into())
+}
+
+/// Checks every dispatch's fault buffer after the step's command buffers have
+/// completed, then returns each to [`allocate_fault_buffer`]'s pool.
+pub(super) fn check_pending_faults(pending_faults: Vec<PendingFault<'_>>) -> Result<(), MetalError> {
+    for (bound, fault_buffer, gathers) in pending_faults {
+        check_gather_fault(bound, &fault_buffer, gathers)?;
+        recycle_fault_buffer(fault_buffer, gathers);
     }
     Ok(())
 }
 
-pub(super) fn read_fault_slots(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize) -> Vec<u32> {
+pub(super) fn fault_slots(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize) -> &[u32] {
     let pointer = buffer.contents();
     // SAFETY: allocated and sized to at least `gather_count` `u32`s by
     // `allocate_fault_buffer`, `storageModeShared` so CPU-visible now that
-    // `waitUntilCompleted` has returned.
+    // `waitUntilCompleted` has returned; the slice borrows `buffer`, which
+    // outlives every use of it.
     unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<u32>(), gather_count.max(1)) }
-        .to_vec()
 }
 
 /// Widens a device buffer back to the host's f32 contract — see this

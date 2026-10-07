@@ -1206,9 +1206,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
     let cpu_gpu_end = sample_timestamps(&device);
 
-    for (bound, fault_buffer, gathers) in &pending_faults {
-        check_gather_fault(bound, fault_buffer, *gathers)?;
-    }
+    check_pending_faults(pending_faults)?;
 
     let cpu_ns_delta = ticks_to_nanos(cpu_gpu_end.0.wrapping_sub(cpu_gpu_start.0));
     let gpu_tick_delta = cpu_gpu_end.1.saturating_sub(cpu_gpu_start.1).max(1);
