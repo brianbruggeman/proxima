@@ -363,11 +363,11 @@ pub(super) mod hyper_connection_tests {
     }
 }
 
-/// [`append_mistral_cached_layer`]'s Qwen3.5 dense-attention counterpart --
+/// [`append_gqa_cached_layer`]'s Qwen3.5 dense-attention counterpart --
 /// same cached-attention/online-softmax shape, three real differences from
 /// the oracle (`modeling_qwen3_next.py`'s `Qwen3NextAttention.forward`,
 /// `apply_rotary_pos_emb`; cross-checked against llama.cpp's hybrid-model source's own
-/// `build_layer_attn`) `append_mistral_cached_layer` has no room for:
+/// `build_layer_attn`) `append_gqa_cached_layer` has no room for:
 ///
 /// 1. Q/K carry a real per-head width (`attn_head_dim`, this checkpoint's
 ///    own `attention.key_length`) wider than the rotary width (`rotary_dim`,
@@ -387,7 +387,7 @@ pub(super) mod hyper_connection_tests {
 /// 2. RoPE itself is split-half (NEOX/IMROPE style, `x_rot -> (x[..d/2],
 ///    x[d/2..])`, GGML_ROPE_TYPE_IMROPE's own `rotate_pairs(n_dims,
 ///    n_dims/2, ...)`, `ggml/src/ggml-cpu/ops.cpp:6210-6211`), not
-///    [`append_mistral_cached_layer`]'s interleaved `(2*i, 2*i+1)` pairing.
+///    [`append_gqa_cached_layer`]'s interleaved `(2*i, 2*i+1)` pairing.
 ///    The checkpoint's declared 3-section MRoPE (`rope.dimension_sections`)
 ///    collapses to this same plain single-section schedule for text-only
 ///    input: `ggml_mrope_cache_init`'s own `theta_t`/`theta_h`/`theta_w`

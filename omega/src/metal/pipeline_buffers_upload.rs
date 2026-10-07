@@ -1217,7 +1217,7 @@ pub(super) fn upload_block(
     match dtype {
         // unreached by every program this driver compiles today (none
         // declares a `Float16` block input -- `proxima-tensor/src/spec.rs`'s
-        // `mistral_cached_forward_program` is `Float32` throughout), so it is
+        // `gqa_cached_forward_program` is `Float32` throughout), so it is
         // not worth the residency cache's extra bookkeeping: the narrowed
         // `Vec<f16>` this allocates is dropped every call regardless.
         DType::Float16 => upload_block_as_half(device, data).map(|buffer| (buffer, 0)),

@@ -1,6 +1,6 @@
 use super::*;
 
-/// [`append_mistral_cached_layer`]'s single-range counterpart: the SAME
+/// [`append_gqa_cached_layer`]'s single-range counterpart: the SAME
 /// function -- same RoPE, same GQA grouping, same `CachedLayerRoots`
 /// return -- but scored through ONE softmax over ONE key axis instead of
 /// two disjoint ranges combined by hand. `k_even_cache`/`k_odd_cache`/
@@ -10,7 +10,7 @@ use super::*;
 /// calls (`kv_cache.{layer}.*`'s own shape grows from `cached_len` to
 /// `cached_len + new_count`, same [`Extent::Symbolic`] slot, no new op).
 /// `rotated_k_new_even`/`rotated_k_new_odd`/`v_new` are STILL computed
-/// in-graph from `x`, unchanged from [`append_mistral_cached_layer`] --
+/// in-graph from `x`, unchanged from [`append_gqa_cached_layer`] --
 /// this call's own [`CachedLayerRoots`] the caller folds into next call's
 /// merged cache -- they are simply no longer read for THIS call's own
 /// score, since this call's own keys are not yet part of the merged range
@@ -18,10 +18,10 @@ use super::*;
 /// after it is computed).
 ///
 /// Score/softmax/attended here are node-for-node
-/// [`append_mistral_layer`]'s own single-range pattern (`score`,
+/// [`append_gqa_layer`]'s own single-range pattern (`score`,
 /// `score_max`, `shifted`, `weights`, `weight_sum`, `inv_weight_sum`,
 /// `probabilities`, `attended_product`, `attended`) rather than
-/// [`append_mistral_cached_layer`]'s two-block online-softmax combine --
+/// [`append_gqa_cached_layer`]'s two-block online-softmax combine --
 /// the entire point of this function existing next to that one.
 /// `is_future` here must come from [`causal_mask_merged`], not
 /// [`causal_mask`]: shape `[s, t]` with `t` sized by [`Extent::Symbolic`]
@@ -39,7 +39,7 @@ use super::*;
 /// `swapping_gate_and_up_order_keeps_dataflow_identical` test.
 ///
 /// `qk_norm` (ROW 373) is the SAME `Option<(NodeId, NodeId, NodeId)>` shape
-/// as [`append_mistral_cached_layer`]'s own parameter of that name --
+/// as [`append_gqa_cached_layer`]'s own parameter of that name --
 /// q-norm weight, k-norm weight, `inv_head_dim` -- applied through the same
 /// [`rmsnorm_per_head`] calls before RoPE, and selects the same
 /// interleaved-vs-split-half pairing that function's doc already derives
@@ -47,7 +47,7 @@ use super::*;
 /// checkpoint; it now builds it, node-for-node the same attention block the
 /// two-range sibling would.
 #[allow(clippy::too_many_arguments)]
-pub fn append_mistral_single_range_cached_layer(
+pub fn append_gqa_single_range_cached_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -75,7 +75,7 @@ pub fn append_mistral_single_range_cached_layer(
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
     gate_before_up: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
-    append_mistral_single_range_cached_layer_with_biases(
+    append_gqa_single_range_cached_layer_with_biases(
         program,
         x,
         inv_dim,
@@ -112,7 +112,7 @@ pub fn append_mistral_single_range_cached_layer(
 /// bias-disabled fixture while allowing checkpoint-driven callers to express
 /// the complete projection semantics.
 #[allow(clippy::too_many_arguments)]
-pub fn append_mistral_single_range_cached_layer_with_biases(
+pub fn append_gqa_single_range_cached_layer_with_biases(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -141,7 +141,7 @@ pub fn append_mistral_single_range_cached_layer_with_biases(
     qkv_biases: Option<(NodeId, NodeId, NodeId)>,
     gate_before_up: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
-    // Same architecture inputs as `append_mistral_cached_layer`'s own
+    // Same architecture inputs as `append_gqa_cached_layer`'s own
     // `qk_norm: Option<(NodeId, NodeId, NodeId)>` (q-norm weight, k-norm
     // weight, `inv_head_dim`) -- ROW 373's typed rejection here was a class
     // defect, not a correct omission: this builder's own attention block is
@@ -233,7 +233,7 @@ pub fn append_mistral_single_range_cached_layer_with_biases(
         None => (q_raw, k_new_raw),
     };
 
-    // Pairing selection mirrors `append_mistral_cached_layer`'s own
+    // Pairing selection mirrors `append_gqa_cached_layer`'s own
     // `qk_norm.is_some()` rule (that function's doc walks the NEOX-vs-
     // interleaved reasoning): a checkpoint carrying `attn_q_norm.weight` is
     // the split-half family, everything else stays interleaved.
@@ -558,24 +558,24 @@ pub fn append_mistral_single_range_cached_layer_with_biases(
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
 
-/// [`mistral_single_range_cached_forward_program`] is
-/// [`mistral_cached_forward_program`]'s single-range counterpart: same
+/// [`gqa_single_range_cached_forward_program`] is
+/// [`gqa_cached_forward_program`]'s single-range counterpart: same
 /// per-layer weight inputs, same [`CachedLayerRoots`] contract, one
 /// difference -- `causal_mask_merged` in place of `causal_mask`
 /// (needs a `cached_len` scalar the plain cache mask does not), and
-/// `append_mistral_single_range_cached_layer` in place of
-/// `append_mistral_cached_layer` for every layer. Dense-only (no MoE
+/// `append_gqa_single_range_cached_layer` in place of
+/// `append_gqa_cached_layer` for every layer. Dense-only (no MoE
 /// branch): the mixture-of-experts FFN this function's counterpart also
 /// supports is orthogonal to the attention-merge this function exists to
 /// prove, and duplicating that branch here would test nothing new.
 ///
 /// `qk_norm` (ROW 373) selects the same per-head QK-norm + split-half RoPE
-/// pairing [`qwen3_cached_forward_program`] carries on the two-range path --
+/// pairing [`qk_norm_cached_forward_program`] carries on the two-range path --
 /// `true` declares `blk.{layer}.attn_q_norm.weight`/`attn_k_norm.weight`
 /// inputs per layer and threads them through
-/// [`append_mistral_single_range_cached_layer`]'s own
+/// [`append_gqa_single_range_cached_layer`]'s own
 /// `Option<(NodeId, NodeId, NodeId)>` parameter, mirroring
-/// [`mistral_cached_forward_program_with_experts`]'s own `inv_head_dim`/
+/// [`gqa_cached_forward_program_with_experts`]'s own `inv_head_dim`/
 /// `qk_norm_weights` construction below. `false` reproduces today's
 /// interleaved, no-norm program node-for-node.
 // ROW 326/328 diagnostic: `duplicate_head` mirrors `gate_before_up`'s own
@@ -593,7 +593,7 @@ pub fn append_mistral_single_range_cached_layer_with_biases(
 // [`DuplicateHeadPosition::None`] (every production call site) is
 // byte-identical to this function's behavior before the flag existed.
 //
-// `last_row_only` is `mistral_cached_forward_program_with_experts_and_layer_taps`'s
+// `last_row_only` is `gqa_cached_forward_program_with_experts_and_layer_taps`'s
 // own flag, reproduced here: `true` gathers `normed_final` to its last row
 // through a host-supplied `lm_head_row` leaf (that function's own doc has
 // the full mechanism) before the real `output.weight` reduce, so `logits`
@@ -609,7 +609,7 @@ pub fn append_mistral_single_range_cached_layer_with_biases(
               forward-program builder in this file (see the other `too_many_arguments` \
               call sites above); `last_row_only` is the 9th and last"
 )]
-pub fn mistral_single_range_cached_forward_program(
+pub fn gqa_single_range_cached_forward_program(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -621,7 +621,7 @@ pub fn mistral_single_range_cached_forward_program(
     duplicate_head: DuplicateHeadPosition,
     last_row_only: bool,
 ) -> Result<SingleRangeForwardProgram, TensorError> {
-    mistral_single_range_cached_forward_program_with_biases(
+    gqa_single_range_cached_forward_program_with_biases(
         vocab,
         embedding,
         feed_forward,
@@ -636,11 +636,11 @@ pub fn mistral_single_range_cached_forward_program(
     )
 }
 
-/// Bias-aware counterpart of [`mistral_single_range_cached_forward_program`].
+/// Bias-aware counterpart of [`gqa_single_range_cached_forward_program`].
 /// `qkv_biases` is a graph capability selected by checkpoint metadata; when
 /// false, the legacy graph is retained exactly.
 #[allow(clippy::too_many_arguments)]
-pub fn mistral_single_range_cached_forward_program_with_biases(
+pub fn gqa_single_range_cached_forward_program_with_biases(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -701,7 +701,7 @@ pub fn mistral_single_range_cached_forward_program_with_biases(
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(head_dim as f32));
     // only materialized when a layer actually consumes it (`qk_norm`), same
-    // guard `mistral_cached_forward_program_with_experts` uses so a dense
+    // guard `gqa_cached_forward_program_with_experts` uses so a dense
     // checkpoint's own node count is unaffected by this feature existing.
     let inv_head_dim = qk_norm.then(|| scalar_constant(&mut program, 1.0 / head_dim as f32));
     let cos_new = input_leaf(
@@ -868,7 +868,7 @@ pub fn mistral_single_range_cached_forward_program_with_biases(
             (q_bias, k_bias, v_bias)
         });
 
-        let (x_next, layer_roots) = append_mistral_single_range_cached_layer_with_biases(
+        let (x_next, layer_roots) = append_gqa_single_range_cached_layer_with_biases(
             &mut program,
             x,
             inv_dim,
@@ -910,7 +910,7 @@ pub fn mistral_single_range_cached_forward_program_with_biases(
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
     // Same `lm_head_row` leaf and gather
-    // `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
+    // `gqa_cached_forward_program_with_experts_and_layer_taps`'s own
     // `last_row_only` arm uses -- see that call site for the full mechanism
     // doc. Only the REAL head narrows to one row; `duplicate_head_scratch`
     // below still reads `x`/`normed_final` directly, since it exists to
@@ -990,22 +990,22 @@ fn scale_residual(
     }
 }
 
-/// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
-/// same relationship [`append_mistral_moe_layer`] bears to
-/// [`append_mistral_layer`]: cached attention block (RoPE + GQA +
+/// [`append_gqa_cached_layer`]'s mixture-of-experts counterpart, the
+/// same relationship [`append_gqa_routed_layer`] bears to
+/// [`append_gqa_layer`]: cached attention block (RoPE + GQA +
 /// online-softmax combine over the cached/new key split, the same shape as
-/// [`append_mistral_cached_layer`]'s own, including that function's
+/// [`append_gqa_cached_layer`]'s own, including that function's
 /// `qk_norm`-gated per-head Q/K norm and RoPE-pairing switch -- Qwen3-MoE's
 /// own checkpoint carries `attn_q_norm.weight`/`attn_k_norm.weight` on every
 /// layer, every one of them MoE, so this arm needs the identical switch or
 /// every MoE layer silently skips QK-norm and rotates Q/K with the wrong
 /// (interleaved, not NEOX split-half) pairing), [`append_moe_ffn`] in place
 /// of the dense SwiGLU triple. Kept as a separate function for the same
-/// reason [`append_mistral_moe_layer`] is: the dense cached path's own node
+/// reason [`append_gqa_routed_layer`] is: the dense cached path's own node
 /// sequence never changes shape merely because this function exists next to
 /// it.
 #[allow(clippy::too_many_arguments)]
-pub fn append_mistral_cached_moe_layer(
+pub fn append_gqa_cached_routed_layer(
     program: &mut Vec<Op>,
     layer: u32,
     x: NodeId,
@@ -1098,7 +1098,7 @@ pub fn append_mistral_cached_moe_layer(
         "sud->sudi",
     )?;
 
-    // Same `qk_norm.is_some()` switch as [`append_mistral_cached_layer`]
+    // Same `qk_norm.is_some()` switch as [`append_gqa_cached_layer`]
     // (see that function's own doc): a checkpoint carrying `attn_q_norm.weight`
     // is NEOX-family (Qwen3), whose on-disk Q/K rows stay in HF's native
     // split-half layout, never llama.cpp's converter-permuted interleaved

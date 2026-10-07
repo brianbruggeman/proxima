@@ -13,19 +13,19 @@ use super::*;
 /// shape. Composes this module's own `elementwise`/`reduce` (the exact
 /// notation grammar `Vec<Op>::try_from(&ProgramSpec)` above already parses),
 /// `embedding_lookup` (`shape.rs`'s `embedding_lookup_program` unit test is
-/// the addressing reference), and `append_mistral_layer` (mirrors
+/// the addressing reference), and `append_gqa_layer` (mirrors
 /// `specs/mistral_layer.toml` node for node).
 ///
 /// `expert_count == 0` means dense: every layer binds
-/// `append_mistral_layer`'s plain `ffn_{gate,up,down}.weight` triple,
+/// `append_gqa_layer`'s plain `ffn_{gate,up,down}.weight` triple,
 /// node-for-node the same program this function has always built, so a
 /// dense checkpoint's generated program (and therefore its output) is
 /// unaffected by this parameter's existence. `expert_count > 0` routes each
-/// layer through `append_mistral_moe_layer` instead, gathering one of
+/// layer through `append_gqa_routed_layer` instead, gathering one of
 /// `expert_count` experts' weight slabs per token per
 /// `append_moe_ffn`'s doc.
 #[allow(clippy::too_many_arguments)]
-pub fn mistral_forward_program(
+pub fn gqa_forward_program(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -162,7 +162,7 @@ pub fn mistral_forward_program(
                 &alloc::format!("blk.{layer}.ffn_down.weight"),
             );
 
-            append_mistral_layer(
+            append_gqa_layer(
                 &mut program,
                 x,
                 inv_dim,
@@ -223,7 +223,7 @@ pub fn mistral_forward_program(
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
 
-            let (next_x, site) = append_mistral_moe_layer(
+            let (next_x, site) = append_gqa_routed_layer(
                 &mut program,
                 layer,
                 x,
@@ -297,7 +297,7 @@ pub fn mistral_forward_program(
 /// nothing more.
 pub type CachedLayerRoots = (NodeId, NodeId, NodeId);
 
-/// [`mistral_cached_forward_program_with_experts`]'s two named roots:
+/// [`gqa_cached_forward_program_with_experts`]'s two named roots:
 /// `logits` (the vocab-projection reduce, this program's terminal node) and
 /// `hidden` (`normed_final` -- the LAST-norm activation `logits` is
 /// projected FROM, one layer earlier in the graph). Before this type
@@ -316,7 +316,7 @@ pub struct ForwardRoots {
     pub hidden: NodeId,
 }
 
-/// [`mistral_single_range_cached_forward_program`]'s own return shape:
+/// [`gqa_single_range_cached_forward_program`]'s own return shape:
 /// the lowered program, its `logits` root, one [`CachedLayerRoots`] per
 /// layer, and ROW 326/328's [`DuplicateHeadPosition`] scratch output
 /// (`Some` only when that position is not [`DuplicateHeadPosition::None`]
@@ -324,12 +324,12 @@ pub struct ForwardRoots {
 pub(super) type SingleRangeForwardProgram =
     (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option<NodeId>);
 
-/// [`mistral_cached_forward_program_with_experts_and_layer_taps`]'s own
+/// [`gqa_cached_forward_program_with_experts_and_layer_taps`]'s own
 /// return shape: the lowered program, its [`ForwardRoots`], one
 /// [`CachedLayerRoots`] per layer, one residual [`NodeId`] per layer
 /// (that function's own doc on what the fourth element is for), and one
 /// [`MoeSite`] per MoE layer (empty on a dense checkpoint).
-pub(super) type MistralMoeForwardProgramWithLayerTaps = (
+pub(super) type GqaRoutedForwardProgramWithLayerTaps = (
     Vec<Op>,
     ForwardRoots,
     Vec<CachedLayerRoots>,
@@ -367,7 +367,7 @@ pub enum DuplicateHeadPosition {
 /// in the oracle, never dropped), `v` the un-rotated projected value.
 pub type DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
 
-/// [`append_mistral_layer`]'s key/value-cached counterpart: `x` carries only
+/// [`append_gqa_layer`]'s key/value-cached counterpart: `x` carries only
 /// the `new` positions this call introduces (`s`, sized by symbol 0), and
 /// attention blends two disjoint key/value sources instead of one —
 /// `k_even_cache`/`k_odd_cache`/`v_cache` (already-rotated positions from
@@ -395,7 +395,7 @@ pub type DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
 /// (`Qwen3Attention.q_norm`/`.k_norm`, `modeling_qwen3.py`, applied to
 /// `query_states`/`key_states` before `apply_rotary_pos_emb`). `None` skips
 /// both calls entirely, leaving `q`/`k_new` exactly as
-/// [`mistral_cached_forward_program`]'s own dense checkpoints have always
+/// [`gqa_cached_forward_program`]'s own dense checkpoints have always
 /// computed them -- this one flag is what lets a single layer builder serve
 /// both architectures rather than forking a parallel copy for the two extra
 /// ops Qwen3 needs.
@@ -455,7 +455,7 @@ pub type DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
 /// full-shape node regardless, which this branch already provides via the
 /// same extract, but no call site in this crate combines the two flags
 /// today and the combination is untested.
-/// Where `append_mistral_cached_layer` reads `q`/`k_new`/`v_new` from --
+/// Where `append_gqa_cached_layer` reads `q`/`k_new`/`v_new` from --
 /// [`Self::Split`] is today's three independent reduces; [`Self::Fused`]
 /// carries the one shared flat-row reduce plus the byte offset `v_new`'s
 /// rows start at within it (`fused_qkv_reduce`'s own doc on that function).
@@ -469,7 +469,7 @@ pub(super) enum QkvSource {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn append_mistral_cached_layer(
+pub fn append_gqa_cached_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,

@@ -308,7 +308,7 @@ fn safetensors_has_qk_norm(manifest: &Manifest) -> bool {
 /// `attn_q`/`attn_k`.
 // one weight's own real shape (lookup/store names, head geometry, in_dim)
 // plus the file/state every binder in this module threads through -- the
-// same shape `proxima_tensor::spec::append_mistral_cached_moe_layer`
+// same shape `proxima_tensor::spec::append_gqa_cached_routed_layer`
 // carries its own `#[allow(clippy::too_many_arguments)]` for.
 #[allow(clippy::too_many_arguments)]
 fn hf_bind_rope_weight<'file>(
@@ -462,7 +462,7 @@ pub mod names {
 }
 
 /// The forward program's own node names -- exactly the GGUF-convention
-/// strings [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
+/// strings [`proxima_tensor::spec::gqa_cached_forward_program_with_experts`]
 /// builds its `Op::Input` leaves with (`spec.rs`'s own `blk.{layer}.*`/
 /// `token_embd.weight`/`output_norm.weight`/`output.weight` literals), never
 /// [`names`]'s HF-convention strings. `LoadedModel`'s `Pipe::call` impl
@@ -525,7 +525,7 @@ pub mod node_names {
 }
 
 /// HF/safetensors counterpart to [`crate::bind_leaves::bind_program_leaves`]: binds
-/// every weight [`proxima_tensor::spec::mistral_cached_forward_program`]
+/// every weight [`proxima_tensor::spec::gqa_cached_forward_program`]
 /// needs out of a single safetensors buffer's [`Manifest`], using HF's own
 /// per-tensor names ([`names`]) in place of GGUF's `blk.{n}.*` convention.
 ///

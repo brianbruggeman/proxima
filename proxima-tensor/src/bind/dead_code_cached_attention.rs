@@ -1760,7 +1760,7 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         }
-        // Every caller of `mistral_cached_forward_program_with_experts`
+        // Every caller of `gqa_cached_forward_program_with_experts`
         // supplies a rank-0 "cached_len" `Op::Input` unconditionally
         // (`find_named_input`'s own doc) -- when a program predates that
         // (a hand-built test fixture with no such leaf), fall back to the
@@ -1832,13 +1832,13 @@ pub(super) fn cached_attention_candidates(
 }
 
 /// [`cached_attention_candidates`]'s counterpart for
-/// [`crate::spec::append_mistral_single_range_cached_layer`]'s output shape:
+/// [`crate::spec::append_gqa_single_range_cached_layer`]'s output shape:
 /// one merged key/value range instead of a cached/new pair, so there is no
 /// online-softmax combine to unwind — `attended` is a plain single-pass
 /// softmax over one masked score matrix
 /// (`score_even+score_odd` -> mask -> max -> sub+exp -> sum -> reciprocal ->
 /// multiply -> weight the one value range), the same eight-step chain
-/// [`crate::spec::append_mistral_layer`] emits for a from-scratch (no cache)
+/// [`crate::spec::append_gqa_layer`] emits for a from-scratch (no cache)
 /// forward pass. The fused [`BoundOpKind::CachedAttention`] still declares
 /// two key/value ranges (its only shape today, per this module's own
 /// `no new BoundOpKind` constraint): the single merged range is placed in

@@ -5,7 +5,7 @@
 //! hybrid, whose zero-KV-head layers the tensor directory resolves). Composes
 //! [`crate::bind::architecture_from_metadata`],
 //! [`crate::bind::checkpoint_has_qk_norm`], and
-//! [`proxima_tensor::spec::mistral_descriptor_from_shape`] built straight off
+//! [`proxima_tensor::spec::gqa_descriptor_from_shape`] built straight off
 //! this checkpoint's own parsed hyperparameters; [`build_forward`]'s
 //! `CacheStrategy::Cached`, `CacheMask::Bounded` arm lowers the result
 //! (`expert_count`/`expert_used_count` off the checkpoint's own metadata is
@@ -22,7 +22,7 @@
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
     AttentionScoreScale, CacheStrategy, EmbeddingScale, LayerAttentionConfig, LayerKind, LayerSchedule,
-    ModelDescriptor, mistral_descriptor_from_shape,
+    ModelDescriptor, gqa_descriptor_from_shape,
 };
 
 use crate::bind::{
@@ -47,7 +47,7 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHpara
 }
 
 /// The dense checkpoint's whole pre-lowering program as one config:
-/// [`mistral_descriptor_from_shape`] over the family profile
+/// [`gqa_descriptor_from_shape`] over the family profile
 /// `general.architecture` names, the header's own scales layered on top, and
 /// the logits row count the checkpoint's task needs. [`build_forward`] over
 /// the result is the entire lowering; serialize the descriptor and a restored
@@ -68,7 +68,7 @@ pub fn descriptor_from_gguf(
     // do not silently select a representative value for this uniform
     // program.
     let kv_heads = architecture.uniform_attention_kv_heads()?;
-    let descriptor = mistral_descriptor_from_shape(
+    let descriptor = gqa_descriptor_from_shape(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,

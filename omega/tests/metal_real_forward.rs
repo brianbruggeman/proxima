@@ -2,7 +2,7 @@
 //! CPU against device.
 //!
 //! Every other GPU number in this workspace comes from a synthetic matvec.
-//! This binds `mistral_cached_forward_program` — the same builder
+//! This binds `gqa_cached_forward_program` — the same builder
 //! `proxima-model-interop` uses for a real token — and runs it through both
 //! evaluators on identical named blocks.
 //!

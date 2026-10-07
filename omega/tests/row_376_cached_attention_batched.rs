@@ -27,7 +27,7 @@
 //!
 //! Builds the REAL openchat decode shape (32 query heads, 8 kv heads,
 //! head_dim 128, GQA group 4) through the production single-range merged-KV
-//! builder, [`mistral_single_range_cached_forward_program`] -- the exact
+//! builder, [`gqa_single_range_cached_forward_program`] -- the exact
 //! function `omega/tests/support/mod.rs`'s `real_single_range_forward_
 //! fixture_with_padding` already wraps at toy dimensions for parity tests;
 //! this file calls the SAME production function at real dimensions instead
@@ -49,9 +49,9 @@
 //! `NumericPolicy::llama_relaxed()` is the compiled production default
 //! (`proxima-tensor/src/numeric.rs`'s own doc). Merged-KV form throughout
 //! (ROW 366: `cached_key_rows: 0`, a single contiguous KV range) --
-//! `mistral_single_range_cached_forward_program` is the fused-single-range
+//! `gqa_single_range_cached_forward_program` is the fused-single-range
 //! builder that produces exactly that shape, never the two-range kind
-//! `mistral_cached_forward_program` emits.
+//! `gqa_cached_forward_program` emits.
 //!
 //! The `context_length=4096` cell's KV cache roots are ~1 GiB of f32
 //! (`LAYERS * 2 * 4096 * KV_HEADS * HEAD_DIM * 4` bytes) -- `build_fixture`
@@ -69,7 +69,7 @@
 
 use std::time::Instant;
 
-use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
+use proxima_tensor::spec::{DuplicateHeadPosition, gqa_single_range_cached_forward_program};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, NumericPolicy, Op, block_node_ids, infer};
 
@@ -100,7 +100,7 @@ fn build_fixture(context_length: u64) -> Row376Fixture {
     let cached_len = context_length - 1;
     let new_count = 1u64;
 
-    let (program, logits_root, cache_roots, _) = mistral_single_range_cached_forward_program(
+    let (program, logits_root, cache_roots, _) = gqa_single_range_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,

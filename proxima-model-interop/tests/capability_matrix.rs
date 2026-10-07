@@ -234,7 +234,7 @@ async fn dense_cpu_q2_k_forward_prefill_and_decode() {
 #[proxima::test]
 #[ignore = "proxima_tensor::cpu::evaluate_quantized_named_with_scratch (the evaluator LoadedModel::call \
             drives) is f32-only: reject_non_float32 (proxima-tensor/src/cpu.rs) rejects any non-Float32 \
-            elementwise node outright, and mistral_cached_forward_program has no f16-typed variant; a \
+            elementwise node outright, and gqa_cached_forward_program has no f16-typed variant; a \
             non-float32 program must instead route through evaluate_typed, which generate.rs never calls"]
 async fn dense_cpu_f16_activation_forward_prefill_and_decode() {
     let (_ids, _text, _stopped) = run_cpu(GgmlType::F16, 2)
@@ -247,7 +247,7 @@ async fn dense_cpu_f16_activation_forward_prefill_and_decode() {
 /// [`run_cpu`]'s MoE counterpart: [`support::checkpoint_bytes_moe`] instead
 /// of [`support::checkpoint_bytes`], so `architecture.expert_count > 0`
 /// reaches `LoadedModel::load`'s routed branch
-/// (`proxima_tensor::spec::mistral_cached_forward_program_with_experts`)
+/// (`proxima_tensor::spec::gqa_cached_forward_program_with_experts`)
 /// instead of the dense one.
 async fn run_cpu_moe(
     codec: GgmlType,

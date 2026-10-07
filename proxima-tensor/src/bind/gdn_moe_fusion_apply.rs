@@ -1280,7 +1280,7 @@ pub(super) fn apply_gated_delta_net_fusion(
 /// output reduced over the contraction axis -- [`crate::spec::append_moe_ffn`]'s
 /// own `PerRoute` gate/up projection shape (`reduce(.., ScalarOp::Add,
 /// ReduceInit::Zero, gathered_expert_product(stack, route, x), ..)`,
-/// `spec/mistral_layer_moe.rs`'s own `append_moe_ffn` body) -- returning the
+/// `spec/gqa_layer_routed.rs`'s own `append_moe_ffn` body) -- returning the
 /// `(stack, route, x)` triple every round shares everything but `route`. The
 /// down projection (`append_moe_round_output`'s own weighted-sum reduce)
 /// shares this exact shape too, so this matcher serves all three

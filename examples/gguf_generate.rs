@@ -15,14 +15,14 @@
 //! has never seen is not rejected up front. [`LoadedModel::load`]
 //! (`proxima-model-interop/src/generate.rs`) is the one architecture-routing
 //! seam: every checkpoint but `qwen35` still compiles
-//! `mistral_cached_forward_program_with_experts`, a dense-attention-plus-MoE
+//! `gqa_cached_forward_program_with_experts`, a dense-attention-plus-MoE
 //! shape with no state-space/Mamba path; `qwen35`'s own hybrid
 //! attention+state-space checkpoint routes to
 //! [`proxima_tensor::spec::qwen35_forward_program`] instead, interleaving
-//! `append_mistral_cached_layer`'s dense-attention shape with
+//! `append_gqa_cached_layer`'s dense-attention shape with
 //! `append_qwen35_ssm_mixer`'s gated-DeltaNet mixer per
 //! `crate::recurrent_interval::IntervalLayerKind`. Its dense-attention layers still run
-//! `append_mistral_cached_layer`'s single-section RoPE rather than this
+//! `append_gqa_cached_layer`'s single-section RoPE rather than this
 //! checkpoint's real 4-section MRoPE (`qwen35.rope.dimension_sections`) --
 //! a known, documented correctness gap on those layers, not a crash -- this
 //! example exists to observe which outcome a real checkpoint gets, not to

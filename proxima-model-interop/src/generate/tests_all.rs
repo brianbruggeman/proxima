@@ -1396,7 +1396,7 @@ pub(super) mod tests {
     /// the rotated halves) to drive `qwen35_forward_program`'s
     /// `DenseAttention` cache path through
     /// [`DenseAttentionPadScratch`] the same way the MoE test above
-    /// drives `mistral_cached_forward_program_with_experts`'s `Attention`
+    /// drives `gqa_cached_forward_program_with_experts`'s `Attention`
     /// path through [`KvPadScratch`]. Asserts `plan_hits`/`plan_misses`
     /// only, per this card's own fake-fixture allowance -- no
     /// `OUTPUT_BUFFER_ALLOCATIONS`/CPU-vs-Metal comparison, since those need

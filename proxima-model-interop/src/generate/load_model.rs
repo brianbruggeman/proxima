@@ -881,7 +881,7 @@ pub struct LoadedModel<'file> {
     pub(super) logits_root: NodeId,
     /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
     /// (`Self::load`/`Self::load_from_safetensors`, both wrapping
-    /// `mistral_cached_forward_program_with_experts`) -- `None` on the
+    /// `gqa_cached_forward_program_with_experts`) -- `None` on the
     /// recurrent-interval hybrid path (`crate::recurrent_interval::qwen35_forward_program` returns
     /// a bare `logits` root with no named hidden-state counterpart yet).
     pub(super) hidden_root: Option<NodeId>,
@@ -896,7 +896,7 @@ pub struct LoadedModel<'file> {
     /// One entry per forward-program layer, in layer order --
     /// [`LayerCacheRoots::Attention`] for every layer on the dense path
     /// (`Self::load`/`Self::load_from_safetensors` wrap
-    /// `mistral_cached_forward_program_with_experts`'s own
+    /// `gqa_cached_forward_program_with_experts`'s own
     /// [`CachedLayerRoots`] in that variant so both checkpoint families
     /// share one cache-threading loop, [`Self::run_decode_loop`]), and a mix
     /// of [`LayerCacheRoots::Attention`]/[`LayerCacheRoots::Ssm`] on the
@@ -929,7 +929,7 @@ pub struct LoadedModel<'file> {
     /// `crate::lowering::BoundProgram::single_position_step` off this
     /// checkpoint's own bound program (`false` for every non-GGUF load entry
     /// point below, all of which wrap
-    /// `mistral_cached_forward_program_with_experts`) -- read by
+    /// `gqa_cached_forward_program_with_experts`) -- read by
     /// [`Self::run_decode_loop_observed_seeded`] to decide whether prefill
     /// batches its whole prompt into one evaluation or feeds it one
     /// position at a time.
@@ -951,7 +951,7 @@ pub struct LoadedModel<'file> {
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
     /// dense, non-recurrent-interval, non-MoE path (the single-range program is
-    /// dense-only, see [`mistral_single_range_cached_forward_program`]'s
+    /// dense-only, see [`gqa_single_range_cached_forward_program`]'s
     /// own doc). CPU decode, any MoE checkpoint, and the recurrent-interval hybrid path
     /// always run the two-range `program`/`layer_roots` fields instead;
     /// [`Self::run_decode_loop`] picks whichever this field's presence and
@@ -1250,7 +1250,7 @@ pub(super) fn missing_program_input(
     })
 }
 
-/// [`mistral_single_range_cached_forward_program`]'s compiled output, plus
+/// [`gqa_single_range_cached_forward_program`]'s compiled output, plus
 /// the one thing that function's own signature does not return: the
 /// per-layer `kv_cache.{layer}.{k_even,k_odd,v}` [`Op::Input`] node ids
 /// (`cache_input_nodes`) that a placed *read* targets -- [`CachedLayerRoots`]
@@ -1290,13 +1290,13 @@ pub(super) fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, Inte
 
 /// Builds [`SingleRangeProgram`] for a checkpoint whose
 /// `architecture.expert_count == 0` -- `None` for any mixture-of-experts
-/// checkpoint, since [`mistral_single_range_cached_forward_program`] is
+/// checkpoint, since [`gqa_single_range_cached_forward_program`] is
 /// dense-only (that function's own doc). Never called for a recurrent-interval
 /// checkpoint: [`LoadedModel::load`]'s recurrent-interval branch returns before this
 /// function's own call site is reached.
 ///
 /// # Errors
-/// Whatever [`mistral_single_range_cached_forward_program`] can fail with,
+/// Whatever [`gqa_single_range_cached_forward_program`] can fail with,
 /// or [`InteropError::UnboundInputName`] if a `kv_cache.{layer}.*` name this
 /// function expects the program to declare is somehow absent (would mean
 /// the program builder and this lookup have drifted out of sync).
@@ -1322,13 +1322,13 @@ pub(super) fn build_single_range_program(
     };
     // ROW 373: `qk_norm` now builds correctly through this path -- the
     // builder derives its per-head norm and RoPE pairing from `qk_norm`
-    // itself (`append_mistral_single_range_cached_layer`'s own doc), so a
+    // itself (`append_gqa_single_range_cached_layer`'s own doc), so a
     // qk-norm checkpoint takes the placed-KV fast path rather than falling
     // back to `Ok(None)`. `Err(TensorError::UnsupportedInBuilder)` still
     // maps to `Ok(None)` below for whatever this builder genuinely cannot
     // express (still dense-only -- MoE is turned away above).
     let (program, logits_root, cache_roots, duplicate_head_scratch) =
-        match mistral_single_range_cached_forward_program(
+        match gqa_single_range_cached_forward_program(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,

@@ -3,7 +3,7 @@
 //! fused kind specifically -- the nine-operand dynamic-`cached_len` shape
 //! (`BoundOpKind::CachedAttention`'s own doc) `metal_real_forward.rs`'s
 //! `fused_cached_attention_root_agrees_between_cpu_and_metal` never reaches,
-//! since that fixture's `mistral_cached_forward_program` only ever produces
+//! since that fixture's `gqa_cached_forward_program` only ever produces
 //! the eight-operand two-range kind.
 //!
 //! Run at three `kv-capacity-bucket` paddings (0, 1, 5 rows past the merged

@@ -57,7 +57,7 @@ config = ["std", "dep:bon", "dep:conflaguration", "smallvec/serde"]
 # Correctness proof (`spec.rs`'s `cpu_mask_zero_ulp`) for the general
 # bucketing mechanism `proxima-model-interop`'s placed-KV Metal decode path
 # relies on: rounding the growing KV extent (`Extent::Symbolic(1)` in
-# `spec::mistral_single_range_cached_forward_program`) up to a bucket
+# `spec::gqa_single_range_cached_forward_program`) up to a bucket
 # instead of binding the true, strictly-increasing `merged_len` directly
 # keeps the plan cache key (`(new_count, extent)`) constant across a whole
 # bucket of decode steps instead of missing every step, PROVIDED the

@@ -4,7 +4,7 @@
 //! [`build_attention_layer_resources`] pre-pass and
 //! [`append_lfm2_layer_ffn`] post-attention/FFN composition verbatim;
 //! [`append_lfm2_single_range_cached_attention`] is the one new piece,
-//! [`single_range_moe_cached::append_mistral_single_range_cached_layer_with_biases`]'s
+//! [`single_range_moe_cached::append_gqa_single_range_cached_layer_with_biases`]'s
 //! own merged-cache scoring generalized the same way
 //! [`append_attention_mixer`] generalized the prefill mixer -- windowed
 //! merged mask ([`causal_mask_merged_windowed`]), [`ValueSource`] (a
@@ -27,7 +27,7 @@ use super::*;
 /// call attends, prior positions and this call's own freshly rotated keys
 /// NOT yet folded in) instead of this call's own freshly rotated
 /// block-local keys, mirroring
-/// `single_range_moe_cached::append_mistral_single_range_cached_layer_with_biases`'s
+/// `single_range_moe_cached::append_gqa_single_range_cached_layer_with_biases`'s
 /// own single-softmax scoring shape. Returns `(post_mixer,
 /// CachedLayerRoots)` -- this call's own freshly rotated
 /// `(k_even, k_odd, v)` for the caller to fold into next call's merged
@@ -320,7 +320,7 @@ pub fn append_lfm2_single_range_cached_attention(
 /// is scored separately, against this call's own in-graph
 /// `rotated_k_new_even`/`rotated_k_new_odd`/`v_new` (never round-tripped
 /// through a cache leaf), the same two-block split
-/// [`single_range_moe_cached::append_mistral_cached_moe_layer`]'s own
+/// [`single_range_moe_cached::append_gqa_cached_routed_layer`]'s own
 /// `score_cached`/`score_new` combine already established. `window`
 /// composes the identical too-old distance check
 /// [`causal_mask_merged_windowed`] uses, OR-ed onto `is_padding` by the
@@ -412,7 +412,7 @@ pub(super) fn causal_mask_cached_windowed(
 /// `k_even_cache`/`k_odd_cache`/`v_cache` before they exist) is closed the
 /// way every OTHER production cached engine in this crate already closes
 /// it --
-/// [`single_range_moe_cached::append_mistral_cached_moe_layer`]'s own
+/// [`single_range_moe_cached::append_gqa_cached_routed_layer`]'s own
 /// two-block online-softmax combine, generalized with the exact same
 /// per-layer knobs [`append_lfm2_single_range_cached_attention`] already
 /// threads ([`ValueSource`], [`RopePairing`], `post_attention_norm`,
@@ -872,7 +872,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
 
     // Host-supplied gather leaf, not a `gather_last_row`-style in-program
     // reduction -- the same `lm_head_row` contract
-    // `mistral_single_range_cached_forward_program`'s own `last_row_only`
+    // `gqa_single_range_cached_forward_program`'s own `last_row_only`
     // arm uses, so this builder's decode-time binding stays identical to
     // every other single-range cached engine's.
     let normed_last = if last_row_only {

@@ -239,7 +239,7 @@ pub enum TensorError {
     #[error("quantized matmul shape mismatch: {reason}")]
     QuantizedShapeMismatch { reason: &'static str },
 
-    /// [`crate::spec::mistral_forward_program`]'s routed-FFN branch needs
+    /// [`crate::spec::gqa_forward_program`]'s routed-FFN branch needs
     /// `1 <= expert_used_count <= expert_count`: zero experts selected per
     /// token is a config that can never route, and selecting more experts
     /// than exist has no meaning.

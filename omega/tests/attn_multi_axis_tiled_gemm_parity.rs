@@ -1,7 +1,7 @@
 //! ROW 114's own correctness gate: `q4k_matmul_layout.rs` proves ONE
 //! weight-owned output axis at tile scale; the attention Q/K/V/attn_output
 //! projections keep TWO (`heads`, `head_dim` -- `wq`'s own declared shape in
-//! `proxima_tensor::spec::mistral_cached_forward_program`), folded into one
+//! `proxima_tensor::spec::gqa_cached_forward_program`), folded into one
 //! flattened feature dimension by [`classify_tiled_gemm`]'s generalized
 //! axis-group check. This is the shape that check newly admits, checked at
 //! tile scale (many tokens, `heads*head_dim` NOT a whole multiple of
@@ -30,7 +30,7 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 
 /// `[tokens, in_dim] x [in_dim, heads, head_dim] -> [tokens, heads,
 /// head_dim]`, reduced over `in_dim` -- the exact iteration shape
-/// `append_mistral_cached_layer`'s own `q_product`/`q` reduce takes
+/// `append_gqa_cached_layer`'s own `q_product`/`q` reduce takes
 /// (`"si->shdi"` then `"shdi->shd"`, with the einsum's `s`/`h`/`d`/`i`
 /// relabeled `tok`/`head`/`hd`/`in` here), generalized to `tokens > 1` so
 /// the tiled path's `TILED_GEMM_MIN_TOKENS` gate actually opens. Axis order
@@ -303,7 +303,7 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
 
 /// The codegen-level counterpart of ROW 114's own falsifiable criterion:
 /// a real per-token DECODE step (`tokens=1`, the shape every
-/// `mistral_cached_forward_program` decode call actually takes for
+/// `gqa_cached_forward_program` decode call actually takes for
 /// `attn_q`/`attn_k`/`attn_v`/`attn_output`) must stay on the row-blocked
 /// `q4k_run8` vector path, never the `simdgroup_matrix`-tiled one --
 /// `classify_tiled_gemm`'s `TokenExtentBelowMinimum` gate exists precisely

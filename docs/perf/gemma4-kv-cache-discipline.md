@@ -30,7 +30,7 @@ Home-turf / Δ / Notes.
   path (`--ignore-chat-template`), so this is an honest home-turf throughput
   number, not a token-identity comparison.
 
-**Tier evidence:** `cargo check -p proxima-model-interop --features std,metal,gemma4-kv-cache` and the same command with `--all-targets` both exit 0 (compiles the new cached gemma4 bind branch, its tests, and its examples). Flag-off equivalents also exit 0 (cacheless branch untouched). `cargo check -p proxima-tensor --features std,config` (+`--all-targets`) exits 0 -- the new `lfm2_single_range_cached.rs` module compiles unconditionally in that crate, matching the existing `single_range_moe_cached.rs`/`mistral_forward_cached.rs` convention (no crate-level feature gate needed there).
+**Tier evidence:** `cargo check -p proxima-model-interop --features std,metal,gemma4-kv-cache` and the same command with `--all-targets` both exit 0 (compiles the new cached gemma4 bind branch, its tests, and its examples). Flag-off equivalents also exit 0 (cacheless branch untouched). `cargo check -p proxima-tensor --features std,config` (+`--all-targets`) exits 0 -- the new `lfm2_single_range_cached.rs` module compiles unconditionally in that crate, matching the existing `single_range_moe_cached.rs`/`gqa_forward_cached.rs` convention (no crate-level feature gate needed there).
 
 **Test N:** `proxima-model-interop` gate for this slice: **261 passed, 0 failed** (`cargo nextest run -p proxima-model-interop --features std,metal`, log at `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/9049d06b-8620-4a97-8fec-5659655eee9d/scratchpad/nextest_gate.log`). `proxima-tensor` CPU spec/bind suite: 669/670 (1 pre-existing unrelated failure, `bind::tests::single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape`, reproduced on the unmodified base commit).
 
@@ -40,7 +40,7 @@ Home-turf / Δ / Notes.
 
 **O(1):** Designed as O(1) per decode step in prior sequence length (`kv_cache.{layer}.k_even/k_odd/v` merged-cache leaves grown once per step via the existing `cached_len` contract, same shape as qwen35moe/mistral). **This is unverified as correct** -- the correctness failure below means the actual per-step read is producing wrong values, so the O(1) claim describes the intended data-flow shape, not a validated property of a working cache.
 
-**Internal-primitive audit:** No new type or trait was minted. Every knob threaded (`LayerAttentionConfig`, `LayerFfnConfig`, `ValueSource`, `AttentionScoreScale`, `RopePairing`, `FfnCombination`) already existed on the prefill (`lfm2_forward_program_with_experts`) side; the new file composes them into a cached-attention builder the same shape as the existing `single_range_moe_cached.rs`/`mistral_forward_cached.rs` siblings. `find_or_insert`/`AttentionLayerResources` were promoted `private -> pub(crate)` (visibility only) so the extracted resource pre-pass could be shared, not to host a new abstraction.
+**Internal-primitive audit:** No new type or trait was minted. Every knob threaded (`LayerAttentionConfig`, `LayerFfnConfig`, `ValueSource`, `AttentionScoreScale`, `RopePairing`, `FfnCombination`) already existed on the prefill (`lfm2_forward_program_with_experts`) side; the new file composes them into a cached-attention builder the same shape as the existing `single_range_moe_cached.rs`/`gqa_forward_cached.rs` siblings. `find_or_insert`/`AttentionLayerResources` were promoted `private -> pub(crate)` (visibility only) so the extracted resource pre-pass could be shared, not to host a new abstraction.
 
 **Tunable axes:** None new -- no magic numbers were introduced; the change composes existing per-layer config types, all of which already resolve through the existing gguf-metadata-driven bind path, not hardcoded constants.
 
@@ -99,7 +99,7 @@ re-bound every step -- an O(n^2) re-prefill, not an explicit
    composition from the prefill tail into the new cached program.
 
 Not a blocker: 128-expert/8-used MoE routing itself -- `expert_count`/
-`expert_used_count` and `append_mistral_cached_moe_layer` already exist and
+`expert_used_count` and `append_gqa_cached_routed_layer` already exist and
 are exercised by qwen35moe's own cached decode path.
 
 ### Correctness verification -- FAILED
@@ -286,7 +286,7 @@ directly, node values in hand.
 `proxima-model-interop/src/gemma4/bind.rs`): a new
 `append_lfm2_two_range_cached_attention` +
 `lfm2_two_range_cached_forward_program_with_experts`, generalizing
-`single_range_moe_cached::append_mistral_cached_moe_layer`'s own
+`single_range_moe_cached::append_gqa_cached_routed_layer`'s own
 already-proven two-block online-softmax combine (reuse-first, no new Op
 variant, no new type) with gemma4's existing knobs (`ValueSource`,
 `RopePairing`, `value_norm`, dual RoPE tables). The cache block scores ONLY

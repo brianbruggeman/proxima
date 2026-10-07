@@ -9,7 +9,7 @@
 //! `cached_len` bound (the fused cached attention excludes the bucket's zero
 //! padding itself). A descriptor carries that choice as
 //! [`CacheMask`](super::CacheMask); the layer builders
-//! ([`append_mistral_cached_layer`], [`append_mistral_cached_moe_layer`],
+//! ([`append_gqa_cached_layer`], [`append_gqa_cached_routed_layer`],
 //! [`append_lfm2_two_range_cached_attention`]) own the projections, norms and
 //! output stage in front of and behind this core.
 

@@ -21,8 +21,8 @@
 #![allow(dead_code)]
 
 use proxima_tensor::spec::{
-    DuplicateHeadPosition, mistral_cached_forward_program,
-    mistral_single_range_cached_forward_program, qwen3_cached_forward_program,
+    DuplicateHeadPosition, gqa_cached_forward_program,
+    gqa_single_range_cached_forward_program, qk_norm_cached_forward_program,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
@@ -79,7 +79,7 @@ pub fn real_forward_fixture_with_cached_len(cached_len: u64) -> RealForwardFixtu
     const HEAD_DIM: u32 = 16;
     const LAYERS: u32 = 2;
 
-    let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+    let (program, logits_root, cache_roots) = gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -144,8 +144,8 @@ pub fn real_forward_fixture_with_cached_len(cached_len: u64) -> RealForwardFixtu
 /// the real Qwen3-1.7B shape's two distinguishing features (`query_heads !=
 /// kv_heads`, already present in the Mistral fixture; split-half RoPE plus
 /// per-head `q_norm`/`k_norm`, which that fixture does NOT exercise) --
-/// built from [`qwen3_cached_forward_program`] instead of
-/// [`mistral_cached_forward_program`], same 2-layer/64-wide/GQA=2 shape.
+/// built from [`qk_norm_cached_forward_program`] instead of
+/// [`gqa_cached_forward_program`], same 2-layer/64-wide/GQA=2 shape.
 /// `new_count` (symbol 0, hardcoded to `1` in the Mistral fixture) is a
 /// caller parameter here so a query_rows > 1 (multi-row prefill/resume)
 /// step can be reproduced against the same cache, not only single-token
@@ -159,7 +159,7 @@ pub fn qwen3_gqa_qk_norm_forward_fixture(new_count: u64, cached_len: u64) -> Rea
     const HEAD_DIM: u32 = 16;
     const LAYERS: u32 = 2;
 
-    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+    let (program, logits_root, cache_roots) = qk_norm_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -209,7 +209,7 @@ pub fn qwen3_gqa_qk_norm_forward_fixture(new_count: u64, cached_len: u64) -> Rea
 
 /// The single-range counterpart of [`real_forward_fixture_with_cached_len`]:
 /// same real op set and shape family (2-layer, 64-wide GQA), built from
-/// [`mistral_single_range_cached_forward_program`] instead, whose
+/// [`gqa_single_range_cached_forward_program`] instead, whose
 /// `causal_mask_merged` band `bind`'s `cached_attention_single_range_
 /// candidates` pattern-matches into the NINE-operand dynamic-`cached_len`
 /// [`proxima_tensor::BoundOpKind::CachedAttention`] (`omega/src/msl.rs`'s
@@ -239,7 +239,7 @@ pub fn real_single_range_forward_fixture_with_padding(
     const HEAD_DIM: u32 = 16;
     const LAYERS: u32 = 2;
 
-    let (program, logits_root, cache_roots, _) = mistral_single_range_cached_forward_program(
+    let (program, logits_root, cache_roots, _) = gqa_single_range_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,

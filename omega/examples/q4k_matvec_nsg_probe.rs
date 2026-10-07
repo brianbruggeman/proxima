@@ -6,7 +6,7 @@
 //!
 //! Reuses `q4k_matmul_layout.rs`'s program shape (weight declared
 //! `[in_dim, out_dim]`, reduction axis first -- the convention every real
-//! matmul weight in `mistral_forward_program` uses, and independently
+//! matmul weight in `gqa_forward_program` uses, and independently
 //! checked there against a from-scratch dequantize+dot oracle, not just
 //! against the CPU backend) and ROW 71's two-size marginal-bandwidth method
 //! (`proxima-tensor/docs/discipline.md:5079-5081`), extended to report a
@@ -93,7 +93,7 @@ fn run() {
 
     // Weight declared `[in_dim, out_dim]`, reduction axis first -- exactly
     // `q4k_matmul_layout.rs`'s `matmul_program`, the shape
-    // `mistral_forward_program`'s own real weights use and the shape that
+    // `gqa_forward_program`'s own real weights use and the shape that
     // file's own committed parity test holds to an independent
     // dequantize+dot oracle (not just to the CPU backend).
     fn matvec_program(in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {

@@ -21,7 +21,7 @@
 //! orchestration below it (`bind_program_leaves` and friends, `pub(crate)`:
 //! [`crate::generate::LoadedModel::load`] is their one caller) turn that
 //! same `(ParsedGguf, file_bytes)` pair into every input
-//! `proxima_tensor::spec::mistral_cached_forward_program` needs, still
+//! `proxima_tensor::spec::gqa_cached_forward_program` needs, still
 //! without opening a file.
 
 use alloc::collections::BTreeSet;
@@ -911,7 +911,7 @@ pub fn vocab_from_token_embedding(
     Ok((elements / divisor) as u32)
 }
 
-/// Every weight [`proxima_tensor::spec::mistral_cached_forward_program`]
+/// Every weight [`proxima_tensor::spec::gqa_cached_forward_program`]
 /// binds by name, split into owned `f32` buffers (norms, plus
 /// `token_embd.weight`, which is an embedding lookup rather than a matmul
 /// operand and so has no packed kernel), zero-copy packed blocks
@@ -1662,7 +1662,7 @@ pub(crate) fn quantize_to_kind(
 /// Binds `gate_name`/`up_name` (`blk.{layer}.ffn_gate.weight`/
 /// `blk.{layer}.ffn_up.weight`) as ONE packed operand under `target_name`
 /// (`blk.{layer}.ffn_gate_up.weight`) -- the loader half of
-/// `proxima_tensor::spec::append_mistral_cached_layer`'s
+/// `proxima_tensor::spec::append_gqa_cached_layer`'s
 /// `paired_gate_up_reduce` flag. Requires both tensors share one packed
 /// codec (checked, not assumed): the paired reduce's single
 /// [`proxima_tensor::cpu::QuantizedBlock`] can only speak one packed format.
@@ -1741,7 +1741,7 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
 /// `q_name`/`k_name`/`v_name` (`blk.{layer}.attn_q.weight`/`attn_k.weight`/
 /// `attn_v.weight`) as ONE packed operand under `target_name`
 /// (`blk.{layer}.attn_qkv.weight`) -- the loader half of
-/// `proxima_tensor::spec::append_mistral_cached_layer`'s `fused_qkv_reduce`
+/// `proxima_tensor::spec::append_gqa_cached_layer`'s `fused_qkv_reduce`
 /// flag. Requires all three tensors share one packed codec, the same
 /// contract [`bind_matmul_weight_paired`] enforces for its pair.
 ///
@@ -2022,7 +2022,7 @@ pub(crate) fn bind_moe_stacked_experts<'file>(
 // one weight family's own tensor shape (layer/projection/expert_count/
 // out_dim/in_dim) plus the file/state every binder in this module threads
 // through -- the same real parameter count `append_moe_ffn`/
-// `append_mistral_moe_layer` (proxima-tensor/src/spec.rs) carry for the
+// `append_gqa_routed_layer` (proxima-tensor/src/spec.rs) carry for the
 // identical MoE shape, not accidental complexity.
 #[allow(clippy::too_many_arguments)]
 pub fn bind_moe_expert_weights<'file>(
@@ -3438,7 +3438,7 @@ mod real_openchat_file {
         );
     }
 
-    /// Byte-identity oracle for `proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// Byte-identity oracle for `proxima_tensor::spec::append_gqa_cached_layer`'s
     /// `paired_gate_up_reduce` flag: [`LoadedModel::load`] (`false`) against
     /// [`LoadedModel::load_with_paired_gate_up_reduce`] (`true`), same real
     /// checkpoint, same prompt, `PROXIMA_MAX_TOKENS` (default 3 for this
@@ -3494,7 +3494,7 @@ mod real_openchat_file {
         );
     }
 
-    /// Byte-identity oracle for `proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// Byte-identity oracle for `proxima_tensor::spec::append_gqa_cached_layer`'s
     /// `fused_qkv_reduce` flag, same structure as
     /// [`paired_gate_up_reduce_matches_the_two_matvec_baseline_byte_for_byte`]
     /// above. CURRENTLY CANNOT RUN END-TO-END against this crate's own
@@ -4114,7 +4114,7 @@ mod real_openchat_file {
     }
 
     /// Bisect diagnostic (fix/qwen3moe-forward): requests
-    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps`]'s
+    /// [`proxima_tensor::spec::gqa_cached_forward_program_with_experts_and_layer_taps`]'s
     /// per-layer residual taps as EXTRA outputs on both the CPU route and
     /// the Metal route for a single 5-token prefill step, and prints each
     /// layer's max relative diff. A BOUNDED output request (`block_count`
@@ -4142,9 +4142,9 @@ mod real_openchat_file {
             architecture_from_metadata(&parsed).expect("derive architecture from real metadata");
         let qk_norm = crate::bind::checkpoint_has_qk_norm(&parsed);
 
-        use proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps;
+        use proxima_tensor::spec::gqa_cached_forward_program_with_experts_and_layer_taps;
         let (program, roots, _cache_roots, layer_residuals, _moe_sites) =
-            mistral_cached_forward_program_with_experts_and_layer_taps(
+            gqa_cached_forward_program_with_experts_and_layer_taps(
                 architecture.vocab,
                 architecture.embedding,
                 architecture.feed_forward,
@@ -4566,8 +4566,8 @@ mod real_openchat_file {
             let architecture = architecture_from_metadata(&parsed)
                 .expect("derive architecture from real metadata");
 
-            use proxima_tensor::spec::mistral_cached_forward_program;
-            let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+            use proxima_tensor::spec::gqa_cached_forward_program;
+            let (program, logits_root, cache_roots) = gqa_cached_forward_program(
                 architecture.vocab,
                 architecture.embedding,
                 architecture.feed_forward,
@@ -5827,7 +5827,7 @@ mod real_mixtral_file {
     ///
     /// **Stale-doc correction (this change): the two gaps this doc used to
     /// describe are not both live any more.** `LoadedModel::load` now calls
-    /// `proxima_tensor::spec::mistral_cached_forward_program_with_experts`
+    /// `proxima_tensor::spec::gqa_cached_forward_program_with_experts`
     /// (`generate.rs:351`), which DOES carry `expert_count`/`expert_used_count`
     /// and selects the routed FFN for a MoE checkpoint -- the first gap this
     /// doc used to name (the cached program being permanently dense) closed

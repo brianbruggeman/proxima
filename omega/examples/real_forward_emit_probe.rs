@@ -6,7 +6,7 @@
 //! a token, has no reference to it — so the kernel being 1.49x off
 //! llama.cpp Metal is worth nothing until the real graph goes through it.
 //!
-//! This needs no GGUF and no weights: `mistral_cached_forward_program`
+//! This needs no GGUF and no weights: `gqa_cached_forward_program`
 //! builds the program from architecture parameters alone, and `bind` +
 //! `emit` are pure functions of the program. So this answers the first
 //! blocking question cheaply — which ops of a real forward can the emitter
@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use proxima_tensor::spec::mistral_cached_forward_program;
+use proxima_tensor::spec::gqa_cached_forward_program;
 use proxima_tensor::{NumericPolicy, bind, infer};
 
 fn main() {
@@ -29,7 +29,7 @@ fn main() {
     const HEAD_DIM: u32 = 128;
     const BLOCKS: u32 = 32;
 
-    let (program, logits_root, cache_roots) = match mistral_cached_forward_program(
+    let (program, logits_root, cache_roots) = match gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
