@@ -17,6 +17,12 @@
 //! `PROXIMA_PROMPT`.
 //!
 //! Packed-weight kernels (a `Q4_0` matvec) are skipped unless `AB_PACKED` is set.
+//! `AB_ONLY_MEMBER=<k>` swaps only the group's k-th member in a step arm.
+//! `AB_WINDOW=<n>` times only the `2n + 1` dispatches around the group's first member
+//! (the variant in place of that member), to tell a kernel's own cost from its effect on
+//! its neighbours.
+//! The bit comparison covers `output_total` values; a fused norm writes its whole
+//! iteration space, so `AB_SPAN_FULL` compares over every element of the extents.
 //! With `AB_SEQUENCE` set, an arm is timed as one command buffer running every
 //! captured member of the group in program order (each member reads its own weight
 //! tensor, as the live step does), after `AB_FLUSH_MIB` (384) of CPU writes evict the
@@ -234,8 +240,17 @@ mod harness {
         members: &[usize],
         replacements: &'a [CapturedDispatch],
     ) -> Vec<&'a CapturedDispatch> {
-        let replaced: BTreeMap<usize, &CapturedDispatch> =
-            members.iter().copied().zip(replacements.iter()).collect();
+        let only_member = std::env::var("AB_ONLY_MEMBER")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
+        let replaced: BTreeMap<usize, &CapturedDispatch> = members
+            .iter()
+            .copied()
+            .zip(replacements.iter())
+            .enumerate()
+            .filter(|(ordinal, _)| only_member.is_none_or(|only| only == *ordinal))
+            .map(|(_, pair)| pair)
+            .collect();
         dispatches
             .iter()
             .enumerate()
@@ -274,9 +289,15 @@ mod harness {
         let passes = env_usize("AB_PASSES", 1);
         let allow_packed = std::env::var_os("AB_PACKED").is_some();
         let describe = std::env::var_os("AB_DESCRIBE").is_some();
+        let span_full = std::env::var_os("AB_SPAN_FULL").is_some();
         let omit_all = std::env::var_os("AB_OMIT_ALL").is_some();
+        let window_radius = std::env::var("AB_WINDOW")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
         let step_sequence = std::env::var_os("AB_STEP_SEQUENCE").is_some();
-        let sequence = step_sequence || std::env::var_os("AB_SEQUENCE").is_some();
+        let sequence = step_sequence
+            || window_radius.is_some()
+            || std::env::var_os("AB_SEQUENCE").is_some();
         let mut scratch = vec![0u8; env_usize("AB_FLUSH_MIB", 384) << 20];
         let variant_dir = PathBuf::from(std::env::var("AB_VARIANT_DIR").expect("AB_VARIANT_DIR"));
         // SAFETY: called from `main` before any thread is spawned.
@@ -386,9 +407,12 @@ mod harness {
                 .iter()
                 .find(|arm| arm.0 == reference_label)
                 .map_or(base, |arm| arm.1[0]);
-            let base_output = reference.replay_output().expect("reference output");
+            let span = span_full.then(|| extents.iter().product::<u64>());
+            let base_output = reference
+                .replay_output_elements(span)
+                .expect("reference output");
             for arm in &arms {
-                let output = arm.1[0].replay_output().expect("arm output");
+                let output = arm.1[0].replay_output_elements(span).expect("arm output");
                 println!(
                     "ab bits sha={} threads={threads} extents={extents:?} arm={} {}",
                     &sha[..SHA_PREFIX_CHARS],
@@ -397,6 +421,39 @@ mod harness {
                 );
             }
             for pass in 0..passes {
+                if let Some(radius) = window_radius {
+                    let ordinals: Vec<usize> = match std::env::var("AB_MEMBER").as_deref() {
+                        Ok("all") => (0..members.len()).collect(),
+                        Ok(value) => vec![value.parse::<usize>().unwrap_or(0).min(members.len() - 1)],
+                        Err(_) => vec![0],
+                    };
+                    for ordinal in ordinals {
+                        let first = members[ordinal];
+                        let low = first.saturating_sub(radius);
+                        let high = (first + radius + 1).min(dispatches.len());
+                        let window_arms: Vec<(String, Vec<&CapturedDispatch>)> = arms
+                            .iter()
+                            .map(|(label, group)| {
+                                let window = (low..high)
+                                    .map(|index| {
+                                        if index == first { group[ordinal] } else { &dispatches[index] }
+                                    })
+                                    .collect();
+                                (label.clone(), window)
+                            })
+                            .collect();
+                        let results = measure_sequence(&window_arms, rounds, &mut scratch, false);
+                        for (arm, total) in window_arms.iter().zip(results) {
+                            println!(
+                                "ab window sha={} extents={extents:?} member={ordinal} first={first} radius={radius} pass={pass} arm={} window_us={:.2}",
+                                &sha[..SHA_PREFIX_CHARS],
+                                arm.0,
+                                total / 1e3
+                            );
+                        }
+                    }
+                    continue;
+                }
                 if step_sequence {
                     let omitted: Vec<&CapturedDispatch> = dispatches
                         .iter()
