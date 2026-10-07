@@ -33,6 +33,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -50,9 +51,12 @@ const PEER_NAMES: [&str; 7] = [
     "speculative_bench",
 ];
 const PEER_WAIT: Duration = Duration::from_secs(3600);
+const LLAMA_ENGINE: &str = "llama-server";
+const OLLAMA_ENGINE: &str = "ollama";
 const LLAMA_PORT: u16 = 8097;
 const OLLAMA_PORT: u16 = 11434;
 const NEW_TOKENS: usize = 128;
+const CONTEXT_TOKENS: usize = 4096;
 const OUTLIER_MAD_SCALE: f64 = 3.0 * 1.4826;
 
 static SERVER_PID: AtomicU32 = AtomicU32::new(0);
@@ -75,21 +79,10 @@ fn kill_registered_server() {
     }
 }
 
-struct KilledOnDrop(Child);
-
-impl KilledOnDrop {
-    fn register(child: Child) -> Self {
-        SERVER_PID.store(child.id(), Ordering::SeqCst);
-        Self(child)
-    }
-}
-
-impl Drop for KilledOnDrop {
-    fn drop(&mut self) {
-        SERVER_PID.store(0, Ordering::SeqCst);
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
+struct Case {
+    name: String,
+    model: String,
+    ollama_tag: Option<String>,
 }
 
 struct Arguments {
@@ -100,8 +93,8 @@ struct Arguments {
     arms: Vec<(String, PathBuf)>,
     llama_server: Option<PathBuf>,
     ollama_tag: Option<String>,
-    http_requests: usize,
     model: String,
+    cases: Vec<Case>,
 }
 
 fn parse_arguments() -> Arguments {
@@ -113,8 +106,8 @@ fn parse_arguments() -> Arguments {
         arms: Vec::new(),
         llama_server: None,
         ollama_tag: None,
-        http_requests: 7,
         model: MODEL_PATH.to_string(),
+        cases: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -127,8 +120,8 @@ fn parse_arguments() -> Arguments {
             "--log" => arguments.log = PathBuf::from(value()),
             "--processes" => arguments.processes = value().parse().expect("integer"),
             "--runs" => arguments.runs = value().parse().expect("integer"),
-            "--requests" => arguments.http_requests = value().parse().expect("integer"),
             "--model" => arguments.model = value(),
+            "--case" => arguments.cases.push(parse_case(&value())),
             "--llama-server" => arguments.llama_server = Some(PathBuf::from(value())),
             "--ollama" => arguments.ollama_tag = Some(value()),
             "--ignore-ollama" => {
@@ -151,7 +144,25 @@ fn parse_arguments() -> Arguments {
         "--prompt-file required"
     );
     assert!(!arguments.log.as_os_str().is_empty(), "--log required");
+    if arguments.cases.is_empty() {
+        arguments.cases.push(Case {
+            name: String::new(),
+            model: arguments.model.clone(),
+            ollama_tag: arguments.ollama_tag.clone(),
+        });
+    }
     arguments
+}
+
+fn parse_case(spec: &str) -> Case {
+    let mut parts = spec.splitn(3, '=');
+    let name = parts.next().expect("--case name=gguf[=ollama_tag]");
+    let model = parts.next().expect("--case name=gguf[=ollama_tag]");
+    Case {
+        name: name.to_string(),
+        model: model.to_string(),
+        ollama_tag: parts.next().map(str::to_string),
+    }
 }
 
 fn utc_now() -> String {
@@ -259,6 +270,8 @@ fn outlier_flags(values: &[f64]) -> Vec<bool> {
 }
 
 struct ArmRuns {
+    case: String,
+    engine: String,
     label: String,
     runs: Vec<(usize, usize, f64)>,
     prefill_runs: Vec<(usize, usize, f64)>,
@@ -268,6 +281,29 @@ struct ArmRuns {
     footprint_by_process: Vec<(usize, usize, f64)>,
     ids_by_run: Vec<Vec<u64>>,
     extra: Vec<String>,
+}
+
+impl ArmRuns {
+    fn new(case: &str, engine: &str, qualified: bool) -> Self {
+        let label = if qualified {
+            format!("{case}.{engine}")
+        } else {
+            engine.to_string()
+        };
+        Self {
+            case: case.to_string(),
+            engine: engine.to_string(),
+            label,
+            runs: Vec::new(),
+            prefill_runs: Vec::new(),
+            ttft_runs: Vec::new(),
+            gpu_peak_runs: Vec::new(),
+            rss_by_process: Vec::new(),
+            footprint_by_process: Vec::new(),
+            ids_by_run: Vec::new(),
+            extra: Vec::new(),
+        }
+    }
 }
 
 fn mad(values: &[f64]) -> f64 {
@@ -347,9 +383,29 @@ fn print_memory(arm: &ArmRuns) {
 }
 
 // bound: each arm against every earlier arm: median <= reference median + max(reference MAD, 2% of reference median), outliers removed
+fn is_server_arm(arm: &ArmRuns) -> bool {
+    arm.engine == LLAMA_ENGINE || arm.engine == OLLAMA_ENGINE
+}
+
+fn bound_references(arms: &[ArmRuns], index: usize) -> Vec<&ArmRuns> {
+    let arm = &arms[index];
+    if is_server_arm(arm) {
+        return Vec::new();
+    }
+    arms.iter()
+        .enumerate()
+        .filter(|(other, reference)| {
+            *other != index
+                && reference.case == arm.case
+                && (is_server_arm(reference) || *other < index)
+        })
+        .map(|(_, reference)| reference)
+        .collect()
+}
+
 fn print_bounds(arms: &[ArmRuns]) {
     for (index, arm) in arms.iter().enumerate() {
-        for reference in &arms[..index] {
+        for reference in bound_references(arms, index) {
             bound_line(arm, reference, "ms_per_token", |each| &each.runs);
             bound_line(arm, reference, "prefill_ms", |each| &each.prefill_runs);
             bound_line(arm, reference, "ttft_ms", |each| &each.ttft_runs);
@@ -427,6 +483,7 @@ fn parse_ids(line: &str) -> Vec<u64> {
 
 fn run_proxima_process(
     arguments: &Arguments,
+    model: &str,
     arm: &mut ArmRuns,
     binary: &PathBuf,
     prompt: &str,
@@ -447,8 +504,8 @@ fn run_proxima_process(
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", std::env::var("HOME").expect("HOME"))
-        .env("PROXIMA_GEMMA4_E2B_GGUF", &arguments.model)
-        .env("PROXIMA_DECODE_MODEL_GGUF", &arguments.model)
+        .env("PROXIMA_GEMMA4_E2B_GGUF", model)
+        .env("PROXIMA_DECODE_MODEL_GGUF", model)
         .env("PROXIMA_SPECULATIVE_TYPES", "none")
         .env("PROXIMA_PROMPT", prompt)
         .env("PROXIMA_MAX_TOKENS", NEW_TOKENS.to_string())
@@ -547,7 +604,36 @@ fn time_report_bytes(line: &str, label: &str) -> Option<f64> {
     value.parse::<f64>().ok()
 }
 
+struct HttpExchange {
+    body: String,
+    first_chunk: Duration,
+}
+
 fn http_request(port: u16, method: &str, path: &str, body: &str, timeout: Duration) -> String {
+    http_exchange(port, method, path, body, timeout).body
+}
+
+fn body_has_data(raw: &[u8]) -> bool {
+    let Some(separator) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&raw[..separator]).to_ascii_lowercase();
+    let payload = &raw[separator + 4..];
+    if head.contains("transfer-encoding: chunked") {
+        !dechunk(payload).is_empty()
+    } else {
+        !payload.is_empty()
+    }
+}
+
+// first_chunk is the client clock from the request write to the first read that carries a complete body chunk
+fn http_exchange(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: &str,
+    timeout: Duration,
+) -> HttpExchange {
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().expect("address");
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).expect("connect");
     stream.set_read_timeout(Some(timeout)).expect("timeout");
@@ -555,9 +641,21 @@ fn http_request(port: u16, method: &str, path: &str, body: &str, timeout: Durati
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
+    let started = Instant::now();
     stream.write_all(request.as_bytes()).expect("write request");
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).expect("read response");
+    let mut first_chunk = None;
+    let mut buffer = vec![0u8; 65_536];
+    loop {
+        let read = stream.read(&mut buffer).expect("read response");
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buffer[..read]);
+        if first_chunk.is_none() && body_has_data(&raw) {
+            first_chunk = Some(started.elapsed());
+        }
+    }
     let separator = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -569,20 +667,27 @@ fn http_request(port: u16, method: &str, path: &str, body: &str, timeout: Durati
     } else {
         payload.to_vec()
     };
-    String::from_utf8(bytes).expect("utf-8 response body")
+    HttpExchange {
+        body: String::from_utf8(bytes).expect("utf-8 response body"),
+        first_chunk: first_chunk.unwrap_or_else(|| started.elapsed()),
+    }
 }
 
 fn dechunk(payload: &[u8]) -> Vec<u8> {
     let mut rest = payload;
     let mut decoded = Vec::new();
     while let Some(line_end) = rest.windows(2).position(|window| window == b"\r\n") {
-        let size_text = std::str::from_utf8(&rest[..line_end]).expect("chunk size text");
-        let size = usize::from_str_radix(size_text.trim(), 16).expect("chunk size");
-        if size == 0 {
+        let Ok(size_text) = std::str::from_utf8(&rest[..line_end]) else {
             break;
-        }
+        };
+        let Ok(size) = usize::from_str_radix(size_text.trim(), 16) else {
+            break;
+        };
         let start = line_end + 2;
-        decoded.extend_from_slice(&rest[start..start + size]);
+        let Some(chunk) = rest.get(start..start + size).filter(|_| size > 0) else {
+            break;
+        };
+        decoded.extend_from_slice(chunk);
         rest = rest.get(start + size + 2..).unwrap_or(&[]);
     }
     decoded
@@ -604,25 +709,78 @@ fn wait_for_http(port: u16, path: &str, seconds: u64) {
     panic!("port {port} never answered {path}");
 }
 
-fn run_llama_arm(arguments: &Arguments, binary: &PathBuf, prompt: &str) -> ArmRuns {
-    require_quiet_gpu("llama-server");
-    log_line(
-        arguments,
-        &format!(
-            "LAUNCH decode_arms llama-server port={LLAMA_PORT} requests={}",
-            arguments.http_requests + 1
+struct ServerRun {
+    prefill_ms: f64,
+    per_token_ms: f64,
+    ttft_ms: f64,
+    ids: Vec<u64>,
+    note: String,
+}
+
+fn json_lines(body: &str, prefix: &str) -> Vec<Value> {
+    body.lines()
+        .filter_map(|line| line.strip_prefix(prefix))
+        .filter_map(|json| serde_json::from_str(json).ok())
+        .collect()
+}
+
+fn llama_request(prompt: &str) -> ServerRun {
+    let body = json!({"prompt": prompt, "n_predict": NEW_TOKENS, "temperature": 0, "top_k": 1, "seed": 1, "cache_prompt": false, "ignore_eos": true, "stream": true, "return_tokens": true}).to_string();
+    let exchange = http_exchange(LLAMA_PORT, "POST", "/completion", &body, Duration::from_secs(120));
+    let events = json_lines(&exchange.body, "data: ");
+    let timings = events
+        .iter()
+        .rev()
+        .find_map(|event| event.get("timings"))
+        .unwrap_or_else(|| {
+            panic!(
+                "llama stream without timings: {}",
+                &exchange.body[..exchange.body.len().min(400)]
+            )
+        });
+    let ids: Vec<u64> = events
+        .iter()
+        .filter_map(|event| event["tokens"].as_array())
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
+    ServerRun {
+        prefill_ms: timings["prompt_ms"].as_f64().expect("prompt_ms"),
+        per_token_ms: timings["predicted_per_token_ms"]
+            .as_f64()
+            .expect("predicted_per_token_ms"),
+        ttft_ms: exchange.first_chunk.as_secs_f64() * 1000.0,
+        note: format!(
+            "prompt_n={} predicted_n={} ids_len={} events={}",
+            timings["prompt_n"],
+            timings["predicted_n"],
+            ids.len(),
+            events.len()
         ),
-    );
-    let server = KilledOnDrop::register(
-        Command::new(binary)
+        ids,
+    }
+}
+
+// the server runs under /usr/bin/time -l so its peak rss is the kernel's, as for the proxima arms
+struct TimedServer {
+    timer: Child,
+    stderr_path: PathBuf,
+}
+
+impl TimedServer {
+    fn spawn(binary: &PathBuf, model: &str, stderr_path: PathBuf) -> Self {
+        let stderr_file = std::fs::File::create(&stderr_path).expect("create server stderr file");
+        let timer = Command::new("/usr/bin/time")
+            .arg("-l")
+            .arg(binary)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", std::env::var("HOME").expect("HOME"))
             .args([
                 "--model",
-                &arguments.model,
+                model,
                 "-c",
-                "4096",
+                &CONTEXT_TOKENS.to_string(),
                 "-ngl",
                 "99",
                 "-np",
@@ -639,61 +797,115 @@ fn run_llama_arm(arguments: &Arguments, binary: &PathBuf, prompt: &str) -> ArmRu
                 &LLAMA_PORT.to_string(),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr_file)
             .spawn()
-            .expect("spawn llama-server"),
-    );
-    wait_for_http(LLAMA_PORT, "/health", 120);
-    let body = json!({"prompt": prompt, "n_predict": NEW_TOKENS, "temperature": 0, "top_k": 1, "seed": 1, "cache_prompt": false, "ignore_eos": true, "stream": false, "return_tokens": true}).to_string();
-    let mut arm = ArmRuns {
-        label: "llama-server".to_string(),
-        runs: Vec::new(),
-        prefill_runs: Vec::new(),
-        ttft_runs: Vec::new(),
-        gpu_peak_runs: Vec::new(),
-        rss_by_process: Vec::new(),
-        footprint_by_process: Vec::new(),
-        ids_by_run: Vec::new(),
-        extra: Vec::new(),
-    };
-    for request in 0..=arguments.http_requests {
-        let answer = http_request(
-            LLAMA_PORT,
-            "POST",
-            "/completion",
-            &body,
-            Duration::from_secs(120),
-        );
-        let parsed: Value = serde_json::from_str(&answer).expect("llama json");
-        let per_token = parsed["timings"]["predicted_per_token_ms"]
-            .as_f64()
-            .unwrap_or_else(|| {
-                panic!(
-                    "llama response without timings: {}",
-                    &answer[..answer.len().min(400)]
-                )
-            });
-        let prompt_n = parsed["timings"]["prompt_n"].as_u64().expect("prompt_n");
-        let ids: Vec<u64> = parsed["tokens"]
-            .as_array()
-            .expect("tokens")
-            .iter()
-            .filter_map(Value::as_u64)
-            .collect();
-        if request > 0 {
-            arm.runs.push((0, request, per_token));
-            arm.prefill_runs.push((0, request, parsed["timings"]["prompt_ms"].as_f64().expect("prompt_ms")));
-        }
-        arm.extra.push(format!(
-            "request={request} prompt_n={prompt_n} predicted_n={} ids_len={}",
-            parsed["timings"]["predicted_n"],
-            ids.len()
-        ));
-        arm.ids_by_run.push(ids);
+            .expect("spawn llama-server under time");
+        SERVER_PID.store(timer.id(), Ordering::SeqCst);
+        let server_pid = Self::child_of(timer.id());
+        SERVER_PID.store(server_pid, Ordering::SeqCst);
+        Self { timer, stderr_path }
     }
-    drop(server);
-    log_line(arguments, "EXIT decode_arms llama-server");
-    arm
+
+    fn child_of(parent: u32) -> u32 {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            let output = Command::new("pgrep")
+                .args(["-P", &parent.to_string()])
+                .output()
+                .expect("pgrep runs");
+            let pid = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .and_then(|line| line.trim().parse::<u32>().ok());
+            if let Some(pid) = pid {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("time pid {parent} never started a child");
+    }
+
+    fn stop(mut self) -> String {
+        kill_registered_server();
+        let started = Instant::now();
+        while self.timer.try_wait().expect("poll timer").is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "llama-server did not exit within 60 s of SIGTERM"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::fs::read_to_string(&self.stderr_path).expect("read server stderr")
+    }
+}
+
+impl Drop for TimedServer {
+    fn drop(&mut self) {
+        kill_registered_server();
+        let _ = self.timer.wait();
+    }
+}
+
+fn push_time_report(arm: &mut ArmRuns, process: usize, report: &str) {
+    for line in report.lines() {
+        if let Some(bytes) = time_report_bytes(line, "maximum resident set size") {
+            arm.rss_by_process.push((process, 0, bytes));
+        }
+        if let Some(bytes) = time_report_bytes(line, "peak memory footprint") {
+            arm.footprint_by_process.push((process, 0, bytes));
+        }
+    }
+}
+
+fn record_server_run(arm: &mut ArmRuns, process: usize, request: usize, run: ServerRun) {
+    arm.extra.push(format!(
+        "process={process} request={request} {} prefill_ms={:.4} ttft_ms={:.4} ms_per_token={:.4}",
+        run.note, run.prefill_ms, run.ttft_ms, run.per_token_ms
+    ));
+    println!(
+        "raw arm={} process={process} run={request} ms_per_token={:.4}",
+        arm.label, run.per_token_ms
+    );
+    std::io::stdout().flush().expect("flush stdout");
+    if request > 0 {
+        arm.runs.push((process, request, run.per_token_ms));
+        arm.prefill_runs.push((process, request, run.prefill_ms));
+        arm.ttft_runs.push((process, request, run.ttft_ms));
+    }
+    arm.ids_by_run.push(run.ids);
+}
+
+fn run_llama_round(
+    arguments: &Arguments,
+    model: &str,
+    binary: &PathBuf,
+    prompt: &str,
+    process: usize,
+    arm: &mut ArmRuns,
+) {
+    require_quiet_gpu(&arm.label);
+    log_line(
+        arguments,
+        &format!(
+            "LAUNCH decode_arms llama-server arm={} process={process} port={LLAMA_PORT} requests={}",
+            arm.label,
+            arguments.runs + 1
+        ),
+    );
+    let stderr_path = arguments
+        .log
+        .with_extension(format!("raw.{}.p{process}.err", arm.label));
+    let server = TimedServer::spawn(binary, model, stderr_path);
+    wait_for_http(LLAMA_PORT, "/health", 120);
+    for request in 0..=arguments.runs {
+        record_server_run(arm, process, request, llama_request(prompt));
+    }
+    let report = server.stop();
+    push_time_report(arm, process, &report);
+    log_line(
+        arguments,
+        &format!("EXIT decode_arms llama-server arm={} process={process}", arm.label),
+    );
 }
 
 fn quit_ollama(arguments: &Arguments) {
@@ -710,13 +922,108 @@ fn quit_ollama(arguments: &Arguments) {
     log_line(arguments, "ollama quit requested");
 }
 
-fn run_ollama_arm(arguments: &Arguments, tag: &str, prompt: &str) -> ArmRuns {
+// sums the rss of every process whose executable path contains ollama, kept as the running maximum
+struct OllamaRssSampler {
+    stop: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<f64>,
+}
+
+fn ollama_rss_bytes() -> f64 {
+    let output = Command::new("ps")
+        .args(["-axo", "rss=,comm="])
+        .output()
+        .expect("ps runs");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("ollama"))
+        .filter_map(|line| line.split_whitespace().next()?.parse::<f64>().ok())
+        .sum::<f64>()
+        * 1024.0
+}
+
+impl OllamaRssSampler {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut peak = 0.0f64;
+            while !flag.load(Ordering::SeqCst) {
+                peak = peak.max(ollama_rss_bytes());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            peak
+        });
+        Self { stop, handle }
+    }
+
+    fn finish(self) -> f64 {
+        self.stop.store(true, Ordering::SeqCst);
+        self.handle.join().expect("rss sampler thread")
+    }
+}
+
+// keep_alive 0 drops the runner and with it Ollama's prompt prefix cache, so every request prefills the whole prompt
+fn ollama_unload(tag: &str) {
+    let body = json!({"model": tag, "keep_alive": 0}).to_string();
+    http_request(OLLAMA_PORT, "POST", "/api/generate", &body, Duration::from_secs(60));
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(60) {
+        let listing: Value = serde_json::from_str(&http_request(
+            OLLAMA_PORT,
+            "GET",
+            "/api/ps",
+            "",
+            Duration::from_secs(5),
+        ))
+        .expect("ollama ps json");
+        if listing["models"].as_array().is_some_and(Vec::is_empty) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    panic!("ollama still holds a model 60 s after keep_alive 0");
+}
+
+// ttft is the client clock to the first streamed chunk minus the server's own load_duration, so a reload is not billed as prefill
+fn ollama_request(tag: &str, prompt: &str) -> ServerRun {
+    let body = json!({"model": tag, "prompt": prompt, "raw": true, "stream": true, "options": {"temperature": 0, "top_k": 1, "num_predict": NEW_TOKENS, "seed": 1, "num_ctx": CONTEXT_TOKENS}}).to_string();
+    let exchange = http_exchange(OLLAMA_PORT, "POST", "/api/generate", &body, Duration::from_secs(300));
+    let events = json_lines(&exchange.body, "");
+    let last = events.last().expect("ollama stream had no events");
+    assert!(
+        last["done"].as_bool().unwrap_or(false),
+        "ollama stream ended without done: {last}"
+    );
+    let eval_count = last["eval_count"].as_u64().expect("eval_count");
+    let eval_duration = last["eval_duration"].as_u64().expect("eval_duration");
+    let load_ms = last["load_duration"].as_f64().unwrap_or(0.0) / 1e6;
+    ServerRun {
+        prefill_ms: last["prompt_eval_duration"].as_f64().expect("prompt_eval_duration") / 1e6,
+        per_token_ms: eval_duration as f64 / eval_count as f64 / 1e6,
+        ttft_ms: exchange.first_chunk.as_secs_f64() * 1000.0 - load_ms,
+        note: format!(
+            "eval_count={eval_count} prompt_eval_count={} load_ms={load_ms:.1} events={}",
+            last["prompt_eval_count"],
+            events.len()
+        ),
+        ids: Vec::new(),
+    }
+}
+
+fn run_ollama_round(
+    arguments: &Arguments,
+    tag: &str,
+    prompt: &str,
+    process: usize,
+    arm: &mut ArmRuns,
+) {
     require_quiet_gpu("ollama");
     log_line(
         arguments,
         &format!(
-            "LAUNCH decode_arms ollama tag={tag} requests={}",
-            arguments.http_requests + 1
+            "LAUNCH decode_arms ollama arm={} tag={tag} process={process} requests={}",
+            arm.label,
+            arguments.runs + 1
         ),
     );
     Command::new("open")
@@ -724,66 +1031,75 @@ fn run_ollama_arm(arguments: &Arguments, tag: &str, prompt: &str) -> ArmRuns {
         .status()
         .expect("open Ollama");
     wait_for_http(OLLAMA_PORT, "/api/tags", 120);
-    let body = json!({"model": tag, "prompt": prompt, "raw": true, "stream": false, "options": {"temperature": 0, "top_k": 1, "num_predict": NEW_TOKENS, "seed": 1}}).to_string();
-    let mut arm = ArmRuns {
-        label: "ollama".to_string(),
-        runs: Vec::new(),
-        prefill_runs: Vec::new(),
-        ttft_runs: Vec::new(),
-        gpu_peak_runs: Vec::new(),
-        rss_by_process: Vec::new(),
-        footprint_by_process: Vec::new(),
-        ids_by_run: Vec::new(),
-        extra: Vec::new(),
-    };
-    for request in 0..=arguments.http_requests {
-        let answer = http_request(
-            OLLAMA_PORT,
-            "POST",
-            "/api/generate",
-            &body,
-            Duration::from_secs(300),
-        );
-        let parsed: Value = serde_json::from_str(&answer).expect("ollama json");
-        let eval_count = parsed["eval_count"].as_u64().expect("eval_count");
-        let eval_duration = parsed["eval_duration"].as_u64().expect("eval_duration");
-        let per_token = eval_duration as f64 / eval_count as f64 / 1e6;
-        arm.extra.push(format!(
-            "request={request} eval_count={eval_count} eval_duration_ns={eval_duration} prompt_eval_count={} prompt_eval_duration_ns={} ms_per_token={per_token:.4}",
-            parsed["prompt_eval_count"], parsed["prompt_eval_duration"]
-        ));
-        if request > 0 {
-            arm.runs.push((0, request, per_token));
-            arm.prefill_runs.push((0, request, parsed["prompt_eval_duration"].as_f64().expect("prompt_eval_duration") / 1e6));
-        }
+    let sampler = OllamaRssSampler::start();
+    for request in 0..=arguments.runs {
+        ollama_unload(tag);
+        record_server_run(arm, process, request, ollama_request(tag, prompt));
     }
+    arm.rss_by_process.push((process, 0, sampler.finish()));
     quit_ollama(arguments);
-    log_line(arguments, "EXIT decode_arms ollama");
-    arm
+    log_line(
+        arguments,
+        &format!("EXIT decode_arms ollama arm={} process={process}", arm.label),
+    );
 }
 
 fn compare_ids(arms: &[ArmRuns]) {
-    let Some(reference) = arms
+    for reference_arm in arms.iter().filter(|arm| arm.engine == LLAMA_ENGINE) {
+        let Some(reference) = reference_arm.ids_by_run.last() else {
+            continue;
+        };
+        for arm in arms
+            .iter()
+            .filter(|arm| arm.case == reference_arm.case && !is_server_arm(arm))
+        {
+            for (run, ids) in arm.ids_by_run.iter().enumerate() {
+                let common = ids
+                    .iter()
+                    .zip(reference.iter())
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                println!(
+                    "ids arm={} run={run} len={} llama_len={} common_prefix={common} equal={}",
+                    arm.label,
+                    ids.len(),
+                    reference.len(),
+                    ids == reference
+                );
+            }
+        }
+    }
+}
+
+fn case_arms(arguments: &Arguments, case: &Case, qualified: bool) -> Vec<ArmRuns> {
+    let mut arms: Vec<ArmRuns> = arguments
+        .arms
         .iter()
-        .find(|arm| arm.label == "llama-server")
-        .and_then(|arm| arm.ids_by_run.last())
-    else {
-        return;
-    };
-    for arm in arms.iter().filter(|arm| arm.label != "llama-server") {
-        for (run, ids) in arm.ids_by_run.iter().enumerate() {
-            let common = ids
+        .map(|(label, _)| ArmRuns::new(&case.name, label, qualified))
+        .collect();
+    if arguments.llama_server.is_some() {
+        arms.push(ArmRuns::new(&case.name, LLAMA_ENGINE, qualified));
+    }
+    if case.ollama_tag.is_some() {
+        arms.push(ArmRuns::new(&case.name, OLLAMA_ENGINE, qualified));
+    }
+    arms
+}
+
+fn run_arm(arguments: &Arguments, case: &Case, prompt: &str, process: usize, arm: &mut ArmRuns) {
+    match (arm.engine.as_str(), &arguments.llama_server, &case.ollama_tag) {
+        (LLAMA_ENGINE, Some(binary), _) => {
+            run_llama_round(arguments, &case.model, binary, prompt, process, arm);
+        }
+        (OLLAMA_ENGINE, _, Some(tag)) => run_ollama_round(arguments, tag, prompt, process, arm),
+        (label, _, _) => {
+            let binary = &arguments
+                .arms
                 .iter()
-                .zip(reference.iter())
-                .take_while(|(left, right)| left == right)
-                .count();
-            println!(
-                "ids arm={} run={run} len={} llama_len={} common_prefix={common} equal={}",
-                arm.label,
-                ids.len(),
-                reference.len(),
-                ids == reference
-            );
+                .find(|(arm_label, _)| arm_label == label)
+                .expect("proxima arm label")
+                .1;
+            run_proxima_process(arguments, &case.model, arm, binary, prompt, process);
         }
     }
 }
@@ -792,40 +1108,25 @@ fn main() {
     install_server_cleanup_hook();
     let arguments = parse_arguments();
     let prompt = std::fs::read_to_string(&arguments.prompt_file).expect("read prompt file");
-    let mut arms: Vec<ArmRuns> = arguments
-        .arms
+    let qualified = arguments.cases.len() > 1;
+    let mut per_case: Vec<Vec<ArmRuns>> = arguments
+        .cases
         .iter()
-        .map(|(label, _)| ArmRuns {
-            label: label.clone(),
-            runs: Vec::new(),
-            prefill_runs: Vec::new(),
-            ttft_runs: Vec::new(),
-            gpu_peak_runs: Vec::new(),
-            rss_by_process: Vec::new(),
-            footprint_by_process: Vec::new(),
-            ids_by_run: Vec::new(),
-            extra: Vec::new(),
-        })
+        .map(|case| case_arms(&arguments, case, qualified))
         .collect();
     for process in 0..arguments.processes {
-        for index in 0..arms.len() {
-            let rotated = (index + process) % arms.len();
-            let binary = arguments.arms[rotated].1.clone();
-            run_proxima_process(&arguments, &mut arms[rotated], &binary, &prompt, process);
+        for (case, arms) in arguments.cases.iter().zip(per_case.iter_mut()) {
+            let count = arms.len();
+            for slot in 0..count {
+                let rotated = (slot + process) % count;
+                run_arm(&arguments, case, &prompt, process, &mut arms[rotated]);
+            }
         }
     }
+    let arms: Vec<ArmRuns> = per_case.into_iter().flatten().collect();
     for arm in &arms {
         print_summary(arm);
     }
     print_bounds(&arms);
-    if let Some(binary) = &arguments.llama_server {
-        arms.push(run_llama_arm(&arguments, binary, &prompt));
-    }
-    if let Some(tag) = &arguments.ollama_tag {
-        arms.push(run_ollama_arm(&arguments, tag, &prompt));
-    }
-    for arm in arms.iter().skip(arguments.arms.len()) {
-        print_summary(arm);
-    }
     compare_ids(&arms);
 }
