@@ -1166,24 +1166,43 @@ pub(super) fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
     Ok(())
 }
 
-/// The `moe-topk-fusion` sibling of [`run_gated_delta_net`]'s own
-/// `state_sink` shape, generalized from one extra output to `2 * top_k`:
-/// [`BoundOpKind::MoeTopK::routes`] (all but round 0, already this op's own
-/// `output`), every [`BoundOpKind::MoeTopK::weights`] entry, then
-/// `weight_total` -- exactly [`moe_topk_extra_node_order`]'s own order, so a
-/// caller can `zip` this sink against that order without either side naming
-/// the other's internal layout.
-pub(super) fn moe_topk_extra_node_order<'routing>(
-    routes: &'routing [NodeId],
-    weights: &'routing [NodeId],
-    weight_total: NodeId,
-) -> impl Iterator<Item = NodeId> + 'routing {
-    routes
-        .iter()
-        .skip(1)
-        .copied()
-        .chain(weights.iter().copied())
-        .chain(core::iter::once(weight_total))
+type MoeTopKExtras<'sink> = Vec<(NodeId, &'sink [f32])>;
+
+/// [`BoundOpKind::moe_topk_extra_outputs`] applied to the sink [`run_moe_topk`] filled:
+/// every extra node paired with its slice. `Ok(None)` for every other kind.
+///
+/// # Errors
+/// [`TensorError::NotLowerable`] when `kind` is a top-k op and `extra` is not
+/// exactly the length its layout implies: a downstream reader would otherwise
+/// find its operand buffer missing and report the wrong node.
+pub(super) fn moe_topk_extras<'sink>(
+    node: NodeId,
+    kind: &BoundOpKind,
+    token_count: usize,
+    extra: &'sink [f32],
+) -> Result<Option<MoeTopKExtras<'sink>>, TensorError> {
+    if !matches!(kind, BoundOpKind::MoeTopK { .. }) {
+        return Ok(None);
+    }
+    let layout = kind.moe_topk_extra_outputs(token_count);
+    let total: usize = layout.iter().map(|(_, length)| *length).sum();
+    if extra.len() != total {
+        return Err(TensorError::NotLowerable {
+            node,
+            reason: "moe top-k extra outputs have the wrong length",
+        });
+    }
+    let mut rest = extra;
+    Ok(Some(
+        layout
+            .into_iter()
+            .map(|(extra_node, length)| {
+                let (block, remaining) = rest.split_at(length);
+                rest = remaining;
+                (extra_node, block)
+            })
+            .collect(),
+    ))
 }
 
 type CachedSoftmaxWeightsExtras<'sink> = [(NodeId, &'sink [f32]); 3];
@@ -1234,11 +1253,11 @@ pub(super) fn cached_softmax_weights_extras<'sink>(
     ]))
 }
 
-/// [`BoundOpKind::MoeTopK`]'s whole computation: `top_k` rounds of
-/// take-the-maximum-with-exclusion over `scores`, ties broken toward the
-/// HIGHER index (ROW 569, `docs/discipline.md`'s own census fixture proves
-/// this is what `mask * expert_index -> reduce(Maximum)` implements, so the
-/// `>=` comparison below -- which keeps advancing to a later index on an
+/// [`BoundOpKind::MoeTopK`]'s whole computation, once per token row of
+/// `scores`: `top_k` rounds of take-the-maximum-with-exclusion, ties broken
+/// toward the HIGHER index (ROW 569, `docs/discipline.md`'s own census fixture
+/// proves this is what `mask * expert_index -> reduce(Maximum)` implements, so
+/// the `>=` comparison below -- which keeps advancing to a later index on an
 /// exact tie -- is the bit-exact match for that construction, not an
 /// arbitrary choice). `weight_r = exp(max_r - max_0)`
 /// (`ExpertGatingFunc::Softmax`'s own softmax-restricted-to-top-k shape,
@@ -1248,10 +1267,8 @@ pub(super) fn cached_softmax_weights_extras<'sink>(
 /// since `weight_total` is this op's own third kind of output, not
 /// recomputed downstream.
 ///
-/// This slice's only supported shape is `n_tokens == 1` (decode) -- checked
-/// here defensively even though [`match_moe_topk`] already declines any
-/// other shape at bind time, the same belt-and-suspenders
-/// [`run_gated_delta_net`] applies to its own `n_tokens`.
+/// `scores` holds `output.len()` rows of `expert_count` values; the sink is
+/// laid out as [`BoundOpKind::moe_topk_extra_outputs`] describes.
 pub(super) fn run_moe_topk<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
@@ -1262,6 +1279,7 @@ pub(super) fn run_moe_topk<B: Deref<Target = [f32]> + Sync>(
         operands,
         expert_count,
         top_k,
+        stacked,
         ..
     } = &resolved.kind
     else {
@@ -1285,57 +1303,66 @@ pub(super) fn run_moe_topk<B: Deref<Target = [f32]> + Sync>(
     let scores = buffer_of(buffers, *scores_node)?;
     let expert_count = *expert_count as usize;
     let top_k = *top_k as usize;
-    if scores.len() != expert_count || output.len() != 1 {
+    let token_count = output.len();
+    if token_count == 0 || scores.len() != token_count * expert_count {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
-            reason: "moe top-k executor only supports this slice's single-token decode shape",
+            reason: "moe top-k scores are not one row of expert_count values per output token",
         });
     }
-    let mut live = scores.to_vec();
-    let mut route0 = 0.0_f32;
-    let mut extra_routes: Vec<f32> = Vec::with_capacity(top_k.saturating_sub(1));
-    let mut extra_weights: Vec<f32> = Vec::with_capacity(top_k);
-    let mut max_selection_0 = 0.0_f32;
-    let mut weight_total = 0.0_f32;
-    for round in 0..top_k {
-        let mut best_index = 0_usize;
-        let mut best_value = f32::NEG_INFINITY;
-        for (index, value) in live.iter().enumerate() {
-            if *value >= best_value {
-                best_value = *value;
-                best_index = index;
+    let layout = resolved.kind.moe_topk_extra_outputs(token_count);
+    let total: usize = layout.iter().map(|(_, length)| *length).sum();
+    let mut extra = vec![0.0_f32; total];
+    let route_block = |round: usize| (round - 1) * token_count;
+    let weight_block = |round: usize| (top_k - 1 + round) * token_count;
+    let total_block = (2 * top_k - 1) * token_count;
+    let stacked_routes_block = (2 * top_k) * token_count;
+    let stacked_weights_block = stacked_routes_block + token_count * top_k;
+    for (token, scores_row) in scores.chunks_exact(expert_count).enumerate() {
+        let mut live = scores_row.to_vec();
+        let mut max_selection_0 = 0.0_f32;
+        let mut weight_total = 0.0_f32;
+        for round in 0..top_k {
+            let mut best_index = 0_usize;
+            let mut best_value = f32::NEG_INFINITY;
+            for (index, value) in live.iter().enumerate() {
+                if *value >= best_value {
+                    best_value = *value;
+                    best_index = index;
+                }
+            }
+            if round == 0 {
+                max_selection_0 = best_value;
+                output[token] = best_index as f32;
+            } else {
+                extra[route_block(round) + token] = best_index as f32;
+            }
+            let weight = (best_value - max_selection_0).exp();
+            extra[weight_block(round) + token] = weight;
+            weight_total += weight;
+            if stacked.is_some() {
+                extra[stacked_routes_block + token * top_k + round] = best_index as f32;
+                extra[stacked_weights_block + token * top_k + round] = weight;
+            }
+            // ROW 569: the graph's own exclusion is `mask = Equal(selection_scores,
+            // max_selection)` then `Select(mask, neg_infinity, selection_scores)`
+            // -- `mask` is `true` at EVERY position tied with this round's own
+            // max, not only the winning (highest) index, so an exact tie excludes
+            // every tied expert in the SAME round, not just the one reported as
+            // `route`. A single-index exclusion here silently diverges from the
+            // unfused chain the moment two experts tie (this executor's own
+            // parity test caught it: unfused round 1 = 255, a naive single-index
+            // exclusion gave 12).
+            for value in live.iter_mut() {
+                if *value == best_value {
+                    *value = f32::NEG_INFINITY;
+                }
             }
         }
-        if round == 0 {
-            max_selection_0 = best_value;
-            route0 = best_index as f32;
-        } else {
-            extra_routes.push(best_index as f32);
-        }
-        let weight = (best_value - max_selection_0).exp();
-        extra_weights.push(weight);
-        weight_total += weight;
-        // ROW 569: the graph's own exclusion is `mask = Equal(selection_scores,
-        // max_selection)` then `Select(mask, neg_infinity, selection_scores)`
-        // -- `mask` is `true` at EVERY position tied with this round's own
-        // max, not only the winning (highest) index, so an exact tie excludes
-        // every tied expert in the SAME round, not just the one reported as
-        // `route`. A single-index exclusion here silently diverges from the
-        // unfused chain the moment two experts tie (this executor's own
-        // parity test caught it: unfused round 1 = 255, a naive single-index
-        // exclusion gave 12).
-        for value in live.iter_mut() {
-            if *value == best_value {
-                *value = f32::NEG_INFINITY;
-            }
-        }
+        extra[total_block + token] = weight_total;
     }
-    output[0] = route0;
     if let Some(sink) = extra_sink {
-        sink.clear();
-        sink.extend(extra_routes);
-        sink.extend(extra_weights);
-        sink.push(weight_total);
+        *sink = extra;
     }
     Ok(())
 }
@@ -1549,17 +1576,14 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             if let BoundOpKind::GatedDeltaNet { state_out, .. } = &resolved.kind {
                 (*buffers)[state_out.0 as usize] = Some(B::from(gdn_state));
             }
-            if let BoundOpKind::MoeTopK {
-                routes,
-                weights,
-                weight_total,
-                ..
-            } = &resolved.kind
-            {
-                for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
-                    .zip(moe_topk_extra.iter().copied())
-                {
-                    (*buffers)[extra_node.0 as usize] = Some(B::from(vec![value]));
+            if let Some(extras) = moe_topk_extras(
+                resolved.node,
+                &resolved.kind,
+                resolved.extents.iter().product::<u64>() as usize,
+                &moe_topk_extra,
+            )? {
+                for (extra_node, values) in extras {
+                    (*buffers)[extra_node.0 as usize] = Some(B::from(values.to_vec()));
                 }
             }
             if let Some(extras) =

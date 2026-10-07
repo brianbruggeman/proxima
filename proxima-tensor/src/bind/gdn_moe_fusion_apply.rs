@@ -904,7 +904,72 @@ pub(super) struct MoeTopKMatch {
     pub(super) routes: Vec<NodeId>,
     pub(super) weights: Vec<NodeId>,
     pub(super) weight_total: NodeId,
+    pub(super) stacked: Option<(NodeId, NodeId)>,
     pub(super) absorbed: BTreeSet<NodeId>,
+}
+
+/// Matches [`crate::spec::stack_selected_routes`]'s construction over
+/// `columns` (one `[sequence]` node per round): per round a `Constant(round)`,
+/// an `Equal(iota, constant)` one-hot mask over the selected axis and a
+/// `Multiply(column, mask)`, then an `Add` chain folding the masked columns
+/// into the `[sequence, selected]` stack. Returns the stack node and every node
+/// the chain consists of, the stack node included, or `None` when the chain is
+/// not exactly that or something outside it reads one of its inner nodes.
+#[cfg(feature = "moe-topk-fusion")]
+pub(super) fn match_moe_stack(
+    program: &[Op],
+    consumers: &BTreeMap<NodeId, Vec<NodeId>>,
+    columns: &[NodeId],
+) -> Option<(NodeId, BTreeSet<NodeId>)> {
+    let mut chain: BTreeSet<NodeId> = BTreeSet::new();
+    let mut selected_axis: Option<NodeId> = None;
+    let mut masked_columns: Vec<NodeId> = Vec::with_capacity(columns.len());
+    for (round, column) in columns.iter().enumerate() {
+        let masked = consumers.get(column)?.iter().copied().find(|candidate| {
+            matches!(
+                program.get(candidate.0 as usize),
+                Some(Op::Elementwise { body: ScalarOp::Multiply, operands, .. })
+                    if operands.len() == 2 && operands[0].0 == *column
+            )
+        })?;
+        let Some(Op::Elementwise { operands, .. }) = program.get(masked.0 as usize) else {
+            return None;
+        };
+        let round_mask = operands[1].0;
+        let [axis, round_value] = moe_binary_elementwise(program, round_mask, ScalarOp::Equal)?;
+        let value_matches = matches!(
+            program.get(round_value.0 as usize),
+            Some(Op::Constant { value, .. }) if *value == round as f32
+        );
+        let axis_matches = matches!(program.get(axis.0 as usize), Some(Op::Iota { .. }))
+            && *selected_axis.get_or_insert(axis) == axis;
+        if !value_matches || !axis_matches {
+            return None;
+        }
+        chain.extend([masked, round_mask, round_value]);
+        masked_columns.push(masked);
+    }
+    let mut stacked = *masked_columns.first()?;
+    for masked in masked_columns.iter().skip(1) {
+        let next = consumers.get(masked)?.iter().copied().find(|candidate| {
+            moe_binary_elementwise(program, *candidate, ScalarOp::Add) == Some([stacked, *masked])
+        })?;
+        chain.insert(next);
+        stacked = next;
+    }
+    let axis = selected_axis?;
+    let axis_is_private = consumers
+        .get(&axis)
+        .is_some_and(|readers| readers.iter().all(|reader| chain.contains(reader)));
+    if axis_is_private {
+        chain.insert(axis);
+    }
+    let sealed = chain.iter().filter(|node| **node != stacked).all(|node| {
+        consumers
+            .get(node)
+            .is_none_or(|readers| readers.iter().all(|reader| chain.contains(reader)))
+    });
+    (sealed && chain.contains(&stacked)).then_some((stacked, chain))
 }
 
 /// Matches `append_moe_ffn`'s own whole routing chain, anchored
@@ -968,9 +1033,10 @@ pub(super) fn match_moe_topk(
     if shapes.of(expert_index) != [expert_count] {
         return None;
     }
-    if shapes.of(route0) != [1] {
-        // n_tokens == 1 only, the same decode-only restriction
-        // `BoundOpKind::GatedDeltaNet` carries.
+    let [token_count] = shapes.of(route0) else {
+        return None;
+    };
+    if shapes.of(scores) != [*token_count, expert_count] {
         return None;
     }
 
@@ -1059,6 +1125,17 @@ pub(super) fn match_moe_topk(
         return None;
     }
     let weight_total = weight_total_running?;
+    let stacked = match (
+        match_moe_stack(program, consumers, &routes),
+        match_moe_stack(program, consumers, &weights),
+    ) {
+        (Some((stacked_routes, route_chain)), Some((stacked_weights, weight_chain))) => {
+            absorbed.extend(route_chain);
+            absorbed.extend(weight_chain);
+            Some((stacked_routes, stacked_weights))
+        }
+        _ => None,
+    };
     Some(MoeTopKMatch {
         route_dtype,
         scores,
@@ -1066,6 +1143,7 @@ pub(super) fn match_moe_topk(
         routes,
         weights,
         weight_total,
+        stacked,
         absorbed,
     })
 }
@@ -1101,6 +1179,7 @@ pub(super) fn moe_topk_candidates(
             .chain(found.weights.iter())
             .chain(core::iter::once(&found.weight_total))
             .copied()
+            .chain(found.stacked.into_iter().flat_map(|(routes, weights)| [routes, weights]))
             .collect();
         if found
             .absorbed
@@ -1131,6 +1210,7 @@ pub(super) fn moe_topk_candidates(
                 routes: found.routes.clone(),
                 weights: found.weights.clone(),
                 weight_total: found.weight_total,
+                stacked: found.stacked,
             },
         };
         candidates.push((fused, found.absorbed));
@@ -1169,12 +1249,22 @@ pub(super) fn apply_moe_topk_fusion(
         planning_outputs.push(root);
     }
     for (fused, _) in &initial_candidates {
-        let BoundOpKind::MoeTopK { operands, .. } = &fused.kind else {
+        let BoundOpKind::MoeTopK {
+            operands, stacked, ..
+        } = &fused.kind
+        else {
             continue;
         };
-        for (source, _, _) in operands {
-            if !planning_outputs.contains(source) {
-                planning_outputs.push(*source);
+        // the stacks are planned as outputs so the bind's chain fusion stops at
+        // them; otherwise it folds a stack into whatever elementwise op reads it
+        // and that op keeps reading the stack's inner nodes after they are absorbed
+        let sources = operands
+            .iter()
+            .map(|(source, _, _)| *source)
+            .chain(stacked.iter().flat_map(|(routes, weights)| [*routes, *weights]));
+        for source in sources {
+            if !planning_outputs.contains(&source) {
+                planning_outputs.push(source);
             }
         }
     }

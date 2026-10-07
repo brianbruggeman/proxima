@@ -1686,6 +1686,12 @@ pub(super) fn tiled_gemm_threadgroup_width(
     if let BoundOpKind::GatedDeltaNet { head_v_dim, .. } = &resolved.kind {
         return Some(*head_v_dim);
     }
+    // one threadgroup of `expert_count` threads per token: `render_moe_topk`'s
+    // simdgroup reduction is coherent only inside one threadgroup, so the
+    // grid's `token_count * expert_count` threads must split along token rows
+    if let BoundOpKind::MoeTopK { expert_count, .. } = &resolved.kind {
+        return Some(*expert_count);
+    }
     // Must agree with `grid_threads`'s own `CachedSoftmaxWeights` arm: one
     // threadgroup per attention row, `width` lanes wide -- the same
     // cooperative-reduce width the surviving 152/157/162 production folds

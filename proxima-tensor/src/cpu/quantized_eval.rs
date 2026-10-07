@@ -718,17 +718,15 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
             if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
                 buffers[state_out.0 as usize] = Some(Cow::Owned(gdn_state));
             }
-            if let BoundOpKind::MoeTopK {
-                routes,
-                weights,
-                weight_total,
-                ..
-            } = &computed.kind
-            {
-                for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
-                    .zip(moe_topk_extra.iter().copied())
-                {
-                    buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
+            if let Some(extras) = moe_topk_extras(
+                computed.node,
+                &computed.kind,
+                computed.extents.iter().product::<u64>() as usize,
+                &moe_topk_extra,
+            )? {
+                for (extra_node, values) in extras {
+                    buffers[extra_node.0 as usize] = Some(Cow::Owned(values.to_vec()));
+                    live_now += 1;
                 }
             }
             if let Some(extras) =
@@ -1489,17 +1487,15 @@ pub fn evaluate_parallel(
         if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
             buffers[state_out.0 as usize] = Some(Cow::Owned(node_output.gdn_state));
         }
-        if let BoundOpKind::MoeTopK {
-            routes,
-            weights,
-            weight_total,
-            ..
-        } = &computed.kind
-        {
-            for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
-                .zip(node_output.moe_topk_extra.iter().copied())
-            {
-                buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
+        if let Some(extras) = moe_topk_extras(
+            computed.node,
+            &computed.kind,
+            computed.extents.iter().product::<u64>() as usize,
+            &node_output.moe_topk_extra,
+        )? {
+            for (extra_node, values) in extras {
+                buffers[extra_node.0 as usize] = Some(Cow::Owned(values.to_vec()));
+                live_now += 1;
             }
         }
         if let Some(extras) = cached_softmax_weights_extras(
@@ -1515,6 +1511,7 @@ pub fn evaluate_parallel(
         if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {
             for (extra_node, value) in round_outputs.iter().skip(1).zip(node_output.round_extra) {
                 buffers[extra_node.0 as usize] = Some(Cow::Owned(value));
+                live_now += 1;
             }
         }
         live_now += 1;
