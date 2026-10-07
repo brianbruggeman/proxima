@@ -1585,3 +1585,52 @@ sha256: binaries.sha256 lists the 20 binaries; `shasum -a 256 -c` against the co
 
 Missing for CI, as in slices 0 to 2: no job runs a GPU bench on Apple hardware, so none of these numbers has a saved
 baseline to diff against; the numbers re-prove only on a Mac with the E2B blob and the 20 binaries.
+# re-plan from the fusion, reduction and caching audit (2026-10-07, main 8ef12e94)
+
+Replaces slices 3-7 of decode-prefill-parity. Ranked by milliseconds recovered on the own-cb basis,
+measured against llama f1ea20621. Each slice keeps the existing three checks and must not slow decode.
+
+1. Prefill attention as an MMA flash-attention kernel (about 645 ms on E2B, 274 ms on granite). Both
+   parts are the same kernel problem:
+   - 28 sliding layers are refused by the fusion at `dead_code_cached_attention.rs:1202` (window 512
+     < 970 rows), so they run materialized dot, max, exp, sum and AV through device memory: 349 ms.
+     35% of the exp work is on the empty, bucketed cached half.
+   - 7 global layers (and all 24 granite layers) fuse onto the legacy per-row scalar kernel, because the
+     row-tiled MMA kernel caps at 64 query rows (`omega-runtime.toml` `max_query_rows=64`). That kernel
+     runs 48 ms per dispatch, at 0.16 TFLOP/s and 1.5% of peak.
+
+   The fix, against llama `fa_*.metal`:
+   - one row-tiled, key-tiled, `simdgroup_matrix` kernel with causal block skip and a windowed band
+     form for the sliding layers;
+   - admission of windowed prefill;
+   - the row cap removed;
+   - KV-head sharing across query heads.
+2. One expert dispatch per (layer, projection) for MoE, `mul_mat_id` and `mul_mv_id` style (granite
+   prefill 485 ms, decode part of 9.75 ms). Today `append_moe_ffn` unrolls one round per top-k slot
+   (`gqa_layer_routed.rs:983-1010`, `PerRoute`), so 576 dispatches. `apply_moe_round_group_fusion`
+   exists but is default-off with no interop passthrough. Admit top-k at prefill
+   (`gdn_moe_fusion_apply.rs:966`, about 6 ms of the router chain).
+3. Codec-generic tiled GEMM (the existing slice 4 text): F16 (107.7 vs 4.35 ms), Q8_0 dense (118 vs 15
+   ms), Q3_K, Q5_0, Q5_1, Q5_K, Q6_K. One per-codec decode description consumed by one stager.
+4. Granite decode host path:
+   - set `command_buffer_chunks` in `profiles/granitemoe.toml`; it is config, and E2B uses 8;
+   - trace and remove the 360 output-buffer allocations per step (1.5 ms of op setup that E2B does not
+     pay).
+   Target: granite decode at llama's 5.25 ms/token, together with slice 2.
+5. Caching fusions:
+   - a resident prefill plan keyed by (new_count, kv bucket, PlanIdentity), 23-27 ms per request;
+   - an on-disk pipeline cache (MTLBinaryArchive), 75-93 ms per process start;
+   - the first decode plan, 27-47 ms per process.
+   Every key is a content digest that includes device, OS and Metal compiler version.
+6. Norm-apply and rope dispatches:
+   - 170 norm-apply stay unfused (cause untraced);
+   - rope is 2 dispatches where llama uses 1;
+   - about 16 ms of prefill, and part of decode.
+7. Real serving prefill width: `ServingConfig::default().ubatch_size = 32` (`serving.rs:1175`) is below
+   `TILED_GEMM_MIN_TOKENS = 160`, so real serving never reaches the tiled kernels the benches measure.
+   Measure TTFT in the real serving path, and make ubatch and the kernel thresholds agree.
+
+Targets:
+- E2B: prefill at or below llama 570 ms; decode about 9 ms at 970 tokens, and the owner's 10-11 ms
+  short-prompt figure re-established.
+- granite: prefill at or below 151 ms; decode at or below 5.25 ms/token.
