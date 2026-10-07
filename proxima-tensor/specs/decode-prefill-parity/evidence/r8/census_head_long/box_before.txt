@@ -1,0 +1,8 @@
+ 8:36  up 6 days, 18:40, 5 users, load averages: 5.06 7.74 7.15
+17029  80.6 a background daemon in ~/.local/bin
+  476  44.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  19.3 /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461   3.6 claude
+  740   1.6 /Applications/ExpressVPN.app/Contents/MacOS/expressvpnd
+  936   1.4 /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent
+ollama curl exit 7

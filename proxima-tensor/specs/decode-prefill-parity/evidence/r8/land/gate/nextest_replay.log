@@ -1,0 +1,21 @@
+   Compiling prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/prime)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-net)
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-test)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-listen)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-quic)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-http)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows)
+   Compiling proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-autograd)
+   Compiling proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-onnx)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+    Finished `gate` profile [optimized] target(s) in 57.58s
+────────────
+ Nextest run ID 1bc6721a-9700-4285-9318-69269814dd41 with nextest profile: default
+    Starting 3 tests across 1 binary (98 binaries skipped)
+        PASS [   0.147s] (1/3) omega::captured_dispatch_replay a_captured_matvec_replays_the_values_the_plan_wrote
+        PASS [   0.148s] (2/3) omega::captured_dispatch_replay a_dispatch_rebound_to_a_siblings_pipeline_writes_the_same_values
+        PASS [   0.152s] (3/3) omega::captured_dispatch_replay every_bound_buffer_is_described_once
+────────────
+     Summary [   0.153s] 3 tests run: 3 passed, 0 skipped

@@ -1,0 +1,25 @@
+ab capture: step=5 dispatches=941 groups=56
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.copy elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.nocoord elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=base step_ms=11.3427
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=2c9c96c767a82cfd.copy step_ms=11.3497
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=2c9c96c767a82cfd.nocoord step_ms=11.3641
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=base step_ms=11.3423
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=2c9c96c767a82cfd.copy step_ms=11.3478
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=2c9c96c767a82cfd.nocoord step_ms=11.3764
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=2 arm=base step_ms=11.3585
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=2 arm=2c9c96c767a82cfd.copy step_ms=11.3659
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=2 arm=2c9c96c767a82cfd.nocoord step_ms=11.3309
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.copy elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.nocoord elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=base step_ms=11.3852
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=2c9c96c767a82cfd.copy step_ms=11.3967
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=2c9c96c767a82cfd.nocoord step_ms=11.3975
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=base step_ms=11.2994
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=2c9c96c767a82cfd.copy step_ms=11.1887
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=2c9c96c767a82cfd.nocoord step_ms=11.2525
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=2 arm=base step_ms=11.2270
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=2 arm=2c9c96c767a82cfd.copy step_ms=11.2968
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=2 arm=2c9c96c767a82cfd.nocoord step_ms=11.2625

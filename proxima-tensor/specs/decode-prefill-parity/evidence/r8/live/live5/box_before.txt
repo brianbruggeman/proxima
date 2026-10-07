@@ -1,0 +1,6 @@
+ollama curl exit 7
+11:10  up 6 days, 21:14, 5 users, load averages: 3.63 4.71 6.45
+17029  59.0 a background daemon in ~/.local/bin
+  476  46.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+31461  17.6 claude
+55233  13.8 /System/Applications/Messages.app/Contents/MacOS/Messages

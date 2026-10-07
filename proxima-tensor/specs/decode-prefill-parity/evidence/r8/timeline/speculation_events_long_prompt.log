@@ -1,0 +1,4 @@
+2026-10-07T16:01:09.531964084Z DEBUG proxima_model_interop::generate::decode: speculative_verify step=126 draft_len=1 accepted=1 emitted=2 drafter=Some(NgramSimple)
+2026-10-07T16:01:09.531971042Z DEBUG proxima_model_interop::generate::decode: speculative_settled_token step=127
+2026-10-07T16:01:12.708132167Z DEBUG proxima_model_interop::generate::decode: speculative_verify step=126 draft_len=1 accepted=1 emitted=2 drafter=Some(NgramSimple)
+2026-10-07T16:01:12.708178459Z DEBUG proxima_model_interop::generate::decode: speculative_settled_token step=127

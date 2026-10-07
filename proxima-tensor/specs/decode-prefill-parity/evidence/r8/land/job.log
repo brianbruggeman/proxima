@@ -1,0 +1,12 @@
+quiet-held 2026-10-07T19:11:35Z
+gpu-held 2026-10-07T19:11:35Z
+compile-drain-waits=8 2026-10-07T19:12:56Z
+released 2026-10-07T19:17:37Z
+quiet-held 2026-10-07T19:17:50Z
+gpu-held 2026-10-07T19:17:55Z
+compile-drain-waits=0 2026-10-07T19:17:55Z
+load-waits=0 2026-10-07T19:17:55Z
+long-exit=0 2026-10-07T19:20:57Z
+short-exit=0 2026-10-07T19:22:14Z
+released 2026-10-07T19:22:14Z
+load-waits=60 2026-10-07T19:22:57Z

@@ -1,0 +1,21 @@
+--- b58c6089c188c541.copy.metal	2026-10-07 09:45:25
++++ b58c6089c188c541.onebarrier.metal	2026-10-07 09:41:36
+@@ -959,15 +959,10 @@
+     threadgroup float partials[8];
+     if (lane % 32u == 0u) { partials[lane / 32u] = partial; }
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+-    if (lane == 0u) {
+-        float reduced = partials[0];
+-        for (uint fold_index = 1u; fold_index < 8u; ++fold_index) {
+-            reduced = (reduced + partials[fold_index]);
+-        }
+-        partials[0] = reduced;
+-    }
+-    threadgroup_barrier(mem_flags::mem_threadgroup);
+     float reduced = partials[0];
++    for (uint fold_index = 1u; fold_index < 8u; ++fold_index) {
++        reduced = (reduced + partials[fold_index]);
++    }
+     epi_scratch[4] = reduced;
+     float epi_step0 = epi_scratch[4];
+     float epi_step1 = (epi_step0 * epi_scratch[3]);

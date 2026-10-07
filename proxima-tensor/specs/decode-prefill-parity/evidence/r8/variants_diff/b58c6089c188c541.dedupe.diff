@@ -1,0 +1,11 @@
+--- b58c6089c188c541.copy.metal	2026-10-07 09:45:25
++++ b58c6089c188c541.dedupe.metal	2026-10-07 09:45:25
+@@ -938,7 +938,7 @@
+         for (int slot = 0; slot < 8; ++slot) {
+             bool in_range = (r + slot * 256) < total_r;
+             batch[slot][0] = in_range ? in0[walk0 + slot * advance0] : (float)0;
+-            batch[slot][1] = in_range ? in1[walk1 + slot * advance1] : (float)0;
++            batch[slot][1] = batch[slot][0];
+         }
+         #pragma unroll
+         for (int slot = 0; slot < 8; ++slot) {

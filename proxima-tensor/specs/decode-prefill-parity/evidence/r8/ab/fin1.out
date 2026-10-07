@@ -1,0 +1,20 @@
+ab capture: step=5 dispatches=941 groups=56
+ab bits sha=b732955972908e7f threads=65536 extents=[1, 512, 512] arm=base elements=512 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=b732955972908e7f threads=65536 extents=[1, 512, 512] arm=b732955972908e7f.copy elements=512 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=b732955972908e7f threads=65536 extents=[1, 512, 512] arm=b732955972908e7f.dedupe elements=512 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=b732955972908e7f threads=65536 extents=[1, 512, 512] arm=b732955972908e7f.immed elements=512 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=0 arm=base step_ms=10.4663
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=0 arm=omit_group step_ms=10.3283
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=0 arm=b732955972908e7f.copy step_ms=10.3578
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=0 arm=b732955972908e7f.dedupe step_ms=10.3490
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=0 arm=b732955972908e7f.immed step_ms=10.3464
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=1 arm=base step_ms=10.3212
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=1 arm=omit_group step_ms=10.3315
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=1 arm=b732955972908e7f.copy step_ms=10.3312
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=1 arm=b732955972908e7f.dedupe step_ms=10.3222
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=1 arm=b732955972908e7f.immed step_ms=10.3249
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=2 arm=base step_ms=10.4242
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=2 arm=omit_group step_ms=10.4579
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=2 arm=b732955972908e7f.copy step_ms=10.3472
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=2 arm=b732955972908e7f.dedupe step_ms=10.3627
+ab step sha=b732955972908e7f threads=65536 extents=[1, 512, 512] count=1 pass=2 arm=b732955972908e7f.immed step_ms=10.3525

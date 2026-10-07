@@ -1,0 +1,32 @@
+--- b58c6089c188c541.copy.metal	2026-10-07 09:45:25
++++ b58c6089c188c541.noreduce.metal	2026-10-07 09:44:29
+@@ -932,29 +932,6 @@
+     int walk1 = (int)off1;
+     int advance1 = (int)(stride1 * 256);
+     int total_r = (int)u.reduction_total;
+-    for (int r = (int)lane; r < total_r; r += 2048) {
+-        float batch[8][2];
+-        #pragma unroll
+-        for (int slot = 0; slot < 8; ++slot) {
+-            bool in_range = (r + slot * 256) < total_r;
+-            batch[slot][0] = in_range ? in0[walk0 + slot * advance0] : (float)0;
+-            batch[slot][1] = in_range ? in1[walk1 + slot * advance1] : (float)0;
+-        }
+-        #pragma unroll
+-        for (int slot = 0; slot < 8; ++slot) {
+-            if ((r + slot * 256) < total_r) {
+-                float scratch[2];
+-                scratch[0] = batch[slot][0];
+-                scratch[1] = batch[slot][1];
+-                float step0 = (scratch[0] * scratch[1]);
+-                float value = step0;
+-                accumulator = seeded ? (accumulator + value) : value;
+-                seeded = true;
+-            }
+-        }
+-        walk0 += 8 * advance0;
+-        walk1 += 8 * advance1;
+-    }
+     float partial = simd_sum(accumulator);
+     threadgroup float partials[8];
+     if (lane % 32u == 0u) { partials[lane / 32u] = partial; }

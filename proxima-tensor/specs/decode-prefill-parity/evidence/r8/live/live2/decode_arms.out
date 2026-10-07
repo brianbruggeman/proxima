@@ -1,0 +1,24 @@
+2026-10-07T15:13:33Z LAUNCH decode_arms proxima arm=base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_cc700bea
+2026-10-07T15:13:59Z EXIT decode_arms proxima arm=base process=0 status=exit status: 0
+2026-10-07T15:13:59Z LAUNCH decode_arms proxima arm=new process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_new1
+2026-10-07T15:14:24Z EXIT decode_arms proxima arm=new process=0 status=exit status: 0
+2026-10-07T15:14:24Z LAUNCH decode_arms proxima arm=base_copy process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_copy
+2026-10-07T15:14:50Z EXIT decode_arms proxima arm=base_copy process=0 status=exit status: 0
+2026-10-07T15:14:50Z LAUNCH decode_arms proxima arm=new process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_new1
+2026-10-07T15:15:15Z EXIT decode_arms proxima arm=new process=1 status=exit status: 0
+2026-10-07T15:15:15Z LAUNCH decode_arms proxima arm=base_copy process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_copy
+2026-10-07T15:15:40Z EXIT decode_arms proxima arm=base_copy process=1 status=exit status: 0
+2026-10-07T15:15:40Z LAUNCH decode_arms proxima arm=base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_cc700bea
+2026-10-07T15:16:06Z EXIT decode_arms proxima arm=base process=1 status=exit status: 0
+2026-10-07T15:16:06Z LAUNCH decode_arms proxima arm=base_copy process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_copy
+2026-10-07T15:16:32Z EXIT decode_arms proxima arm=base_copy process=2 status=exit status: 0
+2026-10-07T15:16:32Z LAUNCH decode_arms proxima arm=base process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_cc700bea
+2026-10-07T15:16:57Z EXIT decode_arms proxima arm=base process=2 status=exit status: 0
+2026-10-07T15:16:57Z LAUNCH decode_arms proxima arm=new process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_new1
+2026-10-07T15:17:22Z EXIT decode_arms proxima arm=new process=2 status=exit status: 0
+2026-10-07T15:17:22Z LAUNCH decode_arms proxima arm=base process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_cc700bea
+2026-10-07T15:17:48Z EXIT decode_arms proxima arm=base process=3 status=exit status: 0
+2026-10-07T15:17:48Z LAUNCH decode_arms proxima arm=new process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_new1
+2026-10-07T15:18:14Z EXIT decode_arms proxima arm=new process=3 status=exit status: 0
+2026-10-07T15:18:14Z LAUNCH decode_arms proxima arm=base_copy process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/bin/decode_gbps_baseline_base_copy
+2026-10-07T15:18:40Z EXIT decode_arms proxima arm=base_copy process=3 status=exit status: 0

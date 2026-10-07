@@ -1,0 +1,46 @@
+--- 7d04ff7a9efdebb7.copy.metal	2026-10-07 09:14:55
++++ 7d04ff7a9efdebb7.cspace.metal	2026-10-07 09:46:50
+@@ -864,15 +864,15 @@
+ kernel void omega_reduce_r3_o2_n2_multiply_add_zero_epi9_fused_identity_o9__multiply_o5_o6__multiply_s1_o4__multiply_s2_o3__add_s3_o2__multiply_s4_o1__tanh_s5__add_s6_o0__multiply_o7_o8__multiply_s7_s8__multiply_s0_s9(
+     device const float* in0 [[buffer(0)]],
+     device const uchar* in1 [[buffer(1)]],
+-    device const float* epi0 [[buffer(2)]],
+-    device const float* epi1 [[buffer(3)]],
++    constant float* epi0 [[buffer(2)]],
++    constant float* epi1 [[buffer(3)]],
+     device const float* epi2 [[buffer(4)]],
+-    device const float* epi3 [[buffer(5)]],
++    constant float* epi3 [[buffer(5)]],
+     device const float* epi4 [[buffer(6)]],
+     device const float* epi5 [[buffer(7)]],
+     device const float* epi6 [[buffer(8)]],
+     device const float* epi7 [[buffer(9)]],
+-    device const float* epi8 [[buffer(10)]],
++    constant float* epi8 [[buffer(10)]],
+     device float* out [[buffer(11)]],
+     constant Uniforms& u [[buffer(12)]],
+     uint gid [[thread_position_in_grid]])
+@@ -965,19 +965,19 @@
+             long epi_off4 = u.epilogue_operand_base[4];
+             epi_off4 += coord_q_cache[q][0] * u.epilogue_operand_strides[4][0];
+             epi_off4 += coord_q_cache[q][2] * u.epilogue_operand_strides[4][1];
+-            epi_scratch[4] = epi4[epi_off4];
++            epi_scratch[4] = epi_scratch[2];
+             long epi_off5 = u.epilogue_operand_base[5];
+             epi_off5 += coord_q_cache[q][0] * u.epilogue_operand_strides[5][0];
+             epi_off5 += coord_q_cache[q][2] * u.epilogue_operand_strides[5][1];
+-            epi_scratch[5] = epi5[epi_off5];
++            epi_scratch[5] = epi_scratch[2];
+             long epi_off6 = u.epilogue_operand_base[6];
+             epi_off6 += coord_q_cache[q][0] * u.epilogue_operand_strides[6][0];
+             epi_off6 += coord_q_cache[q][2] * u.epilogue_operand_strides[6][1];
+-            epi_scratch[6] = epi6[epi_off6];
++            epi_scratch[6] = epi_scratch[2];
+             long epi_off7 = u.epilogue_operand_base[7];
+             epi_off7 += coord_q_cache[q][0] * u.epilogue_operand_strides[7][0];
+             epi_off7 += coord_q_cache[q][2] * u.epilogue_operand_strides[7][1];
+-            epi_scratch[7] = epi7[epi_off7];
++            epi_scratch[7] = epi_scratch[2];
+             long epi_off8 = u.epilogue_operand_base[8];
+             epi_off8 += coord_q_cache[q][0] * u.epilogue_operand_strides[8][0];
+             epi_off8 += coord_q_cache[q][2] * u.epilogue_operand_strides[8][1];

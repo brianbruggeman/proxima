@@ -1,0 +1,11 @@
+14:26  up 7 days, 30 mins, 5 users, load averages: 6.36 8.23 8.52
+  PID  %CPU COMM
+10005 100.0 /private/tmp/cargo_target_arch/gate/deps/packed_row_multi_row_index32_ab-4cf6cbe2b1987eb6
+17029  67.7 a background daemon in ~/.local/bin
+  476  46.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  15.8 /Applications/iTerm.app/Contents/MacOS/iTerm2
+55233  15.1 /System/Applications/Messages.app/Contents/MacOS/Messages
+  888   8.2 /usr/libexec/sysmond
+31461   2.9 claude
+{ 6.36 8.23 8.52 }
+{"models":[]}
