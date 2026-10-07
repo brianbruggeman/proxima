@@ -622,3 +622,26 @@ required-features = ["metal", "instrument"]
 name = "gemma4_kernel_newcount_sweep"
 harness = false
 required-features = ["metal", "instrument"]
+
+# Loads the hand-written granite config, expands `repeat` and `pattern`, and lowers it with
+# `build_forward` -- the descriptor loader (conflaguration, toml) is `std`-gated.
+[[example]]
+name = "model_config_expand"
+required-features = ["std"]
+
+# Edits the hand-written granite config into configs the compiled primitives cannot express and
+# prints each refusal -- same `std`-gated descriptor loader as `model_config_expand`.
+[[example]]
+name = "model_config_limits"
+required-features = ["std"]
+
+# Loads the real granite checkpoint through `LoadedModel::load_with_descriptor`; `metal` is the
+# backend the gate and the timing arms run real models on.
+[[example]]
+name = "model_config_load"
+required-features = ["std", "metal"]
+
+# Drives `ServingState` (re-exported from proxima-core under `std`) by hand; no checkpoint.
+[[example]]
+name = "serving_state_walkthrough"
+required-features = ["std"]
