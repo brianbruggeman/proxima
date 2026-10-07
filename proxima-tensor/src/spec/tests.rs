@@ -13914,11 +13914,20 @@ mod gemma4_synthetic_parity {
                  before the routing decision)"
             );
             #[cfg(feature = "metal-attn-split-rows")]
-            assert_eq!(
-                prefill_accepted, 1,
-                "split-rows on: prefill past the sliding window still declines the sliding layer \
-                 (local_window_not_vacuous) and the global layer binds as CachedAttention"
-            );
+            {
+                assert_eq!(
+                    prefill_accepted, 1,
+                    "split-rows on: a prefill with no cached range past the sliding window still \
+                     declines the sliding layer (local_window_not_vacuous: the single-range op has \
+                     no lower bound for new keys) and the global layer binds as CachedAttention"
+                );
+                let (_, bucketed_prefill_accepted) = accepted(600, SWA_WINDOW as u64);
+                assert_eq!(
+                    bucketed_prefill_accepted, 2,
+                    "split-rows on: a prefill over a bucketed cached range binds both layers as \
+                     CachedAttention, the window riding in cached_lower_inclusive"
+                );
+            }
             let (bit_exact_softmax_weights, bit_exact_attention) = accepted_under(
                 1,
                 SWA_WINDOW as u64 / 2,
@@ -14244,8 +14253,10 @@ mod gemma4_synthetic_parity {
         }
 
         /// One cell of the accept/decline matrix: the K=1 decode, the K=2 verify
-        /// that fits the sliding window, and K=3 that does not (the sliding
-        /// layer's `local_window_not_vacuous`), under both policies.
+        /// that fits the sliding window, and K=3 that does not. Under the relaxed
+        /// policy the window that cuts the new range travels in the two-range op's
+        /// `cached_lower_inclusive`, so both layers fuse; the exact policy keeps the
+        /// sliding layer on the unfused chain (`local_window_not_vacuous`).
         #[test]
         fn the_row_count_and_the_policy_choose_the_fused_form_per_layer() {
             let fixture = fixture();
@@ -14256,7 +14267,7 @@ mod gemma4_synthetic_parity {
                 ("k1_exact", 1, exact, 2, 0),
                 ("k2_relaxed", 2, relaxed, 0, 2),
                 ("k2_exact", 2, exact, 2, 0),
-                ("k3_relaxed_sliding_window_exceeded", 3, relaxed, 0, 1),
+                ("k3_relaxed_sliding_window_exceeded", 3, relaxed, 0, 2),
                 ("k3_exact_sliding_window_exceeded", 3, exact, 1, 0),
             ];
             for (label, count, policy, softmax_weights, attention) in cases {
@@ -14375,8 +14386,8 @@ mod gemma4_synthetic_parity {
                 (2usize, 3usize, 0usize, 2usize),
                 (2, 3, 2, 2),
                 (2, 0, 0, 2),
-                (3, 3, 2, 1),
-                (5, 3, 2, 1),
+                (3, 3, 2, 2),
+                (5, 3, 2, 2),
             ] {
                 let (fused_ops, difference) = fused_against_unfused(
                     count,
