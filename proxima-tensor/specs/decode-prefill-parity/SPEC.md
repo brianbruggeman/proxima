@@ -1629,6 +1629,17 @@ measured against llama f1ea20621. Each slice keeps the existing three checks and
 7. Real serving prefill width: `ServingConfig::default().ubatch_size = 32` (`serving.rs:1175`) is below
    `TILED_GEMM_MIN_TOKENS = 160`, so real serving never reaches the tiled kernels the benches measure.
    Measure TTFT in the real serving path, and make ubatch and the kernel thresholds agree.
+8. E2B decode, Q4_0 matvec per-op cost, plus norm-apply and rope dispatch counts at decode:
+   - Q4_0 matvec per op, 1536x12288 67.0 us against llama 38.3 us (decode matmul class 8.71 against
+     5.30 ms own-cb, slice 0 decode table row 3); the kernel-level cause is untraced;
+   - 446 norm dispatches against llama's 242 (170 `norm apply` stay unfused), and rope at 2 dispatches
+     where llama uses 1;
+   - read the real serving path (speculation default on, `ServingConfig::default()`), so the owner's chat
+     numbers are reproduced.
+
+   Target: E2B decode at or below llama 9.15 ms/token at 971 tokens, and below 11 ms on the short chat
+   prompts of `evidence/decode_drift`. Re-attribute on HEAD first. Every change is expressed on the lowered
+   program and kernel description, and reports its gain on every test model whose program carries the op.
 
 Targets:
 - E2B: prefill at or below llama 570 ms; decode about 9 ms at 970 tokens, and the owner's 10-11 ms
