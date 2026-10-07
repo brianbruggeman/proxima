@@ -1,0 +1,12 @@
+Wed Oct  7 03:00:31 UTC 2026
+22:00  up 6 days,  8:04, 5 users, load averages: 4.75 5.02 6.40
+  PID  %CPU COMM
+17029  72.2 a background daemon in ~/.local/bin
+  792  70.8 /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd
+  476  27.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  716  19.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461  12.3 claude
+55233   5.6 /System/Applications/Messages.app/Contents/MacOS/Messages
+  936   1.0 /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent
+ollama_api_exit=7
+83763 /Users/brianbruggeman/.cargo/bin/sccache

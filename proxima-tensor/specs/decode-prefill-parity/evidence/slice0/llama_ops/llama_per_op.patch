@@ -1,0 +1,209 @@
+--- llama-src-orig/ggml/src/ggml-metal/ggml-metal-context.m	2026-09-28 12:52:45
++++ llama-src/ggml/src/ggml-metal/ggml-metal-context.m	2026-10-06 22:12:08
+@@ -500,7 +500,11 @@
+     @autoreleasepool {
+         ctx->gf = gf;
+ 
+-        if (ctx->n_cb == 0) {
++        if (ggml_metal_prof_enabled()) {
++            ggml_metal_prof_graph(gf);
++        }
++
++        if (ctx->n_cb == 0 || ggml_metal_prof_enabled()) {
+             // single-threaded encoding: the whole graph is encoded by one command buffer
+             ctx->n_nodes_0      = gf->n_nodes;
+             ctx->n_nodes_1      = 0;
+@@ -743,6 +747,8 @@
+ 
+         id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[cb_idx].obj;
+ 
++        const bool profile = ggml_metal_prof_enabled() && cb_idx == n_cb_l;
++
+         ggml_metal_op_t ctx_op = ggml_metal_op_init(
+             ctx->dev,
+             cmd_buf,
+@@ -750,7 +756,7 @@
+             ctx->finfo,
+             idx_start,
+             idx_end,
+-            ctx->use_concurrency,
++            ctx->use_concurrency && !profile,
+             ctx->capture_compute == 0,
+             ctx->debug_graph);
+ 
+@@ -760,11 +766,32 @@
+                 break;
+             }
+ 
++            if (profile) {
++                struct ggml_tensor * node = ggml_metal_op_node(ctx_op, idx);
++                if (!ggml_op_is_empty(node->op) && !ggml_is_empty(node)) {
++                    const int key = ggml_metal_prof_intern(node, res);
++                    id<MTLCommandBuffer> finished = cmd_buf;
++                    [finished addCompletedHandler:^(id<MTLCommandBuffer> done) {
++                        ggml_metal_prof_add(key, done.GPUEndTime - done.GPUStartTime);
++                    }];
++                    cmd_buf = [ggml_metal_device_get_queue(ctx->dev) commandBufferWithUnretainedReferences];
++                    [cmd_buf enqueue];
++                    ggml_metal_op_rotate(ctx_op, cmd_buf);
++                    [finished commit];
++                }
++            }
++
+             idx += res - 1;
+         }
+ 
+         ggml_metal_op_free(ctx_op);
+ 
++        if (profile) {
++            [cmd_buf retain];
++            [ctx->cmd_bufs[cb_idx].obj release];
++            ctx->cmd_bufs[cb_idx].obj = cmd_buf;
++        }
++
+         if (cb_idx < 2 || ctx->abort_callback == NULL) {
+             [cmd_buf commit];
+         }
+--- llama-src-orig/ggml/src/ggml-metal/ggml-metal-ops.cpp	2026-09-28 12:52:45
++++ llama-src/ggml/src/ggml-metal/ggml-metal-ops.cpp	2026-10-06 22:13:15
+@@ -5748,4 +5748,122 @@
+     }
+ 
+     return 1;
++}
++
++// PROXIMA per-op gpu timing: one command buffer per encoded op, timed with GPUEndTime - GPUStartTime
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++#include <cstdio>
++#include <cstdlib>
++
++struct ggml_metal_prof_row {
++    std::string key;
++    long   count  = 0;
++    double sum_us = 0.0;
++    double min_us = 1e30;
++    double max_us = 0.0;
++};
++
++static std::mutex                         g_prof_mutex;
++static std::vector<ggml_metal_prof_row>   g_prof_rows;
++static std::map<std::string, int>         g_prof_index;
++static std::map<int, long>                g_prof_graphs;
++static int                                g_prof_ntok = 0;
++static bool                               g_prof_registered = false;
++
++static void ggml_metal_prof_dump(void) {
++    const char * path = getenv("PROXIMA_OP_TIMING_OUT");
++    FILE * out = path ? fopen(path, "w") : stderr;
++    if (!out) {
++        return;
++    }
++    for (const auto & entry : g_prof_graphs) {
++        fprintf(out, "GRAPHS\tntok=%d\tcount=%ld\n", entry.first, entry.second);
++    }
++    for (const auto & row : g_prof_rows) {
++        fprintf(out, "OP\t%s\tcount=%ld\tsum_us=%.3f\tmin_us=%.3f\tmax_us=%.3f\n",
++                row.key.c_str(), row.count, row.sum_us, row.min_us, row.max_us);
++    }
++    if (path) {
++        fclose(out);
++    }
++}
++
++bool ggml_metal_prof_enabled(void) {
++    static const bool enabled = getenv("PROXIMA_OP_TIMING_OUT") != nullptr;
++    return enabled;
++}
++
++void ggml_metal_prof_graph(struct ggml_cgraph * gf) {
++    std::lock_guard<std::mutex> lock(g_prof_mutex);
++    if (!g_prof_registered) {
++        g_prof_registered = true;
++        atexit(ggml_metal_prof_dump);
++    }
++    int ntok = 0;
++    for (int i = 0; i < gf->n_nodes; i++) {
++        const ggml_tensor * node = gf->nodes[i];
++        if (node->op == GGML_OP_MUL_MAT && node->src[1]) {
++            ntok = std::max(ntok, (int) node->src[1]->ne[1]);
++        }
++        if (node->op == GGML_OP_MUL_MAT_ID && node->src[1]) {
++            ntok = std::max(ntok, (int) node->src[1]->ne[2]);
++        }
++    }
++    g_prof_ntok = ntok;
++    g_prof_graphs[ntok]++;
+ }
++
++static std::string ggml_metal_prof_class(const char * name) {
++    std::string text(name);
++    const size_t dash = text.rfind('-');
++    if (dash != std::string::npos && dash + 1 < text.size() &&
++        text.find_first_not_of("0123456789", dash + 1) == std::string::npos) {
++        text.resize(dash);
++    }
++    return text;
++}
++
++int ggml_metal_prof_intern(struct ggml_tensor * node, int n_fuse) {
++    const ggml_tensor * src0 = node->src[0];
++    const ggml_tensor * src1 = node->src[1];
++    char buffer[512];
++    snprintf(buffer, sizeof(buffer),
++            "ntok=%d\top=%s\tname=%s\tfuse=%d\tsrc0=%s[%lld,%lld,%lld]\tsrc1=%s[%lld,%lld,%lld]\tdst=%s[%lld,%lld,%lld,%lld]",
++            g_prof_ntok, ggml_op_name(node->op), ggml_metal_prof_class(node->name).c_str(), n_fuse,
++            src0 ? ggml_type_name(src0->type) : "-", src0 ? (long long) src0->ne[0] : 0, src0 ? (long long) src0->ne[1] : 0, src0 ? (long long) src0->ne[2] : 0,
++            src1 ? ggml_type_name(src1->type) : "-", src1 ? (long long) src1->ne[0] : 0, src1 ? (long long) src1->ne[1] : 0, src1 ? (long long) src1->ne[2] : 0,
++            ggml_type_name(node->type), (long long) node->ne[0], (long long) node->ne[1], (long long) node->ne[2], (long long) node->ne[3]);
++    std::lock_guard<std::mutex> lock(g_prof_mutex);
++    auto found = g_prof_index.find(buffer);
++    if (found != g_prof_index.end()) {
++        return found->second;
++    }
++    const int index = (int) g_prof_rows.size();
++    g_prof_rows.emplace_back();
++    g_prof_rows.back().key = buffer;
++    g_prof_index[buffer] = index;
++    return index;
++}
++
++void ggml_metal_prof_add(int key, double seconds) {
++    std::lock_guard<std::mutex> lock(g_prof_mutex);
++    ggml_metal_prof_row & row = g_prof_rows[key];
++    const double us = seconds * 1e6;
++    row.count++;
++    row.sum_us += us;
++    row.min_us = std::min(row.min_us, us);
++    row.max_us = std::max(row.max_us, us);
++}
++
++void ggml_metal_op_rotate(ggml_metal_op_t ctx, ggml_metal_cmd_buf_t cmd_buf) {
++    ggml_metal_encoder_end_encoding(ctx->enc);
++    ggml_metal_encoder_free(ctx->enc);
++    ctx->enc = ggml_metal_encoder_init(cmd_buf, false);
++}
++
++struct ggml_tensor * ggml_metal_op_node(ggml_metal_op_t ctx, int idx) {
++    return ctx->node(idx);
++}
+--- llama-src-orig/ggml/src/ggml-metal/ggml-metal-ops.h	2026-09-28 12:52:45
++++ llama-src/ggml/src/ggml-metal/ggml-metal-ops.h	2026-10-06 21:53:44
+@@ -27,6 +27,15 @@
+ 
+ int ggml_metal_op_encode(ggml_metal_op_t ctx, int idx);
+ 
++void ggml_metal_op_rotate(ggml_metal_op_t ctx, ggml_metal_cmd_buf_t cmd_buf);
++
++struct ggml_tensor * ggml_metal_op_node(ggml_metal_op_t ctx, int idx);
++
++bool ggml_metal_prof_enabled(void);
++void ggml_metal_prof_graph(struct ggml_cgraph * gf);
++int  ggml_metal_prof_intern(struct ggml_tensor * node, int n_fuse);
++void ggml_metal_prof_add(int key, double seconds);
++
+ //
+ // available ops:
+ //

@@ -1,0 +1,42 @@
+2026-10-07T03:00:31Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_f76b4a97
+2026-10-07T03:01:08Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=0 status=exit status: 0
+2026-10-07T03:01:08Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=0 port=8097 requests=8
+2026-10-07T03:01:23Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=0
+2026-10-07T03:01:23Z LAUNCH decode_arms ollama arm=gemma4_e2b.ollama tag=gemma4:e2b-it-qat process=0 requests=8
+2026-10-07T03:01:57Z ollama quit requested
+2026-10-07T03:01:57Z EXIT decode_arms ollama arm=gemma4_e2b.ollama process=0
+2026-10-07T03:02:02Z LAUNCH decode_arms proxima arm=granite_moe.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_f76b4a97
+2026-10-07T03:03:10Z EXIT decode_arms proxima arm=granite_moe.tip process=0 status=exit status: 0
+2026-10-07T03:03:10Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=0 port=8097 requests=8
+2026-10-07T03:03:18Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=0
+2026-10-07T03:03:18Z LAUNCH decode_arms ollama arm=granite_moe.ollama tag=granite3.1-moe:1b process=0 requests=8
+2026-10-07T03:03:33Z ollama quit requested
+2026-10-07T03:03:33Z EXIT decode_arms ollama arm=granite_moe.ollama process=0
+2026-10-07T03:03:38Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=1 port=8097 requests=8
+2026-10-07T03:03:53Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=1
+2026-10-07T03:03:53Z LAUNCH decode_arms ollama arm=gemma4_e2b.ollama tag=gemma4:e2b-it-qat process=1 requests=8
+2026-10-07T03:04:26Z ollama quit requested
+2026-10-07T03:04:26Z EXIT decode_arms ollama arm=gemma4_e2b.ollama process=1
+2026-10-07T03:04:31Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_f76b4a97
+2026-10-07T03:05:07Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=1 status=exit status: 0
+2026-10-07T03:05:07Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=1 port=8097 requests=8
+2026-10-07T03:05:15Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=1
+2026-10-07T03:05:15Z LAUNCH decode_arms ollama arm=granite_moe.ollama tag=granite3.1-moe:1b process=1 requests=8
+2026-10-07T03:05:30Z ollama quit requested
+2026-10-07T03:05:30Z EXIT decode_arms ollama arm=granite_moe.ollama process=1
+2026-10-07T03:05:35Z LAUNCH decode_arms proxima arm=granite_moe.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_f76b4a97
+2026-10-07T03:06:45Z EXIT decode_arms proxima arm=granite_moe.tip process=1 status=exit status: 0
+2026-10-07T03:06:45Z LAUNCH decode_arms ollama arm=gemma4_e2b.ollama tag=gemma4:e2b-it-qat process=2 requests=8
+2026-10-07T03:07:18Z ollama quit requested
+2026-10-07T03:07:18Z EXIT decode_arms ollama arm=gemma4_e2b.ollama process=2
+2026-10-07T03:07:23Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_f76b4a97
+2026-10-07T03:08:00Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=2 status=exit status: 0
+2026-10-07T03:08:00Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=2 port=8097 requests=8
+2026-10-07T03:08:16Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=2
+2026-10-07T03:08:16Z LAUNCH decode_arms ollama arm=granite_moe.ollama tag=granite3.1-moe:1b process=2 requests=8
+2026-10-07T03:08:31Z ollama quit requested
+2026-10-07T03:08:31Z EXIT decode_arms ollama arm=granite_moe.ollama process=2
+2026-10-07T03:08:36Z LAUNCH decode_arms proxima arm=granite_moe.tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_f76b4a97
+2026-10-07T03:09:44Z EXIT decode_arms proxima arm=granite_moe.tip process=2 status=exit status: 0
+2026-10-07T03:09:44Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=2 port=8097 requests=8
+2026-10-07T03:09:52Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=2

@@ -1,0 +1,606 @@
+GRAPHS	ntok=1	count=381
+GRAPHS	ntok=2	count=2
+GRAPHS	ntok=488	count=3
+GRAPHS	ntok=512	count=3
+OP	ntok=2	op=SCALE	name=embd	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=25.000	min_us=10.125	max_us=14.875
+OP	ntok=2	op=RMS_NORM	name=norm	fuse=2	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=94	sum_us=1076.333	min_us=7.583	max_us=20.875
+OP	ntok=2	op=MUL_MAT	name=Qcur	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,2,1]	dst=f32[1024,2,1,1]	count=48	sum_us=877.959	min_us=11.667	max_us=29.625
+OP	ntok=2	op=MUL_MAT	name=Vcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,2,1]	dst=f32[512,2,1,1]	count=48	sum_us=755.333	min_us=10.708	max_us=24.833
+OP	ntok=2	op=MUL_MAT	name=Kcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,2,1]	dst=f32[512,2,1,1]	count=48	sum_us=748.334	min_us=10.875	max_us=24.000
+OP	ntok=2	op=ROPE	name=Qcur	fuse=1	src0=f32[64,16,2]	src1=i32[2,1,1]	dst=f32[64,16,2,1]	count=48	sum_us=478.792	min_us=6.667	max_us=16.250
+OP	ntok=2	op=ROPE	name=Kcur	fuse=1	src0=f32[64,8,2]	src1=i32[2,1,1]	dst=f32[64,8,2,1]	count=48	sum_us=463.458	min_us=6.625	max_us=14.875
+OP	ntok=2	op=SET_ROWS	name=cache_v_l0 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=25.167	min_us=8.167	max_us=17.000
+OP	ntok=2	op=SET_ROWS	name=cache_k_l0 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=22.292	min_us=7.417	max_us=14.875
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_22	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=73.750	min_us=24.000	max_us=49.750
+OP	ntok=2	op=MUL_MAT	name=attn_out	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,2,1]	dst=f32[1024,2,1,1]	count=48	sum_us=856.750	min_us=11.750	max_us=30.292
+OP	ntok=2	op=SCALE	name=node_25	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=16.375	min_us=5.792	max_us=10.583
+OP	ntok=2	op=ADD	name=ffn_inp	fuse=1	src0=f32[1024,2,1]	src1=f32[1024,2,1]	dst=f32[1024,2,1,1]	count=46	sum_us=493.792	min_us=7.292	max_us=19.125
+OP	ntok=2	op=MUL_MAT	name=ffn_moe_logits	fuse=1	src0=f32[1024,32,1]	src1=f32[1024,2,1]	dst=f32[32,2,1,1]	count=46	sum_us=614.667	min_us=8.833	max_us=20.625
+OP	ntok=2	op=SOFT_MAX	name=ffn_moe_probs	fuse=6	src0=f32[32,2,1]	src1=-[0,0,0]	dst=f32[32,2,1,1]	count=46	sum_us=595.792	min_us=8.625	max_us=20.750
+OP	ntok=2	op=MUL_MAT_ID	name=ffn_moe_gate	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,2]	dst=f32[512,8,2,1]	count=46	sum_us=5192.375	min_us=71.500	max_us=181.500
+OP	ntok=2	op=MUL_MAT_ID	name=ffn_moe_up	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,2]	dst=f32[512,8,2,1]	count=46	sum_us=5164.959	min_us=71.625	max_us=181.083
+OP	ntok=2	op=GLU	name=ffn_moe_swiglu	fuse=1	src0=f32[512,8,2]	src1=f32[512,8,2]	dst=f32[512,8,2,1]	count=46	sum_us=387.000	min_us=5.542	max_us=17.000
+OP	ntok=2	op=MUL_MAT_ID	name=ffn_moe_down	fuse=1	src0=q8_0[512,1024,32]	src1=f32[512,8,2]	dst=f32[1024,8,2,1]	count=46	sum_us=7302.667	min_us=102.875	max_us=254.833
+OP	ntok=2	op=MUL	name=ffn_moe_weighted	fuse=8	src0=f32[1024,8,2]	src1=f32[1,8,2]	dst=f32[1024,8,2,1]	count=46	sum_us=380.333	min_us=5.667	max_us=15.375
+OP	ntok=2	op=SCALE	name=node_61	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.625	min_us=5.750	max_us=9.875
+OP	ntok=2	op=ADD	name=l_out	fuse=1	src0=f32[1024,2,1]	src1=f32[1024,2,1]	dst=f32[1024,2,1,1]	count=46	sum_us=498.917	min_us=7.458	max_us=18.667
+OP	ntok=2	op=SET_ROWS	name=cache_v_l1 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=25.208	min_us=8.625	max_us=16.583
+OP	ntok=2	op=SET_ROWS	name=cache_k_l1 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.959	min_us=8.125	max_us=15.833
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_83	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=65.375	min_us=21.583	max_us=43.792
+OP	ntok=2	op=SCALE	name=node_86	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.875	min_us=5.750	max_us=10.125
+OP	ntok=2	op=SCALE	name=node_122	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.500	min_us=5.500	max_us=10.000
+OP	ntok=2	op=SET_ROWS	name=cache_v_l2 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.417	min_us=8.042	max_us=15.375
+OP	ntok=2	op=SET_ROWS	name=cache_k_l2 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.125	min_us=8.000	max_us=15.125
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_144	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=63.625	min_us=21.208	max_us=42.417
+OP	ntok=2	op=SCALE	name=node_147	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=16.000	min_us=5.958	max_us=10.042
+OP	ntok=2	op=SCALE	name=node_183	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=16.000	min_us=5.542	max_us=10.458
+OP	ntok=2	op=SET_ROWS	name=cache_v_l3 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.208	min_us=7.750	max_us=15.458
+OP	ntok=2	op=SET_ROWS	name=cache_k_l3 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=22.875	min_us=7.750	max_us=15.125
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_205	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=63.917	min_us=21.125	max_us=42.792
+OP	ntok=2	op=SCALE	name=node_208	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.792	min_us=5.750	max_us=10.042
+OP	ntok=2	op=SCALE	name=node_244	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=14.875	min_us=5.083	max_us=9.792
+OP	ntok=2	op=SET_ROWS	name=cache_v_l4 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=22.875	min_us=7.500	max_us=15.375
+OP	ntok=2	op=SET_ROWS	name=cache_k_l4 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=22.083	min_us=7.333	max_us=14.750
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_266	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=62.792	min_us=20.250	max_us=42.542
+OP	ntok=2	op=SCALE	name=node_269	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=14.708	min_us=4.875	max_us=9.833
+OP	ntok=2	op=SCALE	name=node_305	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=14.583	min_us=4.708	max_us=9.875
+OP	ntok=2	op=SET_ROWS	name=cache_v_l5 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=22.250	min_us=7.250	max_us=15.000
+OP	ntok=2	op=SET_ROWS	name=cache_k_l5 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.000	min_us=7.375	max_us=15.625
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_327	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=62.875	min_us=20.125	max_us=42.750
+OP	ntok=2	op=SCALE	name=node_330	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=14.833	min_us=5.083	max_us=9.750
+OP	ntok=2	op=SCALE	name=node_366	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=14.583	min_us=4.875	max_us=9.708
+OP	ntok=2	op=SET_ROWS	name=cache_v_l6 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=22.375	min_us=7.125	max_us=15.250
+OP	ntok=2	op=SET_ROWS	name=cache_k_l6 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=22.208	min_us=7.125	max_us=15.083
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_388	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=62.417	min_us=19.667	max_us=42.750
+OP	ntok=2	op=SCALE	name=node_391	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=14.875	min_us=5.125	max_us=9.750
+OP	ntok=2	op=SCALE	name=node_427	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.208	min_us=5.500	max_us=9.708
+OP	ntok=2	op=SET_ROWS	name=cache_v_l7 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.750	min_us=8.375	max_us=15.375
+OP	ntok=2	op=SET_ROWS	name=cache_k_l7 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.042	min_us=8.083	max_us=14.958
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_449	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=64.667	min_us=23.375	max_us=41.292
+OP	ntok=2	op=SCALE	name=node_452	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.708	min_us=5.708	max_us=10.000
+OP	ntok=2	op=SCALE	name=node_488	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=14.708	min_us=5.292	max_us=9.417
+OP	ntok=2	op=SET_ROWS	name=cache_v_l8 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.583	min_us=8.125	max_us=15.458
+OP	ntok=2	op=SET_ROWS	name=cache_k_l8 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.500	min_us=8.125	max_us=15.375
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_510	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=65.667	min_us=22.833	max_us=42.833
+OP	ntok=2	op=SCALE	name=node_513	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.833	min_us=5.875	max_us=9.958
+OP	ntok=2	op=SCALE	name=node_549	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=44.333	min_us=9.708	max_us=34.625
+OP	ntok=2	op=SET_ROWS	name=cache_v_l9 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.417	min_us=8.417	max_us=15.000
+OP	ntok=2	op=SET_ROWS	name=cache_k_l9 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.708	min_us=8.875	max_us=14.833
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_571	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=66.167	min_us=23.583	max_us=42.583
+OP	ntok=2	op=SCALE	name=node_574	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.875	min_us=5.833	max_us=10.042
+OP	ntok=2	op=SCALE	name=node_610	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=16.250	min_us=5.875	max_us=10.375
+OP	ntok=2	op=SET_ROWS	name=cache_v_l10 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=24.250	min_us=9.000	max_us=15.250
+OP	ntok=2	op=SET_ROWS	name=cache_k_l10 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.417	min_us=8.417	max_us=15.000
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_632	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=66.917	min_us=24.250	max_us=42.667
+OP	ntok=2	op=SCALE	name=node_635	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.875	min_us=5.625	max_us=10.250
+OP	ntok=2	op=SCALE	name=node_671	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.375	min_us=5.625	max_us=9.750
+OP	ntok=2	op=SET_ROWS	name=cache_v_l11 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=24.750	min_us=8.750	max_us=16.000
+OP	ntok=2	op=SET_ROWS	name=cache_k_l11 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.583	min_us=8.625	max_us=14.958
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_693	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=67.292	min_us=24.542	max_us=42.750
+OP	ntok=2	op=SCALE	name=node_696	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.458	min_us=5.833	max_us=9.625
+OP	ntok=2	op=SCALE	name=node_732	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.667	min_us=5.750	max_us=9.917
+OP	ntok=2	op=SET_ROWS	name=cache_v_l12 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.833	min_us=8.458	max_us=15.375
+OP	ntok=2	op=SET_ROWS	name=cache_k_l12 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=23.333	min_us=8.375	max_us=14.958
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_754	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=66.333	min_us=23.292	max_us=43.042
+OP	ntok=2	op=SCALE	name=node_757	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.708	min_us=5.708	max_us=10.000
+OP	ntok=2	op=SCALE	name=node_793	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.583	min_us=6.000	max_us=9.583
+OP	ntok=2	op=SET_ROWS	name=cache_v_l13 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=24.458	min_us=9.000	max_us=15.458
+OP	ntok=2	op=SET_ROWS	name=cache_k_l13 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=24.625	min_us=8.750	max_us=15.875
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_815	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=65.417	min_us=23.667	max_us=41.750
+OP	ntok=2	op=SCALE	name=node_818	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=15.375	min_us=5.500	max_us=9.875
+OP	ntok=2	op=SCALE	name=node_854	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=12.417	min_us=5.958	max_us=6.458
+OP	ntok=2	op=SET_ROWS	name=cache_v_l14 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.208	min_us=8.583	max_us=8.625
+OP	ntok=2	op=SET_ROWS	name=cache_k_l14 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.833	min_us=8.375	max_us=8.458
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_876	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=47.708	min_us=23.625	max_us=24.083
+OP	ntok=2	op=SCALE	name=node_879	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.542	min_us=5.750	max_us=5.792
+OP	ntok=2	op=SCALE	name=node_915	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=12.000	min_us=6.000	max_us=6.000
+OP	ntok=2	op=SET_ROWS	name=cache_v_l15 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.500	min_us=8.625	max_us=8.875
+OP	ntok=2	op=SET_ROWS	name=cache_k_l15 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.042	min_us=8.500	max_us=8.542
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_937	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=48.417	min_us=24.000	max_us=24.417
+OP	ntok=2	op=SCALE	name=node_940	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.417	min_us=5.708	max_us=5.708
+OP	ntok=2	op=SCALE	name=node_976	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.500	min_us=5.750	max_us=5.750
+OP	ntok=2	op=SET_ROWS	name=cache_v_l16 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.375	min_us=8.625	max_us=8.750
+OP	ntok=2	op=SET_ROWS	name=cache_k_l16 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.667	min_us=8.250	max_us=8.417
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_998	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=46.250	min_us=22.875	max_us=23.375
+OP	ntok=2	op=SCALE	name=node_1001	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.500	min_us=5.750	max_us=5.750
+OP	ntok=2	op=SCALE	name=node_1037	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.458	min_us=5.625	max_us=5.833
+OP	ntok=2	op=SET_ROWS	name=cache_v_l17 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.375	min_us=8.667	max_us=8.708
+OP	ntok=2	op=SET_ROWS	name=cache_k_l17 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.292	min_us=8.625	max_us=8.667
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_1059	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=47.333	min_us=23.458	max_us=23.875
+OP	ntok=2	op=SCALE	name=node_1062	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.750	min_us=5.750	max_us=6.000
+OP	ntok=2	op=SCALE	name=node_1098	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.542	min_us=5.750	max_us=5.792
+OP	ntok=2	op=SET_ROWS	name=cache_v_l18 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.917	min_us=8.417	max_us=8.500
+OP	ntok=2	op=SET_ROWS	name=cache_k_l18 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.292	min_us=8.583	max_us=8.708
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_1120	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=48.208	min_us=23.750	max_us=24.458
+OP	ntok=2	op=SCALE	name=node_1123	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.750	min_us=5.750	max_us=6.000
+OP	ntok=2	op=SCALE	name=node_1159	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.750	min_us=5.750	max_us=6.000
+OP	ntok=2	op=SET_ROWS	name=cache_v_l19 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.292	min_us=8.542	max_us=8.750
+OP	ntok=2	op=SET_ROWS	name=cache_k_l19 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.042	min_us=8.500	max_us=8.542
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_1181	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=47.833	min_us=23.625	max_us=24.208
+OP	ntok=2	op=SCALE	name=node_1184	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.833	min_us=5.875	max_us=5.958
+OP	ntok=2	op=SCALE	name=node_1220	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=10.875	min_us=5.125	max_us=5.750
+OP	ntok=2	op=SET_ROWS	name=cache_v_l20 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.500	min_us=7.917	max_us=8.583
+OP	ntok=2	op=SET_ROWS	name=cache_k_l20 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.000	min_us=7.500	max_us=8.500
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_1242	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=44.125	min_us=20.875	max_us=23.250
+OP	ntok=2	op=SCALE	name=node_1245	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=10.958	min_us=5.125	max_us=5.833
+OP	ntok=2	op=SCALE	name=node_1281	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.083	min_us=5.333	max_us=5.750
+OP	ntok=2	op=SET_ROWS	name=cache_v_l21 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.375	min_us=7.750	max_us=8.625
+OP	ntok=2	op=SET_ROWS	name=cache_k_l21 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.375	min_us=7.625	max_us=8.750
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_1303	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=43.000	min_us=20.250	max_us=22.750
+OP	ntok=2	op=SCALE	name=node_1306	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.208	min_us=5.208	max_us=6.000
+OP	ntok=2	op=SCALE	name=node_1342	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=10.500	min_us=5.000	max_us=5.500
+OP	ntok=2	op=SET_ROWS	name=cache_v_l22 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.208	min_us=7.708	max_us=8.500
+OP	ntok=2	op=SET_ROWS	name=cache_k_l22 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.542	min_us=7.417	max_us=9.125
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_1364	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=44.167	min_us=20.667	max_us=23.500
+OP	ntok=2	op=SCALE	name=node_1367	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=10.875	min_us=5.125	max_us=5.750
+OP	ntok=2	op=SCALE	name=node_1403	fuse=1	src0=f32[1024,2,1]	src1=-[0,0,0]	dst=f32[1024,2,1,1]	count=2	sum_us=11.667	min_us=5.667	max_us=6.000
+OP	ntok=2	op=SET_ROWS	name=cache_v_l23 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=17.708	min_us=8.167	max_us=9.542
+OP	ntok=2	op=SET_ROWS	name=cache_k_l23 (view)	fuse=1	src0=f32[512,2,1]	src1=i64[2,1,1]	dst=f16[512,4096,1,1]	count=2	sum_us=16.500	min_us=7.667	max_us=8.833
+OP	ntok=2	op=GET_ROWS	name=node_1430	fuse=1	src0=f32[1024,2,1]	src1=i32[1,1,1]	dst=f32[1024,1,1,1]	count=2	sum_us=18.625	min_us=8.250	max_us=10.375
+OP	ntok=2	op=FLASH_ATTN_EXT	name=node_1425	fuse=1	src0=f32[64,2,16]	src1=f16[64,256,8]	dst=f32[64,16,2,1]	count=2	sum_us=51.417	min_us=23.667	max_us=27.750
+OP	ntok=2	op=GET_ROWS	name=node_1428	fuse=1	src0=f32[1024,2,1]	src1=i32[1,1,1]	dst=f32[1024,1,1,1]	count=2	sum_us=15.625	min_us=7.292	max_us=8.333
+OP	ntok=2	op=SCALE	name=node_1429	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=2	sum_us=11.500	min_us=5.625	max_us=5.875
+OP	ntok=2	op=ADD	name=ffn_inp	fuse=1	src0=f32[1024,1,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=2	sum_us=12.333	min_us=6.125	max_us=6.208
+OP	ntok=2	op=RMS_NORM	name=norm	fuse=2	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=4	sum_us=36.500	min_us=8.208	max_us=10.333
+OP	ntok=2	op=MUL_MAT	name=ffn_moe_logits	fuse=1	src0=f32[1024,32,1]	src1=f32[1024,1,1]	dst=f32[32,1,1,1]	count=2	sum_us=20.042	min_us=9.083	max_us=10.958
+OP	ntok=2	op=SOFT_MAX	name=ffn_moe_probs	fuse=6	src0=f32[32,1,1]	src1=-[0,0,0]	dst=f32[32,1,1,1]	count=2	sum_us=22.250	min_us=10.000	max_us=12.250
+OP	ntok=2	op=MUL_MAT_ID	name=ffn_moe_gate	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,1]	dst=f32[512,8,1,1]	count=2	sum_us=90.417	min_us=40.167	max_us=50.250
+OP	ntok=2	op=MUL_MAT_ID	name=ffn_moe_up	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,1]	dst=f32[512,8,1,1]	count=2	sum_us=89.833	min_us=40.625	max_us=49.208
+OP	ntok=2	op=GLU	name=ffn_moe_swiglu	fuse=1	src0=f32[512,8,1]	src1=f32[512,8,1]	dst=f32[512,8,1,1]	count=2	sum_us=13.958	min_us=6.375	max_us=7.583
+OP	ntok=2	op=MUL_MAT_ID	name=ffn_moe_down	fuse=1	src0=q8_0[512,1024,32]	src1=f32[512,8,1]	dst=f32[1024,8,1,1]	count=2	sum_us=123.958	min_us=55.833	max_us=68.125
+OP	ntok=2	op=MUL	name=ffn_moe_weighted	fuse=8	src0=f32[1024,8,1]	src1=f32[1,8,1]	dst=f32[1024,8,1,1]	count=2	sum_us=12.583	min_us=5.833	max_us=6.750
+OP	ntok=2	op=SCALE	name=node_1466	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=2	sum_us=11.250	min_us=5.500	max_us=5.750
+OP	ntok=2	op=ADD	name=l_out	fuse=1	src0=f32[1024,1,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=2	sum_us=13.167	min_us=5.250	max_us=7.917
+OP	ntok=2	op=MUL_MAT	name=node_1470	fuse=1	src0=q8_0[1024,49155,1]	src1=f32[1024,1,1]	dst=f32[49155,1,1,1]	count=2	sum_us=659.625	min_us=295.375	max_us=364.250
+OP	ntok=2	op=SCALE	name=result_output	fuse=1	src0=f32[49155,1,1]	src1=-[0,0,0]	dst=f32[49155,1,1,1]	count=2	sum_us=18.875	min_us=8.833	max_us=10.042
+OP	ntok=512	op=SCALE	name=embd	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=86.167	min_us=20.083	max_us=39.708
+OP	ntok=512	op=RMS_NORM	name=norm	fuse=2	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=141	sum_us=2755.416	min_us=17.250	max_us=51.417
+OP	ntok=512	op=MUL_MAT	name=Qcur	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,512,1]	dst=f32[1024,512,1,1]	count=72	sum_us=11583.250	min_us=145.875	max_us=480.250
+OP	ntok=512	op=MUL_MAT	name=Vcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,512,1]	dst=f32[512,512,1,1]	count=72	sum_us=6899.250	min_us=86.000	max_us=281.875
+OP	ntok=512	op=MUL_MAT	name=Kcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,512,1]	dst=f32[512,512,1,1]	count=72	sum_us=6863.375	min_us=85.958	max_us=279.875
+OP	ntok=512	op=ROPE	name=Qcur	fuse=1	src0=f32[64,16,512]	src1=i32[512,1,1]	dst=f32[64,16,512,1]	count=72	sum_us=1598.334	min_us=20.083	max_us=59.000
+OP	ntok=512	op=ROPE	name=Kcur	fuse=1	src0=f32[64,8,512]	src1=i32[512,1,1]	dst=f32[64,8,512,1]	count=72	sum_us=1104.125	min_us=13.542	max_us=38.500
+OP	ntok=512	op=SET_ROWS	name=cache_v_l0 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=122.458	min_us=23.625	max_us=68.750
+OP	ntok=512	op=SET_ROWS	name=cache_k_l0 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=122.333	min_us=23.958	max_us=68.875
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_22	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=879.667	min_us=160.125	max_us=508.750
+OP	ntok=512	op=MUL_MAT	name=attn_out	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,512,1]	dst=f32[1024,512,1,1]	count=72	sum_us=11642.125	min_us=145.625	max_us=542.333
+OP	ntok=512	op=SCALE	name=node_25	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=65.125	min_us=15.542	max_us=33.792
+OP	ntok=512	op=ADD	name=ffn_inp	fuse=1	src0=f32[1024,512,1]	src1=f32[1024,512,1]	dst=f32[1024,512,1,1]	count=69	sum_us=1160.209	min_us=15.375	max_us=39.250
+OP	ntok=512	op=MUL_MAT	name=ffn_moe_logits	fuse=1	src0=f32[1024,32,1]	src1=f32[1024,512,1]	dst=f32[32,512,1,1]	count=69	sum_us=3367.833	min_us=44.167	max_us=129.750
+OP	ntok=512	op=SOFT_MAX	name=ffn_moe_probs	fuse=6	src0=f32[32,512,1]	src1=-[0,0,0]	dst=f32[32,512,1,1]	count=69	sum_us=625.500	min_us=8.167	max_us=20.292
+OP	ntok=512	op=MUL_MAT_ID	name=ffn_moe_gate	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,512]	dst=f32[512,8,512,1]	count=69	sum_us=56627.626	min_us=714.042	max_us=2489.792
+OP	ntok=512	op=MUL_MAT_ID	name=ffn_moe_up	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,512]	dst=f32[512,8,512,1]	count=69	sum_us=56542.626	min_us=714.667	max_us=2496.333
+OP	ntok=512	op=GLU	name=ffn_moe_swiglu	fuse=1	src0=f32[512,8,512]	src1=f32[512,8,512]	dst=f32[512,8,512,1]	count=69	sum_us=3868.250	min_us=50.042	max_us=95.000
+OP	ntok=512	op=MUL_MAT_ID	name=ffn_moe_down	fuse=1	src0=q8_0[512,1024,32]	src1=f32[512,8,512]	dst=f32[1024,8,512,1]	count=69	sum_us=55014.625	min_us=734.000	max_us=1336.625
+OP	ntok=512	op=MUL	name=ffn_moe_weighted	fuse=8	src0=f32[1024,8,512]	src1=f32[1,8,512]	dst=f32[1024,8,512,1]	count=69	sum_us=2323.625	min_us=31.417	max_us=40.125
+OP	ntok=512	op=SCALE	name=node_61	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=52.500	min_us=16.375	max_us=19.542
+OP	ntok=512	op=ADD	name=l_out	fuse=1	src0=f32[1024,512,1]	src1=f32[1024,512,1]	dst=f32[1024,512,1,1]	count=69	sum_us=1239.249	min_us=16.833	max_us=22.625
+OP	ntok=512	op=SET_ROWS	name=cache_v_l1 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=97.292	min_us=29.167	max_us=38.875
+OP	ntok=512	op=SET_ROWS	name=cache_k_l1 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=93.750	min_us=28.875	max_us=35.917
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_83	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=700.417	min_us=215.000	max_us=266.125
+OP	ntok=512	op=SCALE	name=node_86	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=47.167	min_us=14.500	max_us=17.708
+OP	ntok=512	op=SCALE	name=node_122	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=55.417	min_us=16.667	max_us=19.500
+OP	ntok=512	op=SET_ROWS	name=cache_v_l2 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=89.708	min_us=22.750	max_us=35.542
+OP	ntok=512	op=SET_ROWS	name=cache_k_l2 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=87.042	min_us=22.917	max_us=35.500
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_144	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=633.833	min_us=160.375	max_us=259.333
+OP	ntok=512	op=SCALE	name=node_147	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=50.292	min_us=15.625	max_us=17.500
+OP	ntok=512	op=SCALE	name=node_183	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=47.750	min_us=14.250	max_us=16.750
+OP	ntok=512	op=SET_ROWS	name=cache_v_l3 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=85.792	min_us=28.500	max_us=28.667
+OP	ntok=512	op=SET_ROWS	name=cache_k_l3 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=85.750	min_us=28.500	max_us=28.667
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_205	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=635.958	min_us=207.125	max_us=217.000
+OP	ntok=512	op=SCALE	name=node_208	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=46.875	min_us=14.500	max_us=16.750
+OP	ntok=512	op=SCALE	name=node_244	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=47.000	min_us=14.542	max_us=16.458
+OP	ntok=512	op=SET_ROWS	name=cache_v_l4 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=80.125	min_us=22.500	max_us=28.875
+OP	ntok=512	op=SET_ROWS	name=cache_k_l4 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=79.750	min_us=22.583	max_us=28.667
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_266	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=551.083	min_us=163.500	max_us=202.417
+OP	ntok=512	op=SCALE	name=node_269	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=45.042	min_us=13.375	max_us=15.958
+OP	ntok=512	op=SCALE	name=node_305	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=50.167	min_us=13.792	max_us=20.125
+OP	ntok=512	op=SET_ROWS	name=cache_v_l5 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=80.083	min_us=22.625	max_us=28.833
+OP	ntok=512	op=SET_ROWS	name=cache_k_l5 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=79.208	min_us=22.375	max_us=28.625
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_327	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=581.292	min_us=156.250	max_us=218.417
+OP	ntok=512	op=SCALE	name=node_330	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=47.542	min_us=13.500	max_us=18.417
+OP	ntok=512	op=SCALE	name=node_366	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=45.458	min_us=14.000	max_us=17.125
+OP	ntok=512	op=SET_ROWS	name=cache_v_l6 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.500	min_us=22.375	max_us=22.625
+OP	ntok=512	op=SET_ROWS	name=cache_k_l6 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.833	min_us=22.000	max_us=22.583
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_388	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=484.208	min_us=159.542	max_us=164.208
+OP	ntok=512	op=SCALE	name=node_391	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=41.000	min_us=12.250	max_us=16.250
+OP	ntok=512	op=SCALE	name=node_427	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.875	min_us=14.125	max_us=14.417
+OP	ntok=512	op=SET_ROWS	name=cache_v_l7 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.833	min_us=22.583	max_us=22.625
+OP	ntok=512	op=SET_ROWS	name=cache_k_l7 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.250	min_us=22.250	max_us=22.625
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_449	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=478.083	min_us=158.208	max_us=160.125
+OP	ntok=512	op=SCALE	name=node_452	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=44.250	min_us=12.500	max_us=18.250
+OP	ntok=512	op=SCALE	name=node_488	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.875	min_us=14.083	max_us=14.417
+OP	ntok=512	op=SET_ROWS	name=cache_v_l8 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=71.542	min_us=22.500	max_us=26.542
+OP	ntok=512	op=SET_ROWS	name=cache_k_l8 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.292	min_us=22.250	max_us=22.583
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_510	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=478.917	min_us=156.750	max_us=163.917
+OP	ntok=512	op=SCALE	name=node_513	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=37.292	min_us=12.167	max_us=12.625
+OP	ntok=512	op=SCALE	name=node_549	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=44.250	min_us=14.000	max_us=15.875
+OP	ntok=512	op=SET_ROWS	name=cache_v_l9 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=70.792	min_us=22.542	max_us=25.625
+OP	ntok=512	op=SET_ROWS	name=cache_k_l9 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.417	min_us=22.375	max_us=22.625
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_571	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=481.375	min_us=159.625	max_us=161.250
+OP	ntok=512	op=SCALE	name=node_574	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=38.917	min_us=12.542	max_us=13.750
+OP	ntok=512	op=SCALE	name=node_610	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.833	min_us=14.208	max_us=14.333
+OP	ntok=512	op=SET_ROWS	name=cache_v_l10 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.708	min_us=22.500	max_us=22.625
+OP	ntok=512	op=SET_ROWS	name=cache_k_l10 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.542	min_us=22.417	max_us=22.625
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_632	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=480.833	min_us=157.667	max_us=162.708
+OP	ntok=512	op=SCALE	name=node_635	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=38.250	min_us=12.250	max_us=13.417
+OP	ntok=512	op=SCALE	name=node_671	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=46.125	min_us=14.000	max_us=17.750
+OP	ntok=512	op=SET_ROWS	name=cache_v_l11 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.250	min_us=22.292	max_us=22.583
+OP	ntok=512	op=SET_ROWS	name=cache_k_l11 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.167	min_us=22.167	max_us=22.625
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_693	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=483.500	min_us=155.375	max_us=164.250
+OP	ntok=512	op=SCALE	name=node_696	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=39.000	min_us=12.667	max_us=13.583
+OP	ntok=512	op=SCALE	name=node_732	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.708	min_us=14.125	max_us=14.417
+OP	ntok=512	op=SET_ROWS	name=cache_v_l12 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.250	min_us=22.292	max_us=22.542
+OP	ntok=512	op=SET_ROWS	name=cache_k_l12 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.250	min_us=22.208	max_us=22.542
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_754	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=477.208	min_us=156.875	max_us=160.292
+OP	ntok=512	op=SCALE	name=node_757	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=40.958	min_us=12.292	max_us=15.292
+OP	ntok=512	op=SCALE	name=node_793	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=47.542	min_us=14.375	max_us=18.708
+OP	ntok=512	op=SET_ROWS	name=cache_v_l13 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=69.125	min_us=22.333	max_us=24.375
+OP	ntok=512	op=SET_ROWS	name=cache_k_l13 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.167	min_us=22.333	max_us=22.458
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_815	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=475.625	min_us=157.375	max_us=159.375
+OP	ntok=512	op=SCALE	name=node_818	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=40.583	min_us=12.542	max_us=15.375
+OP	ntok=512	op=SCALE	name=node_854	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=43.250	min_us=14.125	max_us=14.750
+OP	ntok=512	op=SET_ROWS	name=cache_v_l14 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=68.125	min_us=22.500	max_us=23.125
+OP	ntok=512	op=SET_ROWS	name=cache_k_l14 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.167	min_us=22.292	max_us=22.500
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_876	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=484.125	min_us=159.750	max_us=163.375
+OP	ntok=512	op=SCALE	name=node_879	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=46.625	min_us=12.583	max_us=17.750
+OP	ntok=512	op=SCALE	name=node_915	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=45.208	min_us=14.000	max_us=17.042
+OP	ntok=512	op=SET_ROWS	name=cache_v_l15 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.792	min_us=22.375	max_us=22.708
+OP	ntok=512	op=SET_ROWS	name=cache_k_l15 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=70.333	min_us=22.375	max_us=25.250
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_937	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=479.167	min_us=159.375	max_us=160.250
+OP	ntok=512	op=SCALE	name=node_940	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=46.417	min_us=12.458	max_us=17.000
+OP	ntok=512	op=SCALE	name=node_976	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=45.125	min_us=14.125	max_us=16.625
+OP	ntok=512	op=SET_ROWS	name=cache_v_l16 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.667	min_us=22.375	max_us=22.667
+OP	ntok=512	op=SET_ROWS	name=cache_k_l16 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.333	min_us=22.292	max_us=22.542
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_998	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=478.542	min_us=156.625	max_us=162.292
+OP	ntok=512	op=SCALE	name=node_1001	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=46.375	min_us=12.333	max_us=17.500
+OP	ntok=512	op=SCALE	name=node_1037	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.708	min_us=14.042	max_us=14.500
+OP	ntok=512	op=SET_ROWS	name=cache_v_l17 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.375	min_us=22.375	max_us=22.542
+OP	ntok=512	op=SET_ROWS	name=cache_k_l17 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=69.125	min_us=22.333	max_us=24.250
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_1059	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=483.167	min_us=159.583	max_us=162.500
+OP	ntok=512	op=SCALE	name=node_1062	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=38.625	min_us=12.375	max_us=13.625
+OP	ntok=512	op=SCALE	name=node_1098	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.750	min_us=14.000	max_us=14.375
+OP	ntok=512	op=SET_ROWS	name=cache_v_l18 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.542	min_us=22.417	max_us=22.583
+OP	ntok=512	op=SET_ROWS	name=cache_k_l18 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.208	min_us=22.333	max_us=22.500
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_1120	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=480.792	min_us=157.333	max_us=163.500
+OP	ntok=512	op=SCALE	name=node_1123	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=43.625	min_us=12.292	max_us=17.958
+OP	ntok=512	op=SCALE	name=node_1159	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=43.417	min_us=14.292	max_us=14.625
+OP	ntok=512	op=SET_ROWS	name=cache_v_l19 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=68.584	min_us=22.625	max_us=23.042
+OP	ntok=512	op=SET_ROWS	name=cache_k_l19 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=70.208	min_us=22.167	max_us=25.792
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_1181	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=472.208	min_us=157.000	max_us=158.083
+OP	ntok=512	op=SCALE	name=node_1184	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=43.792	min_us=12.542	max_us=15.833
+OP	ntok=512	op=SCALE	name=node_1220	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=46.583	min_us=14.167	max_us=17.917
+OP	ntok=512	op=SET_ROWS	name=cache_v_l20 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.292	min_us=22.292	max_us=22.500
+OP	ntok=512	op=SET_ROWS	name=cache_k_l20 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.292	min_us=22.375	max_us=22.458
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_1242	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=487.000	min_us=161.167	max_us=163.375
+OP	ntok=512	op=SCALE	name=node_1245	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=37.750	min_us=12.458	max_us=12.667
+OP	ntok=512	op=SCALE	name=node_1281	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.417	min_us=13.875	max_us=14.292
+OP	ntok=512	op=SET_ROWS	name=cache_v_l21 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.708	min_us=22.500	max_us=22.625
+OP	ntok=512	op=SET_ROWS	name=cache_k_l21 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.875	min_us=22.083	max_us=22.417
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_1303	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=480.333	min_us=157.750	max_us=161.875
+OP	ntok=512	op=SCALE	name=node_1306	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=38.583	min_us=12.500	max_us=13.583
+OP	ntok=512	op=SCALE	name=node_1342	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=43.333	min_us=14.042	max_us=14.792
+OP	ntok=512	op=SET_ROWS	name=cache_v_l22 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.625	min_us=22.375	max_us=22.708
+OP	ntok=512	op=SET_ROWS	name=cache_k_l22 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.458	min_us=22.250	max_us=22.667
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_1364	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=483.167	min_us=159.625	max_us=162.500
+OP	ntok=512	op=SCALE	name=node_1367	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=37.542	min_us=12.500	max_us=12.542
+OP	ntok=512	op=SCALE	name=node_1403	fuse=1	src0=f32[1024,512,1]	src1=-[0,0,0]	dst=f32[1024,512,1,1]	count=3	sum_us=42.625	min_us=14.000	max_us=14.500
+OP	ntok=512	op=SET_ROWS	name=cache_v_l23 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.292	min_us=22.292	max_us=22.500
+OP	ntok=512	op=SET_ROWS	name=cache_k_l23 (view)	fuse=1	src0=f32[512,512,1]	src1=i64[512,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.583	min_us=22.125	max_us=22.250
+OP	ntok=512	op=FLASH_ATTN_EXT	name=node_1425	fuse=1	src0=f32[64,512,16]	src1=f16[64,512,8]	dst=f32[64,16,512,1]	count=3	sum_us=484.917	min_us=160.750	max_us=162.542
+OP	ntok=488	op=SCALE	name=embd	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=41.208	min_us=13.625	max_us=13.833
+OP	ntok=488	op=RMS_NORM	name=norm	fuse=2	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=141	sum_us=2510.291	min_us=16.875	max_us=21.083
+OP	ntok=488	op=MUL_MAT	name=Qcur	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,488,1]	dst=f32[1024,488,1,1]	count=72	sum_us=11006.583	min_us=151.750	max_us=155.750
+OP	ntok=488	op=MUL_MAT	name=Vcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,488,1]	dst=f32[512,488,1,1]	count=72	sum_us=6306.667	min_us=86.083	max_us=92.833
+OP	ntok=488	op=MUL_MAT	name=Kcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,488,1]	dst=f32[512,488,1,1]	count=72	sum_us=6269.083	min_us=86.000	max_us=90.167
+OP	ntok=488	op=ROPE	name=Qcur	fuse=1	src0=f32[64,16,488]	src1=i32[488,1,1]	dst=f32[64,16,488,1]	count=72	sum_us=1432.207	min_us=19.083	max_us=23.083
+OP	ntok=488	op=ROPE	name=Kcur	fuse=1	src0=f32[64,8,488]	src1=i32[488,1,1]	dst=f32[64,8,488,1]	count=72	sum_us=989.333	min_us=12.875	max_us=17.750
+OP	ntok=488	op=SET_ROWS	name=cache_v_l0 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=68.500	min_us=21.875	max_us=24.625
+OP	ntok=488	op=SET_ROWS	name=cache_k_l0 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.708	min_us=22.125	max_us=22.375
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_22	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1033.833	min_us=341.792	max_us=349.333
+OP	ntok=488	op=MUL_MAT	name=attn_out	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,488,1]	dst=f32[1024,488,1,1]	count=72	sum_us=11018.625	min_us=151.208	max_us=156.750
+OP	ntok=488	op=SCALE	name=node_25	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=43.625	min_us=11.917	max_us=18.250
+OP	ntok=488	op=ADD	name=ffn_inp	fuse=1	src0=f32[1024,488,1]	src1=f32[1024,488,1]	dst=f32[1024,488,1,1]	count=69	sum_us=1091.375	min_us=14.750	max_us=19.000
+OP	ntok=488	op=MUL_MAT	name=ffn_moe_logits	fuse=1	src0=f32[1024,32,1]	src1=f32[1024,488,1]	dst=f32[32,488,1,1]	count=69	sum_us=3135.208	min_us=43.625	max_us=49.875
+OP	ntok=488	op=SOFT_MAX	name=ffn_moe_probs	fuse=6	src0=f32[32,488,1]	src1=-[0,0,0]	dst=f32[32,488,1,1]	count=69	sum_us=593.000	min_us=8.167	max_us=11.958
+OP	ntok=488	op=MUL_MAT_ID	name=ffn_moe_gate	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,488]	dst=f32[512,8,488,1]	count=69	sum_us=49405.875	min_us=678.625	max_us=753.250
+OP	ntok=488	op=MUL_MAT_ID	name=ffn_moe_up	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,488]	dst=f32[512,8,488,1]	count=69	sum_us=49607.125	min_us=692.042	max_us=747.375
+OP	ntok=488	op=GLU	name=ffn_moe_swiglu	fuse=1	src0=f32[512,8,488]	src1=f32[512,8,488]	dst=f32[512,8,488,1]	count=69	sum_us=3645.084	min_us=48.000	max_us=59.375
+OP	ntok=488	op=MUL_MAT_ID	name=ffn_moe_down	fuse=1	src0=q8_0[512,1024,32]	src1=f32[512,8,488]	dst=f32[1024,8,488,1]	count=69	sum_us=49363.083	min_us=697.958	max_us=735.375
+OP	ntok=488	op=MUL	name=ffn_moe_weighted	fuse=8	src0=f32[1024,8,488]	src1=f32[1,8,488]	dst=f32[1024,8,488,1]	count=69	sum_us=2209.625	min_us=30.167	max_us=36.875
+OP	ntok=488	op=SCALE	name=node_61	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=45.083	min_us=14.167	max_us=16.667
+OP	ntok=488	op=ADD	name=l_out	fuse=1	src0=f32[1024,488,1]	src1=f32[1024,488,1]	dst=f32[1024,488,1,1]	count=69	sum_us=1188.375	min_us=16.625	max_us=20.042
+OP	ntok=488	op=SET_ROWS	name=cache_v_l1 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=69.542	min_us=22.125	max_us=25.292
+OP	ntok=488	op=SET_ROWS	name=cache_k_l1 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.667	min_us=22.208	max_us=22.250
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_83	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1042.875	min_us=340.792	max_us=354.583
+OP	ntok=488	op=SCALE	name=node_86	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.917	min_us=12.500	max_us=15.292
+OP	ntok=488	op=SCALE	name=node_122	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=47.500	min_us=14.000	max_us=16.875
+OP	ntok=488	op=SET_ROWS	name=cache_v_l2 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.417	min_us=22.292	max_us=22.625
+OP	ntok=488	op=SET_ROWS	name=cache_k_l2 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.333	min_us=22.250	max_us=22.583
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_144	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1040.542	min_us=345.583	max_us=347.708
+OP	ntok=488	op=SCALE	name=node_147	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=46.917	min_us=13.250	max_us=18.625
+OP	ntok=488	op=SCALE	name=node_183	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=45.333	min_us=14.083	max_us=17.000
+OP	ntok=488	op=SET_ROWS	name=cache_v_l3 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=70.667	min_us=22.292	max_us=26.000
+OP	ntok=488	op=SET_ROWS	name=cache_k_l3 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=70.292	min_us=22.167	max_us=25.917
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_205	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1038.833	min_us=343.333	max_us=349.125
+OP	ntok=488	op=SCALE	name=node_208	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=45.708	min_us=12.292	max_us=17.375
+OP	ntok=488	op=SCALE	name=node_244	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=46.625	min_us=14.083	max_us=18.417
+OP	ntok=488	op=SET_ROWS	name=cache_v_l4 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.917	min_us=22.250	max_us=22.333
+OP	ntok=488	op=SET_ROWS	name=cache_k_l4 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.958	min_us=22.292	max_us=22.375
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_266	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1047.416	min_us=346.167	max_us=352.500
+OP	ntok=488	op=SCALE	name=node_269	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=39.542	min_us=13.125	max_us=13.250
+OP	ntok=488	op=SCALE	name=node_305	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=45.625	min_us=14.042	max_us=17.375
+OP	ntok=488	op=SET_ROWS	name=cache_v_l5 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.750	min_us=22.125	max_us=22.375
+OP	ntok=488	op=SET_ROWS	name=cache_k_l5 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.083	min_us=22.250	max_us=22.542
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_327	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1030.083	min_us=341.125	max_us=345.750
+OP	ntok=488	op=SCALE	name=node_330	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=40.458	min_us=12.167	max_us=16.042
+OP	ntok=488	op=SCALE	name=node_366	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.042	min_us=13.875	max_us=14.250
+OP	ntok=488	op=SET_ROWS	name=cache_v_l6 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.833	min_us=22.542	max_us=22.667
+OP	ntok=488	op=SET_ROWS	name=cache_k_l6 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.667	min_us=22.125	max_us=22.292
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_388	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1040.375	min_us=345.000	max_us=348.625
+OP	ntok=488	op=SCALE	name=node_391	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=40.667	min_us=12.375	max_us=15.083
+OP	ntok=488	op=SCALE	name=node_427	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.167	min_us=14.042	max_us=14.083
+OP	ntok=488	op=SET_ROWS	name=cache_v_l7 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.958	min_us=22.208	max_us=22.500
+OP	ntok=488	op=SET_ROWS	name=cache_k_l7 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.583	min_us=22.292	max_us=22.875
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_449	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1040.000	min_us=342.625	max_us=349.458
+OP	ntok=488	op=SCALE	name=node_452	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=40.958	min_us=12.833	max_us=14.958
+OP	ntok=488	op=SCALE	name=node_488	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.625	min_us=14.000	max_us=14.500
+OP	ntok=488	op=SET_ROWS	name=cache_v_l8 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.625	min_us=22.417	max_us=22.625
+OP	ntok=488	op=SET_ROWS	name=cache_k_l8 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.250	min_us=22.333	max_us=22.500
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_510	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1024.458	min_us=338.708	max_us=344.000
+OP	ntok=488	op=SCALE	name=node_513	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=38.083	min_us=12.250	max_us=13.167
+OP	ntok=488	op=SCALE	name=node_549	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.292	min_us=13.917	max_us=14.250
+OP	ntok=488	op=SET_ROWS	name=cache_v_l9 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.458	min_us=22.375	max_us=22.583
+OP	ntok=488	op=SET_ROWS	name=cache_k_l9 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.833	min_us=22.083	max_us=22.375
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_571	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1031.250	min_us=338.250	max_us=348.625
+OP	ntok=488	op=SCALE	name=node_574	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=39.667	min_us=13.042	max_us=13.333
+OP	ntok=488	op=SCALE	name=node_610	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=46.458	min_us=14.250	max_us=17.875
+OP	ntok=488	op=SET_ROWS	name=cache_v_l10 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.625	min_us=22.292	max_us=22.750
+OP	ntok=488	op=SET_ROWS	name=cache_k_l10 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.583	min_us=22.125	max_us=22.250
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_632	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1027.833	min_us=339.708	max_us=347.958
+OP	ntok=488	op=SCALE	name=node_635	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=41.375	min_us=12.250	max_us=16.375
+OP	ntok=488	op=SCALE	name=node_671	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=44.750	min_us=14.000	max_us=16.750
+OP	ntok=488	op=SET_ROWS	name=cache_v_l11 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.208	min_us=22.208	max_us=22.625
+OP	ntok=488	op=SET_ROWS	name=cache_k_l11 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.042	min_us=22.292	max_us=22.375
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_693	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1034.542	min_us=343.417	max_us=346.375
+OP	ntok=488	op=SCALE	name=node_696	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.500	min_us=12.125	max_us=17.167
+OP	ntok=488	op=SCALE	name=node_732	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=43.333	min_us=14.208	max_us=14.875
+OP	ntok=488	op=SET_ROWS	name=cache_v_l12 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.375	min_us=22.333	max_us=22.625
+OP	ntok=488	op=SET_ROWS	name=cache_k_l12 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.750	min_us=22.000	max_us=22.375
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_754	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1036.375	min_us=341.750	max_us=349.000
+OP	ntok=488	op=SCALE	name=node_757	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=38.625	min_us=12.208	max_us=13.417
+OP	ntok=488	op=SCALE	name=node_793	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=46.208	min_us=14.125	max_us=17.958
+OP	ntok=488	op=SET_ROWS	name=cache_v_l13 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.917	min_us=22.292	max_us=22.333
+OP	ntok=488	op=SET_ROWS	name=cache_k_l13 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.042	min_us=22.208	max_us=22.458
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_815	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1035.500	min_us=343.125	max_us=346.375
+OP	ntok=488	op=SCALE	name=node_818	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=38.917	min_us=11.958	max_us=13.583
+OP	ntok=488	op=SCALE	name=node_854	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.500	min_us=14.125	max_us=14.208
+OP	ntok=488	op=SET_ROWS	name=cache_v_l14 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.917	min_us=22.000	max_us=22.542
+OP	ntok=488	op=SET_ROWS	name=cache_k_l14 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.708	min_us=22.042	max_us=22.333
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_876	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1021.500	min_us=337.958	max_us=342.000
+OP	ntok=488	op=SCALE	name=node_879	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=44.125	min_us=13.125	max_us=17.417
+OP	ntok=488	op=SCALE	name=node_915	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=44.917	min_us=14.125	max_us=16.667
+OP	ntok=488	op=SET_ROWS	name=cache_v_l15 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.542	min_us=22.250	max_us=22.708
+OP	ntok=488	op=SET_ROWS	name=cache_k_l15 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.083	min_us=22.292	max_us=22.500
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_937	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1039.208	min_us=346.000	max_us=346.708
+OP	ntok=488	op=SCALE	name=node_940	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=39.708	min_us=13.167	max_us=13.333
+OP	ntok=488	op=SCALE	name=node_976	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=45.333	min_us=14.292	max_us=16.542
+OP	ntok=488	op=SET_ROWS	name=cache_v_l16 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.333	min_us=22.375	max_us=22.583
+OP	ntok=488	op=SET_ROWS	name=cache_k_l16 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.833	min_us=22.125	max_us=22.458
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_998	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1047.292	min_us=344.542	max_us=356.167
+OP	ntok=488	op=SCALE	name=node_1001	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=38.125	min_us=12.333	max_us=13.333
+OP	ntok=488	op=SCALE	name=node_1037	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.417	min_us=13.875	max_us=14.375
+OP	ntok=488	op=SET_ROWS	name=cache_v_l17 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=70.125	min_us=22.250	max_us=25.375
+OP	ntok=488	op=SET_ROWS	name=cache_k_l17 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.625	min_us=22.167	max_us=22.917
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_1059	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1035.833	min_us=344.375	max_us=346.125
+OP	ntok=488	op=SCALE	name=node_1062	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=38.833	min_us=12.250	max_us=13.333
+OP	ntok=488	op=SCALE	name=node_1098	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.875	min_us=14.083	max_us=14.667
+OP	ntok=488	op=SET_ROWS	name=cache_v_l18 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.208	min_us=22.375	max_us=22.417
+OP	ntok=488	op=SET_ROWS	name=cache_k_l18 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.042	min_us=22.292	max_us=22.375
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_1120	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1052.833	min_us=345.625	max_us=356.083
+OP	ntok=488	op=SCALE	name=node_1123	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=39.125	min_us=12.875	max_us=13.208
+OP	ntok=488	op=SCALE	name=node_1159	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.583	min_us=14.083	max_us=14.375
+OP	ntok=488	op=SET_ROWS	name=cache_v_l19 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.042	min_us=22.292	max_us=22.375
+OP	ntok=488	op=SET_ROWS	name=cache_k_l19 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.708	min_us=22.167	max_us=22.333
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_1181	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1048.083	min_us=348.250	max_us=350.250
+OP	ntok=488	op=SCALE	name=node_1184	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.333	min_us=13.208	max_us=15.875
+OP	ntok=488	op=SCALE	name=node_1220	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=48.417	min_us=13.917	max_us=17.375
+OP	ntok=488	op=SET_ROWS	name=cache_v_l20 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=70.917	min_us=22.375	max_us=26.042
+OP	ntok=488	op=SET_ROWS	name=cache_k_l20 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.542	min_us=22.083	max_us=22.333
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_1242	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1041.541	min_us=343.375	max_us=349.500
+OP	ntok=488	op=SCALE	name=node_1245	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=38.958	min_us=12.333	max_us=13.375
+OP	ntok=488	op=SCALE	name=node_1281	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.250	min_us=13.750	max_us=14.250
+OP	ntok=488	op=SET_ROWS	name=cache_v_l21 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.875	min_us=22.250	max_us=22.375
+OP	ntok=488	op=SET_ROWS	name=cache_k_l21 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.000	min_us=22.250	max_us=22.417
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_1303	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1028.375	min_us=339.292	max_us=348.125
+OP	ntok=488	op=SCALE	name=node_1306	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=41.417	min_us=12.125	max_us=15.917
+OP	ntok=488	op=SCALE	name=node_1342	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=42.583	min_us=13.833	max_us=14.375
+OP	ntok=488	op=SET_ROWS	name=cache_v_l22 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.250	min_us=22.167	max_us=22.625
+OP	ntok=488	op=SET_ROWS	name=cache_k_l22 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=67.292	min_us=22.375	max_us=22.542
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_1364	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1046.833	min_us=341.750	max_us=352.958
+OP	ntok=488	op=SCALE	name=node_1367	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=37.500	min_us=12.125	max_us=13.167
+OP	ntok=488	op=SCALE	name=node_1403	fuse=1	src0=f32[1024,488,1]	src1=-[0,0,0]	dst=f32[1024,488,1,1]	count=3	sum_us=46.083	min_us=13.792	max_us=18.125
+OP	ntok=488	op=SET_ROWS	name=cache_v_l23 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=68.292	min_us=22.333	max_us=23.208
+OP	ntok=488	op=SET_ROWS	name=cache_k_l23 (view)	fuse=1	src0=f32[512,488,1]	src1=i64[488,1,1]	dst=f16[512,4096,1,1]	count=3	sum_us=66.833	min_us=22.250	max_us=22.333
+OP	ntok=488	op=GET_ROWS	name=node_1430	fuse=1	src0=f32[1024,488,1]	src1=i32[1,1,1]	dst=f32[1024,1,1,1]	count=3	sum_us=19.875	min_us=5.542	max_us=8.375
+OP	ntok=488	op=FLASH_ATTN_EXT	name=node_1425	fuse=1	src0=f32[64,488,16]	src1=f16[64,1024,8]	dst=f32[64,16,488,1]	count=3	sum_us=1032.833	min_us=342.125	max_us=347.917
+OP	ntok=488	op=GET_ROWS	name=node_1428	fuse=1	src0=f32[1024,488,1]	src1=i32[1,1,1]	dst=f32[1024,1,1,1]	count=3	sum_us=17.667	min_us=5.792	max_us=6.000
+OP	ntok=488	op=SCALE	name=node_1429	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=3	sum_us=13.917	min_us=4.542	max_us=4.750
+OP	ntok=488	op=ADD	name=ffn_inp	fuse=1	src0=f32[1024,1,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=3	sum_us=17.500	min_us=4.875	max_us=7.750
+OP	ntok=488	op=RMS_NORM	name=norm	fuse=2	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=6	sum_us=45.708	min_us=6.625	max_us=11.000
+OP	ntok=488	op=MUL_MAT	name=ffn_moe_logits	fuse=1	src0=f32[1024,32,1]	src1=f32[1024,1,1]	dst=f32[32,1,1,1]	count=3	sum_us=21.667	min_us=7.083	max_us=7.458
+OP	ntok=488	op=SOFT_MAX	name=ffn_moe_probs	fuse=6	src0=f32[32,1,1]	src1=-[0,0,0]	dst=f32[32,1,1,1]	count=3	sum_us=24.500	min_us=7.917	max_us=8.333
+OP	ntok=488	op=MUL_MAT_ID	name=ffn_moe_gate	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,1]	dst=f32[512,8,1,1]	count=3	sum_us=101.167	min_us=31.250	max_us=36.667
+OP	ntok=488	op=MUL_MAT_ID	name=ffn_moe_up	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,1]	dst=f32[512,8,1,1]	count=3	sum_us=94.792	min_us=30.500	max_us=33.417
+OP	ntok=488	op=GLU	name=ffn_moe_swiglu	fuse=1	src0=f32[512,8,1]	src1=f32[512,8,1]	dst=f32[512,8,1,1]	count=3	sum_us=14.958	min_us=4.875	max_us=5.083
+OP	ntok=488	op=MUL_MAT_ID	name=ffn_moe_down	fuse=1	src0=q8_0[512,1024,32]	src1=f32[512,8,1]	dst=f32[1024,8,1,1]	count=3	sum_us=129.042	min_us=42.333	max_us=44.250
+OP	ntok=488	op=MUL	name=ffn_moe_weighted	fuse=8	src0=f32[1024,8,1]	src1=f32[1,8,1]	dst=f32[1024,8,1,1]	count=3	sum_us=14.708	min_us=4.875	max_us=4.958
+OP	ntok=488	op=SCALE	name=node_1466	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=3	sum_us=14.083	min_us=4.500	max_us=4.958
+OP	ntok=488	op=ADD	name=l_out	fuse=1	src0=f32[1024,1,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=3	sum_us=15.750	min_us=4.500	max_us=6.375
+OP	ntok=488	op=MUL_MAT	name=node_1470	fuse=1	src0=q8_0[1024,49155,1]	src1=f32[1024,1,1]	dst=f32[49155,1,1,1]	count=3	sum_us=667.583	min_us=221.292	max_us=224.875
+OP	ntok=488	op=SCALE	name=result_output	fuse=1	src0=f32[49155,1,1]	src1=-[0,0,0]	dst=f32[49155,1,1,1]	count=3	sum_us=25.416	min_us=7.375	max_us=10.500
+OP	ntok=1	op=SCALE	name=embd	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1849.248	min_us=4.375	max_us=8.042
+OP	ntok=1	op=RMS_NORM	name=norm	fuse=2	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=18669	sum_us=139784.792	min_us=6.250	max_us=16.625
+OP	ntok=1	op=MUL_MAT	name=Qcur	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=9144	sum_us=99073.549	min_us=9.375	max_us=19.750
+OP	ntok=1	op=MUL_MAT	name=Vcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,1,1]	dst=f32[512,1,1,1]	count=9144	sum_us=79451.331	min_us=7.500	max_us=18.083
+OP	ntok=1	op=MUL_MAT	name=Kcur	fuse=1	src0=q8_0[1024,512,1]	src1=f32[1024,1,1]	dst=f32[512,1,1,1]	count=9144	sum_us=79116.589	min_us=7.417	max_us=16.042
+OP	ntok=1	op=ROPE	name=Qcur	fuse=1	src0=f32[64,16,1]	src1=i32[1,1,1]	dst=f32[64,16,1,1]	count=9144	sum_us=61349.169	min_us=5.542	max_us=23.625
+OP	ntok=1	op=ROPE	name=Kcur	fuse=1	src0=f32[64,8,1]	src1=i32[1,1,1]	dst=f32[64,8,1,1]	count=9144	sum_us=60885.370	min_us=5.417	max_us=13.875
+OP	ntok=1	op=SET_ROWS	name=cache_v_l0 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2727.751	min_us=6.583	max_us=9.000
+OP	ntok=1	op=SET_ROWS	name=cache_k_l0 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2539.165	min_us=5.917	max_us=8.417
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_22	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1469.750	min_us=19.875	max_us=23.708
+OP	ntok=1	op=MUL_MAT	name=attn_out	fuse=1	src0=q8_0[1024,1024,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=9144	sum_us=97561.547	min_us=9.417	max_us=18.750
+OP	ntok=1	op=SCALE	name=node_25	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1762.332	min_us=4.125	max_us=5.750
+OP	ntok=1	op=ADD	name=ffn_inp	fuse=1	src0=f32[1024,1,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=9144	sum_us=44428.160	min_us=4.000	max_us=27.667
+OP	ntok=1	op=MUL_MAT	name=ffn_moe_logits	fuse=1	src0=f32[1024,32,1]	src1=f32[1024,1,1]	dst=f32[32,1,1,1]	count=9144	sum_us=66159.290	min_us=6.125	max_us=13.833
+OP	ntok=1	op=SOFT_MAX	name=ffn_moe_probs	fuse=6	src0=f32[32,1,1]	src1=-[0,0,0]	dst=f32[32,1,1,1]	count=9144	sum_us=76191.257	min_us=7.125	max_us=16.375
+OP	ntok=1	op=MUL_MAT_ID	name=ffn_moe_gate	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,1]	dst=f32[512,8,1,1]	count=9144	sum_us=297599.919	min_us=29.667	max_us=48.833
+OP	ntok=1	op=MUL_MAT_ID	name=ffn_moe_up	fuse=1	src0=q8_0[1024,512,32]	src1=f32[1024,1,1]	dst=f32[512,8,1,1]	count=9144	sum_us=297316.048	min_us=29.375	max_us=52.625
+OP	ntok=1	op=GLU	name=ffn_moe_swiglu	fuse=1	src0=f32[512,8,1]	src1=f32[512,8,1]	dst=f32[512,8,1,1]	count=9144	sum_us=49919.371	min_us=4.417	max_us=28.250
+OP	ntok=1	op=MUL_MAT_ID	name=ffn_moe_down	fuse=1	src0=q8_0[512,1024,32]	src1=f32[512,8,1]	dst=f32[1024,8,1,1]	count=9144	sum_us=413151.833	min_us=41.542	max_us=69.250
+OP	ntok=1	op=MUL	name=ffn_moe_weighted	fuse=8	src0=f32[1024,8,1]	src1=f32[1,8,1]	dst=f32[1024,8,1,1]	count=9144	sum_us=50385.953	min_us=4.417	max_us=26.750
+OP	ntok=1	op=SCALE	name=node_61	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1746.666	min_us=4.000	max_us=5.708
+OP	ntok=1	op=ADD	name=l_out	fuse=1	src0=f32[1024,1,1]	src1=f32[1024,1,1]	dst=f32[1024,1,1,1]	count=9144	sum_us=46275.708	min_us=4.125	max_us=29.750
+OP	ntok=1	op=SET_ROWS	name=cache_v_l1 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2579.918	min_us=6.042	max_us=8.458
+OP	ntok=1	op=SET_ROWS	name=cache_k_l1 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2503.749	min_us=6.000	max_us=8.000
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_83	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1319.792	min_us=17.542	max_us=19.708
+OP	ntok=1	op=SCALE	name=node_86	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1751.374	min_us=4.042	max_us=5.750
+OP	ntok=1	op=SCALE	name=node_122	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1779.041	min_us=4.042	max_us=5.625
+OP	ntok=1	op=SET_ROWS	name=cache_v_l2 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2616.332	min_us=5.792	max_us=8.417
+OP	ntok=1	op=SET_ROWS	name=cache_k_l2 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2584.001	min_us=6.042	max_us=8.250
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_144	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1369.167	min_us=17.875	max_us=20.500
+OP	ntok=1	op=SCALE	name=node_147	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1777.209	min_us=4.042	max_us=5.833
+OP	ntok=1	op=SCALE	name=node_183	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1772.541	min_us=4.167	max_us=5.792
+OP	ntok=1	op=SET_ROWS	name=cache_v_l3 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2656.291	min_us=6.250	max_us=8.083
+OP	ntok=1	op=SET_ROWS	name=cache_k_l3 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2599.042	min_us=6.125	max_us=8.000
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_205	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1367.375	min_us=18.458	max_us=19.875
+OP	ntok=1	op=SCALE	name=node_208	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1783.250	min_us=4.000	max_us=5.875
+OP	ntok=1	op=SCALE	name=node_244	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1764.209	min_us=4.000	max_us=5.708
+OP	ntok=1	op=SET_ROWS	name=cache_v_l4 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2652.375	min_us=6.250	max_us=8.333
+OP	ntok=1	op=SET_ROWS	name=cache_k_l4 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2555.958	min_us=6.000	max_us=8.083
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_266	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1366.334	min_us=18.292	max_us=20.250
+OP	ntok=1	op=SCALE	name=node_269	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1760.542	min_us=4.125	max_us=5.667
+OP	ntok=1	op=SCALE	name=node_305	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1761.500	min_us=4.125	max_us=5.500
+OP	ntok=1	op=SET_ROWS	name=cache_v_l5 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2653.667	min_us=6.250	max_us=8.083
+OP	ntok=1	op=SET_ROWS	name=cache_k_l5 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2580.084	min_us=6.000	max_us=7.875
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_327	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1397.833	min_us=18.125	max_us=21.750
+OP	ntok=1	op=SCALE	name=node_330	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1769.167	min_us=4.042	max_us=5.875
+OP	ntok=1	op=SCALE	name=node_366	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1771.208	min_us=4.125	max_us=5.875
+OP	ntok=1	op=SET_ROWS	name=cache_v_l6 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2651.499	min_us=6.083	max_us=8.375
+OP	ntok=1	op=SET_ROWS	name=cache_k_l6 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2553.042	min_us=5.917	max_us=7.875
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_388	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1363.541	min_us=18.375	max_us=19.708
+OP	ntok=1	op=SCALE	name=node_391	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1764.334	min_us=4.000	max_us=5.458
+OP	ntok=1	op=SCALE	name=node_427	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1765.083	min_us=4.083	max_us=5.833
+OP	ntok=1	op=SET_ROWS	name=cache_v_l7 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2614.626	min_us=6.125	max_us=8.000
+OP	ntok=1	op=SET_ROWS	name=cache_k_l7 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2573.875	min_us=6.000	max_us=8.000
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_449	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1358.750	min_us=18.333	max_us=19.500
+OP	ntok=1	op=SCALE	name=node_452	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1768.418	min_us=4.083	max_us=5.875
+OP	ntok=1	op=SCALE	name=node_488	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1767.166	min_us=4.125	max_us=5.625
+OP	ntok=1	op=SET_ROWS	name=cache_v_l8 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2593.250	min_us=6.042	max_us=8.708
+OP	ntok=1	op=SET_ROWS	name=cache_k_l8 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2574.000	min_us=6.083	max_us=8.625
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_510	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1365.083	min_us=18.250	max_us=20.625
+OP	ntok=1	op=SCALE	name=node_513	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1764.207	min_us=4.000	max_us=5.625
+OP	ntok=1	op=SCALE	name=node_549	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1763.458	min_us=4.125	max_us=5.833
+OP	ntok=1	op=SET_ROWS	name=cache_v_l9 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2643.958	min_us=6.167	max_us=8.833
+OP	ntok=1	op=SET_ROWS	name=cache_k_l9 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2567.002	min_us=6.000	max_us=8.667
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_571	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1353.459	min_us=18.250	max_us=23.250
+OP	ntok=1	op=SCALE	name=node_574	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1760.917	min_us=3.958	max_us=7.500
+OP	ntok=1	op=SCALE	name=node_610	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1771.250	min_us=4.042	max_us=5.792
+OP	ntok=1	op=SET_ROWS	name=cache_v_l10 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2628.583	min_us=6.083	max_us=8.917
+OP	ntok=1	op=SET_ROWS	name=cache_k_l10 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2580.210	min_us=6.125	max_us=8.375
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_632	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1368.042	min_us=18.250	max_us=21.667
+OP	ntok=1	op=SCALE	name=node_635	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1766.333	min_us=4.125	max_us=5.625
+OP	ntok=1	op=SCALE	name=node_671	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1769.334	min_us=4.125	max_us=5.875
+OP	ntok=1	op=SET_ROWS	name=cache_v_l11 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2658.207	min_us=6.125	max_us=8.667
+OP	ntok=1	op=SET_ROWS	name=cache_k_l11 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2589.751	min_us=6.042	max_us=8.750
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_693	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1354.000	min_us=18.042	max_us=19.875
+OP	ntok=1	op=SCALE	name=node_696	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1768.958	min_us=4.042	max_us=5.875
+OP	ntok=1	op=SCALE	name=node_732	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1770.832	min_us=4.042	max_us=7.500
+OP	ntok=1	op=SET_ROWS	name=cache_v_l12 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2619.877	min_us=6.125	max_us=8.667
+OP	ntok=1	op=SET_ROWS	name=cache_k_l12 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2575.958	min_us=5.958	max_us=8.750
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_754	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1366.333	min_us=18.375	max_us=20.250
+OP	ntok=1	op=SCALE	name=node_757	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1770.458	min_us=4.125	max_us=5.875
+OP	ntok=1	op=SCALE	name=node_793	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1762.291	min_us=4.000	max_us=5.625
+OP	ntok=1	op=SET_ROWS	name=cache_v_l13 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2624.874	min_us=6.125	max_us=10.167
+OP	ntok=1	op=SET_ROWS	name=cache_k_l13 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2574.334	min_us=6.125	max_us=8.792
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_815	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1403.750	min_us=18.125	max_us=23.375
+OP	ntok=1	op=SCALE	name=node_818	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1766.166	min_us=4.042	max_us=5.792
+OP	ntok=1	op=SCALE	name=node_854	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1764.251	min_us=4.125	max_us=5.750
+OP	ntok=1	op=SET_ROWS	name=cache_v_l14 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2647.042	min_us=6.125	max_us=8.583
+OP	ntok=1	op=SET_ROWS	name=cache_k_l14 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2576.667	min_us=6.000	max_us=10.375
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_876	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1361.292	min_us=18.000	max_us=22.250
+OP	ntok=1	op=SCALE	name=node_879	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1771.000	min_us=4.125	max_us=6.000
+OP	ntok=1	op=SCALE	name=node_915	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1774.582	min_us=4.042	max_us=8.750
+OP	ntok=1	op=SET_ROWS	name=cache_v_l15 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2646.792	min_us=6.000	max_us=11.250
+OP	ntok=1	op=SET_ROWS	name=cache_k_l15 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2575.376	min_us=6.083	max_us=8.625
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_937	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1351.792	min_us=18.125	max_us=19.250
+OP	ntok=1	op=SCALE	name=node_940	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1777.123	min_us=4.000	max_us=5.750
+OP	ntok=1	op=SCALE	name=node_976	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1827.792	min_us=4.125	max_us=29.167
+OP	ntok=1	op=SET_ROWS	name=cache_v_l16 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2658.792	min_us=6.125	max_us=10.250
+OP	ntok=1	op=SET_ROWS	name=cache_k_l16 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2629.334	min_us=6.000	max_us=13.917
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_998	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1356.541	min_us=18.250	max_us=21.500
+OP	ntok=1	op=SCALE	name=node_1001	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1811.666	min_us=4.125	max_us=10.125
+OP	ntok=1	op=SCALE	name=node_1037	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1924.960	min_us=4.125	max_us=10.667
+OP	ntok=1	op=SET_ROWS	name=cache_v_l17 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2802.458	min_us=6.208	max_us=13.875
+OP	ntok=1	op=SET_ROWS	name=cache_k_l17 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2735.666	min_us=6.125	max_us=12.708
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1059	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1383.084	min_us=18.208	max_us=25.417
+OP	ntok=1	op=SCALE	name=node_1062	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1891.417	min_us=4.125	max_us=9.208
+OP	ntok=1	op=SCALE	name=node_1098	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=2086.540	min_us=4.125	max_us=11.875
+OP	ntok=1	op=SET_ROWS	name=cache_v_l18 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2909.833	min_us=6.250	max_us=15.000
+OP	ntok=1	op=SET_ROWS	name=cache_k_l18 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2907.167	min_us=6.042	max_us=13.750
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1120	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1397.792	min_us=17.917	max_us=25.750
+OP	ntok=1	op=SCALE	name=node_1123	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1912.459	min_us=4.000	max_us=10.917
+OP	ntok=1	op=SCALE	name=node_1159	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=2084.293	min_us=4.125	max_us=11.750
+OP	ntok=1	op=SET_ROWS	name=cache_v_l19 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2800.209	min_us=6.125	max_us=13.000
+OP	ntok=1	op=SET_ROWS	name=cache_k_l19 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2750.332	min_us=6.042	max_us=12.500
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1181	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1412.583	min_us=18.583	max_us=26.708
+OP	ntok=1	op=SCALE	name=node_1184	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1866.210	min_us=4.125	max_us=10.000
+OP	ntok=1	op=SCALE	name=node_1220	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1915.000	min_us=4.125	max_us=9.708
+OP	ntok=1	op=SET_ROWS	name=cache_v_l20 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2742.002	min_us=6.125	max_us=13.375
+OP	ntok=1	op=SET_ROWS	name=cache_k_l20 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2645.127	min_us=6.000	max_us=11.875
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1242	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1367.459	min_us=18.250	max_us=23.167
+OP	ntok=1	op=SCALE	name=node_1245	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1807.333	min_us=4.000	max_us=8.500
+OP	ntok=1	op=SCALE	name=node_1281	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1907.415	min_us=4.083	max_us=9.875
+OP	ntok=1	op=SET_ROWS	name=cache_v_l21 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2699.416	min_us=6.125	max_us=11.625
+OP	ntok=1	op=SET_ROWS	name=cache_k_l21 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2645.039	min_us=6.000	max_us=12.625
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1303	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1365.958	min_us=18.292	max_us=23.417
+OP	ntok=1	op=SCALE	name=node_1306	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1769.916	min_us=3.958	max_us=8.250
+OP	ntok=1	op=SCALE	name=node_1342	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1799.625	min_us=4.083	max_us=8.917
+OP	ntok=1	op=SET_ROWS	name=cache_v_l22 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2683.749	min_us=6.167	max_us=13.000
+OP	ntok=1	op=SET_ROWS	name=cache_k_l22 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2630.167	min_us=6.042	max_us=11.333
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1364	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1363.958	min_us=18.042	max_us=23.292
+OP	ntok=1	op=SCALE	name=node_1367	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1788.999	min_us=4.125	max_us=9.333
+OP	ntok=1	op=SCALE	name=node_1403	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1931.250	min_us=4.125	max_us=9.125
+OP	ntok=1	op=SET_ROWS	name=cache_v_l23 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2811.291	min_us=6.208	max_us=14.250
+OP	ntok=1	op=SET_ROWS	name=cache_k_l23 (view)	fuse=1	src0=f32[512,1,1]	src1=i64[1,1,1]	dst=f16[512,4096,1,1]	count=381	sum_us=2696.127	min_us=6.000	max_us=12.375
+OP	ntok=1	op=GET_ROWS	name=node_1430	fuse=1	src0=f32[1024,1,1]	src1=i32[1,1,1]	dst=f32[1024,1,1,1]	count=381	sum_us=2697.666	min_us=5.542	max_us=13.583
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1425	fuse=1	src0=f32[64,1,16]	src1=f16[64,1024,8]	dst=f32[64,16,1,1]	count=72	sum_us=1365.750	min_us=18.083	max_us=23.375
+OP	ntok=1	op=GET_ROWS	name=node_1428	fuse=1	src0=f32[1024,1,1]	src1=i32[1,1,1]	dst=f32[1024,1,1,1]	count=381	sum_us=2508.375	min_us=5.583	max_us=13.250
+OP	ntok=1	op=SCALE	name=node_1429	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1905.666	min_us=4.083	max_us=9.500
+OP	ntok=1	op=SCALE	name=node_1466	fuse=1	src0=f32[1024,1,1]	src1=-[0,0,0]	dst=f32[1024,1,1,1]	count=381	sum_us=1858.125	min_us=4.125	max_us=9.875
+OP	ntok=1	op=MUL_MAT	name=node_1470	fuse=1	src0=q8_0[1024,49155,1]	src1=f32[1024,1,1]	dst=f32[49155,1,1,1]	count=381	sum_us=90424.084	min_us=218.875	max_us=363.083
+OP	ntok=1	op=SCALE	name=result_output	fuse=1	src0=f32[49155,1,1]	src1=-[0,0,0]	dst=f32[49155,1,1,1]	count=381	sum_us=3314.250	min_us=6.750	max_us=25.917
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_22	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=7526.124	min_us=22.375	max_us=30.750
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_83	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6677.125	min_us=19.542	max_us=27.750
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_144	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6919.499	min_us=19.875	max_us=27.000
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_205	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6931.250	min_us=20.375	max_us=26.000
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_266	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6896.999	min_us=20.375	max_us=26.125
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_327	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=7173.708	min_us=20.500	max_us=28.833
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_388	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6888.667	min_us=20.333	max_us=25.792
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_449	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6868.126	min_us=20.167	max_us=25.750
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_510	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6940.374	min_us=20.458	max_us=29.417
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_571	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6862.124	min_us=20.375	max_us=29.542
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_632	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6888.377	min_us=20.208	max_us=29.875
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_693	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6910.000	min_us=20.167	max_us=30.292
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_754	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6970.167	min_us=20.167	max_us=29.042
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_815	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=7051.083	min_us=20.083	max_us=31.417
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_876	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6866.708	min_us=20.375	max_us=32.750
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_937	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6852.875	min_us=20.375	max_us=29.000
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_998	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6902.249	min_us=20.500	max_us=31.500
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1059	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=7073.625	min_us=20.417	max_us=30.333
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1120	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=7068.960	min_us=20.125	max_us=30.833
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1181	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=7103.667	min_us=20.417	max_us=31.292
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1242	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6907.210	min_us=20.250	max_us=31.417
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1303	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6938.209	min_us=20.500	max_us=32.083
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1364	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6974.458	min_us=20.333	max_us=31.875
+OP	ntok=1	op=FLASH_ATTN_EXT	name=node_1425	fuse=1	src0=f32[64,1,16]	src1=f16[64,1280,8]	dst=f32[64,16,1,1]	count=309	sum_us=6959.416	min_us=20.417	max_us=32.875

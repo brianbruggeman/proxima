@@ -1,0 +1,8 @@
+round 1 quiet decode_ms_per_token: 13.309 12.737 13.105 13.358 
+round 1 debug decode_ms_per_token: 13.173 13.051 12.865 12.766 
+round 2 quiet decode_ms_per_token: 12.780 12.248 12.262 12.290 
+round 2 debug decode_ms_per_token: 13.406 12.496 12.443 12.841 
+round 3 quiet decode_ms_per_token: 12.692 15.587 12.685 12.315 
+round 3 debug decode_ms_per_token: 13.207 12.750 12.789 12.629 
+instrument no-events tokens=16 decode_ms_per_token: 15.605 12.646 13.208 12.623 
+instrument no-events tokens=128 decode_ms_per_token: 13.873 13.552 13.622 13.902 

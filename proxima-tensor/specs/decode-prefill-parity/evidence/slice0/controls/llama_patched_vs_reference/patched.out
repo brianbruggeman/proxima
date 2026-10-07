@@ -1,0 +1,44 @@
+raw arm=llama-server process=0 run=0 ms_per_token=8.9824
+raw arm=llama-server process=0 run=1 ms_per_token=8.9570
+raw arm=llama-server process=0 run=2 ms_per_token=8.9406
+raw arm=llama-server process=0 run=3 ms_per_token=8.9572
+raw arm=llama-server process=0 run=4 ms_per_token=8.9346
+raw arm=llama-server process=0 run=5 ms_per_token=8.9799
+raw arm=llama-server process=0 run=6 ms_per_token=8.9799
+raw arm=llama-server process=0 run=7 ms_per_token=8.8831
+arm=llama-server metric=ms_per_token process=0 run=1 value=8.9570 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=2 value=8.9406 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=3 value=8.9572 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=4 value=8.9346 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=5 value=8.9799 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=6 value=8.9799 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=7 value=8.8831 outlier=false
+summary arm=llama-server metric=ms_per_token n_all=7 median_all=8.9570 cov_all_pct=0.34 min_all=8.8831 max_all=8.9799 | n_kept=7 median_kept=8.9570 mad_kept=0.0223 cov_kept_pct=0.34 min_kept=8.8831 max_kept=8.9799
+arm=llama-server metric=prefill_ms process=0 run=1 value=571.6940 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=2 value=570.8970 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=3 value=576.0670 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=4 value=571.1920 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=5 value=573.8860 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=6 value=573.2770 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=7 value=572.6420 outlier=false
+summary arm=llama-server metric=prefill_ms n_all=7 median_all=572.6420 cov_all_pct=0.29 min_all=570.8970 max_all=576.0670 | n_kept=7 median_kept=572.6420 mad_kept=1.2440 cov_kept_pct=0.29 min_kept=570.8970 max_kept=576.0670
+arm=llama-server metric=ttft_ms process=0 run=1 value=574.2053 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=2 value=573.3863 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=3 value=578.5715 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=4 value=573.5890 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=5 value=576.6533 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=6 value=576.0424 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=7 value=575.2126 outlier=false
+summary arm=llama-server metric=ttft_ms n_all=7 median_all=575.2126 cov_all_pct=0.30 min_all=573.3863 max_all=578.5715 | n_kept=7 median_kept=575.2126 mad_kept=1.4407 cov_kept_pct=0.30 min_kept=573.3863 max_kept=578.5715
+memory arm=llama-server metric=peak_rss_bytes process=0 value=3735633920
+summary arm=llama-server metric=peak_rss_bytes n=1 median=3735633920 max=3735633920
+memory arm=llama-server metric=peak_footprint_bytes process=0 value=212445504
+summary arm=llama-server metric=peak_footprint_bytes n=1 median=212445504 max=212445504
+extra arm=llama-server process=0 request=0 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=612.3460 ttft_ms=621.9827 ms_per_token=8.9824
+extra arm=llama-server process=0 request=1 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=571.6940 ttft_ms=574.2053 ms_per_token=8.9570
+extra arm=llama-server process=0 request=2 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=570.8970 ttft_ms=573.3863 ms_per_token=8.9406
+extra arm=llama-server process=0 request=3 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=576.0670 ttft_ms=578.5715 ms_per_token=8.9572
+extra arm=llama-server process=0 request=4 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=571.1920 ttft_ms=573.5890 ms_per_token=8.9346
+extra arm=llama-server process=0 request=5 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=573.8860 ttft_ms=576.6533 ms_per_token=8.9799
+extra arm=llama-server process=0 request=6 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=573.2770 ttft_ms=576.0424 ms_per_token=8.9799
+extra arm=llama-server process=0 request=7 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=572.6420 ttft_ms=575.2126 ms_per_token=8.8831
