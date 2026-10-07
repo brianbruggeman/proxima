@@ -113,11 +113,13 @@ pub(super) fn grid_threads(
                         .iter()
                         .map(|&axis| resolved.extents[axis as usize])
                         .product(),
-                    block
-                        .token_axes
-                        .iter()
-                        .map(|&axis| resolved.extents[axis as usize])
-                        .product(),
+                    expert_grouped_launch_tokens(&block).unwrap_or_else(|| {
+                        block
+                            .token_axes
+                            .iter()
+                            .map(|&axis| resolved.extents[axis as usize])
+                            .product()
+                    }),
                 )?
             } else if let Some(block) =
                 dense_batched_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)

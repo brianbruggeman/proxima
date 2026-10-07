@@ -1766,6 +1766,7 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
 pub(crate) const fn tiled_gemm_codec_chunk_width(codec: Codec) -> u64 {
     match codec {
         Codec::Q4_0 => Q4_0_BLOCK_ELEMENTS as u64,
+        Codec::Q8_0 => Q8_0_BLOCK_ELEMENTS as u64,
         _ => (Q4K_BLOCK_ELEMENTS / 8) as u64,
     }
 }

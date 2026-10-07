@@ -276,6 +276,9 @@ metal-q4k-single-fetch = ["omega?/metal-q4k-single-fetch"]
 metal-packed-row-nsg2 = ["omega?/metal-packed-row-nsg2"]
 # passthrough to the default-off gathered-expert packed-row body in omega.
 metal-gathered-packed-row = ["omega?/metal-gathered-packed-row"]
+# passthrough to `omega/metal-grouped-gemm`, the expert-grouped tiled GEMM for
+# gathered Q8_0 expert weights at prefill width.
+metal-grouped-gemm = ["omega?/metal-grouped-gemm"]
 # Selects `proxima-tensor`'s `cpu_mask_zero_ulp` test, the correctness
 # proof that rounding the placed-KV decode loop's growing KV extent
 # (`merged_len`) up to `ServingConfig::kv_bucket_tokens` before binding it

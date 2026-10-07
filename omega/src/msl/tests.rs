@@ -1984,6 +1984,7 @@ fn push_tiled_gemm_body_rejects_an_empty_token_axis_group() {
         token_axes: Vec::new(),
         feature_axes: vec![0],
         codec: Codec::Q4K,
+        gathered: None,
     };
     let mut source = String::new();
     let error = push_tiled_gemm_body(
@@ -2020,6 +2021,7 @@ fn push_tiled_gemm_body_rejects_an_axis_not_in_output_axes() {
         token_axes: vec![5],
         feature_axes: vec![0],
         codec: Codec::Q4K,
+        gathered: None,
     };
     let mut source = String::new();
     let error = push_tiled_gemm_body(
@@ -7039,4 +7041,121 @@ fn rank_select_render_declares_four_passes() {
         .expect("union kernel emits");
     assert!(unioned.source.contains("device const float* keep_rows [[buffer(2)]]"));
     assert!(unioned.source.contains("device float* out [[buffer(3)]]"));
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+mod expert_grouped_gemm {
+    use super::*;
+
+    const TOKENS: u32 = 300;
+    const EXPERTS: u32 = 8;
+    const ROWS: u32 = 192;
+    const REDUCTION: u32 = 512;
+    const OUTPUT_AXES: [u16; 2] = [0, 1];
+
+    fn gathered_q8_0(tokens: u32) -> (BoundOp, BTreeMap<NodeId, Codec>) {
+        let bound = gathered_matmul_op(tokens, EXPERTS, ROWS, REDUCTION);
+        let weight_node = bound.operands()[0].0;
+        let mut packed = BTreeMap::new();
+        packed.insert(weight_node, Codec::Q8_0);
+        (bound, packed)
+    }
+
+    fn classify(
+        bound: &BoundOp,
+        packed: &BTreeMap<NodeId, Codec>,
+    ) -> Result<TiledGemmBlock, TiledGemmRejection> {
+        classify_tiled_gemm(
+            bound,
+            &operand_codecs(bound, packed),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &OUTPUT_AXES,
+        )
+    }
+
+    #[test]
+    fn a_q8_0_expert_gather_at_prefill_width_is_admitted_as_expert_grouped() {
+        let (bound, packed) = gathered_q8_0(TOKENS);
+
+        let block = classify(&bound, &packed).expect("gathered q8_0 at prefill width admits");
+
+        assert_eq!(block.gathered, Some(ExpertGather { slot: 0 }));
+        assert_eq!(block.token_axes, vec![0]);
+        assert_eq!(block.feature_axes, vec![1]);
+        assert_eq!(block.codec, Codec::Q8_0);
+    }
+
+    #[test]
+    fn expert_grouped_dispatch_is_one_z_slice_per_expert_and_row_tiles_times_parts_groups() {
+        let (bound, packed) = gathered_q8_0(TOKENS);
+
+        let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits");
+
+        let row_tiles = u64::from(ROWS).div_ceil(GROUPED_TILE_ROWS);
+        assert_eq!(kernel.grid.depth, u64::from(EXPERTS));
+        assert_eq!(
+            kernel.grid.threads,
+            row_tiles * crate::sized::GROUPED_GEMM_COL_PARTS * 128
+        );
+        assert_eq!(kernel.grid.threadgroup_width, Some(128));
+        assert!(kernel.grid.grid2d.is_none());
+    }
+
+    #[test]
+    fn the_rendered_kernel_ranks_tokens_by_prefix_sum_and_reports_a_bad_route() {
+        let (bound, packed) = gathered_q8_0(TOKENS);
+
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
+
+        assert!(source.contains("uint3 grouped_gid [[thread_position_in_grid]]"), "{source}");
+        assert!(source.contains("simd_prefix_exclusive_sum(scan_match)"), "{source}");
+        assert!(source.contains("tile_token[pending_fill + chunk_before + scan_prefix]"), "{source}");
+        assert!(source.contains("atomic_fetch_max_explicit(&fault[0]"), "{source}");
+        assert!(source.contains("grouped_expert * u.gather_element_stride[0]"), "{source}");
+    }
+
+    #[test]
+    fn the_pipeline_identity_names_the_expert_grouped_body() {
+        let (bound, packed) = gathered_q8_0(TOKENS);
+
+        let identity = kernel_cache_key(&bound, &packed, NumericPolicy::default())
+            .expect("identity resolves");
+
+        assert!(identity.contains("_g10"), "{identity}");
+        assert!(identity.contains("E_w128"), "{identity}");
+    }
+
+    #[test]
+    fn a_codec_without_a_measured_grouped_path_is_rejected_by_name() {
+        let bound = gathered_matmul_op(TOKENS, EXPERTS, ROWS, REDUCTION);
+        let weight_node = bound.operands()[0].0;
+        let mut packed = BTreeMap::new();
+        packed.insert(weight_node, Codec::Q4K);
+
+        let rejection = classify(&bound, &packed)
+            .err()
+            .expect("q4_k experts have no grouped path");
+
+        assert_eq!(
+            rejection,
+            TiledGemmRejection::GatheredCodecNotAdmitted { codec: Codec::Q4K }
+        );
+    }
+
+    #[test]
+    fn below_the_tiled_token_minimum_the_gather_stays_on_the_dense_kernel() {
+        let (bound, packed) = gathered_q8_0(crate::sized::TILED_GEMM_MIN_TOKENS as u32 - 1);
+
+        let rejection = classify(&bound, &packed)
+            .err()
+            .expect("a short prefill is not grouped");
+
+        assert!(
+            matches!(rejection, TiledGemmRejection::TokenExtentBelowMinimum { .. }),
+            "{rejection:?}"
+        );
+    }
 }

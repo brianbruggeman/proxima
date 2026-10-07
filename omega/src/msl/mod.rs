@@ -124,6 +124,7 @@ mod elementwise_reduce_core;
 mod packed_row_blocked_ggml;
 #[macro_use]
 mod tiled_gemm_cooperative_scan;
+mod expert_grouped_gemm;
 mod wide_grid;
 pub use kernel_types_identity::*;
 pub use emit_and_classify::*;
@@ -164,6 +165,7 @@ pub(crate) use cached_attention_render::emit_cached_attention_merge;
 pub(crate) use elementwise_reduce_core::*;
 use packed_row_blocked_ggml::*;
 use tiled_gemm_cooperative_scan::*;
+use expert_grouped_gemm::*;
 use wide_grid::*;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) use wide_grid::fit_flat_width;

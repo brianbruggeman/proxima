@@ -806,6 +806,28 @@ pub(super) fn replace_whole_word(text: &str, identifier: &str, replacement: &str
     output
 }
 
+/// 'E' for the expert-grouped tiled form, 'G' for the dense-weight one. A
+/// gathered op's identity already carries its `_g` operand bits; the letter
+/// states which body rendered, so the two cannot be mistaken for each other
+/// by a reader of the pipeline cache.
+fn expert_group_shape_token(block: &TiledGemmBlock) -> char {
+    if is_expert_grouped(block) { 'E' } else { 'G' }
+}
+
+/// Whether `block` takes the expert-grouped form -- always `false` in a build
+/// without `metal-tiled-gemm`, where no block exists to ask about.
+pub(super) fn is_expert_grouped(block: &TiledGemmBlock) -> bool {
+    #[cfg(feature = "metal-tiled-gemm")]
+    {
+        block.gathered.is_some()
+    }
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    {
+        let _ = block;
+        false
+    }
+}
+
 /// The row-blocked/tiled-GEMM structural shape [`kernel_cache_key`] folds
 /// into [`crate::identity::MetalOnlyExtras::packed_row_block_shape`] — 'G'
 /// (tiled `simdgroup_matrix` GEMM, checked FIRST: [`tiled_gemm_block`] only
@@ -826,8 +848,8 @@ pub(super) fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Opti
     else {
         return 'S';
     };
-    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
-        'G'
+    if let Some(block) = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes) {
+        expert_group_shape_token(&block)
     } else if let Some(block) = packed_row_block(resolved, quantized) {
         if packed_row_block_token_total(&block, &resolved.extents) > 1 {
             'M'
@@ -2462,6 +2484,19 @@ pub(super) fn classify_packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
 ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
+    classify_packed_row_block_with(resolved, quantized, false)
+}
+
+/// [`classify_packed_row_block`] with the multi-row gathered rejection
+/// optionally lifted: `admit_gathered_rows` is only ever `true` from
+/// [`classify_tiled_gemm`], whose expert-grouped path selects the tokens that
+/// share one expert itself and so never reuses a weight row across tokens
+/// that route elsewhere.
+pub(super) fn classify_packed_row_block_with(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    admit_gathered_rows: bool,
+) -> Result<PackedRowBlock, PackedRowBlockRejection> {
     if !reduce_is_cooperative(resolved) {
         return Err(PackedRowBlockRejection::NotCooperativeReduce);
     }
@@ -2581,7 +2616,7 @@ pub(super) fn classify_packed_row_block(
         .map(|&axis| resolved.extents[axis as usize])
         .product::<u64>();
     let gathered_multi_row = gather_count(resolved) != 0 && gathered_token_total > 1;
-    if gathered_multi_row && !cfg!(feature = "metal-gathered-packed-row") {
+    if gathered_multi_row && !admit_gathered_rows && !cfg!(feature = "metal-gathered-packed-row") {
         return Err(PackedRowBlockRejection::GatheredOperand);
     }
     // A routed row's weight IS different per token, so it cannot be shared
@@ -2685,6 +2720,32 @@ pub enum TiledGemmRejection {
     /// so a future change to either rule (or a third packed codec with a
     /// different chunk width) cannot silently reopen the overrun.
     BlockKNotChunkAligned { block_k: u64, chunk_width: u64 },
+    /// The weight operand gathers an expert slab, and the activation also
+    /// gathers or a second operand does: the expert-grouped path selects
+    /// tokens by ONE route index and has nothing to say about a second.
+    GatheredOperandCount { gathered: usize },
+    /// The ACTIVATION is the gathered operand, not the weight.
+    GatheredActivation,
+    /// The token group holds more than one axis: the expert scan walks one
+    /// flat token index and reads the route with one stride.
+    GatheredTokenAxesNotSingle { axes: usize },
+    /// The route index has a nonzero stride on an axis other than the token
+    /// axis, so one token would name several experts.
+    GatheredIndexNotTokenOnly,
+    /// The expert weight's codec has no measured expert-grouped path.
+    GatheredCodecNotAdmitted { codec: Codec },
+    /// The activation is not unit-stride along the reduction axis, which the
+    /// grouped kernel's vector loads of an activation row assume.
+    GatheredActivationNotUnitStride,
+}
+
+/// The expert addressing a gathered weight needs on the grouped tiled path:
+/// `slot` is the weight operand's position among the gathered operands,
+/// which names its `gather_idx{slot}` buffer and its `u.gather_*` uniforms.
+#[cfg(feature = "metal-tiled-gemm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ExpertGather {
+    pub(super) slot: usize,
 }
 
 /// The additional narrowing [`push_tiled_gemm_body`]'s `simdgroup_matrix`
@@ -2726,6 +2787,11 @@ pub(super) struct TiledGemmBlock {
     /// decoder may be codec-specific.
     #[cfg(feature = "metal-tiled-gemm")]
     pub(super) codec: Codec,
+    /// `Some` when the weight is a gathered expert slab and the op takes the
+    /// expert-grouped form: the dispatch grid gains one z slice per expert
+    /// and each threadgroup column selects the tokens routed to its expert.
+    #[cfg(feature = "metal-tiled-gemm")]
+    pub(super) gathered: Option<ExpertGather>,
 }
 
 /// `resolved`/`quantized`/`reduce_op`/`init`/`output_axes` are exactly
@@ -2759,8 +2825,13 @@ pub(super) fn classify_tiled_gemm(
             reduce_dim,
             codec,
             ..
-        } = classify_packed_row_block(resolved, quantized)
-            .map_err(TiledGemmRejection::NotPackedRowBlock)?;
+        } = classify_packed_row_block_with(
+            resolved,
+            quantized,
+            cfg!(feature = "metal-grouped-gemm"),
+        )
+        .map_err(TiledGemmRejection::NotPackedRowBlock)?;
+        let gathered = classify_expert_gather(resolved, weight, codec)?;
         // Q4_K unconditionally, plus Q4_0 behind `PROXIMA_TILED_GEMM_Q4_0`
         // (default ON: unset admits, only explicit `"0"` falls back).
         // Q5_K/Q6_K have no batched-unpack helper
@@ -2769,7 +2840,10 @@ pub(super) fn classify_tiled_gemm(
         // Shipping them unmeasured on a correctness-critical GPU kernel
         // would violate the same discipline this landing's own gate
         // demands (principle 18).
-        if codec != Codec::Q4K && !(codec == Codec::Q4_0 && tiled_gemm_q4_0_override()) {
+        if gathered.is_none()
+            && codec != Codec::Q4K
+            && !(codec == Codec::Q4_0 && tiled_gemm_q4_0_override())
+        {
             return Err(TiledGemmRejection::NotQ4K);
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
@@ -2850,6 +2924,12 @@ pub(super) fn classify_tiled_gemm(
         if !groups_contiguous {
             return Err(TiledGemmRejection::AxisGroupNotContiguous);
         }
+        if gathered.is_some() {
+            expert_route_follows_single_token_axis(resolved, weight, &token_axes)?;
+            if other_layout.stride(reduce_dim as u16) != 1 {
+                return Err(TiledGemmRejection::GatheredActivationNotUnitStride);
+            }
+        }
         let token_extent: u64 = token_axes
             .iter()
             .map(|&axis| resolved.extents[axis as usize])
@@ -2880,7 +2960,65 @@ pub(super) fn classify_tiled_gemm(
             token_axes,
             feature_axes,
             codec,
+            gathered,
         })
+    }
+}
+
+/// Whether the weight is a gathered expert slab the grouped tiled path can
+/// serve, and which gather slot names its route. `None` for a dense weight.
+/// A gathered op is only ever admitted under `metal-grouped-gemm`, and only
+/// for the codec the expert-grouped body has a measured decode for.
+#[cfg(feature = "metal-tiled-gemm")]
+fn classify_expert_gather(
+    resolved: &BoundOp,
+    weight: usize,
+    codec: Codec,
+) -> Result<Option<ExpertGather>, TiledGemmRejection> {
+    let gathered = gather_count(resolved);
+    if gathered == 0 {
+        return Ok(None);
+    }
+    if !cfg!(feature = "metal-grouped-gemm") {
+        return Err(TiledGemmRejection::NotPackedRowBlock(
+            PackedRowBlockRejection::GatheredOperand,
+        ));
+    }
+    let Some(slot) = gather_slots(resolved)[weight] else {
+        return Err(TiledGemmRejection::GatheredActivation);
+    };
+    if gathered != 1 {
+        return Err(TiledGemmRejection::GatheredOperandCount { gathered });
+    }
+    if codec != Codec::Q8_0 {
+        return Err(TiledGemmRejection::GatheredCodecNotAdmitted { codec });
+    }
+    Ok(Some(ExpertGather { slot }))
+}
+
+/// The grouped scan reads one route entry per flat token, so the route index
+/// must move along exactly one token axis and be constant along every other
+/// axis (feature and reduce included).
+#[cfg(feature = "metal-tiled-gemm")]
+fn expert_route_follows_single_token_axis(
+    resolved: &BoundOp,
+    weight: usize,
+    token_axes: &[u16],
+) -> Result<(), TiledGemmRejection> {
+    let [token_axis] = token_axes else {
+        return Err(TiledGemmRejection::GatheredTokenAxesNotSingle {
+            axes: token_axes.len(),
+        });
+    };
+    let Some(lookup) = &resolved.operands()[weight].2 else {
+        return Err(TiledGemmRejection::GatheredIndexNotTokenOnly);
+    };
+    let follows_token_only = (0..resolved.extents.len() as u16)
+        .all(|axis| axis == *token_axis || lookup.index_layout.stride(axis) == 0);
+    if follows_token_only {
+        Ok(())
+    } else {
+        Err(TiledGemmRejection::GatheredIndexNotTokenOnly)
     }
 }
 
@@ -2932,6 +3070,51 @@ pub(super) fn tiled_gemm_block(
     classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).ok()
 }
 
+/// [`tiled_gemm_block`] restricted to the dense-weight form. The env-switched
+/// staging variants (wide activation load, wide weight stage, direct store,
+/// 2D grid) are written against contiguous token tiles; an expert-grouped
+/// block stages scattered tokens and keeps the flat grid, so each of those
+/// switches reads this instead and is off for it.
+#[cfg(feature = "metal-tiled-gemm")]
+fn tiled_gemm_dense_weight_block(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> Option<TiledGemmBlock> {
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes)
+        .filter(|block| block.gathered.is_none())
+}
+
+/// The z extent of an expert-grouped tiled dispatch: one slice per expert the
+/// gathered weight can name. `None` for every other op.
+pub(super) fn expert_group_depth(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<u64> {
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    {
+        let _ = (resolved, quantized);
+        None
+    }
+    #[cfg(feature = "metal-tiled-gemm")]
+    {
+        let BoundOpKind::Reduce {
+            reduce_op,
+            init,
+            output_axes,
+            ..
+        } = &resolved.kind
+        else {
+            return None;
+        };
+        let block = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)?;
+        block.gathered?;
+        resolved.operands()[block.weight]
+            .2
+            .as_ref()
+            .map(|lookup| lookup.extent.max(1))
+    }
+}
+
 /// item 3c (`STAGING.md` §5.3): `true` only when `PROXIMA_TILED_GEMM_WIDE_
 /// ACT_LOAD` admits (default ON: unset admits, only explicit `"0"` disables)
 /// AND `resolved` takes the packed [`tiled_gemm_block`] path.
@@ -2946,7 +3129,9 @@ pub(super) fn wide_activation_load_active(
     if !wide_activation_load_override() {
         return false;
     }
-    let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) else {
+    let Some(block) =
+        tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes)
+    else {
         return false;
     };
     // A `float4` read of 4 consecutive `a_k` values is only byte-correct
@@ -3038,7 +3223,7 @@ pub(super) fn direct_store_active(
     if !crate::identity::reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
         return false;
     }
-    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
         || dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
 }
 
@@ -3059,7 +3244,7 @@ pub(super) fn wide_weight_stage_active(
     if !tiled_gemm_wide_weight_stage_override() {
         return false;
     }
-    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -3089,7 +3274,7 @@ pub(super) fn tiled_gemm_grid2d_active(
     if !tiled_gemm_grid2d_override() {
         return false;
     }
-    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
         || dense_batched_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
 }
 
@@ -3834,6 +4019,9 @@ pub(super) fn dense_batched_gemm_depth(resolved: &BoundOp, quantized: &[Option<C
 /// `Reduce`), so there is no ordering hazard between them.
 pub(super) fn grid_depth_for(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
     if let Some(depth) = reduce_round_count(resolved) {
+        return depth;
+    }
+    if let Some(depth) = expert_group_depth(resolved, quantized) {
         return depth;
     }
     dense_batched_gemm_depth(resolved, quantized).unwrap_or(1)
