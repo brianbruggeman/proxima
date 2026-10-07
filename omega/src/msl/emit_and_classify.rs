@@ -613,7 +613,7 @@ pub(super) fn emit_with_expert_sources_mode(
                 gather = kernel.source.contains("gather_idx0"),
                 token_total = kernel.source.contains("token_total"),
                 source_len = kernel.source.len() as u64,
-                "qwen35_expert_lowering"
+                "moe_expert_lowering"
             );
             if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_FULL").is_some()
                 && source_node == NodeId(3)
@@ -621,7 +621,7 @@ pub(super) fn emit_with_expert_sources_mode(
                 proxima_telemetry::debug!(
                     source_node = ?source_node,
                     source = %kernel.source,
-                    "qwen35_expert_source_full"
+                    "moe_expert_source_full"
                 );
             }
         }

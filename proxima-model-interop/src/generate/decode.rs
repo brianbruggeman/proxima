@@ -1686,7 +1686,7 @@ impl<'file> LoadedModel<'file> {
         layer_row_widths: &[LayerPadRowWidths],
         kv_bound_extent: usize,
         kv_pad_scratch: &'call mut [KvPadScratch],
-        qwen35_dense_pad_scratch: &'call mut [DenseAttentionPadScratch],
+        dense_attention_pad_scratch: &'call mut [DenseAttentionPadScratch],
         step_input_scratch: &'call mut Vec<StepInput>,
         device_resident: &[bool],
         named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
@@ -1756,7 +1756,7 @@ impl<'file> LoadedModel<'file> {
                 device_resident,
             },
             kv_pad_scratch,
-            qwen35_dense_pad_scratch,
+            dense_attention_pad_scratch,
             named_blocks,
         )?;
         Ok(symbols)
@@ -1907,7 +1907,7 @@ impl<'file> LoadedModel<'file> {
                 sidecar_mapped_bytes = slab_memory.mapped_bytes,
                 sidecar_owned_bytes = slab_memory.owned_bytes,
                 sidecar_descriptors = sidecar.descriptor_count(),
-                "qwen35_memory_owners"
+                "moe_memory_owners"
             );
         }
         // The whole-checkpoint Metal buffer is a convenient zero-copy fast
@@ -1985,7 +1985,7 @@ impl<'file> LoadedModel<'file> {
         })
     }
 
-    pub(super) fn reconcile_attached_qwen35moe_residency(
+    pub(super) fn reconcile_attached_moe_residency(
         &self,
         policy: &mut crate::residency::ExpertResidency,
     ) -> Result<(), InteropError> {
@@ -2006,7 +2006,7 @@ impl<'file> LoadedModel<'file> {
     /// this phase boundary.  `Routes` may be a fixed-capacity route array or
     /// a `Vec` owned by the caller, and `Source` may be an expert slab view or
     /// an mmap-backed table.
-    pub fn execute_qwen35moe_pre_gather<Routes, Source, Output, Router, Boundary, Gather>(
+    pub fn execute_moe_pre_gather<Routes, Source, Output, Router, Boundary, Gather>(
         &self,
         router: Router,
         boundary: Boundary,
@@ -3200,12 +3200,12 @@ impl<'file> LoadedModel<'file> {
         // cache leaf names are never hard-coded twice.
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         #[cfg(feature = "metal")]
-        let qwen35_pre_gather_requested = moe_pre_gather_enabled(
+        let moe_pre_gather_requested = moe_pre_gather_enabled(
             serving_config.moe_pre_gather,
             self.ffn_routing == FfnRouting::Routed,
         );
         #[cfg(feature = "metal")]
-        let monolithic_high_mmap_requested = qwen35_pre_gather_requested
+        let monolithic_high_mmap_requested = moe_pre_gather_requested
             && runtime.uses_gpu()
             && serving_config.moe_monolithic_high_mmap;
         #[cfg(not(feature = "metal"))]
@@ -3213,7 +3213,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let monolithic_all_low_requested = self.monolithic_all_low_requested(serving_config, runtime);
         #[cfg(feature = "metal")]
-        if qwen35_pre_gather_requested && !monolithic_high_mmap_requested {
+        if moe_pre_gather_requested && !monolithic_high_mmap_requested {
             // A whole-checkpoint MTLBuffer makes mmap look cheap while still
             // charging every expert byte to Metal's working set.  Routed
             // execution supplies only selected experts through the typed
@@ -3254,7 +3254,7 @@ impl<'file> LoadedModel<'file> {
         // shares the identical `Extent::Symbolic(1)` slot, so it needs the
         // same treatment or a bucketed `symbols[1]` reads past a shorter,
         // unpadded buffer on every recurrent-interval checkpoint.
-        let mut qwen35_dense_pad_scratch: Vec<DenseAttentionPadScratch> = self
+        let mut dense_attention_pad_scratch: Vec<DenseAttentionPadScratch> = self
             .layer_roots
             .iter()
             .map(|_| DenseAttentionPadScratch::new())
@@ -3264,11 +3264,11 @@ impl<'file> LoadedModel<'file> {
         // KV roots are device-resident on Metal regardless of expert-residency
         // mode, so this gate is the architecture, never the pre-gather flag.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let qwen35moe_architecture = self.kv_cache_shape == KvCacheShape::Monolithic;
+        let monolithic_kv_architecture = self.kv_cache_shape == KvCacheShape::Monolithic;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let dense_attention_placement_enabled = !monolithic_all_low_requested
-            && qwen35_dense_attention_placement_enabled(
-                qwen35moe_architecture,
+            && dense_attention_placement_supported(
+                monolithic_kv_architecture,
                 runtime.is_metal(),
                 force_two_range,
                 seed_cached_len,
@@ -3317,21 +3317,21 @@ impl<'file> LoadedModel<'file> {
                 if !dense_attention_placement_enabled {
                     return Ok(None);
                 }
-                let even_odd_byte_length = qwen35_dense_attention_placed_byte_length(
+                let even_odd_byte_length = dense_attention_placed_byte_length(
                     self.family(),
                     dense_attention_positions,
                     *even_odd_row,
                     layer,
                     "rotary key",
                 )?;
-                let pass_byte_length = qwen35_dense_attention_placed_byte_length(
+                let pass_byte_length = dense_attention_placed_byte_length(
                     self.family(),
                     dense_attention_positions,
                     *pass_row,
                     layer,
                     "pass-through key",
                 )?;
-                let value_byte_length = qwen35_dense_attention_placed_byte_length(
+                let value_byte_length = dense_attention_placed_byte_length(
                     self.family(),
                     dense_attention_positions,
                     *v_row,
@@ -3397,7 +3397,7 @@ impl<'file> LoadedModel<'file> {
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_placement_enabled =
-            !monolithic_all_low_requested && qwen35moe_architecture && runtime.is_metal();
+            !monolithic_all_low_requested && monolithic_kv_architecture && runtime.is_metal();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_placement_max_layer = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3501,11 +3501,11 @@ impl<'file> LoadedModel<'file> {
         // `new_count > 1` prefill used to split into `prompt_token_count`
         // one-position evaluations: the compiled decode program's own `s`
         // axis is `Extent::Symbolic(0)`, and
-        // `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
+        // `proxima_tensor::spec::append_delta_net_mixer_with_taps_and_layout`'s
         // squeeze-reduce silently sums across positions for anything but a
-        // literal `Extent::Static` axis. `self.qwen35moe_hparams`
+        // literal `Extent::Static` axis. `self.recurrent_routed_interval_hparams`
         // (`Self::load`'s bind site) is the seam meant to fix it:
-        // `qwen35moe_forward_program_at_width` builds a SECOND program with
+        // `recurrent_routed_interval_forward_program_at_width` builds a SECOND program with
         // `s` pinned to `Extent::Static(prompt_token_count)`, which reaches
         // that same builder's M>1 branch instead. That branch is proven
         // correct in isolation (`spec.rs`'s own oracle,
@@ -3557,7 +3557,7 @@ impl<'file> LoadedModel<'file> {
             Vec<LayerCacheRoots>,
         )> = Vec::new();
         if self.single_position_step
-            && let Some(hparams) = self.qwen35moe_hparams.as_ref()
+            && let Some(hparams) = self.recurrent_routed_interval_hparams.as_ref()
         {
             for &(_offset, width) in &one_evaluation_chunks {
                 if one_evaluation_prefill_programs
@@ -3567,7 +3567,7 @@ impl<'file> LoadedModel<'file> {
                     continue;
                 }
                 let (program, roots, layer_roots, _moe_sites, _diagnostics) =
-                    crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
+                    crate::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width(
                         hparams,
                         Some(width as u32),
                     )
@@ -3798,11 +3798,11 @@ impl<'file> LoadedModel<'file> {
                 // architecture's `new_count > 1` prefill used to split into
                 // `next_ids.len()` one-position evaluations: the compiled
                 // decode program's own `s` axis is `Extent::Symbolic(0)`,
-                // and `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
+                // and `proxima_tensor::spec::append_delta_net_mixer_with_taps_and_layout`'s
                 // squeeze-reduce silently sums across positions for
-                // anything but a literal `Extent::Static` axis. `self.qwen35moe_hparams`
+                // anything but a literal `Extent::Static` axis. `self.recurrent_routed_interval_hparams`
                 // (`Self::load`'s bind site) is the seam that
-                // fixes it: `qwen35moe_forward_program_at_width` builds a
+                // fixes it: `recurrent_routed_interval_forward_program_at_width` builds a
                 // SECOND program with `s` pinned to `Extent::Static(new_count)`,
                 // which reaches that same builder's M>1 branch instead
                 // (`spec.rs`'s own oracle,
@@ -4092,7 +4092,7 @@ impl<'file> LoadedModel<'file> {
                         &layer_row_widths,
                         kv_bound_extent,
                         &mut kv_pad_scratch,
-                        &mut qwen35_dense_pad_scratch,
+                        &mut dense_attention_pad_scratch,
                         &mut step_input_scratch,
                         device_resident_view,
                         &mut named_blocks,
@@ -4669,7 +4669,7 @@ impl<'file> LoadedModel<'file> {
                         pre_gather,
                         sidecar = self.expert_sidecar.is_some(),
                         gpu = runtime.uses_gpu(),
-                        "qwen35_pre_gather_enabled"
+                        "moe_pre_gather_enabled"
                     );
                     if pre_gather
                         && !monolithic_all_low
@@ -4705,7 +4705,7 @@ impl<'file> LoadedModel<'file> {
                     // its borrow is not tied to the short `&self` call.
                     #[cfg(feature = "moe-expert-prefetch")]
                     let expert_sidecar_for_gather = self.expert_sidecar.clone();
-                    let mut before_qwen35moe_gather =
+                    let mut before_moe_gather =
                         |layer: usize,
                          position: u64,
                          routes: &[crate::residency::RoutedExpert],
@@ -4728,7 +4728,7 @@ impl<'file> LoadedModel<'file> {
                                 layer = layer as u64,
                                 position,
                                 experts = ?&selected_experts[..routes.len()],
-                                "qwen35_route"
+                                "moe_route"
                             );
                             #[cfg(feature = "moe-expert-prefetch")]
                             if moe_expert_prefetch_enabled {
@@ -4782,7 +4782,7 @@ impl<'file> LoadedModel<'file> {
                                             next_layer = layer.saturating_add(1) as u64,
                                             candidates = candidates.as_slice().len() as u64,
                                             advised_bytes,
-                                            "qwen35_expert_prefetch"
+                                            "moe_expert_prefetch"
                                         );
                                     }
                                 }
@@ -4905,7 +4905,7 @@ impl<'file> LoadedModel<'file> {
                                     ),
                                 }
                             })?;
-                        self.evaluate_qwen35moe_pre_gather(
+                        self.evaluate_moe_pre_gather(
                             runtime,
                             pre_gather_plan,
                             &symbols,
@@ -4945,7 +4945,7 @@ impl<'file> LoadedModel<'file> {
                                     buffers: &dense_attention_buffers,
                                 }),
                             },
-                            &mut before_qwen35moe_gather,
+                            &mut before_moe_gather,
                         )?
                     } else if use_metal_output_placements(
                         !ssm_input_placements.is_empty() || !ssm_output_placements.is_empty(),
@@ -5031,7 +5031,7 @@ impl<'file> LoadedModel<'file> {
                                     ),
                                 }
                             })?;
-                        self.evaluate_qwen35moe_pre_gather(
+                        self.evaluate_moe_pre_gather(
                             runtime,
                             pre_gather_plan,
                             &symbols,
@@ -5052,7 +5052,7 @@ impl<'file> LoadedModel<'file> {
                                 #[cfg(feature = "metal")]
                                 all_low_expert_scratch: &mut layer_window_expert_scratch,
                             },
-                            &mut before_qwen35moe_gather,
+                            &mut before_moe_gather,
                         )?
                     } else {
                         runtime.evaluate(
@@ -5337,7 +5337,7 @@ impl<'file> LoadedModel<'file> {
                             let Some((logits, shape)) = evaluated.get(router_root) else {
                                 continue;
                             };
-                            visit_qwen35moe_router_selections(
+                            visit_moe_router_selections(
                                 layer,
                                 cached_len,
                                 RouterLogits {
@@ -5393,7 +5393,7 @@ impl<'file> LoadedModel<'file> {
                             node = ?diagnostic.block_output,
                             shape = ?shape,
                             first4 = ?row.iter().take(4).copied().collect::<Vec<_>>(),
-                            "qwen35_monolithic_block_output"
+                            "moe_monolithic_block_output"
                         );
                     }
 
@@ -6334,8 +6334,8 @@ impl<'file> LoadedModel<'file> {
                     // before each gather. Reconcile once after the whole token,
                     // so retained residency actions cannot churn later layers
                     // of the same token.
-                    self.reconcile_attached_qwen35moe_residency(policy)?;
-                    debug!(position = cached_len as u64, "qwen35_residency_boundary");
+                    self.reconcile_attached_moe_residency(policy)?;
+                    debug!(position = cached_len as u64, "moe_residency_boundary");
                 }
 
                 // a cacheless architecture carries no KV between steps, so each
@@ -6411,7 +6411,7 @@ impl<'file> LoadedModel<'file> {
                 overfetch = moe_prefetch_overfetch_count,
                 advice_events = moe_prefetch_advice_events,
                 advised_bytes = moe_prefetch_advised_bytes,
-                "qwen35_expert_prefetch_stats"
+                "moe_expert_prefetch_stats"
             );
         }
 
@@ -7158,7 +7158,7 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|_| KvPadScratch::new())
             .collect();
-        let mut qwen35_dense_pad_scratch: Vec<DenseAttentionPadScratch> = self
+        let mut dense_attention_pad_scratch: Vec<DenseAttentionPadScratch> = self
             .layer_roots
             .iter()
             .map(|_| DenseAttentionPadScratch::new())
@@ -7213,7 +7213,7 @@ impl<'file> LoadedModel<'file> {
             &layer_row_widths,
             kv_bound_extent,
             &mut kv_pad_scratch,
-            &mut qwen35_dense_pad_scratch,
+            &mut dense_attention_pad_scratch,
             &mut step_input_scratch,
             &[],
             &mut named_blocks,

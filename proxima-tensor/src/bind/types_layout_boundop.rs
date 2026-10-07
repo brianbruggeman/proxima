@@ -211,7 +211,7 @@ pub enum BoundOpKind {
         new_upper_inclusive: i64,
     },
     /// One backend-neutral gated-delta-net recurrence step
-    /// ([`crate::spec::append_qwen35_delta_net_step`]'s own ~12-op chain,
+    /// ([`crate::spec::append_delta_net_step`]'s own ~12-op chain,
     /// collapsed): `operands` is exactly `[query, key, value, gate, beta,
     /// state_in]`, `query`/`key` bound PRE-[`crate::spec::repeat_kv_heads`]
     /// (the matcher walks past that op's two broadcast multiplies, the same
@@ -267,7 +267,7 @@ pub enum BoundOpKind {
     /// [`crate::spec::ExpertGatingFunc::Softmax`], `scores` aliased to
     /// `logits`, no `expert_bias` -- this slice's only matched shape, the one
     /// `proxima-model-interop/src/recurrent_routed_interval/program.rs`'s own
-    /// `append_qwen35moe_ffn` builds). `n_tokens == 1` is this slice's only
+    /// `append_shared_expert_moe_ffn` builds). `n_tokens == 1` is this slice's only
     /// supported shape (decode), the same restriction
     /// [`BoundOpKind::GatedDeltaNet`] carries for the same reason: an
     /// M-token prefill bind is out of scope until that slice lands.

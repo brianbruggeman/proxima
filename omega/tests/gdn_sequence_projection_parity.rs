@@ -4,7 +4,7 @@
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
 use proxima_primitives::Codec;
 use proxima_tensor::spec::{
-    GdnSequenceTail, append_qwen35_gdn_sequence_tail_with_taps, input_leaf, scalar_constant,
+    GdnSequenceTail, append_delta_net_sequence_tail_with_taps, input_leaf, scalar_constant,
 };
 use proxima_tensor::{DType, Extent, NumericPolicy, Op, QuantizedBlock};
 
@@ -66,7 +66,7 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
         vec![Extent::Static(CONTRACTION as u32), Extent::Static(EMBED)],
         "out_weight",
     );
-    let taps = append_qwen35_gdn_sequence_tail_with_taps(
+    let taps = append_delta_net_sequence_tail_with_taps(
         &mut program,
         GdnSequenceTail {
             x,

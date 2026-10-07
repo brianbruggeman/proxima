@@ -38,7 +38,7 @@ impl<'file> LoadedModel<'file> {
     /// This checkpoint's pre-`lm_head` hidden-state root
     /// (`proxima_tensor::spec::ForwardRoots::hidden`), when the load path
     /// named one -- `None` on the recurrent-interval hybrid path
-    /// (`crate::recurrent_interval::qwen35_forward_program` carries no named
+    /// (`crate::recurrent_interval::recurrent_interval_forward_program` carries no named
     /// hidden-state root yet). A caller composes this with
     /// [`Self::forward_node_values`] to read that tensor's row out
     /// directly; proxima names the node, it does not decide how a caller
@@ -385,7 +385,7 @@ impl<'file> LoadedModel<'file> {
                         .2
                         .iter()
                         .filter(|(_, mapped)| {
-                            let maximum = std::env::var("PROXIMA_DEBUG_QWEN35_PLAN_MAX_MAPPED")
+                            let maximum = std::env::var("PROXIMA_DEBUG_MOE_PLAN_MAX_MAPPED")
                                 .ok()
                                 .and_then(|value| value.parse::<u32>().ok())
                                 .unwrap_or(24);
@@ -400,7 +400,7 @@ impl<'file> LoadedModel<'file> {
                         .enumerate()
                         .map(|(index, operation)| (index, operation.name()))
                         .collect::<Vec<_>>(),
-                    "qwen35_plan"
+                    "moe_plan"
                 );
             }
         }
@@ -475,7 +475,7 @@ impl<'file> LoadedModel<'file> {
                 produced = produced_cuts.len() as u64,
                 consumed = consumed_cuts.len() as u64,
                 placed = ?placed_boundary_cuts,
-                "qwen35_placement_candidates"
+                "moe_placement_candidates"
             );
             let mut placements = BTreeMap::new();
             for node in placed_boundary_cuts {
@@ -534,7 +534,7 @@ impl<'file> LoadedModel<'file> {
         })
     }
 
-    pub(super) fn evaluate_qwen35moe_pre_gather<'mapping, BeforeGather>(
+    pub(super) fn evaluate_moe_pre_gather<'mapping, BeforeGather>(
         &self,
         runtime: &mut BackendRuntime,
         plan: &PreGatherPlan,
@@ -597,7 +597,7 @@ impl<'file> LoadedModel<'file> {
                     )
                 })
                 .collect::<Vec<_>>(),
-            "qwen35_pre_gather_roots"
+            "moe_pre_gather_roots"
         );
         for (index, operation) in self.program.iter().enumerate() {
             if let proxima_tensor::op::Op::Constant { value, .. } = operation {
@@ -745,7 +745,7 @@ impl<'file> LoadedModel<'file> {
                 let (first_logits, first_shape) = evaluated
                     .get(first_router_mapped)
                     .ok_or(InteropError::MissingEvaluatedNode { node: first_router })?;
-                visit_qwen35moe_router_boundary(
+                visit_moe_router_boundary(
                     layer,
                     position_offset,
                     RouterLogits {
@@ -766,7 +766,7 @@ impl<'file> LoadedModel<'file> {
                         node: second_router,
                     },
                 )?;
-                visit_qwen35moe_router_boundary(
+                visit_moe_router_boundary(
                     layer + 1,
                     position_offset,
                     RouterLogits {
@@ -837,7 +837,7 @@ impl<'file> LoadedModel<'file> {
                     has_segment = segments.gather_next_router.is_some(),
                     ssm = has_ssm_placement,
                     dense = has_dense_attention_placement,
-                    "qwen35_fused_boundary"
+                    "moe_fused_boundary"
                 );
             }
             for phase_index in 0..2 {
@@ -1024,7 +1024,7 @@ impl<'file> LoadedModel<'file> {
                         min = route_values.iter().copied().fold(f32::INFINITY, f32::min),
                         max = route_values.iter().copied().fold(f32::NEG_INFINITY, f32::max),
                         finite = route_values.iter().all(|value| value.is_finite()),
-                        "qwen35_gather_route_input"
+                        "moe_gather_route_input"
                     );
                 }
 
@@ -1071,7 +1071,7 @@ impl<'file> LoadedModel<'file> {
                         _ => None,
                     });
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                retain_qwen35_segment_readbacks(
+                retain_moe_segment_readbacks(
                     &mut requested,
                     &plan.router_cut_placements,
                     placed_dense_roots,
@@ -1089,7 +1089,7 @@ impl<'file> LoadedModel<'file> {
                         layer = layer as u64,
                         original = ?node,
                         mapped = ?mapping.get(node),
-                        "qwen35_placement"
+                        "moe_placement"
                     );
                     if let Some(mapped) = mapping.get(node).copied() {
                         if layer == 39 && *node == NodeId(15) {
@@ -1097,7 +1097,7 @@ impl<'file> LoadedModel<'file> {
                                 original = ?node,
                                 mapped = ?mapped,
                                 op = ?program.get(mapped.0 as usize),
-                                "qwen35_placement_detail"
+                                "moe_placement_detail"
                             );
                         }
                         if matches!(program.get(mapped.0 as usize), Some(Op::Input { .. })) {
@@ -1126,7 +1126,7 @@ impl<'file> LoadedModel<'file> {
                             .iter()
                             .map(|(node, _, offset)| (*node, *offset))
                             .collect::<Vec<_>>(),
-                        "qwen35_placement_bindings"
+                        "moe_placement_bindings"
                     );
                 }
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1243,7 +1243,7 @@ impl<'file> LoadedModel<'file> {
                     future_cuts = future_cuts.len() as u64,
                     global_cuts = plan.global_cut_nodes.len() as u64,
                     outputs = outputs.len() as u64,
-                    "qwen35_segment_requests"
+                    "moe_segment_requests"
                 );
                 if layer == debug_layer
                     && !is_router
@@ -1375,7 +1375,7 @@ impl<'file> LoadedModel<'file> {
                         phase = "router",
                         layer = layer as u64,
                         elapsed_us = segment_started.elapsed().as_micros() as u64,
-                        "qwen35_segment"
+                        "moe_segment"
                     );
                     let evaluated = result?;
                     if layer == 3
@@ -1470,7 +1470,7 @@ impl<'file> LoadedModel<'file> {
                                 metal = actual_values.get(index).copied().unwrap_or_default(),
                                 cpu = expected_values.get(index).copied().unwrap_or_default(),
                                 shape = actual_values.len() as u64,
-                                "qwen35_router_parity"
+                                "moe_router_parity"
                             );
                         }
                     }
@@ -1507,7 +1507,7 @@ impl<'file> LoadedModel<'file> {
                                 high_cache_hits = sidecar_read_scratch.high_cache_hits,
                                 high_cache_misses = sidecar_read_scratch.high_cache_misses,
                                 elapsed_us = sidecar_read_elapsed_us,
-                                "qwen35_bounded_expert_reads"
+                                "moe_bounded_expert_reads"
                             );
                         }
                         Some(&*sidecar_read_scratch)
@@ -1542,7 +1542,7 @@ impl<'file> LoadedModel<'file> {
                         };
                     trace!(
                         nodes = ?mapped_expert_sources.keys().collect::<Vec<_>>(),
-                        "qwen35_mapped_expert_source"
+                        "moe_mapped_expert_source"
                     );
                     let segment_started = std::time::Instant::now();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1716,7 +1716,7 @@ impl<'file> LoadedModel<'file> {
                                     shape = ?first.shape,
                                     metal = ?metal_counterpart,
                                     cpu = ?cpu_counterpart,
-                                    "qwen35_first_nonfinite_gather"
+                                    "moe_first_nonfinite_gather"
                                 );
                                 if let Some(Op::Elementwise { operands, .. }) =
                                     program.get(first.node.0 as usize)
@@ -1735,7 +1735,7 @@ impl<'file> LoadedModel<'file> {
                                             op = ?program.get(operand.0 as usize),
                                             metal = ?metal_value,
                                             cpu = ?cpu_value,
-                                            "qwen35_nonfinite_operand"
+                                            "moe_nonfinite_operand"
                                         );
                                     }
                                 }
@@ -1744,7 +1744,7 @@ impl<'file> LoadedModel<'file> {
                                     layer = layer as u64,
                                     result = "none",
                                     local_nodes = requested_nodes.len() as u64,
-                                    "qwen35_first_nonfinite_gather"
+                                    "moe_first_nonfinite_gather"
                                 );
                             }
                         }
@@ -1786,7 +1786,7 @@ impl<'file> LoadedModel<'file> {
                                 index = index as u64,
                                 metal = actual_values.get(index).copied().unwrap_or_default(),
                                 cpu = expected_values.get(index).copied().unwrap_or_default(),
-                                "qwen35_gather_parity"
+                                "moe_gather_parity"
                             );
                         }
                         if let Ok(actual) = &result {
@@ -1815,7 +1815,7 @@ impl<'file> LoadedModel<'file> {
                                         max_abs = maximum,
                                         actual_first = ?actual_values.iter().take(4).copied().collect::<Vec<_>>(),
                                         expected_first = ?expected_values.iter().take(4).copied().collect::<Vec<_>>(),
-                                        "qwen35_gather_digest"
+                                        "moe_gather_digest"
                                     );
                                 }
                             }
@@ -1837,7 +1837,7 @@ impl<'file> LoadedModel<'file> {
                                     };
                                     match operation {
                                         proxima_tensor::op::Op::Input { name, .. } => {
-                                            trace!(node = ?node, name = ?name, "qwen35_gather_graph_input");
+                                            trace!(node = ?node, name = ?name, "moe_gather_graph_input");
                                         }
                                         proxima_tensor::op::Op::Elementwise {
                                             operands, ..
@@ -1872,7 +1872,7 @@ impl<'file> LoadedModel<'file> {
                                         name = ?program[node.0 as usize].name(),
                                         op = ?program[node.0 as usize],
                                         max_abs = maximum,
-                                        "qwen35_first_gather_divergence"
+                                        "moe_first_gather_divergence"
                                     );
                                     if let proxima_tensor::op::Op::Elementwise {
                                         operands, ..
@@ -1897,7 +1897,7 @@ impl<'file> LoadedModel<'file> {
                                                     node = ?operand,
                                                     index = operand_index as u64,
                                                     max_abs = operand_maximum,
-                                                    "qwen35_gather_operand"
+                                                    "moe_gather_operand"
                                                 );
                                             }
                                         }
@@ -1915,7 +1915,7 @@ impl<'file> LoadedModel<'file> {
                         phase = "gather",
                         layer = layer as u64,
                         elapsed_us = segment_started.elapsed().as_micros() as u64,
-                        "qwen35_segment"
+                        "moe_segment"
                     );
                     result?
                 };
@@ -1965,7 +1965,7 @@ impl<'file> LoadedModel<'file> {
                         readback_bytes,
                         "pre-gather segment returned requested payload bytes"
                     );
-                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_REQUEST_BYTES").is_some() {
+                    if std::env::var_os("PROXIMA_DEBUG_MOE_REQUEST_BYTES").is_some() {
                         let mut returned = requested
                             .iter()
                             .filter_map(|(mapped, original)| {
@@ -1987,7 +1987,7 @@ impl<'file> LoadedModel<'file> {
                             phase = if is_router { "router" } else { "gather" },
                             layer = layer as u64,
                             nodes = ?returned,
-                            "qwen35_segment_returned_bytes"
+                            "moe_segment_returned_bytes"
                         );
                     }
                 }
@@ -2003,7 +2003,7 @@ impl<'file> LoadedModel<'file> {
                             .ok_or(InteropError::MissingEvaluatedNode {
                                 node: diagnostic.router_logits,
                             })?;
-                    visit_qwen35moe_router_boundary(
+                    visit_moe_router_boundary(
                         phase_layer,
                         position_offset,
                         RouterLogits {
@@ -2033,7 +2033,7 @@ impl<'file> LoadedModel<'file> {
                         continue;
                     }
                     let (values, shape) = evaluated.get(mapped).ok_or_else(|| {
-                        if std::env::var_os("PROXIMA_DEBUG_QWEN35_MISSING_NODE").is_some() {
+                        if std::env::var_os("PROXIMA_DEBUG_MOE_MISSING_NODE").is_some() {
                             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                             let placed = plan.router_cut_placements.contains_key(&original);
                             #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
@@ -2044,7 +2044,7 @@ impl<'file> LoadedModel<'file> {
                                 mapped = ?mapped,
                                 placed,
                                 op = ?self.program.get(original.0 as usize),
-                                "qwen35_missing_evaluated_node"
+                                "moe_missing_evaluated_node"
                             );
                         }
                         InteropError::MissingEvaluatedNode { node: original }
@@ -2096,7 +2096,7 @@ impl<'file> LoadedModel<'file> {
                                 .take(4)
                                 .copied()
                                 .collect::<Vec<_>>(),
-                            "qwen35_block_output"
+                            "moe_block_output"
                         );
                     }
                     if !is_router && values.iter().any(|value| !value.is_finite()) {
@@ -2109,7 +2109,7 @@ impl<'file> LoadedModel<'file> {
                             layer = layer as u64,
                             node = ?segment_output,
                             first = ?first_nonfinite,
-                            "qwen35_nonfinite_gather"
+                            "moe_nonfinite_gather"
                         );
                         return Err(InteropError::PreGatherExecutionUnsupported {
                             architecture: String::from(self.family()),
@@ -2131,7 +2131,7 @@ impl<'file> LoadedModel<'file> {
                             min,
                             max,
                             first = ?values.get(..values.len().min(4)).unwrap_or_default(),
-                            "qwen35_segment_output"
+                            "moe_segment_output"
                         );
                     }
                     carried.insert(segment_output, (shape.to_vec(), values.to_vec()));
@@ -2256,7 +2256,7 @@ impl<'file> LoadedModel<'file> {
                         phase = "suffix",
                         node = ?original,
                         mapped = ?mapped,
-                        "qwen35_missing_evaluated_node"
+                        "moe_missing_evaluated_node"
                     );
                     InteropError::MissingEvaluatedNode { node: original }
                 })?;
@@ -2285,7 +2285,7 @@ impl<'file> LoadedModel<'file> {
                 gather_elapsed_us,
                 router_readback_bytes,
                 gather_readback_bytes,
-                "qwen35_segment_summary"
+                "moe_segment_summary"
             );
         }
 
@@ -2725,7 +2725,7 @@ impl<'file> LoadedModel<'file> {
             moe_sites: bound.moe_sites,
             duplicate_head_roots: bound.duplicate_head_roots,
             single_position_step: bound.single_position_step,
-            qwen35moe_hparams: (profile.ffn_routing == FfnRouting::Routed)
+            recurrent_routed_interval_hparams: (profile.ffn_routing == FfnRouting::Routed)
                 .then(|| crate::recurrent_routed_interval::hparams::from_metadata(parsed).ok())
                 .flatten(),
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
@@ -2864,7 +2864,7 @@ impl<'file> LoadedModel<'file> {
             moe_sites,
             duplicate_head_roots: Vec::new(),
             single_position_step: false,
-            qwen35moe_hparams: None,
+            recurrent_routed_interval_hparams: None,
             // safetensors carries no `general.name`-equivalent key this
             // crate reads (`Self::model_name`'s own doc).
             model_name: None,

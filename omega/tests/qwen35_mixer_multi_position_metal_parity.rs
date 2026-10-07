@@ -2,7 +2,7 @@
 //! checkpoint dims (`kv_heads=16, group=2, key_dim=2048, value_dim=4096,
 //! l_cache=4`) -- the same graph and seeded inputs
 //! `proxima_tensor::spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims`
-//! builds via `append_qwen35_ssm_mixer_with_taps`, evaluated three ways: CPU
+//! builds via `append_delta_net_mixer_with_taps`, evaluated three ways: CPU
 //! reference, Metal with the production output set, and Metal with every
 //! `SsmMixerTaps` node also requested. A CPU/Metal disagreement that vanishes
 //! once the tap nodes are also requested as outputs is the signature of the
@@ -12,7 +12,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::spec::{
-    GdnOutputGate, SsmMixerTaps, append_qwen35_ssm_mixer_with_taps, input_leaf, scalar_constant,
+    GdnOutputGate, SsmMixerTaps, append_delta_net_mixer_with_taps, input_leaf, scalar_constant,
 };
 use proxima_tensor::test_support::{ParityRun, compare_rows_relative_to_norm};
 use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
@@ -173,7 +173,7 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
         "state_in",
     );
 
-    let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
+    let (mixer_out, taps) = append_delta_net_mixer_with_taps(
         &mut program,
         x,
         inv_dim,

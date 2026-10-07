@@ -385,13 +385,13 @@ pub fn append_short_conv_mixer(
 /// `head` is a format-interpolated run of letters, not a single character,
 /// the same widening [`rmsnorm_per_head`] already makes: [`repeat_kv_heads`]'s
 /// own doc proves this algebra cannot merge a `u,g` (kv-head, group) split
-/// back into one physical head axis, so [`append_qwen35_ssm_mixer`] calls
+/// back into one physical head axis, so [`append_delta_net_mixer`] calls
 /// this with `head = "ug"` and every map below (`i{head}`, `{head}`,
 /// `ij{head}`) carries both letters through unchanged -- the recurrence
 /// itself is per-head and never mixes heads, so nothing in its math depends
 /// on the head space being one physical axis.
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_delta_net_step(
+pub fn append_delta_net_step(
     program: &mut Vec<Op>,
     query: NodeId,
     key: NodeId,
@@ -669,7 +669,7 @@ pub fn silu(
 
 /// Reads `width` contiguous channels of `x` (`[s, total_channels]`) starting
 /// at `offset`, as a fresh `[s, width]` node -- the piece
-/// [`append_qwen35_conv_branch`] needs three times (`q`/`k`/`v` out of one
+/// [`append_delta_net_conv_branch`] needs three times (`q`/`k`/`v` out of one
 /// fused conv output) that a plain offset [`AxisIndex`] slice cannot give it:
 /// [`append_short_conv_mixer`]'s own doc already proves a *nonzero*-offset
 /// slice of a wider operand needs a same-width "donor" operand to escape
@@ -788,7 +788,7 @@ pub fn per_head_channel_slice(
 /// [`channel_slice`]'s own select-then-reduce technique, generalized over an
 /// ALREADY-split leading per-head axis: `x` is `[s, head, total_channels]`
 /// (a head axis of its own, not [`per_head_channel_slice`]'s flat
-/// `heads*total_channels` an activation like [`append_qwen35_dense_attention_layer`]'s
+/// `heads*total_channels` an activation like [`append_gated_attention_layer`]'s
 /// own `q`/`k` never has after `rmsnorm_per_head`), and this reads `width`
 /// channels at the SAME `offset` uniformly across every head (unlike
 /// [`per_head_channel_slice`]'s per-head-varying stride, there needed only
@@ -866,13 +866,13 @@ pub fn per_head_channel_range(
 // unwired: this one specifically, not the whole mixer -- `causal_conv1d`
 // windows a whole in-graph sequence with zero-boundary padding, which fits
 // a prefill call but not a decode step against a persisted history cache,
-// so `append_qwen35_ssm_mixer` reimplements this function's own
+// so `append_delta_net_mixer` reimplements this function's own
 // silu/channel_slice/l2norm body against the additive cached-conv split its
 // own doc describes, rather than calling this. A prefill-only recurrent-interval
 // program (mirroring `scheduled_forward_program_with_experts`'s own prefill-only
 // scope) is this function's real caller, not built this session.
 #[allow(dead_code, clippy::too_many_arguments)]
-pub fn append_qwen35_conv_branch(
+pub fn append_delta_net_conv_branch(
     program: &mut Vec<Op>,
     qkv_mixed: NodeId,
     conv_weight: NodeId,
@@ -882,7 +882,7 @@ pub fn append_qwen35_conv_branch(
     value_dim: u32,
     l_cache: u32,
 ) -> Result<(NodeId, NodeId, NodeId), TensorError> {
-    let (q_raw, k_raw, v_conv) = append_qwen35_conv_raw(
+    let (q_raw, k_raw, v_conv) = append_delta_net_conv_raw(
         program,
         qkv_mixed,
         conv_weight,
@@ -899,7 +899,7 @@ pub fn append_qwen35_conv_branch(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn append_qwen35_conv_raw(
+pub(super) fn append_delta_net_conv_raw(
     program: &mut Vec<Op>,
     qkv_mixed: NodeId,
     conv_weight: NodeId,
@@ -920,7 +920,7 @@ pub(super) fn append_qwen35_conv_raw(
 }
 
 /// The GQA head repeat `q_conv`/`k_conv` need before
-/// [`append_qwen35_delta_net_step`] (llama.cpp's hybrid-model source, lines 437-440,
+/// [`append_delta_net_step`] (llama.cpp's hybrid-model source, lines 437-440,
 /// `ggml_repeat_4d(.., num_v_heads, ..)`): `num_k_heads` (16) real kv heads
 /// broadcast to `num_v_heads` (48) query/value heads, 3-wide groups.
 ///
@@ -969,7 +969,7 @@ pub fn repeat_kv_heads(
 
 /// `1/(1+e^-x)` -- the exact `negate -> exp -> +1 -> reciprocal` chain
 /// [`ExpertGatingFunc::Sigmoid`] already composes inline, factored out once
-/// [`append_qwen35_ssm_mixer`] needs it twice (`beta`, the attention gate),
+/// [`append_delta_net_mixer`] needs it twice (`beta`, the attention gate),
 /// the same "worth naming at two callers" threshold [`silu`]/[`softplus`]
 /// already crossed for their own chains.
 pub fn sigmoid(
@@ -1002,16 +1002,16 @@ pub fn sigmoid(
 }
 
 /// Qwen3.5's gated-DeltaNet mixer, one decode step (`n_tokens == 1`, the same
-/// scope [`append_qwen35_delta_net_step`]'s own doc already commits to) --
+/// scope [`append_delta_net_step`]'s own doc already commits to) --
 /// llama.cpp's own `build_layer_attn_linear` (llama.cpp's hybrid-model source, lines 335-466) run
 /// op-for-op: `build_qkvz` (`:353-356`, `qkv_mixed`/`z`), `beta`/`gate`
 /// (`:358-376`, `sigmoid(ssm_beta @ x)` / `ssm_a * softplus(ssm_alpha @ x +
 /// ssm_dt)`), the causal conv + [`silu`] + channel split + [`l2norm`]
-/// ([`append_qwen35_conv_branch`]'s own body, `:391-429`, reproduced here
+/// ([`append_delta_net_conv_branch`]'s own body, `:391-429`, reproduced here
 /// against a persisted history window instead of [`causal_conv1d`]'s own
 /// zero-boundary window -- see the conv step below), the GQA repeat
 /// ([`repeat_kv_heads`], `:437-440`), the recurrence itself
-/// ([`append_qwen35_delta_net_step`], `build_delta_net_autoregressive`,
+/// ([`append_delta_net_step`], `build_delta_net_autoregressive`,
 /// `delta-net-base.cpp:289-370`), gated RMSNorm (`build_norm_gated`,
 /// llama.cpp's hybrid-model source, lines 243-250: `rmsnorm(out) * silu(z)`), and the output
 /// projection + residual (`:456-464`, folded into the block-level
@@ -1024,7 +1024,7 @@ pub fn sigmoid(
 /// axis -- `shape::project_output_shape` rejects any `Reduce` `out_map`
 /// axis that is not a pure single-term projection, and a plain
 /// `Elementwise`'s output shape IS its iteration space, so two loop letters
-/// cannot collapse into one output letter. [`append_qwen35_delta_net_step`]'s
+/// cannot collapse into one output letter. [`append_delta_net_step`]'s
 /// own maps are all per-head (nothing in the recurrence mixes heads), so
 /// widening its `head` parameter from one letter to `"ug"` costs nothing but
 /// string interpolation -- verified by reading its maps before relying on
@@ -1037,7 +1037,7 @@ pub fn sigmoid(
 /// terms, not just two, confirmed by reading it before relying on it).
 ///
 /// State threading mirrors [`append_gqa_cached_layer`]: both caches
-/// (`state_in`/`state_out`, [`append_qwen35_delta_net_step`]'s own contract,
+/// (`state_in`/`state_out`, [`append_delta_net_step`]'s own contract,
 /// and `conv_history_in`, the `l_cache - 1` previous raw `qkv_mixed` rows)
 /// are caller-persisted [`Op::Input`]s/return values, never concatenated
 /// in-graph -- [`causal_conv1d`]'s own doc already establishes this op set
@@ -1054,7 +1054,7 @@ pub fn sigmoid(
 /// their KV cache outside the graph -- shift-and-trim lives on the host, not
 /// in the graph.
 ///
-/// Which nonlinearity gates [`append_qwen35_ssm_mixer`]'s output norm --
+/// Which nonlinearity gates [`append_delta_net_mixer`]'s output norm --
 /// `rmsnorm(delta_out) * activation(z)` (reference: PR 27742 line 2896-2899,
 /// `build_norm_gated`, whose own comment names this "the one numerical
 /// difference from Qwen3.5's GDN: sigmoid output gate, not silu"). Qwen3.5's
@@ -1063,12 +1063,12 @@ pub fn sigmoid(
 /// rather than a duplicated function, since every other line of the mixer
 /// (fused QKVZ, causal conv, delta-rule recurrence) is identical between the
 /// two checkpoints.
-/// [`append_qwen35_ssm_mixer`]'s output-gate selector -- see
-/// [`qwen35_forward_program`] for the worked example passing
+/// [`append_delta_net_mixer`]'s output-gate selector -- see
+/// [`recurrent_interval_forward_program`] for the worked example passing
 /// [`GdnOutputGate::Silu`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GdnOutputGate {
-    /// `qwen35_forward_program`'s own GDN layers (llama.cpp's hybrid-model source, lines 243-250).
+    /// `recurrent_interval_forward_program`'s own GDN layers (llama.cpp's hybrid-model source, lines 243-250).
     Silu,
     /// qwen4exp's GDN layers (reference: PR 27742 line 2895-2897) -- no
     /// production call site in this crate (that forward-program assembly is
@@ -1077,13 +1077,13 @@ pub enum GdnOutputGate {
     Sigmoid,
 }
 
-/// [`append_qwen35_ssm_mixer_with_taps`]'s own return shape: every
+/// [`append_delta_net_mixer_with_taps`]'s own return shape: every
 /// intermediate a caller needs to bisect the mixer's tail against an
 /// independent reference, in the order the builder computes them
 /// (`spec.rs:6608-6928`). `qkv_mixed` is the fused `wqkv` projection
 /// (Q/K/V still concatenated, pre-conv). `query`/`key`/`value`/`gate`/
 /// `beta` are the sequence-axis-free inputs to
-/// [`append_qwen35_delta_net_step`]; exposing those existing roots gives an
+/// [`append_delta_net_step`]; exposing those existing roots gives an
 /// executor a typed cut at which it can batch the projections and then drive
 /// the matrix-state recurrence position by position. `state_out` is the
 /// delta-net recurrence's carried state; `delta_out` is the delta-net read-out
@@ -1158,14 +1158,14 @@ pub struct GdnSequenceTailTaps {
 /// no stateful operation. `delta_out` is `[s,j,u,g]`, `z` is `[s,u,g,j]`,
 /// and the result is the post-mixer residual `[s,d]` consumed by the MoE
 /// router.
-pub fn append_qwen35_gdn_sequence_tail(
+pub fn append_delta_net_sequence_tail(
     program: &mut Vec<Op>,
     tail: GdnSequenceTail,
 ) -> Result<NodeId, TensorError> {
-    Ok(append_qwen35_gdn_sequence_tail_with_taps(program, tail)?.output)
+    Ok(append_delta_net_sequence_tail_with_taps(program, tail)?.output)
 }
 
-pub fn append_qwen35_gdn_sequence_tail_with_taps(
+pub fn append_delta_net_sequence_tail_with_taps(
     program: &mut Vec<Op>,
     tail: GdnSequenceTail,
 ) -> Result<GdnSequenceTailTaps, TensorError> {
@@ -1283,15 +1283,15 @@ pub fn append_qwen35_gdn_sequence_tail_with_taps(
     })
 }
 
-/// The GDN (gated delta-net) mixer [`qwen35_forward_program`] calls once
+/// The GDN (gated delta-net) mixer [`recurrent_interval_forward_program`] calls once
 /// per non-attention layer -- see it there for the worked example of
 /// wiring this builder's inputs. Returns `(x_next, qkv_mixed, state_out)`.
-/// Thin wrapper over [`append_qwen35_ssm_mixer_with_taps`] for callers that
+/// Thin wrapper over [`append_delta_net_mixer_with_taps`] for callers that
 /// only need the three roots this signature already returned before taps
 /// existed -- byte-identical program, since this only reshapes the return
 /// value the shared builder already computed.
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_ssm_mixer(
+pub fn append_delta_net_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -1322,7 +1322,7 @@ pub fn append_qwen35_ssm_mixer(
     // This wrapper's own callers (`attention_forward.rs`'s decode-only
     // forward programs) never build `x` at a known static width -- `s` stays
     // `Extent::Symbolic` end to end -- so there is no width to state here.
-    let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
+    let (mixer_out, taps) = append_delta_net_mixer_with_taps(
         program,
         x,
         inv_dim,
@@ -1354,12 +1354,12 @@ pub fn append_qwen35_ssm_mixer(
     Ok((mixer_out, taps.qkv_mixed, taps.state_out))
 }
 
-/// [`append_qwen35_ssm_mixer`]'s full implementation, returning every
+/// [`append_delta_net_mixer`]'s full implementation, returning every
 /// [`SsmMixerTaps`] intermediate alongside `mixer_out` for a caller that
 /// needs to bisect the tail (per-head gated RMSNorm, output gate, `ssm_out`
 /// projection) against an independent reference.
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_ssm_mixer_with_taps(
+pub fn append_delta_net_mixer_with_taps(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -1388,7 +1388,7 @@ pub fn append_qwen35_ssm_mixer_with_taps(
     output_gate: GdnOutputGate,
     prefill_width: Option<u32>,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
-    append_qwen35_ssm_mixer_with_taps_and_layout(
+    append_delta_net_mixer_with_taps_and_layout(
         program,
         x,
         inv_dim,
@@ -1425,10 +1425,10 @@ pub fn append_qwen35_ssm_mixer_with_taps(
 /// slice-then-sum-of-one technique [`channel_slice`] already uses on a
 /// channel axis, applied here to the leading position axis instead: a
 /// caller-known-at-build-time `p` (this exists only inside the M>1 branch
-/// [`append_qwen35_ssm_mixer_with_taps_and_layout`] unrolls, never on the
+/// [`append_delta_net_mixer_with_taps_and_layout`] unrolls, never on the
 /// symbolic architecture-level graph), so it is a plain affine offset, not a
 /// gather.
-pub(super) fn qwen35_gdn_sequence_position(
+pub(super) fn delta_net_sequence_position(
     program: &mut Vec<Op>,
     node: NodeId,
     rest_letters: &str,
@@ -1461,7 +1461,7 @@ pub(super) fn qwen35_gdn_sequence_position(
 }
 
 /// One position's outputs from the M>1 branch
-/// [`append_qwen35_ssm_mixer_with_taps_and_layout`] unrolls -- grouped so the
+/// [`append_delta_net_mixer_with_taps_and_layout`] unrolls -- grouped so the
 /// state-threading loop and the stacked-`delta_out` accumulation share one
 /// call per position instead of two.
 pub(super) struct GdnRecurrenceStep {
@@ -1476,13 +1476,13 @@ pub(super) struct GdnRecurrenceStep {
 }
 
 /// Slices position `p` out of every sequence-preserving tap and runs one
-/// [`append_qwen35_delta_net_step`] against the caller-threaded `state_in`,
-/// the per-position body [`append_qwen35_ssm_mixer_with_taps_and_layout`]'s
+/// [`append_delta_net_step`] against the caller-threaded `state_in`,
+/// the per-position body [`append_delta_net_mixer_with_taps_and_layout`]'s
 /// M>1 branch calls once per prompt position, threading `state_out` into the
 /// next call's `state_in` the same way the decode path threads it call to
 /// call.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn qwen35_gdn_recurrence_step(
+pub(super) fn delta_net_recurrence_step(
     program: &mut Vec<Op>,
     query_sequence: NodeId,
     key_sequence: NodeId,
@@ -1494,13 +1494,13 @@ pub(super) fn qwen35_gdn_recurrence_step(
     inv_sqrt_key_dim: NodeId,
     position: u32,
 ) -> Result<GdnRecurrenceStep, TensorError> {
-    let query = qwen35_gdn_sequence_position(program, query_sequence, "dug", position)?;
-    let key = qwen35_gdn_sequence_position(program, key_sequence, "dug", position)?;
-    let value = qwen35_gdn_sequence_position(program, value_sequence, "jug", position)?;
-    let beta = qwen35_gdn_sequence_position(program, beta_split, "ug", position)?;
-    let gate = qwen35_gdn_sequence_position(program, gate_split, "ug", position)?;
-    let z_head = qwen35_gdn_sequence_position(program, z_split, "ugj", position)?;
-    let (delta_out, state_out) = append_qwen35_delta_net_step(
+    let query = delta_net_sequence_position(program, query_sequence, "dug", position)?;
+    let key = delta_net_sequence_position(program, key_sequence, "dug", position)?;
+    let value = delta_net_sequence_position(program, value_sequence, "jug", position)?;
+    let beta = delta_net_sequence_position(program, beta_split, "ug", position)?;
+    let gate = delta_net_sequence_position(program, gate_split, "ug", position)?;
+    let z_head = delta_net_sequence_position(program, z_split, "ugj", position)?;
+    let (delta_out, state_out) = append_delta_net_step(
         program,
         query,
         key,
@@ -1527,7 +1527,7 @@ pub(super) fn qwen35_gdn_recurrence_step(
 /// stacked `[s,j,u,g]` sequence, everywhere else zero -- [`stack_selected_routes`]'s
 /// own Iota-`Equal`-mask-then-`Add` technique, applied to this function's own
 /// `s`/`jug` axes instead of `stack_selected_routes`'s `s`/`k`.
-pub(super) fn qwen35_gdn_place_position(
+pub(super) fn delta_net_place_position(
     program: &mut Vec<Op>,
     delta_out_at_position: NodeId,
     position_axis: NodeId,
@@ -1560,7 +1560,7 @@ pub(super) fn qwen35_gdn_place_position(
 
 /// Builds the Qwen3.5 SSM mixer while selecting the checkpoint's V-head order.
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
+pub fn append_delta_net_mixer_with_taps_and_layout(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -1610,7 +1610,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
     // loop underflow.
     if prefill_width == Some(0) {
         return Err(TensorError::SingleTokenStepOnly {
-            op: "qwen35_ssm_mixer",
+            op: "delta_net_mixer",
             s: 0,
         });
     }
@@ -1863,7 +1863,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
     // a multi-position prefill. Keep a separate, root-pruned causal branch
     // for the opt-in prefill executor: with an empty cache it gives every
     // sequence tap the same causal window repeated one-position decode would.
-    let (query_prefill_raw, key_prefill_raw, value_prefill) = append_qwen35_conv_raw(
+    let (query_prefill_raw, key_prefill_raw, value_prefill) = append_delta_net_conv_raw(
         program,
         qkv_mixed,
         conv_weight,
@@ -1964,7 +1964,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
             },
         );
 
-        let mut last_step = qwen35_gdn_recurrence_step(
+        let mut last_step = delta_net_recurrence_step(
             program,
             query_sequence,
             key_sequence,
@@ -1977,11 +1977,11 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
             0,
         )?;
         let mut delta_out_stacked =
-            qwen35_gdn_place_position(program, last_step.delta_out, position_axis, 0)?;
+            delta_net_place_position(program, last_step.delta_out, position_axis, 0)?;
         let mut per_position_state_out = alloc::vec![last_step.state_out];
 
         for position in 1..width {
-            let step = qwen35_gdn_recurrence_step(
+            let step = delta_net_recurrence_step(
                 program,
                 query_sequence,
                 key_sequence,
@@ -1994,7 +1994,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
                 position,
             )?;
             let placed =
-                qwen35_gdn_place_position(program, step.delta_out, position_axis, position)?;
+                delta_net_place_position(program, step.delta_out, position_axis, position)?;
             delta_out_stacked = elementwise(
                 program,
                 DType::Float32,
@@ -2008,13 +2008,13 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         let delta_out = delta_out_stacked;
         let state_out = last_step.state_out;
 
-        // `append_qwen35_gdn_sequence_tail_with_taps` is the same
+        // `append_delta_net_sequence_tail_with_taps` is the same
         // RMSNorm-gate-out-proj-residual tail the M=1 branch below computes
         // inline: reused rather than duplicated, per its own doc ("a
         // sans-IO executor supplies its caller-owned `[s,j,u,g]` scan
         // output as `delta_out`") -- this recurrence is exactly that
         // caller.
-        let tail = append_qwen35_gdn_sequence_tail_with_taps(
+        let tail = append_delta_net_sequence_tail_with_taps(
             program,
             GdnSequenceTail {
                 x,
@@ -2055,10 +2055,10 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         };
         (tail.output, taps)
     } else {
-        // squeeze the size-1 decode-step `s` axis away -- `append_qwen35_delta_net_step`
+        // squeeze the size-1 decode-step `s` axis away -- `append_delta_net_step`
         // has no `s` letter at all (a single already-selected token per its own
         // doc), and reordering the surviving letters here (`dug`, not `ugd`)
-        // doubles as the transpose `append_qwen35_delta_net_step`'s own
+        // doubles as the transpose `append_delta_net_step`'s own
         // `i{head}`/`j{head}` maps expect.
         let query = reduce(
             program,
@@ -2115,7 +2115,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
             "ugj->sugj",
         )?;
 
-        let (delta_out, state_out) = append_qwen35_delta_net_step(
+        let (delta_out, state_out) = append_delta_net_step(
             program,
             query,
             key,

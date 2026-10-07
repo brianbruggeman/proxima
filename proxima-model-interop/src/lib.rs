@@ -139,8 +139,8 @@ pub use quality::print_quality_report;
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
 #[cfg(feature = "std")]
 pub use recurrent_interval::{
-    Qwen35Hparams, IntervalLayerKind, SsmShape, bind_qwen35_checkpoint,
-    descriptor_from_architecture as qwen35_descriptor_from_architecture, qwen35_architecture_from_metadata,
+    RecurrentIntervalHparams, IntervalLayerKind, SsmShape, bind_recurrent_interval_checkpoint,
+    descriptor_from_architecture as recurrent_interval_descriptor_from_architecture, recurrent_interval_architecture_from_metadata,
 };
 #[cfg(feature = "std")]
 pub use residency::{

@@ -18,13 +18,13 @@ use super::{
     build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
     first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
     moe_monolithic_all_low_enabled, moe_pre_gather_enabled,
-    should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
-    visit_qwen35moe_router_selections,
+    should_release_monolithic_sources, step_batch_needs_logits, visit_moe_router_boundary,
+    visit_moe_router_selections,
 };
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 use super::{
-    qwen35_dense_attention_placed_byte_length, qwen35_dense_attention_placement_enabled,
-    retain_qwen35_segment_readbacks, use_metal_output_placements,
+    dense_attention_placed_byte_length, dense_attention_placement_supported,
+    retain_moe_segment_readbacks, use_metal_output_placements,
 };
 // Reads as unused under an explicit `--features std,metal` single-crate
 // build (every reference below is the fully-qualified `super::PlanNumerics`,
@@ -52,14 +52,14 @@ pub(super) mod tests {
         first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
         moe_monolithic_all_low_enabled, moe_pre_gather_enabled,
         should_release_monolithic_sources, step_batch_needs_logits,
-        visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
+        visit_moe_router_boundary, visit_moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{map_expert_sources_to_segment, use_metal_output_placements};
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use super::{
-        qwen35_dense_attention_placed_byte_length, qwen35_dense_attention_placement_enabled,
-        retain_qwen35_segment_readbacks,
+        dense_attention_placed_byte_length, dense_attention_placement_supported,
+        retain_moe_segment_readbacks,
     };
     use crate::bind::Codec;
     use alloc::string::String;
@@ -175,22 +175,22 @@ pub(super) mod tests {
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[test]
     fn qwen35_dense_attention_placement_is_qwen35moe_metal_only() {
-        assert!(qwen35_dense_attention_placement_enabled(
+        assert!(dense_attention_placement_supported(
             true, true, false, 0, true
         ));
-        assert!(!qwen35_dense_attention_placement_enabled(
+        assert!(!dense_attention_placement_supported(
             false, true, false, 0, true
         ));
-        assert!(!qwen35_dense_attention_placement_enabled(
+        assert!(!dense_attention_placement_supported(
             true, false, false, 0, true
         ));
-        assert!(!qwen35_dense_attention_placement_enabled(
+        assert!(!dense_attention_placement_supported(
             true, true, true, 0, true
         ));
-        assert!(!qwen35_dense_attention_placement_enabled(
+        assert!(!dense_attention_placement_supported(
             true, true, false, 1, true
         ));
-        assert!(!qwen35_dense_attention_placement_enabled(
+        assert!(!dense_attention_placement_supported(
             true, true, false, 0, false
         ));
     }
@@ -240,7 +240,7 @@ pub(super) mod tests {
         ];
 
         let mut router_requested = original.clone();
-        retain_qwen35_segment_readbacks(
+        retain_moe_segment_readbacks(
             &mut router_requested,
             &router_cut_placements,
             Some(dense_roots),
@@ -252,7 +252,7 @@ pub(super) mod tests {
         );
 
         let mut gather_requested = original.clone();
-        retain_qwen35_segment_readbacks(
+        retain_moe_segment_readbacks(
             &mut gather_requested,
             &router_cut_placements,
             Some(dense_roots),
@@ -261,7 +261,7 @@ pub(super) mod tests {
         assert_eq!(gather_requested, BTreeMap::from([(NodeId(3), NodeId(30))]));
 
         let mut unplaced_requested = original.clone();
-        retain_qwen35_segment_readbacks(
+        retain_moe_segment_readbacks(
             &mut unplaced_requested,
             &BTreeMap::<NodeId, ()>::new(),
             None,
@@ -274,11 +274,11 @@ pub(super) mod tests {
     #[test]
     fn qwen35_dense_attention_placed_size_is_checked() {
         assert_eq!(
-            qwen35_dense_attention_placed_byte_length("qwen35", 32, 128, 3, "value")
+            dense_attention_placed_byte_length("qwen35", 32, 128, 3, "value")
                 .expect("a normal cache extent fits"),
             16_384
         );
-        assert!(qwen35_dense_attention_placed_byte_length("qwen35", usize::MAX, 2, 3, "value").is_err());
+        assert!(dense_attention_placed_byte_length("qwen35", usize::MAX, 2, 3, "value").is_err());
     }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -468,7 +468,7 @@ pub(super) mod tests {
         // the one crate-private escape this test uses to prove the
         // `step_in_progress` rejection still fires when something inside
         // the crate reaches past the guard, exactly as
-        // `visit_qwen35moe_router_boundary`'s own residency callback would.
+        // `visit_moe_router_boundary`'s own residency callback would.
         let during_gather = gather_phase.as_slab_mut().page_expert(
             0,
             0,
@@ -498,7 +498,7 @@ pub(super) mod tests {
         let mut route_scratch = Vec::with_capacity(2);
         let mut visited = Vec::new();
 
-        visit_qwen35moe_router_selections(
+        visit_moe_router_selections(
             3,
             41,
             RouterLogits {
@@ -553,7 +553,7 @@ pub(super) mod tests {
         slab.open_step();
         let mut route_scratch = Vec::with_capacity(1);
 
-        visit_qwen35moe_router_boundary(
+        visit_moe_router_boundary(
             0,
             9,
             RouterLogits {
@@ -649,7 +649,7 @@ pub(super) mod tests {
     fn router_selection_callback_runs_before_gather() {
         let mut scratch = Vec::new();
         let mut observed = Vec::new();
-        super::visit_qwen35moe_router_selections(
+        super::visit_moe_router_selections(
             2,
             11,
             super::RouterLogits {
@@ -693,7 +693,7 @@ pub(super) mod tests {
         let mut scratch = Vec::new();
         let mut observed = Vec::new();
 
-        visit_qwen35moe_router_selections(
+        visit_moe_router_selections(
             2,
             11,
             RouterLogits {
@@ -1393,7 +1393,7 @@ pub(super) mod tests {
     /// state-space mixer to also fixture), just wide enough
     /// (`query_heads = kv_heads = 1`, `attention.key_length = 4`,
     /// `rope.dimension_count = 2`, so `pass_dim = 2` is exercised alongside
-    /// the rotated halves) to drive `qwen35_forward_program`'s
+    /// the rotated halves) to drive `recurrent_interval_forward_program`'s
     /// `DenseAttention` cache path through
     /// [`DenseAttentionPadScratch`] the same way the MoE test above
     /// drives `gqa_cached_forward_program_with_experts`'s `Attention`
@@ -1670,7 +1670,7 @@ pub(super) mod tests {
     /// candidates`'s own doc on the fused op's runtime bound is the
     /// numerics claim this equality is standing in for on the
     /// `DenseAttention` arm, which has no such fusion and instead relies on
-    /// [`append_qwen35_dense_attention_layer`]'s own `cached_len` mask.
+    /// [`append_gated_attention_layer`]'s own `cached_len` mask.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn qwen35_dense_attention_padding_is_invisible_to_softmax() {
@@ -2625,7 +2625,7 @@ pub(super) mod memory_fit_gate_tests {
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             duplicate_head_roots: Vec::new(),
             single_position_step: false,
-            qwen35moe_hparams: None,
+            recurrent_routed_interval_hparams: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
             speculative_verify_program: None,
@@ -3407,7 +3407,7 @@ pub(super) mod memory_fit_gate_tests {
     /// Real-checkpoint oracle for the one-evaluation prefill
     /// (`Self::run_decode_loop_observed_seeded`'s own `one_evaluation_prefill`
     /// doc): a `new_count > 1` qwen35moe prefill built once through
-    /// `qwen35moe_forward_program_at_width`'s `Extent::Static` branch must
+    /// `recurrent_routed_interval_forward_program_at_width`'s `Extent::Static` branch must
     /// agree with the OLD `next_ids.len()`-way split, still reachable via
     /// `PROXIMA_PREFILL_SEQUENTIAL=1`, at both the decoded text AND the
     /// last prompt position's own logits.
@@ -3683,7 +3683,7 @@ pub(super) mod memory_fit_gate_tests {
             let prompt = "The capital of France is";
 
             let hparams = model
-                .qwen35moe_hparams
+                .recurrent_routed_interval_hparams
                 .as_ref()
                 .expect("this checkpoint routes through the qwen35moe family profile");
             let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
@@ -3697,7 +3697,7 @@ pub(super) mod memory_fit_gate_tests {
             let embedding = model.architecture.embedding as usize;
 
             let (_program, _roots, static_layer_roots, _moe_sites, static_diagnostics) =
-                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
+                crate::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width(
                     hparams,
                     Some(prompt_len as u32),
                 )
@@ -3811,7 +3811,7 @@ pub(super) mod memory_fit_gate_tests {
 
         /// Bisects layer 0 itself: `qkv_mixed` (shared code, computed
         /// identically on both branches of
-        /// [`proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`])
+        /// [`proxima_tensor::spec::append_delta_net_mixer_with_taps_and_layout`])
         /// vs `state_out`/`mixer_output` (the M>1 branch's own recurrence
         /// and tail) vs `post_mixer_residual`/`block_output` (the shared
         /// FFN after it).
@@ -3827,7 +3827,7 @@ pub(super) mod memory_fit_gate_tests {
             let prompt = "The capital of France is";
 
             let hparams = model
-                .qwen35moe_hparams
+                .recurrent_routed_interval_hparams
                 .as_ref()
                 .expect("this checkpoint routes through the qwen35moe family profile");
             let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
@@ -3840,7 +3840,7 @@ pub(super) mod memory_fit_gate_tests {
             let prompt_len = prompt_ids.len();
 
             let (_program, _roots, _static_layer_roots, _moe_sites, static_diagnostics) =
-                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
+                crate::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width(
                     hparams,
                     Some(prompt_len as u32),
                 )
@@ -3983,7 +3983,7 @@ pub(super) mod memory_fit_gate_tests {
             let prompt = "The capital of France is";
 
             let hparams = model
-                .qwen35moe_hparams
+                .recurrent_routed_interval_hparams
                 .as_ref()
                 .expect("this checkpoint routes through the qwen35moe family profile");
             let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
@@ -3996,7 +3996,7 @@ pub(super) mod memory_fit_gate_tests {
             let prompt_len = prompt_ids.len();
 
             let (_program, _roots, _static_layer_roots, _moe_sites, static_diagnostics) =
-                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(
+                crate::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width(
                     hparams,
                     Some(prompt_len as u32),
                 )
@@ -4202,12 +4202,12 @@ pub(super) mod memory_fit_gate_tests {
                 .expect("mmap host-local qwen35moe gguf fixture");
             let model = open_model(&mapped);
             let hparams = model
-                .qwen35moe_hparams
+                .recurrent_routed_interval_hparams
                 .as_ref()
                 .expect("this checkpoint routes through the qwen35moe family profile");
 
             let (program, roots, layer_roots, _moe_sites, _diagnostics) =
-                crate::recurrent_routed_interval::qwen35moe_forward_program_at_width(hparams, Some(13))
+                crate::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width(hparams, Some(13))
                     .expect("static-width program builds");
 
             let mut production_outputs = alloc::vec![roots.logits];

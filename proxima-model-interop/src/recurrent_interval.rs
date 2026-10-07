@@ -1,5 +1,5 @@
 //! The hybrid checkpoint whose `general.architecture` selects the `recurrent_interval` schedule source:
-//! [`Qwen35Hparams`] derives this architecture's own metadata shape --
+//! [`RecurrentIntervalHparams`] derives this architecture's own metadata shape --
 //! `{architecture}.full_attention_interval` marks every `interval`th layer
 //! (1-indexed) as dense attention, every other layer as a gated
 //! state-space mixer -- the same "read the checkpoint's own per-layer
@@ -7,8 +7,8 @@
 //! own hybrid checkpoint, just from a scalar interval instead of a
 //! per-layer array.
 //!
-//! [`qwen35_forward_program`] compiles the whole
-//! hybrid forward program (`proxima_tensor::spec::qwen35_forward_program`),
+//! [`recurrent_interval_forward_program`] compiles the whole
+//! hybrid forward program (`proxima_tensor::spec::recurrent_interval_forward_program`),
 //! interleaving [`IntervalLayerKind::Attention`]/[`IntervalLayerKind::Ssm`]
 //! layers per that same per-layer marker.
 
@@ -70,7 +70,7 @@ impl IntervalLayerKind {
 /// does not have to re-derive them: [`crate::short_conv::ShortConvHparams`]'s own
 /// precedent for holding hparams a bind-only pass does not yet consume.
 #[derive(Debug, Clone)]
-pub struct Qwen35Hparams {
+pub struct RecurrentIntervalHparams {
     /// `general.architecture` as the file declares it, the key the family and binding profiles resolve through.
     pub family: String,
     pub vocab: u32,
@@ -103,18 +103,18 @@ pub struct Qwen35Hparams {
 /// llama.cpp's own RMSNorm epsilon default, used only when
 /// `{architecture}.attention.layer_norm_rms_epsilon` is absent -- the same
 /// fallback shape [`crate::short_conv::SHORT_CONV_RMS_EPSILON_DEFAULT`] uses.
-const QWEN35_RMS_EPSILON_DEFAULT: f32 = 1e-6;
+const RECURRENT_INTERVAL_RMS_EPSILON_DEFAULT: f32 = 1e-6;
 
-/// Derives [`Qwen35Hparams`] from `parsed`'s own metadata --
+/// Derives [`RecurrentIntervalHparams`] from `parsed`'s own metadata --
 /// [`crate::short_conv::short_conv_architecture_from_metadata`]'s scalar-interval
 /// counterpart.
 ///
 /// # Errors
 ///
 /// [`InteropError::MissingMetadataKey`] if a required key is absent.
-pub fn qwen35_architecture_from_metadata(
+pub fn recurrent_interval_architecture_from_metadata(
     parsed: &ParsedGguf,
-) -> Result<Qwen35Hparams, InteropError> {
+) -> Result<RecurrentIntervalHparams, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &format!("{architecture}.embedding_length"))?;
     let feed_forward = metadata_u32(parsed, &format!("{architecture}.feed_forward_length"))?;
@@ -139,7 +139,7 @@ pub fn qwen35_architecture_from_metadata(
     let rms_epsilon = metadata_f32_optional(
         parsed,
         &format!("{architecture}.attention.layer_norm_rms_epsilon"),
-        QWEN35_RMS_EPSILON_DEFAULT,
+        RECURRENT_INTERVAL_RMS_EPSILON_DEFAULT,
     );
     let ssm_conv_kernel = metadata_u32(parsed, &format!("{architecture}.ssm.conv_kernel"))?;
     let ssm_state_size = metadata_u32(parsed, &format!("{architecture}.ssm.state_size"))?;
@@ -151,7 +151,7 @@ pub fn qwen35_architecture_from_metadata(
         .map(|layer| IntervalLayerKind::from_interval(layer, full_attention_interval))
         .collect();
 
-    Ok(Qwen35Hparams {
+    Ok(RecurrentIntervalHparams {
         family: architecture.to_owned(),
         vocab,
         embedding,
@@ -216,14 +216,14 @@ fn metadata_u32_nonzero_uniform(parsed: &ParsedGguf, key: &str) -> Result<u32, I
 ///
 /// # Errors
 ///
-/// Whatever `qwen35_architecture_from_metadata`, [`qwen35_forward_program`]
+/// Whatever `recurrent_interval_architecture_from_metadata`, [`recurrent_interval_forward_program`]
 /// and [`bind_program_leaves`] can fail with.
-pub fn bind_qwen35_checkpoint(
+pub fn bind_recurrent_interval_checkpoint(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
-) -> Result<(Qwen35Hparams, usize, usize, usize), InteropError> {
-    let architecture = qwen35_architecture_from_metadata(parsed)?;
-    let (program, _, _) = qwen35_forward_program(&architecture)?;
+) -> Result<(RecurrentIntervalHparams, usize, usize, usize), InteropError> {
+    let architecture = recurrent_interval_architecture_from_metadata(parsed)?;
+    let (program, _, _) = recurrent_interval_forward_program(&architecture)?;
     let weights = bind_program_leaves(
         parsed,
         file_bytes,
@@ -248,9 +248,9 @@ pub fn bind_qwen35_checkpoint(
 /// today is one call into a `pub fn ..._forward_program...` that module
 /// exports whole, never a graph this crate assembles itself.
 /// `proxima_tensor::spec` does not export a recurrent-interval one yet:
-/// `append_qwen35_delta_net_step`/`append_qwen35_conv_branch` (`spec.rs`)
+/// `append_delta_net_step`/`append_delta_net_conv_branch` (`spec.rs`)
 /// are its own state-space building blocks, still module-private, with no
-/// `append_qwen35_ssm_mixer`/`qwen35_forward_program_with_experts` wrapping
+/// `append_delta_net_mixer`/`recurrent_interval_forward_program_with_experts` wrapping
 /// them into something this crate can call.
 ///
 /// The program this checkpoint needs, once that lands, is
@@ -266,43 +266,43 @@ pub fn bind_qwen35_checkpoint(
 ///
 /// # Errors
 ///
-/// Whatever [`proxima_tensor::spec::qwen35_forward_program`] can fail with
+/// Whatever [`proxima_tensor::spec::recurrent_interval_forward_program`] can fail with
 /// (wrapped as [`InteropError::Tensor`]) -- most likely
 /// [`proxima_tensor::TensorError::InvalidFullAttentionInterval`] if a
-/// caller-constructed [`Qwen35Hparams`] carries `full_attention_interval
-/// == 0` (the real checkpoint never does; `qwen35_architecture_from_metadata`
+/// caller-constructed [`RecurrentIntervalHparams`] carries `full_attention_interval
+/// == 0` (the real checkpoint never does; `recurrent_interval_architecture_from_metadata`
 /// reads it straight off `{architecture}.full_attention_interval`).
 /// [`crate::generate::LoadedModel`]'s own `SsmLayerCache::new` fixed sizes,
-/// all derived from [`Qwen35Hparams`]'s ssm hyperparameters at load
+/// all derived from [`RecurrentIntervalHparams`]'s ssm hyperparameters at load
 /// time -- llama.cpp's hybrid-model source, lines 57-60's same derivation this module's
-/// `bind_qwen35_attn_qkv_split` already walks through for the fused
+/// `bind_gated_attention_qkv_split` already walks through for the fused
 /// `attn_qkv.weight` split.
 #[derive(Debug, Clone, Copy)]
 pub struct SsmShape {
     /// `2 * ssm_key_dim + ssm_d_inner` -- one `qkv_mixed` row's width,
-    /// matching `proxima_tensor::spec::qwen35_forward_program`'s own
+    /// matching `proxima_tensor::spec::recurrent_interval_forward_program`'s own
     /// `ssm_cache.{layer}.conv_history` leaf shape's second axis.
     pub qkv_dim: usize,
     /// `ssm_d_conv - 1` -- the rolling conv-history window's fixed row
-    /// count `append_qwen35_ssm_mixer`'s doc names (the causal conv1d
+    /// count `append_delta_net_mixer`'s doc names (the causal conv1d
     /// kernel's own left-context width).
     pub conv_rows: usize,
     /// `ssm_d_state * head_v_dim * ssm_n_group * ssm_group` -- the gated
     /// DeltaNet recurrent state's flat element count, matching
-    /// `qwen35_forward_program`'s own `ssm_cache.{layer}.state` leaf shape.
+    /// `recurrent_interval_forward_program`'s own `ssm_cache.{layer}.state` leaf shape.
     pub state_len: usize,
 }
 
 /// [`SsmShape`]'s own derivation off a real checkpoint's ssm
 /// hyperparameters -- llama.cpp's hybrid-model source, lines 57-60's same arithmetic
-/// [`Qwen35Hparams`]'s own `ssm_key_dim`/`ssm_value_dim` derivation
+/// [`RecurrentIntervalHparams`]'s own `ssm_key_dim`/`ssm_value_dim` derivation
 /// already uses for the fused `attn_qkv.weight` row split, plus
 /// `head_v_dim = ssm_inner_size / ssm_time_step_rank` and `ssm_group =
 /// ssm_time_step_rank / ssm_group_count`
-/// (`proxima_tensor::spec::qwen35_forward_program`'s own `head_v_dim`/
+/// (`proxima_tensor::spec::recurrent_interval_forward_program`'s own `head_v_dim`/
 /// `ssm_group` locals).
 #[must_use]
-pub fn qwen35_ssm_shape(architecture: &Qwen35Hparams) -> SsmShape {
+pub fn recurrent_interval_ssm_shape(architecture: &RecurrentIntervalHparams) -> SsmShape {
     let ssm_key_dim = architecture.ssm_state_size * architecture.ssm_group_count;
     let head_v_dim = architecture.ssm_inner_size / architecture.ssm_time_step_rank;
     let ssm_group = architecture.ssm_time_step_rank / architecture.ssm_group_count;
@@ -326,7 +326,7 @@ pub fn qwen35_ssm_shape(architecture: &Qwen35Hparams) -> SsmShape {
 /// used to feed directly, this function itself is not `metal`-gated, so
 /// [`crate::lowering::step_state`] can call it on every build.
 #[must_use]
-pub fn qwen35_ssm_state_bytes(shape: SsmShape, block_count: u32) -> u64 {
+pub fn recurrent_interval_ssm_state_bytes(shape: SsmShape, block_count: u32) -> u64 {
     let per_layer_elements = (shape.conv_rows * shape.qkv_dim + shape.state_len) as u64;
     per_layer_elements * core::mem::size_of::<f32>() as u64 * u64::from(block_count)
 }
@@ -340,7 +340,7 @@ pub fn qwen35_ssm_state_bytes(shape: SsmShape, block_count: u32) -> u64 {
 /// # Errors
 ///
 /// The family has no embedded profile.
-pub fn descriptor_from_architecture(architecture: &Qwen35Hparams) -> Result<ModelDescriptor, InteropError> {
+pub fn descriptor_from_architecture(architecture: &RecurrentIntervalHparams) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
@@ -419,8 +419,8 @@ pub fn descriptor_from_architecture(architecture: &Qwen35Hparams) -> Result<Mode
 /// # Errors
 ///
 /// The family has no profile, or the descriptor does not lower.
-pub fn qwen35_forward_program(
-    architecture: &Qwen35Hparams,
+pub fn recurrent_interval_forward_program(
+    architecture: &RecurrentIntervalHparams,
 ) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::LayerCacheRoots>), InteropError> {
     let ForwardProgram {
         program,
@@ -438,10 +438,10 @@ pub fn qwen35_forward_program(
 ///
 /// # Errors
 ///
-/// Whatever [`qwen35_architecture_from_metadata`] and
+/// Whatever [`recurrent_interval_architecture_from_metadata`] and
 /// [`descriptor_from_architecture`] can fail with.
 pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
-    let hparams = qwen35_architecture_from_metadata(parsed)?;
+    let hparams = recurrent_interval_architecture_from_metadata(parsed)?;
     let descriptor = descriptor_from_architecture(&hparams)?;
     let architecture = ModelHparams {
         vocab: hparams.vocab,
@@ -464,18 +464,18 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHpara
 }
 
 /// The per-decode-step recurrent scratch sizing, re-derived straight off the
-/// header: [`qwen35_ssm_shape`] and the resident bytes across every layer.
+/// header: [`recurrent_interval_ssm_shape`] and the resident bytes across every layer.
 ///
 /// # Errors
 ///
-/// Whatever [`qwen35_architecture_from_metadata`] can fail with.
+/// Whatever [`recurrent_interval_architecture_from_metadata`] can fail with.
 pub(crate) fn step_state(parsed: &ParsedGguf) -> Result<StepState, InteropError> {
-    let hparams = qwen35_architecture_from_metadata(parsed)?;
-    let shape = qwen35_ssm_shape(&hparams);
+    let hparams = recurrent_interval_architecture_from_metadata(parsed)?;
+    let shape = recurrent_interval_ssm_shape(&hparams);
     Ok(StepState {
         ssm_shape: shape,
         attn_head_dim: hparams.attn_head_dim,
-        ssm_state_bytes: qwen35_ssm_state_bytes(shape, hparams.block_count),
+        ssm_state_bytes: recurrent_interval_ssm_state_bytes(shape, hparams.block_count),
     })
 }
 

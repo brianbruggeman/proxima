@@ -1,14 +1,14 @@
 //! The one-evaluation qwen35moe prefill (M=13, `crate::recurrent_routed_interval::
-//! qwen35moe_forward_program_at_width`) is wrong on the real checkpoint on
+//! recurrent_routed_interval_forward_program_at_width`) is wrong on the real checkpoint on
 //! Metal from layer 0, yet the isolated M-position mixer at real dims
 //! (`omega/tests/qwen35_mixer_multi_position_metal_parity.rs`) and the
 //! position-slice op alone are both clean -- so the defect needs the
 //! multi-layer graph (buffer-arena slot reuse across layers, or the MoE/
 //! attention surround), not one mixer in isolation. This builds the REAL
-//! forward-program builder (`qwen35moe_forward_program_at_width`, never a
+//! forward-program builder (`recurrent_routed_interval_forward_program_at_width`, never a
 //! second hand-rolled copy of its graph) over a small SYNTHETIC checkpoint --
 //! `hybrid_moe_program_builds_one_gdn_and_one_attention_layer`'s own
-//! `Qwen35MoeHparams` literal, widened to 4 layers/8 experts so the graph still
+//! `RecurrentRoutedIntervalHparams` literal, widened to 4 layers/8 experts so the graph still
 //! contains at least one GDN layer, one full-attention layer, and one MoE
 //! block -- and compares every layer's `block_output`
 //! (`MoeLayerDiagnostics::block_output`) between the CPU reference and
@@ -18,8 +18,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-use proxima_model_interop::recurrent_routed_interval::hparams::{Qwen35MoeHparams, LayerKind};
-use proxima_model_interop::recurrent_routed_interval::qwen35moe_forward_program_at_width;
+use proxima_model_interop::recurrent_routed_interval::hparams::{RecurrentRoutedIntervalHparams, LayerKind};
+use proxima_model_interop::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width;
 use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
@@ -37,7 +37,7 @@ const WIDTH: u32 = 13;
 /// `ffn_up_exps` row can be and still be one whole Q4_K block, keeping the
 /// MoE small per the brief while every quantized leaf's trailing axis stays
 /// `QK_K`-aligned (2048, 4096, 8192, 512, 256 are all multiples of 256).
-fn real_dims_architecture(layer_count: u32) -> Qwen35MoeHparams {
+fn real_dims_architecture(layer_count: u32) -> RecurrentRoutedIntervalHparams {
     let layer_kinds = (0..layer_count)
         .map(|layer| LayerKind::from_interval(layer, 4))
         .collect::<Vec<_>>();
@@ -48,7 +48,7 @@ fn real_dims_architecture(layer_count: u32) -> Qwen35MoeHparams {
             LayerKind::Attention => 2,
         })
         .collect();
-    Qwen35MoeHparams {
+    RecurrentRoutedIntervalHparams {
         family: String::from("qwen35moe"),
         vocab: 32,
         embedding: 2048,
@@ -128,7 +128,7 @@ fn quantize_rows(values: &[f32], row_length: usize) -> Vec<u8> {
 /// `layer_count<4` every layer stays GDN, which is how the layer-count sweep
 /// below isolates whether the defect needs a full-attention layer present at
 /// all) and 8 experts top-2 so the MoE block's `top_k>1` branch is exercised.
-fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
+fn synthetic_architecture(layer_count: u32) -> RecurrentRoutedIntervalHparams {
     let layer_kinds = (0..layer_count)
         .map(|layer| LayerKind::from_interval(layer, 4))
         .collect::<Vec<_>>();
@@ -139,7 +139,7 @@ fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
             LayerKind::Attention => 1,
         })
         .collect();
-    Qwen35MoeHparams {
+    RecurrentRoutedIntervalHparams {
         family: String::from("qwen35moe"),
         vocab: 16,
         embedding: 8,
@@ -236,7 +236,7 @@ fn relative_error_at_last_position(found: &[f32], wanted: &[f32], row_length: us
 fn layer_parity(layer_count: u32) -> Vec<(usize, f32)> {
     let architecture = synthetic_architecture(layer_count);
     let (program, _roots, _layer_roots, _moe_sites, diagnostics) =
-        qwen35moe_forward_program_at_width(&architecture, Some(WIDTH))
+        recurrent_routed_interval_forward_program_at_width(&architecture, Some(WIDTH))
             .expect("the qwen35moe forward program lowers at the synthetic architecture's width");
 
     // symbol 0 is the prompt-width axis, pinned static by `Some(WIDTH)` and
@@ -302,7 +302,7 @@ fn layer_parity(layer_count: u32) -> Vec<(usize, f32)> {
 fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
     let architecture = real_dims_architecture(layer_count);
     let (program, _roots, _layer_roots, _moe_sites, diagnostics) =
-        qwen35moe_forward_program_at_width(&architecture, Some(width))
+        recurrent_routed_interval_forward_program_at_width(&architecture, Some(width))
             .expect("the qwen35moe forward program lowers at the real-dims architecture's width");
 
     let symbols = vec![u64::from(width), 0];

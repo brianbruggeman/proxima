@@ -9,7 +9,7 @@ use crate::test_support::Lcg;
 use proptest::proptest;
 
 /// `spec.rs`'s real `wo` shape (`ROW 431`,
-/// `append_qwen35_dense_attention_only_with_taps`, `spec.rs:4358-4404`
+/// `append_gated_attention_only_with_taps`, `spec.rs:4358-4404`
 /// and `spec.rs:9017-9031`): `gated_attended = attended * sigmoid_gate`
 /// (a genuine two-leaf composed chain), `wo = wo_flat * o_head_ones`
 /// (the packed weight's own ones-broadcast reshape, the multi-term

@@ -1,7 +1,7 @@
 //! The Q4_K cell (`qwen35moe_program_metal_cpu_layer_parity.rs`) is moot:
 //! the real-checkpoint layer-0 tap sweep gives byte-identical numbers on
 //! the CPU engine and on Metal, which clears the executor -- the width-13
-//! ONE-SHOT program (`qwen35moe_forward_program_at_width(arch, Some(13))`)
+//! ONE-SHOT program (`recurrent_routed_interval_forward_program_at_width(arch, Some(13))`)
 //! must itself compute something different from the SEQUENTIAL 13-step
 //! program (`Some(1)`, called once per position with cache threaded between
 //! calls) even on a single CPU engine. This is that comparison: checkpoint-
@@ -14,9 +14,9 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::recurrent_routed_interval::hparams::{Qwen35MoeHparams, LayerKind};
+use proxima_model_interop::recurrent_routed_interval::hparams::{RecurrentRoutedIntervalHparams, LayerKind};
 use proxima_model_interop::recurrent_routed_interval::{
-    MoeLayerDiagnostics, qwen35moe_forward_program_at_width,
+    MoeLayerDiagnostics, recurrent_routed_interval_forward_program_at_width,
 };
 use proxima_tensor::spec::LayerCacheRoots;
 use proxima_tensor::test_support::Lcg;
@@ -35,7 +35,7 @@ const WIDTH: u32 = 13;
 /// layers/8 experts -- byte-identical to `qwen35moe_program_metal_cpu_layer_
 /// parity.rs`'s own `synthetic_architecture`, duplicated here rather than
 /// shared across files since this file carries no `metal`/`macos` gate.
-fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
+fn synthetic_architecture(layer_count: u32) -> RecurrentRoutedIntervalHparams {
     let layer_kinds = (0..layer_count)
         .map(|layer| LayerKind::from_interval(layer, 4))
         .collect::<Vec<_>>();
@@ -46,7 +46,7 @@ fn synthetic_architecture(layer_count: u32) -> Qwen35MoeHparams {
             LayerKind::Attention => 1,
         })
         .collect();
-    Qwen35MoeHparams {
+    RecurrentRoutedIntervalHparams {
         family: String::from("qwen35moe"),
         vocab: 16,
         embedding: 8,
@@ -240,7 +240,7 @@ fn relative_error(found: &[f32], wanted: &[f32]) -> f32 {
 fn run_one_shot() -> ParitySample {
     let architecture = synthetic_architecture(LAYERS);
     let (program, roots, layer_roots, _moe_sites, diagnostics) =
-        qwen35moe_forward_program_at_width(&architecture, Some(WIDTH))
+        recurrent_routed_interval_forward_program_at_width(&architecture, Some(WIDTH))
             .expect("the one-shot qwen35moe forward program lowers");
     let symbols = vec![u64::from(WIDTH), 0];
     let empty_caches = std::collections::HashMap::new();
@@ -368,7 +368,7 @@ fn run_sequential() -> ParitySample {
 
     for absolute_position in 0..WIDTH {
         let (program, roots, layer_roots, _moe_sites, diagnostics) =
-            qwen35moe_forward_program_at_width(&architecture, Some(1))
+            recurrent_routed_interval_forward_program_at_width(&architecture, Some(1))
                 .expect("the sequential step-width-1 qwen35moe forward program lowers");
         let symbols = vec![1u64, u64::from(absolute_position)];
 

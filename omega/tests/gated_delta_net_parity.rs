@@ -25,7 +25,7 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::spec::{append_qwen35_delta_net_step, elementwise};
+use proxima_tensor::spec::{append_delta_net_step, elementwise};
 use proxima_tensor::{BoundOpKind, DType, Extent, NodeId, NumericPolicy, Op, ScalarOp, append};
 
 /// Deterministic, non-degenerate fill -- real-shaped small values, never
@@ -84,7 +84,7 @@ struct Synthetic {
     inputs: Vec<(NodeId, Vec<f32>)>,
 }
 
-/// One `append_qwen35_delta_net_step` recurrence at the real qwen35moe GQA
+/// One `append_delta_net_step` recurrence at the real qwen35moe GQA
 /// split when called with `(16, 2, 128, 128)` (`ssm.group_count 16`,
 /// `head_v_dim = 4096 / 32 = 128`) -- the same shape
 /// `bind.rs`'s own `synthetic_gated_delta_net_gqa_program` builds, ported
@@ -114,7 +114,7 @@ fn synthetic_gated_delta_net_gqa_program(
     let query = broadcast_kv_heads(&mut program, query_pre, kv_heads as u32, group as u32);
     let key = broadcast_kv_heads(&mut program, key_pre, kv_heads as u32, group as u32);
 
-    let (out, state_out) = append_qwen35_delta_net_step(
+    let (out, state_out) = append_delta_net_step(
         &mut program,
         query,
         key,

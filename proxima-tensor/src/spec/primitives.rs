@@ -361,7 +361,7 @@ pub fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId 
 
 /// Appends a bound [`Op::Input`] leaf, the primitive every forward-program
 /// builder threads weights and activations through — see
-/// [`qwen35_forward_program`] for the worked example of composing leaves
+/// [`recurrent_interval_forward_program`] for the worked example of composing leaves
 /// like this one into a full program.
 #[must_use]
 pub fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &str) -> NodeId {
@@ -396,7 +396,7 @@ pub fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
 /// `table[ids[s], d]`, the exact pattern `shape.rs`'s
 /// `embedding_lookup_program` unit test documents: `ids` selects `table`'s
 /// vocab axis, `d` passes through as a plain projection. Every forward
-/// program opens with this gather -- see [`qwen35_forward_program`] for the
+/// program opens with this gather -- see [`recurrent_interval_forward_program`] for the
 /// worked example.
 #[must_use]
 pub fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId {
@@ -740,7 +740,7 @@ fn block_index(
 /// kv-head axis (`u`) so this one function serves both call sites without
 /// two copies of the same six ops. `head` is a format-interpolated string
 /// rather than a single letter so the same six ops also serve a head space
-/// that is genuinely two axes -- [`append_qwen35_ssm_mixer`]'s own `u,g`
+/// that is genuinely two axes -- [`append_delta_net_mixer`]'s own `u,g`
 /// (kv-head, group) split, which [`repeat_kv_heads`]'s own doc proves this
 /// algebra cannot merge into one physical axis -- since every interpolation
 /// site here (`s{head}d`, `s{head}`) treats `head` as an opaque run of

@@ -163,7 +163,7 @@ pub struct BoundProgram<'file> {
     pub duplicate_head_roots: Vec<NodeId>,
     /// `true` when the forward program is only correct one position per
     /// evaluation: a layer is [`LayerKind::Gdn`], whose gated-DeltaNet mixer
-    /// (`proxima_tensor::spec::append_qwen35_ssm_mixer`) `s`-axis reduce sums
+    /// (`proxima_tensor::spec::append_delta_net_mixer`) `s`-axis reduce sums
     /// across positions rather than stepping through them (see
     /// `proxima_tensor::error::TensorError::SingleTokenStepOnly`'s own doc for
     /// the mechanism, and [`bind_symbols`] for where this flag is enforced).
@@ -184,15 +184,15 @@ pub use crate::recurrent_interval::SsmShape;
 
 /// Per-decode-step scratch shape only a schedule with recurrent layers needs
 /// to size ahead of the first decode step --
-/// [`crate::generate::LoadedModel`]'s own `qwen35_ssm_shape`/
-/// `qwen35_attn_head_dim`/`ssm_state_bytes` fields. [`step_state`] returns
+/// [`crate::generate::LoadedModel`]'s own `recurrent_interval_ssm_shape`/
+/// `gated_attention_head_dim`/`ssm_state_bytes` fields. [`step_state`] returns
 /// `None` for a schedule of attention layers, so "not applicable" is stated
 /// once, there, and `load_inner` does not special-case it.
 #[derive(Debug, Clone, Copy)]
 pub struct StepState {
     pub ssm_shape: SsmShape,
     pub attn_head_dim: u32,
-    /// `crate::recurrent_interval::qwen35_ssm_state_bytes`'s own resident-bytes
+    /// `crate::recurrent_interval::recurrent_interval_ssm_state_bytes`'s own resident-bytes
     /// total across every layer -- computed once, from the same header read
     /// that derived `ssm_shape`.
     pub ssm_state_bytes: u64,

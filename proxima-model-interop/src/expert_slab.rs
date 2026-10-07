@@ -576,7 +576,7 @@ impl<'file> ExpertSlab<'file> {
     /// The raw, non-RAII half of [`Self::begin_step`]/[`StepGuard`]'s own
     /// close -- crate-private because every step lifecycle should go
     /// through [`Self::begin_step`] except the one place a step legitimately
-    /// re-opens after an intra-step pause: `visit_qwen35moe_router_boundary`
+    /// re-opens after an intra-step pause: `visit_moe_router_boundary`
     /// (`generate/residency_caches.rs`) briefly [`Self::close_step`]s to let
     /// its own residency callback page an expert, then reopens with this
     /// method before resuming the same step its caller's [`StepGuard`] is

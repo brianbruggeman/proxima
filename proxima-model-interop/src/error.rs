@@ -465,7 +465,7 @@ pub enum InteropError {
     )]
     HeterogeneousNonzeroMetadataArray { key: String, distinct_values: usize },
 
-    /// `crate::recurrent_interval::bind_qwen35_attn_qkv_split`'s fused
+    /// `crate::recurrent_interval::bind_gated_attention_qkv_split`'s fused
     /// `blk.{layer}.attn_qkv.weight` did not have exactly
     /// `embedding * (2 * key_dim + value_dim)` elements -- the real
     /// checkpoint's own declared shape disagrees with the row boundaries
@@ -483,7 +483,7 @@ pub enum InteropError {
         expected: u64,
     },
 
-    /// `crate::recurrent_interval::bind_qwen35_attn_qkv_split`'s row-split precondition:
+    /// `crate::recurrent_interval::bind_gated_attention_qkv_split`'s row-split precondition:
     /// `embedding` (the row width, GGUF's `in_dim` axis) is not a whole
     /// multiple of the fused tensor's own codec `block_elements` -- a
     /// row-boundary split is only provably block-aligned when this holds.

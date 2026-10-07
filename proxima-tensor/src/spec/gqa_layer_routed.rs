@@ -717,7 +717,7 @@ pub struct MoeSites(pub Vec<MoeSite>);
 ///
 /// The routed feed-forward block [`scheduled_forward_program_with_experts`]
 /// and [`gqa_cached_forward_program_with_experts`] both call per
-/// layer; see [`qwen35_forward_program`] for this crate's own worked
+/// layer; see [`recurrent_interval_forward_program`] for this crate's own worked
 /// example of a full per-layer builder chain (a dense, non-MoE FFN there).
 pub fn append_moe_ffn(
     program: &mut Vec<Op>,

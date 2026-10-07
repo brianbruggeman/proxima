@@ -315,7 +315,7 @@ pub enum TensorError {
     #[error("engine produced {produced} cache roots, schedule declares {expected} cache-owning layers")]
     CacheRootsCountMismatch { produced: usize, expected: usize },
 
-    /// [`crate::spec::qwen35_forward_program`]'s own dense/SSM layer split
+    /// [`crate::spec::recurrent_interval_forward_program`]'s own dense/SSM layer split
     /// (`(layer + 1) % full_attention_interval != 0`, llama.cpp's hybrid-model source's own
     /// `load_arch_hparams` default) divides by this value; zero has no
     /// meaningful modulus.
@@ -395,7 +395,7 @@ pub enum TensorError {
         feature: &'static str,
     },
 
-    /// [`crate::spec::append_qwen35_ssm_mixer_with_taps`]'s own `s` (sequence)
+    /// [`crate::spec::append_delta_net_mixer_with_taps`]'s own `s` (sequence)
     /// axis reduces away with `ScalarOp::Add` before the delta-net
     /// recurrence step -- correct only when `s == 1` (one position per
     /// evaluation; every decode step and every synthetic test so far). A
