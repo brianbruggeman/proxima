@@ -307,10 +307,19 @@ mod harness {
             std::env::set_var("PROXIMA_CAPTURE_LIVE", "1");
         }
         decode(step);
-        let dispatches: Vec<CapturedDispatch> = omega::take_captured_dispatches()
+        let launched: Vec<CapturedDispatch> = omega::take_captured_dispatches()
             .into_iter()
             .filter(|dispatch| dispatch.grid.threads > 0)
             .collect();
+        let launched_total = launched.len();
+        let dispatches: Vec<CapturedDispatch> = launched
+            .into_iter()
+            .filter(|dispatch| dispatch.unreplayable.is_none())
+            .collect();
+        println!(
+            "ab capture excludes {} unreplayable dispatches of {launched_total}",
+            launched_total - dispatches.len()
+        );
         assert!(!dispatches.is_empty(), "N==0: nothing captured");
         let mut groups: BTreeMap<GroupKey, Vec<usize>> = BTreeMap::new();
         for (index, dispatch) in dispatches.iter().enumerate() {
