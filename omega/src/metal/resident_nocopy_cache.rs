@@ -1332,6 +1332,13 @@ pub(super) fn dispatch(
             height: grid2d.threads_per_threadgroup_y as usize,
             depth: 1,
         };
+        if grid2d.threadgroup_bytes > 0 {
+            // SAFETY: index 0 is the `[[threadgroup(0)]]` argument the kernel declares exactly when
+            // `threadgroup_bytes` is nonzero, and the length is one the emitter sized the array to.
+            unsafe {
+                encoder.setThreadgroupMemoryLength_atIndex(grid2d.threadgroup_bytes as usize, 0);
+            }
+        }
         encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_threadgroup);
         #[cfg(feature = "instrument")]
         counter!(PHYSICAL_DISPATCH_CALLS, 1);

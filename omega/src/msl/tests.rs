@@ -3189,6 +3189,52 @@ fn mm_layout_decodes_before_the_first_barrier_and_ends_the_loop_on_the_multiplie
     );
 }
 
+/// The kernel's `[[threadgroup(0)]]` argument and the launch's bound length are
+/// decided by one predicate; this pins that they can never disagree, for each
+/// switch the lever rides on and for the dense-batched path it never covers.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
+    let (packed, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
+    let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
+    let q4k = BTreeMap::from([(weight_node, Codec::Q4K)]);
+    let dense = dense_batched_score_shaped_op(510, 512, 8, 128);
+    let render = |bound: &BoundOp, codecs: &BTreeMap<NodeId, Codec>, lever: Option<&str>, slim: Option<&str>, grid2d: Option<&str>| {
+        temp_env::with_vars(
+            [
+                ("PROXIMA_TILED_GEMM_DYNAMIC_TGMEM", lever),
+                ("PROXIMA_TILED_GEMM_SLIM_TGMEM", slim),
+                ("PROXIMA_TILED_GEMM_GRID2D", grid2d),
+                ("PROXIMA_TILED_GEMM_DENSE", Some("1")),
+            ],
+            || {
+                let kernel = emit(bound, codecs, NumericPolicy::default()).expect("emits");
+                let bytes = kernel.grid.grid2d.map_or(0, |spec| spec.threadgroup_bytes);
+                (kernel.source.contains("[[threadgroup(0)]]"), bytes)
+            },
+        )
+    };
+    let none = BTreeMap::new();
+
+    for (label, codecs) in [("q4_0", &q4_0), ("q4k", &q4k)] {
+        let (declared, bytes) = render(&packed, codecs, None, None, None);
+        assert!(declared, "{label}: the default declares the argument");
+        assert_eq!(bytes, tiled_gemm_shared_bytes(), "{label}: the default binds the array's size");
+        assert_eq!(tiled_gemm_shared_bytes(), 8192, "the 64 x 32 x 32 tile is ggml's 8192 bytes");
+
+        for (reason, off) in [
+            ("lever off", render(&packed, codecs, Some("0"), None, None)),
+            ("slim store off", render(&packed, codecs, None, Some("0"), None)),
+            ("grid launch off", render(&packed, codecs, None, None, Some("0"))),
+        ] {
+            assert_eq!(off, (false, 0), "{label}: {reason} must declare no argument and bind no length");
+        }
+    }
+
+    let (declared, bytes) = render(&dense, &none, None, None, None);
+    assert_eq!((declared, bytes), (false, 0), "the dense-batched path keeps its declared array");
+}
+
 /// The dense-batched-gemm path (`push_dense_batched_gemm_body`) has no
 /// codec-decode arm at all -- both operands are plain `float` -- so this
 /// switch, unlike `tiled_gemm_direct_store`, must never activate for it
@@ -6775,6 +6821,7 @@ mod flat_grid_form {
             threadgroups_y: 140,
             threads_per_threadgroup_x: SIMD_WIDTH,
             threads_per_threadgroup_y: TILED_GEMM_NSG as u64,
+            threadgroup_bytes: 0,
         };
 
         assert_eq!(fit_flat_width(tiles, 64), tiles);

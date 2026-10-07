@@ -160,15 +160,22 @@ pub(super) fn push_tiled_gemm_body(
     let grid2d_active = metal.tiled_gemm_grid2d;
     if grid2d_active {
         let scalar_gid = "uint gid [[thread_position_in_grid]]";
-        let vector_attrs = "uint3 tgpig [[threadgroup_position_in_grid]],\n    \
+        let threadgroup_argument = if metal.tiled_gemm_dynamic_tgmem {
+            ",\n    threadgroup uchar *tg_shared [[threadgroup(0)]]"
+        } else {
+            ""
+        };
+        let vector_attrs = format!(
+            "uint3 tgpig [[threadgroup_position_in_grid]],\n    \
             ushort tiitg [[thread_index_in_threadgroup]],\n    \
-            ushort sgitg [[simdgroup_index_in_threadgroup]]";
+            ushort sgitg [[simdgroup_index_in_threadgroup]]{threadgroup_argument}"
+        );
         let gid_offset = source.find(scalar_gid).ok_or(EmitError::RenderKindMismatch {
             node,
             expected: "scalar thread_position_in_grid parameter",
             found: "missing",
         })?;
-        source.replace_range(gid_offset..gid_offset + scalar_gid.len(), vector_attrs);
+        source.replace_range(gid_offset..gid_offset + scalar_gid.len(), &vector_attrs);
     }
     source.push_str(&format!(
         "    long feature_extent = {};\n",
@@ -207,18 +214,17 @@ pub(super) fn push_tiled_gemm_body(
     // phases' needs replaces three separately-sized ones -- mirrors ggml's
     // own `kernel_mul_mm` `shmem` reuse (`ggml-metal.metal:160-161,330`).
     let act_element_type = "float";
-    let act_element_bytes = 4u64;
     let act_value_cast = "";
     let act_simdgroup_type = "simdgroup_float8x8";
     let slim_tgmem_active = metal.tiled_gemm_slim_tgmem;
     let weight_tile_bytes = weight_tile_elems * 2;
-    let act_tile_bytes = act_tile_elems * act_element_bytes;
-    let out_tile_bytes = out_tile_elems * 4;
-    let shared_bytes = (weight_tile_bytes + act_tile_bytes).max(out_tile_bytes);
     if slim_tgmem_active {
-        source.push_str(&format!(
-            "    threadgroup uchar tg_shared[{shared_bytes}];\n"
-        ));
+        if !metal.tiled_gemm_dynamic_tgmem {
+            source.push_str(&format!(
+                "    threadgroup uchar tg_shared[{}];\n",
+                tiled_gemm_shared_bytes()
+            ));
+        }
         source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
         source.push_str(&format!(
             "    threadgroup {act_element_type} *act_tile = (threadgroup {act_element_type} *)(tg_shared + {weight_tile_bytes});\n"
@@ -585,6 +591,18 @@ pub(super) const fn mm_layout_geometry_supported() -> bool {
         && crate::sized::TILED_GEMM_BLOCK_N == 32
         && crate::sized::TILED_GEMM_BLOCK_K == 32
         && (TILED_GEMM_NSG as u64) * SIMD_WIDTH == 128
+}
+
+/// Bytes of the slim threadgroup backing store of [`push_tiled_gemm_body`]: the
+/// `half` weight tile and the `float` activation tile side by side, or the `float`
+/// output tile aliased over them, whichever is larger. The one number the
+/// kernel's declared array and `Grid2DSpec::threadgroup_bytes` both read.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) const fn tiled_gemm_shared_bytes() -> u64 {
+    let weight_and_activation = crate::sized::TILED_GEMM_BLOCK_M * crate::sized::TILED_GEMM_BLOCK_K * 2
+        + crate::sized::TILED_GEMM_BLOCK_N * crate::sized::TILED_GEMM_BLOCK_K * 4;
+    let output = crate::sized::TILED_GEMM_BLOCK_M * crate::sized::TILED_GEMM_BLOCK_N * 4;
+    if weight_and_activation > output { weight_and_activation } else { output }
 }
 
 /// The K-reduction loop of [`push_tiled_gemm_body`] in ggml's own tile layout

@@ -13,6 +13,11 @@
 //! (non-unit-stride) activation read (`PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=0`),
 //! and composed with the direct device store (`PROXIMA_TILED_GEMM_DIRECT_STORE=1`).
 //!
+//! The same bar gates `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM`: the kernel takes its threadgroup
+//! backing store as the `[[threadgroup(0)]]` argument and the launch binds its length, which
+//! moves no value, so the default must match `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM=0` word for word;
+//! a launch that bound too little memory would not.
+//!
 //! Real weight bytes: `Q4_0` from the ollama gemma4-E2B blob, `Q4_K` from the
 //! `openchat-3.5-1210.Q4_K_S.gguf` checkpoint (overridable via
 //! `PROXIMA_BENCH_GGUF_PATH`), per guiding-principles section 9. Skips (does
@@ -35,6 +40,8 @@ use proxima_tensor::{
     ScalarOp, append, projection,
 };
 
+const MM_LAYOUT: &str = "PROXIMA_TILED_GEMM_MM_LAYOUT";
+const DYNAMIC_TGMEM: &str = "PROXIMA_TILED_GEMM_DYNAMIC_TGMEM";
 const RESTAGE: [(&str, Option<&str>); 1] = [("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0"))];
 
 const REAL_GEMMA4_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
@@ -197,15 +204,24 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -
     (program, sum)
 }
 
-fn run_mm_layout_byte_identity(
+/// One lever compared at one shape: `lever` unset (the default) against `lever` set to `"0"`, with
+/// `extra_env` held identical on both sides.
+struct Case<'a> {
+    tokens: usize,
+    rows_wanted: usize,
+    lever: &'a str,
+    extra_env: &'a [(&'a str, Option<&'a str>)],
+    label: &'a str,
+}
+
+fn run_lever_byte_identity(
     codec: Codec,
     weight_bytes: &[u8],
     in_dim: usize,
     rows: usize,
-    tokens: usize,
-    extra_env: &[(&str, Option<&str>)],
-    label: &str,
+    case: &Case,
 ) -> TestResult<()> {
+    let Case { tokens, lever, extra_env, label, .. } = *case;
     let mut lcg = Lcg(31001 + tokens as u64 + rows as u64);
     let activation: Vec<f32> = (0..tokens * in_dim)
         .map(|_| lcg.next_unit() * 4.0 - 2.0)
@@ -218,8 +234,8 @@ fn run_mm_layout_byte_identity(
         QuantizedBlock::Float32(&activation),
     ];
 
-    let run = |mm_layout: Option<&str>| {
-        let mut vars = vec![("PROXIMA_TILED_GEMM_MM_LAYOUT", mm_layout)];
+    let run = |lever_value: Option<&str>| {
+        let mut vars = vec![(lever, lever_value)];
         vars.extend_from_slice(extra_env);
         temp_env::with_vars(vars, || {
             omega::execute(
@@ -232,39 +248,33 @@ fn run_mm_layout_byte_identity(
             .map_err(|error| format!("{label}: metal did not execute the tiled matmul: {error:?}"))
         })
     };
-    let row_major = run(Some("0"))?;
-    let mm_layout = run(None)?;
+    let baseline = run(Some("0"))?;
+    let candidate = run(None)?;
 
-    let row_major_root = row_major.root();
-    let mm_layout_root = mm_layout.root();
+    let baseline_root = baseline.root();
+    let candidate_root = candidate.root();
     let element_count = tokens * rows;
-    assert_eq!(row_major_root.len(), element_count, "degenerate: row-major produced no output");
-    assert_eq!(mm_layout_root.len(), element_count, "degenerate: mm layout produced no output");
+    assert_eq!(baseline_root.len(), element_count, "degenerate: {lever}=0 produced no output");
+    assert_eq!(candidate_root.len(), element_count, "degenerate: the {lever} default produced no output");
 
-    let differing = row_major_root
+    let differing = baseline_root
         .iter()
-        .zip(mm_layout_root.iter())
+        .zip(candidate_root.iter())
         .filter(|(left, right)| left.to_bits() != right.to_bits())
         .count();
     eprintln!(
-        "{label} codec={codec:?} tokens={tokens} rows={rows} in_dim={in_dim} extra_env={extra_env:?}: \
-         mm-layout-vs-row-major differing_words={differing}/{element_count}"
+        "{label} codec={codec:?} tokens={tokens} rows={rows} in_dim={in_dim} lever={lever} extra_env={extra_env:?}: \
+         default-vs-{lever}=0 differing_words={differing}/{element_count}"
     );
     assert_eq!(
         differing, 0,
-        "{label} codec={codec:?} tokens={tokens} rows={rows}: the mm tile layout must produce \
-         BIT-IDENTICAL output to the row-major tile layout -- {differing}/{element_count} words differed"
+        "{label} codec={codec:?} tokens={tokens} rows={rows}: {lever} on must produce \
+         BIT-IDENTICAL output to {lever}=0 -- {differing}/{element_count} words differed"
     );
     Ok(())
 }
 
-fn check_q4_0(
-    tensor_name: &str,
-    tokens: usize,
-    rows_wanted: usize,
-    extra_env: &[(&str, Option<&str>)],
-    label: &str,
-) -> TestResult<()> {
+fn check_q4_0(tensor_name: &str, case: &Case) -> TestResult<()> {
     let path = std::path::Path::new(REAL_GEMMA4_GGUF_PATH);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path)? else {
         eprintln!("real gguf file not found at {REAL_GEMMA4_GGUF_PATH}; test skipped");
@@ -277,17 +287,11 @@ fn check_q4_0(
         return Ok(());
     };
     let row_bytes = in_dim / q4_0::QK4_0 * q4_0::BLOCK_BYTES;
-    let rows = rows_wanted.min(out_dim);
-    run_mm_layout_byte_identity(Codec::Q4_0, &weight_bytes[..rows * row_bytes], in_dim, rows, tokens, extra_env, label)
+    let rows = case.rows_wanted.min(out_dim);
+    run_lever_byte_identity(Codec::Q4_0, &weight_bytes[..rows * row_bytes], in_dim, rows, case)
 }
 
-fn check_q4k(
-    tensor_name: &str,
-    tokens: usize,
-    rows_wanted: usize,
-    extra_env: &[(&str, Option<&str>)],
-    label: &str,
-) -> TestResult<()> {
+fn check_q4k(tensor_name: &str, case: &Case) -> TestResult<()> {
     let path_string = real_q4k_gguf_path();
     let path = std::path::Path::new(&path_string);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path)? else {
@@ -301,66 +305,115 @@ fn check_q4k(
         return Ok(());
     };
     let row_bytes = in_dim / q4_k::QK_K * q4_k::BLOCK_BYTES;
-    let rows = rows_wanted.min(out_dim);
-    run_mm_layout_byte_identity(Codec::Q4K, &weight_bytes[..rows * row_bytes], in_dim, rows, tokens, extra_env, label)
+    let rows = case.rows_wanted.min(out_dim);
+    run_lever_byte_identity(Codec::Q4K, &weight_bytes[..rows * row_bytes], in_dim, rows, case)
 }
+
+const WIDE_ACT_LOAD_OFF: [(&str, Option<&str>); 2] = [
+    ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0")),
+    ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
+];
+const DIRECT_STORE_ON: [(&str, Option<&str>); 1] = [("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("1"))];
+const ROW_MAJOR_LAYOUT: [(&str, Option<&str>); 1] = [("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0"))];
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
-    check_q4_0("blk.0.attn_q.weight", 512, 128, &RESTAGE, "full_tile_grid")
+    let case = Case { tokens: 512, rows_wanted: 128, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "full_tile_grid" };
+    check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_partial_token_tile() -> TestResult<()> {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, &RESTAGE, "partial_token_tile")
+    let case = Case { tokens: 510, rows_wanted: 128, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "partial_token_tile" };
+    check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_partial_feature_tile() -> TestResult<()> {
-    check_q4_0("blk.0.attn_q.weight", 510, 100, &RESTAGE, "partial_feature_tile")
+    let case = Case { tokens: 510, rows_wanted: 100, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "partial_feature_tile" };
+    check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width() -> TestResult<()> {
-    check_q4_0("blk.0.ffn_gate.weight", 971, 256, &RESTAGE, "prefill_width")
+    let case = Case { tokens: 971, rows_wanted: 256, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "prefill_width" };
+    check_q4_0("blk.0.ffn_gate.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width_with_the_direct_store_default() -> TestResult<()> {
-    check_q4_0("blk.0.ffn_gate.weight", 971, 256, &[], "prefill_width_direct_store_default")
+    let case = Case {
+        tokens: 971,
+        rows_wanted: 256,
+        lever: MM_LAYOUT,
+        extra_env: &[],
+        label: "prefill_width_direct_store_default",
+    };
+    check_q4_0("blk.0.ffn_gate.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_combined_with_direct_store() -> TestResult<()> {
-    check_q4_0(
-        "blk.0.attn_q.weight",
-        510,
-        128,
-        &[("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("1"))],
-        "combined_with_direct_store",
-    )
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 128,
+        lever: MM_LAYOUT,
+        extra_env: &DIRECT_STORE_ON,
+        label: "combined_with_direct_store",
+    };
+    check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_on_the_generic_activation_read() -> TestResult<()> {
-    check_q4_0(
-        "blk.0.attn_q.weight",
-        510,
-        128,
-        &[
-            ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0")),
-            ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
-        ],
-        "generic_activation_read",
-    )
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 128,
+        lever: MM_LAYOUT,
+        extra_env: &WIDE_ACT_LOAD_OFF,
+        label: "generic_activation_read",
+    };
+    check_q4_0("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4k_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
-    check_q4k("blk.0.attn_q.weight", 512, 128, &RESTAGE, "full_tile_grid")
+    let case = Case { tokens: 512, rows_wanted: 128, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "full_tile_grid" };
+    check_q4k("blk.0.attn_q.weight", &case)
 }
 
 #[test]
 fn q4k_mm_layout_matches_row_major_with_partial_tiles() -> TestResult<()> {
-    check_q4k("blk.0.attn_q.weight", 510, 100, &RESTAGE, "partial_tiles")
+    let case = Case { tokens: 510, rows_wanted: 100, lever: MM_LAYOUT, extra_env: &RESTAGE, label: "partial_tiles" };
+    check_q4k("blk.0.attn_q.weight", &case)
+}
+
+#[test]
+fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_at_the_gemma4_prefill_width() -> TestResult<()> {
+    let case = Case { tokens: 971, rows_wanted: 256, lever: DYNAMIC_TGMEM, extra_env: &[], label: "dynamic_prefill_width" };
+    check_q4_0("blk.0.ffn_gate.weight", &case)
+}
+
+#[test]
+fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles() -> TestResult<()> {
+    let case = Case { tokens: 510, rows_wanted: 100, lever: DYNAMIC_TGMEM, extra_env: &[], label: "dynamic_partial_tiles" };
+    check_q4_0("blk.0.attn_q.weight", &case)
+}
+
+#[test]
+fn q4_0_dynamic_threadgroup_memory_matches_the_declared_array_on_the_row_major_layout() -> TestResult<()> {
+    let case = Case {
+        tokens: 510,
+        rows_wanted: 128,
+        lever: DYNAMIC_TGMEM,
+        extra_env: &ROW_MAJOR_LAYOUT,
+        label: "dynamic_row_major",
+    };
+    check_q4_0("blk.0.attn_q.weight", &case)
+}
+
+#[test]
+fn q4k_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles() -> TestResult<()> {
+    let case = Case { tokens: 510, rows_wanted: 100, lever: DYNAMIC_TGMEM, extra_env: &[], label: "dynamic_partial_tiles" };
+    check_q4k("blk.0.attn_q.weight", &case)
 }

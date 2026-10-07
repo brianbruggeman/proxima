@@ -5204,6 +5204,7 @@ mod merge_pipeline_key_tests {
             threadgroups_y: 2,
             threads_per_threadgroup_x: 32,
             threads_per_threadgroup_y: 1,
+            threadgroup_bytes: 0,
         };
 
         let linear_key = merge_pipeline_key("split_key", &merge_kernel(None));

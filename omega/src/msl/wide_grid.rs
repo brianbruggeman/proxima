@@ -84,6 +84,7 @@ pub(super) fn flat_grid2d(
         threadgroups_y,
         threads_per_threadgroup_x: width,
         threads_per_threadgroup_y: 1,
+        threadgroup_bytes: 0,
     })
 }
 

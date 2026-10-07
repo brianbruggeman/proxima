@@ -1490,6 +1490,12 @@ pub(super) fn metal_specialization(
             }
             _ => false,
         },
+        tiled_gemm_dynamic_tgmem: match &resolved.kind {
+            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
+                dynamic_tgmem_active(resolved, &quantized, *reduce_op, *init, output_axes)
+            }
+            _ => false,
+        },
         wide_grid: matches!(
             grid.grid2d,
             Some(Grid2DSpec { form: Grid2DForm::FlatThreadgroupIndex, .. })
@@ -3324,6 +3330,40 @@ pub(super) fn mm_layout_active(
     false
 }
 
+/// `true` only when `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM` admits (default ON:
+/// unset admits, only explicit `"0"` declines), `resolved` takes the packed
+/// tiled-GEMM path, and both things the lever rides on hold: the slim
+/// backing store ([`slim_tgmem_active`], the one array handed over as the
+/// kernel's argument) and the threadgroup-grid launch
+/// ([`tiled_gemm_grid2d_active`], whose [`Grid2DSpec`] carries the length the
+/// launch binds). The kernel text and the launch both read THIS predicate, so
+/// the argument the kernel declares and the length the launch binds never
+/// disagree.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn dynamic_tgmem_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> bool {
+    tiled_gemm_dynamic_tgmem_override()
+        && tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+        && slim_tgmem_active(resolved, quantized, reduce_op, init, output_axes)
+        && tiled_gemm_grid2d_active(resolved, quantized, reduce_op, init, output_axes)
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+pub(super) fn dynamic_tgmem_active(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+) -> bool {
+    false
+}
+
 /// [`GridSpec::grid2d`] for `resolved` -- `Some` only when
 /// [`tiled_gemm_grid2d_active`] admits, computed from the SAME
 /// `feature_extent`/`token_extent` products [`tiled_gemm_threadgroups`]'s
@@ -3384,6 +3424,11 @@ pub(super) fn tiled_gemm_grid2d_spec(
         threadgroups_y: row_tiles,
         threads_per_threadgroup_x: SIMD_WIDTH,
         threads_per_threadgroup_y: TILED_GEMM_NSG as u64,
+        threadgroup_bytes: if dynamic_tgmem_active(resolved, quantized, reduce_op, init, output_axes) {
+            tiled_gemm_shared_bytes()
+        } else {
+            0
+        },
     }))
 }
 
