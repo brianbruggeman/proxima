@@ -197,6 +197,17 @@ feature-gated, 20 end-of-run). The chain ran in 122 s end to end with 112 s of i
 command. A one-file edit in `proxima-tensor` rebuilds the gate profile in 10.4 s; the first build of the
 profile is 81 s.
 
+Doc examples, run when a slice touches `proxima-tensor/docs/` or an example they quote (the guides'
+code blocks are lines of these files; `cargo test --doc` runs 0 tests for the crate, so the
+examples are the proof, and each prints the counts it asserted):
+
+```
+cargo run -p proxima-model-interop --example model_config_expand --features std --profile gate
+cargo run -p proxima-model-interop --example model_config_limits --features std --profile gate
+cargo run -p proxima-model-interop --example serving_state_walkthrough --features std --profile gate
+cargo run -p proxima-model-interop --example model_config_load --features std,metal --profile gate
+```
+
 End-of-run gate, once, after the last slice (everything above, plus the 20 large-checkpoint tests):
 
 ```
