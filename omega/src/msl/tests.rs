@@ -1314,7 +1314,10 @@ fn uniform_expert_source_retains_packed_row_decoder() {
     );
 }
 
-#[cfg(not(feature = "metal-gathered-packed-row"))]
+#[cfg(all(
+    not(feature = "metal-gathered-packed-row"),
+    not(feature = "metal-tiled-gemm")
+))]
 #[test]
 fn flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked_without_feature() {
     // `[sequence = 1, selected = 2]` flattened to two rows has the same
@@ -7632,6 +7635,64 @@ mod expert_grouped_gemm {
             matches!(rejection, TiledGemmRejection::TokenExtentBelowMinimum { .. }),
             "{rejection:?}"
         );
+    }
+
+    fn packed_row_block_of(
+        bound: &BoundOp,
+        packed: &BTreeMap<NodeId, Codec>,
+    ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
+        classify_packed_row_block(bound, &operand_codecs(bound, packed))
+    }
+
+    #[cfg(not(feature = "metal-gathered-packed-row"))]
+    #[test]
+    fn routed_rows_below_the_tiled_minimum_are_single_row_matvecs_each_on_its_own_expert() {
+        for tokens in [2, 3, 4, crate::sized::TILED_GEMM_MIN_TOKENS as u32 - 1] {
+            let (bound, packed) = gathered_q8_0(tokens);
+
+            let block = packed_row_block_of(&bound, &packed)
+                .expect("a verify-width routed projection takes the packed matvec");
+
+            assert!(block.token_axes.is_empty(), "{tokens} tokens: token axes {:?}", block.token_axes);
+            assert_eq!(block.feature_axes, vec![0, 1], "{tokens} tokens");
+        }
+    }
+
+    #[cfg(not(feature = "metal-gathered-packed-row"))]
+    #[test]
+    fn routed_rows_at_the_tiled_minimum_still_refuse_the_shared_weight_row_body() {
+        let (bound, packed) = gathered_q8_0(crate::sized::TILED_GEMM_MIN_TOKENS as u32);
+
+        assert_eq!(
+            packed_row_block_of(&bound, &packed).err(),
+            Some(PackedRowBlockRejection::GatheredOperand)
+        );
+    }
+
+    #[test]
+    fn a_stacked_down_below_the_tiled_minimum_is_single_row_matvecs_at_every_width() {
+        for sequence in [1, 2, 3, 4] {
+            let (bound, packed) = stacked_q8_0(sequence, true);
+
+            let block = packed_row_block_of(&bound, &packed)
+                .expect("a stacked down at decode or verify width takes the packed matvec");
+
+            assert!(block.token_axes.is_empty(), "{sequence} tokens: token axes {:?}", block.token_axes);
+            assert_eq!(block.feature_axes, STACKED_OUTPUT_AXES.to_vec(), "{sequence} tokens");
+        }
+    }
+
+    #[test]
+    fn a_stacked_gate_and_down_whose_slots_fill_the_tiles_keep_the_tiled_classification() {
+        let filling_sequence = (crate::sized::TILED_GEMM_MIN_TOKENS as u32).div_ceil(SELECTED);
+        for activation_per_selected in [false, true] {
+            let (bound, packed) = stacked_q8_0(filling_sequence, activation_per_selected);
+
+            let block = classify_stacked(&bound, &packed).expect("slots that fill the tiles admit");
+
+            assert_eq!(block.token_axes, vec![0, 1]);
+            assert_eq!(block.feature_axes, vec![2]);
+        }
     }
 }
 
