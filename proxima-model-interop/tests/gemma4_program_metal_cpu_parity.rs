@@ -4,7 +4,7 @@
 //! exercises qwen35moe's GDN/attention schedule or the generic single-RoPE
 //! `gqa_cached` engine -- none reference gemma4's real per-layer
 //! schedule at all. This builds the REAL forward-program builder
-//! (`proxima_tensor::spec::lfm2_forward_program_with_experts`, the exact
+//! (`proxima_tensor::spec::scheduled_forward_program_with_experts`, the exact
 //! function [`crate::sliding_pattern::bind::Gemma4Arch::bind`] hands its own
 //! `gemma4_descriptor_from_gguf` to -- never a second hand-rolled copy of its
 //! graph) over a small SYNTHETIC checkpoint that reproduces gemma4's own
@@ -25,7 +25,7 @@
 //! `proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table`
 //! function (public, reused verbatim), not a hand-rolled angle formula.
 //!
-//! `lfm2_forward_program_with_experts` has no per-layer-taps counterpart
+//! `scheduled_forward_program_with_experts` has no per-layer-taps counterpart
 //! (unlike qwen35moe's `_at_width`, which returns
 //! `MoeLayerDiagnostics::block_output` per layer, or `gqa_cached`'s
 //! own `_and_layer_taps` twin) -- there is no way to request an
@@ -39,7 +39,7 @@
 //! Metal vs CPU, bisecting the smallest layer count at which they diverge.
 //!
 //! GREEN, not RED: `crate::generate::decode`'s step loop runs `self.program`
-//! (`BoundProgram::program`, i.e. exactly `lfm2_forward_program_with_experts`'s
+//! (`BoundProgram::program`, i.e. exactly `scheduled_forward_program_with_experts`'s
 //! own output) directly, with no `gqa_cached`-family substitution for
 //! gemma4 anywhere in that file (grep confirmed) -- so the working
 //! hypothesis this file set out to check ("gemma4 routes through
@@ -64,7 +64,7 @@ use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
     ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
-    lfm2_forward_program_with_experts,
+    scheduled_forward_program_with_experts,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
@@ -244,13 +244,13 @@ fn relative_error_at_last_position(found: &[f32], wanted: &[f32], row_length: us
 }
 
 /// Builds the `layer_count`-layer prefix of [`SLIDING_PATTERN`] through the
-/// REAL [`lfm2_forward_program_with_experts`] engine at [`WIDTH`] positions,
+/// REAL [`scheduled_forward_program_with_experts`] engine at [`WIDTH`] positions,
 /// evaluates its final `logits` on the CPU reference and on Metal, and
 /// returns the relative error between them at the last position.
 fn logits_relative_error(layer_count: u32) -> f32 {
     let sliding_pattern = &SLIDING_PATTERN[..layer_count as usize];
     let schedule = gemma4_synthetic_schedule(sliding_pattern);
-    let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
+    let (program, logits, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,

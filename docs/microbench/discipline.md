@@ -184,7 +184,7 @@ measured — it scales with width where Component 1's aggregate does not.
 
 ## Component 3+4 — ONE gemma4 sliding layer (real isolation, fused)
 
-**Method**: `block_count=1` through the REAL `lfm2_forward_program_with_experts`
+**Method**: `block_count=1` through the REAL `scheduled_forward_program_with_experts`
 engine (`proxima-tensor/src/spec/attention_forward.rs:1719`, the exact
 builder `Gemma4Arch::bind` calls), one SLIDING layer (majority shape: 28 of
 35 real layers) at real dims (`head_dim=256`, `kv_heads=1`, `query_heads=8`,
@@ -199,7 +199,7 @@ documented deviation from the real per-layer shape (E2B's per-layer
 embedding addend is a cheap secondary lookup, not a floor suspect; every
 other field is real-dimensioned).
 
-**NOTE — attention and FFN are NOT separated**: `lfm2_forward_program_with_experts`
+**NOTE — attention and FFN are NOT separated**: `scheduled_forward_program_with_experts`
 has no per-op-kind tap (`gemma4_program_metal_cpu_parity.rs`'s own doc: "no
 per-layer-taps counterpart... no way to request an intermediate layer's
 residual without hand-rolling a second copy of the graph"), so this reports
@@ -316,7 +316,7 @@ with CoV ≤5.4%, and compounds over 35 layers into Component 1's own
    `token_stages`/`prefill_batch_stages` log line instead of re-reading the
    drained global counters.
 2. **Split attention from FFN**: either a per-layer-taps builder twin of
-   `lfm2_forward_program_with_experts` (mirroring qwen35moe's `_at_width`),
+   `scheduled_forward_program_with_experts` (mirroring qwen35moe's `_at_width`),
    or the `execute_plan_with_placements_dispatch_timed` per-dispatch
    GPU-timestamp path (`omega/src/metal/dispatch_timed_and_classify.rs:713`,
    `feature = "metal-output-placement"` + `instrument`) against the REAL

@@ -44,7 +44,7 @@
 //!    applied at the LM head's own real shape instead of a decode matvec's.
 //!    3+4. **One gemma4 layer** (cached attention + FFN, fused — see the
 //!    NOTE on this pairing below) — real isolation: `block_count=1` through
-//!    the REAL `lfm2_forward_program_with_experts` engine
+//!    the REAL `scheduled_forward_program_with_experts` engine
 //!    (`proxima-tensor/src/spec/attention_forward.rs:1719`, the same
 //!    builder `bind_checkpoint` lowers gemma4 through, matching
 //!    `gemma4_descriptor_from_gguf`'s own per-layer config
@@ -54,7 +54,7 @@
 //!    (E2B's per-layer-embedding addend is a cheap secondary lookup, not
 //!    the floor suspect this slice root-causes; documented deviation from
 //!    the exact real per-layer shape, everything else real-dimensioned).
-//!    NOTE: `lfm2_forward_program_with_experts` has no per-op-kind tap
+//!    NOTE: `scheduled_forward_program_with_experts` has no per-op-kind tap
 //!    (`gemma4_program_metal_cpu_parity.rs`'s own doc: "no per-layer-taps
 //!    counterpart... no way to request an intermediate layer's residual
 //!    without hand-rolling a second copy of the graph"), so attention and
@@ -131,7 +131,7 @@ use proxima_tensor::instrument::ticks_to_nanos;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, RopePairing,
-    RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
+    RopeTableSel, ValueSourceKind, scheduled_forward_program_with_experts,
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
@@ -506,7 +506,7 @@ fn bench_one_layer(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
     for width in WIDTHS {
         let schedule = sliding_layer_schedule();
-        let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
+        let (program, logits, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
             LAYER_PROBE_VOCAB,
             EMBEDDING,
             FEED_FORWARD_SWA,

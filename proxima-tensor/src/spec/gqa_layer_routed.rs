@@ -715,7 +715,7 @@ pub struct MoeSites(pub Vec<MoeSite>);
 /// checkpoints (Mixtral, `expert_bias: None`) cannot exhibit since they
 /// never reach this branch.
 ///
-/// The routed feed-forward block [`lfm2_forward_program_with_experts`]
+/// The routed feed-forward block [`scheduled_forward_program_with_experts`]
 /// and [`gqa_cached_forward_program_with_experts`] both call per
 /// layer; see [`qwen35_forward_program`] for this crate's own worked
 /// example of a full per-layer builder chain (a dense, non-MoE FFN there).

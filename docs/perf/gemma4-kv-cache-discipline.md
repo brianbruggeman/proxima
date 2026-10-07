@@ -17,7 +17,7 @@ Home-turf / Δ / Notes.
 
 | Build | Tests | Clippy | Micro-bench | Compare-bench | E2E | Opt | SIMD/SM/no-Box | O(1) | Cfg/API | Home-turf | Δ | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `cargo check -p proxima-model-interop --features std,metal,gemma4-kv-cache` = 0 (also `--all-targets` = 0); flag-off `--features std,metal` = 0 (also `--all-targets` = 0); `cargo check -p proxima-tensor --features std,config` (+ `--all-targets`) = 0 | `cargo nextest run -p proxima-model-interop --features std,metal`: **261 passed, 0 failed, 59 skipped** (this slice's required gate); `cargo nextest run -p proxima-tensor --features std,config,test-support,cached-attention-streaming,kv-capacity-bucket`: 669/670 passed, 1 PRE-EXISTING unrelated failure (confirmed identical on an unmodified `9868d3bb` worktree, not caused by this change) | Not run this slice | PENDING -- no isolated micro-bench of the new cached attention mixer exists yet | Ollama/llama.cpp and MLX decode tok/s captured (Baseline step) but **GATED**: correctness failed before a compare verdict could be drawn (see Δ) | `bench_local`, real gemma4 26B-A4B blob, metal backend, flag-off (cacheless, oracle) and flag-on (cached) binaries both run end to end; flag-on output is WRONG (see Δ) | Reuse-first: no new type/trait minted; extended the existing `lfm2_forward_program_with_experts` machinery (shared `build_attention_layer_resources`, shared `append_lfm2_layer_ffn`) rather than forking | Not evaluated this slice -- correctness gate stops before an opt pass is meaningful | Decode step is DESIGNED O(1) in prior sequence length (merged kv-cache leaves grown once per step, no re-prefill) but this is UNVERIFIED as correct -- see Δ | `gemma4-kv-cache` cargo feature on `proxima-model-interop`, default-off; no matching feature added to `proxima-tensor` (new spec module compiles unconditionally there, matching every sibling `*_cached` module's own convention) | Ollama `batiai/gemma4-26b:latest`: 56.62 tok/s decode. MLX `mlx-community/gemma-4-26b-a4b-it-4bit`: 67.667 tok/s decode. Both measured (Baseline step) but **not usable as a verdict** because the cached arm they'd be compared against is incorrect | **FAILED -- token_identical=false.** Cacheless oracle (flag off) reproduces its own prior baseline byte-for-byte: ids `[818, 5279, 529, 7001, 563, 5213, 50429, 84750, 106, 106, 45518, 107, 45518, 107, 101, 818, 5279, 529, 7001, 563, 5213, 50429, 84750, 106]`, text `"The capital of France is **Paris**...."`. Cached (flag on) diverges at generated-token index 0 (818 vs 236772) and collapses into a 4-token repeating cycle `[236772, 236771, 236771, 236770]`, decoding to `"-001-001-001..."`. Raw cached ttnt (93.538 ms/token, ~44x faster than cacheless 4152.904 ms/token) is **not reported as a performance result** -- it describes how fast the wrong tokens were produced | Component spans two commits on this branch: `9db00f837` (this slice's implementation, compiles clean, passes the full CPU spec/bind suite) and a not-yet-landed root-cause fix for the correctness failure this log records. See Investigate/Blockers/Fix-plan below for the seven architectural gaps that had to be closed to get this far, and the open item for what's still wrong. |
+| `cargo check -p proxima-model-interop --features std,metal,gemma4-kv-cache` = 0 (also `--all-targets` = 0); flag-off `--features std,metal` = 0 (also `--all-targets` = 0); `cargo check -p proxima-tensor --features std,config` (+ `--all-targets`) = 0 | `cargo nextest run -p proxima-model-interop --features std,metal`: **261 passed, 0 failed, 59 skipped** (this slice's required gate); `cargo nextest run -p proxima-tensor --features std,config,test-support,cached-attention-streaming,kv-capacity-bucket`: 669/670 passed, 1 PRE-EXISTING unrelated failure (confirmed identical on an unmodified `9868d3bb` worktree, not caused by this change) | Not run this slice | PENDING -- no isolated micro-bench of the new cached attention mixer exists yet | Ollama/llama.cpp and MLX decode tok/s captured (Baseline step) but **GATED**: correctness failed before a compare verdict could be drawn (see Δ) | `bench_local`, real gemma4 26B-A4B blob, metal backend, flag-off (cacheless, oracle) and flag-on (cached) binaries both run end to end; flag-on output is WRONG (see Δ) | Reuse-first: no new type/trait minted; extended the existing `scheduled_forward_program_with_experts` machinery (shared `build_attention_layer_resources`, shared `append_layer_ffn`) rather than forking | Not evaluated this slice -- correctness gate stops before an opt pass is meaningful | Decode step is DESIGNED O(1) in prior sequence length (merged kv-cache leaves grown once per step, no re-prefill) but this is UNVERIFIED as correct -- see Δ | `gemma4-kv-cache` cargo feature on `proxima-model-interop`, default-off; no matching feature added to `proxima-tensor` (new spec module compiles unconditionally there, matching every sibling `*_cached` module's own convention) | Ollama `batiai/gemma4-26b:latest`: 56.62 tok/s decode. MLX `mlx-community/gemma-4-26b-a4b-it-4bit`: 67.667 tok/s decode. Both measured (Baseline step) but **not usable as a verdict** because the cached arm they'd be compared against is incorrect | **FAILED -- token_identical=false.** Cacheless oracle (flag off) reproduces its own prior baseline byte-for-byte: ids `[818, 5279, 529, 7001, 563, 5213, 50429, 84750, 106, 106, 45518, 107, 45518, 107, 101, 818, 5279, 529, 7001, 563, 5213, 50429, 84750, 106]`, text `"The capital of France is **Paris**...."`. Cached (flag on) diverges at generated-token index 0 (818 vs 236772) and collapses into a 4-token repeating cycle `[236772, 236771, 236771, 236770]`, decoding to `"-001-001-001..."`. Raw cached ttnt (93.538 ms/token, ~44x faster than cacheless 4152.904 ms/token) is **not reported as a performance result** -- it describes how fast the wrong tokens were produced | Component spans two commits on this branch: `9db00f837` (this slice's implementation, compiles clean, passes the full CPU spec/bind suite) and a not-yet-landed root-cause fix for the correctness failure this log records. See Investigate/Blockers/Fix-plan below for the seven architectural gaps that had to be closed to get this far, and the open item for what's still wrong. |
 
 **Incumbent design point(s):**
 - **llama.cpp / Ollama** (`batiai/gemma4-26b:latest`) -- decode one token at a
@@ -30,17 +30,17 @@ Home-turf / Δ / Notes.
   path (`--ignore-chat-template`), so this is an honest home-turf throughput
   number, not a token-identity comparison.
 
-**Tier evidence:** `cargo check -p proxima-model-interop --features std,metal,gemma4-kv-cache` and the same command with `--all-targets` both exit 0 (compiles the new cached gemma4 bind branch, its tests, and its examples). Flag-off equivalents also exit 0 (cacheless branch untouched). `cargo check -p proxima-tensor --features std,config` (+`--all-targets`) exits 0 -- the new `lfm2_single_range_cached.rs` module compiles unconditionally in that crate, matching the existing `single_range_moe_cached.rs`/`gqa_forward_cached.rs` convention (no crate-level feature gate needed there).
+**Tier evidence:** `cargo check -p proxima-model-interop --features std,metal,gemma4-kv-cache` and the same command with `--all-targets` both exit 0 (compiles the new cached gemma4 bind branch, its tests, and its examples). Flag-off equivalents also exit 0 (cacheless branch untouched). `cargo check -p proxima-tensor --features std,config` (+`--all-targets`) exits 0 -- the new `scheduled_cached.rs` module compiles unconditionally in that crate, matching the existing `single_range_moe_cached.rs`/`gqa_forward_cached.rs` convention (no crate-level feature gate needed there).
 
 **Test N:** `proxima-model-interop` gate for this slice: **261 passed, 0 failed** (`cargo nextest run -p proxima-model-interop --features std,metal`, log at `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/9049d06b-8620-4a97-8fec-5659655eee9d/scratchpad/nextest_gate.log`). `proxima-tensor` CPU spec/bind suite: 669/670 (1 pre-existing unrelated failure, `bind::tests::single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape`, reproduced on the unmodified base commit).
 
-**Opt-sweep findings:** Not applicable yet -- the correctness gate failed before any tuning pass would be meaningful. The one structural choice made (extracting `build_attention_layer_resources` and `append_lfm2_layer_ffn` as shared helpers between the prefill and cached builders, rather than duplicating them) was verified behavior-preserving on the prefill side by the full `proxima-tensor` suite staying at 669/670 before and after.
+**Opt-sweep findings:** Not applicable yet -- the correctness gate failed before any tuning pass would be meaningful. The one structural choice made (extracting `build_attention_layer_resources` and `append_layer_ffn` as shared helpers between the prefill and cached builders, rather than duplicating them) was verified behavior-preserving on the prefill side by the full `proxima-tensor` suite staying at 669/670 before and after.
 
 **SIMD/SM/no-dyn pass:** Not evaluated -- this is graph-spec composition (`Vec<Op>` construction), not a hand-rolled hot loop; no dynamic dispatch was introduced (no new trait objects, no `Box<dyn ..>`).
 
 **O(1):** Designed as O(1) per decode step in prior sequence length (`kv_cache.{layer}.k_even/k_odd/v` merged-cache leaves grown once per step via the existing `cached_len` contract, same shape as qwen35moe/mistral). **This is unverified as correct** -- the correctness failure below means the actual per-step read is producing wrong values, so the O(1) claim describes the intended data-flow shape, not a validated property of a working cache.
 
-**Internal-primitive audit:** No new type or trait was minted. Every knob threaded (`LayerAttentionConfig`, `LayerFfnConfig`, `ValueSource`, `AttentionScoreScale`, `RopePairing`, `FfnCombination`) already existed on the prefill (`lfm2_forward_program_with_experts`) side; the new file composes them into a cached-attention builder the same shape as the existing `single_range_moe_cached.rs`/`gqa_forward_cached.rs` siblings. `find_or_insert`/`AttentionLayerResources` were promoted `private -> pub(crate)` (visibility only) so the extracted resource pre-pass could be shared, not to host a new abstraction.
+**Internal-primitive audit:** No new type or trait was minted. Every knob threaded (`LayerAttentionConfig`, `LayerFfnConfig`, `ValueSource`, `AttentionScoreScale`, `RopePairing`, `FfnCombination`) already existed on the prefill (`scheduled_forward_program_with_experts`) side; the new file composes them into a cached-attention builder the same shape as the existing `single_range_moe_cached.rs`/`gqa_forward_cached.rs` siblings. `find_or_insert`/`AttentionLayerResources` were promoted `private -> pub(crate)` (visibility only) so the extracted resource pre-pass could be shared, not to host a new abstraction.
 
 **Tunable axes:** None new -- no magic numbers were introduced; the change composes existing per-layer config types, all of which already resolve through the existing gguf-metadata-driven bind path, not hardcoded constants.
 
@@ -56,7 +56,7 @@ needs the gemma4 blob and exclusive GPU access.)
 ### Investigate -- why gemma4 is cacheless today
 
 `proxima-model-interop/src/gemma4/bind.rs:607-622` calls
-`lfm2_forward_program_with_experts` (the prefill-only engine,
+`scheduled_forward_program_with_experts` (the prefill-only engine,
 `proxima-tensor/src/spec/attention_forward.rs:1016`) and leaves
 `layer_roots: Vec::new()` on the returned `BoundProgram`
 (`bind.rs:649`). With no cache leaves for the generic decode loop
@@ -91,7 +91,7 @@ re-bound every step -- an O(n^2) re-prefill, not an explicit
 6. **`FfnCombination::ParallelDenseMoe`** (gemma4's dense-SwiGLU + routed-MoE
    parallel-sum FFN) -- the cached engines only supported the prefill
    engine's exclusive-OR dense-XOR-MoE switch; closed by extracting the FFN
-   match into a shared `append_lfm2_layer_ffn`, called identically by both
+   match into a shared `append_layer_ffn`, called identically by both
    engines, verified behavior-preserving on the prefill side by the
    `proxima-tensor` suite staying at 669/670.
 7. **`final_logit_softcapping=30`** -- neither cached forward-program took a
@@ -210,10 +210,10 @@ Correctness cells, current truth as of this slice):**
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 |---|---|---|---|---|
 | 2026-09-18 | Baseline: measured cacheless gemma4 decode (oracle), Ollama, and MLX home-turf decode throughput; no code changed | cacheless 0.2415 tok/s; Ollama 56.62 tok/s; MLX 67.667 tok/s | single run each, no repeats yet | local Metal host, model gate held for cacheless+Ollama runs |
-| 2026-09-18 | Implement (`9db00f837`): landed `gemma4-kv-cache` feature -- new `causal_mask_merged_windowed` primitive, new `lfm2_single_range_cached.rs` cached forward-program builder, `Gemma4Arch::bind()` gains a flag-gated branch populating real `CachedLayerRoots`; all seven architectural blockers closed at the spec level | compiles clean with and without the flag; CPU spec/bind suite 669/670 (1 pre-existing unrelated failure); no GPU/model-load run this step (explicitly out of scope) | deterministic build+test counts | local build host, no GPU run |
+| 2026-09-18 | Implement (`9db00f837`): landed `gemma4-kv-cache` feature -- new `causal_mask_merged_windowed` primitive, new `scheduled_cached.rs` cached forward-program builder, `Gemma4Arch::bind()` gains a flag-gated branch populating real `CachedLayerRoots`; all seven architectural blockers closed at the spec level | compiles clean with and without the flag; CPU spec/bind suite 669/670 (1 pre-existing unrelated failure); no GPU/model-load run this step (explicitly out of scope) | deterministic build+test counts | local build host, no GPU run |
 | 2026-09-18 | Verify+Bench: ran both flag-off and flag-on `bench_local` binaries against the real gemma4 blob under the model gate | **token_identical=false** -- cached path diverges at generated-token index 0, collapses to a 4-token repeating cycle; cacheless oracle reproduced its own baseline byte-for-byte | one comparison run each; cacheless reproduced across two independent sessions | local Metal host, model gate held for both runs (0s wait, held ~5.6s total for the cached run) |
 | 2026-09-18 | This log: ran the required crate test gate and recorded the discipline log; no code changed | `cargo nextest run -p proxima-model-interop --features std,metal`: 261 passed, 0 failed, 59 skipped | deterministic | local build host, no GPU run |
-| 2026-09-18 | Fix (`d9f20f107`) + docs (`d23af282b`): root-caused the zero-cache read (single-range engine never folds its own call's new K/V before scoring, generic decode loop never pre-folds), landed `append_lfm2_two_range_cached_attention` generalizing the proven qwen35moe two-block online-softmax combine; 8-token real-checkpoint confirm **token_identical=true** | cacheless 3160.764 ms/token vs cached 107.383 ms/token (~29x, now valid since output is correct); superseded the prior 44x-but-wrong number | `proxima-tensor` 672/673 (1 pre-existing unrelated failure); `proxima-model-interop` 261/261 | local Metal host, model gate held |
+| 2026-09-18 | Fix (`d9f20f107`) + docs (`d23af282b`): root-caused the zero-cache read (single-range engine never folds its own call's new K/V before scoring, generic decode loop never pre-folds), landed `append_two_range_cached_attention` generalizing the proven qwen35moe two-block online-softmax combine; 8-token real-checkpoint confirm **token_identical=true** | cacheless 3160.764 ms/token vs cached 107.383 ms/token (~29x, now valid since output is correct); superseded the prior 44x-but-wrong number | `proxima-tensor` 672/673 (1 pre-existing unrelated failure); `proxima-model-interop` 261/261 | local Metal host, model gate held |
 | 2026-09-18 | C3 VerifyBench: 24-token real-checkpoint run, two fresh-fingerprint binaries, clean back-to-back pair after host contention (2 concurrent Ollama `llama-server` processes) cleared | **token_identical=true (24/24)**; cached 9.368 tok/s vs cacheless 0.2166 tok/s (43.25x); vs Ollama 56.62 tok/s = 0.1654x (6.05x short); vs MLX 67.667 tok/s = 0.1384x (7.22x short) -- **meets-or-beats: NO** | 1 clean comparison pair; 8/10 total attempts degenerate under host contention (documented, ruled out as a logic bug, symmetric across both arms) | local Metal host, model gate held; two Ollama judge-hook `llama-server` processes contending for ~30GB RSS during 8 of 10 attempts |
 | 2026-09-18 | Gate re-run for this doc-only slice, no code changed | `cargo nextest run -p proxima-model-interop --features std,metal`: 261 passed, 0 failed, 59 skipped, exit 0 | deterministic | local build host, no GPU run |
 
@@ -234,7 +234,7 @@ result until the cache reads correct K/V history.
 
 **Implication:** the next slice is a root-cause dig into the cached
 attention mixer's numerical output, starting from
-`proxima-tensor/src/spec/lfm2_single_range_cached.rs` and the
+`proxima-tensor/src/spec/scheduled_cached.rs` and the
 `CachedLayerRoots` population/consumption path in
 `proxima-model-interop/src/gemma4/bind.rs:604-687`, specifically whether
 gemma4's dual-RoPE per-layer leaf naming (`rope_cos`/`rope_sin` vs a
@@ -242,7 +242,7 @@ SWA-specific pair) is actually bound into the cache-consuming graph the way
 the prefill-time mixer binds it. The natural first artifact is a
 CPU-synthetic differential test extending the existing
 `gemma4_synthetic_parity` harness (`proxima-tensor/src/spec/tests.rs`) to
-compare `append_lfm2_single_range_cached_attention`'s output against the
+compare `append_single_range_cached_attention`'s output against the
 prefill mixer's own reference at `cached_len=0` (degenerate case) and
 `cached_len>0` -- this is the gap that let the spec-level test suite pass
 (669/670) while the real-model decode was wrong, and closing it is required
@@ -250,8 +250,8 @@ before any further GPU-level correctness or performance claim.
 
 ## C2 -- root cause and fix
 
-**Root cause (proven, not inferred):** `lfm2_single_range_cached.rs`'s own
-module doc names the shape correctly -- `append_lfm2_single_range_cached_attention`
+**Root cause (proven, not inferred):** `scheduled_cached.rs`'s own
+module doc names the shape correctly -- `append_single_range_cached_attention`
 scores ONLY against the merged `kv_cache.{layer}.*` leaves, and explicitly
 never reads its own freshly-rotated `rotated_k_new`/`v_new` for its own
 call's score ("a query never attends a key that does not exist yet"). That
@@ -282,10 +282,10 @@ hand-folding this call's own new K/V into the SAME leaves before evaluating
 matches the oracle to float noise (`2.98e-8`) -- proving the mechanism
 directly, node values in hand.
 
-**Fix** (`proxima-tensor/src/spec/lfm2_single_range_cached.rs`,
+**Fix** (`proxima-tensor/src/spec/scheduled_cached.rs`,
 `proxima-model-interop/src/gemma4/bind.rs`): a new
-`append_lfm2_two_range_cached_attention` +
-`lfm2_two_range_cached_forward_program_with_experts`, generalizing
+`append_two_range_cached_attention` +
+`scheduled_two_range_cached_forward_program_with_experts`, generalizing
 `single_range_moe_cached::append_gqa_cached_routed_layer`'s own
 already-proven two-block online-softmax combine (reuse-first, no new Op
 variant, no new type) with gemma4's existing knobs (`ValueSource`,

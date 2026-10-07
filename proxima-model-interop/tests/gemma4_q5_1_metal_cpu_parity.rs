@@ -82,7 +82,7 @@ use proxima_tensor::{DType, IndexMap, QuantizedBlock};
 fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     // `DType::Float32`, not `UInt8` -- every real weight leaf
-    // `lfm2_forward_program_with_experts`/`append_attention_mixer` declares
+    // `scheduled_forward_program_with_experts`/`append_attention_mixer` declares
     // (`attention_forward.rs`'s own `input_leaf(..., DType::Float32, ...)`
     // calls for `wq`/`wk`/`wv`/`ffn_down.weight`/etc) uses `Float32` as the
     // graph-level marker regardless of which `QuantizedBlock` variant binds

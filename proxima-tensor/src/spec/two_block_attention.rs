@@ -10,7 +10,7 @@
 //! padding itself). A descriptor carries that choice as
 //! [`CacheMask`](super::CacheMask); the layer builders
 //! ([`append_gqa_cached_layer`], [`append_gqa_cached_routed_layer`],
-//! [`append_lfm2_two_range_cached_attention`]) own the projections, norms and
+//! [`append_two_range_cached_attention`]) own the projections, norms and
 //! output stage in front of and behind this core.
 
 use super::*;

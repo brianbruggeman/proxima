@@ -147,7 +147,7 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
 /// each copy reads the SAME upstream operands the original does (never the
 /// original's own output), so its result is a byte-identical, independently
 /// dispatched recomputation, exactly the method
-/// `spec::lfm2_single_range_cached`'s own `PROXIMA_HEAD_REPEATS` established
+/// `spec::scheduled_cached`'s own `PROXIMA_HEAD_REPEATS` established
 /// at the spec-graph level, generalized to any already-bound node instead of
 /// only the LM head. Every copy's primary `node` (and, for
 /// [`BoundOpKind::CachedSoftmaxWeights`], its three named extra outputs) is

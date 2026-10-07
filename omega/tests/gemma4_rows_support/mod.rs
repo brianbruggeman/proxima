@@ -15,7 +15,7 @@
 use proxima_tensor::spec::{
     AttentionScoreScale, EmbeddingScale, KeySourceKind, LayerAttentionConfig, LayerFfnConfig,
     LayerKind, LayerSchedule, RopePairing, RopeTableSel, ValueSourceKind,
-    lfm2_two_range_cached_forward_program_with_experts,
+    scheduled_two_range_cached_forward_program_with_experts,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, Op, infer};
@@ -160,7 +160,7 @@ fn named_block(
 #[must_use]
 pub fn fixture(rows: usize, cached_len: usize) -> Fixture {
     let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
-        lfm2_two_range_cached_forward_program_with_experts(
+        scheduled_two_range_cached_forward_program_with_experts(
             VOCAB,
             EMBEDDING,
             FEED_FORWARD,

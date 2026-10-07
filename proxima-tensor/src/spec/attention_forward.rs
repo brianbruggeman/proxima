@@ -52,7 +52,7 @@ pub struct AttentionMixerOutput {
 ///
 /// [`ValueSource`] without the resolved weight [`NodeId`] -- a schedule
 /// entry names WHICH shape a layer's `V` takes, but the actual `wv` leaf (if
-/// any) is only known once [`lfm2_forward_program_with_experts`]'s own loop
+/// any) is only known once [`scheduled_forward_program_with_experts`]'s own loop
 /// reaches that layer and can build (or skip) its `attn_v.weight` leaf, so
 /// [`LayerAttentionConfig`] carries this kind rather than a [`ValueSource`]
 /// itself.
@@ -73,7 +73,7 @@ pub enum ValueSourceKind {
 /// caller's behaviour (a real `attn_k.weight`/`attn_k_norm.weight` pair on
 /// disk). [`Self::SharedFromLayer`] is the E2B checkpoint's shared-KV shape: no
 /// `attn_k.weight`/`attn_k_norm.weight` leaves exist for this layer, so
-/// [`lfm2_forward_program_with_experts`] must not declare them -- the `K`
+/// [`scheduled_forward_program_with_experts`] must not declare them -- the `K`
 /// this layer's attention math uses is the named source layer's own
 /// post-rope, post-k-norm `K` halves. Shared-KV shares BOTH `K` and `V` --
 /// ollama's `the mlxrunner model Go source` `Attention.Forward` reads one
@@ -91,7 +91,7 @@ pub enum KeySourceKind {
 /// Technique: Gemma local-global dual-base RoPE (`DualBaseRope { base, base_swa }`) -- see `docs/design/technique-taxonomy.md#positional`.
 ///
 /// Names one RoPE table a layer reads its `cos`/`sin` from, by the exact
-/// [`Op::Input`] leaf names [`lfm2_forward_program_with_experts`] declares
+/// [`Op::Input`] leaf names [`scheduled_forward_program_with_experts`] declares
 /// for it -- e.g. `("rope_cos", "rope_sin")`. Every layer naming the SAME
 /// pair shares the SAME declared leaf (declared once, at first use), so a
 /// heterogeneous schedule with two distinct windows (Gemma 4's sliding vs
@@ -106,7 +106,7 @@ pub struct RopeTableSel {
 /// A multiplier applied to the embedding lookup's own output before the
 /// first layer ever reads it -- Gemma's `hidden_states = hidden_states *
 /// sqrt(embedding)` step, absent from every architecture
-/// [`lfm2_forward_program_with_experts`] served before this knob existed.
+/// [`scheduled_forward_program_with_experts`] served before this knob existed.
 /// `None` (every caller in this crate today) reproduces the prior
 /// unscaled embedding node-for-node.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
@@ -264,7 +264,7 @@ pub(super) fn append_activation(
 }
 
 /// [`FfnCombination::ParallelDenseMoe`]'s own knobs -- fields only legal
-/// (and only ever read, see `lfm2_forward_program_with_experts`) when a
+/// (and only ever read, see `scheduled_forward_program_with_experts`) when a
 /// layer runs BOTH FFNs in parallel; hoisted out of [`LayerFfnConfig`] and
 /// onto this variant's payload so a schedule cannot name them under
 /// [`FfnCombination::Exclusive`], where dense and routed never coexist.
@@ -300,7 +300,7 @@ pub struct ParallelDenseMoeConfig {
 /// Technique: Gemma-style parallel dense+MoE FFN (`ParallelDenseMoe`) -- see `docs/design/technique-taxonomy.md#ffn--experts`.
 ///
 /// How a layer's post-attention output and its feed-forward output combine
-/// -- [`FfnCombination::Exclusive`] is [`lfm2_forward_program_with_experts`]'s
+/// -- [`FfnCombination::Exclusive`] is [`scheduled_forward_program_with_experts`]'s
 /// prior behaviour (a layer runs the dense-triple FFN XOR
 /// [`append_moe_ffn`], selected by `leading_dense_block_count`).
 /// [`FfnCombination::ParallelDenseMoe`] is Gemma 4's shape: BOTH FFNs run
@@ -324,7 +324,7 @@ pub enum FfnCombination {
 /// Technique: gated FFN activation (Shazeer 2020, GLU Variants -- SwiGLU/GeGLU) -- see `docs/design/technique-taxonomy.md#ffn--experts`.
 ///
 /// One layer's post-attention/feed-forward knobs -- generalizes
-/// [`lfm2_forward_program_with_experts`]'s previously-uniform "ffn_norm,
+/// [`scheduled_forward_program_with_experts`]'s previously-uniform "ffn_norm,
 /// then dense-triple XOR routed FFN, then residual add" sequence the same
 /// way [`LayerAttentionConfig`] generalized the attention sub-block, so a
 /// heterogeneous schedule (Gemma 4's parallel dense+MoE, its
@@ -368,7 +368,7 @@ pub struct LayerFfnConfig {
     /// node-for-node; Gemma 4 sets `GeluTanh` for its GeGLU FFN.
     pub activation: Activation,
     /// `Some(width)` overrides this layer's dense-branch FFN width in place
-    /// of [`lfm2_forward_program_with_experts`]'s crate-wide `feed_forward`
+    /// of [`scheduled_forward_program_with_experts`]'s crate-wide `feed_forward`
     /// argument -- Gemma 4 E2B/E4B's matformer checkpoint stores a
     /// per-layer `feed_forward_length` array rather than one uniform width
     /// (`sliding_pattern::hparams::Gemma4Hparams::feed_forward_by_layer`). `None`
@@ -390,7 +390,7 @@ pub struct LayerFfnConfig {
     /// (the reference Go source, lines 1349-1361: gate/GeGLU/proj/`post_norm`, added into the
     /// residual right after the FFN residual add, BEFORE
     /// [`Self::output_scale`]'s own multiply) -- see
-    /// [`lfm2_forward_program_with_experts`]'s own `ple_dim` parameter for
+    /// [`scheduled_forward_program_with_experts`]'s own `ple_dim` parameter for
     /// the checkpoint-wide toggle this per-layer flag composes with: PLE
     /// only runs when BOTH `ple_dim` is `Some` and this layer's own `ple`
     /// is `true`. `false` (every caller today) reproduces the prior
@@ -400,7 +400,7 @@ pub struct LayerFfnConfig {
 }
 
 impl LayerFfnConfig {
-    /// [`lfm2_forward_program_with_experts`]'s prior fixed behaviour: no
+    /// [`scheduled_forward_program_with_experts`]'s prior fixed behaviour: no
     /// post-attention norm, exclusive dense/routed FFN selection, no
     /// output scale, no per-layer-embedding injection.
     #[must_use]
@@ -451,7 +451,7 @@ impl AttentionScoreScale {
 /// Technique: grouped-query attention (Ainslie et al. 2023, GQA -- `kv_heads`) -- see `docs/design/technique-taxonomy.md#attention`.
 ///
 /// One [`LayerKind::Attention`] block's own attention shape --
-/// [`lfm2_forward_program_with_experts`]'s per-layer generalization of the
+/// [`scheduled_forward_program_with_experts`]'s per-layer generalization of the
 /// single crate-wide `head_dim`/`kv_heads` it used to compute once outside
 /// its layer loop. Every field here is exactly what varies across Gemma 4's
 /// sliding (`head_dim=256, kv_heads=8`) vs full (`head_dim=512, kv_heads=2`)
@@ -497,7 +497,7 @@ pub struct LayerAttentionConfig {
     pub value_norm: bool,
 }
 
-/// One block's complete per-layer choice -- [`lfm2_forward_program_with_experts`]
+/// One block's complete per-layer choice -- [`scheduled_forward_program_with_experts`]
 /// walks one `&[LayerSchedule]` rather than three separately-indexed
 /// `layer_kinds`/`attention_configs`/`ffn_configs` slices a caller had to
 /// keep in lockstep by hand; `attention` is read only when `kind` is
@@ -512,13 +512,13 @@ pub struct LayerSchedule {
     pub ffn: LayerFfnConfig,
 }
 
-/// [`lfm2_forward_program_with_experts`]'s own per-attention-layer bundle:
+/// [`scheduled_forward_program_with_experts`]'s own per-attention-layer bundle:
 /// the shared nodes ONE [`LayerAttentionConfig`] resolves to, already
 /// deduplicated against every other layer's own config. Kept separate from
 /// [`LayerAttentionConfig`] itself since these are [`NodeId`]s already
 /// placed in the program, never a caller-facing description. `pub(crate)`
 /// (not `pub(super)`) so [`build_attention_layer_resources`]'s own cached
-/// counterpart (`spec::lfm2_single_range_cached`) can read the same bundle
+/// counterpart (`spec::scheduled_cached`) can read the same bundle
 /// shape rather than re-deriving it.
 pub(crate) struct AttentionLayerResources {
     pub(crate) group: u32,
@@ -598,9 +598,9 @@ pub(super) fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_
 }
 
 /// [`append_gqa_layer`]'s attention sub-block in isolation (RoPE + GQA +
-/// causal mask + residual, no FFN) -- the piece [`lfm2_forward_program_with_experts`]
+/// causal mask + residual, no FFN) -- the piece [`scheduled_forward_program_with_experts`]
 /// needs on its own, since an attention block there sits beside
-/// [`append_lfm2_conv_mixer`] rather than always beside the same FFN choice
+/// [`append_short_conv_mixer`] rather than always beside the same FFN choice
 /// [`append_gqa_layer`] bundles it with. Node-for-node the same attention
 /// graph [`append_gqa_layer`] runs before its own FFN call, extracted
 /// rather than shared by refactoring that function, so the dense uniform-decoder
@@ -920,7 +920,7 @@ pub fn append_attention_mixer(
     })
 }
 
-/// The dense-triple SwiGLU FFN branch [`lfm2_forward_program_with_experts`]
+/// The dense-triple SwiGLU FFN branch [`scheduled_forward_program_with_experts`]
 /// ran inline before [`FfnCombination::ParallelDenseMoe`] needed the same
 /// six-op sequence available a second time (once for its own dense branch,
 /// once for [`FfnCombination::Exclusive`]'s leading dense blocks) --
@@ -1009,7 +1009,7 @@ pub(crate) fn append_dense_swiglu_ffn(
     )
 }
 
-/// The routed MoE FFN branch [`lfm2_forward_program_with_experts`] ran
+/// The routed MoE FFN branch [`scheduled_forward_program_with_experts`] ran
 /// inline before [`FfnCombination::ParallelDenseMoe`] needed the same
 /// weight leaves and [`append_moe_ffn`] call available beside
 /// [`append_dense_swiglu_ffn`] -- extracted node-for-node, so
@@ -1179,13 +1179,13 @@ pub(crate) fn append_routed_expert_ffn(
 /// [`FfnCombination::ParallelDenseMoe`] (both branches, each optionally
 /// sub-normed, summed, optionally normed again), then the residual add
 /// and optional `layer_output_scale`. Extracted node-for-node out of
-/// [`lfm2_forward_program_with_experts`]'s own per-layer loop so
-/// `spec::lfm2_single_range_cached`'s cached counterpart can run the
+/// [`scheduled_forward_program_with_experts`]'s own per-layer loop so
+/// `spec::scheduled_cached`'s cached counterpart can run the
 /// IDENTICAL post-attention/FFN sequence over its own merged-cache
 /// attention output -- this composition has no dependency on how
 /// `post_mixer` was computed (block-local vs merged-cache scoring), only
 /// on what it IS, so nothing here changes for a cached caller. `ple_input`
-/// (`Some` only when [`lfm2_forward_program_with_experts`]'s own `ple_dim`
+/// (`Some` only when [`scheduled_forward_program_with_experts`]'s own `ple_dim`
 /// is `Some`, [`ple_layer_input`]'s own return value for this `layer`) is
 /// Stage B's own per-layer-embedding (PLE) injection input -- consumed only
 /// when `ffn_config.ple` is ALSO `true` (the reference Go source, lines 1349-1361): gate/GeGLU
@@ -1196,7 +1196,7 @@ pub(crate) fn append_routed_expert_ffn(
 /// trailing `* layer_output_scale` (the reference Go source, lines 1359-1361), reused here
 /// rather than re-declared.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn append_lfm2_layer_ffn(
+pub(crate) fn append_layer_ffn(
     program: &mut Vec<Op>,
     layer: u32,
     post_mixer: NodeId,
@@ -1265,7 +1265,7 @@ pub(crate) fn append_lfm2_layer_ffn(
         }
         FfnCombination::RoutedWithSharedExpert => {
             return Err(TensorError::UnsupportedInBuilder {
-                builder: "append_lfm2_layer_ffn",
+                builder: "append_layer_ffn",
                 feature: "FfnCombination::RoutedWithSharedExpert (lowered by the hybrid engine)",
             });
         }
@@ -1461,20 +1461,20 @@ pub(crate) fn append_lfm2_layer_ffn(
 /// DISTINCT value, at the first layer that needs it, walked in schedule
 /// order -- so a uniform schedule (every caller in this crate today)
 /// declares each resource exactly once, in exactly the same relative
-/// order [`lfm2_forward_program_with_experts`] has always declared them
+/// order [`scheduled_forward_program_with_experts`] has always declared them
 /// in: `inv_sqrt_head_dim`, `inv_head_dim`, `rope_cos`/`rope_sin`,
 /// `group_ones`, then the causal mask. A heterogeneous schedule instead
 /// grows each cache to one entry per distinct value actually referenced.
 /// The returned `Vec<AttentionLayerResources>` has one entry per
 /// [`LayerKind::Attention`] schedule entry, in schedule order, for a
 /// caller to index directly when every entry is `Attention` (this
-/// module's own [`lfm2_forward_program_with_experts`] instead walks it
+/// module's own [`scheduled_forward_program_with_experts`] instead walks it
 /// with a running counter, since its own schedule may interleave
 /// `LayerKind::ShortConv`).
 ///
 /// `build_mask` is this function's one caller-supplied knob: the plain
 /// prefill engine's block-local [`causal_mask_windowed`] and
-/// `spec::lfm2_single_range_cached`'s merged-cache
+/// `spec::scheduled_cached`'s merged-cache
 /// [`causal_mask_merged_windowed`] are the SAME resource-dedup shape
 /// around two different mask primitives -- the mask is the one
 /// resource this pre-pass cannot own directly (unlike the RoPE table or
@@ -1599,7 +1599,7 @@ pub(crate) struct PleSharedProjections {
 /// (`per_layer_model_proj`) and gather (`per_layer_token_embd`) every
 /// layer's own [`ple_layer_input`] call slices from, computed once before
 /// the layer loop starts. `h0` is the caller's own post-embedding-scale
-/// hidden state (`x` at the top of [`lfm2_forward_program_with_experts`],
+/// hidden state (`x` at the top of [`scheduled_forward_program_with_experts`],
 /// BEFORE the layer loop reassigns it) -- Gemma 4's `per_layer_model_proj`
 /// input is always the model's initial embedding, never a later layer's
 /// hidden state (the reference Go source, line 1291, `h` there is the preamble's own `h0`).
@@ -1727,7 +1727,7 @@ pub(crate) fn ple_layer_input(
 }
 
 /// the 8B-A1B short-conv checkpoint's hybrid forward pass: `block_count` blocks, each either
-/// `append_attention_mixer` or `append_lfm2_conv_mixer` per its own
+/// `append_attention_mixer` or `append_short_conv_mixer` per its own
 /// `schedule[layer].kind` (derived by [`LayerKind::from_tensor_names`] from the
 /// real checkpoint's tensor directory, since `layer_types` is not a metadata
 /// key this architecture writes), then a shared RMSNorm and
@@ -1740,11 +1740,11 @@ pub(crate) fn ple_layer_input(
 /// Prefill-only: takes the whole prompt as one `[seq, embedding]` pass, the
 /// same scope [`gqa_forward_program`] has. A KV-cached incremental
 /// counterpart for a schedule of ONLY [`LayerKind::Attention`] entries
-/// exists (`spec::lfm2_single_range_cached::lfm2_single_range_cached_forward_program_with_experts`,
+/// exists (`spec::scheduled_cached::scheduled_single_range_cached_forward_program_with_experts`,
 /// behind the `sliding-pattern-kv-cache` feature one level up in
 /// `proxima-model-interop`) -- it shares this function's own
 /// `build_attention_layer_resources` pre-pass and
-/// `append_lfm2_layer_ffn` post-attention/FFN composition, only the
+/// `append_layer_ffn` post-attention/FFN composition, only the
 /// attention sub-block itself differs (merged-cache scoring in place of
 /// block-local scoring). A CONV-state-cached counterpart for a schedule
 /// containing [`LayerKind::ShortConv`] is still a further step neither
@@ -1770,7 +1770,7 @@ pub(crate) fn ple_layer_input(
 /// `true`. `None` (every caller before Gemma 4 E2B) skips Stage A
 /// entirely, reproducing this function's prior program byte-for-byte.
 #[allow(clippy::too_many_arguments)]
-pub fn lfm2_forward_program_with_experts(
+pub fn scheduled_forward_program_with_experts(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -1787,7 +1787,7 @@ pub fn lfm2_forward_program_with_experts(
     last_row_only: bool,
     ple_dim: Option<u32>,
 ) -> Result<(Vec<Op>, NodeId, MoeSites, alloc::vec::Vec<NodeId>), TensorError> {
-    lfm2_forward_program_with_experts_and_head_repeats(
+    scheduled_forward_program_with_experts_and_head_repeats(
         vocab,
         embedding,
         feed_forward,
@@ -1807,13 +1807,13 @@ pub fn lfm2_forward_program_with_experts(
     )
 }
 
-/// [`lfm2_forward_program_with_experts`] with the LM-head repeat count
+/// [`scheduled_forward_program_with_experts`] with the LM-head repeat count
 /// ([`super::ModelDescriptor::head_repeats`]) as an explicit argument: `1`
 /// builds the one production head, `2` and `3` append that many minus one
 /// byte-identical duplicate head chains (returned as the last tuple element)
 /// for the head-cost measurement harness. Values outside `1..=3` clamp.
 #[allow(clippy::too_many_arguments)]
-pub fn lfm2_forward_program_with_experts_and_head_repeats(
+pub fn scheduled_forward_program_with_experts_and_head_repeats(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -1867,7 +1867,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
     // that (not any later layer's hidden state) is `per_layer_model_proj`'s
     // real input. Populated per layer just below the loop's own
     // `ffn_config` binding, in [`ple_layer_inputs`], for
-    // [`append_lfm2_layer_ffn`]'s Stage B to consume.
+    // [`append_layer_ffn`]'s Stage B to consume.
     let ple_shared = match ple_dim {
         Some(ple_dim) => Some(append_ple_shared_projections(
             &mut program,
@@ -2056,7 +2056,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
                 // `b_proj`/`c_proj`/`x_proj` are the real checkpoint's single
                 // fused `blk.{layer}.shortconv.in_proj.weight`
                 // (`[embedding, 3*embedding]`) split three ways -- see
-                // `append_lfm2_conv_mixer`'s own doc for why this graph
+                // `append_short_conv_mixer`'s own doc for why this graph
                 // cannot instead slice one fused `Input` by offset. Binding
                 // these three names from that one on-disk tensor is a
                 // binder-side split this session does not implement; the
@@ -2096,7 +2096,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
                     alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.shortconv.out_proj.weight"),
                 );
-                append_lfm2_conv_mixer(
+                append_short_conv_mixer(
                     &mut program,
                     x,
                     inv_dim,
@@ -2112,13 +2112,13 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
             }
             LayerKind::Gdn => {
                 return Err(TensorError::UnsupportedInBuilder {
-                    builder: "lfm2_forward_program_with_experts",
+                    builder: "scheduled_forward_program_with_experts",
                     feature: "LayerKind::Gdn (lowered by the hybrid engine)",
                 });
             }
         };
 
-        x = append_lfm2_layer_ffn(
+        x = append_layer_ffn(
             &mut program,
             layer,
             post_mixer,
@@ -3012,7 +3012,7 @@ pub enum LayerCacheRoots {
     },
     /// the E2B checkpoint's cross-layer shared-KV layer
     /// (`KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`,
-    /// this crate's own [`lfm2_two_range_cached_forward_program_with_experts`]
+    /// this crate's own [`scheduled_two_range_cached_forward_program_with_experts`]
     /// doc on `stored_kv`) -- this layer owns no `kv_cache.{layer}.*`
     /// `Op::Input` leaves of its own at all (its `K`/`V` are the named
     /// `source` layer's already-declared leaves, read a second time
@@ -3362,10 +3362,10 @@ mod ple_stage_a_tests {
 }
 
 /// Gemma 4's per-layer-embedding (PLE) Stage B injection --
-/// [`append_lfm2_layer_ffn`]'s own `ffn_config.ple` branch against the
+/// [`append_layer_ffn`]'s own `ffn_config.ple` branch against the
 /// derived worked example's `h_final` (the reference Go source, lines 1349-1361), chained onto
 /// [`ple_stage_a_tests`]'s own Stage A machinery so this test exercises the
-/// SAME two-stage composition `lfm2_forward_program_with_experts` runs, not
+/// SAME two-stage composition `scheduled_forward_program_with_experts` runs, not
 /// a hand-reconstructed shortcut.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -3424,7 +3424,7 @@ mod ple_stage_b_tests {
 
     /// Builds and evaluates Stage A (reusing
     /// [`append_ple_shared_projections`]/[`ple_layer_input`], one token,
-    /// one layer) chained into Stage B (`append_lfm2_layer_ffn`'s own
+    /// one layer) chained into Stage B (`append_layer_ffn`'s own
     /// `ffn_config.ple` branch, dense FFN zeroed via an all-zero
     /// `ffn_down.weight` so `post_mixer + ffn_out` reproduces the worked
     /// example's own `h1` exactly, without needing a second independent
@@ -3473,7 +3473,7 @@ mod ple_stage_b_tests {
             ..LayerFfnConfig::exclusive()
         };
         let mut moe_sites = Vec::new();
-        let root = append_lfm2_layer_ffn(
+        let root = append_layer_ffn(
             &mut program,
             0,
             post_mixer,
@@ -3492,7 +3492,7 @@ mod ple_stage_b_tests {
             ple_dim,
             &mut moe_sites,
         )
-        .expect("append_lfm2_layer_ffn lowers");
+        .expect("append_layer_ffn lowers");
 
         let proj_table = proj_table_in_major();
         let inp_gate_table = inp_gate_table_in_major();
@@ -3506,7 +3506,7 @@ mod ple_stage_b_tests {
         // Bound positionally, in the exact order each `Input` leaf was
         // declared above: `ids`, `h0`, then `append_ple_shared_projections`'s
         // own three leaves, `eps`, then this function's own `ffn_norm.weight`/
-        // `post_mixer`, then `append_lfm2_layer_ffn`'s own dense-FFN triple
+        // `post_mixer`, then `append_layer_ffn`'s own dense-FFN triple
         // (zeroed) and Stage B triple, and finally `output_scale`'s leaf.
         let blocks: [&[f32]; 15] = [
             &[0.0],
@@ -3609,7 +3609,7 @@ mod exclusive_dense_post_norm_tests {
             ..LayerFfnConfig::exclusive()
         };
         let mut moe_sites = Vec::new();
-        let root = append_lfm2_layer_ffn(
+        let root = append_layer_ffn(
             &mut program,
             0,
             post_mixer,
@@ -3628,7 +3628,7 @@ mod exclusive_dense_post_norm_tests {
             0,
             &mut moe_sites,
         )
-        .expect("append_lfm2_layer_ffn lowers");
+        .expect("append_layer_ffn lowers");
 
         let w_gate = flatten_in_major(&W_GATE);
         let w_up = flatten_in_major(&W_UP);

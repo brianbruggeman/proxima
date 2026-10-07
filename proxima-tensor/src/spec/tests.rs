@@ -5964,7 +5964,7 @@ fn a_cached_decode_step_matches_the_uncached_forward_pass_exactly() {
 /// arithmetic worked out by hand rather than trusted from the
 /// implementation: `l_cache=3`, one channel, `weight = [1, 10, 100]`
 /// (tap `l=2` is the current position, `l=0` the furthest lookback --
-/// [`append_lfm2_conv_mixer`]'s own convention), `x = [1, 2, 3, 4]`.
+/// [`append_short_conv_mixer`]'s own convention), `x = [1, 2, 3, 4]`.
 /// `out[s] = sum_l valid(s,l) * weight[l] * x[s - 2 + l]`, zero where the
 /// window reaches before position 0:
 /// - `out[0] = 100*x[0]                               = 100`
@@ -7982,7 +7982,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
         .collect();
 
     let build_start = std::time::Instant::now();
-    let (program, _logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
+    let (program, _logits, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
         128_000,
         2048,
         7168,
@@ -8008,7 +8008,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
     let infer_elapsed = infer_start.elapsed();
 
     std::println!(
-        "lfm2_forward_program_with_experts: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}",
+        "scheduled_forward_program_with_experts: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}",
         program.len()
     );
     assert!(
@@ -8046,7 +8046,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
             ffn: LayerFfnConfig::exclusive(),
         },
     ];
-    let error = lfm2_forward_program_with_experts(
+    let error = scheduled_forward_program_with_experts(
         128_000,
         2048,
         7168,
@@ -11895,7 +11895,7 @@ fn causal_mask_merged_windowed_with_no_window_matches_causal_mask_merged_exactly
 /// 4-expert top-2 MoE (`expert_feed_forward=4`) -- millisecond-fast, no
 /// checkpoint. Compares the ENGINE (the exact
 /// [`append_attention_mixer`]/[`append_dense_swiglu_ffn`]/
-/// [`append_routed_expert_ffn`]/[`lfm2_forward_program_with_experts`]
+/// [`append_routed_expert_ffn`]/[`scheduled_forward_program_with_experts`]
 /// functions [`crate::sliding_pattern::bind::Gemma4Arch::bind`]'s real construction
 /// calls, gemma4-interop crate not needed here -- this crate owns every one
 /// of those functions) against an INDEPENDENT reference computed by plain
@@ -11905,7 +11905,7 @@ fn causal_mask_merged_windowed_with_no_window_matches_causal_mask_merged_exactly
 /// (attention mixer alone, dense FFN alone, routed FFN alone) feed the
 /// REFERENCE's own upstream activation as engine input, so a divergence
 /// there is caused entirely by that one primitive, not accumulated drift;
-/// the final full-graph run (`lfm2_forward_program_with_experts`, gemma4's
+/// the final full-graph run (`scheduled_forward_program_with_experts`, gemma4's
 /// real composition) is compared end-to-end to catch a composition-level bug
 /// the isolated primitive calls cannot see.
 mod gemma4_synthetic_parity {
@@ -12081,7 +12081,7 @@ mod gemma4_synthetic_parity {
 
     /// Every weight bundle this harness's two layers need, generated once by
     /// [`wave`] and reused by BOTH the engine build (flat, row-major, last
-    /// axis fastest -- exactly the shapes [`lfm2_forward_program_with_experts`]
+    /// axis fastest -- exactly the shapes [`scheduled_forward_program_with_experts`]
     /// declares) and the reference (indexed by hand off the SAME flat
     /// buffers), so the two sides never see different bytes.
     struct LayerWeights {
@@ -12423,7 +12423,7 @@ mod gemma4_synthetic_parity {
 
     /// Isolated-primitive check: feeds the REFERENCE's own `resid` into the
     /// ENGINE's real [`append_attention_mixer`] call (the exact function
-    /// [`lfm2_forward_program_with_experts`] uses per attention layer) and
+    /// [`scheduled_forward_program_with_experts`] uses per attention layer) and
     /// compares against [`attention_reference`] computed from the same
     /// `resid` -- a divergence here is caused ENTIRELY by the attention
     /// primitive (RoPE convention / QK-norm order / assembly / K=V), not by
@@ -12612,7 +12612,7 @@ mod gemma4_synthetic_parity {
     }
 
     /// Isolated-primitive check for [`append_routed_expert_ffn`] -- the
-    /// exact function [`lfm2_forward_program_with_experts`]'s
+    /// exact function [`scheduled_forward_program_with_experts`]'s
     /// `ParallelDenseMoe` branch calls. `router_x`/`expert_x` are fed as
     /// DIFFERENT tensors (matching gemma4's real call, where the router
     /// consumes the raw residual and the experts consume the
@@ -12825,7 +12825,7 @@ mod gemma4_synthetic_parity {
         );
 
         // -- stage 4: full end-to-end engine graph (gemma4's real
-        // composition via lfm2_forward_program_with_experts) vs the fully
+        // composition via scheduled_forward_program_with_experts) vs the fully
         // independent reference, final logits --
         let ffn_config = LayerFfnConfig {
             post_attention_norm: true,
@@ -12887,7 +12887,7 @@ mod gemma4_synthetic_parity {
                 ffn: ffn_config,
             },
         ];
-        let (program, logits, _moe_sites, _head_repeats) = lfm2_forward_program_with_experts(
+        let (program, logits, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
             VOCAB as u32,
             EMBEDDING as u32,
             FEED_FORWARD as u32,
@@ -13077,7 +13077,7 @@ mod gemma4_synthetic_parity {
     }
 
     /// Root-cause probe for the real-checkpoint `gemma4-kv-cache` divergence:
-    /// [`lfm2_single_range_cached_forward_program_with_experts`] never reads
+    /// [`scheduled_single_range_cached_forward_program_with_experts`] never reads
     /// its own freshly-rotated new K/V for its own call's score (that
     /// module's own doc) -- a caller MUST fold this step's own new K/V into
     /// the merged `kv_cache.{layer}.*` leaves BEFORE evaluating, the same
@@ -13150,7 +13150,7 @@ mod gemma4_synthetic_parity {
             .collect();
 
         // The SAME K/V projection + per-head norm + RoPE transform
-        // `append_lfm2_single_range_cached_attention` computes in-graph as
+        // `append_single_range_cached_attention` computes in-graph as
         // `rotated_k_new_even`/`rotated_k_new_odd`/`v_new` -- reproduced by
         // hand here (mirroring `attention_reference`'s own inline K/V
         // block) so it can be folded into a merged-cache leaf BEFORE the
@@ -13271,7 +13271,7 @@ mod gemma4_synthetic_parity {
             },
         ];
         let (program, logits, _cache_roots, _moe_sites) =
-            lfm2_single_range_cached_forward_program_with_experts(
+            scheduled_single_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -13462,14 +13462,14 @@ mod gemma4_synthetic_parity {
         );
     }
 
-    /// The fix: [`lfm2_two_range_cached_forward_program_with_experts`] fed
+    /// The fix: [`scheduled_two_range_cached_forward_program_with_experts`] fed
     /// EXACTLY the same decode-loop-realistic all-zero merged cache the
     /// prior test's `zero_cache` arm used (real content nowhere, since
     /// `cached_len=0`) must STILL match the prefill oracle, because the
     /// two-range engine never reads `kv_cache.{layer}.*` for this call's own
     /// new positions at all -- they score against its own in-graph
     /// `rotated_k_new_even`/`rotated_k_new_odd`/`v_new` instead
-    /// ([`append_lfm2_two_range_cached_attention`]'s own doc). No pre-fold,
+    /// ([`append_two_range_cached_attention`]'s own doc). No pre-fold,
     /// no decode-loop change.
     #[test]
     fn two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding() {
@@ -13588,7 +13588,7 @@ mod gemma4_synthetic_parity {
             },
         ];
         let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -13818,7 +13818,7 @@ mod gemma4_synthetic_parity {
             },
         ];
         let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -14060,7 +14060,7 @@ mod gemma4_synthetic_parity {
         fn fixture() -> Fixture {
             let schedule = two_layer_schedule();
             let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
-                lfm2_two_range_cached_forward_program_with_experts(
+                scheduled_two_range_cached_forward_program_with_experts(
                     VOCAB as u32,
                     EMBEDDING as u32,
                     FEED_FORWARD as u32,
@@ -14403,7 +14403,7 @@ mod gemma4_synthetic_parity {
     /// shape in the two-range cached engine: a schedule with
     /// `KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`
     /// (this suite's own SWA+full pair above, plus a THIRD layer sharing
-    /// K/V from layer 1) must match [`lfm2_forward_program_with_experts`] --
+    /// K/V from layer 1) must match [`scheduled_forward_program_with_experts`] --
     /// the cacheless engine, proven against ollama's own real-checkpoint
     /// output (`gemma4_real_weight_parity` example) -- run on the exact same
     /// schedule, weights, and tokens. No hand-derived closed-form reference:
@@ -14671,7 +14671,7 @@ mod gemma4_synthetic_parity {
         ];
 
         let (cacheless_program, cacheless_logits, _cacheless_moe, _cacheless_head_repeats) =
-            lfm2_forward_program_with_experts(
+            scheduled_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -14705,7 +14705,7 @@ mod gemma4_synthetic_parity {
             .to_vec();
 
         let (cached_program, cached_logits, cache_roots, _cached_moe, _cached_head_repeats) =
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -14770,7 +14770,7 @@ mod gemma4_synthetic_parity {
 
     /// [`two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`],
     /// but through the generic [`build_forward`] dispatch instead of a
-    /// direct [`lfm2_two_range_cached_forward_program_with_experts`] call --
+    /// direct [`scheduled_two_range_cached_forward_program_with_experts`] call --
     /// proves `build_forward(&descriptor)` with
     /// `CacheStrategy::Cached` and `CacheMask::Padded` lowers to the
     /// SAME op graph that direct call already proves matches the prefill
@@ -15323,7 +15323,7 @@ mod gemma4_synthetic_parity {
             },
         ];
         let (program, logits, cache_roots, _moe_sites, _head_repeats) =
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -15731,7 +15731,7 @@ mod gemma4_synthetic_parity {
         // is the same knob threaded one level up). `logits_all` evaluates to
         // `[SEQ, VOCAB]` -- every new position's own row, not just the last.
         let (program_all, logits_all, _cache_roots_all, _moe_sites_all, _head_repeats_all) =
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -15789,7 +15789,7 @@ mod gemma4_synthetic_parity {
         // 0 -> 1 -> 2 exactly the way `proxima-model-interop`'s decode loop
         // folds one token's own cache output into the next step's input.
         let (program_last, logits_last, cache_roots, _moe_sites_last, _head_repeats_last) =
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -16070,7 +16070,7 @@ mod gemma4_synthetic_parity {
         }
 
         let build = |ring: bool| {
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -16285,7 +16285,7 @@ mod gemma4_synthetic_parity {
             entry(None, ValueSourceKind::SharedWithKey),
         ];
         let build = |ring: bool| {
-            lfm2_two_range_cached_forward_program_with_experts(
+            scheduled_two_range_cached_forward_program_with_experts(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -17151,7 +17151,7 @@ mod gemma4_synthetic_parity {
         /// (so `Q` is identical across all three): layer `x_source` is a real
         /// own-KV layer; layer `y_shared` reads `x_source`'s post-rope `K` /
         /// post-norm `V` via `KeySource::Shared`/`ValueSource::Shared` (the
-        /// production wiring `lfm2_forward_program_with_experts` builds for a
+        /// production wiring `scheduled_forward_program_with_experts` builds for a
         /// `SharedFromLayer` schedule entry); layer `z_control` is an
         /// INDEPENDENT own-KV layer whose `wk`/`k_norm`/`wv` leaves are bound
         /// to the SAME numeric data as `x_source`'s, under different leaf

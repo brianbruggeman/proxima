@@ -48,7 +48,7 @@ pub enum Extent {
 }
 
 /// The `Extent::Symbolic` slot a sliding-window layer's `kv_cache.{layer}.*`
-/// leaves are bounded by when `spec::lfm2_two_range_cached_forward_program_with_experts`
+/// leaves are bounded by when `spec::scheduled_two_range_cached_forward_program_with_experts`
 /// builds the sliding ring layout (its `sliding_kv_ring` argument). Slot 0 is
 /// the new-position count and slot 1 the full-attention cache extent, so this
 /// is the first slot after them: a caller binds it to the number of rows the

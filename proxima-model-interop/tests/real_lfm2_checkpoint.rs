@@ -1,5 +1,5 @@
 //! Real, on-disk `LiquidAI/LFM2.5-8B-A1B-GGUF` (`LFM2.5-8B-A1B-Q4_K_M.gguf`,
-//! 5,155,564,768 bytes, verified): the header facts [`proxima_model_interop::Lfm2Hparams`]
+//! 5,155,564,768 bytes, verified): the header facts [`proxima_model_interop::ShortConvHparams`]
 //! reads, checked against `llama.cpp`'s own metadata dump. Generation against
 //! llama.cpp's ids is `llama_parity_lfm2` in `arch_data_baseline.rs`.
 //! `#[ignore]`d and skips cleanly when the host-local download is absent,
@@ -8,7 +8,7 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::lfm2_architecture_from_metadata;
+use proxima_model_interop::short_conv_architecture_from_metadata;
 
 const MODEL_PATH: &str =
     "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf";
@@ -34,8 +34,8 @@ fn lfm2_architecture_from_metadata_matches_the_real_checkpoints_own_llama_cli_du
     let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
         .expect("parse the real lfm2 gguf checkpoint");
 
-    let architecture = lfm2_architecture_from_metadata(&parsed)
-        .expect("derive Lfm2Hparams from the real checkpoint");
+    let architecture = short_conv_architecture_from_metadata(&parsed)
+        .expect("derive ShortConvHparams from the real checkpoint");
     std::println!("real_lfm2 architecture={architecture:?}");
 
     assert_eq!(architecture.block_count, 24);

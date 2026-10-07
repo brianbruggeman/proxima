@@ -391,7 +391,7 @@ pub struct ModelHparams {
     /// `RMS_EPSILON_DEFAULT` (llama.cpp's own default for a dense
     /// checkpoint, matching openchat-3.5's own declared value) when the key
     /// is absent. `crate::recurrent_interval::Qwen35Hparams::rms_epsilon`
-    /// (`std`-gated) and `crate::short_conv::Lfm2Hparams::rms_epsilon`
+    /// (`std`-gated) and `crate::short_conv::ShortConvHparams::rms_epsilon`
     /// (`std`-gated) read the same metadata
     /// key with their own architecture-specific defaults (`1e-6`) --
     /// duplicated per architecture rather than shared because each
@@ -710,7 +710,7 @@ pub(crate) fn kv_layers_from_metadata(
 /// (openchat-3.5 among them) -- used only when
 /// `{architecture}.attention.layer_norm_rms_epsilon` is absent from the
 /// checkpoint's own metadata. [`crate::recurrent_interval::QWEN35_RMS_EPSILON_DEFAULT`]/
-/// [`crate::short_conv::LFM2_RMS_EPSILON_DEFAULT`] are the same fallback shape for
+/// [`crate::short_conv::SHORT_CONV_RMS_EPSILON_DEFAULT`] are the same fallback shape for
 /// their own architectures, whose real checkpoints declare `1e-6` instead.
 const RMS_EPSILON_DEFAULT: f32 = 1e-5;
 

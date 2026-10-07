@@ -7,7 +7,7 @@
 //! bespoke sliding-pattern forward-graph builder, no sliding-pattern schedule and no sliding-pattern
 //! tensor-name table in this crate.
 //! Teaching pointer: read `proxima_tensor::spec::attention_forward`'s own doc
-//! on `lfm2_forward_program_with_experts` before touching this file -- every
+//! on `scheduled_forward_program_with_experts` before touching this file -- every
 //! knob the descriptor sets is documented there, not here.
 
 
@@ -48,7 +48,7 @@ fn head_repeats_from_env() -> u32 {
 /// [`proxima_tensor::spec::LayerKind::Attention`] (this family has no
 /// `ShortConv` layers), routed through the padded-mask cached engine: the
 /// two-range one, not single-range, because the first step processes the whole
-/// prompt as one `cached_len=0` call (`lfm2_single_range_cached.rs`'s own
+/// prompt as one `cached_len=0` call (`scheduled_cached.rs`'s own
 /// module doc).
 pub(crate) fn header(
     parsed: &ParsedGguf,

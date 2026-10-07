@@ -39,7 +39,7 @@ use proxima_tensor::spec::{
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
     ParallelDenseMoeConfig, CachedLayerRoots, ForwardProgram, LayerCacheRoots, RopePairing, RopeTableSel,
     ValueSourceKind, build_forward,
-    SLIDING_KV_SYMBOL, gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
+    SLIDING_KV_SYMBOL, gemma4_descriptor_from_gguf, scheduled_two_range_cached_forward_program_with_experts,
     gqa_cached_forward_program_with_experts_and_layer_taps, gqa_descriptor_from_shape,
 };
 use sha2::{Digest, Sha256};
@@ -795,7 +795,7 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
     assert_eq!(descriptor.logit_softcap, Some(30.0));
     assert_eq!((descriptor.cache_strategy, descriptor.cache_mask), (CacheStrategy::Cached, CacheMask::Padded));
     let (direct, direct_logits, direct_roots, direct_moe, _head_repeats) =
-        lfm2_two_range_cached_forward_program_with_experts(
+        scheduled_two_range_cached_forward_program_with_experts(
             descriptor.vocab,
             2816,
             2112,

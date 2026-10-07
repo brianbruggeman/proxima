@@ -302,7 +302,7 @@ pub enum TensorError {
     #[error("block {layer} has neither an attention nor a short-convolution tensor marker")]
     UndeterminedLayerKind { layer: u32 },
 
-    /// [`crate::spec::lfm2_forward_program_with_experts`]'s `schedule`
+    /// [`crate::spec::scheduled_forward_program_with_experts`]'s `schedule`
     /// must name exactly one [`crate::spec::LayerSchedule`] per block.
     #[error("schedule has {found} entries but block_count is {expected}")]
     LayerScheduleCountMismatch { expected: u32, found: usize },
@@ -332,7 +332,7 @@ pub enum TensorError {
     #[error("attention mixer combines ValueSource::SharedWithKey with a cross-layer KeySource::Shared -- no local K to reuse as V")]
     SharedWithKeyRequiresProjectedKey,
 
-    /// [`crate::spec::lfm2_forward_program_with_experts`]'s per-layer
+    /// [`crate::spec::scheduled_forward_program_with_experts`]'s per-layer
     /// `key_source_kind`/`value_source_kind: SharedFromLayer(source)` names
     /// a source layer whose own `K`/`V` this pass has not yet computed --
     /// either the source index is `>=` the current layer (forward
@@ -341,9 +341,9 @@ pub enum TensorError {
     #[error("layer {layer} names shared-KV source layer {source_layer}, which has no own-KV to reuse")]
     SharedKvSourceNotAvailable { layer: u32, source_layer: u32 },
 
-    /// [`crate::spec::lfm2_single_range_cached_forward_program_with_experts`]'s merged-cache decode
+    /// [`crate::spec::scheduled_single_range_cached_forward_program_with_experts`]'s merged-cache decode
     /// forward has no cross-layer `stored_kv` pass yet -- unlike
-    /// [`crate::spec::lfm2_forward_program_with_experts`] (the prefill
+    /// [`crate::spec::scheduled_forward_program_with_experts`] (the prefill
     /// engine this crate's shared-KV worked-example targets), this cached
     /// forward scores against a MERGED multi-round cache per layer, so
     /// wiring `ValueSourceKind::SharedFromLayer` here needs the merged

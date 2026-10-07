@@ -252,7 +252,7 @@ pub fn causal_conv1d(
 /// `input[t - (K-1)]`, the same pairing this function's own weight map
 /// (`ld->sld`) uses.
 #[allow(clippy::too_many_arguments)]
-pub fn append_lfm2_conv_mixer(
+pub fn append_short_conv_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -671,7 +671,7 @@ pub fn silu(
 /// at `offset`, as a fresh `[s, width]` node -- the piece
 /// [`append_qwen35_conv_branch`] needs three times (`q`/`k`/`v` out of one
 /// fused conv output) that a plain offset [`AxisIndex`] slice cannot give it:
-/// [`append_lfm2_conv_mixer`]'s own doc already proves a *nonzero*-offset
+/// [`append_short_conv_mixer`]'s own doc already proves a *nonzero*-offset
 /// slice of a wider operand needs a same-width "donor" operand to escape
 /// `shape::unify_iteration_space`'s pure-projection extent rule, and
 /// `shape.rs`'s own
@@ -869,7 +869,7 @@ pub fn per_head_channel_range(
 // so `append_qwen35_ssm_mixer` reimplements this function's own
 // silu/channel_slice/l2norm body against the additive cached-conv split its
 // own doc describes, rather than calling this. A prefill-only recurrent-interval
-// program (mirroring `lfm2_forward_program_with_experts`'s own prefill-only
+// program (mirroring `scheduled_forward_program_with_experts`'s own prefill-only
 // scope) is this function's real caller, not built this session.
 #[allow(dead_code, clippy::too_many_arguments)]
 pub fn append_qwen35_conv_branch(
@@ -1017,7 +1017,7 @@ pub fn sigmoid(
 /// projection + residual (`:456-464`, folded into the block-level
 /// `ggml_add(cur, inpSA)` at `:180`) -- the pre-mixer `rmsnorm` and the
 /// post-mixer residual add both happen INSIDE this function, the same
-/// choice [`append_lfm2_conv_mixer`] already makes for its own block.
+/// choice [`append_short_conv_mixer`] already makes for its own block.
 ///
 /// The `u,g` seam: [`repeat_kv_heads`]'s own doc proves this algebra can
 /// never merge a `u` (kv-head)/`g` (group) split back into one physical head

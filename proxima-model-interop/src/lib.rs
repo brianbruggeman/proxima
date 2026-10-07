@@ -129,7 +129,7 @@ pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_r
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
 pub use short_conv::{
-    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_descriptor, lfm2_forward_values,
+    ShortConvHparams, short_conv_architecture_from_metadata, short_conv_descriptor, short_conv_forward_values,
 };
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};

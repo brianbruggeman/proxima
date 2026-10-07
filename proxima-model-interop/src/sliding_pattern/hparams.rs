@@ -6,7 +6,7 @@
 //! `sliding_window_pattern` -- there is no bespoke `LayerKind` here, since
 //! [`crate::lowering::bind_checkpoint`] reads that array directly to
 //! build [`proxima_tensor::spec::LayerAttentionConfig`] per layer for the
-//! generic [`proxima_tensor::spec::lfm2_forward_program_with_experts`]
+//! generic [`proxima_tensor::spec::scheduled_forward_program_with_experts`]
 //! engine, and every sliding-pattern layer is
 //! [`proxima_tensor::spec::LayerKind::Attention`] (this family has no
 //! `ShortConv` layers).

@@ -7,7 +7,7 @@
 
 //! Cross-oracle logit diff for the real, downloaded
 //! `LFM2.5-8B-A1B-Q4_K_M.gguf` checkpoint: this crate's own
-//! [`lfm2_forward_values`] against a raw `f32` dump of `llama.cpp`'s
+//! [`short_conv_forward_values`] against a raw `f32` dump of `llama.cpp`'s
 //! `llama_get_logits_ith` for the identical (BOS-forced) token sequence --
 //! [`smollm2_logit_oracle_diff`]'s own shape, reused rather than
 //! reinvented, adjusted only for this checkpoint's GGUF-bind, hybrid
@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Hparams, lfm2_architecture_from_metadata, lfm2_forward_values,
+    ShortConvHparams, short_conv_architecture_from_metadata, short_conv_forward_values,
 };
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
@@ -93,7 +93,7 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Hparams = lfm2_architecture_from_metadata(&parsed)
+    let architecture: ShortConvHparams = short_conv_architecture_from_metadata(&parsed)
         .expect("derive lfm2 architecture from gguf metadata");
 
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
@@ -102,7 +102,7 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
         .expect("tokenize prompt");
 
-    let (ours, _extras) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &[])
+    let (ours, _extras) = short_conv_forward_values(&parsed, &file_bytes, &architecture, &ids, &[])
         .expect("compute our own forward logits");
     let theirs = read_oracle_logits(&oracle_path);
 
