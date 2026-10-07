@@ -20,6 +20,10 @@
 //! size sampled at every token) adds the peak GPU allocation. `--model` names
 //! the checkpoint for children that read `PROXIMA_DECODE_MODEL_GGUF`.
 //!
+//! `--dump-llama-ids DIR` writes, per case, the first llama-server process's last run as one
+//! record (`prompt`, llama's `prompt_ids`, greedy `generated_ids`) in the shape
+//! `tests/arch_data_baseline.rs` reads, so a long-prompt oracle fixture is a run of this driver.
+//!
 //! ```sh
 //! cargo run --release -p proxima-model-interop --example decode_arms -- \
 //!   --prompt-file prompt1k.txt --log launches.log --processes 2 --runs 7 \
@@ -95,6 +99,7 @@ struct Arguments {
     ollama_tag: Option<String>,
     model: String,
     cases: Vec<Case>,
+    dump_llama_ids: Option<PathBuf>,
 }
 
 fn parse_arguments() -> Arguments {
@@ -108,6 +113,7 @@ fn parse_arguments() -> Arguments {
         ollama_tag: None,
         model: MODEL_PATH.to_string(),
         cases: Vec::new(),
+        dump_llama_ids: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -123,6 +129,7 @@ fn parse_arguments() -> Arguments {
             "--model" => arguments.model = value(),
             "--case" => arguments.cases.push(parse_case(&value())),
             "--llama-server" => arguments.llama_server = Some(PathBuf::from(value())),
+            "--dump-llama-ids" => arguments.dump_llama_ids = Some(PathBuf::from(value())),
             "--ollama" => arguments.ollama_tag = Some(value()),
             "--ignore-ollama" => {
                 // a token-id correctness run, not a timing run, so an idle
@@ -724,6 +731,31 @@ fn json_lines(body: &str, prefix: &str) -> Vec<Value> {
         .collect()
 }
 
+// one record in the shape `arch_data_baseline`'s `llama_cases` reads: the prompt, the ids llama
+// tokenized it to, and the ids it generated greedily
+fn dump_llama_record(directory: &PathBuf, case: &str, prompt: &str, ids_by_run: &[Vec<u64>]) {
+    let tokenized: Value = serde_json::from_str(&http_request(
+        LLAMA_PORT,
+        "POST",
+        "/tokenize",
+        &json!({"content": prompt, "add_special": true}).to_string(),
+        Duration::from_secs(30),
+    ))
+    .expect("llama tokenize json");
+    let generated = ids_by_run.last().expect("a llama run produced ids");
+    let record = json!([{
+        "prompt": prompt,
+        "prompt_ids": tokenized["tokens"],
+        "generated_ids": generated,
+    }]);
+    std::fs::create_dir_all(directory).expect("create llama ids directory");
+    let name = if case.is_empty() { "case" } else { case };
+    let path = directory.join(format!("{name}_llama_ids.json"));
+    std::fs::write(&path, serde_json::to_string_pretty(&record).expect("serialize record"))
+        .expect("write llama ids record");
+    println!("llama ids record case={case} path={}", path.display());
+}
+
 fn llama_request(prompt: &str) -> ServerRun {
     let body = json!({"prompt": prompt, "n_predict": NEW_TOKENS, "temperature": 0, "top_k": 1, "seed": 1, "cache_prompt": false, "ignore_eos": true, "stream": true, "return_tokens": true}).to_string();
     let exchange = http_exchange(LLAMA_PORT, "POST", "/completion", &body, Duration::from_secs(120));
@@ -899,6 +931,9 @@ fn run_llama_round(
     wait_for_http(LLAMA_PORT, "/health", 120);
     for request in 0..=arguments.runs {
         record_server_run(arm, process, request, llama_request(prompt));
+    }
+    if let (Some(directory), 0) = (&arguments.dump_llama_ids, process) {
+        dump_llama_record(directory, &arm.case, prompt, &arm.ids_by_run);
     }
     let report = server.stop();
     push_time_report(arm, process, &report);
