@@ -17,7 +17,7 @@ fn assert_default_sizing() {
     assert_eq!(crate::sized::ATTENTION_ROWS_MMA_MIN_QUERY_ROWS, 2);
     assert_eq!(crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE, 2);
     assert_eq!(crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS, 16);
-    assert_eq!(crate::sized::ATTENTION_ROWS_TARGET_THREADGROUPS, 256);
+    assert_eq!(crate::sized::ATTENTION_ROWS_TARGET_SIMDGROUPS, 256);
     assert_eq!(
         crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
         THREADGROUP_BUDGET
@@ -148,16 +148,19 @@ fn set_rotary_dim(op: &mut BoundOp, rotary: u64) {
 
 /// `(query rows, kv heads, query groups, head dim, bucket capacity, expected
 /// rows per threadgroup)`: a prefill takes the full tile height its vector
-/// block budget allows, a verify of a few rows keeps one unit per tile.
-const TILE_CASES: [(u64, u64, u64, u64, u64, u64); 9] = [
+/// block budget allows, a verify of two rows keeps one unit per tile because a
+/// taller tile would leave the GPU short of simdgroups, and four rows of the
+/// widest head take two units once the splits still fill it.
+const TILE_CASES: [(u64, u64, u64, u64, u64, u64); 10] = [
     (971, 1, 8, 512, 1942, 2),
     (971, 1, 8, 256, 1483, 2),
     (1000, 8, 2, 64, 2024, 8),
     (600, 8, 2, 128, 1240, 8),
     (600, 8, 8, 128, 1240, 2),
     (600, 8, 16, 256, 1240, 1),
-    (4, 1, 8, 512, 1636, 1),
-    (49, 1, 8, 256, 561, 1),
+    (2, 1, 8, 512, 1634, 1),
+    (4, 1, 8, 512, 1636, 2),
+    (49, 1, 8, 256, 561, 2),
     (17, 1, 8, 512, 2065, 2),
 ];
 
@@ -263,17 +266,17 @@ fn simdgroups_follow_llamas_head_dim_rule_and_never_fall_below_two() {
 type GridRow = (u64, [(u64, u64, u64); 3]);
 
 const GLOBAL_GRID: [GridRow; 4] = [
-    (2, [(1, 1, 2), (1, 9, 18), (1, 32, 64)]),
-    (5, [(1, 1, 5), (1, 9, 45), (1, 32, 160)]),
-    (17, [(1, 1, 17), (1, 9, 153), (2, 29, 261)]),
-    (49, [(1, 2, 98), (1, 6, 294), (2, 11, 275)]),
+    (2, [(1, 1, 2), (1, 9, 18), (2, 32, 32)]),
+    (5, [(1, 1, 5), (1, 7, 35), (2, 11, 33)]),
+    (17, [(1, 1, 17), (2, 4, 36), (2, 4, 36)]),
+    (49, [(2, 2, 50), (2, 2, 50), (2, 2, 50)]),
 ];
 
 const SLIDING_GRID: [GridRow; 4] = [
     (2, [(1, 1, 2), (1, 9, 18), (1, 32, 64)]),
-    (5, [(1, 1, 5), (1, 9, 45), (1, 32, 160)]),
-    (17, [(1, 1, 17), (1, 9, 153), (2, 29, 261)]),
-    (49, [(1, 2, 98), (1, 6, 294), (2, 11, 275)]),
+    (5, [(1, 1, 5), (1, 9, 45), (2, 22, 66)]),
+    (17, [(1, 1, 17), (2, 8, 72), (2, 8, 72)]),
+    (49, [(1, 2, 98), (2, 3, 75), (2, 3, 75)]),
 ];
 
 #[test]
@@ -296,7 +299,7 @@ fn row_tiled_splits_matches_the_grid_table() {
                 let op = build(*capacity, *rows);
                 let tiles = rows.div_ceil(*rows_tile);
                 assert_eq!(
-                    row_tiled_splits(capacity + rows, 1, tiles),
+                    row_tiled_splits(capacity + rows, 1, tiles, row_tiled_simdgroups(head_dim)),
                     *splits,
                     "{label} rows {rows} cached {capacity}: splits"
                 );
@@ -319,6 +322,30 @@ fn row_tiled_splits_matches_the_grid_table() {
         }
     }
     assert_eq!(cells, 24, "2 layers x 4 row counts x 3 capacities");
+}
+
+/// `(query rows, rows per threadgroup, splits)` of granite's eight kv heads at
+/// a thousand cached keys: two simdgroups per threadgroup, so the target is 128
+/// threadgroups and every chunk width lands on it exactly.
+const GRANITE_CHUNKS: [(u64, u64, u64); 5] = [(8, 8, 16), (16, 8, 8), (32, 8, 4), (64, 8, 2), (128, 8, 1)];
+
+#[test]
+fn granite_chunks_split_the_keys_until_the_target_threadgroups_are_filled() {
+    assert_default_sizing();
+    let simdgroups = row_tiled_simdgroups(64);
+    assert_eq!(row_tiled_target_threadgroups(simdgroups), 128);
+    for (rows, rows_tile, splits) in GRANITE_CHUNKS {
+        let capacity = 1024 + rows;
+        let tile = rows_per_threadgroup(rows, 8, 2, 64, capacity);
+        let tiles = rows.div_ceil(tile);
+        assert_eq!(tile, rows_tile, "rows {rows}: rows per threadgroup");
+        assert_eq!(
+            row_tiled_splits(capacity, 8, tiles, simdgroups),
+            splits,
+            "rows {rows}: splits"
+        );
+        assert_eq!(8 * tiles * splits, 128, "rows {rows}: threadgroups");
+    }
 }
 
 fn threadgroup_layout(op: &BoundOp) -> (u64, u64) {

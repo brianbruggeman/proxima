@@ -79,7 +79,7 @@
 //! - `ATTENTION_ROWS_KEYS_PER_BLOCK`/`ATTENTION_ROWS_KEYS_PER_SPLIT`/
 //!   `ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP`/`ATTENTION_ROWS_MIN_SIMDGROUPS`/
 //!   `ATTENTION_ROWS_MMA_MIN_QUERY_ROWS`/`ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE`/
-//!   `ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS`/`ATTENTION_ROWS_TARGET_THREADGROUPS`
+//!   `ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS`/`ATTENTION_ROWS_TARGET_SIMDGROUPS`
 //!   (always compiled) -- the row-tiled cached attention form's block width, split
 //!   granule, simdgroup rule, smallest K, tile height, per-simdgroup register
 //!   budget and split target (`crate::msl::rows_per_threadgroup`, `row_tiled_simdgroups`,
