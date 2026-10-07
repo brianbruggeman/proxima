@@ -104,7 +104,7 @@ async fn family_profile_routes_real_qwen35moe_header_with_per_layer_kv_configura
 /// `"operand buffer missing at evaluation time"` failure: builds the SAME
 /// width-13 one-evaluation prefill symbolic program
 /// `decode.rs`'s `one_evaluation_prefill_programs` builds
-/// (`qwen35moe_forward_program_at_width`, purely symbolic -- `input_leaf`
+/// (`recurrent_routed_interval_forward_program_at_width`, purely symbolic -- `input_leaf`
 /// placeholders, no tensor bytes) and runs `bind::bind` +
 /// `dead_resolved_nodes` + `node_retirement` + `node_last_reader` over it
 /// directly, the exact admission pipeline `evaluate_named`/`quantized_eval`
@@ -126,7 +126,7 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
         .expect("qwen35moe hparams preserve the hybrid layer configuration");
 
     let (program, roots, _layer_roots, _moe_sites, _diagnostics) =
-        proxima_model_interop::recurrent_routed_interval::qwen35moe_forward_program_at_width(
+        proxima_model_interop::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width(
             &architecture,
             Some(13),
         )

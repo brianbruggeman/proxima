@@ -56,7 +56,7 @@ fn refuse_unless_plain_swiglu(layers: &[LayerSchedule], builder: &'static str) -
 /// SwiGLU FFN, lowered from one [`ModelDescriptor`]: the layer kinds come from
 /// `layers[i].kind`, the recurrence shape from the `ssm_*` fields, and the
 /// attention shape from the first attention layer. This is the program
-/// `qwen35_forward_program_with_last_row` has always built, with the
+/// `recurrent_interval_forward_program_with_last_row` has always built, with the
 /// `(layer + 1) % full_attention_interval` predicate replaced by the schedule.
 pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
     const BUILDER: &str = "build_forward(hybrid dense)";
@@ -160,7 +160,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
     // picks it up by NAME on the `Attention` arm's fused `CachedAttention`
     // op. The `DenseAttention` arm has no equivalent fusion, so this same
     // node is ALSO threaded directly into every
-    // [`append_qwen35_dense_attention_layer`] call below to mask its own
+    // [`append_gated_attention_layer`] call below to mask its own
     // padded cached range (that function's own doc).
     let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
@@ -193,7 +193,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
             // `attn_head_dim` param) rather than `embedding / query_heads`
             // -- the latter is not even an integer on the 27B checkpoint
             // (`5120 / 24 = 213.33`), confirmed wrong against the real file
-            // by [`crate::recurrent_interval::qwen35_architecture_from_metadata`]'s own
+            // by [`crate::recurrent_interval::recurrent_interval_architecture_from_metadata`]'s own
             // caller-side doc.
             let wq_flat = input_leaf(
                 &mut program,
@@ -213,7 +213,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
             // then misidentifies as the whole quantized matmul shape and
             // derives `rows`/`k` from the wrong axis pair -- `q`/`gate` now
             // split on the ACTIVATION side instead, inside
-            // [`append_qwen35_dense_attention_only_with_taps`], via
+            // [`append_gated_attention_only_with_taps`], via
             // [`per_head_channel_range`].
             let qg_head_ones = op::append(
                 &mut program,
@@ -249,7 +249,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
             );
             // `k` carries no gate and no partial-rotary truncation at the
             // weight level (the split into rotated/pass halves happens on
-            // the ACTIVATION inside [`append_qwen35_dense_attention_layer`]
+            // the ACTIVATION inside [`append_gated_attention_layer`]
             // now that `q_norm`/`k_norm` need the full width first) -- the
             // same lossless-reshape donor trick `v`/`o` already use below.
             let k_head_ones = op::append(
@@ -407,7 +407,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
                 &alloc::format!("kv_cache.{layer}.v"),
             );
 
-            let (x_next, dense_attention_roots) = append_qwen35_dense_attention_layer(
+            let (x_next, dense_attention_roots) = append_gated_attention_layer(
                 &mut program,
                 x,
                 inv_dim,
@@ -517,7 +517,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
                 &alloc::format!("ssm_cache.{layer}.state"),
             );
 
-            let (mixer_out, qkv_mixed, state_out) = append_qwen35_ssm_mixer(
+            let (mixer_out, qkv_mixed, state_out) = append_delta_net_mixer(
                 &mut program,
                 x,
                 inv_dim,
@@ -547,7 +547,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
             )?;
 
             // Unlike `append_gqa_cached_layer` (bundles FFN internally),
-            // `append_qwen35_ssm_mixer` is mixer-plus-residual only -- the
+            // `append_delta_net_mixer` is mixer-plus-residual only -- the
             // same scope `append_short_conv_mixer` has -- so the SSM branch
             // runs its own dense FFN pass here, matching
             // `gqa_cached_forward_program_with_experts`'s own
@@ -787,7 +787,7 @@ pub fn append_sigmoid_gated_shared_expert(
     )
 }
 
-fn append_qwen35moe_router(
+fn append_shared_expert_router(
     program: &mut Vec<Op>,
     mixer_out: NodeId,
     post_attention_norm_weight: NodeId,
@@ -819,7 +819,7 @@ fn append_qwen35moe_router(
 /// onto `mixer_out` (the pre-FFN residual stream) -- the one FFN sub-block
 /// shape every `recurrent-routed` layer shares, dense-attention or GDN alike.
 #[allow(clippy::too_many_arguments)]
-fn append_qwen35moe_ffn(
+fn append_shared_expert_moe_ffn(
     program: &mut Vec<Op>,
     layer: u32,
     mixer_out: NodeId,
@@ -840,7 +840,7 @@ fn append_qwen35moe_ffn(
 ) -> Result<(NodeId, MoeSite, NodeId, NodeId, NodeId, NodeId), TensorError> {
     // `append_moe_ffn`'s own leading two ops, shared with the batched GDN
     // prefill route so both paths select experts from the same algebra.
-    let (normed, router_logits) = append_qwen35moe_router(
+    let (normed, router_logits) = append_shared_expert_router(
         program,
         mixer_out,
         post_attention_norm_weight,
@@ -931,13 +931,13 @@ pub struct MoeLayerDiagnostics {
 /// fields, the routed experts from `expert_*`, and the shared expert from
 /// `expert_shared_feed_forward`. `prefill_width` pins the position axis to a
 /// literal extent, which is the only way
-/// [`append_qwen35_ssm_mixer_with_taps_and_layout`]'s M > 1 branch (its scan is
+/// [`append_delta_net_mixer_with_taps_and_layout`]'s M > 1 branch (its scan is
 /// unrolled in Rust) is reached; the symbolic per-step program takes the
 /// single-position path regardless of how many rows resolve at run time.
 ///
 /// Teaching pointer: composes [`embedding_lookup`], [`causal_mask`],
-/// [`append_qwen35_dense_attention_only_with_taps`] and
-/// [`append_qwen35_ssm_mixer_with_taps_and_layout`] per layer, [`rmsnorm`] for the
+/// [`append_gated_attention_only_with_taps`] and
+/// [`append_delta_net_mixer_with_taps_and_layout`] per layer, [`rmsnorm`] for the
 /// post-attention norm, [`append_moe_ffn`] for the routed FFN,
 /// [`append_sigmoid_gated_shared_expert`] for the shared expert, and
 /// [`elementwise`]/[`reduce`] for the residual adds and `lm_head`.
@@ -1076,7 +1076,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                 // breaks `cpu::is_quantized_matmul_operand`'s recognizer,
                 // which then derives the packed row length from the wrong
                 // axis (`per_head_channel_slice`'s own former call site here).
-                // `append_qwen35_dense_attention_only_with_taps` does the
+                // `append_gated_attention_only_with_taps` does the
                 // real `x_normed @ wq_gate` contraction and narrows to
                 // `q`/`gate` per head on the ACTIVATION via
                 // `per_head_channel_range`.
@@ -1115,7 +1115,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
 
                 // `wk`/`wv`/`wo` reshape their own flat matmul-bound leaf via
                 // the same lossless broadcast-multiply-by-ones trick
-                // proxima's own dense `qwen35_forward_program` uses
+                // proxima's own dense `recurrent_interval_forward_program` uses
                 // (`proxima-tensor/src/spec.rs:8777-8853`) rather than
                 // declaring the multi-axis shape directly on the `Op::Input`
                 // leaf: the leaf's on-disk bytes are `bind_matmul_weight`'s
@@ -1269,11 +1269,11 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                 );
 
                 // `_with_taps` -- byte-identical program to
-                // `append_qwen35_dense_attention_only`
+                // `append_gated_attention_only`
                 // (`dense_attention_only_and_with_taps_produce_the_same_program`
                 // proves it in proxima-tensor), so this is a diagnostic-only
                 // change, never a production behaviour change.
-                let (residual1, dense_taps) = append_qwen35_dense_attention_only_with_taps(
+                let (residual1, dense_taps) = append_gated_attention_only_with_taps(
                     &mut program,
                     x,
                     inv_dim,
@@ -1409,11 +1409,11 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
                 );
 
                 // `_with_taps` -- byte-identical program to
-                // `append_qwen35_ssm_mixer` (that wrapper's own doc: "this
+                // `append_delta_net_mixer` (that wrapper's own doc: "this
                 // only reshapes the return value the shared builder already
                 // computed"), so this is a diagnostic-only change, never a
                 // production behaviour change.
-                let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps_and_layout(
+                let (mixer_out, taps) = append_delta_net_mixer_with_taps_and_layout(
                     &mut program,
                     x,
                     inv_dim,
@@ -1523,7 +1523,7 @@ pub(super) fn hybrid_routed_forward(descriptor: &ModelDescriptor) -> Result<Forw
             router_logits,
             routed_output,
             shared_output,
-        ) = append_qwen35moe_ffn(
+        ) = append_shared_expert_moe_ffn(
             &mut program,
             layer,
             mixer_out,

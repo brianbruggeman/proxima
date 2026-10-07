@@ -3,7 +3,7 @@
 //! hybrid stack of gated-DeltaNet and gated attention layers over a routed FFN
 //! plus a sigmoid-gated shared expert is the recurrent-hybrid engine's routed
 //! arm, so this file holds no graph construction -- only the map from the
-//! checkpoint's header ([`Qwen35MoeHparams`]) and the family profile to that
+//! checkpoint's header ([`RecurrentRoutedIntervalHparams`]) and the family profile to that
 //! descriptor.
 //!
 //! The real checkpoint also carries `{architecture}.rope.dimension_sections`/
@@ -29,11 +29,11 @@ use proxima_tensor::{Op, TensorError};
 
 pub use proxima_tensor::spec::MoeLayerDiagnostics;
 
-use super::hparams::{Qwen35MoeHparams, LayerKind as HeaderLayerKind};
+use super::hparams::{RecurrentRoutedIntervalHparams, LayerKind as HeaderLayerKind};
 use crate::error::InteropError;
 use crate::profiles::family_profile;
 
-/// [`qwen35moe_forward_program`]'s own return shape: the built `Vec<Op>`,
+/// [`recurrent_routed_interval_forward_program`]'s own return shape: the built `Vec<Op>`,
 /// its logits/hidden roots, each layer's production cache-root tag, every
 /// routed site, and each layer's own [`MoeLayerDiagnostics`] side table.
 pub type MoeForwardProgram = (
@@ -53,7 +53,7 @@ pub type MoeForwardProgram = (
 ///
 /// The family has no embedded profile.
 pub fn descriptor_from_architecture(
-    architecture: &Qwen35MoeHparams,
+    architecture: &RecurrentRoutedIntervalHparams,
     width: Option<u32>,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(&architecture.family)?;
@@ -133,11 +133,11 @@ pub fn descriptor_from_architecture(
 /// # Errors
 ///
 /// [`InteropError::Tensor`] if the descriptor does not lower.
-pub fn qwen35moe_forward_program(architecture: &Qwen35MoeHparams) -> Result<MoeForwardProgram, InteropError> {
-    qwen35moe_forward_program_at_width(architecture, None)
+pub fn recurrent_routed_interval_forward_program(architecture: &RecurrentRoutedIntervalHparams) -> Result<MoeForwardProgram, InteropError> {
+    recurrent_routed_interval_forward_program_at_width(architecture, None)
 }
 
-/// [`qwen35moe_forward_program`], with the prompt-position axis pinned to a
+/// [`recurrent_routed_interval_forward_program`], with the prompt-position axis pinned to a
 /// literal `Extent::Static(width)` instead of the ordinary
 /// `Extent::Symbolic(0)` (`crate::generate::symbols::NEW_COUNT`) every
 /// per-step decode call resolves dynamically. A caller that already knows
@@ -146,8 +146,8 @@ pub fn qwen35moe_forward_program(architecture: &Qwen35MoeHparams) -> Result<MoeF
 /// a literal `Extent::Static` leading axis (its recurrence is unrolled in
 /// Rust, so its length has to be known when the program is lowered), so this
 /// is the ONE seam that reaches it.
-pub fn qwen35moe_forward_program_at_width(
-    architecture: &Qwen35MoeHparams,
+pub fn recurrent_routed_interval_forward_program_at_width(
+    architecture: &RecurrentRoutedIntervalHparams,
     width: Option<u32>,
 ) -> Result<MoeForwardProgram, InteropError> {
     let ForwardProgram {
@@ -160,7 +160,7 @@ pub fn qwen35moe_forward_program_at_width(
         ..
     } = build_forward(&descriptor_from_architecture(architecture, width)?)?;
     let hidden = hidden.ok_or(TensorError::UnsupportedInBuilder {
-        builder: "qwen35moe_forward_program_at_width",
+        builder: "recurrent_routed_interval_forward_program_at_width",
         feature: "a program with no hidden root",
     })?;
     Ok((program, ForwardRoots { logits, hidden }, layer_roots, moe_sites, layer_diagnostics))

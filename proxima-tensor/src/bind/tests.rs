@@ -925,7 +925,7 @@ const QWEN35_PARTIAL_ROTARY_NEW_TOKENS: usize = 1;
 #[cfg(feature = "cached-attention-streaming")]
 const QWEN35_PARTIAL_ROTARY_CACHED_EXTENT: usize = 40;
 
-/// [`append_qwen35_dense_attention_only_with_taps`] wired at qwen3.5's
+/// [`append_gated_attention_only_with_taps`] wired at qwen3.5's
 /// own real per-head shape (`kv_heads` 2, `group` 8 -> 16 query heads,
 /// `attn_head_dim` 256, `rotary_dim` 64 -> 192-wide pass plane,
 /// `docs/discipline.md` ROW 556/557's own residual) -- `embedding` stays
@@ -1071,7 +1071,7 @@ fn qwen35_partial_rotary_attention_fixture() -> (
     );
     let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
 
-    let (residual1, taps) = crate::spec::append_qwen35_dense_attention_only_with_taps(
+    let (residual1, taps) = crate::spec::append_gated_attention_only_with_taps(
         &mut program,
         x,
         inv_dim,
@@ -1302,7 +1302,7 @@ fn qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap
 }
 
 /// Every tap [`qwen35_dense_attention_f64_reference`] computes, in the
-/// order [`crate::spec::append_qwen35_dense_attention_only_with_taps`]
+/// order [`crate::spec::append_gated_attention_only_with_taps`]
 /// builds them -- the order this row's own per-tap divergence search
 /// walks.
 #[cfg(feature = "cached-attention-streaming")]
@@ -1342,7 +1342,7 @@ struct DenseAttentionF64Reference {
 /// semantics (`modeling_qwen3_next.py`), not from either engine.
 ///
 /// Math, per stage (mirrors `spec.rs:4724-5312`
-/// (`append_qwen35_dense_attention_only_with_taps`) exactly, at f64
+/// (`append_gated_attention_only_with_taps`) exactly, at f64
 /// precision, for this fixture's own degenerate `embedding = 1`,
 /// `new_tokens = 1` shape): RMSNorm(`x`) -> the one `q`/`gate`
 /// projection split per head -> `k`/`v` projections -> per-head RMSNorm
@@ -4888,7 +4888,7 @@ mod reduce_epilogue_fusion_tests {
 mod gated_delta_net_tests {
     use super::*;
     use crate::op::{Extent, append};
-    use crate::spec::{append_qwen35_delta_net_step, elementwise};
+    use crate::spec::{append_delta_net_step, elementwise};
 
     const HEAD_K_DIM: usize = 2;
     const HEAD_V_DIM: usize = 3;
@@ -4915,7 +4915,7 @@ mod gated_delta_net_tests {
         )
     }
 
-    /// Builds one `append_qwen35_delta_net_step` recurrence over small,
+    /// Builds one `append_delta_net_step` recurrence over small,
     /// distinct, deterministic values -- real production shapes at
     /// small extents, never all-zero/all-one filler (guiding-principle
     /// 9: the values must exercise the actual recurrence's arithmetic,
@@ -4936,7 +4936,7 @@ mod gated_delta_net_tests {
                 value: core::f32::consts::FRAC_1_SQRT_2,
             },
         );
-        let (out, state_out) = append_qwen35_delta_net_step(
+        let (out, state_out) = append_delta_net_step(
             &mut program,
             query,
             key,
@@ -4979,7 +4979,7 @@ mod gated_delta_net_tests {
     /// match target) built WITHOUT that function's leading seq axis --
     /// the real production graph threads `s` through `repeat_kv_heads`
     /// and then a squeeze [`crate::spec::reduce`] before
-    /// [`append_qwen35_delta_net_step`] ever sees `query`/`key`
+    /// [`append_delta_net_step`] ever sees `query`/`key`
     /// (`spec.rs:8579-8759`'s own `q_repeated`/`query` two-step), and
     /// `gdn_unwrap_repeat_kv_heads` does not yet walk through that
     /// squeeze (see this module's own report on this gap) -- this helper
@@ -5008,7 +5008,7 @@ mod gated_delta_net_tests {
     /// `ssm.state_size 128`, `ssm.inner_size 4096`, `time_step_rank 32`
     /// -- `head_v_dim = 4096 / 32 = 128`, `group = 32 / 16 = 2`,
     /// `head_k_dim = ssm.state_size = 128`, from
-    /// `proxima-model-interop/src/recurrent_interval.rs`'s own `qwen35_ssm_shape`).
+    /// `proxima-model-interop/src/recurrent_interval.rs`'s own `recurrent_interval_ssm_shape`).
     fn synthetic_gated_delta_net_gqa_program(
         kv_heads: usize,
         group: usize,
@@ -5034,7 +5034,7 @@ mod gated_delta_net_tests {
         let query = broadcast_kv_heads(&mut program, query_pre, kv_heads as u32, group as u32);
         let key = broadcast_kv_heads(&mut program, key_pre, kv_heads as u32, group as u32);
 
-        let (out, state_out) = append_qwen35_delta_net_step(
+        let (out, state_out) = append_delta_net_step(
             &mut program,
             query,
             key,
@@ -5358,7 +5358,7 @@ mod gated_delta_net_tests {
         );
     }
 
-    /// `N = 5`: `append_qwen35_delta_net_step` emits 12 computing nodes,
+    /// `N = 5`: `append_delta_net_step` emits 12 computing nodes,
     /// but this crate's own unconditional `ChainFusion` (`bind_plain`'s
     /// own rewrite, admitted for every bind regardless of this feature)
     /// already inlines every elementwise op whose sole use is a reduce
@@ -5451,10 +5451,10 @@ mod gated_delta_net_tests {
 
     /// The real qwen35moe GDN mixer, built through the SAME public entry
     /// point `proxima-model-interop` calls
-    /// (`append_qwen35_ssm_mixer_with_taps_and_layout`), at the real
+    /// (`append_delta_net_mixer_with_taps_and_layout`), at the real
     /// checkpoint shape (`kv_heads = 16`, `group = 2`, `head_k_dim =
     /// head_v_dim = 128`) rather than this module's own synthetic
-    /// direct-`append_qwen35_delta_net_step` programs above -- the
+    /// direct-`append_delta_net_step` programs above -- the
     /// census the matcher's own `gdn_unwrap_decode_squeeze`/
     /// `gdn_unwrap_repeat_kv_heads` walks exist for, never exercised
     /// until this test. `model_dim` (the mixer's own hidden-size axis)
@@ -5463,7 +5463,7 @@ mod gated_delta_net_tests {
     #[test]
     fn qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion() {
         use crate::spec::{
-            GdnOutputGate, append_qwen35_ssm_mixer_with_taps_and_layout, input_leaf,
+            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf,
             scalar_constant,
         };
 
@@ -5579,7 +5579,7 @@ mod gated_delta_net_tests {
             "state_in",
         );
 
-        let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps_and_layout(
+        let (mixer_out, taps) = append_delta_net_mixer_with_taps_and_layout(
             &mut program,
             x,
             inv_dim,
@@ -5795,7 +5795,7 @@ mod gated_delta_net_tests {
     #[test]
     fn qwen35moe_mixer_op_census_prints_every_bound_op() {
         use crate::spec::{
-            GdnOutputGate, append_qwen35_ssm_mixer_with_taps_and_layout, input_leaf,
+            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf,
             scalar_constant,
         };
 
@@ -5911,7 +5911,7 @@ mod gated_delta_net_tests {
             "state_in",
         );
 
-        let (mixer_out, _taps) = append_qwen35_ssm_mixer_with_taps_and_layout(
+        let (mixer_out, _taps) = append_delta_net_mixer_with_taps_and_layout(
             &mut program,
             x,
             inv_dim,
@@ -6048,7 +6048,7 @@ mod moe_routing_census {
 
     /// One qwen35moe layer's routing block: [`ExpertGatingFunc::Softmax`],
     /// `expert_bias = None` -- `proxima-model-interop/src/recurrent_routed_interval/program.rs`'s
-    /// own `append_qwen35moe_ffn` call into `append_moe_ffn`
+    /// own `append_shared_expert_moe_ffn` call into `append_moe_ffn`
     /// (lines 122-135), NOT the `Sigmoid` gate this crate's Mixtral-style
     /// dense callers (`append_gqa_routed_layer`) use -- the two gating
     /// functions cost the same op count per round (`shifted`+`exp` for

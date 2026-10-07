@@ -7,8 +7,8 @@ pub mod layer_boundary;
 mod program;
 
 pub(crate) use header::header;
-pub use hparams::{Qwen35MoeHparams, LayerKind, from_metadata};
+pub use hparams::{RecurrentRoutedIntervalHparams, LayerKind, from_metadata};
 pub use program::{
-    MoeForwardProgram, MoeLayerDiagnostics, descriptor_from_architecture, qwen35moe_forward_program,
-    qwen35moe_forward_program_at_width,
+    MoeForwardProgram, MoeLayerDiagnostics, descriptor_from_architecture, recurrent_routed_interval_forward_program,
+    recurrent_routed_interval_forward_program_at_width,
 };

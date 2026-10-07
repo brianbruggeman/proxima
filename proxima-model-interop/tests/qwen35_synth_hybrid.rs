@@ -5,7 +5,7 @@
 //! Qwen3.8-27B checkpoint exists on this box
 //! (the only on-disk qwen3.5/3.6 files are `qwen35moe`). Random
 //! weights of the right shape and quant mix exercise the same graph
-//! (`proxima_tensor::spec::qwen35_forward_program`) and the same Metal/CPU
+//! (`proxima_tensor::spec::recurrent_interval_forward_program`) and the same Metal/CPU
 //! dispatch classification a real checkpoint would, since neither depends
 //! on weight VALUES.
 //!
@@ -87,7 +87,7 @@ fn supported_config(gpu_layers: i32) -> ServingConfig<'static> {
 /// hybrid attention+state-space graph runs end to end through the real
 /// `qwen35` bind + forward-program path
 /// (`proxima_model_interop::bind_program_leaves` /
-/// `qwen35_forward_program`), not that its output means anything.
+/// `recurrent_interval_forward_program`), not that its output means anything.
 #[test]
 #[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
 fn qwen35_hybrid_synthetic_fixture_decodes_on_cpu() {

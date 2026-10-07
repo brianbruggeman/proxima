@@ -67,7 +67,7 @@ mod gqa_layer_routed;
 #[macro_use]
 mod gqa_forward_cached;
 #[macro_use]
-mod hyperconn_qwen35_dense;
+mod gated_attention;
 #[macro_use]
 mod single_range_moe_cached;
 #[macro_use]
@@ -89,7 +89,7 @@ pub use descriptor::*;
 pub use gguf_descriptor::*;
 pub use hybrid_forward::{MoeLayerDiagnostics, append_sigmoid_gated_shared_expert};
 use hybrid_forward::{hybrid_dense_forward, hybrid_routed_forward};
-pub use hyperconn_qwen35_dense::*;
+pub use gated_attention::*;
 pub use short_conv_delta_net::*;
 pub use scheduled_cached::*;
 pub use gqa_forward_cached::*;

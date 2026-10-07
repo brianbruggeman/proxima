@@ -357,7 +357,7 @@ pub enum DuplicateHeadPosition {
     After,
 }
 
-/// `append_qwen35_dense_attention_layer`'s own per-position cache roots --
+/// `append_gated_attention_layer`'s own per-position cache roots --
 /// [`CachedLayerRoots`]'s 4-wide counterpart, one extra [`NodeId`] for the
 /// partial-rotary remainder [`CachedLayerRoots`] has no room for: `k_first`/
 /// `k_second` are this checkpoint's split-half (NEOX/IMROPE-style) RoPE
@@ -960,7 +960,7 @@ pub fn append_gqa_cached_layer(
 /// No `qwen4exp_forward_program` call site lands in this crate (that
 /// assembly is model-specific and lives in its own consuming crate); this
 /// builder is public so that crate can compose one. See
-/// [`qwen35_forward_program`] for this crate's own worked example of
+/// [`recurrent_interval_forward_program`] for this crate's own worked example of
 /// wiring per-layer builders like this one into a full program.
 #[allow(clippy::too_many_arguments)]
 pub fn append_hyper_connection_mix(
@@ -1146,7 +1146,7 @@ pub fn append_hyper_connection_mix(
 ///
 /// Same rationale as [`append_hyper_connection_mix`]'s own doc: no
 /// production call site in this crate, public so a foreign architecture
-/// crate can compose one. See [`qwen35_forward_program`] for this crate's
+/// crate can compose one. See [`recurrent_interval_forward_program`] for this crate's
 /// own worked example of a full per-layer builder chain.
 #[allow(clippy::too_many_arguments)]
 pub fn append_hyper_connection_combine(

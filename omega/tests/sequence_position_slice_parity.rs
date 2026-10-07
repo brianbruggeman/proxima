@@ -1,11 +1,11 @@
-//! Metal-vs-CPU parity for `qwen35_gdn_sequence_position` (checkpoint-free:
-//! `proxima_tensor::spec::qwen35_gdn_sequence_position`, private, reproduced
+//! Metal-vs-CPU parity for `delta_net_sequence_position` (checkpoint-free:
+//! `proxima_tensor::spec::delta_net_sequence_position`, private, reproduced
 //! here verbatim from the two public ops it lowers to) -- a `[s,d,u,g]`
 //! sequence-preserving tensor sliced at a caller-known-at-build-time
 //! position `p` via an `elementwise` `Identity` with a constant `s+p@1`
 //! offset, then squeezed back off the unit `s` axis with a `reduce(Add,
-//! Zero)`. `qwen35_gdn_recurrence_step` calls this once per tap per prompt
-//! position in the M>1 branch of `append_qwen35_ssm_mixer_with_taps_and_layout`.
+//! Zero)`. `delta_net_recurrence_step` calls this once per tap per prompt
+//! position in the M>1 branch of `append_delta_net_mixer_with_taps_and_layout`.
 
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -19,7 +19,7 @@ const HEAD_DIM: u32 = 128;
 const HEADS: u32 = 16;
 const GROUPS: u32 = 2;
 
-/// Reproduces `proxima_tensor::spec::qwen35_gdn_sequence_position` verbatim
+/// Reproduces `proxima_tensor::spec::delta_net_sequence_position` verbatim
 /// (the fn is private) -- an affine-offset slice of the `s` axis followed by
 /// a sum-of-one reduction that squeezes it back off.
 fn sequence_position(program: &mut Vec<Op>, node: NodeId, rest_letters: &str, position: u32) -> NodeId {

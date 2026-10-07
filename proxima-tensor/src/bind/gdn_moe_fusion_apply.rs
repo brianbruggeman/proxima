@@ -300,7 +300,7 @@ pub(super) fn gdn_is_repeat_kv_heads_donor(program: &[Op], node: NodeId) -> bool
 
 /// Walks past a [`crate::spec::repeat_kv_heads`] broadcast if `node` is one,
 /// returning the pre-repeat source otherwise unchanged — the one place this
-/// matcher intentionally disagrees with [`crate::spec::append_qwen35_delta_net_step`]'s
+/// matcher intentionally disagrees with [`crate::spec::append_delta_net_step`]'s
 /// own physical operand and instead binds what llama.cpp's fused Metal kernel
 /// reads directly (`gated_delta_net.metal:33-34`'s `i01 = i21 % ne01`
 /// mod-broadcast), dropping the eager repeat from the hot path entirely (this
@@ -328,7 +328,7 @@ pub(super) fn gdn_repeat_kv_heads_donor(program: &[Op], node: NodeId) -> Option<
     }
 }
 
-/// Walks past `append_qwen35_ssm_mixer_with_taps_and_layout`'s own
+/// Walks past `append_delta_net_mixer_with_taps_and_layout`'s own
 /// "squeeze the size-1 decode-step `s` axis away" reduce
 /// (`spec.rs:8737-8786`) if `node` is one, returning `node`'s own pre-squeeze
 /// operand instead -- a plain [`ScalarOp::Add`]/[`ReduceInit::Zero`]/
@@ -341,7 +341,7 @@ pub(super) fn gdn_repeat_kv_heads_donor(program: &[Op], node: NodeId) -> Option<
 /// gap [`gated_delta_net_candidates`]'s own doc names: the real program
 /// threads `query`/`key`/`value`/`gate`/`beta` through this exact squeeze
 /// between the algebra's own `u,g`-split construction and
-/// [`append_qwen35_delta_net_step`], and unwrapping it is what lets this
+/// [`append_delta_net_step`], and unwrapping it is what lets this
 /// matcher bind the program's own natural, pre-squeeze storage order instead
 /// of the squeeze's own re-lettered output.
 #[cfg(feature = "gated-delta-net-fusion")]
@@ -384,7 +384,7 @@ pub(super) fn gdn_unwrap_decode_squeeze(program: &[Op], shapes: &Shapes, node: N
     }
 }
 
-/// One matched [`append_qwen35_delta_net_step`](crate::spec::append_qwen35_delta_net_step)
+/// One matched [`append_delta_net_step`](crate::spec::append_delta_net_step)
 /// recurrence, structurally recognized by walking backward from its `out`
 /// node through the exact `ScalarOp` sequence that function emits — anchored
 /// on op shape, never on node names (this module's own convention;
@@ -471,7 +471,7 @@ pub(super) fn match_gated_delta_net_step(
     let inv_sqrt_key_dim = gdn_constant_value(program, inv_sqrt_key_dim_node)?;
 
     // The real program threads every one of these five through its own
-    // decode-squeeze reduce before `append_qwen35_delta_net_step` ever sees
+    // decode-squeeze reduce before `append_delta_net_step` ever sees
     // them (`gdn_unwrap_decode_squeeze`'s own doc); query/key additionally
     // sit behind a `repeat_kv_heads` broadcast UNDER that squeeze, so the
     // squeeze must unwrap first or `gdn_unwrap_repeat_kv_heads` never finds
@@ -517,7 +517,7 @@ pub(super) fn match_gated_delta_net_step(
     })
 }
 
-/// Scans `program` for [`append_qwen35_delta_net_step`](crate::spec::append_qwen35_delta_net_step)
+/// Scans `program` for [`append_delta_net_step`](crate::spec::append_delta_net_step)
 /// candidates and, for each, resolves its six operand sources' [`Layout`]s
 /// against `resolved` — the same technique [`cached_attention_candidates`]
 /// uses, and for the same reason: chain fusion may already have inlined an
@@ -648,7 +648,7 @@ pub(super) fn gated_delta_net_candidates(
         let value_shape = shapes.of(found.value);
         let gate_shape = shapes.of(found.gate);
         let state_shape = shapes.of(found.state_in);
-        // This slice's supported shapes: `append_qwen35_delta_net_step`'s own
+        // This slice's supported shapes: `append_delta_net_step`'s own
         // `head` split, either the single-letter axis (`[heads, dim]`, no GQA
         // broadcast) or the real recurrent-routed two-letter `head = "ug"` split --
         // `u` = kv group (query/key's own trailing axis, PRE-`repeat_kv_heads`,
@@ -659,7 +659,7 @@ pub(super) fn gated_delta_net_candidates(
         // struct doc) is `[kv_heads, key_dim]`, dim FASTEST -- the program's
         // own pre-repeat operand order, distinct from `value`/`gate`/`beta`/
         // `state`, whose consumer reads them un-permuted off
-        // `append_qwen35_delta_net_step`'s own `j{head}`/`{head}` maps, dim
+        // `append_delta_net_step`'s own `j{head}`/`{head}` maps, dim
         // (where present) SLOWEST: value is `[dim, kv_heads, group]`,
         // gate/beta `[kv_heads, group]`, state `[key_dim, value_dim,
         // kv_heads, group]` -- `num_v_heads = kv_heads * group` is exactly

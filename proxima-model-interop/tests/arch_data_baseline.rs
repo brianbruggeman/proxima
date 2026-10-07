@@ -28,8 +28,8 @@ use proxima_model_interop::{
     BoundProgram, BoundWeights, Codec, KvLayout, LoadedModel, bind_checkpoint_with_kv_layout, bind_speculative_verify,
     PromptCacheConfig, ServingConfig, SpeculativeConfig, SpeculativeDecodeStats, architecture_from_metadata, dense_descriptor_from_gguf, sliding_pattern,
     metadata_f32_optional,
-    metadata_str, metadata_u32, profiles::family_profile, qwen35_architecture_from_metadata,
-    qwen35_descriptor_from_architecture, recurrent_routed_interval,
+    metadata_str, metadata_u32, profiles::family_profile, recurrent_interval_architecture_from_metadata,
+    recurrent_interval_descriptor_from_architecture, recurrent_routed_interval,
 };
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::TensorError;
@@ -532,9 +532,9 @@ fn config_descriptors(
         return vec![("bind", decode), ("verify", verify)];
     }
     if checkpoint.architecture == "qwen35" {
-        let architecture = qwen35_architecture_from_metadata(parsed)
-            .unwrap_or_else(|error| panic!("{}: qwen35_architecture_from_metadata failed: {error:?}", checkpoint.name));
-        let descriptor = qwen35_descriptor_from_architecture(&architecture)
+        let architecture = recurrent_interval_architecture_from_metadata(parsed)
+            .unwrap_or_else(|error| panic!("{}: recurrent_interval_architecture_from_metadata failed: {error:?}", checkpoint.name));
+        let descriptor = recurrent_interval_descriptor_from_architecture(&architecture)
             .unwrap_or_else(|error| panic!("{}: the qwen35 descriptor failed: {error:?}", checkpoint.name));
         return vec![("bind", descriptor)];
     }
@@ -673,8 +673,8 @@ fn leaf_names(program: &[Op]) -> Vec<String> {
 fn model_config_edit_moves_a_qwen35_attention_layer_to_the_recurrent_mixer() {
     let mapping = QWEN35.open();
     let parsed = parse_complete(&mapping).expect("parses the real checkpoint's GGUF header");
-    let architecture = qwen35_architecture_from_metadata(&parsed).expect("the qwen35 header reads");
-    let descriptor = qwen35_descriptor_from_architecture(&architecture).expect("the qwen35 descriptor builds");
+    let architecture = recurrent_interval_architecture_from_metadata(&parsed).expect("the qwen35 header reads");
+    let descriptor = recurrent_interval_descriptor_from_architecture(&architecture).expect("the qwen35 descriptor builds");
     assert_eq!(descriptor.layers[3].kind, LayerKind::Attention, "the 0.8b checkpoint attends at layers 3, 7, 11, ...");
     let text = toml::to_string(&descriptor).expect("a descriptor serializes to toml");
 

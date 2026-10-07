@@ -308,7 +308,7 @@ pub fn as_named_blocks(owned: &[(String, Vec<f32>)]) -> Vec<(&str, QuantizedBloc
 }
 
 /// qwen35's real partial-rotary dense-attention chain
-/// (`proxima_tensor::spec::append_qwen35_dense_attention_only_with_taps`,
+/// (`proxima_tensor::spec::append_gated_attention_only_with_taps`,
 /// `kv_heads` 2, `group` 8 -> 16 query heads, `attn_head_dim` 256,
 /// `rotary_dim` 64 -> 192-wide pass plane), ported from
 /// `proxima_tensor::bind`'s own private `qwen35_partial_rotary_attention_
@@ -326,7 +326,7 @@ pub fn qwen35_partial_rotary_forward_fixture(
     cached_len: u64,
 ) -> RealForwardFixture {
     use proxima_tensor::spec::{
-        append_qwen35_dense_attention_only_with_taps, causal_mask, input_leaf, scalar_constant,
+        append_gated_attention_only_with_taps, causal_mask, input_leaf, scalar_constant,
     };
     use proxima_tensor::{DType, Extent};
 
@@ -429,7 +429,7 @@ pub fn qwen35_partial_rotary_forward_fixture(
     let k_pass_cache = input_leaf(&mut program, DType::Float32, cache_pass_shape, "k_pass_cache");
     let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
 
-    let (residual1, taps) = append_qwen35_dense_attention_only_with_taps(
+    let (residual1, taps) = append_gated_attention_only_with_taps(
         &mut program,
         x,
         inv_dim,

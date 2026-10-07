@@ -408,12 +408,12 @@ pub(super) mod hyper_connection_tests {
 ///    `:325-328`; llama.cpp's hybrid-model source, lines 322-328 runs the identical
 ///    `ggml_mul(cur, ggml_sigmoid(gate))` before `wo`).
 ///
-/// The full-attention layer [`qwen35_forward_program`] calls once per
+/// The full-attention layer [`recurrent_interval_forward_program`] calls once per
 /// `full_attention_interval`'th layer -- see it there for the worked
 /// example of wiring this builder's cache inputs and outputs.
 ///
 /// Attention block only -- everything up to and including the residual add
-/// after `o_proj`, no FFN. [`append_qwen35_dense_attention_layer`] is a thin
+/// after `o_proj`, no FFN. [`append_gated_attention_layer`] is a thin
 /// wrapper adding the dense-FFN tail on top of this; a caller whose FFN is
 /// NOT dense (a routed-MoE checkpoint such as `recurrent-routed`, which carries no
 /// `blk.N.ffn_{gate,up,down}.weight` on its attention layers at all) calls
@@ -421,16 +421,16 @@ pub(super) mod hyper_connection_tests {
 /// node, the same "per-layer builders are pub so a foreign crate can
 /// compose them" contract this module's own
 /// `public_builders_compose_a_one_layer_forward_program` test proves for
-/// [`append_qwen35_ssm_mixer`].
+/// [`append_delta_net_mixer`].
 ///
-/// Thin wrapper over [`append_qwen35_dense_attention_only_with_taps`] for
+/// Thin wrapper over [`append_gated_attention_only_with_taps`] for
 /// callers that only need the two roots this signature already returned
 /// before taps existed -- byte-identical program, since this only reshapes
 /// the return value the shared builder already computed
 /// (`dense_attention_only_and_with_taps_produce_the_same_program` proves the
 /// two builders emit identical `Vec<Op>` for the dense synth fixture).
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_dense_attention_only(
+pub fn append_gated_attention_only(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -458,7 +458,7 @@ pub fn append_qwen35_dense_attention_only(
     k_pass_cache: NodeId,
     v_cache: NodeId,
 ) -> Result<(NodeId, DenseAttentionRoots), TensorError> {
-    let (residual1, taps) = append_qwen35_dense_attention_only_with_taps(
+    let (residual1, taps) = append_gated_attention_only_with_taps(
         program,
         x,
         inv_dim,
@@ -498,7 +498,7 @@ pub fn append_qwen35_dense_attention_only(
 }
 
 /// Every intermediate a caller needs to bisect
-/// [`append_qwen35_dense_attention_only`]'s attention block against an
+/// [`append_gated_attention_only`]'s attention block against an
 /// independent reference, in the order the builder computes them
 /// (`spec.rs` just below). Field naming mirrors [`SsmMixerTaps`]'s own
 /// convention -- one field per stage, named after the stage, not the local
@@ -508,7 +508,7 @@ pub fn append_qwen35_dense_attention_only(
 /// `wq_gate` ALREADY reshaped to expose a head axis (the fused on-disk
 /// `blk.N.attn_q.weight`, `2 * query_heads * attn_head_dim` wide, reshaped
 /// by the caller to `[embedding, heads, 2*attn_head_dim]` via the same
-/// multiply-by-broadcast-ones view [`append_qwen35_dense_attention_only`]'s
+/// multiply-by-broadcast-ones view [`append_gated_attention_only`]'s
 /// caller already uses for `wk`/`wv` -- never a per-head WEIGHT-level slice:
 /// splitting a packed quantized weight per head before the real contraction
 /// runs breaks `cpu::is_quantized_matmul_operand`'s recognizer,
@@ -573,14 +573,14 @@ pub struct DenseAttentionTaps {
     pub v_new: NodeId,
 }
 
-/// [`append_qwen35_dense_attention_only`]'s full implementation, returning
+/// [`append_gated_attention_only`]'s full implementation, returning
 /// every [`DenseAttentionTaps`] intermediate alongside the residual
 /// output for a caller that needs to bisect the attention block (q/gate
 /// split, qk-norm, rotary, scores, gate, `o_proj`) against an independent
 /// reference -- a downstream `recurrent-routed`-shaped consumer's own layer-3
 /// position-0 divergence investigation is exactly that caller.
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_dense_attention_only_with_taps(
+pub fn append_gated_attention_only_with_taps(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -1162,14 +1162,14 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     Ok((residual1, taps))
 }
 
-/// [`append_qwen35_dense_attention_only`] plus the dense (non-MoE) SwiGLU
-/// FFN tail `qwen35_forward_program`'s own non-routed checkpoints carry on
+/// [`append_gated_attention_only`] plus the dense (non-MoE) SwiGLU
+/// FFN tail `recurrent_interval_forward_program`'s own non-routed checkpoints carry on
 /// every layer -- see that function for the worked example of wiring this
 /// builder's cache inputs and outputs. A caller whose FFN is routed
-/// (`recurrent-routed`-shaped) calls [`append_qwen35_dense_attention_only`]
+/// (`recurrent-routed`-shaped) calls [`append_gated_attention_only`]
 /// directly instead of this wrapper.
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_dense_attention_layer(
+pub fn append_gated_attention_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -1201,7 +1201,7 @@ pub fn append_qwen35_dense_attention_layer(
     k_pass_cache: NodeId,
     v_cache: NodeId,
 ) -> Result<(NodeId, DenseAttentionRoots), TensorError> {
-    let (residual1, roots) = append_qwen35_dense_attention_only(
+    let (residual1, roots) = append_gated_attention_only(
         program,
         x,
         inv_dim,

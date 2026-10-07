@@ -36,7 +36,7 @@ impl LayerKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct Qwen35MoeHparams {
+pub struct RecurrentRoutedIntervalHparams {
     /// `general.architecture` as the file declares it, the key the family and binding profiles resolve through.
     pub family: String,
     pub vocab: u32,
@@ -94,7 +94,7 @@ fn per_layer_kv(
     }
 }
 
-pub fn from_metadata(parsed: &ParsedGguf) -> Result<Qwen35MoeHparams, InteropError> {
+pub fn from_metadata(parsed: &ParsedGguf) -> Result<RecurrentRoutedIntervalHparams, InteropError> {
     let family = metadata_str(parsed, "general.architecture")?;
     let prefix = |name: &str| format!("{family}.{name}");
     let embedding = metadata_u32(parsed, &prefix("embedding_length"))?;
@@ -138,7 +138,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Qwen35MoeHparams, InteropErr
         parsed.metadata_value(&prefix("rope.mrope_interleaved")),
         Some(MetadataValue::Bool(true))
     );
-    Ok(Qwen35MoeHparams {
+    Ok(RecurrentRoutedIntervalHparams {
         family: family.to_owned(),
         vocab: crate::bind::vocab_from_token_embedding(parsed, embedding)?,
         embedding,

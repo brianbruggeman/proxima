@@ -129,7 +129,7 @@ pub fn run_gdn_prefill_scan(scan: GdnPrefillScan<'_>) -> Result<(), TensorError>
             for value_index in 0..value_dim {
                 // `value`/`output`: natural row-major `[positions, value_dim,
                 // heads]`, `heads` unit-stride -- the SAME order
-                // `append_qwen35_delta_net_step`'s own `j{head}` convention
+                // `append_delta_net_step`'s own `j{head}` convention
                 // already materializes value/output in (`spec.rs:8760`'s own
                 // squeeze `out_map`), so this axis order is UNCHANGED, unlike
                 // `query`/`key` above.

@@ -905,7 +905,7 @@ pub(super) fn copy_into_padded(
 
 /// [`LayerCache`]'s 4-wide counterpart for a
 /// [`LayerCacheRoots::DenseAttention`] layer -- this checkpoint's own
-/// partial-rotary gap (`proxima_tensor::spec::append_qwen35_dense_attention_layer`'s
+/// partial-rotary gap (`proxima_tensor::spec::append_gated_attention_layer`'s
 /// own doc) needs a third K component (`k_pass`, the untouched
 /// `rotary_dim..attn_head_dim` remainder) alongside the rotated
 /// `k_first`/`k_second` halves [`LayerCache`]'s `k_even`/`k_odd` already
@@ -938,7 +938,7 @@ impl DenseAttentionCache {
 
 /// [`KvPadShape`]'s counterpart for a [`DenseAttentionCache`] --
 /// `k_first`/`k_second` share [`KvPadShape::even_odd_len`]'s row width
-/// (both are `pairs`-wide, the same rotary half [`spec::append_qwen35_dense_attention_layer`]'s
+/// (both are `pairs`-wide, the same rotary half [`spec::append_gated_attention_layer`]'s
 /// `k_first_cache`/`k_second_cache` leaves declare), but `k_pass`/`v` are
 /// `attn_head_dim`-based, not `head_dim`-based, so they need their own
 /// widths rather than reusing [`KvPadShape::v_len`].
@@ -969,7 +969,7 @@ impl DenseAttentionPadShape {
 /// `proxima_tensor::bind::cached_attention_candidates`'s plan-key
 /// bucketing unless the bound buffer this layer feeds the backend is padded
 /// out to the SAME `kv_extent` boundary the `Attention` arm already pads
-/// to) applies here identically: `qwen35_forward_program`'s dense-attention
+/// to) applies here identically: `recurrent_interval_forward_program`'s dense-attention
 /// layers declare `k_first_cache`/`k_second_cache`/`k_pass_cache`/`v_cache`
 /// on the identical `Extent::Symbolic(1)` slot the `Attention` arm's
 /// `kv_cache.{layer}.*` leaves use, so a bucketed `symbols[1]` value only
@@ -1351,7 +1351,7 @@ pub(super) fn bound_cache_kind(roots: &LayerCacheRoots) -> DeclaredCacheKind {
 /// that emitted it, collapsed to the flat element count one cached
 /// position occupies -- every `kv_cache.{layer}.*` leaf is
 /// `[Extent::Symbolic(KV_BOUND), heads, width]`
-/// (`proxima_tensor::spec`'s `append_qwen35_dense_attention_layer`/
+/// (`proxima_tensor::spec`'s `append_gated_attention_layer`/
 /// `append_gqa_cached_layer` own `input_leaf` calls for these exact
 /// names), so the row width [`KvPadShape`]/[`DenseAttentionPadShape`]
 /// need is the PRODUCT of every extent after the leading symbolic
@@ -1360,7 +1360,7 @@ pub(super) fn bound_cache_kind(roots: &LayerCacheRoots) -> DeclaredCacheKind {
 /// `ModelHparams`/[`crate::lowering::step_state`]
 /// scalars a bind may leave zero or unset -- the real defect this
 /// function replaces: `LoadedModel` used to carry a single model-wide
-/// `qwen35_attn_head_dim: Option<u32>`, read from a hook whose
+/// `gated_attention_head_dim: Option<u32>`, read from a hook whose
 /// default is `None`, silently sizing every `DenseAttention`
 /// layer's `v`/`k_pass` scratch to zero for any family that left it unset.
 ///
@@ -1542,7 +1542,7 @@ pub(super) fn push_kv_named_blocks<'call>(
     layer_row_widths: &[LayerPadRowWidths],
     step: KvStep,
     kv_pad_scratch: &'call mut [KvPadScratch],
-    qwen35_dense_pad_scratch: &'call mut [DenseAttentionPadScratch],
+    dense_attention_pad_scratch: &'call mut [DenseAttentionPadScratch],
     named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
 ) -> Result<(), InteropError> {
     let KvStep {
@@ -1579,7 +1579,7 @@ pub(super) fn push_kv_named_blocks<'call>(
                     pass_row: *pass_row,
                     v_row: *v_row,
                 };
-                qwen35_dense_pad_scratch[layer].fill(cache, &shape, layer)?;
+                dense_attention_pad_scratch[layer].fill(cache, &shape, layer)?;
             }
             (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm { .. }) => {}
             (LayerCacheState::SharedFromLayer, LayerPadRowWidths::SharedFromLayer) => {}
@@ -1630,7 +1630,7 @@ pub(super) fn push_kv_named_blocks<'call>(
                     v_row: *v_row,
                 };
                 named_blocks.extend(
-                    qwen35_dense_pad_scratch[layer]
+                    dense_attention_pad_scratch[layer]
                         .named_blocks(k_first, k_second, k_pass, v, &shape),
                 );
             }
@@ -4224,7 +4224,7 @@ pub(super) struct RouterExpertCounts<'family> {
     pub(super) expert_used_count: usize,
 }
 
-pub(super) fn visit_qwen35moe_router_selections<BeforeGather>(
+pub(super) fn visit_moe_router_selections<BeforeGather>(
     layer: usize,
     position_offset: usize,
     logits: RouterLogits<'_>,
@@ -4328,7 +4328,7 @@ where
     Ok(())
 }
 
-pub(super) fn visit_qwen35moe_router_boundary<'file, BeforeGather>(
+pub(super) fn visit_moe_router_boundary<'file, BeforeGather>(
     layer: usize,
     position_offset: usize,
     logits: RouterLogits<'_>,
@@ -4345,7 +4345,7 @@ where
         &mut crate::expert_slab::ExpertSlab<'file>,
     ) -> Result<(), InteropError>,
 {
-    visit_qwen35moe_router_selections(
+    visit_moe_router_selections(
         layer,
         position_offset,
         logits,

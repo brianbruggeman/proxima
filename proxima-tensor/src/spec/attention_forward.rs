@@ -2986,11 +2986,11 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     ))
 }
 
-/// Per-layer roots [`qwen35_forward_program`]'s own caller threads back in
+/// Per-layer roots [`recurrent_interval_forward_program`]'s own caller threads back in
 /// as next-call cache [`Op::Input`]s -- [`DenseAttentionRoots`]'s own
 /// 4-wide KV-cache shape for a dense-attention layer
-/// (`append_qwen35_dense_attention_layer`'s own doc walks through why it
-/// is 4-wide, not [`CachedLayerRoots`]'s 3), or `append_qwen35_ssm_mixer`'s
+/// (`append_gated_attention_layer`'s own doc walks through why it
+/// is 4-wide, not [`CachedLayerRoots`]'s 3), or `append_delta_net_mixer`'s
 /// own `(qkv_mixed, state_out)` return for an SSM layer. A discriminated
 /// enum, not a bool flag riding alongside a fixed-shape tuple: the layer
 /// kinds carry genuinely different cache shapes, the same reason
@@ -3028,7 +3028,7 @@ pub enum LayerCacheRoots {
 /// Qwen3.5's whole-model incremental forward program: `full_attention_interval`
 /// dense-attention layers (`append_gqa_cached_layer`, the same KV-cache
 /// pattern [`gqa_cached_forward_program_with_experts`] already runs)
-/// interleaved with gated-DeltaNet layers (`append_qwen35_ssm_mixer`),
+/// interleaved with gated-DeltaNet layers (`append_delta_net_mixer`),
 /// following llama.cpp's own `hparams.is_recr_impl[i] = (i < n_layer) &&
 /// ((i + 1) % full_attention_interval != 0)` (llama.cpp's hybrid-model source, lines 19-20) -- layer
 /// `full_attention_interval - 1`, `2 * full_attention_interval - 1`, ... are
@@ -3041,7 +3041,7 @@ pub enum LayerCacheRoots {
 /// `ssm_d_state`/`ssm_dt_rank`/`ssm_n_group`/`ssm_d_inner`/`ssm_d_conv` name
 /// the same five hyperparameters llama.cpp's hybrid-model source, lines 335-343's own
 /// `build_layer_attn_linear` reads off `hparams`, unpacked into
-/// `append_qwen35_ssm_mixer`'s own `key_dim = ssm_d_state * ssm_n_group`,
+/// `append_delta_net_mixer`'s own `key_dim = ssm_d_state * ssm_n_group`,
 /// `value_dim = ssm_d_inner`, `kv_heads = ssm_n_group`, `group = ssm_dt_rank
 /// / ssm_n_group`, `l_cache = ssm_d_conv` (`head_v_dim = ssm_d_inner /
 /// ssm_dt_rank` falls out inside the mixer itself, matching the oracle's own
@@ -3049,19 +3049,19 @@ pub enum LayerCacheRoots {
 /// `hparams.f_norm_rms_eps` baked as a graph-build-time constant, the same
 /// choice this module already makes for `inv_dim`/`inv_sqrt_head_dim`
 /// (Rust-side config values, not runtime-bound `Input`s) rather than a fresh
-/// runtime-bound tensor shaped to `append_qwen35_ssm_mixer`'s own
+/// runtime-bound tensor shaped to `append_delta_net_mixer`'s own
 /// `head_eps` (`[kv_heads, group]`) -- there is exactly one epsilon value
 /// per checkpoint, known at program-build time.
 ///
-/// Dense attention's own layers (`append_qwen35_dense_attention_layer`,
+/// Dense attention's own layers (`append_gated_attention_layer`,
 /// not `append_gqa_cached_layer`) run split-half RoPE over the
 /// checkpoint's PARTIAL rotary width plus a concatenated-by-sum pass-through
 /// remainder, and a per-head sigmoid gate on the attention output --
-/// `append_qwen35_dense_attention_layer`'s own doc walks through why the
+/// `append_gated_attention_layer`'s own doc walks through why the
 /// declared 3-section MRoPE (`rope.dimension_sections`) collapses to plain
 /// single-section RoPE for this checkpoint's text-only forward program.
 #[allow(clippy::too_many_arguments)]
-pub fn qwen35_forward_program(
+pub fn recurrent_interval_forward_program(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -3078,7 +3078,7 @@ pub fn qwen35_forward_program(
     ssm_d_conv: u32,
     rms_eps: f32,
 ) -> Result<(Vec<Op>, NodeId, Vec<LayerCacheRoots>), TensorError> {
-    qwen35_forward_program_with_last_row(
+    recurrent_interval_forward_program_with_last_row(
         vocab,
         embedding,
         feed_forward,
@@ -3101,7 +3101,7 @@ pub fn qwen35_forward_program(
 /// Builds the recurrent-interval program while optionally reducing the final vocabulary
 /// projection to a host-selected row before the packed weight is read.
 #[allow(clippy::too_many_arguments)]
-pub fn qwen35_forward_program_with_last_row(
+pub fn recurrent_interval_forward_program_with_last_row(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,

@@ -882,7 +882,7 @@ pub struct LoadedModel<'file> {
     /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
     /// (`Self::load`/`Self::load_from_safetensors`, both wrapping
     /// `gqa_cached_forward_program_with_experts`) -- `None` on the
-    /// recurrent-interval hybrid path (`crate::recurrent_interval::qwen35_forward_program` returns
+    /// recurrent-interval hybrid path (`crate::recurrent_interval::recurrent_interval_forward_program` returns
     /// a bare `logits` root with no named hidden-state counterpart yet).
     pub(super) hidden_root: Option<NodeId>,
     /// `general.name` off the checkpoint's own metadata ([`Self::load`]/
@@ -900,7 +900,7 @@ pub struct LoadedModel<'file> {
     /// [`CachedLayerRoots`] in that variant so both checkpoint families
     /// share one cache-threading loop, [`Self::run_decode_loop`]), and a mix
     /// of [`LayerCacheRoots::Attention`]/[`LayerCacheRoots::Ssm`] on the
-    /// recurrent-interval path (`crate::recurrent_interval::qwen35_forward_program`'s own return).
+    /// recurrent-interval path (`crate::recurrent_interval::recurrent_interval_forward_program`'s own return).
     pub(super) layer_roots: Vec<LayerCacheRoots>,
     /// One post-layer residual root per dense layer, when the forward
     /// builder exposes them (`crate::lowering::BoundProgram::residual_roots`'s
@@ -937,16 +937,16 @@ pub struct LoadedModel<'file> {
     /// This checkpoint's own recurrent-routed hparams, re-derived from `parsed`'s
     /// metadata alone (no weight bytes -- `crate::recurrent_routed_interval::hparams::from_metadata`'s
     /// own doc) at the same bind site that already called it once
-    /// inside `crate::recurrent_routed_interval::qwen35moe_forward_program`. `None` for
+    /// inside `crate::recurrent_routed_interval::recurrent_routed_interval_forward_program`. `None` for
     /// every family whose profile does not route the FFN. [`Self::run_decode_loop_observed_seeded`]'s
     /// own prefill batch reads this to build a SECOND, `Extent::Static`-width
-    /// program via `crate::recurrent_routed_interval::qwen35moe_forward_program_at_width`
-    /// on demand -- see `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
+    /// program via `crate::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width`
+    /// on demand -- see `proxima_tensor::spec::append_delta_net_mixer_with_taps_and_layout`'s
     /// own doc on why only a literal static width ever reaches its M>1
     /// branch -- and swaps it into `program`/`logits_root`/`layer_roots`/
     /// `single_position_step` for exactly that one evaluation, restoring
     /// the ordinary `Extent::Symbolic(0)` decode program right after.
-    pub(super) qwen35moe_hparams: Option<crate::recurrent_routed_interval::hparams::Qwen35MoeHparams>,
+    pub(super) recurrent_routed_interval_hparams: Option<crate::recurrent_routed_interval::hparams::RecurrentRoutedIntervalHparams>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -1098,18 +1098,18 @@ pub(super) struct DenseAttentionPlacement<'buffers> {
 // device residency is a backend property, not a pre-gather-mode property
 // (ROW 531 invariant 2): the full-graph decode arm places these roots too.
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-pub(super) fn qwen35_dense_attention_placement_enabled(
-    is_qwen35moe: bool,
+pub(super) fn dense_attention_placement_supported(
+    is_monolithic_kv: bool,
     is_metal: bool,
     force_two_range: bool,
     seed_cached_len: usize,
     requested: bool,
 ) -> bool {
-    is_qwen35moe && is_metal && !force_two_range && seed_cached_len == 0 && requested
+    is_monolithic_kv && is_metal && !force_two_range && seed_cached_len == 0 && requested
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-pub(super) fn qwen35_dense_attention_placed_byte_length(
+pub(super) fn dense_attention_placed_byte_length(
     family: &str,
     positions: usize,
     row_elements: usize,
@@ -1128,7 +1128,7 @@ pub(super) fn qwen35_dense_attention_placed_byte_length(
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-pub(super) fn retain_qwen35_segment_readbacks<RouterPlacement>(
+pub(super) fn retain_moe_segment_readbacks<RouterPlacement>(
     requested: &mut BTreeMap<NodeId, NodeId>,
     router_cut_placements: &BTreeMap<NodeId, RouterPlacement>,
     placed_dense_roots: Option<(NodeId, NodeId, NodeId, NodeId)>,

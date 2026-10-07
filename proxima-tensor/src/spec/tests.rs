@@ -261,12 +261,12 @@ fn gather_head_permutation_selects_head_rows_without_reordering_tokens_or_featur
 /// Proves the per-layer builders this module exports as `pub` are
 /// actually SUFFICIENT to build a forward program from outside this
 /// crate -- composes `embedding_lookup` -> [`append_hyper_connection_mix`]
-/// -> [`append_qwen35_ssm_mixer`] (`GdnOutputGate::Sigmoid`, the
+/// -> [`append_delta_net_mixer`] (`GdnOutputGate::Sigmoid`, the
 /// qwen4exp gate) -> [`append_hyper_connection_combine`] -> a final
 /// output mixer (`w_inject: None`, mirroring the doc's own
 /// "the final hyper-connection mixer carries [output_norm]") -> the
 /// same `rmsnorm` + multiply + reduce lm-head chain
-/// [`qwen35_forward_program`] ends every program with. Every dimension
+/// [`recurrent_interval_forward_program`] ends every program with. Every dimension
 /// is the smallest non-degenerate size that keeps every builder's own
 /// einsum maps distinct (`embedding = 1` matches
 /// `build_ssm_mixer_test_program`'s own convention below); the
@@ -479,7 +479,7 @@ fn public_builders_compose_a_one_layer_forward_program() {
         "state_in",
     );
 
-    let (block_out, _qkv_mixed, _state_out) = append_qwen35_ssm_mixer(
+    let (block_out, _qkv_mixed, _state_out) = append_delta_net_mixer(
         &mut program,
         mixed,
         inv_dim,
@@ -564,7 +564,7 @@ fn public_builders_compose_a_one_layer_forward_program() {
         "the final output mixer must pass w_inject: None"
     );
 
-    // The same rmsnorm + multiply + reduce chain `qwen35_forward_program`
+    // The same rmsnorm + multiply + reduce chain `recurrent_interval_forward_program`
     // ends every program with.
     let output_norm_weight = input_leaf(
         &mut program,
@@ -678,7 +678,7 @@ fn public_builders_compose_a_one_layer_forward_program() {
     assert_eq!(
         logits_shape,
         [tokens as u64, vocab as u64],
-        "logits must be [tokens, vocab] -- the same shape qwen35_forward_program's own lm_head produces"
+        "logits must be [tokens, vocab] -- the same shape recurrent_interval_forward_program's own lm_head produces"
     );
     assert!(
         logits_values.iter().all(|value| value.is_finite()),
@@ -2499,7 +2499,7 @@ fn transpose_rows(matrix: &[f32], rows: usize, cols: usize) -> alloc::vec::Vec<f
     transposed
 }
 
-/// Isolates [`append_qwen35_ssm_mixer_with_taps`]'s output-projection
+/// Isolates [`append_delta_net_mixer_with_taps`]'s output-projection
 /// reduce (spec.rs `out_weight_split_map`/`cur_product`/`cur`, the piece
 /// a downstream model-crate qwen35moe stage-by-stage diagnostic
 /// (`qwen35moe_layer0_stage_by_stage_position0_matches_tapped_reference`)
@@ -2509,7 +2509,7 @@ fn transpose_rows(matrix: &[f32], rows: usize, cols: usize) -> alloc::vec::Vec<f
 /// (`build_ssm_mixer_test_program`,
 /// `public_builders_compose_a_one_layer_forward_program`) used
 /// `kv_heads=1` or `head_v_dim=1`, so a wrong (u,g,j) nesting order in
-/// [`append_qwen35_ssm_mixer_with_taps`]'s own map could never show up
+/// [`append_delta_net_mixer_with_taps`]'s own map could never show up
 /// on them. Decides whether a divergence traces to the quantized-matmul
 /// fold ([`crate::cpu::run_reduce_quantized`]) mishandling this
 /// 3-letter contraction over a declared 4-D leaf, or to the map string
@@ -2568,7 +2568,7 @@ fn ssm_out_projection_reduce_isolated_packed_matches_dequantized_and_hand_comput
             value: 1.0,
         },
     );
-    // exact copy of append_qwen35_ssm_mixer_with_taps's own
+    // exact copy of append_delta_net_mixer_with_taps's own
     // output-projection maps, spec.rs:7093-7117.
     let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
     let ssm_out_split = elementwise(
@@ -6130,7 +6130,7 @@ async fn causal_conv1d_multi_row_batch_row_zero_matches_a_single_row_call() {
 /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
 /// divergence), the stage [`causal_conv1d_multi_row_batch_row_zero_matches_a_single_row_call`]
 /// clears: [`l2norm_with_eps_map`] on the SAME `[s, u, i]` shape
-/// `append_qwen35_ssm_mixer`'s own `query_prefill`/`key_prefill` calls
+/// `append_delta_net_mixer`'s own `query_prefill`/`key_prefill` calls
 /// use (`kv_heads=16`, `key_dim=128`, matching the real checkpoint's own
 /// GQA head count/head width) -- every row is independent (no causal
 /// window, no cross-row recurrence at all), so EVERY position's `[13,
@@ -6163,7 +6163,7 @@ async fn l2norm_multi_row_batch_matches_thirteen_single_row_calls() {
                 name: Some("x".into()),
             },
         );
-        // matches every real caller (`append_qwen35_ssm_mixer`'s own
+        // matches every real caller (`append_delta_net_mixer`'s own
         // `eps`): a rank-1 `[s]`-shaped input, one value per position,
         // never a rank-0 `scalar_constant` -- `l2norm_with_eps_map`'s
         // own `eps_map` ("s->su") reads `eps` through a real `s` axis.
@@ -8103,7 +8103,7 @@ async fn causal_conv1d_rejects_a_zero_width_window() {
     );
 }
 
-/// [`append_qwen35_delta_net_step`] against a hand-computed single-head,
+/// [`append_delta_net_step`] against a hand-computed single-head,
 /// `key_dim = value_dim = 2` delta-rule step -- llama.cpp's own
 /// `build_delta_net_autoregressive` traced by hand: `decay = exp(0) =
 /// 1`, `state_decayed = state_in` (`[[1,2],[3,4]]`), `v_pred = [1,2]`
@@ -8128,7 +8128,7 @@ async fn qwen35_delta_net_step_matches_a_hand_computed_recurrence() {
     let state_in = input_leaf(&mut program, DType::Float32, shape_ijh, "state_in");
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
 
-    let (out, state_out) = append_qwen35_delta_net_step(
+    let (out, state_out) = append_delta_net_step(
         &mut program,
         query,
         key,
@@ -8193,7 +8193,7 @@ async fn qwen35_gdn_prefill_scan_matches_repeated_graph_steps() {
     let beta = input_leaf(&mut program, DType::Float32, shape_h, "beta");
     let state_in = input_leaf(&mut program, DType::Float32, shape_ijh, "state_in");
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
-    let (out, state_out) = append_qwen35_delta_net_step(
+    let (out, state_out) = append_delta_net_step(
         &mut program,
         query,
         key,
@@ -8326,7 +8326,7 @@ async fn qwen35_delta_net_step_hand_computed_check_actually_detects_a_wrong_beta
     let state_in = input_leaf(&mut program, DType::Float32, shape_ijh, "state_in");
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
 
-    let (out, state_out) = append_qwen35_delta_net_step(
+    let (out, state_out) = append_delta_net_step(
         &mut program,
         query,
         key,
@@ -8435,7 +8435,7 @@ async fn l2norm_matches_a_hand_computed_unit_vector() {
     assert!((out_values[1] - 0.8).abs() < 1e-5, "got {}", out_values[1]);
 }
 
-/// [`append_qwen35_conv_branch`] against a hand-computed depthwise causal
+/// [`append_delta_net_conv_branch`] against a hand-computed depthwise causal
 /// conv (kernel 4, three channels `q|k|v` at `key_dim = value_dim = 1`,
 /// two steps): `causal_conv1d`'s own doc gives `out[s,d] = sum_l
 /// weight[d,l] * x[s+l-3, d]` (zero where the index is negative), so with
@@ -8476,7 +8476,7 @@ async fn append_qwen35_conv_branch_matches_a_hand_computed_conv_silu_split_and_n
     );
     let one = scalar_constant(&mut program, 1.0);
 
-    let (q_conv, k_conv, v_conv) = append_qwen35_conv_branch(
+    let (q_conv, k_conv, v_conv) = append_delta_net_conv_branch(
         &mut program,
         qkv_mixed,
         conv_weight,
@@ -8564,7 +8564,7 @@ async fn append_qwen35_conv_branch_hand_computed_check_actually_detects_a_wrong_
     );
     let one = scalar_constant(&mut program, 1.0);
 
-    let (_, _, v_conv) = append_qwen35_conv_branch(
+    let (_, _, v_conv) = append_delta_net_conv_branch(
         &mut program,
         qkv_mixed,
         conv_weight,
@@ -8679,7 +8679,7 @@ async fn repeat_kv_heads_hand_computed_check_actually_detects_a_swapped_head() {
     );
 }
 
-/// [`append_qwen35_ssm_mixer_with_taps`]'s own `s`-axis guard: a static
+/// [`append_delta_net_mixer_with_taps`]'s own `s`-axis guard: a static
 /// `s = 0` can never feed the recurrence (there is no position zero to
 /// seed `state_out`), so it is refused before any op after the guard
 /// runs -- unlike `s > 1`, which the M>1 branch
@@ -8697,7 +8697,7 @@ async fn qwen35_ssm_mixer_rejects_a_static_zero_width_step() {
         "x",
     );
 
-    let result = append_qwen35_ssm_mixer_with_taps(
+    let result = append_delta_net_mixer_with_taps(
         &mut program,
         x,
         x,
@@ -8729,14 +8729,14 @@ async fn qwen35_ssm_mixer_rejects_a_static_zero_width_step() {
 
     match result {
         Err(TensorError::SingleTokenStepOnly { op, s }) => {
-            assert_eq!(op, "qwen35_ssm_mixer");
+            assert_eq!(op, "delta_net_mixer");
             assert_eq!(s, 0);
         }
         other => panic!("expected SingleTokenStepOnly, got {other:?}"),
     }
 }
 
-/// The M>1 branch [`append_qwen35_ssm_mixer_with_taps_and_layout`] takes
+/// The M>1 branch [`append_delta_net_mixer_with_taps_and_layout`] takes
 /// when `x`'s leading axis is a literal `Extent::Static(width)` above 1
 /// (a per-request bound graph once the prompt length is known, per that
 /// function's own doc) unrolls the delta-rule recurrence across the
@@ -8878,7 +8878,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
         ],
         "state_in",
     );
-    let (static_mixer_out, static_taps) = append_qwen35_ssm_mixer_with_taps(
+    let (static_mixer_out, static_taps) = append_delta_net_mixer_with_taps(
         &mut static_program,
         x,
         inv_dim,
@@ -9190,7 +9190,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             ],
             "state_in",
         );
-        let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps_and_layout(
+        let (mixer_out, taps) = append_delta_net_mixer_with_taps_and_layout(
             &mut program,
             x,
             inv_dim,
@@ -9491,7 +9491,7 @@ fn assert_relative_rows_match(actual: &[f32], expected: &[f32], label: &str) {
     }
 }
 
-/// Builds one [`append_qwen35_ssm_mixer`] decode step at `kv_heads = 1`,
+/// Builds one [`append_delta_net_mixer`] decode step at `kv_heads = 1`,
 /// `group = 2` (the `u,g` seam, degenerate on `u` but real on `g`),
 /// `key_dim = value_dim_per_head = 1`, `l_cache = 2` -- every weight
 /// chosen to make the pipeline hand-traceable: `wqkv = 0` and the conv's
@@ -9502,11 +9502,11 @@ fn assert_relative_rows_match(actual: &[f32], expected: &[f32], label: &str) {
 /// downstream projection equals its own raw weight row; `ssm_beta =
 /// ssm_alpha = ssm_dt_bias = ssm_a = 0` collapse `beta` to `sigmoid(0) =
 /// 0.5` and `gate` (hence `decay`) to `0`/`1`, reusing
-/// [`append_qwen35_delta_net_step`]'s own already-proven `decay = 1`
+/// [`append_delta_net_step`]'s own already-proven `decay = 1`
 /// path; `head_v_dim = 1` degenerates the gated RMSNorm's own
 /// mean-square to `delta_out^2`, so `normed_out = sign(delta_out)`
 /// exactly, the same width-1-l2norm-is-sign identity
-/// [`append_qwen35_conv_branch`]'s own test already exploits.
+/// [`append_delta_net_conv_branch`]'s own test already exploits.
 fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId, SsmMixerTaps) {
     let mut program = Vec::new();
     let key_dim = 1u32;
@@ -9616,7 +9616,7 @@ fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId,
         "state_in",
     );
 
-    let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
+    let (mixer_out, taps) = append_delta_net_mixer_with_taps(
         &mut program,
         x,
         inv_dim,
@@ -9652,7 +9652,7 @@ fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId,
 
 /// The recurrent prefill boundary is made from values the graph already
 /// computes, rather than a second projection path. Their shapes are the
-/// exact one-position contract [`append_qwen35_delta_net_step`] consumes;
+/// exact one-position contract [`append_delta_net_step`] consumes;
 /// an executor may therefore cut immediately before `query` through
 /// `beta`, batch the prefix, and thread only `state_out` sequentially.
 #[test]
@@ -9864,7 +9864,7 @@ async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
         query: sequence.get(taps.query_sequence).expect("query sequence").0,
         key: sequence.get(taps.key_sequence).expect("key sequence").0,
         // `query_sequence`/`key_sequence`'s own `"sdug->sugd"` reduce
-        // (`append_qwen35_ssm_mixer_with_taps_and_layout`'s prefill
+        // (`append_delta_net_mixer_with_taps_and_layout`'s prefill
         // branch) stores `kv_heads` fastest, `key_dim` next -- `key_dim
         // == 1` here so `query_key_dim_stride`'s exact value never
         // actually advances an index, but `kv_heads` still must.
@@ -9927,7 +9927,7 @@ async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
         alloc::vec![Extent::Static(2), Extent::Static(1)],
         "tail_out_weight",
     );
-    let tail_mixer_out = append_qwen35_gdn_sequence_tail(
+    let tail_mixer_out = append_delta_net_sequence_tail(
         &mut tail_program,
         GdnSequenceTail {
             x: tail_x,
@@ -10015,7 +10015,7 @@ async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
     }
 }
 
-/// Builds one call into [`append_qwen35_dense_attention_layer`] at the
+/// Builds one call into [`append_gated_attention_layer`] at the
 /// smallest non-degenerate dims that still separate all three fixed
 /// defects: `embedding = 1` (so every matmul is a scalar identity,
 /// `wq`/`wk`/`wv`/`w_gate_q`/`wo` ARE the per-dim activation), `rotary_dim
@@ -10076,7 +10076,7 @@ fn append_qwen35_dense_attention_layer_hand_computed_check_actually_detects_a_dr
     );
 }
 
-/// One call into [`append_qwen35_dense_attention_layer`] at the fixed
+/// One call into [`append_gated_attention_layer`] at the fixed
 /// small dims the two tests above hand-compute against -- `gate_data`
 /// is the only knob a caller varies (`w_gate_q`'s own 4 values), so the
 /// mutation test above and the base test share every other weight byte
@@ -10172,7 +10172,7 @@ fn evaluate_dense_attention_test_program(
     let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
 
     let (x_next, (rotated_k_first, rotated_k_second, k_pass, v_new)) =
-        append_qwen35_dense_attention_layer(
+        append_gated_attention_layer(
             &mut program,
             x,
             inv_dim,
@@ -10277,7 +10277,7 @@ fn evaluate_dense_attention_test_program(
     )
 }
 
-/// Builds [`append_qwen35_dense_attention_only`]'s (or its `_with_taps`
+/// Builds [`append_gated_attention_only`]'s (or its `_with_taps`
 /// sibling's) own tiny fixture inputs, at the same fixed dims
 /// [`evaluate_dense_attention_test_program`] hand-computes against
 /// (`embedding = 1`, `attn_head_dim = 4`, `rotary_dim = 2`,
@@ -10401,9 +10401,9 @@ fn dense_attention_only_test_inputs(
     )
 }
 
-/// [`append_qwen35_dense_attention_only_with_taps`] must build the
+/// [`append_gated_attention_only_with_taps`] must build the
 /// byte-identical program to its thin-wrapper sibling
-/// [`append_qwen35_dense_attention_only`] -- the taps variant only
+/// [`append_gated_attention_only`] -- the taps variant only
 /// returns extra `NodeId`s into the same program, never a structurally
 /// different one, mirroring
 /// `layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer`'s
@@ -10435,7 +10435,7 @@ fn dense_attention_only_and_with_taps_produce_the_same_program() {
         k_pass_cache,
         v_cache,
     ) = dense_attention_only_test_inputs(&mut plain_program);
-    let (plain_residual, plain_roots) = append_qwen35_dense_attention_only(
+    let (plain_residual, plain_roots) = append_gated_attention_only(
         &mut plain_program,
         x,
         inv_dim,
@@ -10490,7 +10490,7 @@ fn dense_attention_only_and_with_taps_produce_the_same_program() {
         k_pass_cache,
         v_cache,
     ) = dense_attention_only_test_inputs(&mut taps_program);
-    let (taps_residual, taps) = append_qwen35_dense_attention_only_with_taps(
+    let (taps_residual, taps) = append_gated_attention_only_with_taps(
         &mut taps_program,
         x,
         inv_dim,
@@ -10537,7 +10537,7 @@ fn dense_attention_only_and_with_taps_produce_the_same_program() {
     );
 }
 
-/// [`qwen35_forward_program`]'s whole-program wiring, both layer kinds
+/// [`recurrent_interval_forward_program`]'s whole-program wiring, both layer kinds
 /// in one small stack (`block_count = 4`, `full_attention_interval =
 /// 2`, so layers 0,2 are SSM and layers 1,3 are dense attention, per
 /// its own `(layer + 1) % full_attention_interval == 0` doc) --
@@ -10551,7 +10551,7 @@ fn dense_attention_only_and_with_taps_produce_the_same_program() {
 #[test]
 fn the_whole_qwen35_forward_pass_infers_at_real_dimensions() {
     let (program, logits, roots) =
-        qwen35_forward_program(100, 8, 16, 2, 1, 4, 8, 4, 2, 2, 2, 1, 4, 3, 1e-5)
+        recurrent_interval_forward_program(100, 8, 16, 2, 1, 4, 8, 4, 2, 2, 2, 1, 4, 3, 1e-5)
             .expect("the whole qwen35 forward pass lowers to a program");
 
     assert_eq!(roots.len(), 4, "one root set per block");
@@ -10579,7 +10579,7 @@ fn the_whole_qwen35_forward_pass_infers_at_real_dimensions() {
 
 #[test]
 fn qwen35_last_row_projection_has_one_output_row() {
-    let (program, logits, _roots) = qwen35_forward_program_with_last_row(
+    let (program, logits, _roots) = recurrent_interval_forward_program_with_last_row(
         100, 8, 16, 2, 1, 4, 8, 4, 2, 2, 2, 1, 4, 3, 1e-5, true,
     )
     .expect("the last-row qwen35 program lowers");
@@ -10590,7 +10590,7 @@ fn qwen35_last_row_projection_has_one_output_row() {
 
 /// Real-checkpoint regression: `qwen35moe` layer 3 (the first
 /// full-attention layer), position 0 -- the q/gate projection chain
-/// [`append_qwen35_dense_attention_only_with_taps`] builds (`qg_product`
+/// [`append_gated_attention_only_with_taps`] builds (`qg_product`
 /// -> `qg_raw` reduce -> [`per_head_channel_range`] narrow, spec.rs
 /// 4771-4794) used to return UNRELATED row-0 values between a 13-row
 /// prefill evaluation and a 1-row evaluation of the identical row, even
@@ -10852,7 +10852,7 @@ fn the_whole_qwen35_forward_pass_infers_at_the_2b_checkpoints_real_dimensions() 
     // (rope.dimension_count), block_count=24, full_attention_interval=4,
     // ssm_state_size=128, ssm_time_step_rank=16, ssm_group_count=16,
     // ssm_inner_size=2048, ssm_conv_kernel=4, rms_epsilon=1e-6.
-    let (program, _logits, roots) = qwen35_forward_program(
+    let (program, _logits, roots) = recurrent_interval_forward_program(
         151936, 2048, 6144, 8, 2, 64, 256, 24, 4, 128, 16, 16, 2048, 4, 1e-6,
     )
     .expect("the real 2b's own dimensions lower to a program");
@@ -10880,7 +10880,7 @@ fn the_whole_qwen35_forward_pass_infers_at_the_2b_checkpoints_real_dimensions() 
     }
 }
 
-/// [`append_qwen35_ssm_mixer`] against the hand-derivation in
+/// [`append_delta_net_mixer`] against the hand-derivation in
 /// [`build_ssm_mixer_test_program`]'s own doc: `history = [q=3, k=-2,
 /// v0=1, v1=2]` conv-blends straight through (new-token tap weighted by
 /// a zero `qkv_mixed`), `silu` gives `q_raw = 2.85772238`, `k_raw =
@@ -10963,7 +10963,7 @@ async fn qwen35_ssm_mixer_matches_a_hand_computed_decode_step() {
         query: evaluated.get(taps.query).expect("query tap present").0,
         key: evaluated.get(taps.key).expect("key tap present").0,
         // `taps.query`/`taps.key` are the SQUEEZED `"dug"`-ordered nodes
-        // (`append_qwen35_ssm_mixer_with_taps_and_layout`'s own decode
+        // (`append_delta_net_mixer_with_taps_and_layout`'s own decode
         // squeeze): `kv_heads` fastest here (`group == 1`), `key_dim ==
         // 1` so its own stride never actually advances an index.
         query_key_head_stride: 1,
@@ -11140,7 +11140,7 @@ async fn qwen35_gdn_sequence_tail_matches_repeated_one_position_graphs() {
         alloc::vec![Extent::Static(2), Extent::Static(2)],
         "out_weight",
     );
-    let output = append_qwen35_gdn_sequence_tail(
+    let output = append_delta_net_sequence_tail(
         &mut program,
         GdnSequenceTail {
             x,
@@ -18781,7 +18781,7 @@ mod hybrid_dense_descriptor {
     fn the_descriptor_and_the_positional_interval_builder_lower_one_program() {
         let kinds = [LayerKind::Gdn, LayerKind::Attention, LayerKind::Gdn, LayerKind::Attention];
         let (positional, logits, _roots) =
-            qwen35_forward_program_with_last_row(VOCAB, EMBEDDING, 16, 2, 1, ROTARY_DIM, ATTN_HEAD_DIM, 4, 2, 2, 2, 1, 4, 3, 1e-5, true)
+            recurrent_interval_forward_program_with_last_row(VOCAB, EMBEDDING, 16, 2, 1, ROTARY_DIM, ATTN_HEAD_DIM, 4, 2, 2, 2, 1, 4, 3, 1e-5, true)
                 .expect("the positional builder lowers");
 
         let lowered = build_forward(&descriptor(&kinds)).expect("the descriptor lowers");
