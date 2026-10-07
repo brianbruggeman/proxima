@@ -1,0 +1,47 @@
+raw arm=tip process=0 run=0 ms_per_token=15.5300
+raw arm=tip process=0 run=1 ms_per_token=14.9250
+raw arm=tip process=0 run=2 ms_per_token=14.9160
+raw arm=llama-server process=0 run=0 ms_per_token=5.2446
+raw arm=llama-server process=0 run=1 ms_per_token=5.2164
+raw arm=llama-server process=0 run=2 ms_per_token=5.2223
+arm=tip metric=ms_per_token process=0 run=1 value=14.9250 outlier=false
+arm=tip metric=ms_per_token process=0 run=2 value=14.9160 outlier=false
+summary arm=tip metric=ms_per_token n_all=2 median_all=14.9205 cov_all_pct=0.03 min_all=14.9160 max_all=14.9250 | n_kept=2 median_kept=14.9205 mad_kept=0.0045 cov_kept_pct=0.03 min_kept=14.9160 max_kept=14.9250
+arm=tip metric=prefill_ms process=0 run=1 value=830.0620 outlier=false
+arm=tip metric=prefill_ms process=0 run=2 value=845.0010 outlier=false
+summary arm=tip metric=prefill_ms n_all=2 median_all=837.5315 cov_all_pct=0.89 min_all=830.0620 max_all=845.0010 | n_kept=2 median_kept=837.5315 mad_kept=7.4695 cov_kept_pct=0.89 min_kept=830.0620 max_kept=845.0010
+arm=tip metric=ttft_ms process=0 run=1 value=830.0000 outlier=false
+arm=tip metric=ttft_ms process=0 run=2 value=845.0000 outlier=false
+summary arm=tip metric=ttft_ms n_all=2 median_all=837.5000 cov_all_pct=0.90 min_all=830.0000 max_all=845.0000 | n_kept=2 median_kept=837.5000 mad_kept=7.5000 cov_kept_pct=0.90 min_kept=830.0000 max_kept=845.0000
+memory arm=tip metric=peak_rss_bytes process=0 value=2326659072
+summary arm=tip metric=peak_rss_bytes n=1 median=2326659072 max=2326659072
+memory arm=tip metric=peak_footprint_bytes process=0 value=615356608
+summary arm=tip metric=peak_footprint_bytes n=1 median=615356608 max=615356608
+memory arm=tip metric=peak_gpu_bytes process=0 value=3315433472
+summary arm=tip metric=peak_gpu_bytes n=1 median=3315433472 max=3315433472
+extra arm=tip process=0 peers_present_at_exit=[]
+arm=llama-server metric=ms_per_token process=0 run=1 value=5.2164 outlier=false
+arm=llama-server metric=ms_per_token process=0 run=2 value=5.2223 outlier=false
+summary arm=llama-server metric=ms_per_token n_all=2 median_all=5.2193 cov_all_pct=0.06 min_all=5.2164 max_all=5.2223 | n_kept=2 median_kept=5.2193 mad_kept=0.0029 cov_kept_pct=0.06 min_kept=5.2164 max_kept=5.2223
+arm=llama-server metric=prefill_ms process=0 run=1 value=151.1990 outlier=false
+arm=llama-server metric=prefill_ms process=0 run=2 value=151.2710 outlier=false
+summary arm=llama-server metric=prefill_ms n_all=2 median_all=151.2350 cov_all_pct=0.02 min_all=151.1990 max_all=151.2710 | n_kept=2 median_kept=151.2350 mad_kept=0.0360 cov_kept_pct=0.02 min_kept=151.1990 max_kept=151.2710
+arm=llama-server metric=ttft_ms process=0 run=1 value=153.0225 outlier=false
+arm=llama-server metric=ttft_ms process=0 run=2 value=153.0674 outlier=false
+summary arm=llama-server metric=ttft_ms n_all=2 median_all=153.0449 cov_all_pct=0.01 min_all=153.0225 max_all=153.0674 | n_kept=2 median_kept=153.0449 mad_kept=0.0224 cov_kept_pct=0.01 min_kept=153.0225 max_kept=153.0674
+memory arm=llama-server metric=peak_rss_bytes process=0 value=1767735296
+summary arm=llama-server metric=peak_rss_bytes n=1 median=1767735296 max=1767735296
+memory arm=llama-server metric=peak_footprint_bytes process=0 value=281434304
+summary arm=llama-server metric=peak_footprint_bytes n=1 median=281434304 max=281434304
+extra arm=llama-server process=0 request=0 prompt_n=1000 predicted_n=128 ids_len=128 events=129 prefill_ms=165.5250 ttft_ms=168.6279 ms_per_token=5.2446
+extra arm=llama-server process=0 request=1 prompt_n=1000 predicted_n=128 ids_len=128 events=129 prefill_ms=151.1990 ttft_ms=153.0225 ms_per_token=5.2164
+extra arm=llama-server process=0 request=2 prompt_n=1000 predicted_n=128 ids_len=128 events=129 prefill_ms=151.2710 ttft_ms=153.0674 ms_per_token=5.2223
+bound metric=ms_per_token arm=tip vs=llama-server arm_median=14.9205 reference_median=5.2193 delta=9.7012 limit=0.1044 within=false
+bound metric=prefill_ms arm=tip vs=llama-server arm_median=837.5315 reference_median=151.2350 delta=686.2965 limit=3.0247 within=false
+bound metric=ttft_ms arm=tip vs=llama-server arm_median=837.5000 reference_median=153.0449 delta=684.4551 limit=3.0609 within=false
+bound metric=peak_rss_bytes arm=tip vs=llama-server arm_median=2326659072 reference_median=1767735296 delta=558923776 limit=35354706 within=false
+bound metric=peak_footprint_bytes arm=tip vs=llama-server arm_median=615356608 reference_median=281434304 delta=333922304 limit=5628686 within=false
+bound metric=peak_gpu_bytes arm=tip vs=llama-server n=0
+ids arm=tip run=0 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=tip run=1 len=128 llama_len=128 common_prefix=128 equal=true
+ids arm=tip run=2 len=128 llama_len=128 common_prefix=128 equal=true

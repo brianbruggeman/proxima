@@ -1,0 +1,25 @@
+probe=expert_grouped_gemm experts=32 runs=21 unit=us gpu_clock=GPUStartTime..GPUEndTime
+shape=gate_up tokens=160 routing=balanced median_us=1146.1 cov_pct=36.50 useful_tflops=0.146
+shape=gate_up tokens=160 routing=zipf median_us=1278.2 cov_pct=22.50 useful_tflops=0.131
+shape=gate_up tokens=160 routing=single median_us=454.9 cov_pct=14.50 useful_tflops=0.369
+shape=gate_up tokens=512 routing=balanced median_us=614.4 cov_pct=60.33 useful_tflops=0.874
+shape=gate_up tokens=512 routing=zipf median_us=696.2 cov_pct=4.06 useful_tflops=0.771
+shape=gate_up tokens=512 routing=single median_us=469.6 cov_pct=2.70 useful_tflops=1.143
+shape=gate_up tokens=1000 routing=balanced median_us=638.4 cov_pct=61.66 useful_tflops=1.643
+shape=gate_up tokens=1000 routing=zipf median_us=828.0 cov_pct=2.22 useful_tflops=1.266
+shape=gate_up tokens=1000 routing=single median_us=912.6 cov_pct=0.51 useful_tflops=1.149
+shape=gate_up tokens=2048 routing=balanced median_us=1024.0 cov_pct=60.93 useful_tflops=2.097
+shape=gate_up tokens=2048 routing=zipf median_us=1470.0 cov_pct=1.63 useful_tflops=1.461
+shape=gate_up tokens=2048 routing=single median_us=1840.8 cov_pct=1.14 useful_tflops=1.167
+shape=down tokens=160 routing=balanced median_us=501.6 cov_pct=63.87 useful_tflops=0.334
+shape=down tokens=160 routing=zipf median_us=434.4 cov_pct=24.26 useful_tflops=0.386
+shape=down tokens=160 routing=single median_us=208.8 cov_pct=7.92 useful_tflops=0.804
+shape=down tokens=512 routing=balanced median_us=662.9 cov_pct=38.11 useful_tflops=0.810
+shape=down tokens=512 routing=zipf median_us=617.0 cov_pct=2.81 useful_tflops=0.870
+shape=down tokens=512 routing=single median_us=526.9 cov_pct=4.01 useful_tflops=1.019
+shape=down tokens=1000 routing=balanced median_us=948.8 cov_pct=17.87 useful_tflops=1.105
+shape=down tokens=1000 routing=zipf median_us=790.1 cov_pct=2.16 useful_tflops=1.327
+shape=down tokens=1000 routing=single median_us=1042.5 cov_pct=13.69 useful_tflops=1.006
+shape=down tokens=2048 routing=balanced median_us=1061.4 cov_pct=52.52 useful_tflops=2.023
+shape=down tokens=2048 routing=zipf median_us=1213.7 cov_pct=1.46 useful_tflops=1.769
+shape=down tokens=2048 routing=single median_us=2078.0 cov_pct=14.08 useful_tflops=1.033
