@@ -586,12 +586,12 @@ fn emit_sizing_consts() {
     out.push_str(&format!(
         "pub const ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS: u64 = {attention_rows_accumulator_fragments};\n"
     ));
-    let attention_rows_target_threadgroups = require_nonzero(
-        "attention_rows.target_threadgroups",
-        resolve_int(&root, "attention_rows", "target_threadgroups"),
+    let attention_rows_target_simdgroups = require_nonzero(
+        "attention_rows.target_simdgroups",
+        resolve_int(&root, "attention_rows", "target_simdgroups"),
     );
     out.push_str(&format!(
-        "pub const ATTENTION_ROWS_TARGET_THREADGROUPS: u64 = {attention_rows_target_threadgroups};\n"
+        "pub const ATTENTION_ROWS_TARGET_SIMDGROUPS: u64 = {attention_rows_target_simdgroups};\n"
     ));
 
     let workgroup_size = require_nonzero(

@@ -381,9 +381,10 @@ simdgroups_max = 4
 # override via OMEGA_ATTENTION_ROWS_KEYS_PER_BLOCK.
 keys_per_block = 128
 # keys one split of the cached range holds, at least: the bucket capacity over this is the
-# split count a small K fans out to, up to `target_threadgroups`. smaller than the block, so
-# a verify of a few rows keeps the occupancy a 64-key slice gives while a prefill walks whole
-# blocks. must be a multiple of 8. override via OMEGA_ATTENTION_ROWS_KEYS_PER_SPLIT.
+# split count a small K fans out to, up to the threadgroups `target_simdgroups` asks for.
+# smaller than the block, so a verify of a few rows keeps the occupancy a 64-key slice gives
+# while a prefill walks whole blocks. must be a multiple of 8. override via
+# OMEGA_ATTENTION_ROWS_KEYS_PER_SPLIT.
 keys_per_split = 64
 # head dims per simdgroup: simdgroups = clamp(head_dim / this, min_simdgroups, 8), llama.cpp's
 # `ne00 >= 512 ? 8 : 4` (ggml-metal-ops.cpp:3406) for head dims 256 and 512. must be a
@@ -407,10 +408,14 @@ vector_blocks_per_tile = 2
 # unit may need before the accumulators spill. override via
 # OMEGA_ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS.
 accumulator_fragments = 16
-# threadgroups the split rule fills to: the decode split form's count at 2048 keys
-# (8 heads x 32 splits). raising it adds splits (scratch, merge width) at large K.
-# override via OMEGA_ATTENTION_ROWS_TARGET_THREADGROUPS.
-target_threadgroups = 256
+# simdgroups in flight the split rule fills to (threadgroups = this over the form's simdgroups
+# per threadgroup). measured on one device: the fastest tile and split of a verify or chunk of
+# 8 to 128 rows lands on 256 simdgroups on head dim 512 (8 simdgroups, 32 threadgroups) and on
+# head dim 64 (2 simdgroups, 128 threadgroups); head dim 256 (4 simdgroups) is fastest near 384
+# and up to 26 percent slower at 256 (32 rows). a device with a different resident-simdgroup
+# capacity moves this, not code. must be nonzero. override via
+# OMEGA_ATTENTION_ROWS_TARGET_SIMDGROUPS.
+target_simdgroups = 256
 
 [selection]
 # smallest row count at which the rank-count top-fraction expression lowers to one selection
