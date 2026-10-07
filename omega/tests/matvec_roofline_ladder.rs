@@ -2905,7 +2905,7 @@ fn row334_four_failing_arms_real_scale() {
 /// VARIANT half of ROW 327's 2x2. `LadderReduceLast` delegates straight to
 /// [`multi_tensor_matmul_program`] (weight operand first, reduces the LAST
 /// axis, `_ax_0_1` in `kernel_cache_key`); `ProductionReduceMiddle` mirrors
-/// `mistral_forward_program`'s own output-head `elementwise`/`reduce` calls
+/// `gqa_forward_program`'s own output-head `elementwise`/`reduce` calls
 /// (`proxima-tensor/src/spec.rs:4181-4195`: `(normed_final, "sd->sdv")` then
 /// `(lm_head, "dv->sdv")`, `reduce(.., "sdv->sdv", "sv->sdv")`) exactly --
 /// activation operand first, reduces the MIDDLE axis, `_ax_0_2`.
@@ -2924,7 +2924,7 @@ impl OpShape {
     }
 }
 
-/// Mirrors `mistral_forward_program`'s output head exactly
+/// Mirrors `gqa_forward_program`'s output head exactly
 /// (`proxima-tensor/src/spec.rs:4181-4195`), generalized over
 /// `weight_names.len()` independent weight nodes sharing ONE `activation`
 /// input so [`omega::metal::plan`]/`execute_plan` batch every dispatch into
@@ -3488,7 +3488,7 @@ fn pack_production_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
 /// controls the dispatch (no hazard tracker, no arena, no plan cache) the
 /// same way arms A-D already do for the ladder's own hand-written body.
 /// Builds the exact `sd->sdv`/`dv->sdv` reduce-middle op
-/// [`production_head_program`] mirrors from `mistral_forward_program`'s own
+/// [`production_head_program`] mirrors from `gqa_forward_program`'s own
 /// output head (activation operand first, weight second -- that function's
 /// own doc), which is why [`Kernel::bindings`] is read back rather than
 /// assumed: production's own operand order differs from this ladder's

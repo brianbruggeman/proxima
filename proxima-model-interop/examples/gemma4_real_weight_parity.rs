@@ -1955,7 +1955,7 @@ fn position_zero_slice(embedding: usize) -> std::ops::Range<usize> {
 }
 
 /// Reproduces `append_moe_ffn`'s own
-/// top-k selection (`mistral_layer_moe.rs:1061-1221`) for
+/// top-k selection (`gqa_layer_routed.rs:1061-1221`) for
 /// [`proxima_tensor::spec::ExpertGatingFunc::Softmax`] gating: each round
 /// takes the arg-max of the still-unselected logits (ties break to the
 /// HIGHEST index, matching the engine's `reduce Maximum` over
@@ -2017,7 +2017,7 @@ fn dequant_range(ggml_type: GgmlType, source: &[u8], element_count: usize) -> Ve
 }
 
 /// One expert's GeGLU FFN round: `down(gelu_tanh(gate . x) * (up . x))` --
-/// `append_moe_round_output`'s math (`mistral_layer_moe.rs:897-930`)
+/// `append_moe_round_output`'s math (`gqa_layer_routed.rs:897-930`)
 /// independently reproduced against dequantized weight rows instead of the
 /// engine's gathered-quantized kernel.
 fn compute_expert_ffn(

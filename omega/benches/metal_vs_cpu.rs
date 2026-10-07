@@ -16,7 +16,7 @@
 //!   misread as a perf win.
 //! - `matvec_batch1_f32`: bandwidth-bound batch-1 matvec at the model's real
 //!   weight shapes (4096x4096, 4096x14336, 14336x4096 — `attn_q`/`attn_output`,
-//!   `ffn_gate`/`ffn_up`, `ffn_down` in `spec::mistral_forward_program`'s
+//!   `ffn_gate`/`ffn_up`, `ffn_down` in `spec::gqa_forward_program`'s
 //!   `EMBEDDING=4096`/`FEED_FORWARD=14336`). M1 Max GPU and CPU share unified
 //!   memory, so this is the arm that tells whether Metal wins the decode
 //!   regime at all, not just the arm that flatters it.
@@ -293,7 +293,7 @@ fn bench_gemm_square(c: &mut Criterion) {
 fn bench_matvec_batch1(c: &mut Criterion) {
     let mut group = c.benchmark_group("matvec_batch1_f32");
     // (out_dim, in_dim, label) — the three real weight shapes
-    // `mistral_forward_program` carries: `attn_q`/`attn_output`
+    // `gqa_forward_program` carries: `attn_q`/`attn_output`
     // (4096x4096), `ffn_gate`/`ffn_up` (14336x4096), `ffn_down`
     // (4096x14336).
     let shapes: [(u32, u32, &str); 3] = [

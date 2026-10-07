@@ -276,7 +276,7 @@ pub enum InteropError {
     /// program for an [`proxima_tensor::Op::Input`] named `name` and found
     /// none -- would mean `crate::generate::build_single_range_program`'s
     /// own `kv_cache.{layer}.*` naming has drifted out of sync with
-    /// [`proxima_tensor::spec::mistral_single_range_cached_forward_program`]'s.
+    /// [`proxima_tensor::spec::gqa_single_range_cached_forward_program`]'s.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[error("single-range program has no input node named {0:?}")]
     UnboundInputName(String),

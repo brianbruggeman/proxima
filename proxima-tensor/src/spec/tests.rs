@@ -687,8 +687,8 @@ fn public_builders_compose_a_one_layer_forward_program() {
 }
 
 /// Regression proof for the qk-norm-dropped-on-MoE-layers bug fixed
-/// alongside this test: before the fix, `append_mistral_cached_moe_layer`
-/// took no `qk_norm` parameter at all, so `mistral_cached_forward_program_with_experts`
+/// alongside this test: before the fix, `append_gqa_cached_routed_layer`
+/// took no `qk_norm` parameter at all, so `gqa_cached_forward_program_with_experts`
 /// silently discarded the `qk_norm` argument for every routed (MoE)
 /// layer -- flipping it produced the byte-identical program. A
 /// Qwen3-MoE-shaped checkpoint (`expert_count > 0`) carries
@@ -698,12 +698,12 @@ fn public_builders_compose_a_one_layer_forward_program() {
 /// this asserts the MoE program's own length actually changes with the
 /// flag, the exact invariant the bug violated.
 #[test]
-fn mistral_cached_forward_program_with_experts_qk_norm_changes_the_moe_program() {
-    let (qk_norm_off, _, _, _) = mistral_cached_forward_program_with_experts(
+fn gqa_cached_forward_program_with_experts_qk_norm_changes_the_moe_program() {
+    let (qk_norm_off, _, _, _) = gqa_cached_forward_program_with_experts(
         32_000, 256, 128, 4, 2, 64, 1, 4, 1, false, false, false, false,
     )
     .expect("moe program without qk_norm lowers");
-    let (qk_norm_on, _, _, _) = mistral_cached_forward_program_with_experts(
+    let (qk_norm_on, _, _, _) = gqa_cached_forward_program_with_experts(
         32_000, 256, 128, 4, 2, 64, 1, 4, 1, true, false, false, false,
     )
     .expect("moe program with qk_norm lowers");
@@ -723,7 +723,7 @@ fn mistral_cached_forward_program_with_experts_qk_norm_changes_the_moe_program()
 #[test]
 fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
     let (qwen2_program, _, _, _, _) =
-        mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+        gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
             32_000,
             256,
             128,
@@ -747,7 +747,7 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             false,
         )
         .expect("qwen2-shaped split-half program lowers");
-    let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
+    let (generic_program, _, _, _, _) = gqa_cached_forward_program_with_experts_and_layer_taps(
         32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, false,
     )
     .expect("generic program lowers");
@@ -757,9 +757,9 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
     );
 }
 
-/// [`mistral_cached_forward_program_with_experts_and_layer_taps`] must
+/// [`gqa_cached_forward_program_with_experts_and_layer_taps`] must
 /// build the byte-identical program to its thin-wrapper sibling
-/// (`mistral_cached_forward_program_with_experts`'s own doc on that
+/// (`gqa_cached_forward_program_with_experts`'s own doc on that
 /// relationship) and return exactly one residual tap per layer, in
 /// layer order -- the invariant a caller bisecting CPU-vs-Metal
 /// divergence across a 48-layer checkpoint depends on to index
@@ -767,12 +767,12 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
 #[test]
 fn layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer() {
     let (plain_program, plain_roots, plain_cache_roots, _plain_moe_sites) =
-        mistral_cached_forward_program_with_experts(
+        gqa_cached_forward_program_with_experts(
             32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false, false,
         )
         .expect("plain moe program lowers");
     let (taps_program, taps_roots, taps_cache_roots, layer_residuals, _taps_moe_sites) =
-        mistral_cached_forward_program_with_experts_and_layer_taps(
+        gqa_cached_forward_program_with_experts_and_layer_taps(
             32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false, false, false,
         )
         .expect("taps moe program lowers");
@@ -808,7 +808,7 @@ fn layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer() 
 /// before any real-checkpoint embedding test would even hint at it.
 #[test]
 fn forward_roots_hidden_is_an_operand_of_the_lm_head_product() {
-    let (program, roots, _cache_roots, _moe_sites) = mistral_cached_forward_program_with_experts(
+    let (program, roots, _cache_roots, _moe_sites) = gqa_cached_forward_program_with_experts(
         32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false, false,
     )
     .expect("the dense cached forward pass lowers to a program");
@@ -1904,7 +1904,7 @@ fn a_topk2_probe_unrolls_two_argmax_rounds_with_exclusion() {
 /// SwiGLU over a raw `f32` slice, independent of the graph
 /// [`append_moe_ffn`] builds -- the same role [`matvec`] plays for the
 /// bare-linear probes above, just with the real per-layer nonlinearity
-/// [`append_mistral_layer`]'s dense FFN also runs.
+/// [`append_gqa_layer`]'s dense FFN also runs.
 fn swiglu_ffn(
     x: &[f32],
     gate_w: &[f32],
@@ -1968,7 +1968,7 @@ fn top_k_routes_and_weights(logits: &[f32], k: usize) -> alloc::vec::Vec<(usize,
         .collect()
 }
 
-/// End-to-end proof for [`append_moe_ffn`]/[`append_mistral_moe_layer`]:
+/// End-to-end proof for [`append_moe_ffn`]/[`append_gqa_routed_layer`]:
 /// two tokens, three experts, top-2 routing, real SwiGLU per expert
 /// (not the bare-linear stand-in the two probes above use) and a real
 /// softmax combination weight -- everything [`a_moe_block_written_as_toml_...`]
@@ -3421,7 +3421,7 @@ fn a_gqa_attention_block_with_a_non_power_of_two_group_groups_query_heads_onto_s
 /// `scores` before the mask does not fail `sums to 1.0` — a saturated
 /// softmax is still a valid softmax — so that invariant alone cannot
 /// catch it. This builds the same score/scale/softmax composition
-/// `append_mistral_layer` now runs (`q . k`, multiply by
+/// `append_gqa_layer` now runs (`q . k`, multiply by
 /// [`scalar_constant`], then max-shift/exp/normalize, no mask
 /// — masking is `causal_attention.toml`'s own proven concern, not this
 /// one's), at the model's real `head_dim=128`, built TWICE on the same
@@ -3861,7 +3861,7 @@ fn a_mistral_layer_written_as_toml_evaluates() {
 
 /// The whole model, built as a program instead of authored as 32 copies
 /// of one TOML file: token embedding lookup, `block_count` layers (each
-/// [`append_mistral_layer`], mirroring `specs/mistral_layer.toml`), a
+/// [`append_gqa_layer`], mirroring `specs/mistral_layer.toml`), a
 /// final RMSNorm, and the LM head projection to `[seq, vocab]` logits.
 /// Shape inference is symbolic arithmetic over extents, not data — cheap
 /// enough to run unignored even at the model's real context length,
@@ -3877,7 +3877,7 @@ fn a_mistral_layer_written_as_toml_evaluates() {
 /// on forever, which is the drift class this asserts is gone.
 #[test]
 fn no_repeated_scalar_crosses_the_binding_surface() {
-    let program = mistral_forward_program(128, 64, 172, 8, 4, 16, 2, 0, 0)
+    let program = gqa_forward_program(128, 64, 172, 8, 4, 16, 2, 0, 0)
         .expect("the forward pass lowers to a program");
 
     let bound: Vec<&str> = program
@@ -3955,7 +3955,7 @@ fn the_whole_mistral_forward_pass_infers_at_real_dimensions() {
     const REAL_CONTEXT: u64 = 8192;
 
     let build_start = std::time::Instant::now();
-    let program = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, 0, 0)
+    let program = gqa_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, 0, 0)
         .expect("the whole forward pass lowers to a program");
     let build_elapsed = build_start.elapsed();
 
@@ -3965,7 +3965,7 @@ fn the_whole_mistral_forward_pass_infers_at_real_dimensions() {
     let infer_elapsed = infer_start.elapsed();
 
     std::println!(
-        "mistral_forward_program: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}",
+        "gqa_forward_program: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}",
         program.len()
     );
     assert!(
@@ -3976,11 +3976,11 @@ fn the_whole_mistral_forward_pass_infers_at_real_dimensions() {
 }
 
 /// Node-count budget for the chunked key/value fold, established
-/// BEFORE that fold is built. [`mistral_cached_forward_program`] binds
+/// BEFORE that fold is built. [`gqa_cached_forward_program`] binds
 /// ONE cache buffer per layer sized by `Extent::Symbolic(1)`, so it is
 /// already the one-chunk case of an N-chunk fold. Splitting the cache
 /// into N fixed chunks replicates, per layer per chunk, the twelve
-/// cache-reading nodes in `append_mistral_cached_layer`
+/// cache-reading nodes in `append_gqa_cached_layer`
 /// (`score_cached_even_product`, `score_cached_even`,
 /// `score_cached_odd_product`, `score_cached_odd`, `score_cached`,
 /// `score_cached_scaled`, `score_max_cached`, `shifted_cached`,
@@ -3997,14 +3997,14 @@ fn the_whole_mistral_forward_pass_infers_at_real_dimensions() {
 #[test]
 fn the_chunked_cache_fold_node_budget_is_measured_before_it_is_built() {
     let nodes_of = |block_count: u32| {
-        mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
+        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
             .expect("the cached forward pass lowers to a program")
             .0
             .len()
     };
     let per_layer = nodes_of(2) - nodes_of(1);
     let full = nodes_of(32);
-    let uncached = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, 0, 0)
+    let uncached = gqa_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, 0, 0)
         .expect("the whole forward pass lowers to a program")
         .len();
     // a built `Op` is not an executed op: `crate::bind` fuses
@@ -4012,7 +4012,7 @@ fn the_chunked_cache_fold_node_budget_is_measured_before_it_is_built() {
     // than the program. Both counts are printed because the chunk
     // budget is built in program nodes and paid in bound ops.
     let (cached_program, cached_logits, cached_roots) =
-        mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
             .expect("the cached forward pass lowers to a program");
     let mut cached_outputs = alloc::vec![cached_logits];
     for (even, odd, value) in &cached_roots {
@@ -4055,31 +4055,31 @@ fn the_chunked_cache_fold_node_budget_is_measured_before_it_is_built() {
 }
 
 /// [`the_chunked_cache_fold_node_budget_is_measured_before_it_is_built`]'s
-/// single-range counterpart: [`append_mistral_single_range_cached_layer`]
+/// single-range counterpart: [`append_gqa_single_range_cached_layer`]
 /// deletes the eighteen cache-reading nodes that test documents
 /// (`CACHE_READING_NODES=12` plus three combine nodes counted
 /// separately there) and replaces them with nothing -- there is no
 /// second block left to combine, so the eighteen-node-per-chunk cost
 /// this budget exists to warn about does not apply to the single-range
 /// path at all. Old->new, per layer: 83 raw `Op`s (baseline, matching
-/// [`append_mistral_cached_layer`]'s own doc) -> whatever `per_layer`
+/// [`append_gqa_cached_layer`]'s own doc) -> whatever `per_layer`
 /// prints below, deleting the 6-op cached score block
 /// (`score_cached_even_product`..`score_cached_scaled`) and the
 /// 17-op online-softmax combine (`score_max_cached`..`attended`),
 /// adding back an 8-op single-pass softmax
 /// (`score_max`,`shifted`,`weights`,`weight_sum`,`inv_weight_sum`,
 /// `probabilities`,`attended_product`,`attended`) node-for-node
-/// [`append_mistral_layer`]'s own pattern.
+/// [`append_gqa_layer`]'s own pattern.
 #[test]
 fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_baseline() {
     let two_range_nodes_of = |block_count: u32| {
-        mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
+        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
             .expect("the two-range cached forward pass lowers to a program")
             .0
             .len()
     };
     let single_range_nodes_of = |block_count: u32| {
-        mistral_single_range_cached_forward_program(
+        gqa_single_range_cached_forward_program(
             32_002,
             4096,
             14336,
@@ -4099,7 +4099,7 @@ fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_bas
     let single_range_per_layer = single_range_nodes_of(2) - single_range_nodes_of(1);
 
     let (two_range_program, two_range_logits, two_range_roots) =
-        mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
             .expect("the two-range cached forward pass lowers to a program");
     let mut two_range_outputs = alloc::vec![two_range_logits];
     for (even, odd, value) in &two_range_roots {
@@ -4125,7 +4125,7 @@ fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_bas
     .len();
 
     let (single_range_program, single_range_logits, single_range_roots, _) =
-        mistral_single_range_cached_forward_program(
+        gqa_single_range_cached_forward_program(
             32_002,
             4096,
             14336,
@@ -4173,8 +4173,8 @@ fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_bas
 }
 
 /// The falsifiable claim under test: for the SAME weights and the SAME
-/// `cached_len`, [`append_mistral_single_range_cached_layer`] must
-/// produce the SAME decode-step logits [`append_mistral_cached_layer`]'s
+/// `cached_len`, [`append_gqa_single_range_cached_layer`] must
+/// produce the SAME decode-step logits [`append_gqa_cached_layer`]'s
 /// own two-range online-softmax combine produces -- PROVIDED its cache
 /// input holds what write-placement (`proxima-wt-place`'s
 /// `execute_plan_with_placements`) actually hands it at runtime: the
@@ -4182,7 +4182,7 @@ fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_bas
 /// appended at the tail, sized `cached_len + new_count`. This is not a
 /// calling-convention change to the single-range graph -- it is the
 /// single-range graph's documented contract
-/// (`append_mistral_single_range_cached_layer`'s own doc: "the WHOLE
+/// (`append_gqa_single_range_cached_layer`'s own doc: "the WHOLE
 /// merged context this call attends to ... already folded in by the
 /// caller between calls"). `cpu::evaluate` has no write-placement, so
 /// this test builds that merged cache by hand: run the two-range oracle
@@ -4298,7 +4298,7 @@ fn a_single_range_decode_step_matches_the_two_range_decode_step() {
         // program's own prefill path, the same mechanism
         // `a_cached_decode_step_matches_the_uncached_forward_pass_exactly`
         // already trusts.
-        let (cached_program, _, cache_roots) = mistral_cached_forward_program(
+        let (cached_program, _, cache_roots) = gqa_cached_forward_program(
             VOCAB as u32,
             EMBEDDING as u32,
             FEED_FORWARD as u32,
@@ -4409,7 +4409,7 @@ fn a_single_range_decode_step_matches_the_two_range_decode_step() {
         // in by hand the way write-placement would fold them in at
         // runtime).
         let (single_range_program, single_range_root, _, _) =
-            mistral_single_range_cached_forward_program(
+            gqa_single_range_cached_forward_program(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -4494,14 +4494,14 @@ fn a_single_range_decode_step_matches_the_two_range_decode_step() {
 
 /// ROW 373's own parity check: [`a_single_range_decode_step_matches_the_two_range_decode_step`]'s
 /// exact harness, `qk_norm` flipped on for both arms
-/// ([`qwen3_cached_forward_program`] as the two-range oracle,
-/// [`mistral_single_range_cached_forward_program`]'s `qk_norm: true` as
+/// ([`qk_norm_cached_forward_program`] as the two-range oracle,
+/// [`gqa_single_range_cached_forward_program`]'s `qk_norm: true` as
 /// the candidate) and `attn_q_norm.weight`/`attn_k_norm.weight` (random,
 /// non-degenerate, so a wrong gamma or a missing normalization is
 /// visible) added per layer. Split-half RoPE is exercised by
 /// construction -- `qk_norm.is_some()` selects it in both builders, see
-/// `append_mistral_cached_layer`'s and
-/// `append_mistral_single_range_cached_layer`'s own doc on that rule.
+/// `append_gqa_cached_layer`'s and
+/// `append_gqa_single_range_cached_layer`'s own doc on that rule.
 /// Same normalized-error tolerance as the plain arm: the online-softmax
 /// combine's own op ordering (two partial reduces, elementwise-summed)
 /// vs the single-range one-shot reduce is not required to be 0-ULP, only
@@ -4615,7 +4615,7 @@ fn a_single_range_decode_step_with_qk_norm_matches_the_two_range_decode_step() {
         // -- fold the cache up to `cached_len` via the two-range qk-norm
         // program's own prefill path, same mechanism the plain-layer
         // parity test trusts.
-        let (cached_program, _, cache_roots) = qwen3_cached_forward_program(
+        let (cached_program, _, cache_roots) = qk_norm_cached_forward_program(
             VOCAB as u32,
             EMBEDDING as u32,
             FEED_FORWARD as u32,
@@ -4724,7 +4724,7 @@ fn a_single_range_decode_step_with_qk_norm_matches_the_two_range_decode_step() {
         // -- single-range decode step: the graph under test, `qk_norm:
         // true`, fed the MERGED cache.
         let (single_range_program, single_range_root, _, _) =
-            mistral_single_range_cached_forward_program(
+            gqa_single_range_cached_forward_program(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -5029,7 +5029,7 @@ fn cached_attention_single_range_fused_matches_the_unfused_program() {
         max_error
     }
 
-    let (program, root, _, _) = mistral_single_range_cached_forward_program(
+    let (program, root, _, _) = gqa_single_range_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -5182,7 +5182,7 @@ fn cpu_mask_zero_ulp() {
             kv_seed += 3;
         }
 
-        let (program, root, _, _) = mistral_single_range_cached_forward_program(
+        let (program, root, _, _) = gqa_single_range_cached_forward_program(
             VOCAB as u32,
             EMBEDDING as u32,
             FEED_FORWARD as u32,
@@ -5290,7 +5290,7 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
     const CACHED_LEN_A: u64 = 50;
     const CACHED_LEN_B: u64 = 51;
 
-    let header_nodes = mistral_cached_forward_program(
+    let header_nodes = gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -5302,7 +5302,7 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
     .expect("a zero-layer program still lowers (embedding lookup plus final norm/lm-head)")
     .0
     .len();
-    let one_layer_nodes = mistral_cached_forward_program(
+    let one_layer_nodes = gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -5316,7 +5316,7 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
     .len();
     let per_layer_program_nodes = one_layer_nodes - header_nodes;
 
-    let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+    let (program, logits_root, cache_roots) = gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -5554,7 +5554,7 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
     const FEED_FORWARD: usize = 14336;
     const BLOCK_COUNT: u32 = 32;
 
-    let program = mistral_forward_program(
+    let program = gqa_forward_program(
         VOCAB as u32,
         EMBEDDING as u32,
         FEED_FORWARD as u32,
@@ -5570,7 +5570,7 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
     let symbols = [SEQUENCE as u64];
     crate::shape::infer(&program, &symbols).expect("the whole forward pass infers");
 
-    // block order mirrors `mistral_forward_program`'s own `Input`
+    // block order mirrors `gqa_forward_program`'s own `Input`
     // emission order exactly: ids, table, eps, cos/sin, then each
     // layer's attn_norm_weight/ffn_norm_weight/wq/wk/wv/wo/w_gate/
     // w_up/w_down, then the lm head. `inv_dim`, `ones`, `group_ones`,
@@ -5680,8 +5680,8 @@ fn rope_angles(start: usize, count: usize, pairs: usize, head_dim: usize) -> (Ve
 }
 
 /// The falsifiable claim under test: a prefill call followed by a
-/// one-token decode call through [`mistral_cached_forward_program`]
-/// must produce the SAME last-position logits [`mistral_forward_program`]
+/// one-token decode call through [`gqa_cached_forward_program`]
+/// must produce the SAME last-position logits [`gqa_forward_program`]
 /// produces evaluating the whole sequence at once, with NO per-step
 /// growth in the amount of new work the decode call performs (it binds
 /// a fixed `N=1` symbol regardless of how long the cache has grown).
@@ -5747,7 +5747,7 @@ fn a_cached_decode_step_matches_the_uncached_forward_pass_exactly() {
     let lm_head = random_vec(seed, EMBEDDING * VOCAB);
 
     // -- uncached oracle: the whole 3-token sequence in one shot.
-    let uncached_program = mistral_forward_program(
+    let uncached_program = gqa_forward_program(
         VOCAB as u32,
         EMBEDDING as u32,
         FEED_FORWARD as u32,
@@ -5817,7 +5817,7 @@ fn a_cached_decode_step_matches_the_uncached_forward_pass_exactly() {
     // -- cached path: prefill the first PROMPT_LEN positions, then one
     // decode step for the final position, growing the cache in between
     // exactly the way `bind.rs`'s decode loop would.
-    let (cached_program, cached_logits_root, cache_roots) = mistral_cached_forward_program(
+    let (cached_program, cached_logits_root, cache_roots) = gqa_cached_forward_program(
         VOCAB as u32,
         EMBEDDING as u32,
         FEED_FORWARD as u32,
@@ -6538,7 +6538,7 @@ async fn silu_multi_row_batch_at_production_width_matches_single_row() {
 /// its declared `Float32` element count, or is smaller because the
 /// checkpoint actually stored it `Q4_K`/`Q5_K`/`Q6_K` packed) -- it is
 /// not recoverable from this symbolic program alone, which declares
-/// every weight `DType::Float32` (`mistral_cached_forward_program_with_
+/// every weight `DType::Float32` (`gqa_cached_forward_program_with_
 /// experts`, `spec.rs:4561-4646` and onward: every `input_leaf` weight
 /// call passes `DType::Float32`, never a quantized tag). Reproducing it
 /// here would require binding the real `openchat-3.5-1210.Q4_K_S.gguf`
@@ -6570,7 +6570,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     crate::instrument::reset_online_softmax_block_range();
 
     let (program, logits, roots) =
-        mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
             .expect("the cached forward pass lowers to a program");
     let mut outputs = alloc::vec![logits];
     for (even, odd, value) in &roots {
@@ -6611,7 +6611,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
         })
         .count();
     // MEASURED (this test, `reduce-epilogue-fusion` on): the FIRST fixpoint
-    // round absorbs 4 fusions x 32 layers, one per `append_mistral_cached_layer` call
+    // round absorbs 4 fusions x 32 layers, one per `append_gqa_cached_layer` call
     // (`spec.rs:2378`). Each fusion is an `Op::Elementwise` whose SOLE
     // operand-of-interest is an `Op::Reduce` with no other consumer, read
     // at full identity -- exactly `bind::reduce_epilogue_candidates`'s
@@ -6877,7 +6877,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     // materialize). `online_softmax_block_ranges` brackets the combine
     // block (`spec.rs:2596-2726`) by construction -- `score_max_cached`
     // and `attended`, the block's own first/last emitted `NodeId`s,
-    // recorded once per `append_mistral_cached_layer` call, never
+    // recorded once per `append_gqa_cached_layer` call, never
     // assumed from reading the source alone.
     let block_ranges = crate::instrument::online_softmax_block_ranges();
     assert_eq!(
@@ -7472,7 +7472,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
 #[test]
 fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline() {
     let (baseline_program, baseline_logits, baseline_roots) =
-        mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
             .expect("the baseline cached forward pass lowers to a program");
     let mut baseline_outputs = alloc::vec![baseline_logits];
     for (even, odd, value) in &baseline_roots {
@@ -7494,7 +7494,7 @@ fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline()
         .count();
 
     let (paired_program, paired_roots_bundle, paired_roots, _paired_moe_sites) =
-        mistral_cached_forward_program_with_experts(
+        gqa_cached_forward_program_with_experts(
             32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, true, false,
         )
         .expect("the paired cached forward pass lowers to a program");
@@ -7556,7 +7556,7 @@ fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline()
         std::println!(
             "paired_gate_up_reduce_census baseline_epilogued={baseline_epilogued} paired_epilogued={paired_epilogued}"
         );
-        // `ffn_hidden` (`spec.rs`'s own `append_mistral_cached_layer`)
+        // `ffn_hidden` (`spec.rs`'s own `append_gqa_cached_layer`)
         // never absorbs the paired reduce's `up` slice: `up` is read
         // through a non-identity, base-shifted axis expression (the
         // parity-selecting `"s,0*s+1,g->sg"` map) from the SAME node the
@@ -7604,7 +7604,7 @@ fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline()
 /// three can be read back out of the shared flat buffer at zero extra
 /// cost the way `paired_gate_up_reduce` reads its parity axis -- the IR
 /// cannot split one real axis into two unconstrained virtual sub-axes
-/// from a single operand (`append_mistral_cached_layer`'s
+/// from a single operand (`append_gqa_cached_layer`'s
 /// `fused_qkv_reduce` doc traces the exact `shape::infer`
 /// `UnconstrainedDim` this hits and why `ScalarOp::arity` blocks the
 /// obvious fix of adding a shape-only operand to an existing binary
@@ -7617,7 +7617,7 @@ fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline()
 #[test]
 fn fused_qkv_reduce_adds_one_dispatch_per_layer_relative_to_the_baseline() {
     let (baseline_program, baseline_logits, baseline_roots) =
-        mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        gqa_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
             .expect("the baseline cached forward pass lowers to a program");
     let mut baseline_outputs = alloc::vec![baseline_logits];
     for (even, odd, value) in &baseline_roots {
@@ -7640,7 +7640,7 @@ fn fused_qkv_reduce_adds_one_dispatch_per_layer_relative_to_the_baseline() {
         .count();
 
     let (fused_program, fused_roots_bundle, fused_roots, _fused_moe_sites) =
-        mistral_cached_forward_program_with_experts(
+        gqa_cached_forward_program_with_experts(
             32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, false, true,
         )
         .expect("the fused-qkv cached forward pass lowers to a program");
@@ -10545,7 +10545,7 @@ fn dense_attention_only_and_with_taps_produce_the_same_program() {
 /// own "lowers, then `shape::infer` succeeds" scope, not a numeric
 /// check (the mixer's own hand-computed test below already owns that).
 /// `symbols = [1, 0]`: one new decode-step token, an empty dense-attention
-/// KV cache -- [`append_mistral_cached_layer`]'s own doc already proves
+/// KV cache -- [`append_gqa_cached_layer`]'s own doc already proves
 /// `cached_len == 0` degenerates to plain self-attention with no special
 /// case.
 #[test]
@@ -11322,9 +11322,9 @@ async fn qwen35_ssm_mixer_hand_computed_check_actually_detects_a_wrong_history_v
     );
 }
 
-/// One `append_mistral_single_range_cached_layer` invocation, minus the
+/// One `append_gqa_single_range_cached_layer` invocation, minus the
 /// `gate_before_up` flag under test -- the minimal single-layer preamble
-/// [`mistral_single_range_cached_forward_program`]'s own loop body builds
+/// [`gqa_single_range_cached_forward_program`]'s own loop body builds
 /// for `block_count = 1`, `query_heads = kv_heads = 1`, `head_dim = 2`,
 /// `embedding = feed_forward = 2` (small enough to read by eye, large
 /// enough that `w_gate`/`w_up`'s shapes are distinguishable from every
@@ -11490,7 +11490,7 @@ fn single_range_layer_with_order(
         (q_norm_weight, k_norm_weight, inv_head_dim)
     });
 
-    append_mistral_single_range_cached_layer(
+    append_gqa_single_range_cached_layer(
         &mut program,
         x,
         inv_dim,
@@ -11523,7 +11523,7 @@ fn single_range_layer_with_order(
 }
 
 /// ROW 373: the single-range builder no longer rejects a qk-norm
-/// checkpoint -- it binds the same shape [`append_mistral_cached_layer`]
+/// checkpoint -- it binds the same shape [`append_gqa_cached_layer`]
 /// would. This is the acceptance replacement for ROW 372's rejection
 /// test: a qk-norm layer must produce the two extra `rmsnorm_per_head`
 /// reduces (one per q/k) that a plain interleaved layer does not, and
@@ -11567,7 +11567,7 @@ fn single_range_layer_binds_qk_norm_with_two_extra_per_head_norm_reduces() {
 /// The `PROXIMA_ENCODE_ORDER=gate_first|up_first` order-swap knob
 /// (`test_support::encode_order_from_env` in
 /// `proxima-model-interop`) is honored here at the program-builder
-/// level: `append_mistral_single_range_cached_layer`'s `gate_before_up`
+/// level: `append_gqa_single_range_cached_layer`'s `gate_before_up`
 /// flag decides only which of the two independent FFN matvecs (both
 /// read `normed2`, neither reads the other) is PUSHED first — the node
 /// SET and every dependency is unchanged, only their relative order.
@@ -15082,7 +15082,7 @@ mod gemma4_synthetic_parity {
         );
     }
 
-    /// Proves [`mistral_descriptor_from_shape`]'s
+    /// Proves [`gqa_descriptor_from_shape`]'s
     /// split-half [`FamilyProfile`] plus [`CacheMask::Bounded`]'s
     /// [`build_forward`] arm reproduce the deleted
     /// `qwen2_cached_forward_program_with_experts_and_layer_taps` byte-for-byte
@@ -15111,7 +15111,7 @@ mod gemma4_synthetic_parity {
         .expect("the split-half dense profile parses");
 
         let (program_a, roots_a, cache_roots_a, layer_residuals_a, moe_a) =
-            mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+            gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
                 REAL_VOCAB,
                 REAL_EMBEDDING,
                 REAL_FEED_FORWARD,
@@ -15136,7 +15136,7 @@ mod gemma4_synthetic_parity {
             )
             .expect("direct real qwen2-dims build");
 
-        let descriptor_b = mistral_descriptor_from_shape(
+        let descriptor_b = gqa_descriptor_from_shape(
             REAL_VOCAB,
             REAL_EMBEDDING,
             REAL_FEED_FORWARD,
@@ -17653,7 +17653,7 @@ mod forward_scales {
     pub(super) fn descriptor(expert_count: u32, expert_used_count: u32) -> ModelDescriptor {
         let profile = toml::from_str::<FamilyProfile>(&profile_text("adjacent"))
             .expect("the dense profile parses");
-        mistral_descriptor_from_shape(
+        gqa_descriptor_from_shape(
             16,
             8,
             16,
@@ -17687,7 +17687,7 @@ mod forward_scales {
     fn moe_descriptor_with(rope_layout: &str, qk_norm: bool) -> ModelDescriptor {
         let profile = toml::from_str::<FamilyProfile>(&profile_text(rope_layout))
             .expect("the moe profile parses");
-        mistral_descriptor_from_shape(
+        gqa_descriptor_from_shape(
             16, 8, 16, 2, 1, 4, 2, 4, 2, qk_norm, false, false, false, &profile,
         )
     }
@@ -17829,7 +17829,7 @@ mod forward_scales {
             matches!(
                 outcome,
                 Err(TensorError::UnsupportedInBuilder {
-                    builder: "mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
+                    builder: "gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
                     feature: "a residual scale on a dense layer",
                 })
             ),
@@ -18135,7 +18135,7 @@ mod dense_windows {
     fn dense_descriptor(block_count: u32, windows: &[Option<u32>], ring: bool) -> ModelDescriptor {
         let profile = toml::from_str::<FamilyProfile>(&profile_text("adjacent"))
             .expect("the dense profile parses");
-        let mut descriptor = mistral_descriptor_from_shape(
+        let mut descriptor = gqa_descriptor_from_shape(
             VOCAB as u32,
             EMBEDDING as u32,
             FEED_FORWARD as u32,

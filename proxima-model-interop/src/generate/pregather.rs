@@ -10,7 +10,7 @@ impl<'file> LoadedModel<'file> {
     /// program for this checkpoint ([`Self::single_range`]'s own doc) --
     /// the ROW 373 evidence hook: a qk-norm (Qwen3) checkpoint returned
     /// `false` here before that row (rejected by
-    /// `append_mistral_single_range_cached_layer`, `build_single_range_program`
+    /// `append_gqa_single_range_cached_layer`, `build_single_range_program`
     /// falling back to `Ok(None)`) and returns `true` after it, WITHOUT this
     /// crate's own decode output changing (`Self::run_decode_loop`'s own
     /// `Some(single_range)` branch is what a Metal decode step then takes).
@@ -2411,7 +2411,7 @@ impl<'file> LoadedModel<'file> {
     ///
     /// Whatever [`crate::bind::architecture_from_metadata`],
     /// [`proxima_tokenizer::gguf::vocab_from_metadata`], or
-    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
+    /// [`proxima_tensor::spec::gqa_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
         Self::load_inner(parsed, file_bytes, KvLayout::SlidingRing, None)
@@ -2470,7 +2470,7 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// [`Self::load`] with the paired gate/up reduce
-    /// (`proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// (`proxima_tensor::spec::append_gqa_cached_layer`'s
     /// `paired_gate_up_reduce`) flipped on: one `Op::Reduce` per layer over
     /// `blk.{layer}.ffn_gate_up.weight` (`crate::bind::bind_matmul_weight_paired`)
     /// in place of today's two independent `ffn_gate`/`ffn_up` matvecs.
@@ -2493,14 +2493,14 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// [`Self::load`] with the fused Q/K/V reduce
-    /// (`proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// (`proxima_tensor::spec::append_gqa_cached_layer`'s
     /// `fused_qkv_reduce`) flipped on: one `Op::Reduce` per layer over
     /// `blk.{layer}.attn_qkv.weight` (`crate::bind::bind_matmul_weight_triple`)
     /// in place of today's three independent `attn_q`/`attn_k`/`attn_v`
     /// matvecs. Unlike [`Self::load_with_paired_gate_up_reduce`], this does
     /// NOT remove dispatches -- q/k/v's three different GQA row counts mean
     /// none of them can be read back out of the shared reduce at zero
-    /// extra cost (`append_mistral_cached_layer`'s `fused_qkv_reduce` doc
+    /// extra cost (`append_gqa_cached_layer`'s `fused_qkv_reduce` doc
     /// traces the exact `shape::infer` limit this hits), so the measured
     /// effect, if any, is per-dispatch bandwidth on the one larger reduce,
     /// not fewer kernel launches. No effect on a `recurrent-interval` checkpoint or a
@@ -2652,7 +2652,7 @@ impl<'file> LoadedModel<'file> {
         // turns away any mixture-of-experts checkpoint. A family whose profile
         // names a cache shape other than `Uniform` is excluded for the same
         // reason: the E2B/E4B checkpoint (dense, `expert_count == 0`) declare shared-KV
-        // layers, and `mistral_single_range_cached_forward_program` declares a
+        // layers, and `gqa_single_range_cached_forward_program` declares a
         // uniform `attn_k.weight`/`attn_k_norm.weight`/`attn_v.weight`
         // `Op::Input` leaf for every layer 0..block_count with no concept of
         // `KeySourceKind::SharedFromLayer` -- it would declare
@@ -2762,7 +2762,7 @@ impl<'file> LoadedModel<'file> {
     /// [`InteropError::HfMoeWeightsUnsupported`] if `architecture.expert_count`
     /// is nonzero; otherwise whatever
     /// `crate::hf_bind::bind_all_weights_from_safetensors` or
-    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`] can fail with.
+    /// [`proxima_tensor::spec::gqa_cached_forward_program_with_experts`] can fail with.
     pub fn load_from_safetensors(
         manifest: &proxima_safetensors::Manifest,
         file_bytes: &'file [u8],
@@ -2777,7 +2777,7 @@ impl<'file> LoadedModel<'file> {
         // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
         // the GGUF path that does.
         let profile = family_profile(&architecture.family)?;
-        let descriptor = mistral_descriptor_from_shape(
+        let descriptor = gqa_descriptor_from_shape(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,

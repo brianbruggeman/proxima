@@ -11,7 +11,7 @@
 //! weight) does not need to satisfy.
 //!
 //! Scaled down (2 layers) so every case in the matrix runs in
-//! milliseconds, but every op this crate's own `mistral_cached_forward_program`
+//! milliseconds, but every op this crate's own `gqa_cached_forward_program`
 //! runs on a real checkpoint (embedding lookup, RMSNorm, RoPE, grouped-query
 //! attention with a KV cache, SwiGLU, output projection) runs here exactly
 //! the same way.

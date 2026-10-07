@@ -193,7 +193,7 @@ pub(super) fn packed_reduce_activation_operand(
 ///
 /// [`matmul_q4k_f32`] itself only knows one activation vector times one
 /// weight matrix — batch-1. A real forward pass batches every sequence
-/// position through the same weight in one call (`mistral_forward_program`'s
+/// position through the same weight in one call (`gqa_forward_program`'s
 /// `wq` node alone folds `s`, `h`, and `d` together into one packed-row
 /// dimension: `"ihd->shdi"` broadcasts the same `[s, i]` activation across
 /// every head, so the physical weight row a given `(h, d)` pair needs is

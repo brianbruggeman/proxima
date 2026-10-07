@@ -1185,7 +1185,7 @@ pub fn reset_window_reduce() {
 
 // combine-block-locate task (2026-09-02): brackets the online-softmax
 // combine block (`spec.rs:2596-2726`) by construction rather than by name
-// -- a symbolic program has none. Recorded once per `append_mistral_cached_
+// -- a symbolic program has none. Recorded once per `append_gqa_cached_
 // layer` call (32 times for the real forward), so the census can both
 // locate the block's `NodeId` range AND verify by measurement that every
 // layer's block sits at the same relative offset (structural periodicity),
@@ -1194,7 +1194,7 @@ static ONLINE_SOFTMAX_BLOCK_RANGE: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new(
 
 /// Records one layer's `[first_node, last_node]` inclusive `NodeId` bracket
 /// for the online-softmax combine block, called once per
-/// `append_mistral_cached_layer` invocation from `spec.rs`, with the two
+/// `append_gqa_cached_layer` invocation from `spec.rs`, with the two
 /// `NodeId`s the block's own first and last emitted nodes already are --
 /// never re-derived from `program.len()` after the fact.
 pub fn record_online_softmax_block_range(first_node: NodeId, last_node: NodeId) {

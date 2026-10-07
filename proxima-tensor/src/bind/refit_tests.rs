@@ -18,7 +18,7 @@ fn outputs_for(logits: NodeId, cache_roots: &[CachedLayerRoots]) -> Vec<NodeId> 
 
 fn single_range_fixture(layers: u32) -> Fixture {
     let (program, logits, cache_roots, _) =
-        crate::spec::mistral_single_range_cached_forward_program(
+        crate::spec::gqa_single_range_cached_forward_program(
             32,
             16,
             24,
@@ -41,7 +41,7 @@ fn single_range_fixture(layers: u32) -> Fixture {
 
 fn two_range_fixture(layers: u32) -> Fixture {
     let (program, logits, cache_roots) =
-        crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, layers)
+        crate::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, layers)
             .expect("two-range fixture builds");
     let outputs = outputs_for(logits, &cache_roots);
     Fixture {

@@ -13,7 +13,7 @@
 //! here -- same convention as `smollm2_logit_oracle_diff.rs`).
 //!
 //! [`LoadedModel::forward_node_values`]'s own doc explains the derivation:
-//! rebuilding [`mistral_cached_forward_program_with_experts`] at a shorter
+//! rebuilding [`gqa_cached_forward_program_with_experts`] at a shorter
 //! `block_count` against the SAME architecture shares every `NodeId` up to
 //! where it stops (`NodeId`'s id-is-index invariant), so the last id two
 //! consecutive-depth builds still agree on IS the residual-stream value
@@ -28,7 +28,7 @@ use proxima_model_interop::{LoadedModel, architecture_from_hf_config, parse_hf_c
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
 use proxima_telemetry::recorder::Recorder;
-use proxima_tensor::spec::mistral_cached_forward_program_with_experts;
+use proxima_tensor::spec::gqa_cached_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path)
@@ -63,7 +63,7 @@ fn layer_boundary_node_id(
         // an edge this diagnostic has no reason to depend on).
         return proxima_tensor::op::NodeId(2);
     }
-    let (shallow, _, _, _) = mistral_cached_forward_program_with_experts(
+    let (shallow, _, _, _) = gqa_cached_forward_program_with_experts(
         vocab,
         embedding,
         feed_forward,
@@ -79,7 +79,7 @@ fn layer_boundary_node_id(
         false,
     )
     .expect("build shallow throwaway program");
-    let (deep, _, _, _) = mistral_cached_forward_program_with_experts(
+    let (deep, _, _, _) = gqa_cached_forward_program_with_experts(
         vocab,
         embedding,
         feed_forward,

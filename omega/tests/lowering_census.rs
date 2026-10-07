@@ -1,6 +1,6 @@
 //! Lowering census: for every named production matmul weight family in the
 //! real openchat single-range decode/prefill program
-//! (`proxima_tensor::spec::mistral_single_range_cached_forward_program`),
+//! (`proxima_tensor::spec::gqa_single_range_cached_forward_program`),
 //! at the real `(in_dim, out_dim)` pair that weight is declared at
 //! (`row_376_cached_attention_batched.rs`'s own decode dims: `QUERY_HEADS`
 //! 32, `KV_HEADS` 8, `HEAD_DIM` 128, `EMBEDDING = QUERY_HEADS * HEAD_DIM` =
@@ -17,7 +17,7 @@
 //! investigation.
 //!
 //! A standalone matmul per weight family, not the full fused graph: binding
-//! the real `mistral_single_range_cached_forward_program` directly hits two
+//! the real `gqa_single_range_cached_forward_program` directly hits two
 //! structurally different lowerings this census does not model yet
 //! (`attn_k`/`attn_v` fuse into the KV-cache write's fold; `attn_output`
 //! resolves to a bare `Elementwise`, found empirically via `diagnose_packed_row_block`

@@ -63,9 +63,9 @@ use crate::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 #[macro_use]
 mod primitives;
 #[macro_use]
-mod mistral_layer_moe;
+mod gqa_layer_routed;
 #[macro_use]
-mod mistral_forward_cached;
+mod gqa_forward_cached;
 #[macro_use]
 mod hyperconn_qwen35_dense;
 #[macro_use]
@@ -92,8 +92,8 @@ use hybrid_forward::{hybrid_dense_forward, hybrid_routed_forward};
 pub use hyperconn_qwen35_dense::*;
 pub use lfm2_qwen35_gdn::*;
 pub use lfm2_single_range_cached::*;
-pub use mistral_forward_cached::*;
-pub use mistral_layer_moe::*;
+pub use gqa_forward_cached::*;
+pub use gqa_layer_routed::*;
 #[cfg(feature = "config")]
 pub use program_spec::*;
 pub use primitives::*;

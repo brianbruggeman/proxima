@@ -80,7 +80,7 @@ use proxima_tensor::cpu::{
 use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
-use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, LayerCacheRoots, ScheduleSource, build_forward, mistral_descriptor_from_shape};
+use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, LayerCacheRoots, ScheduleSource, build_forward, gqa_descriptor_from_shape};
 use proxima_tokenizer::{SamplingConfig, TokenType, Vocab, sample_next_token};
 use std::cell::RefCell;
 use std::fs::File;
@@ -140,9 +140,9 @@ use omega::metal::metal_stage_totals;
 // aliased to avoid colliding with `omega::backend::plan_named` above,
 // which returns the backend-polymorphic `omega::backend::Plan` enum
 // `PlacedBuffer` placement has no arm for) --
-// `mistral_single_range_cached_forward_program` is this call's program
+// `gqa_single_range_cached_forward_program` is this call's program
 // builder, `proxima-tensor/src/spec.rs`'s own single-range counterpart to
-// `mistral_cached_forward_program_with_experts`.
+// `gqa_cached_forward_program_with_experts`.
 #[cfg(all(
     feature = "metal-output-placement",
     feature = "instrument",
@@ -181,7 +181,7 @@ use proxima_tensor::TensorError;
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
+use proxima_tensor::spec::{DuplicateHeadPosition, gqa_single_range_cached_forward_program};
 
 use crate::bind::{BoundWeights, Codec, ModelHparams, metadata_str};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

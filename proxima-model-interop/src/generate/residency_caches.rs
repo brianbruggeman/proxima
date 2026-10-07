@@ -1352,7 +1352,7 @@ pub(super) fn bound_cache_kind(roots: &LayerCacheRoots) -> DeclaredCacheKind {
 /// position occupies -- every `kv_cache.{layer}.*` leaf is
 /// `[Extent::Symbolic(KV_BOUND), heads, width]`
 /// (`proxima_tensor::spec`'s `append_qwen35_dense_attention_layer`/
-/// `append_mistral_cached_layer` own `input_leaf` calls for these exact
+/// `append_gqa_cached_layer` own `input_leaf` calls for these exact
 /// names), so the row width [`KvPadShape`]/[`DenseAttentionPadShape`]
 /// need is the PRODUCT of every extent after the leading symbolic
 /// bound-extent slot, not a single dimension. This is the single source of
@@ -2109,7 +2109,7 @@ pub(crate) struct BackendRuntime {
     /// then hands ownership to the bounded DynaExq sources.
     pub(super) retain_monolithic_prefill_sources: bool,
     /// Keyed by `(new_count, kv_bound_extent)` -- the two symbols
-    /// `mistral_cached_forward_program`'s cached-attention read extent
+    /// `gqa_cached_forward_program`'s cached-attention read extent
     /// resolves against (`Extent::Symbolic(1) == kv_bound_extent`). A
     /// [`Plan`] bakes concrete shapes from those symbols
     /// (`omega::backend::plan_named`'s own doc), and RAW `cached_len` grows

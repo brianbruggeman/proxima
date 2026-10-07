@@ -352,7 +352,7 @@ pub fn fused_rope_pair(
 /// epsilon is model metadata (`attention.layer_norm_rms_epsilon` in a GGUF
 /// checkpoint), not a value this function's `u32` parameters determine, so
 /// it is the one constant here that cannot become an [`Op::Constant`]
-/// without `mistral_forward_program` taking it as a parameter.
+/// without `gqa_forward_program` taking it as a parameter.
 /// `inv_dim`/`ones`/`group_ones` all could, and did — see [`scalar_constant`].
 #[must_use]
 pub fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
@@ -985,7 +985,7 @@ pub fn causal_mask_windowed(
 }
 
 /// [`causal_mask`]'s single-range-attention counterpart:
-/// [`append_mistral_single_range_cached_layer`]'s key axis (`t`) is no
+/// [`append_gqa_single_range_cached_layer`]'s key axis (`t`) is no
 /// longer this call's own new positions (symbol 0) but the *whole* merged
 /// context (symbol 1) -- everything a growing KV cache holds once this
 /// call's own freshly rotated keys are folded into it. A query at local

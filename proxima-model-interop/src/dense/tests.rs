@@ -20,7 +20,7 @@ fn header_bytes(family: &str, floats: &[(&str, f32)]) -> Vec<u8> {
 }
 
 fn granite_input() -> ModelDescriptor {
-    mistral_descriptor_from_shape(
+    gqa_descriptor_from_shape(
         49155,
         1024,
         512,
@@ -39,7 +39,7 @@ fn granite_input() -> ModelDescriptor {
 }
 
 fn llama_input() -> ModelDescriptor {
-    mistral_descriptor_from_shape(
+    gqa_descriptor_from_shape(
         32000,
         4096,
         14336,

@@ -431,7 +431,7 @@ fn count_fused_epilogues(bound: &[BoundOp]) -> usize {
 #[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
     let (program, logits, roots) =
-        crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
+        crate::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
             .expect("cached attention fixture builds");
     let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
     let mut requested = alloc::vec![logits];
@@ -495,8 +495,8 @@ fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
 /// ROW 364's own artifact: the ACTUAL bound program the real openchat
 /// decode fixture uses. The production decode loop
 /// (`proxima-model-interop::generate::build_single_range_program`)
-/// calls `mistral_single_range_cached_forward_program` with
-/// `DuplicateHeadPosition::None` -- NOT `mistral_cached_forward_program`,
+/// calls `gqa_single_range_cached_forward_program` with
+/// `DuplicateHeadPosition::None` -- NOT `gqa_cached_forward_program`,
 /// the dual-range builder an earlier draft of this row's census
 /// mistakenly used. The dual-range builder's toy fixture already
 /// carried a fused SiLU epilogue on both main and this branch (a
@@ -531,7 +531,7 @@ fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
 ))]
 fn row_364_per_layer_bound_op_list() {
     let (program, logits, roots, _duplicate_head_scratch) =
-        crate::spec::mistral_single_range_cached_forward_program(
+        crate::spec::gqa_single_range_cached_forward_program(
             32,
             16,
             24,
@@ -595,7 +595,7 @@ fn row_364_per_layer_bound_op_list() {
 #[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_rewrite_accepts_the_omega_nonempty_cache_fixture() {
     let (program, logits, cache_roots) =
-        crate::spec::mistral_cached_forward_program(64, 64, 128, 4, 2, 16, 2)
+        crate::spec::gqa_cached_forward_program(64, 64, 128, 4, 2, 16, 2)
             .expect("omega cached attention fixture builds");
     let mut outputs = alloc::vec![logits];
     for (even, odd, value) in cache_roots {
@@ -643,7 +643,7 @@ fn cached_attention_rewrite_accepts_the_omega_nonempty_cache_fixture() {
 #[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_rewrite_accepts_the_qwen3_gqa_qk_norm_fixture() {
     let (program, logits, cache_roots) =
-        crate::spec::qwen3_cached_forward_program(64, 64, 128, 4, 2, 16, 2)
+        crate::spec::qk_norm_cached_forward_program(64, 64, 128, 4, 2, 16, 2)
             .expect("qwen3 gqa+qk_norm fixture builds");
     let mut outputs = alloc::vec![logits];
     for (even, odd, value) in cache_roots {
@@ -675,7 +675,7 @@ fn cached_attention_rewrite_accepts_the_qwen3_gqa_qk_norm_fixture() {
 fn moe_topk_fusion_keeps_the_cached_attention_ops_of_a_moe_decoder() {
     const LAYERS: u32 = 3;
     let (program, roots, cache_roots, _moe_sites) =
-        crate::spec::mistral_cached_forward_program_with_experts(
+        crate::spec::gqa_cached_forward_program_with_experts(
             64, 64, 128, 4, 2, 16, LAYERS, 8, 2, false, false, false, false,
         )
         .expect("moe gqa decoder fixture builds");
@@ -744,7 +744,7 @@ fn moe_topk_fusion_keeps_the_cached_attention_ops_of_a_moe_decoder() {
 #[cfg(feature = "cached-attention-streaming")]
 fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
     let (program, logits, cache_roots, _) =
-        crate::spec::mistral_single_range_cached_forward_program(
+        crate::spec::gqa_single_range_cached_forward_program(
             32_002,
             4096,
             14336,
@@ -830,7 +830,7 @@ fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_s
 #[cfg(feature = "cached-attention-streaming")]
 fn single_range_fusion_declares_an_empty_cached_range_not_a_duplicated_capacity() {
     let (program, logits, cache_roots, _) =
-        crate::spec::mistral_single_range_cached_forward_program(
+        crate::spec::gqa_single_range_cached_forward_program(
             32,
             16,
             24,
@@ -1787,7 +1787,7 @@ fn a_perturbed_pass_plane_map_declines_the_qwen35_fusion() {
 #[cfg(feature = "cached-attention-streaming")]
 fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
     let (program, logits, cache_roots, _) =
-        crate::spec::mistral_single_range_cached_forward_program(
+        crate::spec::gqa_single_range_cached_forward_program(
             32,
             16,
             24,
@@ -2424,7 +2424,7 @@ fn transpose_layout_has_permuted_strides() {
 
 /// [`correct_packed_matmul_layouts`]/[`native_packed_layout`] on a
 /// **two-axis output group** (`heads`, `head_dim`), the exact iteration
-/// shape `mistral_cached_forward_program`'s `wq`/`wk`/`wv` projections
+/// shape `gqa_cached_forward_program`'s `wq`/`wk`/`wv` projections
 /// take (`tok`, `in`, `head`, `hd`), with `heads=3 != head_dim=4` so a
 /// swapped output-axis order changes the numbers, not just the labels —
 /// unlike `causal_conv1d`'s own `embedding=1` fixture, which made an
@@ -3830,7 +3830,7 @@ mod reduce_epilogue_fusion_tests {
     #[test]
     fn reduce_epilogue_fusion_shrinks_the_real_openchat_single_range_program() {
         let (program, logits, cache_roots, _) =
-            crate::spec::mistral_single_range_cached_forward_program(
+            crate::spec::gqa_single_range_cached_forward_program(
                 32_002,
                 4096,
                 14336,
@@ -3921,7 +3921,7 @@ mod reduce_epilogue_fusion_tests {
         );
     }
 
-    /// The same `mistral_single_range_cached_forward_program` builder the
+    /// The same `gqa_single_range_cached_forward_program` builder the
     /// structural test above proves the bound-op COUNT for, run end to
     /// end through [`Interpreter`]: `bind`'s own epilogue-fused resolve
     /// against `bind_cached_attention_fusion`'s un-epilogued one, same
@@ -3949,7 +3949,7 @@ mod reduce_epilogue_fusion_tests {
         let group = (QUERY_HEADS / KV_HEADS) as usize;
 
         let (program, logits, cache_roots, _) =
-            crate::spec::mistral_single_range_cached_forward_program(
+            crate::spec::gqa_single_range_cached_forward_program(
                 VOCAB,
                 EMBEDDING,
                 FEED_FORWARD,
@@ -6050,7 +6050,7 @@ mod moe_routing_census {
     /// `expert_bias = None` -- `proxima-model-interop/src/recurrent_routed_interval/program.rs`'s
     /// own `append_qwen35moe_ffn` call into `append_moe_ffn`
     /// (lines 122-135), NOT the `Sigmoid` gate this crate's Mixtral-style
-    /// dense callers (`append_mistral_moe_layer`) use -- the two gating
+    /// dense callers (`append_gqa_routed_layer`) use -- the two gating
     /// functions cost the same op count per round (`shifted`+`exp` for
     /// softmax vs `masked_scores`+reduce for sigmoid), so the fusion
     /// target is identical either way, but the matcher must anchor on

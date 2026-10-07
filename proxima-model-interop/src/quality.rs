@@ -1290,7 +1290,7 @@ mod real_qwen3_file {
 
         // ROW 373: this qk-norm checkpoint must now take the placed-KV
         // single-range program, not the two-range fallback -- the same
-        // condition `append_mistral_single_range_cached_layer` used to
+        // condition `append_gqa_single_range_cached_layer` used to
         // reject (`LoadedModel::takes_placed_kv_path`'s own doc).
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         assert!(

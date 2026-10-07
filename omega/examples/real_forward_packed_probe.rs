@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use proxima_tensor::spec::mistral_cached_forward_program;
+use proxima_tensor::spec::gqa_cached_forward_program;
 use proxima_tensor::{
     BoundOpKind, Keep, NodeId, NumericPolicy, bind, correct_packed_matmul_layouts, infer,
 };
@@ -49,7 +49,7 @@ fn main() {
     const HEAD_DIM: u32 = 128;
     const BLOCKS: u32 = 32;
 
-    let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+    let (program, logits_root, cache_roots) = gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,

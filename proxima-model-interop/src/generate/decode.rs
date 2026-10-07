@@ -3241,7 +3241,7 @@ impl<'file> LoadedModel<'file> {
         }
         // One [`KvPadScratch`] per layer, reused across every step of this
         // call -- only ever filled for a [`LayerCacheState::Attention`]
-        // layer (the only cache shape `mistral_cached_forward_program_with_experts`
+        // layer (the only cache shape `gqa_cached_forward_program_with_experts`
         // produces, `LayerCacheRoots`'s own doc), left empty and unread for
         // every `DenseAttention`/`Ssm` layer a recurrent-interval checkpoint carries.
         let mut kv_pad_scratch: Vec<KvPadScratch> = self
@@ -3969,14 +3969,14 @@ impl<'file> LoadedModel<'file> {
                         usize::MAX,
                         serving_config.kv_bucket_tokens,
                     );
-                    // `mistral_cached_forward_program_with_experts`'s own
+                    // `gqa_cached_forward_program_with_experts`'s own
                     // `cached_len` `Op::Input` -- always present regardless of
                     // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::bind::
                     // cached_attention_candidates`'s own doc on the runtime bound
                     // that reads it), so this scalar is fed on every step,
                     // bucketed or not.
                     let cached_len_scalar = [cached_len as f32];
-                    // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
+                    // `gqa_cached_forward_program_with_experts_and_layer_taps`'s
                     // own `lm_head_row` `Op::Input` -- the last row of THIS
                     // step's `new_count` freshly-computed rows, host-supplied
                     // because the gather it feeds is a data-dependent index
@@ -7030,7 +7030,7 @@ impl<'file> LoadedModel<'file> {
     /// defect. [`Self::forward_logits`] is the `node_ids == [logits_root]`
     /// convenience most callers want; this general form additionally lets a
     /// caller bisect a numeric divergence by depth: build
-    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
+    /// [`proxima_tensor::spec::gqa_cached_forward_program_with_experts`]
     /// again at a shorter `block_count` against this same architecture and
     /// read off the last shared `NodeId` (`proxima_tensor::op::append`'s
     /// id-is-index invariant guarantees the two programs agree on every
@@ -7183,7 +7183,7 @@ impl<'file> LoadedModel<'file> {
                 crate::bind::as_block(*kind, bytes).ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
             named_blocks.push((name.as_str(), block));
         }
-        // `mistral_cached_forward_program_with_experts`'s own `cached_len`
+        // `gqa_cached_forward_program_with_experts`'s own `cached_len`
         // `Op::Input` (ROW 404/405's runtime bound the fused Metal
         // `CachedAttention` kernel reads) is present on every program this
         // method evaluates, fresh-KV or not -- this is always a one-shot

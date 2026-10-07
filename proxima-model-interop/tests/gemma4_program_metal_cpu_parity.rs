@@ -2,7 +2,7 @@
 //! (`qwen35moe_program_metal_cpu_layer_parity.rs`, `omega/tests/
 //! cached_attention_coop_load_parity.rs`, `omega/tests/wgpu_parity.rs`, ...)
 //! exercises qwen35moe's GDN/attention schedule or the generic single-RoPE
-//! `mistral_cached` engine -- none reference gemma4's real per-layer
+//! `gqa_cached` engine -- none reference gemma4's real per-layer
 //! schedule at all. This builds the REAL forward-program builder
 //! (`proxima_tensor::spec::lfm2_forward_program_with_experts`, the exact
 //! function [`crate::sliding_pattern::bind::Gemma4Arch::bind`] hands its own
@@ -27,7 +27,7 @@
 //!
 //! `lfm2_forward_program_with_experts` has no per-layer-taps counterpart
 //! (unlike qwen35moe's `_at_width`, which returns
-//! `MoeLayerDiagnostics::block_output` per layer, or `mistral_cached`'s
+//! `MoeLayerDiagnostics::block_output` per layer, or `gqa_cached`'s
 //! own `_and_layer_taps` twin) -- there is no way to request an
 //! intermediate layer's residual without hand-rolling a second copy of the
 //! graph up to that point, which this file deliberately does not do. Per-
@@ -40,10 +40,10 @@
 //!
 //! GREEN, not RED: `crate::generate::decode`'s step loop runs `self.program`
 //! (`BoundProgram::program`, i.e. exactly `lfm2_forward_program_with_experts`'s
-//! own output) directly, with no `mistral_cached`-family substitution for
+//! own output) directly, with no `gqa_cached`-family substitution for
 //! gemma4 anywhere in that file (grep confirmed) -- so the working
 //! hypothesis this file set out to check ("gemma4 routes through
-//! single-RoPE `mistral_cached`") does not hold at THIS layer: both tests
+//! single-RoPE `gqa_cached`") does not hold at THIS layer: both tests
 //! below pass at `relative_error` ~1e-7 (float32 noise floor), every layer
 //! count 1..=4, both sliding and global RoPE tables exercised. This is real,
 //! previously-absent coverage that the dual-rope schedule composition is

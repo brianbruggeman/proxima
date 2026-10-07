@@ -5,7 +5,7 @@
 //! weight's physical byte order -- so none of them can catch a Q4_K weight
 //! bound in the OTHER declared axis order, reduction-axis-first, which is
 //! the order every real matmul weight in
-//! `proxima_tensor::spec::mistral_cached_forward_program` actually uses
+//! `proxima_tensor::spec::gqa_cached_forward_program` actually uses
 //! (`wq`'s own declared shape is `[embedding, heads, head_dim]`: the
 //! contraction axis `embedding` comes first, not last).
 //!

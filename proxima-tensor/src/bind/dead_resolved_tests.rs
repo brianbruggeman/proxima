@@ -142,7 +142,7 @@ fn pruning_leaves_a_requested_output_bit_identical() {
 #[cfg(feature = "cached-attention-streaming")]
 fn a_fused_single_range_decode_plan_keeps_no_orphaned_mask_node() {
     let (program, logits, cache_roots, _) =
-        crate::spec::mistral_single_range_cached_forward_program(
+        crate::spec::gqa_single_range_cached_forward_program(
             32,
             16,
             24,

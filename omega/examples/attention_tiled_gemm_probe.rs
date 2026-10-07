@@ -21,7 +21,7 @@
 //! `score_product`/`value_product` have no [`Op::Input`] name to key a
 //! family off (the fused reduce's own two operands are both computed
 //! nodes), so they are identified structurally, over the REAL graph
-//! `mistral_cached_forward_program` returns as `Vec<Op>`: a fused two-operand
+//! `gqa_cached_forward_program` returns as `Vec<Op>`: a fused two-operand
 //! `Add`-reduce with neither operand tagged as a packed weight is either
 //! `rmsnorm`'s sum-of-squares (both operand slots are the SAME `NodeId` --
 //! `x * x`) or an attention product (the two operand slots are DISTINCT
@@ -34,7 +34,7 @@
 
 use std::collections::BTreeSet;
 
-use proxima_tensor::spec::mistral_cached_forward_program;
+use proxima_tensor::spec::gqa_cached_forward_program;
 use proxima_tensor::{
     BoundOpKind, Keep, NodeId, NumericPolicy, Op, ScalarOp, bind, correct_packed_matmul_layouts,
     infer,
@@ -60,7 +60,7 @@ fn main() {
     const HEAD_DIM: u32 = 128;
     const BLOCKS: u32 = 32;
 
-    let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+    let (program, logits_root, cache_roots) = gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,

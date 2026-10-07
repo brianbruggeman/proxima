@@ -207,7 +207,7 @@ pub fn causal_conv1d(
     )
 }
 
-/// the short-conv family's gated short-convolution mixer, [`append_mistral_layer`]'s
+/// the short-conv family's gated short-convolution mixer, [`append_gqa_layer`]'s
 /// attention-block counterpart for a `LayerKind::ShortConv` block: three
 /// separate `embedding x embedding` projections (`b_proj`/`c_proj`/`x_proj`)
 /// stand in for the real checkpoint's single fused `blk.N.shortconv.in_proj.weight`
@@ -227,7 +227,7 @@ pub fn causal_conv1d(
 /// three independently-shaped `Input`s sidesteps the gap entirely, at the
 /// cost of pushing the fused-to-three-tensor split to whichever binder loads
 /// the real checkpoint (unimplemented this session, same as
-/// [`append_mistral_layer`]'s own `wq`/`wk`/`wv` already being separate
+/// [`append_gqa_layer`]'s own `wq`/`wk`/`wv` already being separate
 /// `Input`s despite some checkpoints fusing QKV on disk).
 ///
 /// `b_proj` gates the ungated `x_proj` branch, [`causal_conv1d`] convolves
@@ -362,7 +362,7 @@ pub fn append_lfm2_conv_mixer(
 /// no new [`Op`] variant, per this crate's own reuse-first rule: a
 /// state-carrying IIR recurrence over a caller-owned `[key_dim, value_dim,
 /// head]` matrix is exactly what an `Input`/`Output` pair already expresses
-/// for [`append_mistral_cached_layer`]'s own KV cache, so the persistent
+/// for [`append_gqa_cached_layer`]'s own KV cache, so the persistent
 /// state here is a caller-provided `state_in` node returned again as
 /// `state_out`, not a new stateful primitive.
 ///
@@ -1036,7 +1036,7 @@ pub fn sigmoid(
 /// expression -- `parse_axis_expr` sums an arbitrary run of `+`-joined
 /// terms, not just two, confirmed by reading it before relying on it).
 ///
-/// State threading mirrors [`append_mistral_cached_layer`]: both caches
+/// State threading mirrors [`append_gqa_cached_layer`]: both caches
 /// (`state_in`/`state_out`, [`append_qwen35_delta_net_step`]'s own contract,
 /// and `conv_history_in`, the `l_cache - 1` previous raw `qkv_mixed` rows)
 /// are caller-persisted [`Op::Input`]s/return values, never concatenated
@@ -1044,13 +1044,13 @@ pub fn sigmoid(
 /// has no concat primitive. Instead of windowing (which would need a real
 /// concat), the cached conv is a plain additive split: `conv_out = sum_w
 /// weight[.., w] * history[w] + weight[.., l_cache - 1] * qkv_mixed_new`,
-/// the same disjoint-source blend [`append_mistral_cached_layer`]'s own
+/// the same disjoint-source blend [`append_gqa_cached_layer`]'s own
 /// `score_cached` + `score_new` split already uses for attention, minus the
 /// online-softmax combine step (a linear conv sum splits for free; attention
 /// only splits after `Maximum`/`Add` recombine it). The caller is
 /// responsible for trimming/appending `qkv_mixed` (this function's second
 /// return) into its own persisted history buffer, exactly as
-/// [`append_mistral_cached_layer`]'s own [`CachedLayerRoots`] callers manage
+/// [`append_gqa_cached_layer`]'s own [`CachedLayerRoots`] callers manage
 /// their KV cache outside the graph -- shift-and-trim lives on the host, not
 /// in the graph.
 ///

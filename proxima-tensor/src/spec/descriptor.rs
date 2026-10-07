@@ -27,7 +27,7 @@ pub enum CacheMask {
     /// `cached_len` operand bounds it, so a past position is always visible.
     /// Only a windowed layer adds a mask, because a window is a distance the
     /// bound cannot express. This is the dense and MoE families' lowering
-    /// ([`mistral_cached_forward_program_with_experts_and_layer_taps`]).
+    /// ([`gqa_cached_forward_program_with_experts_and_layer_taps`]).
     #[default]
     Bounded,
     /// Every cached block is masked in the graph
@@ -132,7 +132,7 @@ pub struct ModelDescriptor {
     pub sliding_kv_ring: bool,
     /// Qwen3-style per-head QK-norm, consulted ONLY by
     /// [`CacheMask::Bounded`]'s arm
-    /// (`mistral_cached_forward_program_with_experts_and_layer_taps`'s own
+    /// (`gqa_cached_forward_program_with_experts_and_layer_taps`'s own
     /// `qk_norm` parameter) -- inert, safe at any value, under
     /// [`CacheStrategy::Cacheless`]/[`CacheMask::Padded`], same
     /// "unused when the arm never reads it" precedent [`Self::l_cache`]'s
@@ -280,7 +280,7 @@ impl conflaguration::Validate for ModelDescriptor {
 
 /// The values a family's GGUF header and HF `config.json` do not carry, as
 /// DATA: the one record both [`gemma4_descriptor_from_gguf`] and
-/// [`mistral_descriptor_from_shape`] read, so neither holds a per-family
+/// [`gqa_descriptor_from_shape`] read, so neither holds a per-family
 /// literal. `proxima-model-interop` parses one TOML file per family into this
 /// (`serde`, via the [`Deserialize`] derives on [`LayerFfnConfig`],
 /// [`ParallelDenseMoeConfig`], [`EmbeddingScale`], [`Activation`] and
@@ -455,7 +455,7 @@ impl FamilyProfile {
 /// attention score scale, plain projected-V (no value-norm, no shared-KV),
 /// exclusive SwiGLU FFN, no embedding scale, no logit softcap.
 /// [`CacheMask::Bounded`] makes [`build_forward`] dispatch straight to
-/// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
+/// `gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
 /// (see that variant's own doc). Every dimension is a parameter because
 /// `DenseArch` serves every dense decoder header alike;
 /// `expert_feed_forward` is `feed_forward` because that builder sizes the
@@ -471,7 +471,7 @@ impl FamilyProfile {
 /// [`DenseArch::bind`]: ../../../proxima_model_interop/dense/struct.DenseArch.html
 #[expect(clippy::too_many_arguments, reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's Bounded arm, which reads every one of these fields straight back off the descriptor it builds")]
 #[must_use]
-pub fn mistral_descriptor_from_shape(
+pub fn gqa_descriptor_from_shape(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -574,7 +574,7 @@ pub struct ForwardProgram {
     /// One [`MoeSite`] per routed layer; empty for a dense program.
     pub moe_sites: MoeSites,
     /// One residual root per layer, populated only by [`CacheMask::Bounded`]'s
-    /// engine (`mistral_cached_forward_program_with_experts_and_layer_taps`).
+    /// engine (`gqa_cached_forward_program_with_experts_and_layer_taps`).
     pub layer_residuals: Vec<NodeId>,
     /// The last-norm activation `logits` projects from, which a pooled
     /// embedding reads. `None` for the engines that expose no hidden node.
@@ -649,7 +649,7 @@ pub(super) fn refuse_when(
 /// the decode program or the verify program by flipping it.
 ///
 /// [`CacheMask::Bounded`] dispatches to
-/// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
+/// `gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
 /// directly, passing this descriptor's own `attention.rope_pairing` rather
 /// than re-inferring it from `qk_norm` -- see that variant's own doc for why
 /// (a genuinely different cache-scoring algebra, not a knob the other two
@@ -813,10 +813,10 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
             // re-inferred from `qk_norm` here -- a split-half checkpoint needs split-half RoPE
             // with `qk_norm` still `false` (no QK-norm tensors at all), a
             // combination the qk_norm-inferring wrapper cannot express (its
-            // own doc on that limitation, `mistral_descriptor_from_shape`'s
+            // own doc on that limitation, `gqa_descriptor_from_shape`'s
             // `rope_pairing` parameter above).
             let (program, roots, cache_roots, layer_residuals, moe_sites) =
-                mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+                gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
                     descriptor.vocab,
                     descriptor.embedding,
                     descriptor.feed_forward,

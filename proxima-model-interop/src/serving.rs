@@ -1304,7 +1304,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         return Err(InteropError::UnsupportedServingConfig(format!(
             "kv_cache_key_quant={:?} kv_cache_value_quant={:?} (-ctk/-ctv): the per-layer \
              key/value context cache (`proxima-model-interop`'s cached decode loop, \
-             `proxima_tensor::spec::mistral_cached_forward_program`) stores F32 unquantized \
+             `proxima_tensor::spec::gqa_cached_forward_program`) stores F32 unquantized \
              today; Q8_0 storage and its `matmul_q8_0_f32` kernel exist \
              (`proxima_tensor::cpu::QuantizedBlock::Packed` with `Codec::Q8_0`) but the read path does not work \
              end to end -- the quantized matmul dispatch only handles a flat \
@@ -1321,7 +1321,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
 
     if config.flash_attention {
         return Err(InteropError::UnsupportedServingConfig(
-            "flash_attention=true (-fa on): `mistral_forward_program` lowers attention to \
+            "flash_attention=true (-fa on): `gqa_forward_program` lowers attention to \
              a naive multiply-then-reduce op graph, not a fused flash-attention kernel; \
              implementing this requires a new fused Op variant plus a matching cpu.rs \
              kernel that never materializes the full [seq, seq] score matrix"

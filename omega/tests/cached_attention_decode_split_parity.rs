@@ -20,7 +20,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
-use proxima_tensor::spec::qwen3_cached_forward_program;
+use proxima_tensor::spec::qk_norm_cached_forward_program;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{BoundOpKind, NodeId, Op, bind, infer};
 
@@ -54,7 +54,7 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 }
 
 fn gqa_decode_fixture(cached_len: u64, head_dim: u32) -> Fixture {
-    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+    let (program, logits_root, cache_roots) = qk_norm_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,

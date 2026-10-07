@@ -40,7 +40,7 @@ use proxima_tensor::spec::{
     ParallelDenseMoeConfig, CachedLayerRoots, ForwardProgram, LayerCacheRoots, RopePairing, RopeTableSel,
     ValueSourceKind, build_forward,
     SLIDING_KV_SYMBOL, gemma4_descriptor_from_gguf, lfm2_two_range_cached_forward_program_with_experts,
-    mistral_cached_forward_program_with_experts_and_layer_taps, mistral_descriptor_from_shape,
+    gqa_cached_forward_program_with_experts_and_layer_taps, gqa_descriptor_from_shape,
 };
 use sha2::{Digest, Sha256};
 
@@ -834,7 +834,7 @@ fn descriptor_real_dims_openchat_program_equals_direct_builder() {
     );
 
     let (direct, direct_roots, direct_cache_roots, direct_residuals, direct_moe) =
-        mistral_cached_forward_program_with_experts_and_layer_taps(
+        gqa_cached_forward_program_with_experts_and_layer_taps(
             shape.vocab,
             shape.embedding,
             shape.feed_forward,
@@ -851,7 +851,7 @@ fn descriptor_real_dims_openchat_program_equals_direct_builder() {
             true,
         )
         .expect("direct real-dims build");
-    let descriptor = mistral_descriptor_from_shape(
+    let descriptor = gqa_descriptor_from_shape(
         shape.vocab,
         shape.embedding,
         shape.feed_forward,

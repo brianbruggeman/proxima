@@ -8,7 +8,7 @@ use super::*;
 /// or one of the position-only constants [`causal_mask`]/`cos`/`sin` share
 /// across every layer.
 #[allow(clippy::too_many_arguments)]
-pub fn append_mistral_layer(
+pub fn append_gqa_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -587,7 +587,7 @@ fn gather_expert_scale(program: &mut Vec<Op>, scale: NodeId, route: NodeId) -> N
 /// `Softmax` is llama.cpp's own fallback when that key is absent
 /// (`llama-model.cpp:1237-1240`, "existing models that have no
 /// `expert_gating_func` model parameter set") -- Mixtral carries no such
-/// key, so `append_mistral_moe_layer`/`append_mistral_cached_moe_layer`
+/// key, so `append_gqa_routed_layer`/`append_gqa_cached_routed_layer`
 /// always pass `Softmax` unconditionally rather than reading a key that
 /// does not exist on that checkpoint. `Sigmoid` is `_TYPE_SIGMOID` (`2`),
 /// the short-conv family's own value (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:209`'s
@@ -683,7 +683,7 @@ pub struct MoeSites(pub Vec<MoeSite>);
 /// inside the affine-only + `Iota`/`Computed`-gather algebra, no new
 /// `Op`/`ScalarOp` variant, unrolled at spec-build time the same way this
 /// whole function is), and each round's gathered expert runs the same
-/// SwiGLU [`append_mistral_layer`]'s dense path uses, weighted by its own
+/// SwiGLU [`append_gqa_layer`]'s dense path uses, weighted by its own
 /// share among only the selected experts.
 ///
 /// `gating` picks how raw `logits` become the per-expert `scores` used both
@@ -716,7 +716,7 @@ pub struct MoeSites(pub Vec<MoeSite>);
 /// never reach this branch.
 ///
 /// The routed feed-forward block [`lfm2_forward_program_with_experts`]
-/// and [`mistral_cached_forward_program_with_experts`] both call per
+/// and [`gqa_cached_forward_program_with_experts`] both call per
 /// layer; see [`qwen35_forward_program`] for this crate's own worked
 /// example of a full per-layer builder chain (a dense, non-MoE FFN there).
 pub fn append_moe_ffn(
@@ -1142,15 +1142,15 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     Ok((output, site))
 }
 
-/// [`append_mistral_layer`]'s mixture-of-experts counterpart: identical
+/// [`append_gqa_layer`]'s mixture-of-experts counterpart: identical
 /// attention block (RoPE + GQA + causal mask, node-for-node the same code),
 /// [`append_moe_ffn`] in place of the dense SwiGLU triple. Kept as a
-/// separate function rather than a branch inside [`append_mistral_layer`]
+/// separate function rather than a branch inside [`append_gqa_layer`]
 /// so the dense path's own node sequence — and therefore its generated
 /// program bytes — never changes shape by so much as one node merely
 /// because this function exists next to it.
 #[allow(clippy::too_many_arguments)]
-pub fn append_mistral_moe_layer(
+pub fn append_gqa_routed_layer(
     program: &mut Vec<Op>,
     layer: u32,
     x: NodeId,

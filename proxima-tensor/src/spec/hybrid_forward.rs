@@ -154,7 +154,7 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
         },
     );
     let (is_future, _neg_infinity) = causal_mask(&mut program)?;
-    // Same rank-0 leaf [`mistral_cached_forward_program_with_experts`] adds
+    // Same rank-0 leaf [`gqa_cached_forward_program_with_experts`] adds
     // right after its own `causal_mask` call, and for the same reason: named
     // "cached_len" so `bind::cached_attention_candidates`'s `find_named_input`
     // picks it up by NAME on the `Attention` arm's fused `CachedAttention`
@@ -546,11 +546,11 @@ pub(super) fn hybrid_dense_forward(descriptor: &ModelDescriptor) -> Result<Forwa
                 GdnOutputGate::Silu,
             )?;
 
-            // Unlike `append_mistral_cached_layer` (bundles FFN internally),
+            // Unlike `append_gqa_cached_layer` (bundles FFN internally),
             // `append_qwen35_ssm_mixer` is mixer-plus-residual only -- the
             // same scope `append_lfm2_conv_mixer` has -- so the SSM branch
             // runs its own dense FFN pass here, matching
-            // `mistral_cached_forward_program_with_experts`'s own
+            // `gqa_cached_forward_program_with_experts`'s own
             // `expert_count == 0` FFN math exactly (Qwen3.5 never routes FFN
             // through experts, llama.cpp's hybrid-model source, line 471).
             let normed2 = rmsnorm(&mut program, mixer_out, ffn_norm_weight, inv_dim, eps)?;

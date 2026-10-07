@@ -29,7 +29,7 @@ fn gemma4_e2b_shaped_model_architecture() -> ModelHparams {
 
 /// The hazard the `"sliding-pattern"` exclusion exists to prevent, proven
 /// directly: called on the E2B checkpoint's own shape,
-/// `build_single_range_program` (`mistral_single_range_cached_forward_program`'s
+/// `build_single_range_program` (`gqa_single_range_cached_forward_program`'s
 /// own doc: dense-uniform-only, ONE uniform per-layer schedule, no
 /// `KeySourceKind::SharedFromLayer` concept at all) still declares
 /// `blk.15.attn_k.weight` -- the exact leaf name the real checkpoint's
@@ -42,7 +42,7 @@ fn gemma4_e2b_shaped_model_architecture() -> ModelHparams {
 fn build_single_range_program_declares_blk15_attn_k_for_gemma4_shaped_architecture() {
     let architecture = gemma4_e2b_shaped_model_architecture();
     let single_range = build_single_range_program(&architecture, false)
-        .expect("mistral_single_range_cached_forward_program builds for a uniform 35-layer shape")
+        .expect("gqa_single_range_cached_forward_program builds for a uniform 35-layer shape")
         .expect("expert_count == 0 does not turn this builder away");
     let declares_blk15_attn_k = single_range.program.iter().any(|operation| {
         matches!(

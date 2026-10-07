@@ -597,12 +597,12 @@ pub(super) fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_
     }
 }
 
-/// [`append_mistral_layer`]'s attention sub-block in isolation (RoPE + GQA +
+/// [`append_gqa_layer`]'s attention sub-block in isolation (RoPE + GQA +
 /// causal mask + residual, no FFN) -- the piece [`lfm2_forward_program_with_experts`]
 /// needs on its own, since an attention block there sits beside
 /// [`append_lfm2_conv_mixer`] rather than always beside the same FFN choice
-/// [`append_mistral_layer`] bundles it with. Node-for-node the same attention
-/// graph [`append_mistral_layer`] runs before its own FFN call, extracted
+/// [`append_gqa_layer`] bundles it with. Node-for-node the same attention
+/// graph [`append_gqa_layer`] runs before its own FFN call, extracted
 /// rather than shared by refactoring that function, so the dense uniform-decoder
 /// path's own generated program bytes never change shape because this
 /// function exists next to it.
@@ -1732,13 +1732,13 @@ pub(crate) fn ple_layer_input(
 /// real checkpoint's tensor directory, since `layer_types` is not a metadata
 /// key this architecture writes), then a shared RMSNorm and
 /// `append_moe_ffn`/dense-triple FFN exactly like
-/// [`mistral_forward_program`]'s own MoE branch --
+/// [`gqa_forward_program`]'s own MoE branch --
 /// `leading_dense_block_count` (the 8B-A1B short-conv checkpoint: `2`) is threaded per layer
 /// rather than a single crate-wide dense/MoE switch, since this checkpoint's
 /// first two blocks are dense and the rest are routed.
 ///
 /// Prefill-only: takes the whole prompt as one `[seq, embedding]` pass, the
-/// same scope [`mistral_forward_program`] has. A KV-cached incremental
+/// same scope [`gqa_forward_program`] has. A KV-cached incremental
 /// counterpart for a schedule of ONLY [`LayerKind::Attention`] entries
 /// exists (`spec::lfm2_single_range_cached::lfm2_single_range_cached_forward_program_with_experts`,
 /// behind the `sliding-pattern-kv-cache` feature one level up in
@@ -2211,7 +2211,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
     Ok((program, logits, MoeSites(moe_sites), duplicate_head_roots))
 }
 
-/// [`mistral_forward_program`]'s key/value-cached counterpart: the same
+/// [`gqa_forward_program`]'s key/value-cached counterpart: the same
 /// architecture, but `ids`/`rope_cos`/`rope_sin` carry only the `new`
 /// positions this call introduces (symbol 0), attention also draws on a
 /// per-layer already-rotated key/value cache sized by symbol 1
@@ -2228,9 +2228,9 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
 /// already define as identity/`-inf`, so the first call degenerates to
 /// plain causal self-attention over the whole prompt with no special case.
 ///
-/// Dense-only: always binds `append_mistral_cached_layer`'s plain
+/// Dense-only: always binds `append_gqa_cached_layer`'s plain
 /// `ffn_{gate,up,down}.weight` triple. Delegates to
-/// [`mistral_cached_forward_program_with_experts`] with `expert_count = 0`,
+/// [`gqa_cached_forward_program_with_experts`] with `expert_count = 0`,
 /// `expert_used_count = 0` -- that function's own doc explains why those two
 /// values select the identical dense program this function has always
 /// built. Kept as its own entry point (rather than folding the two extra
@@ -2238,7 +2238,7 @@ pub fn lfm2_forward_program_with_experts_and_head_repeats(
 /// outside this crate that a dense-only checkpoint never needs to pass an
 /// expert config to.
 #[allow(clippy::too_many_arguments)]
-pub fn mistral_cached_forward_program(
+pub fn gqa_cached_forward_program(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -2247,7 +2247,7 @@ pub fn mistral_cached_forward_program(
     head_dim: u32,
     block_count: u32,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
-    mistral_cached_forward_program_with_experts(
+    gqa_cached_forward_program_with_experts(
         vocab,
         embedding,
         feed_forward,
@@ -2265,17 +2265,17 @@ pub fn mistral_cached_forward_program(
     .map(|(program, roots, cache_roots, _moe_sites)| (program, roots.logits, cache_roots))
 }
 
-/// [`mistral_cached_forward_program`]'s Qwen3 dense-attention counterpart:
+/// [`gqa_cached_forward_program`]'s Qwen3 dense-attention counterpart:
 /// the identical interleaved-RoPE cached layer, plus per-head QK-norm
 /// (Qwen3's own `q_norm`/`k_norm`, `modeling_qwen3.py`'s `Qwen3Attention`)
 /// applied to `q`/`k_new` before RoPE -- see
-/// `append_mistral_cached_layer`'s `qk_norm` parameter doc for the exact
+/// `append_gqa_cached_layer`'s `qk_norm` parameter doc for the exact
 /// two ops this adds over the plain dense layer. Qwen3 has no
 /// mixture-of-experts variant this crate has bound yet, so this takes no
 /// `expert_count`/`expert_used_count`, the same dense-only shape
-/// [`mistral_cached_forward_program`] itself uses.
+/// [`gqa_cached_forward_program`] itself uses.
 #[allow(clippy::too_many_arguments)]
-pub fn qwen3_cached_forward_program(
+pub fn qk_norm_cached_forward_program(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -2284,7 +2284,7 @@ pub fn qwen3_cached_forward_program(
     head_dim: u32,
     block_count: u32,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
-    mistral_cached_forward_program_with_experts(
+    gqa_cached_forward_program_with_experts(
         vocab,
         embedding,
         feed_forward,
@@ -2302,21 +2302,21 @@ pub fn qwen3_cached_forward_program(
     .map(|(program, roots, cache_roots, _moe_sites)| (program, roots.logits, cache_roots))
 }
 
-/// [`mistral_cached_forward_program`]'s mixture-of-experts-capable
+/// [`gqa_cached_forward_program`]'s mixture-of-experts-capable
 /// counterpart, carrying the same `expert_count`/`expert_used_count`
-/// parameters [`mistral_forward_program`] already takes. `expert_count == 0`
-/// binds every layer through `append_mistral_cached_layer`'s plain
+/// parameters [`gqa_forward_program`] already takes. `expert_count == 0`
+/// binds every layer through `append_gqa_cached_layer`'s plain
 /// `ffn_{gate,up,down}.weight` triple, node-for-node the same program
-/// [`mistral_cached_forward_program`] has always built, so a dense
+/// [`gqa_cached_forward_program`] has always built, so a dense
 /// checkpoint's generated program is unaffected by this function's
 /// existence. `expert_count > 0` routes each layer through
-/// `append_mistral_cached_moe_layer` instead, gathering one of
+/// `append_gqa_cached_routed_layer` instead, gathering one of
 /// `expert_count` experts' weight slabs per token per `append_moe_ffn`'s
-/// doc -- the same routed FFN [`mistral_forward_program`]'s own MoE branch
+/// doc -- the same routed FFN [`gqa_forward_program`]'s own MoE branch
 /// already runs, reused rather than reconstructed.
 ///
 /// `paired_gate_up_reduce` is passed straight through to every dense layer's
-/// `append_mistral_cached_layer` call (see that parameter's own doc) --
+/// `append_gqa_cached_layer` call (see that parameter's own doc) --
 /// `false` at every call site in this crate today; a caller opts in only
 /// once its loader has bound `blk.{layer}.ffn_gate_up.weight`
 /// (`proxima-model-interop::bind::bind_matmul_weight_paired`). No effect on
@@ -2324,15 +2324,15 @@ pub fn qwen3_cached_forward_program(
 /// per-expert stack this flag does not touch).
 ///
 /// `fused_qkv_reduce` is passed straight through to every dense layer's
-/// `append_mistral_cached_layer` call (see that parameter's own doc) --
+/// `append_gqa_cached_layer` call (see that parameter's own doc) --
 /// `false` at every call site in this crate today; a caller opts in only
 /// once its loader has bound `blk.{layer}.attn_qkv.weight`
 /// (`proxima-model-interop::bind::bind_matmul_weight_triple`). Requires
-/// `qk_norm == false` (`append_mistral_cached_layer`'s own doc); no effect
+/// `qk_norm == false` (`append_gqa_cached_layer`'s own doc); no effect
 /// on the `expert_count > 0` branch (attention projections are untouched by
 /// which FFN branch runs).
 #[allow(clippy::too_many_arguments)]
-pub fn mistral_cached_forward_program_with_experts(
+pub fn gqa_cached_forward_program_with_experts(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -2348,7 +2348,7 @@ pub fn mistral_cached_forward_program_with_experts(
     fused_qkv_reduce: bool,
 ) -> Result<(Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>, MoeSites), TensorError> {
     let (program, roots, cache_roots, _layer_residuals, moe_sites) =
-        mistral_cached_forward_program_with_experts_and_layer_taps(
+        gqa_cached_forward_program_with_experts_and_layer_taps(
             vocab,
             embedding,
             feed_forward,
@@ -2367,7 +2367,7 @@ pub fn mistral_cached_forward_program_with_experts(
     Ok((program, roots, cache_roots, moe_sites))
 }
 
-/// [`mistral_cached_forward_program_with_experts`]'s full implementation,
+/// [`gqa_cached_forward_program_with_experts`]'s full implementation,
 /// additionally returning one [`NodeId`] per layer -- the residual
 /// (`x_next`, the post-MoE-add activation) each block hands the next layer,
 /// in layer order, `block_count` entries. A caller bisecting a CPU-vs-Metal
@@ -2391,7 +2391,7 @@ pub fn mistral_cached_forward_program_with_experts(
 /// logprobs) opts into that by passing `false`, not by this crate guessing
 /// which one a caller wants.
 #[allow(clippy::too_many_arguments)]
-pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
+pub fn gqa_cached_forward_program_with_experts_and_layer_taps(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -2406,7 +2406,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
     last_row_only: bool,
-) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
+) -> Result<GqaRoutedForwardProgramWithLayerTaps, TensorError> {
     let rope_pairing = if qk_norm {
         RopePairing::SplitHalf {
             pairs: head_dim / 2,
@@ -2414,7 +2414,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     } else {
         RopePairing::Interleaved
     };
-    mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+    gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
         vocab,
         embedding,
         feed_forward,
@@ -2442,12 +2442,12 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
 /// A no-QK-norm checkpoint can still use split-half (NEOX) RoPE even so,
 /// so its pairing is the family profile's `rope_pairing` rather than
 /// inferred from the presence of norm tensors -- see
-/// [`crate::spec::mistral_descriptor_from_shape`]'s own `rope_pairing` parameter, which
+/// [`crate::spec::gqa_descriptor_from_shape`]'s own `rope_pairing` parameter, which
 /// the `proxima-model-interop` dense-architecture binder feeds with
 /// `RopePairing::SplitHalf { pairs: head_dim / 2 }` for such a
 /// checkpoint instead of a dedicated builder.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
     vocab: u32,
     embedding: u32,
     feed_forward: u32,
@@ -2469,10 +2469,10 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     residual_scale: Option<f32>,
     layer_windows: &[Option<u32>],
     sliding_kv_ring: bool,
-) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
+) -> Result<GqaRoutedForwardProgramWithLayerTaps, TensorError> {
     if residual_scale.is_some() && expert_count == 0 {
         return Err(TensorError::UnsupportedInBuilder {
-            builder: "mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
+            builder: "gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
             feature: "a residual scale on a dense layer",
         });
     }
@@ -2485,7 +2485,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     let windows: Vec<u32> = layer_windows.iter().flatten().copied().filter(|width| *width > 0).collect();
     if sliding_kv_ring && windows.iter().any(|width| *width != windows[0]) {
         return Err(TensorError::UnsupportedInBuilder {
-            builder: "mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
+            builder: "gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
             feature: "sliding_kv_ring with differing window widths (one sliding slot)",
         });
     }
@@ -2540,7 +2540,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
             value: 1.0,
         },
     );
-    // Only ever consulted by `append_mistral_cached_layer`'s
+    // Only ever consulted by `append_gqa_cached_layer`'s
     // `fused_qkv_reduce` branch (that parameter's own doc) -- built ONLY
     // when the flag is set, so `false` reproduces today's program
     // node-for-node (`cached_attention_rewrite_replaces_the_bound_attention_subgraph`'s
@@ -2566,7 +2566,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
         );
         (head_shape_ones, kv_head_shape_ones)
     } else {
-        // Never read (`append_mistral_cached_layer`'s `fused_qkv_reduce`
+        // Never read (`append_gqa_cached_layer`'s `fused_qkv_reduce`
         // branch is the only reader, and it never runs when the flag is
         // `false`) -- `ones` (already built above) is reused as the
         // placeholder rather than adding an `Option` the callee would need
@@ -2799,7 +2799,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
                 (q_norm_weight, k_norm_weight, inv_head_dim)
             });
 
-            append_mistral_cached_layer(
+            append_gqa_cached_layer(
                 &mut program,
                 x,
                 inv_dim,
@@ -2889,7 +2889,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
                 (q_norm_weight, k_norm_weight, inv_head_dim)
             });
 
-            let (next_x, next_roots, site) = append_mistral_cached_moe_layer(
+            let (next_x, next_roots, site) = append_gqa_cached_routed_layer(
                 &mut program,
                 layer,
                 x,
@@ -2996,7 +2996,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
 /// kinds carry genuinely different cache shapes, the same reason
 /// [`LayerKind`] exists as its own type rather than a boolean.
 ///
-/// `Attention(CachedLayerRoots)` is [`mistral_cached_forward_program_with_experts`]'s
+/// `Attention(CachedLayerRoots)` is [`gqa_cached_forward_program_with_experts`]'s
 /// own 3-wide shape, still constructed by that program's caller
 /// (`crate::generate::LoadedModel::load`) for every non-recurrent-interval checkpoint --
 /// kept as its own variant rather than folded into `DenseAttention` so that
@@ -3026,8 +3026,8 @@ pub enum LayerCacheRoots {
 }
 
 /// Qwen3.5's whole-model incremental forward program: `full_attention_interval`
-/// dense-attention layers (`append_mistral_cached_layer`, the same KV-cache
-/// pattern [`mistral_cached_forward_program_with_experts`] already runs)
+/// dense-attention layers (`append_gqa_cached_layer`, the same KV-cache
+/// pattern [`gqa_cached_forward_program_with_experts`] already runs)
 /// interleaved with gated-DeltaNet layers (`append_qwen35_ssm_mixer`),
 /// following llama.cpp's own `hparams.is_recr_impl[i] = (i < n_layer) &&
 /// ((i + 1) % full_attention_interval != 0)` (llama.cpp's hybrid-model source, lines 19-20) -- layer
@@ -3035,7 +3035,7 @@ pub enum LayerCacheRoots {
 /// dense attention, every other layer is SSM. Qwen3.5 never routes FFN
 /// through experts (llama.cpp's hybrid-model source, line 471, `GGML_ASSERT(model.layers[il].ffn_gate_inp
 /// == nullptr)`), so every layer's FFN is the plain dense triple
-/// [`mistral_cached_forward_program_with_experts`]'s own `expert_count == 0`
+/// [`gqa_cached_forward_program_with_experts`]'s own `expert_count == 0`
 /// branch already builds -- reused here rather than reconstructed.
 ///
 /// `ssm_d_state`/`ssm_dt_rank`/`ssm_n_group`/`ssm_d_inner`/`ssm_d_conv` name
@@ -3054,7 +3054,7 @@ pub enum LayerCacheRoots {
 /// per checkpoint, known at program-build time.
 ///
 /// Dense attention's own layers (`append_qwen35_dense_attention_layer`,
-/// not `append_mistral_cached_layer`) run split-half RoPE over the
+/// not `append_gqa_cached_layer`) run split-half RoPE over the
 /// checkpoint's PARTIAL rotary width plus a concatenated-by-sum pass-through
 /// remainder, and a per-head sigmoid gate on the attention output --
 /// `append_qwen35_dense_attention_layer`'s own doc walks through why the
