@@ -689,3 +689,51 @@ function; `opt-level` did not move it. Attribution table:
   and per-process RSS of one binary spans 2.34 to 2.68 GB in these runs. Reading the diff (not measured), nothing in the slice adds memory at
   load (a `String` per hparams struct, a closed error variant, strings); the cause of the run-1 delta is not
   traced. Evidence: `evidence/name_sweep/perf_e2b`, `perf_granite`, `perf_granite_run2`, `perf_granite_run3`.
+
+### Slice 12b: identifiers named for what they are (measured 2026-10-06)
+
+- Requirement ids: 45 files lost the requirement, acceptance and slice ids from comments and from test
+  assertion text (`a9a6df92`); the spec path stays where a comment pointed at it. Prime, primitives and omega
+  comments that carried an initiative row id lost it too. Left as written: `R9/...` paths in omega (the name of a
+  dump directory, not a requirement), `ROW <n>` references in omega (rows of `docs/discipline.md`), P-TU and
+  proxima-vm slice labels (those initiatives' own documents), and `R1`/`E2`-style node labels, RFC rounds and
+  test constants.
+- Identifier renames, four commits, each a text rename over every tracked file outside `specs/` and
+  `docs/bench-campaigns/`, each green on the per-slice tier:
+  `aabbde8e` the plain RoPE + GQA layer and program builders (`gqa_*`, `append_gqa_*`,
+  `qk_norm_cached_forward_program`, `GqaRoutedForwardProgramWithLayerTaps`) and the files `gqa_forward_cached.rs`
+  and `gqa_layer_routed.rs`; `27389d8f` the layer-schedule builders (`scheduled_*`, `append_layer_ffn`,
+  `append_short_conv_mixer`, `append_single_range_cached_attention`, `append_two_range_cached_attention`), the
+  interop short-conv names (`ShortConvHparams`, `short_conv_*`) and the files `scheduled_cached.rs` and
+  `short_conv_delta_net.rs`; `69a46fcd` the delta-net and gated-attention builders (`append_delta_net_*`,
+  `delta_net_*`, `append_gated_attention_*`, `append_shared_expert_*`), the interop interval names
+  (`RecurrentIntervalHparams`, `RecurrentRoutedIntervalHparams`, `recurrent_interval_*`,
+  `recurrent_routed_interval_forward_program*`), the decode names (`dense_attention_pad_scratch`,
+  `dense_attention_placement_supported`, `moe_pre_gather_*`, `*_moe_router_*`), the `qwen35_*` log events
+  (now `moe_*`), the three `PROXIMA_DEBUG_QWEN35_*` variables (now `PROXIMA_DEBUG_MOE_*`) and the file
+  `gated_attention.rs`; `eacb75f7` `SlidingPatternHparams`, `sliding_rope_table`,
+  `sliding_pattern_descriptor_from_gguf`.
+- Count, the 315-line search of the previous slice (`git grep -nIiP '(gemma4|qwen35moe|qwen35|qwen2|lfm2|mistral)'`
+  over the AC4 paths and exclusions, comment lines removed): 315 at `a9a6df92`, 37 at `eacb75f7`. The wider search
+  that adds `qwen3` and every `llama`: 552 before, 273 after. AC4 itself: 0 before and after. The five
+  `proxima-tensor/src/spec` file names are `gqa_forward_cached`, `gqa_layer_routed`, `scheduled_cached`,
+  `short_conv_delta_net` and `gated_attention`.
+- What stays, 37 lines of the first search, all inside inline `#[cfg(test)]` code: test function names and case
+  names that name the real checkpoint or header they load (`real_lfm2_hybrid_file`, `gemma4_ring_rows`,
+  `memory_budget_gemma4_window_cap`, `prove_resident_per_gib_range_pattern_on_the_real_qwen35moe_checkpoint`),
+  the test fixtures `gemma4_e2b_header` and `tiny_gemma4_vocab` (a real E2B header and a vocabulary shaped like
+  its tokenizer arrays), the `PROXIMA_QWEN35MOE_GGUF` variable that locates the real checkpoint file, and the
+  module `gemma4_single_range_exclusion_tests` (a file of tests over the E2B header). In the wider search:
+  `llama_relaxed` and `LLAMA_*` defaults (they name the incumbent's numerics and CLI defaults), `llama.cpp`
+  references, and the tokenizer file-format values in `gguf_names.rs`. The profile TOMLs (`mistral.toml`,
+  `qwen35.toml`, `gemma4.toml`, `lfm2moe.toml`) are keyed by the `general.architecture` string the file carries,
+  which is a file-format value, and `specs/mistral_layer.toml` is data.
+- Gates, per-slice tier at `eacb75f7` (logs `.long_ctx_backups/arch_data/slice_12b/d_sliding_*`): clippy exit 0,
+  tensor alloc check exit 0, interop no-default check exit 0, omega all-targets check exit 0, root `gguf_generate`
+  example check exit 0, tensor 779 passed 8 skipped (6.6 s), interop slice-gate 708 passed 124 skipped (94.3 s);
+  tokenizer 211 passed 22 skipped (18.3 s, run at `a9a6df92`, the only commit that touched tokenizer text). The same
+  five commands were green at each of the four rename commits and at `a9a6df92`, with the same 779 and 708.
+  AC0 8 passed (2.8 s): the 8 op-graph digests are byte-identical (they sit in the slice-gate set, 8 of 8 passed at every
+  commit). Renames only: no digest moved and neither the decode nor the prefill loop changed behaviour, so no
+  performance arms ran and the slice inherits the baseline. Not run here: `--all-features` (the `mlx-gdn` build
+  step needs `PROXIMA_MLX_PREFIX`, absent on this machine).
