@@ -133,3 +133,124 @@ mod lookup {
         run(&in_range).expect("a step after a faulted one starts from a clean fault buffer");
     }
 }
+
+#[cfg(feature = "moe-topk-fusion")]
+mod routed_moe {
+    use super::metal_stage_totals;
+    use proxima_tensor::spec::{
+        Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter,
+        append_moe_ffn, input_leaf, scalar_constant,
+    };
+    use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
+
+    const EXPERT_COUNT: u32 = 32;
+    const EXPERTS_USED: u32 = 8;
+    const EMBEDDING: u32 = 8;
+    const FEED_FORWARD: u32 = 8;
+
+    struct RoutedStep {
+        program: Vec<Op>,
+        output: NodeId,
+        x: Vec<f32>,
+        logits: Vec<f32>,
+        expert_weights: Vec<f32>,
+    }
+
+    fn routed_decode_step() -> RoutedStep {
+        let mut program = Vec::new();
+        let mut leaf = |shape: Vec<u32>, name: &str| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                shape.into_iter().map(Extent::Static).collect(),
+                name,
+            )
+        };
+        let x = leaf(vec![1, EMBEDDING], "x");
+        let logits = leaf(vec![1, EXPERT_COUNT], "logits");
+        let expert_w_gate = leaf(vec![EXPERT_COUNT, EMBEDDING, FEED_FORWARD], "expert_w_gate");
+        let expert_w_up = leaf(vec![EXPERT_COUNT, EMBEDDING, FEED_FORWARD], "expert_w_up");
+        let expert_w_down = leaf(vec![EXPERT_COUNT, FEED_FORWARD, EMBEDDING], "expert_w_down");
+        let ones = scalar_constant(&mut program, 1.0);
+        let moe_spec = MoeFfnSpec {
+            router: MoeRouter::Logits(logits),
+            expert_w_gate,
+            expert_w_up,
+            expert_w_down,
+            expert_count: EXPERT_COUNT,
+            expert_used_count: EXPERTS_USED,
+            ones,
+            gating: ExpertGatingFunc::Softmax,
+            expert_bias: None,
+            expert_scale: None,
+            activation: Activation::Silu,
+            strategy: MoeProjectionStrategy::PerRoute,
+        };
+        let (output, _site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
+            .expect("routed moe ffn lowers at 32 experts, top 8");
+        let expert_cells = (EXPERT_COUNT * EMBEDDING * FEED_FORWARD) as usize;
+        RoutedStep {
+            program,
+            output,
+            x: (0..EMBEDDING).map(|index| 0.1 + index as f32 * 0.05).collect(),
+            logits: (0..EXPERT_COUNT)
+                .map(|index| ((index * 7 + 3) % EXPERT_COUNT) as f32 * 0.17)
+                .collect(),
+            expert_weights: (0..expert_cells)
+                .map(|index| ((index % 13) as f32 - 6.0) * 0.03)
+                .collect(),
+        }
+    }
+
+    fn blocks(step: &RoutedStep) -> [QuantizedBlock<'_>; 5] {
+        [
+            QuantizedBlock::Float32(&step.x),
+            QuantizedBlock::Float32(&step.logits),
+            QuantizedBlock::Float32(&step.expert_weights),
+            QuantizedBlock::Float32(&step.expert_weights),
+            QuantizedBlock::Float32(&step.expert_weights),
+        ]
+    }
+
+    #[test]
+    fn a_warm_routed_moe_step_allocates_no_device_buffers() {
+        let step = routed_decode_step();
+        let blocks = blocks(&step);
+        let plan = omega::plan(
+            &step.program,
+            &[],
+            &blocks,
+            &[step.output],
+            NumericPolicy::default(),
+        )
+        .expect("plans the full routed moe step");
+
+        let _ = metal_stage_totals();
+        let cold = omega::execute_plan_with_placements(&plan, &blocks, &[], &[], &mut Vec::new())
+            .expect("cold step builds the arena and runs");
+        let cold_totals = metal_stage_totals();
+        let warm = omega::execute_plan_with_placements(&plan, &blocks, &[], &[], &mut Vec::new())
+            .expect("warm step runs against the plan-owned buffers");
+        let warm_totals = metal_stage_totals();
+
+        assert!(
+            cold_totals.output_buffer_allocations > 0 && cold_totals.physical_dispatch_calls > 0,
+            "the cold step must build device buffers and dispatch: allocations={} dispatches={}",
+            cold_totals.output_buffer_allocations,
+            cold_totals.physical_dispatch_calls
+        );
+        assert_eq!(
+            warm_totals.output_buffer_allocations, 0,
+            "a warm step over {} dispatches allocated {} device buffers ({} bytes)",
+            warm_totals.physical_dispatch_calls,
+            warm_totals.output_buffer_allocations,
+            warm_totals.output_buffer_allocated_bytes
+        );
+        let cold_values = cold.get(step.output).expect("cold output present").0;
+        let warm_values = warm.get(step.output).expect("warm output present").0;
+        assert_eq!(
+            cold_values, warm_values,
+            "recycling buffers across steps must not change the step's result"
+        );
+    }
+}
