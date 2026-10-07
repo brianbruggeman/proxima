@@ -1484,6 +1484,12 @@ pub(super) fn metal_specialization(
             }
             _ => false,
         },
+        tiled_gemm_mm_layout: match &resolved.kind {
+            BoundOpKind::Reduce { reduce_op, init, output_axes, .. } => {
+                mm_layout_active(resolved, &quantized, *reduce_op, *init, output_axes)
+            }
+            _ => false,
+        },
         wide_grid: matches!(
             grid.grid2d,
             Some(Grid2DSpec { form: Grid2DForm::FlatThreadgroupIndex, .. })
@@ -3280,6 +3286,35 @@ pub(super) fn tiled_gemm_grid2d_active(
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_grid2d_active(
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+) -> bool {
+    false
+}
+
+/// `true` only when `PROXIMA_TILED_GEMM_MM_LAYOUT` admits (default ON: unset
+/// admits, only explicit `"0"` declines), the tile sizing is the geometry that
+/// layout is written for ([`mm_layout_geometry_supported`]), AND
+/// [`wide_weight_stage_active`] does: the layout reuses the wide weight
+/// stage's two-threads-per-row schedule, so the two share one admission.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn mm_layout_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> bool {
+    tiled_gemm_mm_layout_override()
+        && mm_layout_geometry_supported()
+        && wide_weight_stage_active(resolved, quantized, reduce_op, init, output_axes)
+}
+
+#[cfg(not(feature = "metal-tiled-gemm"))]
+pub(super) fn mm_layout_active(
     _resolved: &BoundOp,
     _quantized: &[Option<Codec>],
     _reduce_op: ScalarOp,
