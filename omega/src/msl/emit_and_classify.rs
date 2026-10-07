@@ -1387,6 +1387,7 @@ pub(super) fn metal_specialization(
         packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
         packed_row_block_grouped_axes: packed_row_block_grouped_axes(resolved, &quantized),
         elementwise_addressing: elementwise_addressing_cache_token(resolved),
+        operand_aliases: operand_alias_cache_token(resolved),
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
         merged_z: None,
         packed_row_block_rows_override: packed_row_block(resolved, &quantized).and_then(|block| {
