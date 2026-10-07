@@ -416,7 +416,7 @@ fn topological_order_by_read_sources_moves_a_late_producer_ahead_of_its_consumer
 /// raw-`Op`-shaped census in `reduce_epilogue_candidates` proposed but
 /// that never applied because cached-attention fusion had already
 /// absorbed one side of the pair).
-#[cfg(feature = "reduce-epilogue-fusion")]
+#[cfg(all(feature = "reduce-epilogue-fusion", feature = "cached-attention-streaming"))]
 fn count_fused_epilogues(bound: &[BoundOp]) -> usize {
     bound
         .iter()
@@ -512,11 +512,8 @@ fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
 /// Gated on `reduce-epilogue-fusion` (the feature `bind()` actually
 /// consults before folding a post-reduce tail into its `Reduce`'s
 /// `epilogue_body` -- neither feature is in this crate's own `default`
-/// set, see `Cargo.toml`) AND `cached-attention-streaming` (needed only
-/// to keep this build free of the pre-existing, unrelated
-/// `count_fused_epilogues` dead-code trap that fires when
-/// `reduce-epilogue-fusion` is compiled in alone -- that function has no
-/// caller outside the `cached-attention-streaming`-gated test below it).
+/// set, see `Cargo.toml`) AND `cached-attention-streaming` (the rewrite
+/// whose bound subgraph this test counts).
 /// Ungated, this test asserted the FUSED count (28) against whatever
 /// `bind()` produces under the ambient feature set of the invoking
 /// `cargo`/`nextest` command -- silently unfused (37 ops, not even the
