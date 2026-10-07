@@ -352,6 +352,118 @@ fn with_every_multi_row_env_unset<T>(closure: impl FnOnce() -> T) -> T {
     })
 }
 
+/// A gathered expert projection over every selected expert at once: output
+/// `[sequence, selected, rows]`, reduced over `k`, the route a
+/// `[sequence, selected]` tensor. `activation_per_selected` gives the
+/// activation its own `[sequence, selected, k]` rows (a down projection)
+/// instead of one `[sequence, k]` row shared by every selected expert (gate and up).
+fn stacked_gathered_matmul_op(
+    sequence: u32,
+    selected: u32,
+    experts: u32,
+    rows: u32,
+    k: u32,
+    activation_per_selected: bool,
+) -> BoundOp {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(experts),
+                Extent::Static(rows),
+                Extent::Static(k),
+            ],
+            name: None,
+        },
+    );
+    let route = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(sequence), Extent::Static(selected)],
+            name: None,
+        },
+    );
+    let activation_shape = if activation_per_selected {
+        vec![
+            Extent::Static(sequence),
+            Extent::Static(selected),
+            Extent::Static(k),
+        ]
+    } else {
+        vec![Extent::Static(sequence), Extent::Static(k)]
+    };
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: activation_shape,
+            name: None,
+        },
+    );
+    let activation_map = if activation_per_selected {
+        map::projection(4, &[0, 1, 3])
+    } else {
+        map::projection(4, &[0, 3])
+    };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (
+                    weight,
+                    IndexMap::Computed {
+                        indices: route,
+                        index_map: map::projection(4, &[0, 1]),
+                        base: map::IndexPattern {
+                            iter_rank: 4,
+                            axes: vec![
+                                map::AxisIndex::default(),
+                                map::AxisIndex {
+                                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                                    offset: 0,
+                                    len: None,
+                                },
+                                map::AxisIndex {
+                                    terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                                    offset: 0,
+                                    len: None,
+                                },
+                            ],
+                        },
+                        gathered_dim: 0,
+                    },
+                ),
+                (activation, IndexMap::Affine(activation_map)),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 1, 2])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("stacked gathered matmul infers");
+    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("stacked gathered matmul lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
+}
+
 fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
     let mut program = Vec::new();
     let weight = append(
@@ -7333,7 +7445,13 @@ mod expert_grouped_gemm {
 
         let block = classify(&bound, &packed).expect("gathered q8_0 at prefill width admits");
 
-        assert_eq!(block.gathered, Some(ExpertGather { slot: 0 }));
+        assert_eq!(
+            block.gathered,
+            Some(ExpertGather {
+                slot: 0,
+                route_flat: true
+            })
+        );
         assert_eq!(block.token_axes, vec![0]);
         assert_eq!(block.feature_axes, vec![1]);
         assert_eq!(block.codec, Codec::Q8_0);
@@ -7408,6 +7526,107 @@ mod expert_grouped_gemm {
         let rejection = classify(&bound, &packed)
             .err()
             .expect("a short prefill is not grouped");
+
+        assert!(
+            matches!(rejection, TiledGemmRejection::TokenExtentBelowMinimum { .. }),
+            "{rejection:?}"
+        );
+    }
+
+    const SELECTED: u32 = 8;
+    const STACKED_OUTPUT_AXES: [u16; 3] = [0, 1, 2];
+
+    fn stacked_q8_0(
+        sequence: u32,
+        activation_per_selected: bool,
+    ) -> (BoundOp, BTreeMap<NodeId, Codec>) {
+        let bound = stacked_gathered_matmul_op(
+            sequence,
+            SELECTED,
+            EXPERTS,
+            ROWS,
+            REDUCTION,
+            activation_per_selected,
+        );
+        let weight_node = bound.operands()[0].0;
+        let mut packed = BTreeMap::new();
+        packed.insert(weight_node, Codec::Q8_0);
+        (bound, packed)
+    }
+
+    fn classify_stacked(
+        bound: &BoundOp,
+        packed: &BTreeMap<NodeId, Codec>,
+    ) -> Result<TiledGemmBlock, TiledGemmRejection> {
+        classify_tiled_gemm(
+            bound,
+            &operand_codecs(bound, packed),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &STACKED_OUTPUT_AXES,
+        )
+    }
+
+    #[test]
+    fn a_stacked_gate_over_sequence_and_selected_axes_is_one_expert_grouped_op() {
+        let (bound, packed) = stacked_q8_0(crate::sized::TILED_GEMM_MIN_TOKENS as u32, false);
+
+        let block = classify_stacked(&bound, &packed).expect("stacked gate admits");
+
+        assert_eq!(
+            block.gathered,
+            Some(ExpertGather {
+                slot: 0,
+                route_flat: true
+            })
+        );
+        assert_eq!(block.token_axes, vec![0, 1]);
+        assert_eq!(block.feature_axes, vec![2]);
+    }
+
+    #[test]
+    fn a_stacked_down_whose_activation_differs_per_selected_expert_is_admitted_too() {
+        let (bound, packed) = stacked_q8_0(crate::sized::TILED_GEMM_MIN_TOKENS as u32, true);
+
+        let block = classify_stacked(&bound, &packed).expect("stacked down admits");
+
+        assert_eq!(block.token_axes, vec![0, 1]);
+        assert_eq!(block.feature_axes, vec![2]);
+    }
+
+    #[test]
+    fn the_stacked_op_renders_one_kernel_that_decomposes_the_flat_token_into_both_axes() {
+        let (bound, packed) = stacked_q8_0(TOKENS, false);
+
+        let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("stacked kernel emits");
+
+        assert_eq!(kernel.grid.depth, u64::from(EXPERTS));
+        assert!(kernel.source.contains("a_c1 = (long)(a_c_rest % (uint)u.output_extents[1])"), "{}", kernel.source);
+        assert!(kernel.source.contains("o_c1 = (long)(o_c_rest % (uint)u.output_extents[1])"), "{}", kernel.source);
+        assert!(!kernel.source.contains("route_c"), "{}", kernel.source);
+    }
+
+    #[test]
+    fn the_stacked_pipeline_identity_differs_from_the_single_axis_one() {
+        let (stacked, stacked_packed) = stacked_q8_0(TOKENS, false);
+        let (single, single_packed) = gathered_q8_0(TOKENS);
+
+        let stacked_key = kernel_cache_key(&stacked, &stacked_packed, NumericPolicy::default())
+            .expect("stacked identity resolves");
+        let single_key = kernel_cache_key(&single, &single_packed, NumericPolicy::default())
+            .expect("single identity resolves");
+
+        assert!(stacked_key.contains("F1_w128"), "{stacked_key}");
+        assert_ne!(stacked_key, single_key);
+    }
+
+    #[test]
+    fn a_stacked_decode_step_stays_below_the_tiled_minimum_and_keeps_the_matvec() {
+        let (bound, packed) = stacked_q8_0(1, false);
+
+        let rejection = classify_stacked(&bound, &packed)
+            .err()
+            .expect("eight slots of one token are not a prefill");
 
         assert!(
             matches!(rejection, TiledGemmRejection::TokenExtentBelowMinimum { .. }),
@@ -8147,7 +8366,7 @@ mod expert_grouped_decode_description {
             let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
             (block, source)
         });
-        assert_eq!(block.gathered, Some(ExpertGather { slot: 0 }));
+        assert_eq!(block.gathered, Some(ExpertGather { slot: 0, route_flat: true }));
         assert_eq!(block.codec, codec);
         assert!(
             source.contains(&format!("{};", decode.call("w_blk", "w_pos", "w_regs"))),
