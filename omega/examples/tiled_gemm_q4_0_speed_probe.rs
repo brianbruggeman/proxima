@@ -1,7 +1,8 @@
 //! Isolated GPU time of one dense `Q4_0` weight matmul at prefill width on the
-//! tiled path (`metal-tiled-gemm`), at the gemma4 E2B shapes: K = 1536 against
-//! 12288, 6144, 4096 and 2048 output rows (the ffn gate and up, ffn down and
-//! attention projections of the 275 tiled dispatches of a 971-token prefill).
+//! tiled path (`metal-tiled-gemm`), at six of the gemma4 E2B weight shapes of
+//! the 275 tiled dispatches of a 971-token prefill: K = 1536 against 12288,
+//! 6144, 4096 and 2048 output rows, and the long-K projections back to 1536
+//! rows (K = 6144 and 12288). The kernel census covers all 275 dispatches.
 //!
 //! Timing is `GPUStartTime`/`GPUEndTime` per op ([`omega::metal::execute_plan_named_op_timed`],
 //! `instrument` feature): one op in a loop with nothing else on the device, so
@@ -47,11 +48,13 @@ const WARMUP_RUNS: usize = 60;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 const TOKEN_COUNTS: [usize; 3] = [160, 512, 971];
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-const SHAPES: [(&str, usize, usize); 4] = [
-    ("ffn_gate_up", 12288, 1536),
-    ("ffn_down", 6144, 1536),
-    ("attn_q", 4096, 1536),
-    ("attn_o", 2048, 1536),
+const SHAPES: [(&str, usize, usize); 6] = [
+    ("rows12288_k1536", 12288, 1536),
+    ("rows6144_k1536", 6144, 1536),
+    ("rows4096_k1536", 4096, 1536),
+    ("rows2048_k1536", 2048, 1536),
+    ("rows1536_k6144", 1536, 6144),
+    ("rows1536_k12288", 1536, 12288),
 ];
 
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
