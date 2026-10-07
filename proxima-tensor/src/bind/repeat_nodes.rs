@@ -44,11 +44,15 @@ fn max_node_id(built: &[BoundOp]) -> u32 {
                 routes,
                 weights,
                 weight_total,
+                stacked,
                 ..
             } => {
                 highest = highest.max(weight_total.0);
                 for extra in routes.iter().chain(weights.iter()) {
                     highest = highest.max(extra.0);
+                }
+                if let Some((stacked_routes, stacked_weights)) = stacked {
+                    highest = highest.max(stacked_routes.0).max(stacked_weights.0);
                 }
             }
             BoundOpKind::RoundBatchedReduce { round_outputs, .. } => {

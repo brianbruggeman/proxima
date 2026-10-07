@@ -230,13 +230,14 @@ pub(super) fn grid_threads(
             head_v_dim,
             ..
         } => checked_product(resolved.node, [*num_v_heads, *head_v_dim])?,
-        // One threadgroup, `expert_count` threads -- `dispatch`'s own doc:
-        // `grid.threadgroup_width` left `None` at this kind's call site
-        // defaults the threadgroup to the WHOLE grid, exactly one
-        // threadgroup, which is what `render_moe_topk`'s own threadgroup
-        // reduction (`live`/`reduce_val`/`reduce_idx` are `threadgroup`
-        // arrays, coherent only within one threadgroup) requires.
-        BoundOpKind::MoeTopK { expert_count, .. } => *expert_count,
+        // One threadgroup of `expert_count` threads per token -- the width is
+        // pinned to `expert_count` by `tiled_gemm_threadgroup_width`, which is
+        // what `render_moe_topk`'s own threadgroup reduction (`sg_max`/`sg_idx`
+        // are `threadgroup` arrays, coherent only within one threadgroup)
+        // requires.
+        BoundOpKind::MoeTopK { expert_count, .. } => {
+            checked_product(resolved.node, [*expert_count, resolved.extents.iter().product()])?
+        }
         BoundOpKind::TopFractionSelect { .. } => SELECTION_THREADGROUP_WIDTH,
         // One threadgroup per attention row, `width` lanes cooperating --
         // `render_cached_softmax_weights`'s own doc; `tiled_gemm_
@@ -486,8 +487,12 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
         BoundOpKind::MoeTopK {
             expert_count,
             top_k,
+            stacked,
             ..
-        } => format!("omega_moe_topk_e{expert_count}_k{top_k}"),
+        } => format!(
+            "omega_moe_topk_e{expert_count}_k{top_k}{}",
+            if stacked.is_some() { "_stacked" } else { "" }
+        ),
         BoundOpKind::TopFractionSelect {
             rows,
             has_keep_rows,
@@ -1269,6 +1274,7 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
     let BoundOpKind::MoeTopK {
         expert_count,
         top_k,
+        stacked,
         ..
     } = &resolved.kind
     else {
@@ -1280,6 +1286,7 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
     };
     let expert_count = *expert_count;
     let top_k = *top_k;
+    let stacked = stacked.is_some();
     // `crate::metal::encode_op`'s own `MoeTopK` arm binds exactly
     // `2 * top_k` extra buffers -- `routes[1..top_k]` (`top_k - 1` entries),
     // every `weights` entry (`top_k` entries), then `weight_total` (1) --
@@ -1300,8 +1307,16 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
             "    device float* extra{index} [[buffer({buffer_index})]],\n"
         ));
     }
+    if stacked {
+        let first = 3 + extra_count;
+        source.push_str(&format!(
+            "    device float* stacked_routes [[buffer({first})]],\n    device float* stacked_weights [[buffer({})]],\n",
+            first + 1
+        ));
+    }
     source.push_str(
-        "    uint tid [[thread_position_in_threadgroup]],\n\
+        "    uint token [[threadgroup_position_in_grid]],\n\
+         \tuint tid [[thread_position_in_threadgroup]],\n\
          \tuint sg_id [[simdgroup_index_in_threadgroup]],\n\
          \tuint sg_lane [[thread_index_in_simdgroup]]) {\n",
     );
@@ -1310,13 +1325,19 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
         "    device float* extras[{extra_count}] = {{ {} }};\n",
         extra_params.join(", ")
     ));
+    let stacked_writes = if stacked {
+        "\t\t\tstacked_routes[token * top_k + round] = float(winner_index);\n\
+         \t\t\tstacked_weights[token * top_k + round] = weight;\n"
+    } else {
+        ""
+    };
     source.push_str(&format!(
         "    constexpr uint expert_count = {expert_count}u; constexpr uint top_k = {top_k}u; \
          constexpr uint num_simdgroups = {num_simdgroups}u;\n\
          \t(void)u;\n\
          \tthreadgroup float sg_max[num_simdgroups];\n\
          \tthreadgroup int sg_idx[num_simdgroups];\n\
-         \tfloat masked = (tid < expert_count) ? scores[tid] : -INFINITY;\n\
+         \tfloat masked = (tid < expert_count) ? scores[token * expert_count + tid] : -INFINITY;\n\
          \tfloat max0 = 0.0;\n\
          \tfloat weight_total = 0.0;\n\
          \tfor (uint round = 0; round < top_k; round++) {{\n\
@@ -1336,12 +1357,13 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
          \t\t\tconst float weight = exp(max_value - max0);\n\
          \t\t\tweight_total += weight;\n\
          \t\t\tif (round == 0) {{\n\
-         \t\t\t\troute0[0] = float(winner_index);\n\
+         \t\t\t\troute0[token] = float(winner_index);\n\
          \t\t\t}} else {{\n\
-         \t\t\t\textras[round - 1][0] = float(winner_index);\n\
+         \t\t\t\textras[round - 1][token] = float(winner_index);\n\
          \t\t\t}}\n\
-         \t\t\textras[(top_k - 1) + round][0] = weight;\n\
-         \t\t\tif (round == top_k - 1) {{ extras[{extra_count} - 1][0] = weight_total; }}\n\
+         \t\t\textras[(top_k - 1) + round][token] = weight;\n\
+         {stacked_writes}\
+         \t\t\tif (round == top_k - 1) {{ extras[{extra_count} - 1][token] = weight_total; }}\n\
          \t\t}}\n\
          \t\tif (masked == max_value) {{ masked = -INFINITY; }}\n\
          \t}}\n\

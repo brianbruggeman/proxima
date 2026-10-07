@@ -2232,26 +2232,15 @@ pub(super) fn encode_op(
     // own doc: nothing here is cross-decode-step persistent recurrent
     // state), so this is the plain "resolve from `device_buffers`, or
     // allocate fresh" path with no placement lookup at all.
-    if let BoundOpKind::MoeTopK {
-        routes,
-        weights,
-        weight_total,
-        ..
-    } = &bound.kind
-    {
-        let extra_nodes: Vec<NodeId> = routes
-            .iter()
-            .skip(1)
-            .chain(weights.iter())
-            .chain(core::iter::once(weight_total))
-            .copied()
-            .collect();
-        for (offset, extra_node) in extra_nodes.iter().enumerate() {
+    if matches!(&bound.kind, BoundOpKind::MoeTopK { .. }) {
+        let token_count = bound.extents.iter().product::<u64>() as usize;
+        let extra_outputs = bound.kind.moe_topk_extra_outputs(token_count);
+        for (offset, (extra_node, element_count)) in extra_outputs.iter().enumerate() {
             let buffer_index = bindings.len() + offset;
             let existing = device_buffers.get(extra_node).cloned();
             let (extra_buffer, extra_offset) = match existing {
                 Some(buffer) => buffer,
-                None => (allocate_buffer(device, 1, bound.dtype)?, 0),
+                None => (allocate_buffer(device, *element_count, bound.dtype)?, 0),
             };
             unsafe {
                 encoder.setBuffer_offset_atIndex(

@@ -768,8 +768,12 @@ mod gated {
             BoundOpKind::MoeTopK {
                 expert_count,
                 top_k,
+                stacked,
                 ..
-            } => format!("{prefix}_moe_topk_e{expert_count}_k{top_k}"),
+            } => format!(
+                "{prefix}_moe_topk_e{expert_count}_k{top_k}{}",
+                if stacked.is_some() { "_stacked" } else { "" }
+            ),
             BoundOpKind::TopFractionSelect {
                 rows,
                 has_keep_rows,
