@@ -899,6 +899,20 @@ pub(super) fn push_packed_row_combine_and_write(
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
     let combine_fn = simd_combine_fn(node, reduce_op)?;
+    if rows <= SIMD_WIDTH as usize && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+    {
+        push_packed_row_lane_parallel_tail(
+            source,
+            combine_fn,
+            rows,
+            rank,
+            output_axes,
+            element_type,
+            epilogue_body,
+            epilogue_operands,
+        );
+        return Ok(());
+    }
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
         "        {element_type} reduced = {combine_fn}(sumf[q]);\n"
@@ -2271,3 +2285,88 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // renders `<codec>_element(wblk0` for every codec instead of `(in`/`(blk`
     "_element(wblk0",
 ];
+
+/// `cond ? a : (cond ? b : ...)` over `values`, picked by `lane`: the
+/// register-resident way to give each lane its own entry of a short array,
+/// where a private array indexed by `lane` is not.
+#[cfg(not(feature = "metal-q4k-split-k"))]
+fn lane_select_expression(values: &[String]) -> String {
+    let last = values.len() - 1;
+    values
+        .iter()
+        .enumerate()
+        .rev()
+        .fold(String::new(), |tail, (index, value)| {
+            if index == last {
+                value.clone()
+            } else {
+                format!("(lane == {index}u ? {value} : {tail})")
+            }
+        })
+}
+
+/// The row-blocked packed path's write tail when a fused epilogue follows the
+/// fold: lane `q` of the simdgroup finishes output row `q`, so the `rows`
+/// epilogue operand loads, the epilogue arithmetic and the stores of one
+/// simdgroup run side by side instead of one row after another on lane 0
+/// ([`push_multi_row_lane_epilogue`] does the same for a multi-token group).
+/// Each row's value is the same `simd` combine the single-lane tail writes,
+/// and each lane reads the same epilogue operands at the same coordinates,
+/// so the output is unchanged; what changes is that the tail's memory round
+/// trips overlap and one row's epilogue registers are live at a time.
+#[cfg(not(feature = "metal-q4k-split-k"))]
+#[allow(clippy::too_many_arguments)]
+fn push_packed_row_lane_parallel_tail(
+    source: &mut String,
+    combine_fn: &str,
+    rows: usize,
+    rank: usize,
+    output_axes: &[u16],
+    element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+) {
+    let rank_len = rank.max(1);
+    for row in 0..rows {
+        source.push_str(&format!(
+            "    {element_type} reduced_row{row} = {combine_fn}(sumf[{row}]);\n"
+        ));
+    }
+    source.push_str(&format!("    if (lane < {rows}u) {{\n"));
+    let reduced_rows: Vec<String> = (0..rows).map(|row| format!("reduced_row{row}")).collect();
+    source.push_str(&format!(
+        "        {element_type} reduced = {};\n",
+        lane_select_expression(&reduced_rows)
+    ));
+    source.push_str("        long flat = group_first + (long)lane;\n");
+    source.push_str("        if (flat < u.output_total) {\n");
+    source.push_str(&format!("            long lane_coord[{rank_len}];\n"));
+    for dim in 0..rank {
+        let coords: Vec<String> = (0..rows)
+            .map(|row| format!("coord_q_cache[{row}][{dim}]"))
+            .collect();
+        source.push_str(&format!(
+            "            lane_coord[{dim}] = {};\n",
+            lane_select_expression(&coords)
+        ));
+    }
+    source.push_str("            long out_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "            out_offset += lane_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_axes.len(),
+        element_type,
+        "            ",
+        |dim| format!("lane_coord[{}]", output_axes[dim]),
+        "reduced",
+        "out_offset",
+    );
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}

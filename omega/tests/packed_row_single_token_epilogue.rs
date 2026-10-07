@@ -1,10 +1,12 @@
-//! A fused body that mentions one tensor several times loads it once. This
-//! gate fuses `sum * (gate * gate + gate)` -- the gate vector is mentioned
-//! three times, the shape a fused `gelu` or `silu` takes -- into a one-token
-//! packed matvec and holds every output against the f64 CPU oracle: a full row
-//! count, a count that leaves a partial row group (the rows past the last one
-//! must stay unwritten), counts below the rows one simdgroup folds, and
-//! `Q6_K`, whose simdgroup folds a single row.
+//! `push_packed_row_blocked_body`'s single-token (decode) write-back finishes
+//! each of a simdgroup's output rows on its own lane when a reduce epilogue is
+//! fused, and a fused body that mentions one tensor several times loads it
+//! once. This gate fuses `sum * (gate * gate + gate)` -- the gate vector is
+//! mentioned three times, the shape a fused `gelu` or `silu` takes -- into a
+//! one-token packed matvec and holds every output against the f64 CPU oracle:
+//! a full row count, a count that leaves a partial row group (the lanes past
+//! the last row must stay masked), counts below the rows one simdgroup folds,
+//! and `Q6_K`, whose simdgroup folds a single row.
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -7528,4 +7528,44 @@ mod epilogue_operand_reuse {
         assert!(repeated_key.contains("_al_e_0_0_0"), "{repeated_key}");
         assert!(!distinct_key.contains("_al"), "{distinct_key}");
     }
+
+    #[test]
+    fn a_fused_epilogue_finishes_each_row_of_the_simdgroup_on_its_own_lane() {
+        let (bound, packed) = matvec_with_gated_epilogue([7, 8, 9]);
+
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("emits")
+            .source;
+
+        assert!(
+            source.contains("if (lane < 4u) {"),
+            "four rows per simdgroup, one lane each:\n{source}"
+        );
+        assert!(
+            source.contains("reduced_row3 = simd_sum(sumf[3]);"),
+            "every row is combined across the simdgroup before the lanes split:\n{source}"
+        );
+        assert!(
+            !source.contains("if (lane == 0u && flat < u.output_total)"),
+            "the epilogue must not run row after row on lane 0:\n{source}"
+        );
+    }
+
+    #[test]
+    fn a_plain_matvec_keeps_the_single_lane_write() {
+        let bound = packed_row_multi_token_op(1, REDUCTION, ROWS);
+        let weight_node = bound.operands()[0].0;
+        let mut packed = BTreeMap::new();
+        packed.insert(weight_node, Codec::Q4_0);
+
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("emits")
+            .source;
+
+        assert!(
+            source.contains("if (lane == 0u && flat < u.output_total)"),
+            "a matvec with no fused epilogue writes exactly what it always wrote:\n{source}"
+        );
+        assert!(!source.contains("reduced_row0"), "{source}");
+    }
 }
