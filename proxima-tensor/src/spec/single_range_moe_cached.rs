@@ -1213,7 +1213,7 @@ pub fn append_gqa_cached_routed_layer(
         expert_bias: None,
         expert_scale: None,
         activation: Activation::Silu,
-        strategy: MoeProjectionStrategy::PerRoute,
+        strategy: MoeProjectionStrategy::production(),
     };
     let (ffn_out, site) = append_moe_ffn(program, layer, normed2, &moe_spec)?;
     let ffn_out = scale_residual(program, ffn_out, residual_scale)?;
