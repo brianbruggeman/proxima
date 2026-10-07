@@ -2556,11 +2556,14 @@ pub type PackedOperands = BTreeMap<NodeId, Codec>;
 
 /// For every slot of `operands`, the first slot that reads the same data: the
 /// same source node at the same layout through the same gather. A fused body
-/// that mentions one tensor several times (`gelu` reads its gate five times,
-/// `x * x` reads `x` twice) carries one operand slot per mention, and every
-/// slot is an address computation plus a device load; reading each distinct
-/// operand once and reusing the register is the same value at a fraction of
-/// the traffic. `aliases[index] == index` marks the slot that does the load.
+/// that mentions one tensor several times (`gelu` reads its gate five times)
+/// carries one operand slot per mention, and every slot is an address
+/// computation plus a device load; reading each distinct operand once and
+/// reusing the register is the same value at a fraction of the traffic.
+/// `aliases[index] == index` marks the slot that does the load. Only a reduce's
+/// epilogue operands are reused today: the same reuse in the cooperative fold's
+/// batched loads made a 26B prefill norm kernel's step cost rise by 1.4% with
+/// no change in its own kernel time, so the fold keeps its duplicate load.
 #[must_use]
 pub(crate) fn operand_aliases(operands: &[(NodeId, Layout, Option<Lookup>)]) -> Vec<usize> {
     operands
@@ -2579,24 +2582,11 @@ fn has_duplicate_operand(aliases: &[usize]) -> bool {
     aliases.iter().enumerate().any(|(index, alias)| *alias != index)
 }
 
-fn alias_token_part(prefix: char, aliases: &[usize]) -> String {
-    let mut token = String::new();
-    if has_duplicate_operand(aliases) {
-        token.push('_');
-        token.push(prefix);
-        for alias in aliases {
-            token.push('_');
-            token.push_str(&alias.to_string());
-        }
-    }
-    token
-}
-
-/// The pipeline-cache fragment for [`operand_aliases`]: two ops that agree on
-/// every other structural axis but repeat different operands render different
-/// loads, so the repeat pattern is part of the kernel's identity. `None` when
-/// no operand repeats, which keeps the identity of every kernel without a
-/// repeat exactly what it was.
+/// The pipeline-cache fragment for [`operand_aliases`] over a reduce's epilogue
+/// operands: two ops that agree on every other structural axis but repeat
+/// different epilogue operands render different loads, so the repeat pattern is
+/// part of the kernel's identity. `None` when no epilogue operand repeats, which
+/// keeps the identity of every kernel without a repeat exactly what it was.
 #[must_use]
 pub(crate) fn operand_alias_cache_token(resolved: &BoundOp) -> Option<String> {
     let BoundOpKind::Reduce {
@@ -2605,10 +2595,10 @@ pub(crate) fn operand_alias_cache_token(resolved: &BoundOp) -> Option<String> {
     else {
         return None;
     };
-    let token = format!(
-        "{}{}",
-        alias_token_part('f', &operand_aliases(resolved.operands())),
-        alias_token_part('e', &operand_aliases(epilogue_operands))
-    );
-    (!token.is_empty()).then(|| format!("_al{token}"))
+    let aliases = operand_aliases(epilogue_operands);
+    has_duplicate_operand(&aliases).then(|| {
+        aliases
+            .iter()
+            .fold(String::from("_al_e"), |token, alias| format!("{token}_{alias}"))
+    })
 }
