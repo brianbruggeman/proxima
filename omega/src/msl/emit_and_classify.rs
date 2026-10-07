@@ -3194,8 +3194,8 @@ pub(super) fn slim_tgmem_active(
 }
 
 /// lever 2 (see `docs/model-interop/discipline.md` ROW C4.11): `true` only when `PROXIMA_TILED_GEMM_
-/// DIRECT_STORE` admits (default OFF: unset or any value other than `"1"`
-/// declines, only explicit `"1"` admits) AND `resolved` takes EITHER
+/// DIRECT_STORE` admits (default ON: unset admits,
+/// only explicit `"0"` declines) AND `resolved` takes EITHER
 /// tiled-GEMM path AND its fused epilogue is the untouched identity default.
 /// The epilogue gate exists because [`push_tiled_gemm_body`]'s epilogue tail
 /// reads `out_tile[idx]` (a per-element SCALAR already unpacked from the

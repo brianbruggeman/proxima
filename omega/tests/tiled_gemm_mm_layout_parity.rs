@@ -35,6 +35,8 @@ use proxima_tensor::{
     ScalarOp, append, projection,
 };
 
+const RESTAGE: [(&str, Option<&str>); 1] = [("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0"))];
+
 const REAL_GEMMA4_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
 fn real_q4k_gguf_path() -> String {
@@ -305,22 +307,27 @@ fn check_q4k(
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
-    check_q4_0("blk.0.attn_q.weight", 512, 128, &[], "full_tile_grid")
+    check_q4_0("blk.0.attn_q.weight", 512, 128, &RESTAGE, "full_tile_grid")
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_partial_token_tile() -> TestResult<()> {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, &[], "partial_token_tile")
+    check_q4_0("blk.0.attn_q.weight", 510, 128, &RESTAGE, "partial_token_tile")
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_with_a_partial_feature_tile() -> TestResult<()> {
-    check_q4_0("blk.0.attn_q.weight", 510, 100, &[], "partial_feature_tile")
+    check_q4_0("blk.0.attn_q.weight", 510, 100, &RESTAGE, "partial_feature_tile")
 }
 
 #[test]
 fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width() -> TestResult<()> {
-    check_q4_0("blk.0.ffn_gate.weight", 971, 256, &[], "prefill_width")
+    check_q4_0("blk.0.ffn_gate.weight", 971, 256, &RESTAGE, "prefill_width")
+}
+
+#[test]
+fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width_with_the_direct_store_default() -> TestResult<()> {
+    check_q4_0("blk.0.ffn_gate.weight", 971, 256, &[], "prefill_width_direct_store_default")
 }
 
 #[test]
@@ -340,17 +347,20 @@ fn q4_0_mm_layout_matches_row_major_on_the_generic_activation_read() -> TestResu
         "blk.0.attn_q.weight",
         510,
         128,
-        &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0"))],
+        &[
+            ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0")),
+            ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
+        ],
         "generic_activation_read",
     )
 }
 
 #[test]
 fn q4k_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
-    check_q4k("blk.0.attn_q.weight", 512, 128, &[], "full_tile_grid")
+    check_q4k("blk.0.attn_q.weight", 512, 128, &RESTAGE, "full_tile_grid")
 }
 
 #[test]
 fn q4k_mm_layout_matches_row_major_with_partial_tiles() -> TestResult<()> {
-    check_q4k("blk.0.attn_q.weight", 510, 100, &[], "partial_tiles")
+    check_q4k("blk.0.attn_q.weight", 510, 100, &RESTAGE, "partial_tiles")
 }

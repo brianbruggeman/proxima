@@ -171,8 +171,8 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32, weight_dtype: DType) -
 }
 
 /// Runs one real weight tensor, at one (tokens, rows) shape, through the
-/// tiled-GEMM Q4_0 path TWICE -- `PROXIMA_TILED_GEMM_DIRECT_STORE` unset
-/// (off, today's restage-only path) and explicit `"1"` (on) -- and asserts
+/// tiled-GEMM Q4_0 path TWICE -- `PROXIMA_TILED_GEMM_DIRECT_STORE` explicit
+/// `"0"` (off, the restage-only path) and explicit `"1"` (on) -- and asserts
 /// the two runs are bit-for-bit identical. Returns early (no assertion) if
 /// the tensor is absent, matching this crate's other real-checkpoint tests.
 fn check_direct_store_byte_identity(tensor_name: &str, tokens: usize, rows_wanted: usize, label: &str) {
@@ -205,7 +205,7 @@ fn check_direct_store_byte_identity(tensor_name: &str, tokens: usize, rows_wante
         QuantizedBlock::Float32(&activation),
     ];
 
-    let direct_store_off = temp_env::with_var("PROXIMA_TILED_GEMM_DIRECT_STORE", None::<&str>, || {
+    let direct_store_off = temp_env::with_var("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0"), || {
         omega::execute(
             &packed_program,
             &[],
