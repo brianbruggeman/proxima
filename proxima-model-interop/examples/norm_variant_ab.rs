@@ -9,10 +9,26 @@
 //! production kernel in alternating rounds inside this one process, so GPU
 //! clock state and background load hit every arm alike. An optional
 //! `<sha16>.<tag>.width` file holds the new threadgroup width; the thread
-//! count scales with it.
+//! count scales with it. An optional `<sha16>.<tag>.scale` file holds `n/d`, a further
+//! multiplier on the thread count, for a variant that changes how many rows one
+//! simdgroup folds.
 //!
 //! Knobs: `AB_VARIANT_DIR`, `AB_STEP` (5), `AB_ROUNDS` (60), `AB_BATCH` (16),
 //! `PROXIMA_PROMPT`.
+//!
+//! Packed-weight kernels (a `Q4_0` matvec) are skipped unless `AB_PACKED` is set.
+//! With `AB_SEQUENCE` set, an arm is timed as one command buffer running every
+//! captured member of the group in program order (each member reads its own weight
+//! tensor, as the live step does), after `AB_FLUSH_MIB` (384) of CPU writes evict the
+//! system cache; the figure is microseconds per dispatch. `AB_SHA` restricts the run to
+//! groups whose kernel sha256 starts with the given prefix. With `AB_STEP_SEQUENCE` set
+//! (implies `AB_SEQUENCE`), an arm is the whole captured step replayed in program order with
+//! the group's members swapped for the variant, so a variant is judged by the step time it
+//! moves with the real kernel interleaving and real weight streaming; set `AB_FLUSH_MIB=0`
+//! there, the step streams more bytes than the system cache holds. With `AB_OMIT_ALL` set,
+//! every kernel group is timed by omission instead: the step with the group's dispatches
+//! removed against the whole step, one `ab omit` line per group (its in-situ cost on a
+//! GPU kept busy, unlike an isolated single-dispatch command buffer).
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -80,12 +96,25 @@ mod harness {
             .expect("greedy decode");
     }
 
-    struct Arm {
-        label: String,
-        dispatch: CapturedDispatch,
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    struct GroupKey {
+        sha: String,
+        threads: u64,
+        width: Option<u64>,
+        extents: Vec<u64>,
     }
 
-    fn load_variants(dir: &PathBuf, base: &CapturedDispatch, base_width: u64) -> Vec<Arm> {
+    struct Arm {
+        label: String,
+        dispatches: Vec<CapturedDispatch>,
+    }
+
+    fn load_variants(
+        dir: &PathBuf,
+        members: &[&CapturedDispatch],
+        base_width: u64,
+    ) -> Vec<Arm> {
+        let base = members[0];
         let needle = format!("kernel void {}(", base.entry);
         let mut arms = Vec::new();
         let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -93,6 +122,7 @@ mod harness {
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .filter(|name| name.ends_with(".metal"))
+            .filter(|name| name.starts_with(&base.msl_sha256[..SHA_PREFIX_CHARS]))
             .collect();
         names.sort();
         for name in names {
@@ -108,12 +138,26 @@ mod harness {
                 }
                 Err(_) => (base.grid.threads, base.grid.threadgroup_width),
             };
-            let variant = base
+            let scale_path = dir.join(name.replace(".metal", ".scale"));
+            let threads = match std::fs::read_to_string(&scale_path) {
+                Ok(text) => {
+                    let (numerator, denominator) = text.trim().split_once('/').expect("scale n/d");
+                    let numerator: u64 = numerator.parse().expect("scale numerator integer");
+                    let denominator: u64 = denominator.parse().expect("scale denominator integer");
+                    threads * numerator / denominator
+                }
+                Err(_) => threads,
+            };
+            let template = base
                 .with_kernel_variant(&source, &base.entry, threads, width, numeric_policy())
                 .unwrap_or_else(|error| panic!("variant {name} does not compile: {error}"));
+            let dispatches = members
+                .iter()
+                .map(|member| member.with_pipeline_of(&template))
+                .collect();
             arms.push(Arm {
                 label: name.trim_end_matches(".metal").to_string(),
-                dispatch: variant,
+                dispatches,
             });
         }
         arms
@@ -160,8 +204,47 @@ mod harness {
         )
     }
 
+    fn evict_system_cache(scratch: &mut [u8], round: usize) {
+        scratch.fill(round as u8);
+        std::hint::black_box(&scratch);
+    }
+
+    fn measure_sequence(
+        arms: &[(String, Vec<&CapturedDispatch>)],
+        rounds: usize,
+        scratch: &mut [u8],
+        per_dispatch: bool,
+    ) -> Vec<f64> {
+        let mut spans: Vec<Vec<f64>> = vec![Vec::new(); arms.len()];
+        for round in 0..rounds {
+            for offset in 0..arms.len() {
+                let index = (round + offset) % arms.len();
+                evict_system_cache(scratch, round + offset);
+                let total = CapturedDispatch::time_gpu_sequence_ns(&arms[index].1)
+                    .expect("sequence replay");
+                let divisor = if per_dispatch { arms[index].1.len() as f64 } else { 1.0 };
+                spans[index].push(total / divisor);
+            }
+        }
+        spans.iter_mut().map(|samples| median(samples)).collect()
+    }
+
+    fn step_with_group_replaced<'a>(
+        dispatches: &'a [CapturedDispatch],
+        members: &[usize],
+        replacements: &'a [CapturedDispatch],
+    ) -> Vec<&'a CapturedDispatch> {
+        let replaced: BTreeMap<usize, &CapturedDispatch> =
+            members.iter().copied().zip(replacements.iter()).collect();
+        dispatches
+            .iter()
+            .enumerate()
+            .map(|(index, dispatch)| replaced.get(&index).copied().unwrap_or(dispatch))
+            .collect()
+    }
+
     fn measure(
-        arms: &[(String, &CapturedDispatch)],
+        arms: &[(String, Vec<&CapturedDispatch>)],
         rounds: usize,
         batch: usize,
     ) -> Vec<(f64, f64)> {
@@ -170,8 +253,8 @@ mod harness {
         for round in 0..rounds {
             for offset in 0..arms.len() {
                 let index = (round + offset) % arms.len();
-                single[index].push(arms[index].1.time_gpu_ns(1).expect("replay"));
-                batched[index].push(arms[index].1.time_gpu_ns(batch).expect("replay"));
+                single[index].push(arms[index].1[0].time_gpu_ns(1).expect("replay"));
+                batched[index].push(arms[index].1[0].time_gpu_ns(batch).expect("replay"));
             }
         }
         (0..arms.len())
@@ -189,6 +272,12 @@ mod harness {
         let rounds = env_usize("AB_ROUNDS", 60);
         let batch = env_usize("AB_BATCH", 16);
         let passes = env_usize("AB_PASSES", 1);
+        let allow_packed = std::env::var_os("AB_PACKED").is_some();
+        let describe = std::env::var_os("AB_DESCRIBE").is_some();
+        let omit_all = std::env::var_os("AB_OMIT_ALL").is_some();
+        let step_sequence = std::env::var_os("AB_STEP_SEQUENCE").is_some();
+        let sequence = step_sequence || std::env::var_os("AB_SEQUENCE").is_some();
+        let mut scratch = vec![0u8; env_usize("AB_FLUSH_MIB", 384) << 20];
         let variant_dir = PathBuf::from(std::env::var("AB_VARIANT_DIR").expect("AB_VARIANT_DIR"));
         // SAFETY: called from `main` before any thread is spawned.
         unsafe {
@@ -202,13 +291,14 @@ mod harness {
             .filter(|dispatch| dispatch.grid.threads > 0)
             .collect();
         assert!(!dispatches.is_empty(), "N==0: nothing captured");
-        let mut groups: BTreeMap<(String, u64, Option<u64>), Vec<usize>> = BTreeMap::new();
+        let mut groups: BTreeMap<GroupKey, Vec<usize>> = BTreeMap::new();
         for (index, dispatch) in dispatches.iter().enumerate() {
-            let key = (
-                dispatch.msl_sha256.clone(),
-                dispatch.grid.threads,
-                dispatch.grid.threadgroup_width,
-            );
+            let key = GroupKey {
+                sha: dispatch.msl_sha256.clone(),
+                threads: dispatch.grid.threads,
+                width: dispatch.grid.threadgroup_width,
+                extents: dispatch.extents.clone(),
+            };
             groups.entry(key).or_default().push(index);
         }
         println!(
@@ -217,21 +307,77 @@ mod harness {
             groups.len()
         );
         let mut timed_groups = 0usize;
-        for ((sha, threads, width), members) in &groups {
+        for (
+            GroupKey {
+                sha,
+                threads,
+                width,
+                extents,
+            },
+            members,
+        ) in &groups
+        {
             let base = &dispatches[members[0]];
-            if base.operands.iter().any(|(_, codec)| codec != "unpacked") {
+            if !allow_packed && base.operands.iter().any(|(_, codec)| codec != "unpacked") {
+                continue;
+            }
+            let sha_filter = std::env::var("AB_SHA").ok();
+            if sha_filter.as_ref().is_some_and(|prefix| !sha.starts_with(prefix.as_str())) {
+                continue;
+            }
+            if describe {
+                println!(
+                    "ab describe sha={} extents={extents:?} count={} entry={}",
+                    &sha[..SHA_PREFIX_CHARS],
+                    members.len(),
+                    base.entry
+                );
+                for line in base.describe_buffers() {
+                    println!("ab describe   {line}");
+                }
+                timed_groups += 1;
+                continue;
+            }
+            if omit_all {
+                let kept: Vec<&CapturedDispatch> = dispatches
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !members.contains(index))
+                    .map(|(_, dispatch)| dispatch)
+                    .collect();
+                let arms = vec![
+                    ("base".to_string(), dispatches.iter().collect::<Vec<_>>()),
+                    ("omit".to_string(), kept),
+                ];
+                let totals = measure_sequence(&arms, rounds, &mut scratch, false);
+                let cost_ms = (totals[0] - totals[1]) / 1e6;
+                println!(
+                    "ab omit entry={} sha={} threads={threads} tg={width:?} extents={extents:?} count={} base_ms={:.4} cost_ms={cost_ms:.4} per_dispatch_us={:.2}",
+                    base.entry,
+                    &sha[..SHA_PREFIX_CHARS],
+                    members.len(),
+                    totals[0] / 1e6,
+                    cost_ms * 1e3 / members.len() as f64
+                );
+                timed_groups += 1;
                 continue;
             }
             let base_width = width.unwrap_or(*threads).max(1);
-            let variants = load_variants(&variant_dir, base, base_width);
+            let member_refs: Vec<&CapturedDispatch> = if sequence {
+                members.iter().map(|index| &dispatches[*index]).collect()
+            } else {
+                vec![base]
+            };
+            let variants = load_variants(&variant_dir, &member_refs, base_width);
             if variants.is_empty() {
                 continue;
             }
-            let mut arms: Vec<(String, &CapturedDispatch)> = vec![("base".to_string(), base)];
+            let mut arms: Vec<(String, Vec<&CapturedDispatch>)> =
+                vec![("base".to_string(), member_refs.clone())];
             arms.extend(
                 variants
                     .iter()
-                    .map(|arm| (arm.label.clone(), &arm.dispatch)),
+                    .map(|arm| (arm.label.clone(), arm.dispatches.iter().collect())),
             );
             timed_groups += 1;
             let reference_label =
@@ -239,22 +385,64 @@ mod harness {
             let reference = arms
                 .iter()
                 .find(|arm| arm.0 == reference_label)
-                .map_or(base, |arm| arm.1);
+                .map_or(base, |arm| arm.1[0]);
             let base_output = reference.replay_output().expect("reference output");
             for arm in &arms {
-                let output = arm.1.replay_output().expect("arm output");
+                let output = arm.1[0].replay_output().expect("arm output");
                 println!(
-                    "ab bits sha={} threads={threads} arm={} {}",
+                    "ab bits sha={} threads={threads} extents={extents:?} arm={} {}",
                     &sha[..SHA_PREFIX_CHARS],
                     arm.0,
                     compare_outputs(&base_output, &output)
                 );
             }
             for pass in 0..passes {
+                if step_sequence {
+                    let omitted: Vec<&CapturedDispatch> = dispatches
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !members.contains(index))
+                        .map(|(_, dispatch)| dispatch)
+                        .collect();
+                    let step_arms: Vec<(String, Vec<&CapturedDispatch>)> =
+                        std::iter::once(("base".to_string(), dispatches.iter().collect()))
+                            .chain(std::iter::once(("omit_group".to_string(), omitted)))
+                            .chain(variants.iter().map(|arm| {
+                                (
+                                    arm.label.clone(),
+                                    step_with_group_replaced(&dispatches, members, &arm.dispatches),
+                                )
+                            }))
+                            .collect();
+                    let results = measure_sequence(&step_arms, rounds, &mut scratch, false);
+                    for (arm, total) in step_arms.iter().zip(results) {
+                        println!(
+                            "ab step sha={} threads={threads} extents={extents:?} count={} pass={pass} arm={} step_ms={:.4}",
+                            &sha[..SHA_PREFIX_CHARS],
+                            members.len(),
+                            arm.0,
+                            total / 1e6
+                        );
+                    }
+                    continue;
+                }
+                if sequence {
+                    let results = measure_sequence(&arms, rounds, &mut scratch, true);
+                    for (arm, per_dispatch) in arms.iter().zip(results) {
+                        println!(
+                            "ab sequence sha={} threads={threads} extents={extents:?} tg={width:?} count={} pass={pass} arm={} per_dispatch_us={:.3}",
+                            &sha[..SHA_PREFIX_CHARS],
+                            members.len(),
+                            arm.0,
+                            per_dispatch / 1e3
+                        );
+                    }
+                    continue;
+                }
                 let results = measure(&arms, rounds, batch);
                 for (arm, (marginal, single)) in arms.iter().zip(results) {
                     println!(
-                        "ab group sha={} threads={threads} tg={width:?} count={} pass={pass} arm={} marginal_us={:.3} single_us={:.3}",
+                        "ab group sha={} threads={threads} extents={extents:?} tg={width:?} count={} pass={pass} arm={} marginal_us={:.3} single_us={:.3}",
                         &sha[..SHA_PREFIX_CHARS],
                         members.len(),
                         arm.0,
