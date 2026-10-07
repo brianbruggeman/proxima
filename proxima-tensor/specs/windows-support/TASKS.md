@@ -17,8 +17,8 @@ Each slice is one coherent behavior change with direct validation commands. The 
 
 ## resume
 
-Last observed execution: card 10's local Windows `http-hyper` alias cross-check, Hyper ALPN regression test, and Hyper no-TLS feature check passed; outputs are in EVIDENCE.md. GitHub Actions run 37542940589 for commit `f2e26b1bf0080fcad8080e3102a744c1e501084d` failed at “compile every workspace target”; public artifacts do not expose its compiler diagnostic.
-Next action: obtain the native Windows job log through an authorized artifact route, reproduce the failing workspace compile, and record the compiler diagnostic before treating native CI acceptance as complete.
+Last observed execution: the docs-only commit `f918f18b4cc34b7810a6895d9f0c538567bd9813` passed `doc-strict` and both tutorial CI jobs, while Windows run 37629370130 failed at workspace compilation. The exact CI log was not accessible; the same xwin command locally reproduced `sha2-asm` rejecting Windows. A portable `sha2` dev dependency is now present on every target, with its `asm` optimization restricted to non-Windows, and the no-std test imports its alloc collection types. The updated full-workspace xwin check and host interop all-target check both exited 0; outputs are in EVIDENCE.md.
+Next action: verify the native Windows workflow on the follow-up commit; retain the cross-target result separately from native execution evidence.
 Open acceptance: slices 5–9 and the complete direct-command native Windows workflow; native TLS store runtime remains unexecuted.
 
 ## struck

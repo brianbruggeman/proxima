@@ -356,8 +356,8 @@ proxima = { workspace = true, features = ["test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
 tempfile.workspace = true
 temp-env.workspace = true
-sha2 = { workspace = true, features = ["asm"] }
 proptest.workspace = true
+sha2 = { version = "0.10.9", default-features = false }
 
 # Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
 # `proxima_telemetry`'s recorder/macros (only pulled in by `instrument`,
@@ -622,6 +622,9 @@ required-features = ["metal", "instrument"]
 name = "gemma4_kernel_newcount_sweep"
 harness = false
 required-features = ["metal", "instrument"]
+
+[target.'cfg(not(target_os = "windows"))'.dev-dependencies]
+sha2 = { version = "0.10.9", default-features = false, features = ["asm"] }
 
 # Loads the hand-written granite config, expands `repeat` and `pattern`, and lowers it with
 # `build_forward` -- the descriptor loader (conflaguration, toml) is `std`-gated.
