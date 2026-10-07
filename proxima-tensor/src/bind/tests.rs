@@ -6253,6 +6253,11 @@ mod moe_routing_census {
 
     #[cfg(feature = "moe-topk-fusion")]
     fn build_routing_program() -> RoutingProgram {
+        build_routing_program_with(MoeProjectionStrategy::PerRoute)
+    }
+
+    #[cfg(feature = "moe-topk-fusion")]
+    fn build_routing_program_with(strategy: MoeProjectionStrategy) -> RoutingProgram {
         let mut program = Vec::new();
         let x = input_leaf(
             &mut program,
@@ -6309,7 +6314,7 @@ mod moe_routing_census {
             expert_bias: None,
             expert_scale: None,
             activation: Activation::Silu,
-            strategy: MoeProjectionStrategy::PerRoute,
+            strategy,
         };
         let (output, site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
             .expect("real-shape qwen35moe routing block lowers");
@@ -6550,6 +6555,62 @@ mod moe_routing_census {
                 "case {case}: unfused weight_total must match the independent reference \
                  within 1e-6"
             );
+        }
+    }
+
+    /// The stacked strategy tags its round routes `Float32` (they feed the
+    /// float route stack, never a gather index directly), and the top-k fusion
+    /// must still anchor on them: it fires, reports the same dtype, and the
+    /// fused and unfused binds produce identical routes and MoE outputs.
+    #[cfg(feature = "moe-topk-fusion")]
+    #[test]
+    fn stacked_strategy_routes_still_fuse_into_one_moe_topk_and_match_unfused() {
+        let built = build_routing_program_with(MoeProjectionStrategy::Stacked);
+        let shapes = shape::infer(&built.program, &[1]).expect("stacked program infers");
+        let mut outputs = alloc::vec![built.output];
+        outputs.extend(built.selected.iter().copied());
+        outputs.extend(built.weights.iter().copied());
+        let unfused = bind_plain(&built.program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("unfused stacked program binds");
+        let fused = bind_with_fusion(&built.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
+            .expect("fused stacked program binds");
+
+        let topk_dtype = fused
+            .iter()
+            .find(|bound| matches!(bound.kind, BoundOpKind::MoeTopK { .. }))
+            .map(|bound| bound.dtype);
+        assert_eq!(topk_dtype, Some(DType::Float32), "the matcher anchors on float routes");
+
+        let mut lcg = crate::test_support::Lcg(11);
+        let mut unit_values = |count: usize| -> Vec<f32> {
+            (0..count).map(|_| lcg.next_unit() * 2.0 - 1.0).collect()
+        };
+        let stack_len = EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize;
+        let x_data = unit_values(EMBEDDING as usize);
+        let gate_data = unit_values(stack_len);
+        let up_data = unit_values(stack_len);
+        let down_data = unit_values(stack_len);
+        for case in 0..20_usize {
+            let scores: Vec<f32> = unit_values(EXPERT_COUNT as usize)
+                .into_iter()
+                .map(|value| value * 10.0)
+                .collect();
+            let inputs = alloc::vec![
+                (built.x, x_data.clone()),
+                (built.logits, scores),
+                (built.expert_w_gate, gate_data.clone()),
+                (built.expert_w_up, up_data.clone()),
+                (built.expert_w_down, down_data.clone()),
+            ];
+            let unfused_buffers = run_resolved(built.program.len(), &unfused, inputs.clone());
+            let fused_buffers = run_resolved(built.program.len(), &fused, inputs);
+            for node in alloc::vec![built.output].iter().chain(built.selected.iter()) {
+                assert_eq!(
+                    unfused_buffers[node.0 as usize], fused_buffers[node.0 as usize],
+                    "case {case}: node {} must be identical fused and unfused",
+                    node.0
+                );
+            }
         }
     }
 }

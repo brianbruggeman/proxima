@@ -209,6 +209,155 @@ fn grouped_gate_up_matches_the_per_route_moe_graph_on_cpu() {
 }
 
 #[test]
+fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_projection() {
+    const EXPERT_COUNT: u32 = 6;
+    const EXPERT_USED_COUNT: u32 = 3;
+    const EMBEDDING: u32 = 4;
+    const FEED_FORWARD: u32 = 5;
+    const TOKENS: u32 = 3;
+
+    let unit_values = |seed: u64, count: usize| -> Vec<f32> {
+        let mut lcg = crate::test_support::Lcg(seed);
+        (0..count).map(|_| lcg.next_unit() * 2.0 - 1.0).collect()
+    };
+    let build = |strategy: MoeProjectionStrategy, scaled: bool, activation: Activation| {
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(TOKENS), Extent::Static(EMBEDDING)],
+            "x",
+        );
+        let gate_inp = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING), Extent::Static(EXPERT_COUNT)],
+            "gate_inp",
+        );
+        let stack = |program: &mut Vec<Op>, rows: u32, columns: u32, name: &str| {
+            input_leaf(
+                program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(rows),
+                    Extent::Static(columns),
+                ],
+                name,
+            )
+        };
+        let gate = stack(&mut program, EMBEDDING, FEED_FORWARD, "gate");
+        let up = stack(&mut program, EMBEDDING, FEED_FORWARD, "up");
+        let down = stack(&mut program, FEED_FORWARD, EMBEDDING, "down");
+        let expert_scale = scaled.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(EXPERT_COUNT)],
+                "scale",
+            )
+        });
+        let ones = scalar_constant(&mut program, 1.0);
+        let moe_spec = MoeFfnSpec {
+            router: MoeRouter::GateInput(gate_inp),
+            expert_w_gate: gate,
+            expert_w_up: up,
+            expert_w_down: down,
+            expert_count: EXPERT_COUNT,
+            expert_used_count: EXPERT_USED_COUNT,
+            ones,
+            gating: ExpertGatingFunc::Softmax,
+            expert_bias: None,
+            expert_scale,
+            activation,
+            strategy,
+        };
+        let (root, _) =
+            append_moe_ffn(&mut program, 0, x, &moe_spec).expect("the MoE graph builds");
+        (program, root)
+    };
+    let gathered_count = |program: &[Op]| {
+        program
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    Op::Elementwise { operands, .. }
+                        if operands.iter().any(|(_, index_map)| {
+                            matches!(index_map, IndexMap::Computed { .. })
+                        })
+                )
+            })
+            .count()
+    };
+
+    let x = unit_values(3, (TOKENS * EMBEDDING) as usize);
+    let gate_inp = unit_values(5, (EMBEDDING * EXPERT_COUNT) as usize);
+    let gate = unit_values(7, (EXPERT_COUNT * EMBEDDING * FEED_FORWARD) as usize);
+    let up = unit_values(11, (EXPERT_COUNT * EMBEDDING * FEED_FORWARD) as usize);
+    let down = unit_values(13, (EXPERT_COUNT * FEED_FORWARD * EMBEDDING) as usize);
+    let scale = unit_values(17, EXPERT_COUNT as usize);
+    let workers = core::num::NonZeroUsize::new(1).expect("one worker exists");
+
+    for (case, scaled, activation) in [
+        ("silu without an output scale", false, Activation::Silu),
+        ("silu with a per-expert output scale", true, Activation::Silu),
+        ("gelu with a per-expert output scale", true, Activation::GeluTanh),
+    ] {
+        let blocks: Vec<&[f32]> = if scaled {
+            vec![&x, &gate_inp, &gate, &up, &down, &scale]
+        } else {
+            vec![&x, &gate_inp, &gate, &up, &down]
+        };
+        let (per_route_program, per_route_root) =
+            build(MoeProjectionStrategy::PerRoute, scaled, activation);
+        let per_route = crate::cpu::evaluate_parallel(
+            &per_route_program,
+            &[],
+            &blocks,
+            &[per_route_root],
+            workers,
+        )
+        .expect("per-route graph evaluates");
+        let (stacked_program, stacked_root) =
+            build(MoeProjectionStrategy::Stacked, scaled, activation);
+        let stacked = crate::cpu::evaluate_parallel(
+            &stacked_program,
+            &[],
+            &blocks,
+            &[stacked_root],
+            workers,
+        )
+        .expect("stacked graph evaluates");
+
+        let worst_relative_difference = stacked
+            .root()
+            .iter()
+            .zip(per_route.root())
+            .map(|(stacked_value, per_route_value)| {
+                (stacked_value - per_route_value).abs() / per_route_value.abs().max(1.0e-3)
+            })
+            .fold(0.0_f32, f32::max);
+        assert_eq!(stacked.root().len(), (TOKENS * EMBEDDING) as usize, "{case}");
+        assert!(
+            worst_relative_difference <= 4.0e-7,
+            "{case}: the stacked graph drifted {worst_relative_difference:e} from the per-route outputs; \
+             the only allowed difference is the reduce folding each product into its sum"
+        );
+        assert_eq!(
+            gathered_count(&per_route_program),
+            3 * EXPERT_USED_COUNT as usize + if scaled { EXPERT_USED_COUNT as usize } else { 0 },
+            "{case}: the per-route graph gathers once per selected expert and projection"
+        );
+        assert_eq!(
+            gathered_count(&stacked_program),
+            3 + usize::from(scaled),
+            "{case}: the stacked graph gathers once per projection"
+        );
+    }
+}
+
+#[test]
 fn gather_head_permutation_selects_head_rows_without_reordering_tokens_or_features() {
     let sequence = 2u32;
     let source_heads = 3u32;

@@ -171,33 +171,36 @@ pub(super) fn append_activation(
     x: NodeId,
     ones: NodeId,
     activation: Activation,
+    axes: &str,
 ) -> Result<NodeId, TensorError> {
+    let same_axes = alloc::format!("{axes}->{axes}");
+    let broadcast_axes = alloc::format!("->{axes}");
     match activation {
         Activation::Silu => {
-            let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, "sg->sg")])?;
+            let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, &same_axes)])?;
             let exp_neg_x = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Exponential,
-                &[(neg_x, "sg->sg")],
+                &[(neg_x, &same_axes)],
             )?;
             let one_plus_exp = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Add,
-                &[(exp_neg_x, "sg->sg"), (ones, "->sg")],
+                &[(exp_neg_x, &same_axes), (ones, &broadcast_axes)],
             )?;
             let sigmoid_x = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Reciprocal,
-                &[(one_plus_exp, "sg->sg")],
+                &[(one_plus_exp, &same_axes)],
             )?;
             elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Multiply,
-                &[(x, "sg->sg"), (sigmoid_x, "sg->sg")],
+                &[(x, &same_axes), (sigmoid_x, &same_axes)],
             )
         }
         Activation::GeluTanh => {
@@ -209,55 +212,55 @@ pub(super) fn append_activation(
                 program,
                 DType::Float32,
                 ScalarOp::Multiply,
-                &[(x, "sg->sg"), (x, "sg->sg")],
+                &[(x, &same_axes), (x, &same_axes)],
             )?;
             let x_cubed = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Multiply,
-                &[(x_squared, "sg->sg"), (x, "sg->sg")],
+                &[(x_squared, &same_axes), (x, &same_axes)],
             )?;
             let cubic_term = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Multiply,
-                &[(x_cubed, "sg->sg"), (cubic_coeff, "->sg")],
+                &[(x_cubed, &same_axes), (cubic_coeff, &broadcast_axes)],
             )?;
             let inner = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Add,
-                &[(x, "sg->sg"), (cubic_term, "sg->sg")],
+                &[(x, &same_axes), (cubic_term, &same_axes)],
             )?;
             let scaled_inner = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Multiply,
-                &[(inner, "sg->sg"), (sqrt_two_over_pi, "->sg")],
+                &[(inner, &same_axes), (sqrt_two_over_pi, &broadcast_axes)],
             )?;
             let tanh_term = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Tanh,
-                &[(scaled_inner, "sg->sg")],
+                &[(scaled_inner, &same_axes)],
             )?;
             let one_plus_tanh = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Add,
-                &[(tanh_term, "sg->sg"), (ones, "->sg")],
+                &[(tanh_term, &same_axes), (ones, &broadcast_axes)],
             )?;
             let half_x = elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Multiply,
-                &[(x, "sg->sg"), (half, "->sg")],
+                &[(x, &same_axes), (half, &broadcast_axes)],
             )?;
             elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Multiply,
-                &[(half_x, "sg->sg"), (one_plus_tanh, "sg->sg")],
+                &[(half_x, &same_axes), (one_plus_tanh, &same_axes)],
             )
         }
     }
@@ -984,7 +987,7 @@ pub(crate) fn append_dense_swiglu_ffn(
         "sg->sdg",
     )?;
 
-    let activated_gate = append_activation(program, gate, ones, activation)?;
+    let activated_gate = append_activation(program, gate, ones, activation, "sg")?;
     let ffn_hidden = elementwise(
         program,
         DType::Float32,
@@ -1166,7 +1169,7 @@ pub(crate) fn append_routed_expert_ffn(
         expert_bias,
         expert_scale,
         activation,
-        strategy: MoeProjectionStrategy::PerRoute,
+        strategy: MoeProjectionStrategy::production(),
     };
     let (ffn_out, site) = append_moe_ffn(program, layer, normed, &moe_spec)?;
     moe_sites.push(site);
@@ -1394,7 +1397,7 @@ pub(crate) fn append_layer_ffn(
             "sdo->sdo",
             "so->sdo",
         )?;
-        let gate_act = append_activation(program, gate_raw, ones, Activation::GeluTanh)?;
+        let gate_act = append_activation(program, gate_raw, ones, Activation::GeluTanh, "sg")?;
         let gated = elementwise(
             program,
             DType::Float32,
@@ -3248,7 +3251,7 @@ mod activation_tests {
         );
         let ones = scalar_constant(&mut program, 1.0);
         let root =
-            append_activation(&mut program, x, ones, activation).expect("append_activation lowers");
+            append_activation(&mut program, x, ones, activation, "sg").expect("append_activation lowers");
 
         let symbols: [u64; 0] = [];
         let blocks: [&[f32]; 1] = [&VALUES];

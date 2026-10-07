@@ -439,9 +439,58 @@ pub fn grouped_gathered_expert_product(
     )
 }
 
+/// [`grouped_gathered_expert_product`] for an activation that differs per
+/// selected expert: `x` is `[sequence, selected, d_in]` (the gate and up
+/// output after the activation, feeding the down projection) rather than one
+/// `[sequence, d_in]` row shared by every selected expert. The result is the
+/// same `[sequence, selected, d_in, d_out]` product, so a caller reduces
+/// `d_in` and gets one down-projection output per selected expert from a
+/// single operation.
+#[must_use]
+pub fn slotwise_gathered_expert_product(
+    program: &mut Vec<Op>,
+    stack: NodeId,
+    route: NodeId,
+    x: NodeId,
+) -> NodeId {
+    let gathered_map = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(4, &[0, 1]),
+        base: IndexPattern {
+            iter_rank: 4,
+            axes: alloc::vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let x_map = IndexMap::Affine(map::projection(4, &[0, 1, 2]));
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![(stack, gathered_map), (x, x_map)],
+            name: None,
+        },
+    )
+}
+
 /// Packs independently selected expert ids (`[sequence]` each) into the
 /// `[sequence, selected]` index tensor consumed by
-/// [`grouped_gathered_expert_product`].
+/// [`grouped_gathered_expert_product`]. Any other `[sequence]` column per
+/// round packs the same way, which is how [`MoeProjectionStrategy::Stacked`]
+/// stacks the per-round routing weights.
 ///
 /// This is graph-construction work, not a runtime host allocation: the
 /// selected axis is an [`Op::Iota`] and each column is selected with the
@@ -553,18 +602,25 @@ pub fn select_grouped_round(
     )
 }
 
-/// `scale[route[s]]`: gathers one scalar per selected expert, the
-/// rank-one counterpart of [`gathered_expert_product`]'s weight-matrix
-/// gather. Used to fold a per-expert output scale (the sliding-pattern family's
+/// `scale[route[s]]` (`route_rank` 1) or `scale[routes[s, k]]` (`route_rank`
+/// 2): gathers one scalar per selected expert, the rank-one counterpart of
+/// [`gathered_expert_product`]'s weight-matrix gather. Used to fold a
+/// per-expert output scale (the sliding-pattern family's
 /// `blk.{layer}.ffn_down_exps.scale`, `[expert_count]`) into that expert's
 /// routing weight before combination.
 #[must_use]
-fn gather_expert_scale(program: &mut Vec<Op>, scale: NodeId, route: NodeId) -> NodeId {
+fn gather_expert_scale(
+    program: &mut Vec<Op>,
+    scale: NodeId,
+    route: NodeId,
+    route_rank: u16,
+) -> NodeId {
+    let route_axes: alloc::vec::Vec<u16> = (0..route_rank).collect();
     let gathered_map = IndexMap::Computed {
         indices: route,
-        index_map: map::projection(1, &[0]),
+        index_map: map::projection(route_rank, &route_axes),
         base: IndexPattern {
-            iter_rank: 1,
+            iter_rank: route_rank,
             axes: alloc::vec![AxisIndex::default()],
         },
         gathered_dim: 0,
@@ -768,6 +824,27 @@ pub fn append_moe_ffn(
 pub enum MoeProjectionStrategy {
     PerRoute,
     GroupedGateUp,
+    /// Gate, up and down each run once over a `[sequence, selected]` stack of
+    /// routes ([`stack_selected_routes`]) instead of once per selected expert:
+    /// [`grouped_gathered_expert_product`] for gate and up,
+    /// [`slotwise_gathered_expert_product`] for down, then one reduce over the
+    /// selected axis that applies the stacked routing weights. A backend
+    /// lowers each projection as one operation whose route varies along the
+    /// selected axis, which is `ggml`'s `mul_mat_id` / `mul_mv_id` shape.
+    Stacked,
+}
+
+impl MoeProjectionStrategy {
+    /// The strategy the model builders use: [`Self::Stacked`] when the
+    /// `moe-stacked-experts` feature is on, [`Self::PerRoute`] otherwise.
+    #[must_use]
+    pub const fn production() -> Self {
+        if cfg!(feature = "moe-stacked-experts") {
+            Self::Stacked
+        } else {
+            Self::PerRoute
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -781,7 +858,7 @@ pub(super) fn append_moe_round_output(
     ones: NodeId,
     activation: Activation,
 ) -> Result<NodeId, TensorError> {
-    let activated_gate = append_activation(program, gate, ones, activation)?;
+    let activated_gate = append_activation(program, gate, ones, activation, "sg")?;
     let hidden = elementwise(
         program,
         DType::Float32,
@@ -882,6 +959,13 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         },
     );
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    // a stacked route only ever feeds the float elementwise stack, never a gather index
+    // directly, so an `Int32` tag would put it outside the f32 evaluator's index-node allowance
+    let route_dtype = if projection_strategy == MoeProjectionStrategy::Stacked {
+        DType::Float32
+    } else {
+        DType::Int32
+    };
 
     let mut max_selection_0: Option<NodeId> = None;
     let mut selected_routes: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
@@ -914,7 +998,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         )?;
         let route = reduce(
             program,
-            DType::Int32,
+            route_dtype,
             ScalarOp::Maximum,
             ReduceInit::Zero,
             candidate,
@@ -967,8 +1051,8 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         // `topk_weights = topk_weights * expert_scales` fold applied AFTER
         // renormalization, not before it.
         let combine_weight = match expert_scale {
-            Some(scale) => {
-                let gathered_scale = gather_expert_scale(program, scale, route);
+            Some(scale) if projection_strategy != MoeProjectionStrategy::Stacked => {
+                let gathered_scale = gather_expert_scale(program, scale, route, 1);
                 elementwise(
                     program,
                     DType::Float32,
@@ -976,7 +1060,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                     &[(weight, "s->s"), (gathered_scale, "s->s")],
                 )?
             }
-            None => weight,
+            _ => weight,
         };
         combine_weights.push(combine_weight);
 
@@ -1101,6 +1185,86 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                 )?,
                 None => weighted_round,
             });
+            weight_total = Some(match weight_total {
+                Some(accumulated) => elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(accumulated, "s->s"), (weight, "s->s")],
+                )?,
+                None => weight,
+            });
+        }
+    }
+
+    if projection_strategy == MoeProjectionStrategy::Stacked {
+        let routes = stack_selected_routes(program, &selected_routes)?;
+        let stacked_weights = stack_selected_routes(program, &round_weights)?;
+        let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x);
+        let gate = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "skio->skio",
+            "sko->skio",
+        )?;
+        let up_product = grouped_gathered_expert_product(program, expert_w_up, routes, x);
+        let up = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            up_product,
+            "skio->skio",
+            "sko->skio",
+        )?;
+        let activated_gate = append_activation(program, gate, ones, activation, "sko")?;
+        let hidden = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(activated_gate, "sko->sko"), (up, "sko->sko")],
+        )?;
+        let down_product = slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
+        let down = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            down_product,
+            "skio->skio",
+            "sko->skio",
+        )?;
+        let slot_weights = match expert_scale {
+            Some(scale) => {
+                let gathered_scale = gather_expert_scale(program, scale, routes, 2);
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(stacked_weights, "sk->sk"), (gathered_scale, "sk->sk")],
+                )?
+            }
+            None => stacked_weights,
+        };
+        let weighted = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(down, "sko->sko"), (slot_weights, "sk->sko")],
+        )?;
+        weighted_sum = Some(reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            weighted,
+            "sko->sko",
+            "so->sko",
+        )?);
+        for weight in round_weights.iter().copied() {
             weight_total = Some(match weight_total {
                 Some(accumulated) => elementwise(
                     program,
@@ -1410,7 +1574,7 @@ pub fn append_gqa_routed_layer(
         expert_bias: None,
         expert_scale: None,
         activation: Activation::Silu,
-        strategy: MoeProjectionStrategy::PerRoute,
+        strategy: MoeProjectionStrategy::production(),
     };
     let (ffn_out, site) = append_moe_ffn(program, layer, normed2, &moe_spec)?;
 
