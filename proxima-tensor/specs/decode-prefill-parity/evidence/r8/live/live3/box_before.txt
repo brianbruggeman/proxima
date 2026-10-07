@@ -1,0 +1,10 @@
+ollama curl exit 7
+10:44  up 6 days, 20:48, 5 users, load averages: 4.92 10.05 11.28
+17029  57.5 a background daemon in ~/.local/bin
+  476  49.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+31461  18.7 claude
+55233  14.3 /System/Applications/Messages.app/Contents/MacOS/Messages
+91989   4.2 /bin/zsh
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

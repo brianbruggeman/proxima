@@ -1,0 +1,6 @@
+ollama curl exit 7
+10:13  up 6 days, 20:17, 5 users, load averages: 5.46 6.13 5.89
+  587  92.2 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+17029  47.2 a background daemon in ~/.local/bin
+ 1418  41.3 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  476  40.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer

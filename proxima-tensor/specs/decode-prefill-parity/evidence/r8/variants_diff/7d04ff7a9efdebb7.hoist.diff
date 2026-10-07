@@ -1,0 +1,96 @@
+--- 7d04ff7a9efdebb7.copy.metal	2026-10-07 09:14:55
++++ 7d04ff7a9efdebb7.hoist.metal	2026-10-07 09:38:53
+@@ -937,64 +937,35 @@
+         for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
+         y4 += y4_step;
+     }
+-    for (int q = 0; q < 4; ++q) {
+-        float reduced = simd_sum(sumf[q]);
+-        long flat = group_first + q;
+-        if (lane == 0u && flat < u.output_total) {
+-            long out_offset = u.out_base;
+-            out_offset += coord_q_cache[q][0] * u.out_strides[0];
+-            out_offset += coord_q_cache[q][1] * u.out_strides[1];
+-            out_offset += coord_q_cache[q][2] * u.out_strides[2];
+-            float epi_scratch[10];
+-            long epi_off0 = u.epilogue_operand_base[0];
+-            epi_off0 += coord_q_cache[q][0] * u.epilogue_operand_strides[0][0];
+-            epi_off0 += coord_q_cache[q][2] * u.epilogue_operand_strides[0][1];
+-            epi_scratch[0] = epi0[epi_off0];
+-            long epi_off1 = u.epilogue_operand_base[1];
+-            epi_off1 += coord_q_cache[q][0] * u.epilogue_operand_strides[1][0];
+-            epi_off1 += coord_q_cache[q][2] * u.epilogue_operand_strides[1][1];
+-            epi_scratch[1] = epi1[epi_off1];
+-            long epi_off2 = u.epilogue_operand_base[2];
+-            epi_off2 += coord_q_cache[q][0] * u.epilogue_operand_strides[2][0];
+-            epi_off2 += coord_q_cache[q][2] * u.epilogue_operand_strides[2][1];
+-            epi_scratch[2] = epi2[epi_off2];
+-            long epi_off3 = u.epilogue_operand_base[3];
+-            epi_off3 += coord_q_cache[q][0] * u.epilogue_operand_strides[3][0];
+-            epi_off3 += coord_q_cache[q][2] * u.epilogue_operand_strides[3][1];
+-            epi_scratch[3] = epi3[epi_off3];
+-            long epi_off4 = u.epilogue_operand_base[4];
+-            epi_off4 += coord_q_cache[q][0] * u.epilogue_operand_strides[4][0];
+-            epi_off4 += coord_q_cache[q][2] * u.epilogue_operand_strides[4][1];
+-            epi_scratch[4] = epi4[epi_off4];
+-            long epi_off5 = u.epilogue_operand_base[5];
+-            epi_off5 += coord_q_cache[q][0] * u.epilogue_operand_strides[5][0];
+-            epi_off5 += coord_q_cache[q][2] * u.epilogue_operand_strides[5][1];
+-            epi_scratch[5] = epi5[epi_off5];
+-            long epi_off6 = u.epilogue_operand_base[6];
+-            epi_off6 += coord_q_cache[q][0] * u.epilogue_operand_strides[6][0];
+-            epi_off6 += coord_q_cache[q][2] * u.epilogue_operand_strides[6][1];
+-            epi_scratch[6] = epi6[epi_off6];
+-            long epi_off7 = u.epilogue_operand_base[7];
+-            epi_off7 += coord_q_cache[q][0] * u.epilogue_operand_strides[7][0];
+-            epi_off7 += coord_q_cache[q][2] * u.epilogue_operand_strides[7][1];
+-            epi_scratch[7] = epi7[epi_off7];
+-            long epi_off8 = u.epilogue_operand_base[8];
+-            epi_off8 += coord_q_cache[q][0] * u.epilogue_operand_strides[8][0];
+-            epi_off8 += coord_q_cache[q][2] * u.epilogue_operand_strides[8][1];
+-            epi_scratch[8] = epi8[epi_off8];
+-            epi_scratch[9] = reduced;
+-            float epi_step0 = epi_scratch[9];
+-            float epi_step1 = (epi_scratch[5] * epi_scratch[6]);
+-            float epi_step2 = (epi_step1 * epi_scratch[4]);
+-            float epi_step3 = (epi_step2 * epi_scratch[3]);
+-            float epi_step4 = (epi_step3 + epi_scratch[2]);
+-            float epi_step5 = (epi_step4 * epi_scratch[1]);
+-            float epi_step6 = tanh(clamp(epi_step5, -20.0f, 20.0f));
+-            float epi_step7 = (epi_step6 + epi_scratch[0]);
+-            float epi_step8 = (epi_scratch[7] * epi_scratch[8]);
+-            float epi_step9 = (epi_step7 * epi_step8);
+-            float epi_step10 = (epi_step0 * epi_step9);
+-            out[out_offset] = epi_step10;
++    float reduced_rows[4];
++    for (int q = 0; q < 4; ++q) { reduced_rows[q] = simd_sum(sumf[q]); }
++    if (lane == 0u) {
++        float gate_rows[4];
++        for (int q = 0; q < 4; ++q) {
++            long gate_off = u.epilogue_operand_base[2];
++            gate_off += coord_q_cache[q][0] * u.epilogue_operand_strides[2][0];
++            gate_off += coord_q_cache[q][2] * u.epilogue_operand_strides[2][1];
++            gate_rows[q] = epi2[gate_off];
+         }
++        for (int q = 0; q < 4; ++q) {
++            long flat = group_first + q;
++            if (flat < u.output_total) {
++                long out_offset = u.out_base;
++                out_offset += coord_q_cache[q][0] * u.out_strides[0];
++                out_offset += coord_q_cache[q][1] * u.out_strides[1];
++                out_offset += coord_q_cache[q][2] * u.out_strides[2];
++                float gate = gate_rows[q];
++                float epi_step1 = (gate * gate);
++                float epi_step2 = (epi_step1 * gate);
++                float epi_step3 = (epi_step2 * 0.044715f);
++                float epi_step4 = (epi_step3 + gate);
++                float epi_step5 = (epi_step4 * 0.7978846f);
++                float epi_step6 = tanh(clamp(epi_step5, -20.0f, 20.0f));
++                float epi_step7 = (epi_step6 + 1.0f);
++                float epi_step8 = (gate * 0.5f);
++                float epi_step9 = (epi_step7 * epi_step8);
++                out[out_offset] = (reduced_rows[q] * epi_step9);
++            }
++        }
+     }
+ }

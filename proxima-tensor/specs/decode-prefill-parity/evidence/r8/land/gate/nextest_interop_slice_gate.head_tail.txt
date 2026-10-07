@@ -1,0 +1,13 @@
+    Finished `gate` profile [optimized] target(s) in 0.26s
+────────────
+ Nextest run ID 7cdb292a-af99-44a3-ba8d-617dbabed12b with nextest profile: slice-gate
+    Starting 710 tests across 31 binaries (124 tests skipped, including 19 tests via profile.slice-gate.default-filter)
+        PASS [   0.011s] (  1/710) proxima-model-interop bind::moe_memory_shape::transpose_expert_stack_keeps_each_experts_slab_addressing_separate
+        PASS [   0.012s] (  2/710) proxima-model-interop bind::tests::architecture_from_metadata_names_the_missing_key
+...
+        PASS [   0.207s] (707/710) proxima-model-interop::swa_rope_from_metadata swa_rope_from_metadata_gemma4_e2b
+        PASS [   1.991s] (708/710) proxima-model-interop::tier_real_state tier_real_state_device_to_host
+        PASS [   1.856s] (709/710) proxima-model-interop::tier_real_state tier_real_state_disk_to_host
+        PASS [   1.877s] (710/710) proxima-model-interop::tier_real_state tier_real_state_host_to_disk
+────────────
+     Summary [ 119.780s] 710 tests run: 710 passed, 124 skipped

@@ -1,0 +1,264 @@
+raw arm=base process=0 run=0 ms_per_token=50.6930
+raw arm=base process=0 run=1 ms_per_token=45.4140
+raw arm=base process=0 run=2 ms_per_token=48.2160
+raw arm=base process=0 run=3 ms_per_token=48.0450
+raw arm=c1_dedupe process=0 run=0 ms_per_token=56.6240
+raw arm=c1_dedupe process=0 run=1 ms_per_token=47.4880
+raw arm=c1_dedupe process=0 run=2 ms_per_token=45.1710
+raw arm=c1_dedupe process=0 run=3 ms_per_token=47.2680
+raw arm=c2_lanes process=0 run=0 ms_per_token=49.0910
+raw arm=c2_lanes process=0 run=1 ms_per_token=46.5050
+raw arm=c2_lanes process=0 run=2 ms_per_token=46.5640
+raw arm=c2_lanes process=0 run=3 ms_per_token=46.6020
+raw arm=c1_copy process=0 run=0 ms_per_token=52.1190
+raw arm=c1_copy process=0 run=1 ms_per_token=47.5520
+raw arm=c1_copy process=0 run=2 ms_per_token=46.1810
+raw arm=c1_copy process=0 run=3 ms_per_token=46.3500
+raw arm=c1_dedupe process=1 run=0 ms_per_token=52.2330
+raw arm=c1_dedupe process=1 run=1 ms_per_token=46.7100
+raw arm=c1_dedupe process=1 run=2 ms_per_token=47.5510
+raw arm=c1_dedupe process=1 run=3 ms_per_token=47.5560
+raw arm=c2_lanes process=1 run=0 ms_per_token=50.4510
+raw arm=c2_lanes process=1 run=1 ms_per_token=46.9520
+raw arm=c2_lanes process=1 run=2 ms_per_token=47.5940
+raw arm=c2_lanes process=1 run=3 ms_per_token=44.6350
+raw arm=c1_copy process=1 run=0 ms_per_token=49.7820
+raw arm=c1_copy process=1 run=1 ms_per_token=48.3660
+raw arm=c1_copy process=1 run=2 ms_per_token=46.5270
+raw arm=c1_copy process=1 run=3 ms_per_token=47.3050
+raw arm=base process=1 run=0 ms_per_token=50.1680
+raw arm=base process=1 run=1 ms_per_token=47.6670
+raw arm=base process=1 run=2 ms_per_token=47.3250
+raw arm=base process=1 run=3 ms_per_token=48.3980
+raw arm=c2_lanes process=2 run=0 ms_per_token=51.2110
+raw arm=c2_lanes process=2 run=1 ms_per_token=46.8020
+raw arm=c2_lanes process=2 run=2 ms_per_token=45.6430
+raw arm=c2_lanes process=2 run=3 ms_per_token=46.7350
+raw arm=c1_copy process=2 run=0 ms_per_token=52.3770
+raw arm=c1_copy process=2 run=1 ms_per_token=47.2180
+raw arm=c1_copy process=2 run=2 ms_per_token=46.5200
+raw arm=c1_copy process=2 run=3 ms_per_token=44.7200
+raw arm=base process=2 run=0 ms_per_token=50.5250
+raw arm=base process=2 run=1 ms_per_token=48.7270
+raw arm=base process=2 run=2 ms_per_token=47.1130
+raw arm=base process=2 run=3 ms_per_token=46.2020
+raw arm=c1_dedupe process=2 run=0 ms_per_token=52.5510
+raw arm=c1_dedupe process=2 run=1 ms_per_token=45.0890
+raw arm=c1_dedupe process=2 run=2 ms_per_token=46.9530
+raw arm=c1_dedupe process=2 run=3 ms_per_token=47.8320
+arm=base metric=ms_per_token process=0 run=1 value=45.4140 outlier=false
+arm=base metric=ms_per_token process=0 run=2 value=48.2160 outlier=false
+arm=base metric=ms_per_token process=0 run=3 value=48.0450 outlier=false
+arm=base metric=ms_per_token process=1 run=1 value=47.6670 outlier=false
+arm=base metric=ms_per_token process=1 run=2 value=47.3250 outlier=false
+arm=base metric=ms_per_token process=1 run=3 value=48.3980 outlier=false
+arm=base metric=ms_per_token process=2 run=1 value=48.7270 outlier=false
+arm=base metric=ms_per_token process=2 run=2 value=47.1130 outlier=false
+arm=base metric=ms_per_token process=2 run=3 value=46.2020 outlier=false
+summary arm=base metric=ms_per_token n_all=9 median_all=47.6670 cov_all_pct=2.15 min_all=45.4140 max_all=48.7270 | n_kept=9 median_kept=47.6670 mad_kept=0.5540 cov_kept_pct=2.15 min_kept=45.4140 max_kept=48.7270
+arm=base metric=prefill_ms process=0 run=1 value=7920.9990 outlier=false
+arm=base metric=prefill_ms process=0 run=2 value=7926.9960 outlier=false
+arm=base metric=prefill_ms process=0 run=3 value=7938.9850 outlier=true
+arm=base metric=prefill_ms process=1 run=1 value=7925.0140 outlier=false
+arm=base metric=prefill_ms process=1 run=2 value=7928.9980 outlier=false
+arm=base metric=prefill_ms process=1 run=3 value=7935.9960 outlier=true
+arm=base metric=prefill_ms process=2 run=1 value=7926.0000 outlier=false
+arm=base metric=prefill_ms process=2 run=2 value=7925.9970 outlier=false
+arm=base metric=prefill_ms process=2 run=3 value=7971.0100 outlier=true
+summary arm=base metric=prefill_ms n_all=9 median_all=7926.9960 cov_all_pct=0.18 min_all=7920.9990 max_all=7971.0100 | n_kept=6 median_kept=7925.9985 mad_kept=0.9910 cov_kept_pct=0.03 min_kept=7920.9990 max_kept=7928.9980
+arm=base metric=ttft_ms process=0 run=1 value=7921.0000 outlier=false
+arm=base metric=ttft_ms process=0 run=2 value=7927.0000 outlier=false
+arm=base metric=ttft_ms process=0 run=3 value=7939.0000 outlier=true
+arm=base metric=ttft_ms process=1 run=1 value=7925.0000 outlier=false
+arm=base metric=ttft_ms process=1 run=2 value=7929.0000 outlier=false
+arm=base metric=ttft_ms process=1 run=3 value=7936.0000 outlier=true
+arm=base metric=ttft_ms process=2 run=1 value=7926.0000 outlier=false
+arm=base metric=ttft_ms process=2 run=2 value=7926.0000 outlier=false
+arm=base metric=ttft_ms process=2 run=3 value=7971.0000 outlier=true
+summary arm=base metric=ttft_ms n_all=9 median_all=7927.0000 cov_all_pct=0.18 min_all=7921.0000 max_all=7971.0000 | n_kept=6 median_kept=7926.0000 mad_kept=1.0000 cov_kept_pct=0.03 min_kept=7921.0000 max_kept=7929.0000
+memory arm=base metric=peak_rss_bytes process=0 value=27716190208
+memory arm=base metric=peak_rss_bytes process=1 value=27713585152
+memory arm=base metric=peak_rss_bytes process=2 value=27779956736
+summary arm=base metric=peak_rss_bytes n=3 median=27716190208 max=27779956736
+memory arm=base metric=peak_footprint_bytes process=0 value=13272011008
+memory arm=base metric=peak_footprint_bytes process=1 value=13271372096
+memory arm=base metric=peak_footprint_bytes process=2 value=13266424064
+summary arm=base metric=peak_footprint_bytes n=3 median=13271372096 max=13272011008
+memory arm=base metric=peak_gpu_bytes process=0 value=20630847488
+memory arm=base metric=peak_gpu_bytes process=1 value=20630847488
+memory arm=base metric=peak_gpu_bytes process=2 value=20630847488
+summary arm=base metric=peak_gpu_bytes n=3 median=20630847488 max=20630847488
+extra arm=base process=0 peers_present_at_exit=[]
+extra arm=base process=1 peers_present_at_exit=[]
+extra arm=base process=2 peers_present_at_exit=[]
+arm=c1_dedupe metric=ms_per_token process=0 run=1 value=47.4880 outlier=false
+arm=c1_dedupe metric=ms_per_token process=0 run=2 value=45.1710 outlier=true
+arm=c1_dedupe metric=ms_per_token process=0 run=3 value=47.2680 outlier=false
+arm=c1_dedupe metric=ms_per_token process=1 run=1 value=46.7100 outlier=false
+arm=c1_dedupe metric=ms_per_token process=1 run=2 value=47.5510 outlier=false
+arm=c1_dedupe metric=ms_per_token process=1 run=3 value=47.5560 outlier=false
+arm=c1_dedupe metric=ms_per_token process=2 run=1 value=45.0890 outlier=true
+arm=c1_dedupe metric=ms_per_token process=2 run=2 value=46.9530 outlier=false
+arm=c1_dedupe metric=ms_per_token process=2 run=3 value=47.8320 outlier=false
+summary arm=c1_dedupe metric=ms_per_token n_all=9 median_all=47.2680 cov_all_pct=2.07 min_all=45.0890 max_all=47.8320 | n_kept=7 median_kept=47.4880 mad_kept=0.2200 cov_kept_pct=0.76 min_kept=46.7100 max_kept=47.8320
+arm=c1_dedupe metric=prefill_ms process=0 run=1 value=8014.9910 outlier=false
+arm=c1_dedupe metric=prefill_ms process=0 run=2 value=8007.0000 outlier=false
+arm=c1_dedupe metric=prefill_ms process=0 run=3 value=8011.9910 outlier=false
+arm=c1_dedupe metric=prefill_ms process=1 run=1 value=8014.9850 outlier=false
+arm=c1_dedupe metric=prefill_ms process=1 run=2 value=8018.0120 outlier=false
+arm=c1_dedupe metric=prefill_ms process=1 run=3 value=8015.0110 outlier=false
+arm=c1_dedupe metric=prefill_ms process=2 run=1 value=8018.9870 outlier=false
+arm=c1_dedupe metric=prefill_ms process=2 run=2 value=8010.0130 outlier=false
+arm=c1_dedupe metric=prefill_ms process=2 run=3 value=8017.0130 outlier=false
+summary arm=c1_dedupe metric=prefill_ms n_all=9 median_all=8014.9910 cov_all_pct=0.05 min_all=8007.0000 max_all=8018.9870 | n_kept=9 median_kept=8014.9910 mad_kept=3.0000 cov_kept_pct=0.05 min_kept=8007.0000 max_kept=8018.9870
+arm=c1_dedupe metric=ttft_ms process=0 run=1 value=8015.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=0 run=2 value=8007.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=0 run=3 value=8012.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=1 run=1 value=8015.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=1 run=2 value=8018.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=1 run=3 value=8015.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=2 run=1 value=8019.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=2 run=2 value=8010.0000 outlier=false
+arm=c1_dedupe metric=ttft_ms process=2 run=3 value=8017.0000 outlier=false
+summary arm=c1_dedupe metric=ttft_ms n_all=9 median_all=8015.0000 cov_all_pct=0.05 min_all=8007.0000 max_all=8019.0000 | n_kept=9 median_kept=8015.0000 mad_kept=3.0000 cov_kept_pct=0.05 min_kept=8007.0000 max_kept=8019.0000
+memory arm=c1_dedupe metric=peak_rss_bytes process=0 value=27745927168
+memory arm=c1_dedupe metric=peak_rss_bytes process=1 value=27602616320
+memory arm=c1_dedupe metric=peak_rss_bytes process=2 value=27521925120
+summary arm=c1_dedupe metric=peak_rss_bytes n=3 median=27602616320 max=27745927168
+memory arm=c1_dedupe metric=peak_footprint_bytes process=0 value=13266112768
+memory arm=c1_dedupe metric=peak_footprint_bytes process=1 value=13280137408
+memory arm=c1_dedupe metric=peak_footprint_bytes process=2 value=13273371008
+summary arm=c1_dedupe metric=peak_footprint_bytes n=3 median=13273371008 max=13280137408
+memory arm=c1_dedupe metric=peak_gpu_bytes process=0 value=20630847488
+memory arm=c1_dedupe metric=peak_gpu_bytes process=1 value=20630847488
+memory arm=c1_dedupe metric=peak_gpu_bytes process=2 value=20630847488
+summary arm=c1_dedupe metric=peak_gpu_bytes n=3 median=20630847488 max=20630847488
+extra arm=c1_dedupe process=0 peers_present_at_exit=[]
+extra arm=c1_dedupe process=1 peers_present_at_exit=[]
+extra arm=c1_dedupe process=2 peers_present_at_exit=[]
+arm=c2_lanes metric=ms_per_token process=0 run=1 value=46.5050 outlier=false
+arm=c2_lanes metric=ms_per_token process=0 run=2 value=46.5640 outlier=false
+arm=c2_lanes metric=ms_per_token process=0 run=3 value=46.6020 outlier=false
+arm=c2_lanes metric=ms_per_token process=1 run=1 value=46.9520 outlier=false
+arm=c2_lanes metric=ms_per_token process=1 run=2 value=47.5940 outlier=true
+arm=c2_lanes metric=ms_per_token process=1 run=3 value=44.6350 outlier=true
+arm=c2_lanes metric=ms_per_token process=2 run=1 value=46.8020 outlier=false
+arm=c2_lanes metric=ms_per_token process=2 run=2 value=45.6430 outlier=true
+arm=c2_lanes metric=ms_per_token process=2 run=3 value=46.7350 outlier=false
+summary arm=c2_lanes metric=ms_per_token n_all=9 median_all=46.6020 cov_all_pct=1.72 min_all=44.6350 max_all=47.5940 | n_kept=6 median_kept=46.6685 mad_kept=0.1190 cov_kept_pct=0.33 min_kept=46.5050 max_kept=46.9520
+arm=c2_lanes metric=prefill_ms process=0 run=1 value=8015.0110 outlier=false
+arm=c2_lanes metric=prefill_ms process=0 run=2 value=8009.0120 outlier=false
+arm=c2_lanes metric=prefill_ms process=0 run=3 value=8015.0120 outlier=false
+arm=c2_lanes metric=prefill_ms process=1 run=1 value=8017.0090 outlier=false
+arm=c2_lanes metric=prefill_ms process=1 run=2 value=8009.9990 outlier=false
+arm=c2_lanes metric=prefill_ms process=1 run=3 value=8021.0120 outlier=false
+arm=c2_lanes metric=prefill_ms process=2 run=1 value=8014.0060 outlier=false
+arm=c2_lanes metric=prefill_ms process=2 run=2 value=8019.0020 outlier=false
+arm=c2_lanes metric=prefill_ms process=2 run=3 value=8014.9980 outlier=false
+summary arm=c2_lanes metric=prefill_ms n_all=9 median_all=8015.0110 cov_all_pct=0.05 min_all=8009.0120 max_all=8021.0120 | n_kept=9 median_kept=8015.0110 mad_kept=1.9980 cov_kept_pct=0.05 min_kept=8009.0120 max_kept=8021.0120
+arm=c2_lanes metric=ttft_ms process=0 run=1 value=8015.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=0 run=2 value=8009.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=0 run=3 value=8015.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=1 run=1 value=8017.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=1 run=2 value=8010.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=1 run=3 value=8021.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=2 run=1 value=8014.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=2 run=2 value=8019.0000 outlier=false
+arm=c2_lanes metric=ttft_ms process=2 run=3 value=8015.0000 outlier=false
+summary arm=c2_lanes metric=ttft_ms n_all=9 median_all=8015.0000 cov_all_pct=0.05 min_all=8009.0000 max_all=8021.0000 | n_kept=9 median_kept=8015.0000 mad_kept=2.0000 cov_kept_pct=0.05 min_kept=8009.0000 max_kept=8021.0000
+memory arm=c2_lanes metric=peak_rss_bytes process=0 value=27832860672
+memory arm=c2_lanes metric=peak_rss_bytes process=1 value=27644051456
+memory arm=c2_lanes metric=peak_rss_bytes process=2 value=27602026496
+summary arm=c2_lanes metric=peak_rss_bytes n=3 median=27644051456 max=27832860672
+memory arm=c2_lanes metric=peak_footprint_bytes process=0 value=13266587776
+memory arm=c2_lanes metric=peak_footprint_bytes process=1 value=13266801152
+memory arm=c2_lanes metric=peak_footprint_bytes process=2 value=13263867904
+summary arm=c2_lanes metric=peak_footprint_bytes n=3 median=13266587776 max=13266801152
+memory arm=c2_lanes metric=peak_gpu_bytes process=0 value=20630847488
+memory arm=c2_lanes metric=peak_gpu_bytes process=1 value=20630847488
+memory arm=c2_lanes metric=peak_gpu_bytes process=2 value=20630847488
+summary arm=c2_lanes metric=peak_gpu_bytes n=3 median=20630847488 max=20630847488
+extra arm=c2_lanes process=0 peers_present_at_exit=[]
+extra arm=c2_lanes process=1 peers_present_at_exit=[]
+extra arm=c2_lanes process=2 peers_present_at_exit=[]
+arm=c1_copy metric=ms_per_token process=0 run=1 value=47.5520 outlier=false
+arm=c1_copy metric=ms_per_token process=0 run=2 value=46.1810 outlier=false
+arm=c1_copy metric=ms_per_token process=0 run=3 value=46.3500 outlier=false
+arm=c1_copy metric=ms_per_token process=1 run=1 value=48.3660 outlier=false
+arm=c1_copy metric=ms_per_token process=1 run=2 value=46.5270 outlier=false
+arm=c1_copy metric=ms_per_token process=1 run=3 value=47.3050 outlier=false
+arm=c1_copy metric=ms_per_token process=2 run=1 value=47.2180 outlier=false
+arm=c1_copy metric=ms_per_token process=2 run=2 value=46.5200 outlier=false
+arm=c1_copy metric=ms_per_token process=2 run=3 value=44.7200 outlier=false
+summary arm=c1_copy metric=ms_per_token n_all=9 median_all=46.5270 cov_all_pct=2.08 min_all=44.7200 max_all=48.3660 | n_kept=9 median_kept=46.5270 mad_kept=0.6910 cov_kept_pct=2.08 min_kept=44.7200 max_kept=48.3660
+arm=c1_copy metric=prefill_ms process=0 run=1 value=8019.9910 outlier=false
+arm=c1_copy metric=prefill_ms process=0 run=2 value=8016.9950 outlier=false
+arm=c1_copy metric=prefill_ms process=0 run=3 value=8019.0120 outlier=false
+arm=c1_copy metric=prefill_ms process=1 run=1 value=8012.9960 outlier=false
+arm=c1_copy metric=prefill_ms process=1 run=2 value=8015.0140 outlier=false
+arm=c1_copy metric=prefill_ms process=1 run=3 value=8021.0040 outlier=false
+arm=c1_copy metric=prefill_ms process=2 run=1 value=8014.0080 outlier=false
+arm=c1_copy metric=prefill_ms process=2 run=2 value=8015.9990 outlier=false
+arm=c1_copy metric=prefill_ms process=2 run=3 value=8013.0060 outlier=false
+summary arm=c1_copy metric=prefill_ms n_all=9 median_all=8015.9990 cov_all_pct=0.04 min_all=8012.9960 max_all=8021.0040 | n_kept=9 median_kept=8015.9990 mad_kept=2.9930 cov_kept_pct=0.04 min_kept=8012.9960 max_kept=8021.0040
+arm=c1_copy metric=ttft_ms process=0 run=1 value=8020.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=0 run=2 value=8017.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=0 run=3 value=8019.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=1 run=1 value=8013.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=1 run=2 value=8015.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=1 run=3 value=8021.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=2 run=1 value=8014.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=2 run=2 value=8016.0000 outlier=false
+arm=c1_copy metric=ttft_ms process=2 run=3 value=8013.0000 outlier=false
+summary arm=c1_copy metric=ttft_ms n_all=9 median_all=8016.0000 cov_all_pct=0.04 min_all=8013.0000 max_all=8021.0000 | n_kept=9 median_kept=8016.0000 mad_kept=3.0000 cov_kept_pct=0.04 min_kept=8013.0000 max_kept=8021.0000
+memory arm=c1_copy metric=peak_rss_bytes process=0 value=27857289216
+memory arm=c1_copy metric=peak_rss_bytes process=1 value=27647885312
+memory arm=c1_copy metric=peak_rss_bytes process=2 value=27629797376
+summary arm=c1_copy metric=peak_rss_bytes n=3 median=27647885312 max=27857289216
+memory arm=c1_copy metric=peak_footprint_bytes process=0 value=13276631360
+memory arm=c1_copy metric=peak_footprint_bytes process=1 value=13266309184
+memory arm=c1_copy metric=peak_footprint_bytes process=2 value=13264654400
+summary arm=c1_copy metric=peak_footprint_bytes n=3 median=13266309184 max=13276631360
+memory arm=c1_copy metric=peak_gpu_bytes process=0 value=20630847488
+memory arm=c1_copy metric=peak_gpu_bytes process=1 value=20630847488
+memory arm=c1_copy metric=peak_gpu_bytes process=2 value=20630847488
+summary arm=c1_copy metric=peak_gpu_bytes n=3 median=20630847488 max=20630847488
+extra arm=c1_copy process=0 peers_present_at_exit=[]
+extra arm=c1_copy process=1 peers_present_at_exit=[]
+extra arm=c1_copy process=2 peers_present_at_exit=[]
+bound metric=ms_per_token arm=c1_dedupe vs=base arm_median=47.4880 reference_median=47.6670 delta=-0.1790 limit=0.9533 within=true
+bound metric=prefill_ms arm=c1_dedupe vs=base arm_median=8014.9910 reference_median=7925.9985 delta=88.9925 limit=158.5200 within=true
+bound metric=ttft_ms arm=c1_dedupe vs=base arm_median=8015.0000 reference_median=7926.0000 delta=89.0000 limit=158.5200 within=true
+bound metric=peak_rss_bytes arm=c1_dedupe vs=base arm_median=27602616320 reference_median=27716190208 delta=-113573888 limit=554323804 within=true
+bound metric=peak_footprint_bytes arm=c1_dedupe vs=base arm_median=13273371008 reference_median=13271372096 delta=1998912 limit=265427442 within=true
+bound metric=peak_gpu_bytes arm=c1_dedupe vs=base arm_median=20630847488 reference_median=20630847488 delta=0 limit=412616950 within=true
+bound metric=ms_per_token arm=c2_lanes vs=base arm_median=46.6685 reference_median=47.6670 delta=-0.9985 limit=0.9533 within=true
+bound metric=prefill_ms arm=c2_lanes vs=base arm_median=8015.0110 reference_median=7925.9985 delta=89.0125 limit=158.5200 within=true
+bound metric=ttft_ms arm=c2_lanes vs=base arm_median=8015.0000 reference_median=7926.0000 delta=89.0000 limit=158.5200 within=true
+bound metric=peak_rss_bytes arm=c2_lanes vs=base arm_median=27644051456 reference_median=27716190208 delta=-72138752 limit=554323804 within=true
+bound metric=peak_footprint_bytes arm=c2_lanes vs=base arm_median=13266587776 reference_median=13271372096 delta=-4784320 limit=265427442 within=true
+bound metric=peak_gpu_bytes arm=c2_lanes vs=base arm_median=20630847488 reference_median=20630847488 delta=0 limit=412616950 within=true
+bound metric=ms_per_token arm=c2_lanes vs=c1_dedupe arm_median=46.6685 reference_median=47.4880 delta=-0.8195 limit=0.9498 within=true
+bound metric=prefill_ms arm=c2_lanes vs=c1_dedupe arm_median=8015.0110 reference_median=8014.9910 delta=0.0200 limit=160.2998 within=true
+bound metric=ttft_ms arm=c2_lanes vs=c1_dedupe arm_median=8015.0000 reference_median=8015.0000 delta=0.0000 limit=160.3000 within=true
+bound metric=peak_rss_bytes arm=c2_lanes vs=c1_dedupe arm_median=27644051456 reference_median=27602616320 delta=41435136 limit=552052326 within=true
+bound metric=peak_footprint_bytes arm=c2_lanes vs=c1_dedupe arm_median=13266587776 reference_median=13273371008 delta=-6783232 limit=265467420 within=true
+bound metric=peak_gpu_bytes arm=c2_lanes vs=c1_dedupe arm_median=20630847488 reference_median=20630847488 delta=0 limit=412616950 within=true
+bound metric=ms_per_token arm=c1_copy vs=base arm_median=46.5270 reference_median=47.6670 delta=-1.1400 limit=0.9533 within=true
+bound metric=prefill_ms arm=c1_copy vs=base arm_median=8015.9990 reference_median=7925.9985 delta=90.0005 limit=158.5200 within=true
+bound metric=ttft_ms arm=c1_copy vs=base arm_median=8016.0000 reference_median=7926.0000 delta=90.0000 limit=158.5200 within=true
+bound metric=peak_rss_bytes arm=c1_copy vs=base arm_median=27647885312 reference_median=27716190208 delta=-68304896 limit=554323804 within=true
+bound metric=peak_footprint_bytes arm=c1_copy vs=base arm_median=13266309184 reference_median=13271372096 delta=-5062912 limit=265427442 within=true
+bound metric=peak_gpu_bytes arm=c1_copy vs=base arm_median=20630847488 reference_median=20630847488 delta=0 limit=412616950 within=true
+bound metric=ms_per_token arm=c1_copy vs=c1_dedupe arm_median=46.5270 reference_median=47.4880 delta=-0.9610 limit=0.9498 within=true
+bound metric=prefill_ms arm=c1_copy vs=c1_dedupe arm_median=8015.9990 reference_median=8014.9910 delta=1.0080 limit=160.2998 within=true
+bound metric=ttft_ms arm=c1_copy vs=c1_dedupe arm_median=8016.0000 reference_median=8015.0000 delta=1.0000 limit=160.3000 within=true
+bound metric=peak_rss_bytes arm=c1_copy vs=c1_dedupe arm_median=27647885312 reference_median=27602616320 delta=45268992 limit=552052326 within=true
+bound metric=peak_footprint_bytes arm=c1_copy vs=c1_dedupe arm_median=13266309184 reference_median=13273371008 delta=-7061824 limit=265467420 within=true
+bound metric=peak_gpu_bytes arm=c1_copy vs=c1_dedupe arm_median=20630847488 reference_median=20630847488 delta=0 limit=412616950 within=true
+bound metric=ms_per_token arm=c1_copy vs=c2_lanes arm_median=46.5270 reference_median=46.6685 delta=-0.1415 limit=0.9334 within=true
+bound metric=prefill_ms arm=c1_copy vs=c2_lanes arm_median=8015.9990 reference_median=8015.0110 delta=0.9880 limit=160.3002 within=true
+bound metric=ttft_ms arm=c1_copy vs=c2_lanes arm_median=8016.0000 reference_median=8015.0000 delta=1.0000 limit=160.3000 within=true
+bound metric=peak_rss_bytes arm=c1_copy vs=c2_lanes arm_median=27647885312 reference_median=27644051456 delta=3833856 limit=552881029 within=true
+bound metric=peak_footprint_bytes arm=c1_copy vs=c2_lanes arm_median=13266309184 reference_median=13266587776 delta=-278592 limit=265331756 within=true
+bound metric=peak_gpu_bytes arm=c1_copy vs=c2_lanes arm_median=20630847488 reference_median=20630847488 delta=0 limit=412616950 within=true

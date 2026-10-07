@@ -1,0 +1,47 @@
+ab capture: step=5 dispatches=941 groups=56
+ab bits sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] arm=base elements=6144 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] arm=7d04ff7a9efdebb7.copy elements=6144 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] arm=7d04ff7a9efdebb7.dedupe elements=6144 differing=10 max_ulp=9 max_abs=2.682209e-7 max_abs_over_largest=1.5523618e-8
+ab bits sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] arm=7d04ff7a9efdebb7.immed elements=6144 differing=8 max_ulp=6 max_abs=2.3841858e-7 max_abs_over_largest=1.3798772e-8
+ab bits sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] arm=7d04ff7a9efdebb7.lanepar elements=6144 differing=8 max_ulp=6 max_abs=2.3841858e-7 max_abs_over_largest=1.3798772e-8
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=0 arm=base step_ms=11.2739
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=0 arm=omit_group step_ms=10.6885
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=0 arm=7d04ff7a9efdebb7.copy step_ms=11.2476
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=0 arm=7d04ff7a9efdebb7.dedupe step_ms=11.1634
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=0 arm=7d04ff7a9efdebb7.immed step_ms=11.1400
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=0 arm=7d04ff7a9efdebb7.lanepar step_ms=11.0626
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=1 arm=base step_ms=10.5483
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=1 arm=omit_group step_ms=10.0135
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=1 arm=7d04ff7a9efdebb7.copy step_ms=10.5439
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=1 arm=7d04ff7a9efdebb7.dedupe step_ms=10.4987
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=1 arm=7d04ff7a9efdebb7.immed step_ms=10.4038
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=1 arm=7d04ff7a9efdebb7.lanepar step_ms=10.3740
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=2 arm=base step_ms=10.5320
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=2 arm=omit_group step_ms=10.0003
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=2 arm=7d04ff7a9efdebb7.copy step_ms=10.5319
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=2 arm=7d04ff7a9efdebb7.dedupe step_ms=10.4746
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=2 arm=7d04ff7a9efdebb7.immed step_ms=10.3886
+ab step sha=7d04ff7a9efdebb7 threads=49152 extents=[1, 1536, 6144] count=15 pass=2 arm=7d04ff7a9efdebb7.lanepar step_ms=10.3469
+ab bits sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] arm=base elements=12288 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] arm=7d04ff7a9efdebb7.copy elements=12288 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] arm=7d04ff7a9efdebb7.dedupe elements=12288 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] arm=7d04ff7a9efdebb7.immed elements=12288 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] arm=7d04ff7a9efdebb7.lanepar elements=12288 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=0 arm=base step_ms=10.5241
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=0 arm=omit_group step_ms=9.3659
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=0 arm=7d04ff7a9efdebb7.copy step_ms=10.5304
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=0 arm=7d04ff7a9efdebb7.dedupe step_ms=10.4116
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=0 arm=7d04ff7a9efdebb7.immed step_ms=10.2660
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=0 arm=7d04ff7a9efdebb7.lanepar step_ms=10.1741
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=1 arm=base step_ms=10.5453
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=1 arm=omit_group step_ms=9.3714
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=1 arm=7d04ff7a9efdebb7.copy step_ms=10.5505
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=1 arm=7d04ff7a9efdebb7.dedupe step_ms=10.3945
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=1 arm=7d04ff7a9efdebb7.immed step_ms=10.2639
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=1 arm=7d04ff7a9efdebb7.lanepar step_ms=10.1738
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=2 arm=base step_ms=10.5391
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=2 arm=omit_group step_ms=9.3816
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=2 arm=7d04ff7a9efdebb7.copy step_ms=10.5476
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=2 arm=7d04ff7a9efdebb7.dedupe step_ms=10.4302
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=2 arm=7d04ff7a9efdebb7.immed step_ms=10.2726
+ab step sha=7d04ff7a9efdebb7 threads=98304 extents=[1, 1536, 12288] count=20 pass=2 arm=7d04ff7a9efdebb7.lanepar step_ms=10.1858

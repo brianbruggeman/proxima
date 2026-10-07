@@ -1,0 +1,31 @@
+ab capture: step=5 dispatches=941 groups=56
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.copy elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.tg128 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.tg256 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.tg32 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=base step_ms=11.1659
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=2c9c96c767a82cfd.copy step_ms=11.2298
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=2c9c96c767a82cfd.tg128 step_ms=11.1205
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=2c9c96c767a82cfd.tg256 step_ms=11.0121
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=0 arm=2c9c96c767a82cfd.tg32 step_ms=11.1631
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=base step_ms=10.4553
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=2c9c96c767a82cfd.copy step_ms=11.2095
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=2c9c96c767a82cfd.tg128 step_ms=10.7315
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=2c9c96c767a82cfd.tg256 step_ms=10.4703
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] count=28 pass=1 arm=2c9c96c767a82cfd.tg32 step_ms=10.8450
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.copy elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.tg128 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.tg256 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.tg32 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=base step_ms=10.4148
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=2c9c96c767a82cfd.copy step_ms=10.3476
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=2c9c96c767a82cfd.tg128 step_ms=10.9527
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=2c9c96c767a82cfd.tg256 step_ms=11.0179
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=0 arm=2c9c96c767a82cfd.tg32 step_ms=10.3373
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=base step_ms=10.3218
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=2c9c96c767a82cfd.copy step_ms=10.6389
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=2c9c96c767a82cfd.tg128 step_ms=10.5247
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=2c9c96c767a82cfd.tg256 step_ms=10.3382
+ab step sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] count=7 pass=1 arm=2c9c96c767a82cfd.tg32 step_ms=10.5850

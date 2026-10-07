@@ -1,0 +1,13 @@
+    Finished `gate` profile [optimized] target(s) in 0.22s
+────────────
+ Nextest run ID a2434f34-e851-4e02-b766-821a2f5bb7ff with nextest profile: default
+    Starting 613 tests across 99 binaries (16 tests skipped)
+        PASS [   0.009s] (  1/613) omega backend::tests::an_unknown_engine_name_lists_the_known_ones
+        PASS [   0.010s] (  2/613) omega backend::tests::gpu_expert_source_gate_rejects_a_nonempty_substitution_table
+...
+        PASS [   0.133s] (610/613) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_maximum_holds_parity_on_ragged_extents
+        PASS [   0.125s] (611/613) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_multiply_holds_parity_on_ragged_extents
+        PASS [   0.145s] (612/613) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_add_holds_parity_on_ragged_extents
+        PASS [   0.137s] (613/613) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_minimum_holds_parity_on_ragged_extents
+────────────
+     Summary [  50.878s] 613 tests run: 613 passed, 16 skipped

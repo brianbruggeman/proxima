@@ -1,0 +1,56 @@
+1.4597 20 72.99 7d04ff7a [1, 1536, 12288] omega_reduce_r3_o2_n2_multiply_add_zero_epi9_fused_identity_o9__multiply_o5_o6__multiply_s1_o4__multiply_s2_
+1.0924 1 1092.38 7aa33403 [1, 1536, 262144] omega_reduce_r3_o2_n2_multiply_add_zero_epi2_fused_identity_o2__divide_s0_o1__tanh_s1__multiply_s2_o0
+0.8692 71 12.24 b58c6089 [1, 1536] omega_reduce_r2_o1_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciproc
+0.8609 20 43.05 0a3f20f1 [1, 1536, 12288] omega_reduce_r3_o2_n2_multiply_add_zero
+0.8293 20 41.46 6d145f7d [1, 12288, 1536] omega_reduce_r3_o2_n2_multiply_add_zero
+0.7192 28 25.69 b2651dd9 [1, 1, 8, 256] omega_cached_attention_q1_h1_g8_d256_s3f800000_ln511_up0_x4_e1_k1_ds
+0.5443 105 5.18 97ab4307 [1, 1536] omega_reduce_r2_o1_n2_multiply_add_zero
+0.5203 15 34.68 7d04ff7a [1, 1536, 6144] omega_reduce_r3_o2_n2_multiply_add_zero_epi9_fused_identity_o9__multiply_o5_o6__multiply_s1_o4__multiply_s2_o
+0.4587 15 30.58 6d145f7d [1, 6144, 1536] omega_reduce_r3_o2_n2_multiply_add_zero
+0.4081 35 11.66 8a0df5ee [1, 256] omega_reduce_r2_o1_n2_multiply_add_zero_epi15_fused_identity_o15__identity_o0__multiply_s0_o4__add_s2_o3__square_roo
+0.4050 7 57.86 a99a3e2e [1, 1, 8, 512] omega_cached_attention_q1_h1_g8_d512_s3f800000_ln9223372036854775808_up0_x4_e1_k1_ds
+0.4001 15 26.68 0a3f20f1 [1, 1536, 6144] omega_reduce_r3_o2_n2_multiply_add_zero
+0.3966 28 14.16 2c9c96c7 [1, 1, 8, 256, 1536] omega_reduce_r5_o2_n2_multiply_add_zero
+0.3534 70 5.05 dfd99e0b [1, 1536] omega_elementwise_r2_n6_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_
+0.3501 28 12.50 100f142c [1, 8, 256] omega_elementwise_r3_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_
+0.3103 35 8.87 0a3f20f1 [1, 1536, 256] omega_reduce_r3_o2_n2_multiply_add_zero
+0.2443 35 6.98 b1b9fc58 [1, 1536] omega_elementwise_r2_n7_fused_multiply_o4_o5__add_s0_o3__square_root_s1__reciprocal_s2__multiply_s3_o2__multiply_s4_
+0.2406 1 240.58 b7329559 [1, 512, 512] omega_reduce_r3_o2_n4_fused_greater_o0_o1__greater_o2_o3__multiply_s0_s1_add_zero
+0.2353 28 8.40 6ccd88ae [1, 8, 256, 1536] omega_reduce_r4_o3_n2_multiply_add_zero
+0.2054 7 29.34 6ccd88ae [1, 8, 512, 1536] omega_reduce_r4_o3_n2_multiply_add_zero
+0.2046 28 7.31 fb384d9b [1, 1, 8, 256] omega_cached_attention_q1_h1_g8_d256_s3f800000_ln511_up0_x4_e1_k1_ds_merge
+0.1580 35 4.52 0a3f20f1 [1, 256, 1536] omega_reduce_r3_o2_n2_multiply_add_zero
+0.1562 28 5.58 edc2d0c8 [1, 8, 256] omega_reduce_r3_o2_n2_multiply_add_zero
+0.1254 28 4.48 f893efa8 [1, 8, 128] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1
+0.1215 24 5.06 edc2d0c8 [1, 1, 256] omega_reduce_r3_o2_n2_multiply_add_zero
+0.1076 7 15.37 2c9c96c7 [1, 1, 8, 512, 1536] omega_reduce_r5_o2_n2_multiply_add_zero
+0.0865 1 86.50 c5fcdbd8 [512] omega_elementwise_r1_n2_multiply
+0.0857 1 85.71 588991df [1, 1536, 8960] omega_reduce_r3_o2_n2_multiply_add_zero_epi1_fused_identity_o1__multiply_s0_o0
+0.0842 12 7.01 d9c87ee0 [1, 1, 128] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1
+0.0790 35 2.26 5a043550 [1, 256] omega_elementwise_r2_n1_identity
+0.0775 12 6.46 e83e36ec [1, 1, 256] omega_elementwise_r3_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s
+0.0727 24 3.03 aac99d1a [1, 1, 256, 1536] omega_reduce_r4_o3_n2_multiply_add_zero
+0.0662 7 9.46 a12f572b [1, 8, 256] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1
+0.0645 12 5.38 ff2ca7c6 [1, 1, 128] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1
+0.0555 3 18.51 e83e36ec [1, 1, 512] omega_elementwise_r3_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s
+0.0502 1 50.25 6ea595c3 [1, 1536] omega_elementwise_r2_n1_identity_g1
+0.0420 7 6.01 f893efa8 [1, 8, 256] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1
+0.0375 6 6.25 aac99d1a [1, 1, 512, 1536] omega_reduce_r4_o3_n2_multiply_add_zero
+0.0366 7 5.23 54be1209 [1, 8, 512] omega_reduce_r3_o2_n2_multiply_add_zero
+0.0353 1 35.33 2b18e2e4 [1, 512] omega_reduce_r2_o1_n1_identity_minimum_positive_infinity
+0.0306 3 10.21 6665bf94 [1, 1, 512] omega_elementwise_r3_n4_fused_multiply_o2_o3__add_s0_o1__square_root_s1__reciprocal_s2__multiply_s3_o0
+0.0279 1 27.92 8f117d35 [1, 512, 512] omega_reduce_r3_o2_n5_fused_equal_o0_o1__add_o2_o3__select_s0_s1_o4_minimum_positive_infinity
+0.0258 3 8.60 ff2ca7c6 [1, 1, 256] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1
+0.0204 7 2.91 100f142c [1, 8, 512] omega_elementwise_r3_n5_fused_multiply_o3_o4__add_s0_o2__square_root_s1__reciprocal_s2__multiply_s3_o1__multiply_s4
+0.0166 1 16.58 d28d35ec [1, 1536] omega_elementwise_r2_n2_fused_identity_o0__multiply_s0_o1_g10
+0.0080 1 8.00 d28d35ec [1, 8960] omega_elementwise_r2_n2_fused_identity_o0__multiply_s0_o1_g10
+0.0030 12 0.25 6665bf94 [1, 1, 256] omega_elementwise_r3_n4_fused_multiply_o2_o3__add_s0_o1__square_root_s1__reciprocal_s2__multiply_s3_o0
+0.0026 1 2.62 565c16a0 [1, 512, 512] omega_reduce_r3_o2_n1_identity_maximum_negative_infinity
+0.0006 28 0.02 a12f572b [1, 8, 128] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1
+-0.0055 3 -1.82 d9c87ee0 [1, 1, 256] omega_elementwise_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1
+-0.0133 7 -1.90 5c2e7fcd [1, 1, 8, 512] omega_cached_attention_q1_h1_g8_d512_s3f800000_ln9223372036854775808_up0_x4_e1_k1_ds_merge
+-0.0183 1 -18.33 a358f4cb [1, 512] omega_reduce_r2_o1_n1_identity_maximum_negative_infinity
+-0.0299 6 -4.99 54be1209 [1, 1, 512] omega_reduce_r3_o2_n2_multiply_add_zero
+-0.0390 2 -19.50 2ed77224 [512] omega_iota_r1
+-0.0444 1 -44.37 efb05eff [1, 512, 512] omega_elementwise_r3_n1_identity
+-0.0706 1 -70.58 055f1105 [1, 512] omega_reduce_r2_o1_n1_identity_add_zero

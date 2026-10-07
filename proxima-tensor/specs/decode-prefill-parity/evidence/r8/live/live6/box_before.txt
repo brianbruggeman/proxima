@@ -1,0 +1,10 @@
+ollama curl exit 7
+11:15  up 6 days, 21:19, 5 users, load averages: 4.47 4.54 5.86
+31771  80.5 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  587  56.3 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+17029  40.6 a background daemon in ~/.local/bin
+  476  38.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                              698026.
+Pages active:                           1488100.
+Pages inactive:                         1408343.

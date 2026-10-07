@@ -1,0 +1,25 @@
+ab capture: step=5 dispatches=941 groups=56
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.copy elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] arm=2c9c96c767a82cfd.nocoord elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=0 arm=base per_dispatch_us=28.454
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=0 arm=2c9c96c767a82cfd.copy per_dispatch_us=28.717
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=0 arm=2c9c96c767a82cfd.nocoord per_dispatch_us=28.603
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=1 arm=base per_dispatch_us=28.414
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=1 arm=2c9c96c767a82cfd.copy per_dispatch_us=28.338
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=1 arm=2c9c96c767a82cfd.nocoord per_dispatch_us=28.719
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=2 arm=base per_dispatch_us=28.440
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=2 arm=2c9c96c767a82cfd.copy per_dispatch_us=28.470
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 256, 1536] tg=Some(64) count=28 pass=2 arm=2c9c96c767a82cfd.nocoord per_dispatch_us=28.357
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.copy elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] arm=2c9c96c767a82cfd.nocoord elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=0 arm=base per_dispatch_us=46.607
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=0 arm=2c9c96c767a82cfd.copy per_dispatch_us=46.786
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=0 arm=2c9c96c767a82cfd.nocoord per_dispatch_us=46.411
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=1 arm=base per_dispatch_us=46.810
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=1 arm=2c9c96c767a82cfd.copy per_dispatch_us=46.732
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=1 arm=2c9c96c767a82cfd.nocoord per_dispatch_us=46.518
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=2 arm=base per_dispatch_us=46.768
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=2 arm=2c9c96c767a82cfd.copy per_dispatch_us=46.857
+ab sequence sha=2c9c96c767a82cfd threads=12288 extents=[1, 1, 8, 512, 1536] tg=Some(64) count=7 pass=2 arm=2c9c96c767a82cfd.nocoord per_dispatch_us=46.720

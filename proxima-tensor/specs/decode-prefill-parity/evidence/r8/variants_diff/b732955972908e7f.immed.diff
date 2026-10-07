@@ -1,0 +1,15 @@
+--- b732955972908e7f.copy.metal	2026-10-07 09:55:16
++++ b732955972908e7f.immed.metal	2026-10-07 09:55:16
+@@ -925,9 +925,9 @@
+         for (int slot = 0; slot < 8; ++slot) {
+             bool in_range = (r + slot * 128) < total_r;
+             batch[slot][0] = in_range ? in0[walk0 + slot * advance0] : (float)0;
+-            batch[slot][1] = in_range ? in1[walk1 + slot * advance1] : (float)0;
+-            batch[slot][2] = in_range ? in2[walk2 + slot * advance2] : (float)0;
+-            batch[slot][3] = in_range ? in3[walk3 + slot * advance3] : (float)0;
++            batch[slot][1] = -3.4028235e38f;
++            batch[slot][2] = 3.4028235e38f;
++            batch[slot][3] = batch[slot][0];
+         }
+         #pragma unroll
+         for (int slot = 0; slot < 8; ++slot) {

@@ -1,0 +1,31 @@
+ab capture: step=5 dispatches=941 groups=56
+ab bits sha=97ab430703a403c2 threads=256 extents=[1, 1536] arm=base elements=1 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=97ab430703a403c2 threads=256 extents=[1, 1536] arm=97ab430703a403c2.copy elements=1 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=97ab430703a403c2 threads=256 extents=[1, 1536] arm=97ab430703a403c2.dedupe elements=1 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=0 arm=base step_ms=11.3420
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=0 arm=omit_group step_ms=10.7314
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=0 arm=97ab430703a403c2.copy step_ms=11.3388
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=0 arm=97ab430703a403c2.dedupe step_ms=11.2492
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=1 arm=base step_ms=11.3324
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=1 arm=omit_group step_ms=10.7180
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=1 arm=97ab430703a403c2.copy step_ms=11.3326
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=1 arm=97ab430703a403c2.dedupe step_ms=11.2110
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=2 arm=base step_ms=11.3277
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=2 arm=omit_group step_ms=10.7500
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=2 arm=97ab430703a403c2.copy step_ms=11.3284
+ab step sha=97ab430703a403c2 threads=256 extents=[1, 1536] count=105 pass=2 arm=97ab430703a403c2.dedupe step_ms=11.2592
+ab bits sha=b58c6089c188c541 threads=256 extents=[1, 1536] arm=base elements=1 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=b58c6089c188c541 threads=256 extents=[1, 1536] arm=b58c6089c188c541.copy elements=1 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=b58c6089c188c541 threads=256 extents=[1, 1536] arm=b58c6089c188c541.dedupe elements=1 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=0 arm=base step_ms=11.3351
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=0 arm=omit_group step_ms=10.6193
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=0 arm=b58c6089c188c541.copy step_ms=11.3328
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=0 arm=b58c6089c188c541.dedupe step_ms=11.2754
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=1 arm=base step_ms=11.3664
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=1 arm=omit_group step_ms=10.6260
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=1 arm=b58c6089c188c541.copy step_ms=11.3385
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=1 arm=b58c6089c188c541.dedupe step_ms=11.2909
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=2 arm=base step_ms=11.3705
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=2 arm=omit_group step_ms=10.6359
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=2 arm=b58c6089c188c541.copy step_ms=11.3537
+ab step sha=b58c6089c188c541 threads=256 extents=[1, 1536] count=71 pass=2 arm=b58c6089c188c541.dedupe step_ms=11.3066

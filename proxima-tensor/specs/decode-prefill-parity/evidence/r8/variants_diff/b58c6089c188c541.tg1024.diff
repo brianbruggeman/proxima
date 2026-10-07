@@ -1,0 +1,110 @@
+--- b58c6089c188c541.copy.metal	2026-10-07 09:45:25
++++ b58c6089c188c541.tg1024.metal	2026-10-07 09:48:39
+@@ -873,9 +873,9 @@
+     constant Uniforms& u [[buffer(7)]],
+     uint gid [[thread_position_in_grid]])
+ {
+-    long output_index = (long)gid / 256;
++    long output_index = (long)gid / 1024;
+     if (output_index >= u.output_total) { return; }
+-    uint lane = gid % 256u;
++    uint lane = gid % 1024u;
+     long full_coord[2];
+     full_coord[0] = 0;
+     full_coord[1] = 0;
+@@ -905,7 +905,7 @@
+     float epi_pre1[8];
+     #pragma unroll
+     for (int slot = 0; slot < 8; ++slot) {
+-        long epi_pre_r = (long)lane + (long)slot * 256;
++        long epi_pre_r = (long)lane + (long)slot * 1024;
+         long epi_pre_off0 = u.epilogue_operand_base[0];
+         epi_pre_off0 += full_coord[0] * u.epilogue_operand_strides[0][0];
+         epi_pre_off0 += epi_pre_r * u.epilogue_operand_strides[0][1];
+@@ -913,7 +913,7 @@
+     }
+     #pragma unroll
+     for (int slot = 0; slot < 8; ++slot) {
+-        long epi_pre_r = (long)lane + (long)slot * 256;
++        long epi_pre_r = (long)lane + (long)slot * 1024;
+         long epi_pre_off1 = u.epilogue_operand_base[1];
+         epi_pre_off1 += full_coord[0] * u.epilogue_operand_strides[1][0];
+         epi_pre_off1 += epi_pre_r * u.epilogue_operand_strides[1][1];
+@@ -924,25 +924,25 @@
+     off0 += full_coord[0] * u.operand_strides[0][0];
+     off0 += (long)lane * stride0;
+     int walk0 = (int)off0;
+-    int advance0 = (int)(stride0 * 256);
++    int advance0 = (int)(stride0 * 1024);
+     long stride1 = u.operand_strides[1][1];
+     long off1 = u.operand_base[1];
+     off1 += full_coord[0] * u.operand_strides[1][0];
+     off1 += (long)lane * stride1;
+     int walk1 = (int)off1;
+-    int advance1 = (int)(stride1 * 256);
++    int advance1 = (int)(stride1 * 1024);
+     int total_r = (int)u.reduction_total;
+-    for (int r = (int)lane; r < total_r; r += 2048) {
++    for (int r = (int)lane; r < total_r; r += 8192) {
+         float batch[8][2];
+         #pragma unroll
+         for (int slot = 0; slot < 8; ++slot) {
+-            bool in_range = (r + slot * 256) < total_r;
++            bool in_range = (r + slot * 1024) < total_r;
+             batch[slot][0] = in_range ? in0[walk0 + slot * advance0] : (float)0;
+             batch[slot][1] = in_range ? in1[walk1 + slot * advance1] : (float)0;
+         }
+         #pragma unroll
+         for (int slot = 0; slot < 8; ++slot) {
+-            if ((r + slot * 256) < total_r) {
++            if ((r + slot * 1024) < total_r) {
+                 float scratch[2];
+                 scratch[0] = batch[slot][0];
+                 scratch[1] = batch[slot][1];
+@@ -956,12 +956,12 @@
+         walk1 += 8 * advance1;
+     }
+     float partial = simd_sum(accumulator);
+-    threadgroup float partials[8];
++    threadgroup float partials[32];
+     if (lane % 32u == 0u) { partials[lane / 32u] = partial; }
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+     if (lane == 0u) {
+         float reduced = partials[0];
+-        for (uint fold_index = 1u; fold_index < 8u; ++fold_index) {
++        for (uint fold_index = 1u; fold_index < 32u; ++fold_index) {
+             reduced = (reduced + partials[fold_index]);
+         }
+         partials[0] = reduced;
+@@ -974,11 +974,11 @@
+     float epi_step2 = (epi_step1 + epi_scratch[2]);
+     float epi_step3 = sqrt(epi_step2);
+     float epi_step4 = (1.0f / epi_step3);
+-    for (long block_start = (long)lane; block_start < u.reduction_total; block_start += 2048) {
++    for (long block_start = (long)lane; block_start < u.reduction_total; block_start += 8192) {
+         if (block_start != (long)lane) {
+             #pragma unroll
+             for (int slot = 0; slot < 8; ++slot) {
+-                long epi_pre_r = block_start + (long)slot * 256;
++                long epi_pre_r = block_start + (long)slot * 1024;
+                 long epi_pre_off0 = u.epilogue_operand_base[0];
+                 epi_pre_off0 += full_coord[0] * u.epilogue_operand_strides[0][0];
+                 epi_pre_off0 += epi_pre_r * u.epilogue_operand_strides[0][1];
+@@ -986,7 +986,7 @@
+             }
+             #pragma unroll
+             for (int slot = 0; slot < 8; ++slot) {
+-                long epi_pre_r = block_start + (long)slot * 256;
++                long epi_pre_r = block_start + (long)slot * 1024;
+                 long epi_pre_off1 = u.epilogue_operand_base[1];
+                 epi_pre_off1 += full_coord[0] * u.epilogue_operand_strides[1][0];
+                 epi_pre_off1 += epi_pre_r * u.epilogue_operand_strides[1][1];
+@@ -995,7 +995,7 @@
+         }
+         #pragma unroll
+         for (int slot = 0; slot < 8; ++slot) {
+-            long r = block_start + (long)slot * 256;
++            long r = block_start + (long)slot * 1024;
+             if (r < u.reduction_total) {
+                 full_coord[1] = r;
+                 long out_offset = u.out_base;

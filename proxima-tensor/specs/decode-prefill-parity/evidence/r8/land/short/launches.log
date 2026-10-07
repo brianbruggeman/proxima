@@ -1,0 +1,32 @@
+2026-10-07T19:20:57Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/base
+2026-10-07T19:21:02Z EXIT decode_arms proxima arm=gemma4_e2b.base process=0 status=exit status: 0
+2026-10-07T19:21:03Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tip
+2026-10-07T19:21:08Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=0 status=exit status: 0
+2026-10-07T19:21:08Z LAUNCH decode_arms proxima arm=gemma4_e2b.tipcopy process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tipcopy
+2026-10-07T19:21:13Z EXIT decode_arms proxima arm=gemma4_e2b.tipcopy process=0 status=exit status: 0
+2026-10-07T19:21:13Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=0 port=8097 requests=4
+2026-10-07T19:21:18Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=0
+2026-10-07T19:21:18Z LAUNCH decode_arms proxima arm=granite_moe.base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/base
+2026-10-07T19:21:23Z EXIT decode_arms proxima arm=granite_moe.base process=0 status=exit status: 0
+2026-10-07T19:21:23Z LAUNCH decode_arms proxima arm=granite_moe.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tip
+2026-10-07T19:21:28Z EXIT decode_arms proxima arm=granite_moe.tip process=0 status=exit status: 0
+2026-10-07T19:21:28Z LAUNCH decode_arms proxima arm=granite_moe.tipcopy process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tipcopy
+2026-10-07T19:21:33Z EXIT decode_arms proxima arm=granite_moe.tipcopy process=0 status=exit status: 0
+2026-10-07T19:21:33Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=0 port=8097 requests=4
+2026-10-07T19:21:35Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=0
+2026-10-07T19:21:35Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tip
+2026-10-07T19:21:41Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=1 status=exit status: 0
+2026-10-07T19:21:41Z LAUNCH decode_arms proxima arm=gemma4_e2b.tipcopy process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tipcopy
+2026-10-07T19:21:46Z EXIT decode_arms proxima arm=gemma4_e2b.tipcopy process=1 status=exit status: 0
+2026-10-07T19:21:46Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=1 port=8097 requests=4
+2026-10-07T19:21:50Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=1
+2026-10-07T19:21:50Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/base
+2026-10-07T19:21:56Z EXIT decode_arms proxima arm=gemma4_e2b.base process=1 status=exit status: 0
+2026-10-07T19:21:56Z LAUNCH decode_arms proxima arm=granite_moe.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tip
+2026-10-07T19:22:01Z EXIT decode_arms proxima arm=granite_moe.tip process=1 status=exit status: 0
+2026-10-07T19:22:01Z LAUNCH decode_arms proxima arm=granite_moe.tipcopy process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/tipcopy
+2026-10-07T19:22:06Z EXIT decode_arms proxima arm=granite_moe.tipcopy process=1 status=exit status: 0
+2026-10-07T19:22:06Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=1 port=8097 requests=4
+2026-10-07T19:22:08Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=1
+2026-10-07T19:22:08Z LAUNCH decode_arms proxima arm=granite_moe.base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/land/bin/base
+2026-10-07T19:22:13Z EXIT decode_arms proxima arm=granite_moe.base process=1 status=exit status: 0

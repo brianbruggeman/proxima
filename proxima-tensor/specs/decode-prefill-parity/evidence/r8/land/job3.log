@@ -1,0 +1,16 @@
+start 2026-10-07T19:26:37Z
+quiet-held 2026-10-07T19:26:37Z
+gpu-held 2026-10-07T19:26:42Z
+compile-drain-waits=0 2026-10-07T19:26:42Z
+long2-exit=0 2026-10-07T19:30:11Z
+quiet-released 2026-10-07T19:30:11Z
+omega-exit=0 2026-10-07T19:31:02Z
+slice-gate-exit=0 2026-10-07T19:33:03Z
+parity-exit=0 2026-10-07T19:38:45Z
+census-e2b-base-exit=0 2026-10-07T19:38:48Z
+census-e2b-tip-exit=0 2026-10-07T19:38:52Z
+census-granite-base-exit=0 2026-10-07T19:38:54Z
+census-granite-tip-exit=0 2026-10-07T19:38:56Z
+census-g26-base-exit=0 2026-10-07T19:39:14Z
+census-g26-tip-exit=0 2026-10-07T19:39:27Z
+released 2026-10-07T19:39:27Z

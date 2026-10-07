@@ -1645,3 +1645,383 @@ Targets:
 - E2B: prefill at or below llama 570 ms; decode about 9 ms at 970 tokens, and the owner's 10-11 ms
   short-prompt figure re-established.
 - granite: prefill at or below 151 ms; decode at or below 5.25 ms/token.
+
+## r8 result (measured 2026-10-07, main 14b8389d to HEAD of this slice)
+
+Slice r8 of the re-plan: E2B decode, the Q4_0 matvec per-op cost, the norm-apply and rope dispatch counts, and the real
+serving path. The task text named "r1" and defined "r8"; the spec had no item 8, so the r8 text was added first
+(`14b8389d`) and this section answers it. Evidence root: `evidence/r8/` (this directory). Raw per-process logs, the
+binaries and every variant kernel are under
+`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/r8/` (`bin/` holds the executables, `variants/` the
+kernel files, `logs/` every build and gate log). Every number below is a measurement with its source; the status of a
+statement is the status of its weakest cell.
+
+### what landed
+
+| commit | change | status of its number |
+|---|---|---|
+| `7c531e84` | `CapturedDispatch::with_pipeline_of`, `describe_buffers`, `replay_output` poisons `output_total` elements only (3 Metal tests, `omega/tests/captured_dispatch_replay.rs`) | measurement tool; no kernel text changes |
+| `4d29bc87` | `norm_variant_ab` times a kernel variant, or the omission of a group, over the whole captured step (`AB_STEP_SEQUENCE`, `AB_OMIT_ALL`, `AB_SEQUENCE`, `AB_DESCRIBE`) | measurement tool |
+| `10bae12f` | a fused body that mentions one tensor several times loads it once: epilogue operands (`push_epilogue_operand_reads`, `elementwise_reduce_core.rs:484`), the cooperative fold's batched loads (`push_batched_accumulate_loop`, `tiled_gemm_cooperative_scan.rs:2865`), the broadcast prefetch (`prefetch_loaded_operands`, `:2971`); the repeat pattern is part of the pipeline identity (`operand_alias_cache_token`, `kernel_types_identity.rs:2601`, `identity.rs:856`) | E2B decode -0.30 ms short, -0.34 ms long (arm `c1_dedupe` against `base`, "earlier interleaved runs" below); 26B prefill +88 ms (+1.1%), which `c23e9a2c` removed |
+| `962d9351` | a matvec simdgroup with a fused epilogue finishes row `q` on lane `q` (`push_packed_row_lane_parallel_tail`, `elementwise_reduce_core.rs:2319`); a matvec with no epilogue keeps its single-lane write | E2B decode -0.32 ms short, -0.29 ms long (arm `c2_lanes` against `c1_dedupe`, same table) |
+| `c23e9a2c` | the cooperative fold's batched loads (`push_batched_accumulate_loop`) are back to one load per operand slot; the repeat pattern stays in the pipeline identity for the epilogue and prefetch paths | 26B prefill 8014.0 to 7904.0 ms (arm `c2_lanes` against `c3_nofold`, same table); E2B decode not separately timed |
+| `064584d1` | a round-batched reduce is keyed by its epilogue repeats (`omega/src/msl/kernel_types_identity.rs`, `omega/src/identity.rs`, 61 added test lines in `omega/src/msl/tests.rs`) | correctness fix to the identity of `10bae12f`; no timing |
+| `35f63a6d` | `norm_variant_ab` times one member of a group or a span window of a step | measurement tool |
+
+Neither perf commit touches `proxima-tensor` or the dispatch path (`git show --stat 10bae12f 962d9351`: `omega/src/msl/*`,
+`omega/src/identity.rs`, tests). The Q4_0 matvec body itself (`push_q4_0_native_body`) is unchanged; no model name, trait
+or registry was added.
+
+### re-attribution on HEAD before any code
+
+The r8 premise (1536x12288 Q4_0 67.0 us against llama 38.3 us, matmul class 8.71 against 5.30 ms) is slice 0's census at
+`f76b4a97`. Re-run on HEAD (`gemma4_decode_kernel_census`, release `std,metal,instrument`, 971-token prompt, box load average
+5.06, no Ollama, `evidence/r8/census_head_long/`), through the same `attribution_rank` file:
+
+| class | proxima ops | proxima ms own-cb | llama ms own-cb | gap | slice 0 gap |
+|---|---|---|---|---|---|
+| matmul (weights) | 277 | 6.39 | 5.30 | +1.09 (1.21x) | +3.41 (1.64x) |
+| Q4_0 1536x12288 (60 ops) | 60 | 2.52 = 42.0 us/op | 2.30 = 38.3 us/op | +0.22 (1.10x) | +1.73 (1.75x), 67.0 us/op |
+| Q4_0 1536x6144 (45 ops) | 45 | 1.19 | 1.06 | +0.14 (1.13x) | +0.78 (1.73x) |
+| Q4_0 1536x2048 (56 ops) | 56 | 1.31 | 0.71 | +0.60 (1.85x) | +0.61 (1.87x) |
+| rms norm (446 against 242 dispatches) | 446 | 3.90 | 1.80 | +2.10 (2.17x) | +2.17 (2.21x) |
+| rope (100 against 50) | 100 | 0.62 | 0.32 | +0.30 | +0.29 |
+| attention core | 73 | 1.48 | 1.21 | +0.27 | +0.35 |
+
+`evidence/r8/census_head_long/rank_vs_llama.md`. Control, same session: the slice-2 era census binary (`census_s2_mml`)
+reads 5676.5 us for the 275 Q4_0 dispatches (20.64 us/op cold) against HEAD's 6081.1 us (22.11 us/op), so slice 0's
+8.58 ms / 31.2 us/op is not reproduced by either binary
+(`evidence/r8/census_head_long/control_s2_binary_stdout.log`). In slice 0's census the ffn_down group (`count=20 grid=12288`)
+read 70.6 cold / 113.2 warm / 104.9 us marginal; on HEAD it reads 40.2 / 37.8 / 37.3 (same group, `census_groups.csv`).
+
+What the census measures differs from what a step spends. The 1536x2048 attn_output group
+(`omega_reduce_r5_o2_n2_multiply_add_zero`, 28 dispatches) reads 21.4 cold / 33.2 warm / 26.7 us marginal in the census
+and 9.3 us marginal, 12.0 us single in a batch-16 replay inside a process that keeps the GPU busy
+(`evidence/r8/ab/attn_out_run1.out`, `attn_out_run3.out`); the 28-dispatch sequence with each member on its own weights
+is 9.2 us per dispatch with the system cache warm and 26.1 us per dispatch after 384 MiB of CPU writes
+(`ab/single_tg.out`, `ab/seq_tg.out` are not kept; `attn_out_run3.out` holds the sequence). The census issues one
+single-dispatch command buffer per sample with the CPU waiting in between; GPU clock state during that is not read
+(`sudo` for `powermetrics`). Its per-op numbers were therefore not used to rank work. The ranking below is by omission:
+the same captured step, replayed in one command buffer in program order, with one kernel group's dispatches removed
+(`AB_OMIT_ALL`), so the cost is what the step loses without the group.
+
+### where a decode step goes, by omission (E2B HEAD, step 5, 971-token prompt)
+
+`evidence/r8/ab/omit_all_ranked.txt` (ms the step loses, group size, us per dispatch; replay step 10.3 to 11.4 ms by box
+state, small groups carry +-0.1 ms of noise). The largest:
+
+| group | n | ms | us/dispatch |
+|---|---|---|---|
+| ffn_gate + fused gelu epilogue, K=1536 N=12288 | 20 | 1.460 | 73.0 |
+| head (Q6_K, 262144 rows) | 1 | 1.092 | 1092 |
+| RMSNorm sumsq + fused epilogue, [1,1536] | 71 | 0.869 | 12.2 |
+| ffn_up plain, K=1536 N=12288 | 20 | 0.861 | 43.1 |
+| ffn_down, K=12288 N=1536 | 20 | 0.829 | 41.5 |
+| sliding cached attention partial | 28 | 0.719 | 25.7 |
+| RMSNorm sumsq, [1,1536] | 105 | 0.544 | 5.2 |
+| ffn_gate + fused gelu epilogue, N=6144 | 15 | 0.520 | 34.7 |
+| ffn_down N=6144 | 15 | 0.459 | 30.6 |
+| ffn_up plain N=6144 | 15 | 0.400 | 26.7 |
+
+ffn_gate and ffn_up read the same 10.6 MB of weights. The fused-epilogue form costs 73.0 us against 43.1 us (N=12288) and
+34.7 against 26.7 (N=6144): 20 x 29.9 + 15 x 8.0 = 0.72 ms per token that is not weight traffic.
+
+### mechanism
+
+1. Operand slots. `AB_DESCRIBE` prints every buffer a captured dispatch is bound to, before any replay writes
+   (`evidence/r8/ab/describe_all.out`). The gate-epilogue kernel (`omega_reduce_r3_o2_n2_multiply_add_zero_epi9_...`,
+   N=12288) binds nine epilogue operands: slots 4, 6, 7, 8 and 9 are one buffer (`0x121eb4000`, 49152 bytes, the gate
+   vector, offset 0); slots 2, 3, 5 and 10 are four-byte buffers holding 1.0, 0.7978846, 0.044715 and 0.5. The emitted
+   epilogue loads every slot from device memory, per row, on lane 0. 19 of the 56 kernel groups of the step bind a buffer
+   twice (`describe_all.out`): the sumsq `x * x` binds `x` twice (105 + 71 dispatches), the 15-operand per-layer gate binds
+   one vector five times and carries seven scalar constants. `proxima-tensor/src/cpu/epilogue.rs:433` records that
+   `bind` does not deduplicate a repeated operand; the duplicate is in the lowered program, not in one kernel.
+2. Lane-0 tail. `push_packed_row_combine_and_write` combined the four rows of a simdgroup and then ran, for each row in
+   turn, the epilogue operand loads, the arithmetic and the store on lane 0. The multi-token form already writes
+   one pair per lane for the same reason (`push_multi_row_lane_epilogue`, `elementwise_reduce_core.rs:1408`: "a fused
+   `ffn_up` at 8 tokens spent half its time there"); the single-token form did not.
+
+Variant evidence (replay of the whole captured step, arms interleaved per round, 60 rounds, 3 passes; the state of the
+box moves the absolute step by about 1 ms between passes, so the delta is read inside a pass; every variant is a diff of
+the production kernel: `evidence/r8/variants_diff/`). Gate group N=12288, ms of step against the production kernel:
+
+| variant | -ms (N=12288) | -ms (N=6144) | output bits against production |
+|---|---|---|---|
+| duplicate loads replaced by the first (`dedupe`) | 0.12 | 0.04 to 0.07 | 0 of 12288 differ; 10 of 6144 differ, 9 ulp at most |
+| `dedupe` + scalars as literals (`immed`) | 0.28 | 0.13 to 0.15 | 0 / 8 differ, 6 ulp at most |
+| the four gate loads issued together before the stores (`hoist`) | 0.27 | 0.14 | 0 / 8 |
+| `dedupe` + epilogue on lane `q` (`lanepar_loaded`) | 0.33 | 0.17 | 0 / 10, 9 ulp at most |
+| `immed` + lane `q` (`lanepar`) | 0.35 | 0.18 | 0 / 8 |
+| epilogue operands preloaded before the K loop | worse than `dedupe` (11.31 against 11.25) | | |
+| scalar operands in the `constant` address space | `dedupe`-level | | |
+
+(`ab/epi3.out`, `epi4.out`, `epi5.out`, `epi6.out`, `epi7.out`.) `lanepar_loaded` equals `lanepar`, so the scalar
+constants need not be literals, which would need the value of a constant node at emit (the `PackedOperands` map is
+threaded through 225 sites in `omega/src`); the landed form keeps them loaded.
+
+### interleaved timing of the landed tree (lander run, 2026-10-07)
+
+Command (`evidence/r8/land/`; the binaries and their sha256 are in `land/binaries.sha256`; `base` is the
+`cc700bea` build, which has no non-markdown difference from `14b8389d` (`git diff --stat cc700bea 14b8389d -- . ':!*.md'`
+printed nothing), `tip` is a release build of HEAD `35f63a6d` whose sha256 equals the earlier `decode_gbps_baseline_tip`,
+`tipcopy` is a byte copy of `tip`, the same-binary control). `tip` also contains `e38ce6c3` (the `sha2` dev-dependency
+layout in `proxima-model-interop/Cargo.toml`, `asm` kept on non-Windows targets), which `base` lacks. `git diff --stat
+14b8389d HEAD -- . ':!*.md'` lists 13 files: 10 from the r8 commits (9 in `omega/`, `norm_variant_ab.rs`) and 3 from
+`e38ce6c3` (`ai_docs/index.jsonl`, the interop `Cargo.toml`, a 3-line test import in `serving_grammar.rs`). The commands:
+
+```
+decode_arms --prompt-file prompt1k.txt --processes 2 --runs 3 --arm base=<base> --arm tip=<tip> --arm tipcopy=<tipcopy> \
+  --llama-server <llama-server f1ea20621> --ignore-ollama --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>        # long
+decode_arms --prompt-file prompt_short_hippo.txt --new-tokens 64 --processes 2 --runs 3 --arm ... (same arms and cases)         # short
+```
+
+Each arm ran 2 processes of 1 warm-up and 3 timed generations, so n = 6 timed per cell (`n_all` in the file), rounds
+interleaved. Long prompt: `prompt1k.txt` (970 tokens on gemma4, 1000 on granite), 128 new tokens. Short chat prompt:
+`prompt_short_hippo.txt` (26 tokens on gemma4, 36 on granite), 64 new tokens. There is no Ollama arm and no `ollama` CLI call (`--ignore-ollama`; an Ollama server process was already resident on the box, listed by `pgrep` at 14:10 local, and `curl localhost:11434/api/ps` in `long/box_before.txt` returns `{"models":[]}`, no model loaded);
+the llama-server arm is the one allowed anchor.
+Quiet lock and GPU lock held from `job3.log` `quiet-held 19:26:37Z`, `gpu-held 19:26:42Z` for the long run and until
+`quiet-released 19:30:11Z`; the short run ran under the locks of the relaunched job recorded in `job.log` (`quiet-held
+19:17:50Z`, `gpu-held 19:17:55Z`, `short-exit 19:22:14Z`, `released 19:22:14Z`). Cells are
+median over the 6 timed runs (min to max; CoV of all 6, percent). A CoV above 5 percent would be reported as a range
+only; none of the decode cells exceeds 3.8 percent. Token text: every generation of `base`, `tip` and `tipcopy` in a
+case printed one `text_hash` (`land/text_hash_counts.txt`: 24 rows, each 4 generations with one hash per model and prompt).
+
+decode ms/token:
+
+| case | base | tip | tipcopy (control) | tip against base | tip against tipcopy | llama-server (same run) |
+|---|---|---|---|---|---|---|
+| E2B long | 11.981 (11.673 to 12.867; 3.71) | 11.584 (11.150 to 12.036; 3.13) | 11.728 (11.635 to 12.021; 1.16) | -0.397 (-3.3%) | -0.144 | 9.173 (9.082 to 9.527; 1.83) |
+| E2B short | 11.709 (11.440 to 11.837; 1.18) | 11.102 (11.017 to 11.232; 0.67) | 11.108 (10.975 to 11.151; 0.64) | -0.607 (-5.2%) | -0.006 | 9.028 (8.961 to 9.295; 1.36) |
+| granite long | 14.860 (14.739 to 14.982; 0.52) | 14.484 (14.373 to 14.621; 0.60) | 14.409 (14.353 to 14.755; 0.92) | -0.376 (-2.5%) | +0.075 | 5.254 (5.106 to 5.484; 2.10) |
+| granite short | 13.850 (13.564 to 13.928; 0.87) | 13.348 (13.273 to 13.711; 1.11) | 13.406 (13.307 to 13.902; 1.55) | -0.502 (-3.6%) | -0.058 | 5.134 (5.101 to 5.191; 0.61) |
+
+prefill ms (TTFT is the same figure to the millisecond in the file):
+
+| case | base | tip | tipcopy | llama-server |
+|---|---|---|---|---|
+| E2B long | 1429.5 (1425.0 to 1436.0; 0.27) | 1428.5 (1417.0 to 1436.0; 0.42) | 1426.0 (1423.0 to 1430.0; 0.19) | 569.7 (566.8 to 570.8; 0.26) |
+| E2B short | 125.0 (124.0 to 143.0; 6.21) | 124.5 (124.0 to 132.0; 2.27) | 132.0 (125.0 to 139.0; 3.88) | 57.4 (56.8 to 59.2; 1.47) |
+| granite long | 897.5 (889.0 to 903.0; 0.57) | 891.0 (831.0 to 902.1; 2.71) | 891.5 (882.0 to 894.0; 0.43) | 151.3 (150.6 to 151.6; 0.22) |
+| granite short | 279.5 (278.0 to 288.0; 1.27) | 278.0 (277.0 to 286.0; 1.13) | 277.0 (275.0 to 292.0; 2.09) | 19.1 (19.0 to 19.5; 1.05) |
+
+The E2B short `base` prefill cell has CoV 6.21 percent over six runs (one run at 143.0); it is a range, not a point.
+
+Memory, median over the 2 processes (`peak_rss_bytes`, `peak_footprint_bytes`, `peak_gpu_bytes`; tip against base):
+
+| case | RSS base to tip | footprint base to tip | GPU allocation base to tip |
+|---|---|---|---|
+| E2B long | 3 888 644 096 to 3 929 088 000 | 719 375 136 to 725 912 576 | 5 608 554 496 to 5 608 554 496 |
+| E2B short | 3 621 232 640 to 3 624 525 824 | 212 265 280 to 205 285 568 | 3 386 310 656 to 3 386 187 776 |
+| granite long | 2 415 247 360 to 2 444 632 064 | 608 639 264 to 634 960 160 | 3 315 433 472 to 3 315 433 472 |
+| granite short | 1 592 614 912 to 1 597 825 024 | 124 556 032 to 125 391 712 | 1 482 113 024 to 1 482 113 024 |
+
+Against the owner's bounds, from the tip rows above (llama figures are the same run's llama-server arm, E2B decode 9.173
+against the recorded 9.15 and 9.0178, `evidence/slice0/ac1`):
+
+| bound | tip | gap |
+|---|---|---|
+| E2B decode at or below llama on the 971-token prompt | 11.584 ms | +2.41 ms, 1.26x llama-server in the same run |
+| E2B decode under 11 ms on the short chat prompt | 11.102 ms (range 11.017 to 11.232) | +0.10 ms over the bound; all 6 timed runs are above 11 |
+| E2B prefill at or below llama (572 ms recorded; 569.7 ms in this run) | 1428.5 ms | +858.8 ms against this run, 2.51x |
+| granite decode at or below 5.25 ms/token | 14.484 ms | +9.23 ms, 2.76x |
+| granite prefill at or below 151 ms | 891.0 ms | +740 ms, 5.9x |
+
+None of the five bounds is met. This slice moves E2B decode by 0.40 ms (long) and 0.61 ms (short) and granite decode by
+0.38 and 0.50 ms. Prefill base to tip differs by 1.0, 0.5, 6.5 and 1.5 ms (E2B long, E2B short, granite long, granite
+short; 0.1 to 0.7 percent); granite long's 6.5 ms is outside the 0.5 ms between `tip` and `tipcopy` and inside the min to
+max range of every arm. Memory, per-process values in `long/decode_arms.out` (`memory` lines): RSS base to tip is +40.4 MB
+(E2B long) and +29.4 MB (granite long) on the two-process medians, inside the 43 MB and 69 MB between the byte-identical
+`tip` and `tipcopy`. Peak footprint is the one that moves the wrong way and does not sit inside that spread on granite
+long: base 612.0 and 605.3 MB, tip 652.6 and 617.3 MB, tipcopy 646.5 and 659.6 MB (all four tip-family processes above both
+base processes, +12 to +54 MB; +4.3 percent on the medians); on E2B long base is 730.0 and 708.7 MB, tip 729.4 and 722.4,
+tipcopy 731.5 and 723.4, within base's own 21 MB process spread. Why granite footprint reads higher at the tip is not traced
+(the tip contains `e38ce6c3`'s dev-dependency change as well as the r8 kernels; nothing here separates them); the short
+cases show +0.8 MB (granite) and -7.0 MB (E2B). GPU allocation is equal to the byte on the long cases and 122 880 bytes apart
+on E2B short.
+
+Box state. Long run: `land/long/box_before.txt` (14:26 local, load averages 6.36 8.23 8.52) lists
+`packed_row_multi_row_index32_ab-4cf6cbe2b1987eb6` at 100 percent CPU from `/private/tmp/cargo_target_arch/gate/deps/`; it is
+absent from `land/long/box_after.txt` (14:30, load 6.04 6.94 7.88). That binary is an `omega` test from the gate profile;
+which process started it, and how long it overlapped the first minutes of the run, was not recorded. Short run: its
+`box_before.txt` was lost (the stale process described next rewrote it at 19:22:57Z, while a clippy compile of mine was
+running, load 20.60; that file is not kept); `land/short/box_after.txt` (14:22, load 5.69 7.01 7.97) is the only box record
+for it, and `job.log` shows the compile-drain loop found no `rustc` or `cargo` process before the job's runs started
+(`compile-drain-waits=0` at 19:17:55Z). a background daemon in `~/.local/bin` (named so in the box files, as in earlier evidence) at 52 to 68 percent CPU and WindowServer at 32 to 47 percent in the `ps`
+samples that list them.
+
+A first long run (job `job.log`, 19:17:55Z to 19:20:57Z) was lost: the very first launch of the job (`quiet-held
+19:11:35Z`) had been sent SIGTERM at 19:17:37Z while it sat in a load-wait loop; its `sh` trap released the locks and the
+script then continued, and at 19:22:57Z it started `decode_arms` again without locks, overwriting `long/decode_arms.out`
+and the raw per-process logs after I had read the summary lines. The summary medians
+read from the terminal before the overwrite were E2B 12.0885, 11.805 and 11.8245 ms/token (base, tip, tipcopy) and granite
+14.945, 14.5765 and 14.614; they are not an artifact and are not used above. The stale process was killed with SIGKILL, the
+run was repeated as `long2` (copied to `land/long/`), and the short run's files were not touched (`land/short/decode_arms.out`
+timestamp 19:22:14Z, 446 lines).
+
+### earlier interleaved runs (development builds, not the landed tree)
+
+Seven interleaved runs from the working session, kept for the per-commit deltas the landed-tree run cannot give. `base` is
+`decode_gbps_baseline_base_cc700bea`; `c1_dedupe` (sha256 `6573e46c`, byte-identical to `c1_copy`) is the tree of `10bae12f`;
+`c2_lanes` (sha256 `0cadeb16`, byte-identical to `c2_copy`) adds `962d9351`; `c3_nofold` and `c3_copy` are byte-identical to
+each other and to `tip` (sha256 `78095f90`). Binary names are the earlier session's; the mapping to commits was not rebuilt
+here. Medians over all timed runs (`n_all`), CoV in parentheses; the file is `evidence/r8/live/<run>/stdout.log` (the 26B
+short runs: `live7_26b_short`, `live8_26b_short`, `live9_26b_short`).
+
+| run | model, prompt | base | c1_dedupe | c2_lanes | c3 (tip bytes) | same-binary control | prefill ms base / c1 / c2 / c3 |
+|---|---|---|---|---|---|---|---|
+| live3 | E2B, 26 tokens, n=42 | 11.4145 (0.72) | 11.1155 (4.98) | 10.7935 (2.18) | | base_copy 11.4785 (1.49); c2_copy 10.7925 (1.33) | 124.0 / 124.0 / 124.0 / - |
+| live4 | E2B, 970 tokens, n=35 | 12.178 (2.21) | 11.839 (4.13) | 11.547 (3.17) | | base_copy 12.228 (5.14) | 1431.0 / 1427.0 / 1420.0 / - |
+| live5 | granite, 1000 tokens, n=20 | 14.8435 (0.49) | 14.7010 (0.60) | 14.3725 (0.83) | | base_copy 14.854 (0.49) | 890.4 / 880.5 / 882.0 / - |
+| live6 | 26B, 970 tokens, n=9 | 51.860 (3.08) | | 50.439 (1.70) | | base_copy 51.598 (1.13) | 40132.0 / - / 40596.0 / - |
+| live7 | 26B, 192 tokens, n=9 | 47.725 (2.82) | | 47.319 (2.25) | | base_copy 47.921 (2.40); c2_copy 47.381 (2.57) | 7931.0 / - / 8016.0 / - |
+| live8 | 26B, 192 tokens, n=9 | 47.667 (2.15) | 47.268 (2.07) | 46.602 (1.72) | | c1_copy 46.527 (2.08) | 7927.0 / 8015.0 / 8015.0 / - |
+| live9 | 26B, 192 tokens, n=9 | 48.582 (2.21) | | 47.307 (3.51) | 46.431 (2.34) | c3_copy 45.988 (3.45) | 7931.0 / - / 8014.0 / 7904.0 |
+
+Readings that hurt first.
+
+- The cooperative fold's dedupe (the part of `10bae12f` in `push_batched_accumulate_loop`) raised 26B prefill by 88.0 ms
+  (+1.1 percent, CoV 0.05 and 0.18 percent on the two sides) in `live8` (7927.0 to 8015.0), 85.0 in `live7`, 83.0 in `live9`;
+  the tip bytes read 7904.0 and 7902.0 (`live9`), 27 ms under `base`. E2B and granite prefill did not move with the same
+  binaries (`live3`, `live4`, `live5` prefill columns, and the landed-tree table above). Why 26B pays and E2B does not is
+  not traced: no census of the 26B prefill was taken with and without the fold change. `c23e9a2c` takes the dedupe out of
+  the fold (`git show c23e9a2c`, 9 changed lines in `tiled_gemm_cooperative_scan.rs`); the epilogue and prefetch dedupe stay.
+- The same-binary control moves by as much as the effect in three cells: `live4` `base_copy` CoV 5.14 percent, `live9` the
+  two byte-identical c3 binaries differ by 0.443 ms (46.431 against 45.988), `live7` `base` and `base_copy` differ by 0.196.
+  26B decode deltas (-0.4 to -2.6 ms against 45 to 50) are inside two to three times that control spread and are
+  `plausible`, not `proven`.
+- 26B long-prompt prefill moved +464 ms (40132.0 to 40596.0, `live6`, CoV 0.12 and 0.03 percent) with `c2_lanes`; 40 seconds
+  for 970 tokens is itself a figure with no attribution in this spec. `c3` was not run on the long 26B prompt.
+
+### norm and rope: variants tried over the captured step, none landed
+
+The norm family is 446 of the 941 dispatches in the captured step (`family=norms` in `census_head_long/stdout.log`), 3.90 ms
+own-cb against llama's 1.80 in the re-attribution above. Omitting the `RMSNorm sumsq + fused epilogue` group (71 dispatches,
+`b58c6089`) takes the replayed step from 11.37 to 10.64 ms (`ab/norm5.out`, pass 0), so the group costs about 0.73 ms of the
+step; every variant below was timed in that replay, arms interleaved, 3 passes, against the `copy` control (the production
+kernel recompiled from its own text):
+
+| variant (`evidence/r8/variants_diff/`) | step ms against `copy` (pass 0) | output bits | source |
+|---|---|---|---|
+| `tg1024` threadgroup width 1024 | +0.112 (11.479 against 11.367) | differs, 1094584677 ulp in the one element checked | `ab/norm5.out` |
+| `tg512` | -0.012 (11.355 against 11.367) | 1 ulp | `ab/norm5.out` |
+| `tg128` | +0.379 (11.687 against 11.308) | 0 differ | `ab/norm4.out` |
+| `tg64` | +0.563 (11.871 against 11.308) | 1 ulp | `ab/norm4.out` |
+| one barrier in the reduction (`onebarrier`), 1536-wide group | +0.047 (11.075 against 11.028) | 0 differ | `ab/norm1.out` |
+| one barrier, 256-wide group (`8a0df5ee`, 35 dispatches) | -0.010 (11.246 against 11.256) | 0 differ | `ab/norm1.out` |
+| epilogue removed (`noepi`; wrong output by construction) | -0.256 (10.765 against 11.021) | differs | `ab/norm2.out` |
+| reduction removed (`noreduce`; wrong output by construction) | -0.090 (10.931 against 11.021) | differs | `ab/norm2.out` |
+| duplicate operand loads replaced by the first, 71-dispatch group (`dedupe`) | -0.057 (11.275 against 11.333) | 0 differ | `ab/norm3.out` |
+| `dedupe`, 105-dispatch sumsq group (`97ab4307`) | -0.090 (11.249 against 11.339) | 0 differ | `ab/norm3.out` |
+
+The omission costs 0.73 ms and no variant with correct output recovers more than 0.09 ms of it (the best is the `dedupe`
+of the 105-dispatch group). Threadgroup width, barrier count, the epilogue and the reduction each account for under
+0.27 ms, and the two largest deltas belong to the two variants that produce wrong output. The dedupe rows are what
+`10bae12f` generalises. Per dispatch the group is 12.2 us (`ab/omit_all_ranked.txt`, 71 dispatches, 0.869 ms) for a
+1536-float, 6 KB operand, so the cost is not a bandwidth cost; which fixed per-dispatch cost it is (launch, the barrier
+ladder, the epilogue loads) the variants did not isolate, and that is unexplained. The dispatch count itself (446 norm
+family dispatches against llama's 242, `rank_vs_llama.md`) was not changed by this slice, and no change to the lowered
+program that merges norm dispatches was written or timed. The rope class (100 against 50 dispatches, +0.30 ms in the
+census) was not varied: no rope variant was timed.
+
+### reach: which dispatches of each test model carry the changed kernels
+
+Census at base (`census_base`, the `cc700bea` instrument build) and at tip (`census_tip`, release `std,metal,instrument`
+of HEAD), same prompt (`prompt_short_hippo.txt`), `M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=1 M0_ITERS=1 M0_BATCH=2`, one process
+each, under the GPU lock (`job3.log` `census-*-exit=0`; commands in `job3.log`'s script, groups in
+`evidence/r8/land/reach/<model>/groups_{base,tip}.csv`, the `msl_sha256` column). A group counts as reached when the
+tuple (class, count, entry, grid threads, `msl_sha256`) exists on the tip side and not on the base side; the same count of
+dispatches is unmatched on the base side in all three models (`changed_groups_base_side.txt`). This counts kernels whose
+text changed. It does not time them. The captured step is decode step 1, whose plan differs from the steady-state step
+(E2B: 1199 dispatches in 140 groups here, 941 in 124 at step 23 in `census_head_long`).
+
+| model | dispatches in the step | dispatches with changed kernel text | groups changed / total | what they are |
+|---|---|---|---|---|
+| gemma4 E2B | 1199 | 71 | 38 / 140 | Q4_0 matvec with the gelu-gate epilogue (20 + 15), 35 per-layer norm-plus-epilogue groups (`epi15`), the head (1) |
+| granite moe | 935 | 241 | 4 / 38 | Q8_0 matvec with a fused epilogue (24 + 24 + 192 + 1) |
+| gemma4 26B | 2599 | 271 | 3 / 75 | Q3K matvec with a fused epilogue (30 + 240), the head (1) |
+
+Decode ms/token moved on E2B (-0.40 long, -0.61 short) and granite (-0.38 long, -0.50 short) in the landed-tree table; 26B
+was timed only in the development runs above (`live6` to `live9`, within the control's spread for decode). The sum of the
+replayed `lanepar_loaded` deltas for the two E2B gate groups (0.33 + 0.17 = 0.50 ms, variant table above) sits inside the
+range of the two measured E2B deltas; the 35 norm-epilogue groups and the head have no replay delta of their own, so the
+split of the measured -0.40 to -0.61 between them is not attributed.
+
+What the reach does not include, from the same census: the `RMSNorm sumsq` groups (`97ab4307`, 105 dispatches; `b58c6089`,
+71 dispatches; and the others in `groups_tip.csv`) carry the same `msl_sha256` at base and tip. They are the groups where
+the `dedupe` variant timed -0.057 and -0.090 ms (norm table above); `c23e9a2c` took that dedupe out of the cooperative
+fold, so those two gains are not in the tip. Their sum is 0.147 ms of an 11.58 ms step if the two are additive, which was not measured; both are replay figures on E2B only.
+Whether the fold dedupe can be restored for a decode-only shape without the 26B prefill cost (+85 ms, `live7` to `live9`)
+was not tried.
+
+### three checks
+
+1. Correctness (tests, run under the GPU lock for the Metal ones; logs in `evidence/r8/land/gate/`).
+   - `cargo nextest run -p omega --features metal --cargo-profile gate`: 613 tests run, 613 passed, 16 skipped
+     (`nextest_omega.head_tail.txt`; 613 PASS lines, 0 FAIL lines in the full log). The last count recorded in this spec is 599 (slice 2 fix); this slice adds 14, which makes 613:
+     5 integration cases in `omega/tests/packed_row_single_token_epilogue.rs` (rows 6, 1536, 3, 5 and 7 over Q4_0 and Q6_K
+     lane masking) and 9 unit cases in `omega/src/msl/tests.rs`. The 16 skipped are `#[ignore]`d probes and golden recorders
+     already present before this slice: `record_main_goldens`, `record_main_softmax_weights_goldens`,
+     `device_streaming_ceiling_across_three_sources_and_two_sizes`, `gpu_load_generator`,
+     `real_per_layer_model_proj_weight_is_fully_populated_at_the_overflow_row_counts`,
+     `ladder_eight_dispatches_vs_one_merged_dispatch_gpu_time`, eight `matvec_roofline_ladder` probes,
+     `upload_path_totals_report_after_the_full_parity_suite` and
+     `metal_matmul_on_real_ffn_up_q3k_bytes_matches_the_dequantized_f32_cpu_path` (a real-checkpoint test, skipped by
+     `#[ignore]`; it is not run by this gate and was not run here).
+   - `cargo nextest run -p omega --features metal,instrument --cargo-profile gate -E 'binary(captured_dispatch_replay)'`:
+     3 run, 3 passed (`nextest_replay.log`); the default gate does not build those three because they need `instrument`.
+   - `cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate`: 710 run,
+     710 passed, 124 skipped (`nextest_interop_slice_gate.head_tail.txt`; 710 PASS, 0 FAIL).
+   - `cargo clippy -p proxima-tensor -p proxima-model-interop -p omega --features
+     proxima-model-interop/std,proxima-model-interop/metal,omega/metal --all-targets -- -D warnings`: exit 0
+     (`clippy.log`); with `omega/instrument` and `proxima-model-interop/instrument` added for omega and interop: exit 0
+     (`clippy_instr.log`).
+   - Not run: the alloc-tier and `--no-default-features` builds of `proxima-tensor`, which `git diff --stat 14b8389d HEAD`
+     shows untouched (the 13 files are in `omega/`, `proxima-model-interop/`, `ai_docs/`); `cargo test --doc`.
+2. Semantic (the incumbent's token ids; `evidence/r8/land/gate/nextest_parity.log`).
+   `cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate -E 'test(llama_parity_) or
+   test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama)'`: 14 run, 14 passed, 820 skipped, 3 slow
+   (340.6 s). The 14 are 7 `llama_parity_` (gemma4_26b, gemma4_e2b, granite_moe, lfm2, openchat, qwen2, qwen3), 5
+   `generic_verify_llama_parity_` (gemma4_e2b, granite_moe, openchat, qwen2, qwen3) and 2
+   `prefill_width_parity_with_llama_` (gemma4_e2b, granite_moe). `lfm2` is excluded from the slice-gate profile and ran here.
+   The decode_arms run printed one `text_hash` per case across `base`, `tip` and `tipcopy`
+   (`text_hash_counts.txt`: 24 files, 4 generations each, 96 generations; E2B long `8fec363180a250e0`, E2B short
+   `1ab772cf44dbbf7b`, granite long `c4625c1fb93f28b7`, granite short `8cf1c359770788c7`). That compares base to tip
+   text, not ids to the incumbent; the ids-to-incumbent comparison is the `llama_parity_` line.
+3. Performance: the landed-tree tables above (decode, prefill, TTFT, peak RSS, footprint, GPU allocation; E2B and granite,
+   long and short; 2 processes x 3 timed runs, same-binary control). Not measured here: 26B at the tip (the development runs
+   `live6` to `live9` stand for it), and p99 per-token latency (the driver prints medians and ranges).
+
+### what the three checks do not establish
+
+- The five bounds of the goal are all unmet at the tip (bounds table above). The slice moved E2B decode by 0.40 and
+  0.61 ms and granite decode by 0.38 and 0.50 ms; the remaining gap to llama-server in the same run is 2.41 ms (E2B long),
+  2.07 ms (E2B short, against 9.028), 9.23 ms (granite long) and 8.21 ms (granite short, against 5.134).
+- E2B decode deltas are 3 to 5 percent of the step and the long-prompt cells have CoV 3.1 and 3.7 percent over six runs;
+  the `tip` to `tipcopy` difference on E2B long (0.144 ms) is more than a third of the base to tip difference (0.397 ms).
+  The short-prompt delta (0.607 ms, control 0.006 ms) is the clearer of the two.
+- The omission ranking ("where a decode step goes") was taken on the pre-slice tree. The ranking at the tip was not
+  re-taken; the next slice starts from that table and from the fact that the norm family (0.73 ms for the 71-dispatch group
+  alone), the head (1.09 ms) and the Q4_0 `ffn_*` groups (0.83 to 1.46 ms each) were the largest entries before it.
+- Granite prefill (891 ms against 151) and granite short-prompt prefill (278 ms for 36 tokens against llama's
+  19.1 ms) are not touched by this slice and have no attribution in this section.
+- Unexplained: why the cooperative fold dedupe costs 26B prefill 85 to 88 ms and E2B and granite prefill nothing; what the
+  fixed per-dispatch cost of the 12.2 us norm group is; what overlapped the first minutes of the long run (the
+  `packed_row_multi_row_index32_ab` process in `box_before.txt`).
+
+### re-prove
+
+```
+git diff --stat 14b8389d HEAD -- . ':!*.md'                                   # 13 files, none in proxima-tensor
+shasum -a 256 -c evidence/r8/land/binaries.sha256                             # from .long_ctx_backups/parity_perf/r8/land (bin/, prompts)
+decode_arms --prompt-file prompt1k.txt --processes 2 --runs 3 --arm base=<land/bin/base> --arm tip=<land/bin/tip> \
+  --arm tipcopy=<land/bin/tipcopy> --llama-server <llama-server f1ea20621> --ignore-ollama \
+  --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>               # land/long
+decode_arms --prompt-file prompt_short_hippo.txt --new-tokens 64 ... (same arms)   # land/short
+cargo nextest run -p omega --features metal --cargo-profile gate                                # 613 passed, 16 skipped
+cargo nextest run -p omega --features metal,instrument --cargo-profile gate -E 'binary(captured_dispatch_replay)'   # 3
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate           # 710
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate \
+  -E 'test(llama_parity_) or test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama)'          # 14
+M0_OUT_DIR=<dir> M0_MODEL_GGUF=<blob> M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=1 M0_ITERS=1 M0_BATCH=2 \
+  PROXIMA_PROMPT_FILE=prompt_short_hippo.txt gemma4_decode_kernel_census                                         # reach; compare msl_sha256
+```

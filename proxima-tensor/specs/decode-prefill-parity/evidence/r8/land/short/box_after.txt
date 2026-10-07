@@ -1,0 +1,9 @@
+14:22  up 7 days, 26 mins, 5 users, load averages: 5.69 7.01 7.97
+  PID  %CPU COMM
+17029  61.2 a background daemon in ~/.local/bin
+  476  43.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+79505  21.4 /usr/sbin/httpd
+55233  14.2 /System/Applications/Messages.app/Contents/MacOS/Messages
+79298  10.6 bash
+  716   8.9 /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461   2.9 claude
