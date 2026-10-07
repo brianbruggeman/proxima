@@ -1,5 +1,10 @@
 use super::*;
 
+/// Token axes the expert-grouped kernel decomposes a flat token index into:
+/// `[sequence]` for one top-k slot per dispatch, `[sequence, selected]` for the
+/// stacked form that runs every selected expert of a projection at once.
+pub(super) const GROUPED_MAX_TOKEN_AXES: usize = 3;
+
 /// Rows of the weight tile one expert-grouped threadgroup computes.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) const GROUPED_TILE_ROWS: u64 = 64;
@@ -128,7 +133,9 @@ struct GroupedGeometry {
     rank: usize,
     output_axes: Vec<u16>,
     feature_axis: u16,
-    token_axis: u16,
+    token_axes: Vec<u16>,
+    token_positions: Vec<usize>,
+    route_flat: bool,
     feature_extent_expr: String,
     token_extent_expr: String,
 }
@@ -141,21 +148,33 @@ impl GroupedGeometry {
         resolved: &BoundOp,
     ) -> Result<Self, EmitError> {
         let node = resolved.node;
-        let (Some(&token_axis), Some(&feature_axis)) =
-            (block.token_axes.last(), block.feature_axes.last())
+        let (Some(_), Some(&feature_axis)) = (block.token_axes.last(), block.feature_axes.last())
         else {
             return Err(EmitError::EmptyAxisGroup {
                 node,
                 group: "token or feature",
             });
         };
+        let token_positions = block
+            .token_axes
+            .iter()
+            .map(|&axis| {
+                output_axes
+                    .iter()
+                    .position(|&candidate| candidate == axis)
+                    .ok_or(EmitError::AxisNotInOutputAxes { node, axis })
+            })
+            .collect::<Result<Vec<usize>, EmitError>>()?;
+        let route_flat = block.gathered.is_some_and(|expert| expert.route_flat);
         Ok(Self {
             col_parts: crate::sized::GROUPED_GEMM_COL_PARTS,
             scan_ahead: crate::sized::GROUPED_GEMM_SCAN_AHEAD,
             rank: resolved.extents.len(),
             output_axes: output_axes.to_vec(),
             feature_axis,
-            token_axis,
+            token_axes: block.token_axes.clone(),
+            token_positions,
+            route_flat,
             feature_extent_expr: group_extent(node, output_axes, &block.feature_axes)?,
             token_extent_expr: group_extent(node, output_axes, &block.token_axes)?,
         })
@@ -172,6 +191,48 @@ fn group_extent(node: NodeId, output_axes: &[u16], group: &[u16]) -> Result<Stri
         terms.push(format!("u.output_extents[{index}]"));
     }
     Ok(terms.join(" * "))
+}
+
+/// Declares `long {prefix}0 .. {prefix}{n-1}`, the coordinates of flat token
+/// `token_expr` along each token axis, outermost first. One token axis is the
+/// flat index itself. A stacked `[sequence, selected]` group peels the
+/// innermost axis with a 32-bit remainder, which the kernel reaches once per
+/// pending token per tile, never per route entry.
+#[cfg(feature = "metal-grouped-gemm")]
+fn push_token_coordinates(
+    source: &mut String,
+    geometry: &GroupedGeometry,
+    indent: &str,
+    token_expr: &str,
+    prefix: &str,
+) {
+    source.push_str(&format!("{indent}uint {prefix}_rest = (uint)({token_expr});\n"));
+    for ordinal in (1..geometry.token_positions.len()).rev() {
+        let extent = format!("(uint)u.output_extents[{}]", geometry.token_positions[ordinal]);
+        source.push_str(&format!(
+            "{indent}long {prefix}{ordinal} = (long)({prefix}_rest % {extent});\n"
+        ));
+        source.push_str(&format!("{indent}{prefix}_rest /= {extent};\n"));
+    }
+    source.push_str(&format!("{indent}long {prefix}0 = (long){prefix}_rest;\n"));
+}
+
+/// The sum of each token coordinate declared by [`push_token_coordinates`]
+/// times its stride, where `stride` names the stride of one token axis in some
+/// layout (an operand, the output, the route index).
+#[cfg(feature = "metal-grouped-gemm")]
+fn token_offset_expr(
+    geometry: &GroupedGeometry,
+    prefix: &str,
+    stride: impl Fn(u16) -> String,
+) -> String {
+    geometry
+        .token_axes
+        .iter()
+        .enumerate()
+        .map(|(ordinal, &axis)| format!("{prefix}{ordinal} * {}", stride(axis)))
+        .collect::<Vec<String>>()
+        .join(" + ")
 }
 
 /// Widens the scalar `uint gid` the kernel signature carries to a `uint3` so
@@ -263,7 +324,7 @@ fn push_grouped_refill(
     slot: usize,
     geometry: &GroupedGeometry,
 ) {
-    let token_axis = geometry.token_axis;
+    let innermost_axis = geometry.token_axes.last().copied().unwrap_or(0);
     let ahead = geometry.scan_ahead;
     source.push_str(&format!(
         "        while (pending_fill < {GROUPED_TILE_TOKENS}u && scan_base < token_extent) {{\n"
@@ -275,8 +336,22 @@ fn push_grouped_refill(
     source.push_str(&format!(
         "                long ahead_token = scan_base + (long)ahead * {GROUPED_THREADS} + tiitg;\n"
     ));
+    let route_offset = if geometry.route_flat {
+        format!("ahead_token * u.gather_index_strides[{slot}][{innermost_axis}]")
+    } else {
+        push_token_coordinates(
+            source,
+            geometry,
+            "                ",
+            "(ahead_token < token_extent) ? ahead_token : 0",
+            "route_c",
+        );
+        token_offset_expr(geometry, "route_c", |axis| {
+            format!("u.gather_index_strides[{slot}][{axis}]")
+        })
+    };
     source.push_str(&format!(
-        "                routed_ahead[ahead] = (ahead_token < token_extent) ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + ahead_token * u.gather_index_strides[{slot}][{token_axis}]] : (long)-1;\n"
+        "                routed_ahead[ahead] = (ahead_token < token_extent) ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + {route_offset}] : (long)-1;\n"
     ));
     source.push_str("            }\n");
     source.push_str(&format!(
@@ -416,7 +491,6 @@ fn push_grouped_stage_pointers(
     let weight = block.weight;
     let other = block.other;
     let feature_axis = geometry.feature_axis;
-    let token_axis = geometry.token_axis;
     source.push_str("            long w_row = tiitg / 2;\n");
     source.push_str("            long w_half = tiitg % 2;\n");
     source.push_str(&format!(
@@ -442,11 +516,20 @@ fn push_grouped_stage_pointers(
     source.push_str(
         "            threadgroup half4 *a_slot = (threadgroup half4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n",
     );
+    push_token_coordinates(source, geometry, "            ", "(a_tok < 0 ? 0 : a_tok)", "a_c");
+    let activation_offset = token_offset_expr(geometry, "a_c", |axis| {
+        format!("u.operand_strides[{other}][{axis}]")
+    });
     source.push_str(&format!(
-        "            device const float *a_ptr = in{other} + u.operand_base[{other}] + (a_tok < 0 ? 0 : a_tok) * u.operand_strides[{other}][{token_axis}] + a_k_block * 8;\n"
+        "            device const float *a_ptr = in{other} + u.operand_base[{other}] + {activation_offset} + a_k_block * 8;\n"
     ));
+    let alignment_terms = geometry
+        .token_axes
+        .iter()
+        .map(|axis| format!(" | u.operand_strides[{other}][{axis}]"))
+        .collect::<String>();
     source.push_str(&format!(
-        "            bool a_vector = ((u.operand_base[{other}] | u.operand_strides[{other}][{token_axis}]) & 3) == 0;\n"
+        "            bool a_vector = ((u.operand_base[{other}]{alignment_terms}) & 3) == 0;\n"
     ));
 }
 
@@ -559,7 +642,6 @@ fn push_grouped_writeback(
     let rank = geometry.rank;
     let rank_len = rank.max(1);
     let feature_axis = geometry.feature_axis;
-    let token_axis = geometry.token_axis;
     source.push_str("            if ((sgitg >> 1) == 0 || has_hi) {\n");
     source.push_str(&format!(
         "                threadgroup float *temp_str = out_tile + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * {GROUPED_TILE_ROWS};\n"
@@ -579,6 +661,10 @@ fn push_grouped_writeback(
         "            for (long j = sgitg; j < (long)tile_count; j += {TILED_GEMM_NSG}) {{\n"
     ));
     source.push_str("                long o_tok = (long)tile_token[j];\n");
+    push_token_coordinates(source, geometry, "                ", "o_tok", "o_c");
+    let output_token_offset = token_offset_expr(geometry, "o_c", |axis| {
+        format!("u.out_strides[{axis}]")
+    });
     source.push_str(&format!(
         "                for (long o_col = (long)grouped_lane; o_col < {GROUPED_TILE_ROWS}; o_col += {SIMD_WIDTH}) {{\n"
     ));
@@ -587,9 +673,13 @@ fn push_grouped_writeback(
     ));
     source.push_str("                    if (o_feat < feature_extent) {\n");
     source.push_str(&format!("                        coord[{feature_axis}] = o_feat;\n"));
-    source.push_str(&format!("                        coord[{token_axis}] = o_tok;\n"));
+    for (ordinal, axis) in geometry.token_axes.iter().enumerate() {
+        source.push_str(&format!(
+            "                        coord[{axis}] = o_c{ordinal};\n"
+        ));
+    }
     source.push_str(&format!(
-        "                        long out_offset = u.out_base + o_feat * u.out_strides[{feature_axis}] + o_tok * u.out_strides[{token_axis}];\n"
+        "                        long out_offset = u.out_base + o_feat * u.out_strides[{feature_axis}] + {output_token_offset};\n"
     ));
     let accumulator_expr = format!("({element_type})out_tile[j * {GROUPED_TILE_ROWS} + o_col]");
     push_reduce_epilogue_write(
