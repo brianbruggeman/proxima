@@ -451,9 +451,7 @@ pub(super) fn execute_plan_inner(
         counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
     }
 
-    for (bound, fault_buffer, gathers) in &pending_faults {
-        check_gather_fault(bound, fault_buffer, *gathers)?;
-    }
+    check_pending_faults(pending_faults)?;
 
     // Everything still in `device_buffers` at this point (never removed by
     // the retirement loop above -- e.g. the root output and any other
