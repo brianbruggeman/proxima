@@ -47,7 +47,7 @@
 //!    the REAL `scheduled_forward_program_with_experts` engine
 //!    (`proxima-tensor/src/spec/attention_forward.rs:1719`, the same
 //!    builder `bind_checkpoint` lowers gemma4 through, matching
-//!    `gemma4_descriptor_from_gguf`'s own per-layer config
+//!    `sliding_pattern_descriptor_from_gguf`'s own per-layer config
 //!    verbatim, real dims), `VOCAB` shrunk to keep the LM-head tail cheap
 //!    (component 2 already covers that cost in isolation) — a SLIDING
 //!    layer (the majority shape: 28 of 35 real E2B layers), `ple: false`
@@ -122,7 +122,7 @@ use proxima_gguf::parse_complete;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::types::GgmlType;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table;
+use proxima_model_interop::sliding_pattern::program::sliding_rope_table;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::{ContextLength, LoadedModel, ServingConfig, SpeculativeConfig};
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -309,7 +309,7 @@ fn matmul_rhs_transposed_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
 }
 
 /// Real per-layer config for a SLIDING gemma4-E2B layer --
-/// `gemma4_descriptor_from_gguf`'s own values at this checkpoint's
+/// `sliding_pattern_descriptor_from_gguf`'s own values at this checkpoint's
 /// real dims (`ple: false` is this bench's one documented deviation, see
 /// the module doc's Component 3+4 section).
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -358,7 +358,7 @@ fn seed_named_inputs(
     positions: &[usize],
 ) -> Vec<(String, Vec<f32>)> {
     let shapes = infer(program, symbols).expect("one-layer gemma4 program infers its own shapes");
-    let (cos_swa, sin_swa) = gemma4_sliding_rope_table(positions, ROPE_FREQ_BASE_SWA, HEAD_DIM_SWA);
+    let (cos_swa, sin_swa) = sliding_rope_table(positions, ROPE_FREQ_BASE_SWA, HEAD_DIM_SWA);
     block_node_ids(program)
         .into_iter()
         .map(|node| {

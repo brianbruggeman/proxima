@@ -1685,7 +1685,7 @@ pub(crate) struct PositionInputs {
 /// outright (`rotary_pairs` truncation, since removed: this is the
 /// data-driven replacement, not an additional code path). `None` (every
 /// non-sliding-pattern architecture, and the sliding-pattern family's own SWA layers via
-/// `gemma4_sliding_rope_table`, which never calls this function) leaves
+/// `sliding_rope_table`, which never calls this function) leaves
 /// every pair's angle undivided -- full rotation, this function's only
 /// behaviour before `rope_freqs` existed.
 ///

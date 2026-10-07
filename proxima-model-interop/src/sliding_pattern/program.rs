@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 /// (the header reader's own `ModelHparams::head_dim`/
 /// `rope_freq_base`).
 #[must_use]
-pub fn gemma4_sliding_rope_table(
+pub fn sliding_rope_table(
     positions: &[usize],
     freq_base: f32,
     dimension_count: u32,
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn gemma4_sliding_rope_table_produces_identity_angles_at_position_zero() {
-        let (cos, sin) = gemma4_sliding_rope_table(&[0], 1.0e4, 4);
+        let (cos, sin) = sliding_rope_table(&[0], 1.0e4, 4);
         assert_eq!(
             cos,
             alloc::vec![1.0, 1.0],
@@ -61,8 +61,8 @@ mod tests {
 
     #[test]
     fn gemma4_sliding_rope_table_varies_by_position() {
-        let (cos_zero, _) = gemma4_sliding_rope_table(&[0], 1.0e4, 4);
-        let (cos_one, _) = gemma4_sliding_rope_table(&[1], 1.0e4, 4);
+        let (cos_zero, _) = sliding_rope_table(&[0], 1.0e4, 4);
+        let (cos_one, _) = sliding_rope_table(&[1], 1.0e4, 4);
         assert_ne!(
             cos_zero, cos_one,
             "distinct positions rotate by distinct angles"

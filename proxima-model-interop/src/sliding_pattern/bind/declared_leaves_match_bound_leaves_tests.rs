@@ -1,6 +1,6 @@
 use super::*;
 use proxima_tensor::spec::{ForwardProgram, build_forward};
-use crate::sliding_pattern::Gemma4Hparams;
+use crate::sliding_pattern::SlidingPatternHparams;
 use arrayvec::ArrayVec;
 use proxima_tensor::spec::{CacheStrategy, KeySourceKind};
 use proxima_gguf::types::GgmlType;
@@ -15,7 +15,7 @@ use proxima_tensor::op::Op;
 /// gate this test exercises. Written by the real GGUF encoder and
 /// parsed back by the real decoder; `token_embd.weight` is a 1-row
 /// table so vocab resolves.
-fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, Gemma4Hparams) {
+fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, SlidingPatternHparams) {
     let mut feed_forward = alloc::vec![6144u32; 15];
     feed_forward.extend(alloc::vec![12288u32; 20]);
     let u32_array = |values: Vec<u32>| MetadataValue::Array(MetadataArray::U32(values));
@@ -68,7 +68,7 @@ fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, Gemma4Hparams) {
 /// tensor for: own-KV layers carry K and its norm, and V where the
 /// sliding pattern or a shared-KV header says so.
 fn stored_leaf_names(
-    architecture: &Gemma4Hparams,
+    architecture: &SlidingPatternHparams,
     suffix: &str,
 ) -> alloc::collections::BTreeSet<String> {
     let first_shared_idx = architecture
@@ -94,7 +94,7 @@ fn stored_leaf_names(
 }
 
 /// The name set the ACTUAL forward program `crate::lowering::bind_checkpoint` lowers --
-/// `gemma4_descriptor_from_gguf`'s own output, built through the
+/// `sliding_pattern_descriptor_from_gguf`'s own output, built through the
 /// cacheless engine so the check is independent of which
 /// `CacheStrategy` bind picks -- declares as an `Input` leaf for `suffix`.
 fn declared_leaf_names(

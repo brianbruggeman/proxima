@@ -460,7 +460,7 @@ pub fn sliding_rope_inputs(
         return;
     };
     let positions: Vec<usize> = (new_start..new_start + new_count).collect();
-    let (cos, sin) = crate::sliding_pattern::program::gemma4_sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
+    let (cos, sin) = crate::sliding_pattern::program::sliding_rope_table(&positions, rope.freq_base, rope.dimension_count);
     out.push(StepInput { name: "rope_cos_swa", values: cos, symbol: None });
     out.push(StepInput { name: "rope_sin_swa", values: sin, symbol: None });
 }

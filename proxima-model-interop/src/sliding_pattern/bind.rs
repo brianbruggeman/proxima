@@ -1,5 +1,5 @@
 //! The `sliding_pattern` header reader ([`proxima_tensor::spec::ScheduleSource::SlidingPattern`]):
-//! the parsed header goes to [`proxima_tensor::spec::gemma4_descriptor_from_gguf`],
+//! the parsed header goes to [`proxima_tensor::spec::sliding_pattern_descriptor_from_gguf`],
 //! which builds the whole [`proxima_tensor::spec::ModelDescriptor`] (per-layer
 //! [`proxima_tensor::spec::LayerAttentionConfig`]/
 //! [`proxima_tensor::spec::LayerFfnConfig`] schedule included). The lowering
@@ -12,7 +12,7 @@
 
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::{ModelDescriptor, gemma4_descriptor_from_gguf};
+use proxima_tensor::spec::{ModelDescriptor, sliding_pattern_descriptor_from_gguf};
 
 use crate::bind::{ModelHparams, SlidingRope, find_tensor, metadata_str};
 use crate::error::InteropError;
@@ -21,7 +21,7 @@ use crate::profiles::family_profile;
 
 use super::hparams::from_metadata;
 
-/// The checkpoint's descriptor: [`gemma4_descriptor_from_gguf`] over the family
+/// The checkpoint's descriptor: [`sliding_pattern_descriptor_from_gguf`] over the family
 /// profile `general.architecture` names, so the values GGUF does not carry come
 /// from `crate::profiles` and never from this module.
 pub fn descriptor_from_gguf(
@@ -29,7 +29,7 @@ pub fn descriptor_from_gguf(
     sliding_kv_ring: bool,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(metadata_str(parsed, "general.architecture")?)?;
-    Ok(gemma4_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?)
+    Ok(sliding_pattern_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?)
 }
 
 /// `PROXIMA_HEAD_REPEATS=1|2|3` (unset or unparsable reads as `1`): the
@@ -87,14 +87,14 @@ pub(crate) fn header(
 /// Regression coverage for the bug this crate shipped once: the binder and the
 /// forward program each independently gated `attn_k.weight`/
 /// `attn_k_norm.weight`/`attn_v.weight` per layer, and nothing forced the
-/// two gates to agree -- `gemma4_descriptor_from_gguf` used to gate
+/// two gates to agree -- `sliding_pattern_descriptor_from_gguf` used to gate
 /// `ValueSourceKind::ProjectedV` (and therefore the forward program's own
 /// `attn_v.weight` [`proxima_tensor::op::Op::Input`] leaf) on `is_sliding`
 /// alone, the MoE convention, while E2B/E4B's own-KV FULL layers (`blk.4`,
 /// `blk.9`, `blk.14` on the real `e2b-it-qat` checkpoint) carry a
 /// real `attn_v.weight` regardless of sliding vs full. This test builds the
 /// ACTUAL forward program `crate::lowering::bind_checkpoint` builds (not a hand-simulated
-/// stand-in) for a synthetic E2B-shaped [`Gemma4Hparams`] whose
+/// stand-in) for a synthetic E2B-shaped [`SlidingPatternHparams`] whose
 /// `sliding_window_pattern`/`shared_kv_layers`/`block_count` are the real
 /// checkpoint's own measured values (a real header dump against
 /// `~/.ollama/models/blobs/sha256-3646b4c...` on 2026-09-20), then asserts

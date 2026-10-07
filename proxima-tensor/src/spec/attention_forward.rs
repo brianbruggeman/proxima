@@ -371,7 +371,7 @@ pub struct LayerFfnConfig {
     /// of [`scheduled_forward_program_with_experts`]'s crate-wide `feed_forward`
     /// argument -- Gemma 4 E2B/E4B's matformer checkpoint stores a
     /// per-layer `feed_forward_length` array rather than one uniform width
-    /// (`sliding_pattern::hparams::Gemma4Hparams::feed_forward_by_layer`). `None`
+    /// (`sliding_pattern::hparams::SlidingPatternHparams::feed_forward_by_layer`). `None`
     /// (every caller in this crate before Gemma 4 E2B) reproduces the
     /// prior uniform-width behaviour unchanged.
     #[serde(default)]

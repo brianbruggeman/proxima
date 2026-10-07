@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::Path;
 
 use proxima_gguf::parse_complete;
-use proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table;
+use proxima_model_interop::sliding_pattern::program::sliding_rope_table;
 use proxima_model_interop::{KvLayout, StepInput, bind_checkpoint_with_kv_layout, sliding_rope_inputs};
 
 const POSITIONS: usize = 1500;
@@ -58,7 +58,7 @@ fn assert_swa_rope_matches_oracle(name: &str, env: &str, path: &str) {
 
     let positions: Vec<usize> = (0..POSITIONS).collect();
     let (expected_cos, expected_sin) =
-        gemma4_sliding_rope_table(&positions, freq_base, dimension_count);
+        sliding_rope_table(&positions, freq_base, dimension_count);
     let cos = inputs
         .iter()
         .find(|input| input.name == "rope_cos_swa")

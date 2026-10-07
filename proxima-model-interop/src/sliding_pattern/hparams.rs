@@ -24,7 +24,7 @@ use crate::bind::{
 use crate::error::InteropError;
 
 #[derive(Debug, Clone)]
-pub struct Gemma4Hparams {
+pub struct SlidingPatternHparams {
     pub vocab: u32,
     pub embedding: u32,
     pub block_count: u32,
@@ -72,13 +72,13 @@ pub struct Gemma4Hparams {
     /// the reference Go source's own `HiddenSizePerLayer`). `0` (the default
     /// `metadata_u32_optional` returns when the key is absent, e.g.
     /// 12B/26B/31B) means this checkpoint carries no PLE tensors at all --
-    /// `crate::gemma4_descriptor_from_gguf`'s own `ple_dim > 0`
+    /// `crate::sliding_pattern_descriptor_from_gguf`'s own `ple_dim > 0`
     /// check is what gates both the tensor names and the schedule's
     /// `LayerFfnConfig::ple` flag on it.
     pub ple_dim: u32,
 }
 
-pub fn from_metadata(parsed: &ParsedGguf) -> Result<Gemma4Hparams, InteropError> {
+pub fn from_metadata(parsed: &ParsedGguf) -> Result<SlidingPatternHparams, InteropError> {
     let family = metadata_str(parsed, "general.architecture")?;
     let prefix = |name: &str| format!("{family}.{name}");
 
@@ -101,7 +101,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Gemma4Hparams, InteropError>
         metadata_u32_per_layer(parsed, &prefix("feed_forward_length"), block_count)?;
     let feed_forward = *feed_forward_by_layer.first().unwrap_or(&0);
 
-    Ok(Gemma4Hparams {
+    Ok(SlidingPatternHparams {
         vocab: vocab_from_token_embedding(parsed, embedding)?,
         embedding,
         block_count,

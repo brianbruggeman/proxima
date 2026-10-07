@@ -9,7 +9,7 @@
 //! back to another family's values.
 //!
 //! The parsed value is a [`proxima_tensor::spec::FamilyProfile`], built from
-//! the descriptor's own enums; `proxima_tensor::spec::gemma4_descriptor_from_gguf`
+//! the descriptor's own enums; `proxima_tensor::spec::sliding_pattern_descriptor_from_gguf`
 //! and `proxima_tensor::spec::gqa_descriptor_from_shape` consume it as
 //! plain fields. TOML parsing stays here because `proxima-tensor`'s alloc tier
 //! carries no parser.

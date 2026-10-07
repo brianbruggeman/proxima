@@ -6,7 +6,7 @@
 //! schedule at all. This builds the REAL forward-program builder
 //! (`proxima_tensor::spec::scheduled_forward_program_with_experts`, the exact
 //! function [`crate::sliding_pattern::bind::Gemma4Arch::bind`] hands its own
-//! `gemma4_descriptor_from_gguf` to -- never a second hand-rolled copy of its
+//! `sliding_pattern_descriptor_from_gguf` to -- never a second hand-rolled copy of its
 //! graph) over a small SYNTHETIC checkpoint that reproduces gemma4's own
 //! dual-RoPE schedule: `sliding_window_pattern` alternates sliding/global
 //! layers, sliding layers read `rope_cos_swa`/`rope_sin_swa` (freq_base=1e4,
@@ -14,7 +14,7 @@
 //! `rope.dimension_count_swa`) and global layers read `rope_cos`/`rope_sin`
 //! (freq_base=1e6, dimension_count=512 -- the real checkpoint's
 //! `rope.freq_base`/`rope.dimension_count`), matching
-//! `gemma4_descriptor_from_gguf`'s own per-layer `RopeTableSel`/
+//! `sliding_pattern_descriptor_from_gguf`'s own per-layer `RopeTableSel`/
 //! `RopePairing::SplitHalf` wiring (that function and its caller,
 //! `Gemma4Arch::bind`, are both crate-private/`std`-gated, so this test
 //! replicates the SCHEDULE VALUES inline rather than calling them --
@@ -22,7 +22,7 @@
 //! establishes this is the correct, CPU-proven shape for that schedule; this
 //! file adds the Metal side that CPU-only test never had). Both RoPE tables
 //! are built by gemma4's own real
-//! `proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table`
+//! `proxima_model_interop::sliding_pattern::program::sliding_rope_table`
 //! function (public, reused verbatim), not a hand-rolled angle formula.
 //!
 //! `scheduled_forward_program_with_experts` has no per-layer-taps counterpart
@@ -59,7 +59,7 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::sliding_pattern::program::gemma4_sliding_rope_table;
+use proxima_model_interop::sliding_pattern::program::sliding_rope_table;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
@@ -104,12 +104,12 @@ const ROPE_FREQ_BASE_SWA: f32 = 1.0e4;
 /// [`layer_parity`] for the bisection sweep.
 const SLIDING_PATTERN: [bool; 4] = [true, false, true, false];
 
-/// Replicates `gemma4_descriptor_from_gguf`'s own per-layer
+/// Replicates `sliding_pattern_descriptor_from_gguf`'s own per-layer
 /// `LayerAttentionConfig`/`LayerFfnConfig` values (that function is
 /// crate-private, reachable only from inside `proxima-model-interop`'s own
 /// `src/`, never from this external `tests/` binary) at the synthetic dims
 /// above, for `sliding_pattern`'s own layers in order -- every field here is
-/// copied verbatim from `gemma4_descriptor_from_gguf`, not
+/// copied verbatim from `sliding_pattern_descriptor_from_gguf`, not
 /// reinvented.
 fn gemma4_synthetic_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
     let ffn = LayerFfnConfig {
@@ -187,13 +187,13 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// Float32-fed convention, `qwen35moe_program_metal_cpu_layer_parity.rs`'s
 /// own `seed_named_inputs`), `eps` the real serving value, the four RoPE
 /// leaves their real angle tables (via gemma4's own
-/// [`gemma4_sliding_rope_table`], never a hand-rolled formula here), and
+/// [`sliding_rope_table`], never a hand-rolled formula here), and
 /// every weight/norm leaf an `Lcg`-seeded fill of the right size so this
 /// test never has to enumerate gemma4's ~20 per-layer weight names by hand.
 fn seed_named_inputs(program: &[Op], symbols: &[u64], positions: &[usize]) -> Vec<(String, Vec<f32>)> {
     let shapes = infer(program, symbols).expect("gemma4 synthetic forward program infers its own shapes");
-    let (cos_full, sin_full) = gemma4_sliding_rope_table(positions, ROPE_FREQ_BASE, HEAD_DIM_FULL);
-    let (cos_swa, sin_swa) = gemma4_sliding_rope_table(positions, ROPE_FREQ_BASE_SWA, HEAD_DIM_SWA);
+    let (cos_full, sin_full) = sliding_rope_table(positions, ROPE_FREQ_BASE, HEAD_DIM_FULL);
+    let (cos_swa, sin_swa) = sliding_rope_table(positions, ROPE_FREQ_BASE_SWA, HEAD_DIM_SWA);
     block_node_ids(program)
         .into_iter()
         .map(|node| {
