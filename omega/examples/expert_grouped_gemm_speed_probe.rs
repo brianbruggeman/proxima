@@ -256,7 +256,7 @@ fn run() -> anyhow::Result<()> {
         (program, sum)
     }
 
-    fn program(shape: &Shape) -> (Vec<Op>, NodeId) {
+    fn build_program(shape: &Shape) -> (Vec<Op>, NodeId) {
         if shape.selected > 1 {
             return stacked_program(shape);
         }
@@ -343,6 +343,7 @@ fn run() -> anyhow::Result<()> {
     let routings = env_list("PROBE_ROUTINGS", ROUTINGS.iter().map(|routing| (*routing).to_string()).collect());
     let shape_names = env_list("PROBE_SHAPES", SHAPES.iter().map(|shape| shape.0.to_string()).collect());
     let selected = env_list("PROBE_SELECTED", vec![1_usize]).first().copied().unwrap_or(1).max(1);
+    let interleave_per_slot = std::env::var_os("PROBE_AB").is_some();
     for (name, rows, k) in SHAPES.into_iter().filter(|shape| shape_names.iter().any(|wanted| wanted == shape.0)) {
         for &tokens in &token_counts {
             let shape = Shape {
@@ -359,7 +360,7 @@ fn run() -> anyhow::Result<()> {
                 tokens * k
             };
             let activation = unit_values(23, activation_len);
-            let (program, root) = program(&shape);
+            let (program, root) = build_program(&shape);
             for routing in routings.iter().map(String::as_str) {
                 let route_values = if selected > 1 {
                     top_k_route(tokens, selected)
@@ -378,10 +379,65 @@ fn run() -> anyhow::Result<()> {
                         .context("metal warm-up executes on a real device")?;
                 }
                 let mut samples = Vec::with_capacity(RUNS);
+                let mut per_slot_samples = Vec::with_capacity(RUNS);
+                let per_slot_case = if interleave_per_slot && selected > 1 {
+                    let single = Shape {
+                        tokens,
+                        selected: 1,
+                        per_selected_activation: false,
+                        rows,
+                        k,
+                    };
+                    let single_activation = unit_values(23, tokens * k);
+                    let single_route = route(routing, tokens);
+                    let (single_program, single_root) = build_program(&single);
+                    Some((single_program, single_root, single_activation, single_route))
+                } else {
+                    None
+                };
+                let per_slot_plan = match &per_slot_case {
+                    Some((single_program, single_root, single_activation, single_route)) => {
+                        let single_named = [
+                            ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }),
+                            ("route", QuantizedBlock::Float32(single_route)),
+                            ("activation", QuantizedBlock::Float32(single_activation)),
+                        ];
+                        let single_plan = omega::plan_named(
+                            single_program,
+                            &[],
+                            &single_named,
+                            &[*single_root],
+                            NumericPolicy::default(),
+                        )
+                        .context("per-slot plan compiles")?;
+                        for _ in 0..WARMUP_RUNS {
+                            omega::metal::execute_plan_named_op_timed(&single_plan, &single_named, None)
+                                .context("per-slot warm-up executes")?;
+                        }
+                        Some((single_plan, single_named))
+                    }
+                    None => None,
+                };
                 for _ in 0..RUNS {
+                    if let Some((single_plan, single_named)) = &per_slot_plan {
+                        let (_, timings) =
+                            omega::metal::execute_plan_named_op_timed(single_plan, single_named, None)
+                                .context("per-slot executes")?;
+                        per_slot_samples.push(timings.iter().map(|timing| timing.gpu_ns).sum::<u64>());
+                    }
                     let (_, timings) = omega::metal::execute_plan_named_op_timed(&plan, &named, None)
                         .context("metal executes on a real device")?;
                     samples.push(timings.iter().map(|timing| timing.gpu_ns).sum::<u64>());
+                }
+                if !per_slot_samples.is_empty() {
+                    let per_slot_us = median(per_slot_samples.clone()) as f64 / 1000.0;
+                    let stacked_us = median(samples.clone()) as f64 / 1000.0;
+                    println!(
+                        "ab shape={name} tokens={tokens} selected={selected} per_slot_us={per_slot_us:.1} per_slot_cov_pct={:.2} stacked_us={stacked_us:.1} stacked_cov_pct={:.2} stacked_over_{selected}x_per_slot={:.3}",
+                        coefficient_of_variation_percent(&per_slot_samples),
+                        coefficient_of_variation_percent(&samples),
+                        stacked_us / (per_slot_us * selected as f64)
+                    );
                 }
                 let gflop = 2.0 * (tokens * selected) as f64 * rows as f64 * k as f64 / 1.0e9;
                 let microseconds = median(samples.clone()) as f64 / 1000.0;
