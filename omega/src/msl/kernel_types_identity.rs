@@ -313,6 +313,12 @@ pub struct Grid2DSpec {
     pub threadgroups_y: u64,
     pub threads_per_threadgroup_x: u64,
     pub threads_per_threadgroup_y: u64,
+    /// Bytes of dynamic threadgroup memory the launch binds at `[[threadgroup(0)]]`
+    /// (`setThreadgroupMemoryLength`), the way ggml provisions `kernel_mul_mm`'s
+    /// `shmem`; `0` when the kernel declares its threadgroup memory itself. Decided
+    /// with the kernel text by `dynamic_tgmem_active`, so the argument the kernel
+    /// declares and the length the launch binds never disagree.
+    pub threadgroup_bytes: u64,
 }
 
 /// Emits an MSL kernel from a bound [`BoundOp`] — the GPU-emission half of
@@ -2261,6 +2267,37 @@ fn log_tiled_gemm_mm_layout_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn tiled_gemm_mm_layout_override() -> bool {
+    true
+}
+
+/// `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM` (see
+/// [`crate::identity::MetalOnlyExtras::tiled_gemm_dynamic_tgmem`]'s own doc for
+/// what this switch changes). Default ON: unset admits, and only an explicit
+/// `"0"` keeps the threadgroup array the kernel declares itself.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_dynamic_tgmem_override() -> bool {
+    let active = !matches!(
+        std::env::var("PROXIMA_TILED_GEMM_DYNAMIC_TGMEM"),
+        Ok(value) if value.trim() == "0"
+    );
+    log_tiled_gemm_dynamic_tgmem_once(active);
+    active
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
+fn log_tiled_gemm_dynamic_tgmem_once(active: bool) {
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let source = if active { "env" } else { "default" };
+        proxima_telemetry::debug!(active, source, "tiled_gemm_dynamic_tgmem");
+    });
+}
+
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm", not(feature = "instrument")))]
+fn log_tiled_gemm_dynamic_tgmem_once(_active: bool) {}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_dynamic_tgmem_override() -> bool {
     true
 }
 

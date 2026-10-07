@@ -160,6 +160,7 @@ mod ladder {
         uniforms: Vec<u8>,
         threadgroups: MTLSize,
         threads: MTLSize,
+        threadgroup_bytes: usize,
     }
 
     fn emit_production(config: &Config) -> anyhow::Result<Production> {
@@ -190,6 +191,7 @@ mod ladder {
                 height: spec.threads_per_threadgroup_y as usize,
                 depth: 1,
             },
+            threadgroup_bytes: spec.threadgroup_bytes as usize,
         })
     }
 
@@ -416,16 +418,17 @@ mod ladder {
     fn build_arms(config: &Config, device: &Device, production: &Production) -> anyhow::Result<Vec<Arm>> {
         let output_bytes = config.rows * config.tokens * 4;
         let zeroed = |count: usize| buffer_from_bytes(device, &vec![0u8; count]);
-        let proxima_launch = |source: &str| Launch::Proxima {
+        let proxima_launch = |dynamic_bytes: usize| Launch::Proxima {
             threadgroups: production.threadgroups,
             threads: production.threads,
-            dynamic_bytes: if source.contains("[[threadgroup(0)]]") { 8192 } else { 0 },
+            dynamic_bytes,
         };
+        let variant_bytes = |source: &str| if source.contains("[[threadgroup(0)]]") { 8192 } else { 0 };
         let mut arms = vec![Arm {
             label: "prod".into(),
             pipeline: compile(device, &production.source, &production.entry)?,
             output: zeroed(output_bytes)?,
-            launch: proxima_launch(&production.source),
+            launch: proxima_launch(production.threadgroup_bytes),
         }];
         for path in &config.variants {
             let source = std::fs::read_to_string(path).with_context(|| format!("read variant {}", path.display()))?;
@@ -434,7 +437,7 @@ mod ladder {
                 label,
                 pipeline: compile(device, &source, &production.entry)?,
                 output: zeroed(output_bytes)?,
-                launch: proxima_launch(&source),
+                launch: proxima_launch(variant_bytes(&source)),
             });
         }
         let row_bytes = (config.k / QK4_0 * BLOCK_BYTES) as u64;

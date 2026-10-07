@@ -333,6 +333,17 @@ pub(crate) struct MetalOnlyExtras {
     /// with the row-major kernel. Default ON (unset admits; only explicit
     /// `"0"` keeps the row-major tile). Feeds the `_mml` suffix.
     pub tiled_gemm_mm_layout: bool,
+    /// `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM`: `true` when the packed tiled-GEMM
+    /// kernel takes its slim threadgroup backing store as its `[[threadgroup(0)]]`
+    /// argument instead of declaring the array, and the launch binds
+    /// [`crate::msl::Grid2DSpec::threadgroup_bytes`] through
+    /// `setThreadgroupMemoryLength` -- ggml's own provisioning of `kernel_mul_mm`'s
+    /// `shmem`. Needs the slim store (one array to hand over) and the threadgroup
+    /// grid launch (the spec the length rides on). Never changes a value; the
+    /// EMITTED SOURCE and the launch both differ, so it must never share a cache
+    /// entry with the static form. Default ON (unset admits; only explicit `"0"`
+    /// keeps the declared array). Feeds the `_dyn` suffix.
+    pub tiled_gemm_dynamic_tgmem: bool,
     /// `true` when `msl::grid2d_for` chose the flat 2D form
     /// ([`crate::msl::Grid2DForm::FlatThreadgroupIndex`]) because the grid is
     /// wider than the 32 bits a `uint gid [[thread_position_in_grid]]` kernel
@@ -905,6 +916,9 @@ mod gated {
         }
         if metal.tiled_gemm_mm_layout {
             identity.push_str("_mml");
+        }
+        if metal.tiled_gemm_dynamic_tgmem {
+            identity.push_str("_dyn");
         }
         if metal.wide_grid {
             identity.push_str("_wg");
