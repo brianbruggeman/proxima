@@ -1,4 +1,5 @@
 #![cfg(all(feature = "serve-prime", feature = "http-prime-deps"))]
+#![allow(clippy::expect_used)]
 
 #[path = "../examples/support/windows_port.rs"]
 mod support;
