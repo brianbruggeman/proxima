@@ -39,7 +39,7 @@ use proxima_tensor::spec::{
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
     ParallelDenseMoeConfig, CachedLayerRoots, ForwardProgram, LayerCacheRoots, RopePairing, RopeTableSel,
     ValueSourceKind, build_forward,
-    SLIDING_KV_SYMBOL, gemma4_descriptor_from_gguf, scheduled_two_range_cached_forward_program_with_experts,
+    SLIDING_KV_SYMBOL, sliding_pattern_descriptor_from_gguf, scheduled_two_range_cached_forward_program_with_experts,
     gqa_cached_forward_program_with_experts_and_layer_taps, gqa_descriptor_from_shape,
 };
 use sha2::{Digest, Sha256};
@@ -783,7 +783,7 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
     let parsed = parse_complete(&mapping).expect("the real gemma4 26B header parses");
 
     let profile = family_profile(GEMMA4_26B.architecture).expect("the gemma4 profile is embedded");
-    let descriptor = gemma4_descriptor_from_gguf(&parsed, false, &profile)
+    let descriptor = sliding_pattern_descriptor_from_gguf(&parsed, false, &profile)
         .expect("the production builder reads the real 26B header");
 
     assert_eq!(descriptor.block_count, 30);

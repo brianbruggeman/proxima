@@ -27,7 +27,7 @@ use super::*;
 /// [`TensorError::GgufPerLayerLengthMismatch`] when a per-layer array is not
 /// `block_count` long; [`TensorError::GgufVocabShapeMismatch`] when the
 /// embedding table does not divide by `embedding_length`.
-pub fn gemma4_descriptor_from_gguf(
+pub fn sliding_pattern_descriptor_from_gguf(
     parsed: &ParsedGguf,
     sliding_kv_ring: bool,
     profile: &FamilyProfile,

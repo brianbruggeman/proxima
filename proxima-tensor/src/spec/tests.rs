@@ -14494,7 +14494,7 @@ mod gemma4_synthetic_parity {
             score_scale: AttentionScoreScale::Unscaled,
             // `ValueSource::Shared` already carries a post-norm `V` (the
             // donor normalized it once) -- re-normalizing here would
-            // double-apply (mirrors `gemma4_descriptor_from_gguf`'s own doc in
+            // double-apply (mirrors `sliding_pattern_descriptor_from_gguf`'s own doc in
             // `proxima-model-interop`).
             value_norm: false,
         };

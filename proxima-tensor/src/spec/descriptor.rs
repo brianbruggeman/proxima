@@ -45,7 +45,7 @@ pub enum CacheMask {
 /// `logit_softcap`), one [`LayerSchedule`] per block, and which cache engine
 /// to build with. `layers` reuses [`LayerSchedule`] verbatim -- it already
 /// composes [`LayerKind`], [`LayerAttentionConfig`], and [`LayerFfnConfig`]
-/// (`proxima-model-interop::gemma4_descriptor_from_gguf` builds
+/// (`proxima-model-interop::sliding_pattern_descriptor_from_gguf` builds
 /// exactly this shape today, by hand, at bind time), so this struct does not
 /// re-mint a per-layer type. Genuinely new: no existing type bundles a
 /// model's full hyperparameter set with its per-layer schedule and a
@@ -279,7 +279,7 @@ impl conflaguration::Validate for ModelDescriptor {
 }
 
 /// The values a family's GGUF header and HF `config.json` do not carry, as
-/// DATA: the one record both [`gemma4_descriptor_from_gguf`] and
+/// DATA: the one record both [`sliding_pattern_descriptor_from_gguf`] and
 /// [`gqa_descriptor_from_shape`] read, so neither holds a per-family
 /// literal. `proxima-model-interop` parses one TOML file per family into this
 /// (`serde`, via the [`Deserialize`] derives on [`LayerFfnConfig`],

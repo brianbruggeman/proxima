@@ -36,7 +36,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
         .unwrap_or_else(|| panic!("no Op::Input leaf named {name:?} in program"))
 }
 
-/// Reproduces `gemma4_descriptor_from_gguf`
+/// Reproduces `sliding_pattern_descriptor_from_gguf`
 /// (`proxima-model-interop/src/sliding_pattern/bind.rs`, private to that crate)
 /// so this diagnostic can call `scheduled_forward_program_with_experts` directly
 /// -- pure graph construction, no weight bytes touched, so it is
@@ -46,7 +46,7 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 /// budget). This reproduces the exact same `(Vec<Op>, NodeId, MoeSites)`
 /// `LoadedModel::load` built internally, so its `NodeId`s are the same ones
 /// `LoadedModel::forward_node_values` evaluates against the real blob.
-fn gemma4_program(architecture: &proxima_model_interop::sliding_pattern::Gemma4Hparams) -> (Vec<Op>, NodeId) {
+fn gemma4_program(architecture: &proxima_model_interop::sliding_pattern::SlidingPatternHparams) -> (Vec<Op>, NodeId) {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
         combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
@@ -882,7 +882,7 @@ fn main() {
 
     // STAGE 4 -- THE KEY SLIDING CHECK: independently rotate the engine's OWN
     // q_normed/k_normed with the sliding rope formula
-    // (`gemma4_sliding_rope_table`, `gemma4/program.rs:27-44`, and its ONE
+    // (`sliding_rope_table`, `gemma4/program.rs:27-44`, and its ONE
     // call site, `sliding_rope_inputs`):
     // `theta = position * 1e4^(-2*pair/256)` for ALL 128 pairs (full
     // rotation, base 1e4, dim 256) -- NOT layer 5's base-1e6/full-512-dim
@@ -1143,7 +1143,7 @@ fn main() {
     // (`attention_forward.rs:627-632`: `scores_scaled = scores *
     // inv_sqrt_head_dim`, `inv_sqrt_head_dim = 1/sqrt(query_pre_attn_scalar)`,
     // `query_pre_attn_scalar` hard-set 256 for every gemma4 layer in
-    // `gemma4_descriptor_from_gguf`, `gemma4/bind.rs:502`.)
+    // `sliding_pattern_descriptor_from_gguf`, `gemma4/bind.rs:502`.)
     let mut factor_samples: Vec<f32> = Vec::new();
     for (&raw, &scaled) in engine_scores_raw5.iter().zip(engine_scores_scaled5.iter()) {
         if raw.abs() > 1e-3 {

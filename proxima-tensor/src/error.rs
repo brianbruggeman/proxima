@@ -422,7 +422,7 @@ pub enum TensorError {
     #[error("invalid gdn prefill scan shape: {reason}")]
     InvalidGdnPrefillShape { reason: &'static str },
 
-    /// [`crate::spec::gemma4_descriptor_from_gguf`] needed a metadata key or
+    /// [`crate::spec::sliding_pattern_descriptor_from_gguf`] needed a metadata key or
     /// tensor directory entry the header does not carry (or carries with an
     /// unsupported wire type); `name` is the key or tensor name.
     #[error("gguf header has no usable entry named {name:?}")]
