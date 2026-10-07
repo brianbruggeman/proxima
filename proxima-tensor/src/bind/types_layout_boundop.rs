@@ -274,10 +274,9 @@ pub enum BoundOpKind {
     /// [`crate::spec::ExpertGatingFunc::Softmax`], `scores` aliased to
     /// `logits`, no `expert_bias` -- this slice's only matched shape, the one
     /// `proxima-model-interop/src/recurrent_routed_interval/program.rs`'s own
-    /// `append_shared_expert_moe_ffn` builds). `n_tokens == 1` is this slice's only
-    /// supported shape (decode), the same restriction
-    /// [`BoundOpKind::GatedDeltaNet`] carries for the same reason: an
-    /// M-token prefill bind is out of scope until that slice lands.
+    /// `append_shared_expert_moe_ffn` builds). The scores are `[n_tokens,
+    /// expert_count]` and every output is one value per token, so a prefill
+    /// of `n_tokens` rows binds the same way a decode step of one row does.
     ///
     /// Each round picks the still-live expert with the MAXIMUM score
     /// (`mask = Equal(selection_scores, max_selection)`,
@@ -319,6 +318,13 @@ pub enum BoundOpKind {
         routes: Vec<NodeId>,
         weights: Vec<NodeId>,
         weight_total: NodeId,
+        /// `(routes, weights)` as `[n_tokens, top_k]` tensors, round `r` of
+        /// token `t` at `t * top_k + r`: the
+        /// [`crate::spec::MoeProjectionStrategy::Stacked`] strategy's route
+        /// stack and weight stack, written by the same dispatch instead of by
+        /// the `3 * top_k` small elementwise operations that build them.
+        /// `None` for a program that does not stack its rounds.
+        stacked: Option<(NodeId, NodeId)>,
     },
     /// The bound form of `spec::top_fraction_mask`: a 0/1 f32 mask over `rows` scores, 1.0 on the
     /// `keep_count` highest (lower index wins a tie). `operands` is `[scores, keep_count]`, plus
@@ -545,6 +551,41 @@ pub enum BoundOpKind {
 }
 
 impl BoundOpKind {
+    /// Every output a [`BoundOpKind::MoeTopK`] writes besides its primary
+    /// `routes[0]`, each node with the number of values it holds for
+    /// `token_count` tokens, in the order a backend binds them: the remaining
+    /// `routes`, every `weights` entry and `weight_total` (one value per
+    /// token each), then the `stacked` pair when present (`top_k` values per
+    /// token each, round `r` of token `t` at `t * top_k + r`). Empty for every
+    /// other kind. The CPU interpreter's extra-output sink and a device
+    /// backend's extra buffers both follow this one list, so neither names the
+    /// layout itself.
+    #[must_use]
+    pub fn moe_topk_extra_outputs(&self, token_count: usize) -> Vec<(NodeId, usize)> {
+        let BoundOpKind::MoeTopK {
+            top_k,
+            routes,
+            weights,
+            weight_total,
+            stacked,
+            ..
+        } = self
+        else {
+            return Vec::new();
+        };
+        let per_token = routes
+            .iter()
+            .skip(1)
+            .chain(weights.iter())
+            .chain(core::iter::once(weight_total))
+            .map(|node| (*node, token_count));
+        let per_slot = stacked
+            .iter()
+            .flat_map(|(stacked_routes, stacked_weights)| [*stacked_routes, *stacked_weights])
+            .map(|node| (node, token_count * *top_k as usize));
+        per_token.chain(per_slot).collect()
+    }
+
     /// This variant's own discriminant name, used by every backend renderer
     /// (`omega::cuda`, `omega::wgsl`, `omega::wgpu_driver`) to report
     /// `EmitError::RenderKindMismatch { expected, found }` — the one place a

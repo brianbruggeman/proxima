@@ -6557,56 +6557,79 @@ mod moe_routing_census {
 
     /// The stacked strategy tags its round routes `Float32` (they feed the
     /// float route stack, never a gather index directly), and the top-k fusion
-    /// must still anchor on them: it fires, reports the same dtype, and the
-    /// fused and unfused binds produce identical routes and MoE outputs.
+    /// must still anchor on them: it fires at decode width and at prefill
+    /// width, absorbs the route stack and the weight stack into the same
+    /// dispatch, and every route, stacked route, stacked weight and MoE output
+    /// is identical between the fused and unfused binds.
     #[cfg(feature = "moe-topk-fusion")]
     #[test]
-    fn stacked_strategy_routes_still_fuse_into_one_moe_topk_and_match_unfused() {
+    fn stacked_strategy_fuses_routing_and_both_stacks_into_one_moe_topk_for_any_token_count() {
         let built = build_routing_program_with(MoeProjectionStrategy::Stacked);
-        let shapes = shape::infer(&built.program, &[1]).expect("stacked program infers");
-        let mut outputs = alloc::vec![built.output];
-        outputs.extend(built.selected.iter().copied());
-        outputs.extend(built.weights.iter().copied());
-        let unfused = bind_plain(&built.program, &shapes, &outputs, NumericPolicy::bit_exact())
-            .expect("unfused stacked program binds");
-        let fused = bind_with_fusion(&built.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
-            .expect("fused stacked program binds");
-
-        let topk_dtype = fused
-            .iter()
-            .find(|bound| matches!(bound.kind, BoundOpKind::MoeTopK { .. }))
-            .map(|bound| bound.dtype);
-        assert_eq!(topk_dtype, Some(DType::Float32), "the matcher anchors on float routes");
-
         let mut lcg = crate::test_support::Lcg(11);
         let mut unit_values = |count: usize| -> Vec<f32> {
             (0..count).map(|_| lcg.next_unit() * 2.0 - 1.0).collect()
         };
         let stack_len = EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize;
-        let x_data = unit_values(EMBEDDING as usize);
         let gate_data = unit_values(stack_len);
         let up_data = unit_values(stack_len);
         let down_data = unit_values(stack_len);
-        for case in 0..20_usize {
-            let scores: Vec<f32> = unit_values(EXPERT_COUNT as usize)
-                .into_iter()
-                .map(|value| value * 10.0)
-                .collect();
-            let inputs = alloc::vec![
-                (built.x, x_data.clone()),
-                (built.logits, scores),
-                (built.expert_w_gate, gate_data.clone()),
-                (built.expert_w_up, up_data.clone()),
-                (built.expert_w_down, down_data.clone()),
-            ];
-            let unfused_buffers = run_resolved(built.program.len(), &unfused, inputs.clone());
-            let fused_buffers = run_resolved(built.program.len(), &fused, inputs);
-            for node in alloc::vec![built.output].iter().chain(built.selected.iter()) {
-                assert_eq!(
-                    unfused_buffers[node.0 as usize], fused_buffers[node.0 as usize],
-                    "case {case}: node {} must be identical fused and unfused",
-                    node.0
-                );
+
+        for token_count in [1_u64, 4, 33] {
+            let shapes = shape::infer(&built.program, &[token_count]).expect("stacked program infers");
+            let mut outputs = alloc::vec![built.output];
+            outputs.extend(built.selected.iter().copied());
+            let probe = bind_with_fusion(&built.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
+                .expect("fused stacked program binds");
+            let topk = probe
+                .iter()
+                .find(|bound| matches!(bound.kind, BoundOpKind::MoeTopK { .. }))
+                .unwrap_or_else(|| panic!("{token_count} tokens: the top-k fusion must fire"));
+            assert_eq!(topk.dtype, DType::Float32, "{token_count} tokens: float routes");
+            assert_eq!(topk.extents, alloc::vec![token_count], "{token_count} tokens: one route per token");
+            let BoundOpKind::MoeTopK { stacked: Some((stacked_routes, stacked_weights)), .. } = &topk.kind else {
+                panic!("{token_count} tokens: the route and weight stacks must be absorbed");
+            };
+            outputs.extend([*stacked_routes, *stacked_weights]);
+
+            let unfused = bind_plain(&built.program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("unfused stacked program binds");
+            let fused = bind_with_fusion(&built.program, &shapes, &outputs, true, NumericPolicy::bit_exact())
+                .expect("fused stacked program binds");
+            assert!(
+                unfused.len() - fused.len() >= 3 * EXPERT_USED_COUNT as usize,
+                "{token_count} tokens: fusing must remove the routing chain and both stacks, \
+                 removed {} of {}",
+                unfused.len() - fused.len(),
+                unfused.len()
+            );
+
+            let x_data = unit_values(token_count as usize * EMBEDDING as usize);
+            for case in 0..6_usize {
+                let scores: Vec<f32> = unit_values(token_count as usize * EXPERT_COUNT as usize)
+                    .into_iter()
+                    .map(|value| value * 10.0)
+                    .collect();
+                let inputs = alloc::vec![
+                    (built.x, x_data.clone()),
+                    (built.logits, scores),
+                    (built.expert_w_gate, gate_data.clone()),
+                    (built.expert_w_up, up_data.clone()),
+                    (built.expert_w_down, down_data.clone()),
+                ];
+                let unfused_buffers = run_resolved(built.program.len(), &unfused, inputs.clone());
+                let fused_buffers = run_resolved(built.program.len(), &fused, inputs);
+                for node in outputs.iter() {
+                    assert_eq!(
+                        unfused_buffers[node.0 as usize], fused_buffers[node.0 as usize],
+                        "{token_count} tokens, case {case}: node {} must be identical fused and unfused",
+                        node.0
+                    );
+                    assert!(
+                        fused_buffers[node.0 as usize].is_some(),
+                        "{token_count} tokens, case {case}: node {} was never written",
+                        node.0
+                    );
+                }
             }
         }
     }

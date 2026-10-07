@@ -749,17 +749,12 @@ pub fn build_static_arena_with_constants(
         // ROW 569: `MoeTopK`'s own `2 * top_k` extra outputs never appear as
         // any resolved node's `.node` either, for the same reason `state_out`
         // does not -- size every one of them here, one scalar slot apiece
-        // (this slice's `n_tokens == 1` decode-only shape).
-        if let BoundOpKind::MoeTopK {
-            routes,
-            weights,
-            weight_total,
-            ..
-        } = &computed.kind
+        // (`moe_topk_extra_outputs` names each one's length).
+        for (extra_node, length) in computed
+            .kind
+            .moe_topk_extra_outputs(computed.extents.iter().product::<u64>() as usize)
         {
-            for extra_node in moe_topk_extra_node_order(routes, weights, *weight_total) {
-                buffers[extra_node.0 as usize] = Some(vec![0.0f32; 1]);
-            }
+            buffers[extra_node.0 as usize] = Some(vec![0.0f32; length]);
         }
         // Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
         // sections): `cached_weight_sum`/`new_weight_sum` never appear as
@@ -1147,17 +1142,14 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
             if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
                 arena.buffers[state_out.0 as usize] = Some(gdn_state);
             }
-            if let BoundOpKind::MoeTopK {
-                routes,
-                weights,
-                weight_total,
-                ..
-            } = &computed.kind
-            {
-                for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
-                    .zip(moe_topk_extra.iter().copied())
-                {
-                    arena.buffers[extra_node.0 as usize] = Some(vec![value]);
+            if let Some(extras) = moe_topk_extras(
+                computed.node,
+                &computed.kind,
+                computed.extents.iter().product::<u64>() as usize,
+                &moe_topk_extra,
+            )? {
+                for (extra_node, values) in extras {
+                    arena.buffers[extra_node.0 as usize] = Some(values.to_vec());
                 }
             }
             // Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate

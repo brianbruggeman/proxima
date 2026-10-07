@@ -318,7 +318,7 @@ fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_
             &[per_route_root],
             workers,
         )
-        .expect("per-route graph evaluates");
+        .unwrap_or_else(|error| panic!("{case}: the per-route graph evaluates: {error:?}"));
         let (stacked_program, stacked_root) =
             build(MoeProjectionStrategy::Stacked, scaled, activation);
         let stacked = crate::cpu::evaluate_parallel(
@@ -328,7 +328,7 @@ fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_
             &[stacked_root],
             workers,
         )
-        .expect("stacked graph evaluates");
+        .unwrap_or_else(|error| panic!("{case}: the stacked graph evaluates: {error:?}"));
 
         let worst_relative_difference = stacked
             .root()
