@@ -8,7 +8,7 @@
 //! `warmup + runs` generations each, rounds interleaved A B A B so a drifting
 //! GPU clock or background load lands on every arm alike. llama-server and
 //! Ollama are driven over HTTP with `std::net`, temperature 0, the same prompt
-//! text, `n_predict`/`num_predict` 128.
+//! text, `n_predict`/`num_predict` 128 unless `--new-tokens N` says otherwise.
 //!
 //! Outlier rule, fixed before any run: a run is an outlier when its distance
 //! from its arm's pooled median exceeds `3 * 1.4826 * MAD` of that pool. Raw
@@ -38,7 +38,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -59,12 +59,13 @@ const LLAMA_ENGINE: &str = "llama-server";
 const OLLAMA_ENGINE: &str = "ollama";
 const LLAMA_PORT: u16 = 8097;
 const OLLAMA_PORT: u16 = 11434;
-const NEW_TOKENS: usize = 128;
+const DEFAULT_NEW_TOKENS: usize = 128;
 const CONTEXT_TOKENS: usize = 4096;
 const OUTLIER_MAD_SCALE: f64 = 3.0 * 1.4826;
 
 static SERVER_PID: AtomicU32 = AtomicU32::new(0);
 static IGNORE_OLLAMA: AtomicBool = AtomicBool::new(false);
+static NEW_TOKENS: AtomicUsize = AtomicUsize::new(DEFAULT_NEW_TOKENS);
 
 // the release profile aborts on panic, so Drop never runs and a failed request
 // would orphan the server; the hook kills the registered pid before the abort
@@ -74,6 +75,10 @@ fn install_server_cleanup_hook() {
         kill_registered_server();
         previous(info);
     }));
+}
+
+fn new_tokens() -> usize {
+    NEW_TOKENS.load(Ordering::SeqCst)
 }
 
 fn kill_registered_server() {
@@ -131,6 +136,7 @@ fn parse_arguments() -> Arguments {
             "--llama-server" => arguments.llama_server = Some(PathBuf::from(value())),
             "--dump-llama-ids" => arguments.dump_llama_ids = Some(PathBuf::from(value())),
             "--ollama" => arguments.ollama_tag = Some(value()),
+            "--new-tokens" => NEW_TOKENS.store(value().parse().expect("integer"), Ordering::SeqCst),
             "--ignore-ollama" => {
                 // a token-id correctness run, not a timing run, so an idle
                 // resident Ollama is not a GPU peer
@@ -515,7 +521,7 @@ fn run_proxima_process(
         .env("PROXIMA_DECODE_MODEL_GGUF", model)
         .env("PROXIMA_SPECULATIVE_TYPES", "none")
         .env("PROXIMA_PROMPT", prompt)
-        .env("PROXIMA_MAX_TOKENS", NEW_TOKENS.to_string())
+        .env("PROXIMA_MAX_TOKENS", new_tokens().to_string())
         .env("PROXIMA_RUNS", (arguments.runs + 1).to_string())
         .output()
         .expect("spawn decode_gbps_baseline");
@@ -757,7 +763,7 @@ fn dump_llama_record(directory: &PathBuf, case: &str, prompt: &str, ids_by_run: 
 }
 
 fn llama_request(prompt: &str) -> ServerRun {
-    let body = json!({"prompt": prompt, "n_predict": NEW_TOKENS, "temperature": 0, "top_k": 1, "seed": 1, "cache_prompt": false, "ignore_eos": true, "stream": true, "return_tokens": true}).to_string();
+    let body = json!({"prompt": prompt, "n_predict": new_tokens(), "temperature": 0, "top_k": 1, "seed": 1, "cache_prompt": false, "ignore_eos": true, "stream": true, "return_tokens": true}).to_string();
     let exchange = http_exchange(LLAMA_PORT, "POST", "/completion", &body, Duration::from_secs(120));
     let events = json_lines(&exchange.body, "data: ");
     let timings = events
@@ -1021,7 +1027,7 @@ fn ollama_unload(tag: &str) {
 
 // ttft is the client clock to the first streamed chunk minus the server's own load_duration, so a reload is not billed as prefill
 fn ollama_request(tag: &str, prompt: &str) -> ServerRun {
-    let body = json!({"model": tag, "prompt": prompt, "raw": true, "stream": true, "options": {"temperature": 0, "top_k": 1, "num_predict": NEW_TOKENS, "seed": 1, "num_ctx": CONTEXT_TOKENS}}).to_string();
+    let body = json!({"model": tag, "prompt": prompt, "raw": true, "stream": true, "options": {"temperature": 0, "top_k": 1, "num_predict": new_tokens(), "seed": 1, "num_ctx": CONTEXT_TOKENS}}).to_string();
     let exchange = http_exchange(OLLAMA_PORT, "POST", "/api/generate", &body, Duration::from_secs(300));
     let events = json_lines(&exchange.body, "");
     let last = events.last().expect("ollama stream had no events");
