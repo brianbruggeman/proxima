@@ -106,8 +106,16 @@ fn run() -> anyhow::Result<()> {
     const EXPERTS: usize = 32;
     const RUNS: usize = 21;
     const WARMUP_RUNS: usize = 5;
-    const TOKEN_COUNTS: [usize; 4] = [160, 512, 1000, 2048];
+    const DEFAULT_TOKEN_COUNTS: [usize; 4] = [160, 512, 1000, 2048];
     const SHAPES: [(&str, usize, usize); 2] = [("gate_up", 512, 1024), ("down", 1024, 512)];
+    const ROUTINGS: [&str; 5] = ["balanced", "uniform", "zipf", "single", "chain"];
+
+    fn env_list<T: std::str::FromStr>(name: &str, default: Vec<T>) -> Vec<T> {
+        match std::env::var(name) {
+            Ok(value) => value.split(',').filter_map(|item| item.trim().parse().ok()).collect(),
+            Err(_) => default,
+        }
+    }
 
     struct Shape {
         tokens: usize,
@@ -242,13 +250,16 @@ fn run() -> anyhow::Result<()> {
     }
 
     println!("probe=expert_grouped_gemm experts={EXPERTS} runs={RUNS} unit=us gpu_clock=GPUStartTime..GPUEndTime");
-    for (name, rows, k) in SHAPES {
-        for tokens in TOKEN_COUNTS {
+    let token_counts = env_list("PROBE_TOKEN_COUNTS", DEFAULT_TOKEN_COUNTS.to_vec());
+    let routings = env_list("PROBE_ROUTINGS", ROUTINGS.iter().map(|routing| (*routing).to_string()).collect());
+    let shape_names = env_list("PROBE_SHAPES", SHAPES.iter().map(|shape| shape.0.to_string()).collect());
+    for (name, rows, k) in SHAPES.into_iter().filter(|shape| shape_names.iter().any(|wanted| wanted == shape.0)) {
+        for &tokens in &token_counts {
             let shape = Shape { tokens, rows, k };
             let stack = expert_stack(&shape)?;
             let activation = unit_values(23, tokens * k);
             let (program, root) = program(&shape);
-            for routing in ["balanced", "uniform", "zipf", "single", "chain"] {
+            for routing in routings.iter().map(String::as_str) {
                 let route_values = route(routing, tokens);
                 let named = [
                     ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &stack }),
