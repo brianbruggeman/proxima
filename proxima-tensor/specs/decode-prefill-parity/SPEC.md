@@ -305,7 +305,8 @@ prefill and decode). "Derived" targets subtract the table's class gap from the m
 1. Granite prefill, gathered expert matmuls onto a grouped tiled GEMM (llama's MUL_MAT_ID shape). Removes
    up to 5759 ms of the 6395 ms prefill gap. Target: 624-op Q8_0 1024x512 class 5873.64 -> at most 120 ms
    (llama 114.41); granite prefill 6546 -> about 790 ms after this slice alone (derived), toward llama
-   151 / Ollama 177 once slices 3 and 4 land.
+   151 / Ollama 177 once slices 3 and 4 land. LANDED 2026-10-07, targets not reached: class 5872.94 ->
+   599.36 ms (llama 114.41), granite prefill 6458.99 -> 831.94 ms (llama 151.40). See "slice 1 result".
 2. E2B prefill Q4_0 tiled GEMM throughput. Removes up to 980 ms. Target: Q4_0 class 1479.66 -> at most 500 ms
    (llama 483.00, the 7.9 to 8.3 TFLOP/s rate, derived); E2B prefill 2540 -> about 1560 ms (derived). First step: capture GPU counters
    or toggle the kernel's staging and fragment types to find the kernel-level cause, since it is untraced.
@@ -328,3 +329,224 @@ prefill and decode). "Derived" targets subtract the table's class gap from the m
    most 250 dispatches). Target: `gpu_busy` 11.04 -> at most 10.0 ms (R4 parity), then toward 7. First step:
    re-attribute decode on an additive sequence basis for llama, since own-cb inflates both sides unevenly.
 7. Prefill plan reuse across requests: 23.0 ms (E2B) and 26.5 ms (granite) per request to 0.
+
+## slice 1 result (measured 2026-10-07)
+
+Slice 1 of the list above: expert-grouped tiled GEMM for gathered Q8_0 expert weights. Every number
+below is a measurement with its source; no row is a verdict. Evidence root: `evidence/slice1/` (this
+directory); raw logs that were too large to commit sit in
+`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice1/`.
+
+### what landed
+
+- `0bdb132b` `omega` feature `metal-grouped-gemm` (passthrough in `proxima-model-interop`): classification
+  in `omega/src/msl/emit_and_classify.rs` (`classify_tiled_gemm` now returns a `TiledGemmBlock` with
+  `gathered: Some(ExpertGather)` for a gathered Q8_0 weight), the kernel body in
+  `omega/src/msl/expert_grouped_gemm.rs`, sizing keys `[grouped_gemm] col_parts, scan_ahead` in
+  `omega/omega-runtime.toml`, 6 unit tests (`msl::tests::expert_grouped_gemm`) and 8 Metal tests against the
+  f32 CPU oracle (`omega/tests/expert_grouped_gemm_parity.rs`, includes a control that must fail and the
+  out-of-range-expert fault).
+- `37dc2980` `omega/examples/expert_grouped_gemm_speed_probe.rs`, the isolated GPU timer used for every
+  kernel row below. `9eaa9b63` `decode_arms --dump-llama-ids`. `8c629a45` test
+  `prefill_width_parity_with_llama_granite_moe` and its llama.cpp fixture (1000 prompt ids, 128 greedy ids).
+- `b3f5e7aa` joins the feature into omega's `metal` set, so a default `std,metal` build takes the path.
+- Scope: gathered, Q8_0, one token axis, route index constant off the token axis, activation unit-stride on
+  the reduce axis, `TILED_GEMM_MIN_TOKENS` (160) rows or more, `metal-tiled-gemm` on. Every other gathered op
+  (Q4_K/Q6_K experts, token axes `[sequence, selected]`, below 160 rows) still takes the cooperative gather
+  kernel, now rejected by a named `TiledGemmRejection` variant (`GatheredCodecNotAdmitted`,
+  `GatheredTokenAxesNotSingle`, `TokenExtentBelowMinimum`, ...) where it was `GatheredOperand` before.
+  Non-gathered Q8_0 (the 97 `NotQ4K` nodes of the slice 0 plan) is untouched: slice 4.
+
+### re-attribution on HEAD before any code
+
+`evidence/slice1/census_head_granite_prefill/` (`gemma4_decode_kernel_census`, `M0_CAPTURE_STEPS=0`,
+granite blob, `prompt1k.txt`, built from `f76b4a97`, whose omega, tensor and interop sources are identical to
+`c4810cb7`: empty `git diff f76b4a97..c4810cb7 -- omega proxima-tensor/src proxima-model-interop/src`).
+
+| quantity | slice 0 | HEAD re-measured | source |
+|---|---|---|---|
+| class `Q8_0 524288 (1024x512)`, 624 ops, own-cb | 5873.64 ms | 5872.94 ms | `rank.md` |
+| `matvec Q8_0` 673 dispatches, cold own-cb | 5992.96 ms | 6013.47 ms | `stdout.log` |
+| live step `gpu_busy_ms` | 6433.73 (run 1) | 6382.93 | `stdout.log` `m0 step` line |
+| 698-dispatch matmul family, one command buffer, 7 runs | n/a | mean 6009.90, min 6004.08, CoV 0.04% | `stdout.log` family lines |
+
+Mechanism removed, traced in `census_groups.csv`: each of the 576 gathered expert dispatches was the generic
+cooperative gather kernel, `grid_threads=131072000` at threadgroup width 256 or 128, one threadgroup per
+output element (1000 tokens x 512 rows), re-reading the expert row once per token: 9.67 ms (gate), 10.08 ms
+(up with its silu epilogue), 9.77 ms (down), 15.62 ms (last round of down with the 25-step combine epilogue),
+cold own-cb per dispatch. `classify_tiled_gemm` rejected all of them with `GatheredOperand`
+(`timeline/granite_tiled_gemm_classification_first_plan.log`, slice 0).
+
+### before and after
+
+Interleaved final run, `evidence/slice1/interleaved/decode_arms.out`: 3 processes x (1 warm-up + 7 timed) =
+21 timed runs per arm, arms rotated per process, Ollama quit (api refused, 0 processes), 1000-token granite
+prompt and 971-token E2B prompt (`prompt1k.txt`), 128 new tokens. Arms: `base` =
+`decode_gbps_baseline_f76b4a97` (sha256 `9c2dca1a...3619`), `tip` = the final tree, `tipcopy` = a byte copy of
+`tip` (sha256 `e3db0a4b...f21`, both), llama-server `f1ea20621`. Box: load average 4.27 before and 3.75 after;
+`suggestd` 90.6% CPU and a background daemon in `~/.local/bin` 89.8% CPU before, `mds_stores` 108.3% and
+the same daemon 78.9% after (`box_load_before.txt`, `box_load_after.txt`); no cargo, GPU or Ollama process
+of mine ran during it.
+
+| arm | prefill ms (median, CoV, range) | TTFT ms | decode ms/token (median, CoV, range) | peak RSS (median of 3) | peak footprint | peak GPU bytes |
+|---|---|---|---|---|---|---|
+| granite base | 6458.99, 0.16%, 6454.0-6495.0 | 6459.0 | 15.004, 1.50%, 14.923-16.035 | 2.470 GB | 611.8 MB | 3,315,433,472 |
+| granite tip | 831.94, 0.94%, 825.0-859.0 | 832.0 | 14.954, 0.85%, 14.548-15.093 | 2.501 GB | 597.7 MB | 3,315,433,472 |
+| granite tipcopy (control) | 830.05, 1.60%, 827.0-884.0 | 830.0 | 14.933, 1.03%, 14.544-15.132 | 2.500 GB | 605.8 MB | 3,315,433,472 |
+| granite llama-server | 151.40, 5.35%, 151.2-186.4 | 153.25 | 5.255, 5.43%, 5.116-6.337 | 1.764 GB | 279.7 MB | n/a |
+| E2B base | 2402.95, 0.18% | 2403.0 | 12.203, 3.06% | 3.922 GB | 717.4 MB | 5,608,554,496 |
+| E2B tip | 2401.05, 0.40% | 2401.0 | 12.180, 4.91% | 3.902 GB | 714.3 MB | 5,608,554,496 |
+| E2B tipcopy (control) | 2399.06, 0.27% | 2399.0 | 12.230, 3.28% | 3.903 GB | 716.0 MB | 5,608,554,496 |
+| E2B llama-server | 573.53, 7.99% | 576.9 | 9.002, 4.82% | 3.746 GB | 216.2 MB | n/a |
+
+Bound lines (`bound metric=... arm=tip vs=base`, limit = max(2% of the base median, twin gap), printed by the
+driver): granite prefill delta -5626.50 ms within=true; TTFT -5626.00 within=true; decode -0.044 ms/token,
+limit 0.300, within=true; RSS +30.8 MB, limit 49.4 MB, within=true; footprint -14.1 MB within=true; GPU bytes
+delta 0. E2B (code path unchanged by this slice): prefill -1.93 ms, decode -0.040 ms/token, within=true on
+all. Twin gap `tipcopy` vs `tip`: granite prefill -1.50 ms (limit 16.61), E2B prefill -2.98 ms. Against
+llama-server, granite `tip` is `within=false` on every metric: prefill +679.1 ms, TTFT +677.8 ms,
+ms/token +9.72, RSS +736 MB, footprint +318 MB (the AC4 prefill line of the spec: not reached).
+
+Per-kernel, same census method as slice 0 (`evidence/slice1/census_tip_granite_prefill/`, final tree,
+`rank.md`; cold own-cb of one representative dispatch per kernel group, `census_groups.csv`):
+
+| quantity | HEAD | tip | llama |
+|---|---|---|---|
+| class `Q8_0 524288 (1024x512)`, 624 ops, own-cb | 5872.94 ms | 599.36 ms | 114.41 ms (237 ops) |
+| gate, per dispatch (192) | 9.670 ms, 131,072,000 threads | 1.035 ms, 2048 threads, depth 32 | n/a |
+| up + silu epilogue (192) | 10.082 ms | 1.086 ms | n/a |
+| down (168) | 9.770 ms | 0.591 ms | n/a |
+| down + 25-step combine epilogue (24) | 15.622 ms | 1.196 ms | n/a |
+| live step `gpu_busy_ms` | 6382.93 | 753.97 | n/a |
+| 698-dispatch matmul family, one command buffer, 7 runs | 6009.90 mean, min 6004.08 | 747.92 mean, min 700.62, CoV 2.68% | n/a |
+
+The class row is the number this slice named: 5872.94 -> 599.36 ms (-89.8%), against a target of at most
+120 ms; the target is not met (5.24x llama). Granite prefill 6458.99 -> 831.94 ms (-87.1%), against the
+derived 790 ms; not met (+42 ms), and 5.49x llama.
+
+### the three checks
+
+- correctness: omega suite 581 passed, 16 skipped (567 before plus 8 integration and 6 unit tests of this
+  slice); `proxima-tensor` 779 passed, 8 skipped; `proxima-model-interop` slice-gate 709 passed, 124 skipped
+  (708 before plus the new test); clippy `-D warnings` exit 0 for tensor, interop and omega with and without
+  `metal-grouped-gemm`; alloc and no-default checks exit 0; omega `cargo check` exit 0 at `alloc`,
+  `metal-core`, `cuda`, `metal-core,metal-tiled-gemm`, `metal-core,metal-grouped-gemm`, `std,metal`, 0
+  warnings (`evidence/slice1/gate/*.tail`). The Metal tests compare the kernel with `proxima_tensor::cpu` on
+  the same packed bytes: worst row error 8.1e-5 to 1.2e-4 of the row norm (half-precision weights and
+  activations); a result compared against an oracle routed to other experts exceeds the 2e-3 tolerance (the
+  control, asserted).
+- semantic: ids equal to llama.cpp `f1ea20621` on 24 of 24 runs per arm for base, tip and tipcopy, on both
+  models (`ids arm=... equal=true` lines, 128 ids, `common_prefix=128`); the owner gate sets on the final
+  tree: `llama_parity_` 7 passed, `generic_verify_llama_parity_` 5 passed, and the new
+  `prefill_width_parity_with_llama_granite_moe` 1 passed (13 run, `gate/7_ac5_llama_parity.tail`; the spec's
+  AC5 says 6 for `llama_parity_`, the file defines 7). The existing llama fixtures carry prompts of 4 to 72
+  tokens, below the 160 rows the tiled paths need, so none of them reaches this kernel; the new fixture is
+  the 1000-token prompt with llama's own prompt ids. The new test takes 9.45 s with the feature off and
+  3.86 s on (`evidence/slice1/parity/prefill_width_parity_grouped_off.log`, `..._on.log`): the 5.6 s
+  difference is the evidence the path ran, the test itself asserts only the ids.
+- performance: the table above. Decode ms/token, RSS, footprint and GPU bytes sit inside the base bounds;
+  E2B is unchanged.
+
+### incumbent, home-turf arm
+
+llama.cpp `f1ea20621` `test-backend-ops perf -o MUL_MAT_ID -b MTL0` (built out of tree from
+`git archive f1ea20621`, perf cases added for these shapes: `evidence/slice1/llama_mul_mat_id/`), `q8_0`
+experts, 32 experts, 8 used, uniformly random routing per token. design-favors: incumbent: one op covers all
+8 top-k slots, so tiles fill (250 tokens per expert at 1000 tokens) and one dispatch amortizes its ramp; the
+per-route program issues 8 dispatches of one slot each. Ours: `expert_grouped_gemm_speed_probe`, uniform
+routing, `col_parts` 2, 3 process runs (`evidence/slice1/probe/final_p2_run{1,2,3}.out`), per-slot median
+times 8x to compare with the llama op.
+
+| tokens | shape | llama 8-slot op | ours, 1 slot (3 runs) | ours x8 / llama |
+|---|---|---|---|---|
+| 160 | gate/up 1024->512 | 313.54 us | 330.8 to 513.0 us (CoV 14.6 to 16.7%) | 8.4 to 13.1 |
+| 160 | down 512->1024 | 292.94 us | 199.1 to 201.0 us | 5.4 to 5.5 |
+| 512 | gate/up | 752.74 us | 248.1, 251.4, 402.4 us | 2.6 to 4.3 |
+| 512 | down | 752.91 us | 246.6 to 248.1 us | 2.6 |
+| 1000 | gate/up | 1377.09 us (6.09 TFLOP/s) | 351.2 to 356.9 us (2.94 to 2.99 TFLOP/s useful) | 2.04 to 2.07 |
+| 1000 | down | 1401.99 us (5.98 TFLOP/s) | 355.0 to 357.9 us | 2.03 to 2.04 |
+| 2048 | gate/up | 2684.83 us | 595.5 to 601.5 us | 1.77 to 1.79 |
+| 2048 | down | 2889.23 us | 604.4 to 611.7 us | 1.67 to 1.69 |
+
+Frequency-weighted: the granite prefill is one 1000-token request per prompt; 576 gathered dispatches per
+request, all at the 1000-token row of this table, so that row is the hot path, and there the kernel is 2.0x
+llama's time for the same work.
+
+### discipline log, one row per tweak
+
+Probe rows are `expert_grouped_gemm_speed_probe` medians of 21 dispatches after 5 untimed ones (the first
+arms ran without the warm-up), gate/up shape, 1000 tokens, one process unless stated; the kernel versions
+other than the final one are not in the tree, their outputs are kept in `evidence/slice1/probe/` as the
+record. Probe arms named `zipf` in v1 to v4 drew their routing from `[-1, 1]` instead of `[0, 1)`, which sent at
+least half the tokens to expert 0 (`zipf (defective)`); fixed from v4c on. The `balanced` arm shows a
+bimodal 15 to 68% CoV in every version (GPU clock state suspected, not traced), so it is not used for any
+delta. Host loadout for all of them: the box described above (`suggestd`, a background daemon, `mds_stores` running), no
+other bench of mine active.
+
+| row | change | measurement | delta vs prior | CoV, runs | status |
+|---|---|---|---|---|---|
+| 0 | HEAD, generic cooperative gather kernel | granite prefill 6458.99 ms (interleaved), class 5872.94 ms | baseline | 0.16%, 21 | |
+| 1 | v1: one threadgroup per (row tile, token tile, expert), each scanning the route, grid z = expert, Q8_0 tile decode, token-scattered write-back | prefill 6467.0 -> 1509.0 ms (2 runs, `sweeps/v1_vs_base_2runs`) | -76.7% | 0.07%, 2 | kept |
+| 2 | ablation of v1 (`probe/ablate_*.out`, `PROXIMA_GROUPED_ABLATE`, zipf (defective)): full 1386.6 us (same run); scan only 322.2; scan + barriers + write-back 412.1; without weight staging 918.0; without activation staging 1165.6; without MMA 1160.8 | the scan alone is 23% of the dispatch | diagnostic | 0.09 to 2.4%, 1 each | informs row 3 |
+| 3 | v2: token tiles of an expert walked inside one threadgroup (`col_parts` 4), scan once instead of per tile | zipf (defective) 1391.8 -> 803.7 us (v2 `col_parts` 4); `col_parts` 1 made `single` 899.5 -> 3486.3 us | -42% on zipf (defective) | 1.7%, 1 | kept |
+| 4 | v3: route entries of `scan_ahead` 4 chunks loaded back to back, upper token half skipped when a tile has <= 16 tokens | zipf (defective) `col_parts` 4: 803.7 -> 803.3 us; gate/up `col_parts` 8: 822.5 -> 783.0 | no signal at 4, -4.8% at 8 | 2.9% and 3.2%, 1 | kept (sized key, ggml's own skip) |
+| 5 | half-precision activation tile on the padded layout | zipf (defective) 807.7 -> 882.5 us (down 774.0 -> 770.4) | +9.3% on gate/up, none on down | 2.9% and 2.8%, 1 | no signal; half activations returned in row 7 with ggml's layout |
+| 6 | weight levels loaded as aligned words instead of `packed_char4` | zipf (defective) 807.2 -> 828.0 us | +2.6% | 3.1% and 2.2%, 1 | no signal, ROLLED BACK |
+| 7 | v4: ggml-metal's 8x8-block tile layout, half activations, token-major coalesced write-back | gate/up zipf (defective) `col_parts` 8: 783.0 -> 732.5 us; down 848.2 -> 771.7; prefill (`col_parts` 4) 1005.0 ms | -6.4% and -9.0% | 2.4% and 1.1%, 1; prefill 2 runs | kept |
+| 8 | diagnostic: weight address held fixed across K (`weight_hot`, `probe/v2ab_weight_hot.out`) | 802 -> 496 us against 417 without any weight staging | about 300 us of the 385 us weight-staging cost is the K-streaming access, about 80 us decode | 2.5%, 1 | informs row 9 |
+| 9 | v5: global loads and decode issued into registers before the barrier that waits for the previous MMA, per-tile weight and activation pointers advanced by 34 bytes and 32 floats per step | `col_parts` 4 uniform: gate/up 699.9 -> 402.4 us, down 666.9 -> 423.1; prefill 1005.0 -> 848.0 ms | -42.5% and -36.6% kernel; -15.6% prefill | 3.5% and 2.4%; 2.3% and 1.4%; prefill 0.72%, 3 | kept |
+| 10 | v6: next step's loads issued before the MMA | uniform 402.4 -> 416.1 us, down 423.1 -> 459.9 | +3.4% and +8.7% | 2.5% and 1.1%, 1 | ROLLED BACK |
+| 11 | `col_parts` sweep, whole granite prefill (`sweeps/v4_parts_*`, `sweeps/v5_parts_*`) | v4: 2/4/8/16/32 = 1051.0/1005.0/1030.0/1110.0/1243.5 ms; v5: 1/2/4/8 = 864.0/828.0/848.0/869.9 ms | v5 `col_parts` 2 is -2.4% vs 4 | 0.25 to 1.8%, 2 or 3 each | `col_parts` = 2 |
+| 12 | diagnostic: threadgroup memory padded by 0/4/8/16 KB (`probe/tgpad_*.out`) | uniform 712.8/745.1/807.3/1013.6 us | +4.5%, +13.3%, +42.2% | 3.0 to 3.8%, 1 | occupancy depends on threadgroup memory; not tuned further |
+| 13 | join into `metal` | final interleaved run, rows 0 and the table above | 6458.99 -> 831.94 ms | 0.16% and 0.94%, 21 each | landed |
+
+### not met, not traced, not done
+
+- The class target (at most 120 ms) and the derived granite prefill target (about 790 ms) are not met:
+  599.36 ms and 831.94 ms. Granite prefill is 5.49x llama (151.40 ms) and its decode is untouched (14.954
+  against llama 5.255 ms/token).
+- Why the per-slot kernel is 2.04x llama's time at 1000 tokens: not decomposed. Two facts that bear on it, both
+  stated as derived or measured: at 31 tokens per expert per slot it runs about 46 partial tiles where llama
+  runs about 32 full ones for the same tokens (derived: expected `ceil(n / 32)` over 32 experts at uniform
+  routing, not counted on the device), and each of the 576 dispatches ramps and drains on its own
+  (measured: 351 to 357 us per dispatch in the probe). Fusing the 8 slots into one dispatch is not done in
+  this slice: every production builder emits `MoeProjectionStrategy::PerRoute`; `GroupedGateUp` exists in
+  `gqa_layer_routed.rs` but no production caller selects it, and its `[sequence, selected]` token axes are
+  rejected by this kernel (`GatheredTokenAxesNotSingle`). Spec slice 5's "expert dispatch batching" is the
+  same structural change for decode.
+- The census times one representative dispatch per kernel group (layer 0, round 0). The live step
+  (`gpu_busy_ms` 753.97) and the family replay (747.92) are the aggregates; the group rows above are not
+  additive to them.
+- The probe's `balanced` arm bimodality (15 to 68% CoV) and the high CoV of the 160-token rows (14.6 to
+  16.7%) are unexplained.
+- `ServingConfig::default().ubatch_size` is 32 (`omega`-side `TILED_GEMM_MIN_TOKENS` is 160), so a prefill
+  run through the default serving config is chunked below the threshold and never reaches this kernel or the
+  dense tiled one; only `ubatch_size: 0` (what `decode_gbps_baseline` sets) or a value of at least 160 does.
+  Not changed here.
+- The threshold itself (160) was not re-measured for the gathered kernel: at 160 tokens the kernel takes
+  199 to 513 us per slot against about 1.55 ms for the generic path scaled linearly from its 9.67 ms at
+  1000 tokens (derived, not measured).
+- Q4_K, Q6_K and Q4_0 experts (qwen35moe, gemma4 26B) were not run through this kernel and are not admitted.
+
+### re-prove
+
+```
+cargo nextest run -p omega --features metal --cargo-profile gate                      # 581 tests
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate  # 709
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate \
+  -E 'test(llama_parity_) or test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama_granite_moe)'  # 13
+cargo run --release -p omega --example expert_grouped_gemm_speed_probe --features metal,instrument
+decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<f76b4a97 binary> \
+  --arm tip=<final binary> --arm tipcopy=<copy of tip> --llama-server <llama-server f1ea20621> \
+  --case granite_moe=<granite blob> --case gemma4_e2b=<E2B blob>
+gemma4_decode_kernel_census with M0_CAPTURE_STEPS=0 M0_MODEL_GGUF=<granite blob> PROXIMA_PROMPT_FILE=prompt1k.txt
+attribution_rank rank --census DIR --llama evidence/slice0/llama_ops/granite_ops.tsv --ntok 512,488 --requests 3 --floor-us 4.0
+test-backend-ops perf -o MUL_MAT_ID -b MTL0   # llama.cpp f1ea20621 with evidence/slice1/llama_mul_mat_id/perf_cases.patch
+```
+
+Missing for CI, as in slice 0: no job runs the example tests or a GPU bench on Apple hardware, so the
+interleaved numbers, the census and the probe have no saved baseline to diff against; the Metal tests and the
+gates above are the part that re-proves from the tree. The llama perf cases are
+`evidence/slice1/llama_mul_mat_id/perf_cases.patch`, applied to `tests/test-backend-ops.cpp` of a
+`git archive f1ea20621` tree built with `-DLLAMA_BUILD_TESTS=ON -DGGML_METAL=ON` (Release); run with
+`-p "type_a=q8_0,type_b=f32,n_mats=32,n_used=8"`.
