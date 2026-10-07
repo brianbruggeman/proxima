@@ -176,6 +176,13 @@ pub enum BoundOpKind {
     ///   unaffected — this bound is query-independent, unlike the
     ///   single-range case's causal band.
     ///
+    /// `cached_lower_inclusive` is the least `key position - query position`
+    /// either range admits (`1 - window` for a sliding layer, `i64::MIN` for a
+    /// global one), so a new key at row `j` is visible to query row `i` only
+    /// when `cached_lower_inclusive <= j - i <= new_upper_inclusive`. A
+    /// window that is at least `new_key_rows` makes the lower bound vacuous
+    /// on the new range; a prefill past the window is where it cuts.
+    ///
     /// `rotary_dim` is the RoPE-rotated width per head (`head_dim` when
     /// every column rotates — every dense decoder today); when
     /// `rotary_dim < head_dim`, `operands` carries THREE more trailing
