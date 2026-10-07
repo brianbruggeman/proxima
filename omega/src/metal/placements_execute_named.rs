@@ -1396,6 +1396,7 @@ pub(super) fn execute_plan_with_placements_inner(
             #[cfg(feature = "instrument")]
             let placement_resolve_started = read_ticks();
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
+            bind_arena_extras(plan, position, &mut device_buffers);
             // Redesign §4c: the ONE call site that resolves a scratch
             // buffer for `encode_op`'s two-dispatch `CachedAttention` form
             // -- every other `encode_op` caller passes `None` and rejects a
