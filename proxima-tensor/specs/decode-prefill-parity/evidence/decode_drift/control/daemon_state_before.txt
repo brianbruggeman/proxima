@@ -1,0 +1,2 @@
+  PID STAT ARGS
+17029 R    a background daemon in ~/.local/bin

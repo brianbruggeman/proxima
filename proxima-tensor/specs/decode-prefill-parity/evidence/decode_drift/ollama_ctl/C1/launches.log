@@ -1,0 +1,6 @@
+2026-10-07T13:01:31Z LAUNCH decode_arms proxima arm=a13_f76b4a97 process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+2026-10-07T13:02:06Z EXIT decode_arms proxima arm=a13_f76b4a97 process=0 status=exit status: 0
+2026-10-07T13:02:06Z LAUNCH decode_arms proxima arm=a13_f76b4a97 process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+2026-10-07T13:02:41Z EXIT decode_arms proxima arm=a13_f76b4a97 process=1 status=exit status: 0
+2026-10-07T13:02:41Z LAUNCH decode_arms proxima arm=a13_f76b4a97 process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+2026-10-07T13:03:16Z EXIT decode_arms proxima arm=a13_f76b4a97 process=2 status=exit status: 0

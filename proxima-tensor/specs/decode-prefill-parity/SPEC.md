@@ -1353,3 +1353,235 @@ interleaved numbers have no saved baseline to diff against; the byte-identity te
 tier builds, and the E2B prefill-width fixture are the part that re-proves from the tree on a Mac with the E2B blob. The
 ladder variants re-prove only by applying the diffs in `ladder/variants/` and running the ladder against a llama.cpp
 checkout.
+
+## decode drift (measured 2026-10-07)
+
+Owner question: the E2B decode numbers recorded on main moved (11.97, 12.2, 13.35, 12.21 ms/token); is that a code
+regression or measurement contamination. Everything below is a measurement or a number derived from measurements, with
+its source. No row is a verdict. Evidence root: `evidence/decode_drift/` (this directory). Raw per-process child
+stderr (`launches.raw.*.err`, one per arm per process) sits in
+`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/` next to the binaries (`bin/`) and the log dir
+for every run; the committed `decode_arms.out` files carry every `raw` line.
+
+### what ran
+
+- Host: Apple M1 Max, macOS 24.6, AC power. HEAD `8ef12e94` release `std,metal` `decode_gbps_baseline` built for this
+  task (`build_head.log`); its sha256 `4bb13cb5...eac6` equals the `3a933038` binary and the `2e2933e6` rebuild
+  recorded in `evidence/slice2fix/interleaved/rebuild_at_2e2933e6.sha256`. `a16` (`3a933038`), `a17` (HEAD) and `a18`
+  (byte copy of HEAD) are therefore three copies of one executable.
+- Driver: `decode_arms` with the new `--new-tokens` flag (`4ea3fa38`, the only code change of this task), arms
+  rotated per process, 1 warm-up + 7 timed runs per process per arm, Ollama not running for any run
+  except the discarded condition `ollama_ctl/O1` (see below); the checks
+  (`curl -s -m 1 http://127.0.0.1:11434/api/ps` refused, exit 7, and no Ollama process, before and after:
+  `run1/box_load_before.txt`, `final_box.txt`, `run5_probe/box_load_after.txt`). One llama-server `f1ea20621` arm per
+  full run, as that run's anchor.
+- Box: load average 4.47 before run 1, 4.30 after. Top CPU before: the `~/.local/bin` daemon
+  (a background daemon in `~/.local/bin`, pid 17029, started 2026-09-30 17:56; its full path and arguments are in the local copy of `run1/box_load_before.txt` under `regression_hunt/`, the committed copy redacts the name)
+  74.2%, WindowServer 52.0%, iTerm2 10.6%, claude 5.4% (`run1/box_load_before.txt`). The daemon was running for every
+  run except the two paused conditions below. `pmset -g therm`: no thermal, performance or CPU power warning recorded
+  (before, `run1/box_load_before.txt`; after, `final_box.txt`). A `ps` sample every 60 s is in `run1/box_samples.txt`
+  (77 samples, 11:49Z to 13:06Z, covers runs 1, 2, 3, the control conditions and `ollama_ctl`), `run4_long_subset/box_samples.txt`,
+  `run5_probe/box_samples.txt`.
+- Prompts: `prompt1k.txt` (971 tokens, 128 new tokens, sha256 in `prompt1k.sha256`; the file is
+  `evidence/slice0/ac1/prompt1k.txt`); short chat prompts `prompt_short_hippo.txt` (26 tokens; the default prompt of
+  `decode_gbps_baseline`) and `prompt_short_france.txt` (22 tokens), 64 new tokens, gemma4 chat template
+  `<|turn>user\n...<turn|>\n<|turn>model\n`; both generated the full 64 tokens (`tokens_generated=64`, `stopped_by_eos=false`).
+- Binary to commit mapping. Named by file or build log: `a00` 9f0647da, `a01` 152467a9, `a13` f76b4a97, `a14`
+  (sha256 equals `base_s2`, the head before slice 2), `a15` slice 2 tip, `a16` 3a933038, `a19` the 9f0647da probe build.
+  Inferred (no build log names the commit; matched by the binary's mtime against commit times): `a02`..`a12`, the
+  `mapping` column below. `a03`, `a04`, `a07`, `a08` were built from uncommitted trees ahead of the named commit.
+
+### the table: long prompt, 971 tokens, 128 new tokens (`run1/`)
+
+Run 1: 19 proxima arms plus llama-server, 3 processes x 7 timed runs = 21 per arm, 2026-10-07 11:52Z to 12:24Z.
+Median is over all 21 runs, MAD over the runs left after the driver's fixed outlier rule, CoV over all 21
+(`run1/decode_arms.out` `summary` lines; `run1/table.md` is this table). Prefill is the headline column.
+
+| arm | commit | mapping | prefill ms: median / MAD / CoV% | decode ms/token: median / MAD / CoV% |
+|---|---|---|---|---|
+| a00_0b_9f0647da | 9f0647da (row 0b) | named | 2533.0 / 3.0 / 0.23 | 12.245 / 0.138 / 1.86 |
+| a01_0c_152467a9 | 152467a9 (row 0c) | named | 2538.0 / 2.0 / 0.21 | 12.288 / 0.185 / 1.77 |
+| a02_slice5 | ecdd1bdd | inferred from mtime 10-05 11:45 | 2537.0 / 2.9 / 0.16 | 12.216 / 0.086 / 1.33 |
+| a03_slice6 | tree before ce94f2d0 | inferred from mtime 10-05 15:20 | 2539.1 / 3.9 / 0.21 | 12.181 / 0.040 / 1.01 |
+| a04_slice7 | tree before 53064bff | inferred from mtime 10-05 21:04 | 2537.0 / 3.0 / 0.17 | 12.147 / 0.037 / 0.71 |
+| a05_slice8 | 3c42090d | inferred from mtime 10-06 04:25 | 2539.1 / 3.9 / 0.16 | 12.189 / 0.030 / 1.13 |
+| a06_slice9 | bc686691 | inferred from mtime 10-06 09:48 | 2540.0 / 2.9 / 0.17 | 12.166 / 0.088 / 1.10 |
+| a07_slice10b | tree before 5576a197 | inferred from mtime 10-06 13:15 | 2538.1 / 2.0 / 0.19 | 12.174 / 0.054 / 1.12 |
+| a08_slice10b_fix | tree before 51df2ee7 | inferred from mtime 10-06 14:00 | 2540.0 / 4.0 / 0.17 | 12.200 / 0.098 / 1.29 |
+| a09_slice10c | 74bdbb87 | inferred from mtime 10-06 15:29 | 2541.0 / 4.0 / 0.18 | 12.141 / 0.114 / 1.46 |
+| a10_slice11 | 44f48761 / f2aea8bc | inferred from mtime 10-06 16:50 | 2540.0 / 4.1 / 0.24 | 12.178 / 0.051 / 1.16 |
+| a11_slice12 | e9f94b2e | inferred from mtime 10-06 18:02 | 2542.0 / 1.5 / 0.27 | 12.227 / 0.087 / 2.59 |
+| a12_eor | 42f375e2 | inferred from mtime 10-06 20:12 | 2540.0 / 4.0 / 0.20 | 12.119 / 0.031 / 0.95 |
+| a13_f76b4a97 | f76b4a97 | named | 2543.0 / 3.9 / 0.20 | 12.118 / 0.061 / 0.57 |
+| a14_tip_s1 | slice 1 tip, sha equals base_s2 | named, sha-identical to base_s2 | 2543.0 / 4.0 / 0.20 | 12.156 / 0.023 / 0.53 |
+| a15_s2_mml | slice 2 tip 6e8729fe | named s2_mml | 1619.0 / 3.0 / 0.28 | 12.182 / 0.141 / 1.82 |
+| a16_s2fix_3a933038 | 3a933038 | named | 1438.1 / 2.9 / 0.25 | 12.151 / 0.066 / 1.64 |
+| a17_head_8ef12e94 | 8ef12e94 | built this task | 1439.0 / 3.0 / 0.32 | 12.153 / 0.035 / 0.81 |
+| a18_head_copy | 8ef12e94 byte copy | control | 1438.1 / 2.0 / 0.26 | 12.122 / 0.030 / 1.36 |
+| llama-server | reference | llama-server f1ea20621 | 571.6 / 2.4 / 2.23 | 9.154 / 0.061 / 1.32 |
+
+Control (HEAD against its byte copy, against 0b): prefill 1439.0 against 1438.1 (difference 0.96 ms), against 0b 2533.0
+(difference 1094.0); decode 12.153 against 12.122 (difference 0.031), against 0b 12.245 (difference 0.092). In run 1
+the HEAD-to-copy difference is smaller than the HEAD-to-0b difference on both metrics.
+
+### what the table shows, hurt first
+
+- Decode: arm medians span 12.119 (`a12`) to 12.288 (`a01`), 0.169 ms, in run 1. No adjacent pair differs by
+  more than 0.11 ms in either direction (largest rise `a10` to `a11` +0.049, `a00` to `a01` +0.043; largest fall `a11` to
+  `a12` -0.108). That span is smaller
+  than the 0.399 ms HEAD-to-copy difference in run 4 (below), so run 1 contains no step the harness can resolve.
+- Prefill: 2533.0 (0b) to 2543.0 (`a13`, `a14`), +10.0 ms (+0.39%), a slow creep across `a01`..`a14` with no neighbour
+  step above +5.1 ms (`a00` to `a01`); the HEAD-to-copy control is 0.96 ms. This is not bisected. It is inside the driver's
+  own bound (median <= reference + max(MAD, 2% of reference), 2% of 2533 is 50.7 ms). In run 5 (below), the clean
+  processes read 0b 2528.0, 0b probe 2530.0, 0c 2529.5 (`tools/metric_median`, 14 runs each), so the `a00` to `a01` step does not reproduce there.
+- Prefill after 0b falls at slice 2 (`a15` 1619.0, `a16` 1438.1, HEAD 1439.0), 43% below 0b; llama-server 571.6.
+- Decode against llama-server: HEAD 12.153 against 9.154, +2.999 ms; prefill 1439.0 against 571.6.
+
+### short chat prompts (`run2_short_hippo/`, `run3_short_france/`)
+
+Run 2: the same 19 arms plus the 0b probe build `a19` plus llama-server, 26-token prompt, 64 new tokens, 21 timed runs
+per arm. Run 3: 6 arms, 22-token prompt, 64 new tokens, 4 processes = 28 timed runs per arm, no llama arm.
+
+Run 2 (the CoV values above 5% in this table trace to process 1, see the noise section; `run2_short_hippo/table.md` has the commit column):
+
+| arm | prefill ms: median / MAD / CoV% | decode ms/token: median / MAD / CoV% |
+|---|---|---|
+| a00_0b_9f0647da | 127.0 / 2.0 / 11.10 | 11.708 / 0.179 / 9.11 |
+| a01_0c_152467a9 | 125.0 / 2.0 / 4.96 | 11.614 / 0.138 / 2.80 |
+| a02_slice5 | 127.0 / 5.0 / 7.59 | 11.829 / 0.142 / 4.40 |
+| a03_slice6 | 130.0 / 7.0 / 7.65 | 11.599 / 0.130 / 3.85 |
+| a04_slice7 | 129.0 / 6.0 / 5.47 | 11.701 / 0.114 / 2.90 |
+| a05_slice8 | 127.0 / 5.0 / 5.47 | 11.785 / 0.157 / 3.86 |
+| a06_slice9 | 127.0 / 4.0 / 5.06 | 11.679 / 0.087 / 3.18 |
+| a07_slice10b | 127.0 / 5.0 / 5.21 | 11.751 / 0.133 / 3.15 |
+| a08_slice10b_fix | 132.0 / 8.0 / 7.53 | 11.715 / 0.106 / 4.95 |
+| a09_slice10c | 123.0 / 0.0 / 6.98 | 11.627 / 0.059 / 2.94 |
+| a10_slice11 | 124.0 / 1.0 / 6.34 | 11.620 / 0.013 / 1.73 |
+| a11_slice12 | 128.0 / 6.0 / 8.92 | 11.612 / 0.038 / 2.35 |
+| a12_eor | 123.0 / 1.0 / 4.94 | 11.617 / 0.064 / 2.79 |
+| a13_f76b4a97 | 123.0 / 0.0 / 5.92 | 11.626 / 0.042 / 2.05 |
+| a14_tip_s1 | 127.0 / 4.0 / 5.04 | 11.641 / 0.062 / 1.65 |
+| a15_s2_mml | 126.0 / 1.0 / 8.85 | 11.558 / 0.041 / 8.59 |
+| a16_s2fix_3a933038 | 129.0 / 5.0 / 6.58 | 11.573 / 0.048 / 1.16 |
+| a17_head_8ef12e94 | 129.0 / 5.0 / 12.05 | 11.597 / 0.242 / 15.38 |
+| a18_head_copy | 132.0 / 5.5 / 8.20 | 11.806 / 0.127 / 20.80 |
+| a19_0b_probe_9f0647da | 134.0 / 10.0 / 7.64 | 11.863 / 0.347 / 4.19 |
+| llama-server | 57.8 / 0.4 / 9.18 | 9.080 / 0.065 / 13.97 |
+
+Run 3 (`run3_short_france/table.md`):
+
+| arm | prefill ms: median / MAD / CoV% | decode ms/token: median / MAD / CoV% |
+|---|---|---|
+| a00_0b_9f0647da | 117.0 / 12.0 / 10.17 | 11.867 / 0.318 / 4.10 |
+| a01_0c_152467a9 | 108.5 / 1.0 / 10.97 | 11.868 / 0.281 / 4.17 |
+| a12_eor | 120.5 / 10.0 / 9.59 | 12.540 / 0.592 / 5.11 |
+| a16_s2fix_3a933038 | 107.0 / 0.0 / 11.52 | 11.668 / 0.060 / 5.07 |
+| a17_head_8ef12e94 | 106.0 / 0.0 / 8.67 | 11.620 / 0.033 / 3.81 |
+| a18_head_copy | 120.0 / 14.0 / 11.60 | 11.627 / 0.022 / 3.50 |
+
+- Short-prompt decode: arm medians 11.558 (`a15`) to 11.863 (`a19`) in run 2, 11.620 (HEAD) to 12.540 (`a12`) in run 3.
+  Long-prompt decode over the same arms is 12.119 to 12.288. For the byte-identical HEAD: 12.153 (long, run 1), 11.597
+  (short hippo, run 2), 11.620 (short France, run 3). The long-minus-short gap for HEAD is 0.556 and 0.533 ms.
+  No short-prompt timed run is below 11.121 (`a15`, run 2).
+- Short-prompt prefill: the minimum per arm is 120.99 to 124.01 ms in run 2 (hippo) and 103.97 to
+  105.02 in run 3, with no trend across the arms; llama-server 57.75 median in run 2. The medians in the table are higher and noisy (CoV 5 to 12%) because
+  of the bursts below.
+- Cold first request of each process (`run_index=0`, the warm-up the table excludes), TTFT of HEAD and its copy: 220-229 ms
+  for the 22-token prompt (8 values) and 239-254 ms for the 26-token prompt (6 values), against timed-run medians of 106.0
+  and 120.0 ms (France, HEAD and copy) and 129.0 and 132.0 ms (hippo). The owner's recorded short-prompt TTFT of 207-491 ms was not produced by any run here; the
+  nearest figures are these cold first requests. A repo search (`grep` over `proxima-tensor`, `omega`,
+  `proxima-model-interop`, `docs` for those figures and for 10-11 ms/token) found no record of a 10-11 ms decode.
+
+### control: does the measurement see a difference
+
+Rule: if HEAD against its copy differs by more than HEAD against 0b, the measurement cannot see the regression.
+
+| run | HEAD to copy | HEAD to 0b | decode metric | result |
+|---|---|---|---|---|
+| run 1, long, 19 arms (`run1/`) | 0.031 | 0.092 | median ms/token | copy difference smaller |
+| run 4, long, 4 arms (`run4_long_subset/`) | 0.399 (HEAD 12.580, copy 12.181) | 0.360 (0b 12.220) | median ms/token | copy difference larger |
+| run 2, short hippo, 20 arms | 0.209 | 0.111 | median ms/token | copy difference larger |
+| run 3, short France, 6 arms | 0.007 | 0.247 | median ms/token | copy difference smaller |
+| control U1 (daemon running) | 0.163 | 0.308 | median ms/token | copy difference smaller |
+| control P1 (daemon paused) | 0.012 | 0.002 | median ms/token | copy difference larger (both below 0.02) |
+| control P2 (daemon paused) | 0.025 | 0.128 | median ms/token | copy difference smaller |
+| control U2 (daemon running) | 0.524 | 0.592 | median ms/token | copy difference smaller |
+
+Prefill passes the control in every long run (copy difference 0.96 ms in run 1, 2.0 ms in run 4, against differences of
+1000+ ms to 0b). For decode the largest byte-identical difference observed is 0.524 ms (U2), so differences below about
+0.5 ms in a decode median are not resolvable by these runs.
+
+### noise source
+
+- Per-process state. For one binary the per-process medians (7 timed runs each) differ more than the within-process
+  MAD. Run 4, HEAD: 12.687, 12.506, 12.406; its byte copy: 12.137, 12.258, 12.088. Run 1, `a16`: 12.462, 12.126, 12.151
+  (`tools/per_process`). Run 5, 0b: 12.105, 12.130, 13.519, 12.938. Within a process the values are bimodal, about 11.5
+  to 11.7 and 12.2 to 13.1 on the short prompt.
+- The background daemon does not account for it. Pausing pid 17029 (`kill -STOP`, resumed by `kill -CONT` from a drop
+  guard, `tools/pause_run.rs`; `pause_run: SIGSTOP`, `SIGCONT` and the process state before and after are in
+  `control/P1/decode_arms.err` and `control/P2/decode_arms.err`; the daemon was in state R before and after, and R in
+  `final_box.txt`). Short-prompt timed runs at or above 12.0 ms, out of 28 per arm
+  (0b, eor, HEAD, copy): U1 daemon running 7, 10, 13, 11; P1 paused 12, 10, 7, 6; P2 paused 18, 12, 24, 21; U2 running
+  4, 6, 16, 9 (`control/*/decode_arms.out`). The paused and running ranges overlap (paused 6 to 24, running 4 to 13 and
+  4 to 16); the highest fractions of the four conditions are in paused P2.
+- A system burst contaminated run 2, process 1. `run1/box_samples.txt:604` (2026-10-07T12:32:51Z): load average 46.43,
+  `contactsd` 161.9% CPU, `contactsdonationagent` 32.9%, `AddressBookManager` 29.7%, Firefox media helper 22.6%, while `a00`
+  ran (its process-1 runs: 12.016, 13.721, 12.906, 14.761, 15.343, 12.796, 13.205, 13.110). The previous sample, 12:31:51Z
+  (`run1/box_samples.txt`), has load average 4.85. HEAD and its copy ran 12:32:06Z to 12:32:29Z in the same process,
+  between the two samples; their process-1 timed runs span 11.263 to 17.043 (HEAD) and 11.806 to 20.943 (copy)
+  (`run2_short_hippo/decode_arms.out`, `process=1`). The driver flags 4 of HEAD's 5 outliers and all 4 of the copy's
+  outliers in process 1; HEAD CoV 15.4% and copy CoV 20.8% in run 2.
+- External compiles contaminated run 5, processes 2 and 3: `cargo doc --workspace` (pid 69181) and
+  `cargo test -p proxima ...` (pid 69849) were running from about 13:21Z (`run5_probe/box_samples.txt`, the 13:23:18Z
+  sample lists `rustc` at 20% each; `ps` at 13:24Z); prefill in those processes rose to 2800-3415 ms
+  (`run5_probe/decode_arms.out`). The 0b, probe and 0c comparison above uses processes 0 and 1 only.
+- Mechanism of the per-process slow state: not traced. The instrument that would show it (GPU and CPU clocks via
+  `powermetrics`) needs sudo (`sudo -n true` asks for a password), `ioreg` `AGXAccelerator` `PerformanceStatistics`
+  carries utilization and memory but no clock. No thermal warning was recorded.
+
+### the same binary, different launch contexts (long prompt, decode ms/token median)
+
+`a13` (`f76b4a97`, sha256 `9c2dca1a...`), 21 timed runs unless noted:
+
+| context | median | per-process medians | source |
+|---|---|---|---|
+| 19-arm rotation, run 1 | 12.118 | 12.111, 12.044, 12.149 | `run1/` |
+| 4-arm rotation, run 4 | 12.188 | 12.113, 12.179, 12.200 | `run4_long_subset/` |
+| alone, 3 processes back to back, C1 | 12.449 | 12.507, 12.464, 12.446 | `ollama_ctl/C1/` |
+| alone, C2 | 12.467 | 12.423, 12.458, 12.954 | `ollama_ctl/C2/` |
+| each process: arm then llama-server, N1 | 12.500 | 12.217, 12.554, 12.806 | `ollama_ctl/N1/` |
+| each process: arm then llama-server, N2 | 12.563 | 13.166, 12.588, 12.215 (process 0 began 12:53:35Z, the minute of the Ollama stop below) | `ollama_ctl/N2/` |
+| slice 0 AC1: arm, llama-server, Ollama (Ollama started and quit by the driver each process) | 13.348 (range 12.477-14.403) | p0 12.48-13.93, p1 13.19-13.79, p2 13.21-14.40 (ranges) | `evidence/slice0/ac1/decode_arms.out`, text above |
+
+The row 0b recorded on 2026-10-05 (11.9735, 14 runs, `evidence/speed_baseline/decode_arms.out` in the architecture-as-data
+spec) came from the same executable as `a00` (sha256 `07e6cc6c...`); `a00` reads 12.245 (run 1) and 12.220 (run 4) today.
+The AC1 process 0 ran first in its run, before any Ollama request of that run, and read 12.48-13.93, so Ollama preceding
+the proxima process does not by itself explain AC1's 13.348. Whether Ollama running in the rotation raises decode was
+not tested: the condition O1 (driver `--ollama`) opened the Ollama app at 12:52:04Z and 12:53:02Z, the main thread
+stopped it at about 12:53:35Z, the driver panicked at `decode_arms.rs:1034`, and O1 is discarded (`ollama_ctl/O1/`). Ollama
+was not started again and is stopped. The cause of the lower reading inside a rotation than alone is untraced.
+
+### findings
+
+- Decode between 0b and HEAD: no adjacent arms differ by more than 0.11 ms in run 1; the same-binary spread across
+  launch contexts today is 0.445 ms (12.118 to 12.563) and the byte-identical spread is up to 0.524 ms. No arm is
+  worse than the noise by these controls, so there is no first-worse arm, no bisect, and no per-kernel census of two
+  commits was taken (`gemma4_decode_kernel_census_*` binaries exist in `parity_perf/bin/`; none was run).
+- Prefill: +10.0 ms (+0.39%) from 0b to f76b4a97 in run 1, not reproduced between 0b and 0c in run 5; a 1094 ms fall
+  at slice 2 and slice 2 fix.
+- Unmeasured: the cause of the per-process slow state; Ollama in the rotation; whether `a02`..`a12` are built from the
+  commits in the mapping column; any commit before 9f0647da (no binary exists, none was built).
+
+### re-prove
+
+```
+decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm <label>=<binary> ... --llama-server <llama-server f1ea20621>    # run 1 (19 arms), run 4 (4 arms)
+decode_arms --prompt-file prompt_short_hippo.txt --new-tokens 64 --processes 3 --runs 7 --arm ... --llama-server ...                 # run 2
+decode_arms --prompt-file prompt_short_france.txt --new-tokens 64 --processes 4 --runs 7 --arm ...                                   # run 3
+pause_run 17029 decode_arms --prompt-file prompt_short_hippo.txt --new-tokens 64 --processes 4 --runs 7 --arm ...                    # P1, P2
+drift_table <decode_arms.out>      # the tables; summary_table, per_process give the cells quoted above
+sha256: binaries.sha256 lists the 20 binaries; `shasum -a 256 -c` against the copies in regression_hunt/bin/
+```
+
+Missing for CI, as in slices 0 to 2: no job runs a GPU bench on Apple hardware, so none of these numbers has a saved
+baseline to diff against; the numbers re-prove only on a Mac with the E2B blob and the 20 binaries.

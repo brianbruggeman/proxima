@@ -1,0 +1,10 @@
+2026-10-07T12:51:12Z LAUNCH decode_arms proxima arm=a13_f76b4a97 process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a13_f76b4a97
+2026-10-07T12:51:47Z EXIT decode_arms proxima arm=a13_f76b4a97 process=0 status=exit status: 0
+2026-10-07T12:51:47Z LAUNCH decode_arms llama-server arm=llama-server process=0 port=8097 requests=8
+2026-10-07T12:52:04Z EXIT decode_arms llama-server arm=llama-server process=0
+2026-10-07T12:52:04Z LAUNCH decode_arms ollama arm=ollama tag=gemma4:e2b-it-qat process=0 requests=8
+2026-10-07T12:52:39Z ollama quit requested
+2026-10-07T12:52:39Z EXIT decode_arms ollama arm=ollama process=0
+2026-10-07T12:52:44Z LAUNCH decode_arms llama-server arm=llama-server process=1 port=8097 requests=8
+2026-10-07T12:53:02Z EXIT decode_arms llama-server arm=llama-server process=1
+2026-10-07T12:53:02Z LAUNCH decode_arms ollama arm=ollama tag=gemma4:e2b-it-qat process=1 requests=8

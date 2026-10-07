@@ -1,0 +1,15 @@
+Wed Oct  7 13:24:10 UTC 2026
+ 8:24  up 6 days, 18:28, 5 users, load averages: 8.69 5.81 5.41
+  PID  %CPU STAT COMM
+69847  81.5 R    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+17029  72.7 R    a background daemon in ~/.local/bin
+69880  31.6 U    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+69878  30.8 R    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+69881  30.6 R    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+ollama_api_curl_rc=7
+ollama_ps_grep_rc=1
+  PID STAT ARGS
+17029 R    a background daemon in ~/.local/bin
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

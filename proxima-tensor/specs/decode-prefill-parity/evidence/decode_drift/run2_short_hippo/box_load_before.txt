@@ -1,0 +1,8 @@
+Wed Oct  7 12:26:34 UTC 2026
+ 7:26  up 6 days, 17:30, 5 users, load averages: 5.97 5.92 5.93
+  PID  %CPU STAT COMM
+ 1418  98.5 R    /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  792  54.5 R    /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd
+17029  52.2 R    a background daemon in ~/.local/bin
+  476  40.8 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+31461  13.8 S+   claude

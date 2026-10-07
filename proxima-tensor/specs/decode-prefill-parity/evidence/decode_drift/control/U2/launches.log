@@ -1,0 +1,32 @@
+2026-10-07T12:45:14Z LAUNCH decode_arms proxima arm=a00_0b_9f0647da process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a00_0b_9f0647da
+2026-10-07T12:45:23Z EXIT decode_arms proxima arm=a00_0b_9f0647da process=0 status=exit status: 0
+2026-10-07T12:45:23Z LAUNCH decode_arms proxima arm=a12_eor process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a12_eor
+2026-10-07T12:45:32Z EXIT decode_arms proxima arm=a12_eor process=0 status=exit status: 0
+2026-10-07T12:45:32Z LAUNCH decode_arms proxima arm=a17_head_8ef12e94 process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a17_head_8ef12e94
+2026-10-07T12:45:42Z EXIT decode_arms proxima arm=a17_head_8ef12e94 process=0 status=exit status: 0
+2026-10-07T12:45:42Z LAUNCH decode_arms proxima arm=a18_head_copy process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a18_head_copy
+2026-10-07T12:45:51Z EXIT decode_arms proxima arm=a18_head_copy process=0 status=exit status: 0
+2026-10-07T12:45:51Z LAUNCH decode_arms proxima arm=a12_eor process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a12_eor
+2026-10-07T12:46:00Z EXIT decode_arms proxima arm=a12_eor process=1 status=exit status: 0
+2026-10-07T12:46:00Z LAUNCH decode_arms proxima arm=a17_head_8ef12e94 process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a17_head_8ef12e94
+2026-10-07T12:46:10Z EXIT decode_arms proxima arm=a17_head_8ef12e94 process=1 status=exit status: 0
+2026-10-07T12:46:10Z LAUNCH decode_arms proxima arm=a18_head_copy process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a18_head_copy
+2026-10-07T12:46:19Z EXIT decode_arms proxima arm=a18_head_copy process=1 status=exit status: 0
+2026-10-07T12:46:19Z LAUNCH decode_arms proxima arm=a00_0b_9f0647da process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a00_0b_9f0647da
+2026-10-07T12:46:28Z EXIT decode_arms proxima arm=a00_0b_9f0647da process=1 status=exit status: 0
+2026-10-07T12:46:28Z LAUNCH decode_arms proxima arm=a17_head_8ef12e94 process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a17_head_8ef12e94
+2026-10-07T12:46:37Z EXIT decode_arms proxima arm=a17_head_8ef12e94 process=2 status=exit status: 0
+2026-10-07T12:46:37Z LAUNCH decode_arms proxima arm=a18_head_copy process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a18_head_copy
+2026-10-07T12:46:46Z EXIT decode_arms proxima arm=a18_head_copy process=2 status=exit status: 0
+2026-10-07T12:46:46Z LAUNCH decode_arms proxima arm=a00_0b_9f0647da process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a00_0b_9f0647da
+2026-10-07T12:46:55Z EXIT decode_arms proxima arm=a00_0b_9f0647da process=2 status=exit status: 0
+2026-10-07T12:46:55Z LAUNCH decode_arms proxima arm=a12_eor process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a12_eor
+2026-10-07T12:47:04Z EXIT decode_arms proxima arm=a12_eor process=2 status=exit status: 0
+2026-10-07T12:47:04Z LAUNCH decode_arms proxima arm=a18_head_copy process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a18_head_copy
+2026-10-07T12:47:13Z EXIT decode_arms proxima arm=a18_head_copy process=3 status=exit status: 0
+2026-10-07T12:47:13Z LAUNCH decode_arms proxima arm=a00_0b_9f0647da process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a00_0b_9f0647da
+2026-10-07T12:47:22Z EXIT decode_arms proxima arm=a00_0b_9f0647da process=3 status=exit status: 0
+2026-10-07T12:47:22Z LAUNCH decode_arms proxima arm=a12_eor process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a12_eor
+2026-10-07T12:47:31Z EXIT decode_arms proxima arm=a12_eor process=3 status=exit status: 0
+2026-10-07T12:47:31Z LAUNCH decode_arms proxima arm=a17_head_8ef12e94 process=3 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/regression_hunt/bin/a17_head_8ef12e94
+2026-10-07T12:47:40Z EXIT decode_arms proxima arm=a17_head_8ef12e94 process=3 status=exit status: 0

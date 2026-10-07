@@ -1,0 +1,9 @@
+Wed Oct  7 13:15:33 UTC 2026
+ 8:15  up 6 days, 18:19, 5 users, load averages: 5.07 5.55 5.48
+  PID  %CPU STAT COMM
+17029  66.5 R    a background daemon in ~/.local/bin
+  476  45.3 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+67270  29.4 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+  495  13.2 Ss   /usr/sbin/coreaudiod
+31461  13.0 S+   claude
+ollama_api_curl_rc=7

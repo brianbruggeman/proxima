@@ -1,0 +1,105 @@
+raw arm=a13_f76b4a97 process=0 run=0 ms_per_token=13.5810
+raw arm=a13_f76b4a97 process=0 run=1 ms_per_token=12.1660
+raw arm=a13_f76b4a97 process=0 run=2 ms_per_token=13.1690
+raw arm=a13_f76b4a97 process=0 run=3 ms_per_token=14.7580
+raw arm=a13_f76b4a97 process=0 run=4 ms_per_token=13.6770
+raw arm=a13_f76b4a97 process=0 run=5 ms_per_token=12.5070
+raw arm=a13_f76b4a97 process=0 run=6 ms_per_token=12.4470
+raw arm=a13_f76b4a97 process=0 run=7 ms_per_token=12.3780
+raw arm=a13_f76b4a97 process=1 run=0 ms_per_token=12.8350
+raw arm=a13_f76b4a97 process=1 run=1 ms_per_token=12.5270
+raw arm=a13_f76b4a97 process=1 run=2 ms_per_token=12.4190
+raw arm=a13_f76b4a97 process=1 run=3 ms_per_token=12.4250
+raw arm=a13_f76b4a97 process=1 run=4 ms_per_token=12.4640
+raw arm=a13_f76b4a97 process=1 run=5 ms_per_token=12.4710
+raw arm=a13_f76b4a97 process=1 run=6 ms_per_token=12.3770
+raw arm=a13_f76b4a97 process=1 run=7 ms_per_token=12.5300
+raw arm=a13_f76b4a97 process=2 run=0 ms_per_token=12.7760
+raw arm=a13_f76b4a97 process=2 run=1 ms_per_token=12.3770
+raw arm=a13_f76b4a97 process=2 run=2 ms_per_token=12.4460
+raw arm=a13_f76b4a97 process=2 run=3 ms_per_token=12.4230
+raw arm=a13_f76b4a97 process=2 run=4 ms_per_token=12.5450
+raw arm=a13_f76b4a97 process=2 run=5 ms_per_token=12.4800
+raw arm=a13_f76b4a97 process=2 run=6 ms_per_token=12.3930
+raw arm=a13_f76b4a97 process=2 run=7 ms_per_token=12.4490
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=1 value=12.1660 outlier=true
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=2 value=13.1690 outlier=true
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=3 value=14.7580 outlier=true
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=4 value=13.6770 outlier=true
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=5 value=12.5070 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=6 value=12.4470 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=0 run=7 value=12.3780 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=1 value=12.5270 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=2 value=12.4190 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=3 value=12.4250 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=4 value=12.4640 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=5 value=12.4710 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=6 value=12.3770 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=1 run=7 value=12.5300 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=1 value=12.3770 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=2 value=12.4460 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=3 value=12.4230 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=4 value=12.5450 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=5 value=12.4800 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=6 value=12.3930 outlier=false
+arm=a13_f76b4a97 metric=ms_per_token process=2 run=7 value=12.4490 outlier=false
+summary arm=a13_f76b4a97 metric=ms_per_token n_all=21 median_all=12.4490 cov_all_pct=4.48 min_all=12.1660 max_all=14.7580 | n_kept=17 median_kept=12.4470 mad_kept=0.0330 cov_kept_pct=0.42 min_kept=12.3770 max_kept=12.5450
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=1 value=2540.0480 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=2 value=2532.9940 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=3 value=2536.9450 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=4 value=2530.9470 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=5 value=2549.0070 outlier=true
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=6 value=2535.9880 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=0 run=7 value=2529.9440 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=1 value=2532.0250 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=2 value=2538.0020 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=3 value=2534.9640 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=4 value=2543.9410 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=5 value=2533.0230 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=6 value=2530.0300 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=1 run=7 value=2523.9860 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=1 value=2529.9790 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=2 value=2532.0390 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=3 value=2536.0010 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=4 value=2534.0070 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=5 value=2535.0520 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=6 value=2532.0460 outlier=false
+arm=a13_f76b4a97 metric=prefill_ms process=2 run=7 value=2537.0410 outlier=false
+summary arm=a13_f76b4a97 metric=prefill_ms n_all=21 median_all=2534.0070 cov_all_pct=0.20 min_all=2523.9860 max_all=2549.0070 | n_kept=20 median_kept=2533.5150 mad_kept=2.5270 cov_kept_pct=0.17 min_kept=2523.9860 max_kept=2543.9410
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=1 value=2540.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=2 value=2533.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=3 value=2537.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=4 value=2531.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=5 value=2549.0000 outlier=true
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=6 value=2536.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=0 run=7 value=2530.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=1 value=2532.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=2 value=2538.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=3 value=2535.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=4 value=2544.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=5 value=2533.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=6 value=2530.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=1 run=7 value=2524.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=1 value=2530.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=2 value=2532.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=3 value=2536.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=4 value=2534.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=5 value=2535.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=6 value=2532.0000 outlier=false
+arm=a13_f76b4a97 metric=ttft_ms process=2 run=7 value=2537.0000 outlier=false
+summary arm=a13_f76b4a97 metric=ttft_ms n_all=21 median_all=2534.0000 cov_all_pct=0.20 min_all=2524.0000 max_all=2549.0000 | n_kept=20 median_kept=2533.5000 mad_kept=2.5000 cov_kept_pct=0.17 min_kept=2524.0000 max_kept=2544.0000
+memory arm=a13_f76b4a97 metric=peak_rss_bytes process=0 value=3989684224
+memory arm=a13_f76b4a97 metric=peak_rss_bytes process=1 value=3854794752
+memory arm=a13_f76b4a97 metric=peak_rss_bytes process=2 value=3914514432
+summary arm=a13_f76b4a97 metric=peak_rss_bytes n=3 median=3914514432 max=3989684224
+memory arm=a13_f76b4a97 metric=peak_footprint_bytes process=0 value=728214848
+memory arm=a13_f76b4a97 metric=peak_footprint_bytes process=1 value=705670144
+memory arm=a13_f76b4a97 metric=peak_footprint_bytes process=2 value=714533760
+summary arm=a13_f76b4a97 metric=peak_footprint_bytes n=3 median=714533760 max=728214848
+memory arm=a13_f76b4a97 metric=peak_gpu_bytes process=0 value=5608554496
+memory arm=a13_f76b4a97 metric=peak_gpu_bytes process=1 value=5608554496
+memory arm=a13_f76b4a97 metric=peak_gpu_bytes process=2 value=5608554496
+summary arm=a13_f76b4a97 metric=peak_gpu_bytes n=3 median=5608554496 max=5608554496
+extra arm=a13_f76b4a97 process=0 peers_present_at_exit=[]
+extra arm=a13_f76b4a97 process=1 peers_present_at_exit=[]
+extra arm=a13_f76b4a97 process=2 peers_present_at_exit=[]

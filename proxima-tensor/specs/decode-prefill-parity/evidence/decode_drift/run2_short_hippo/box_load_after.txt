@@ -1,0 +1,8 @@
+Wed Oct  7 12:36:42 UTC 2026
+ 7:36  up 6 days, 17:40, 5 users, load averages: 5.36 10.90 9.01
+  PID  %CPU STAT COMM
+17029  75.6 R    a background daemon in ~/.local/bin
+  476  24.7 Ss   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+47004  15.1 S    /Applications/Firefox.app/Contents/MacOS/media-plugin-helper.app/Contents/MacOS/Firefox Media Plugin Helper
+31461  12.5 S+   claude
+  716  12.4 S    /Applications/iTerm.app/Contents/MacOS/iTerm2

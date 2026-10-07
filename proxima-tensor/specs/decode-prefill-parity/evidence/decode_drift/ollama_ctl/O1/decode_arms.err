@@ -1,0 +1,4 @@
+
+thread 'main' (68728398) panicked at proxima-model-interop/examples/decode_arms.rs:1034:5:
+ollama stream ended without done: {"created_at":"2026-10-07T12:53:35.801271Z","done":false,"model":"gemma4:e2b-it-qat","response":" project"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

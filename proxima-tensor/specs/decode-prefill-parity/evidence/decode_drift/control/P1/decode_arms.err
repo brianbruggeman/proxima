@@ -1,0 +1,7 @@
+pause_run: before PID STAT ARGS
+17029 R    a background daemon in ~/.local/bin
+pause_run: SIGSTOP pid=17029
+pause_run: child status=Ok(ExitStatus(unix_wait_status(0)))
+pause_run: SIGCONT pid=17029 status=Ok(ExitStatus(unix_wait_status(0)))
+pause_run: after PID STAT ARGS
+17029 R    a background daemon in ~/.local/bin
