@@ -56,6 +56,7 @@ const PEER_NAMES: [&str; 7] = [
     "gguf_generate",
     "speculative_bench",
 ];
+const COMPILE_ONLY_FLAG: &str = " --no-run";
 const PEER_WAIT: Duration = Duration::from_secs(3600);
 const LLAMA_ENGINE: &str = "llama-server";
 const LLAMA_PORT: u16 = 8097;
@@ -229,15 +230,17 @@ fn log_line(arguments: &Arguments, text: &str) {
 
 fn running_peers() -> Vec<String> {
     let output = Command::new("ps")
-        .args(["-axo", "comm"])
+        .args(["-axo", "command"])
         .output()
         .expect("ps runs");
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| {
-            PEER_NAMES.iter().any(|name| line.contains(name))
+        .filter(|line| !line.contains(COMPILE_ONLY_FLAG))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|program| {
+            PEER_NAMES.iter().any(|name| program.contains(name))
                 || (!IGNORE_OLLAMA.load(Ordering::SeqCst)
-                    && line.to_ascii_lowercase().contains("ollama"))
+                    && program.to_ascii_lowercase().contains("ollama"))
         })
         .map(str::to_string)
         .collect()
