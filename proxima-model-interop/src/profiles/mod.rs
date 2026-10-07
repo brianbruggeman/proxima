@@ -127,7 +127,7 @@ mod tests {
         let table = [
             ("llama", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
             ("mixtral", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
-            ("granitemoe", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
+            ("granitemoe", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 8),
             ("qwen2", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
             ("qwen3", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
             ("lfm2moe", ScheduleSource::Uniform, KvCacheShape::Uniform, FfnRouting::Dense, 1),
