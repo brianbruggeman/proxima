@@ -28,6 +28,52 @@
 //!   --features metal,metal-grouped-gemm,instrument
 //! ```
 
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-grouped-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use anyhow::Context;
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-grouped-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, quantize};
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-grouped-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use proxima_primitives::Codec;
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-grouped-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use proxima_tensor::map::{self, AxisIndex, AxisTerm};
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-grouped-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use proxima_tensor::test_support::Lcg;
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-grouped-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append,
+};
+
 fn main() -> anyhow::Result<()> {
     #[cfg(all(
         feature = "metal",
@@ -57,16 +103,6 @@ fn main() -> anyhow::Result<()> {
     target_os = "macos"
 ))]
 fn run() -> anyhow::Result<()> {
-    use anyhow::Context;
-    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, quantize};
-    use proxima_primitives::Codec;
-    use proxima_tensor::map::{self, AxisIndex, AxisTerm};
-    use proxima_tensor::test_support::Lcg;
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
-        ReduceInit, ScalarOp, append,
-    };
-
     const EXPERTS: usize = 32;
     const RUNS: usize = 21;
     const WARMUP_RUNS: usize = 5;
