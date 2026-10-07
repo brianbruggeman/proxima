@@ -58,6 +58,8 @@ mod ladder {
 
     const DEFAULT_GGML_DIR: &str = "/Users/brianbruggeman/repos/others/llama.cpp/ggml/src/ggml-metal";
 
+    const GGML_VARIANT_SHARED_BYTES: usize = 8192;
+
     struct Config {
         rows: usize,
         k: usize,
@@ -271,6 +273,11 @@ mod ladder {
         Ok(format!("{prelude}{}", bake_function_constants(&trimmed, config)?))
     }
 
+    fn ggml_shared_bytes(config: &Config) -> usize {
+        let boundary_output = !config.rows.is_multiple_of(64) || !config.tokens.is_multiple_of(32);
+        if boundary_output { 8192 } else { 4096 + 2048 }
+    }
+
     fn compile(device: &Device, source: &str, entry: &str) -> anyhow::Result<Pipeline> {
         let options = MTLCompileOptions::new();
         options.setMathMode(MTLMathMode::Relaxed);
@@ -319,7 +326,7 @@ mod ladder {
 
     enum Launch {
         Proxima { threadgroups: MTLSize, threads: MTLSize, dynamic_bytes: usize },
-        Ggml { kargs: GgmlKargs, threadgroups: MTLSize },
+        Ggml { kargs: GgmlKargs, threadgroups: MTLSize, threadgroup_bytes: usize },
     }
 
     struct Arm {
@@ -354,7 +361,7 @@ mod ladder {
                 }
                 encoder.dispatchThreadgroups_threadsPerThreadgroup(*threadgroups, *threads);
             }
-            Launch::Ggml { kargs, threadgroups } => {
+            Launch::Ggml { kargs, threadgroups, threadgroup_bytes } => {
                 // SAFETY: `kargs` is copied by `setBytes`; buffers outlive the waited-on command buffer.
                 unsafe {
                     let pointer = NonNull::new_unchecked((kargs as *const GgmlKargs).cast_mut().cast::<c_void>());
@@ -362,7 +369,7 @@ mod ladder {
                     encoder.setBuffer_offset_atIndex(Some(&inputs.weight), 0, 1);
                     encoder.setBuffer_offset_atIndex(Some(&inputs.activation), 0, 2);
                     encoder.setBuffer_offset_atIndex(Some(&arm.output), 0, 3);
-                    encoder.setThreadgroupMemoryLength_atIndex(8192, 0);
+                    encoder.setThreadgroupMemoryLength_atIndex(*threadgroup_bytes, 0);
                 }
                 encoder.dispatchThreadgroups_threadsPerThreadgroup(*threadgroups, MTLSize { width: 32, height: 4, depth: 1 });
             }
@@ -470,14 +477,14 @@ mod ladder {
                 label: format!("g_{stem}"),
                 pipeline: compile(device, &source, "kernel_mul_mm_q4_0_f32")?,
                 output: zeroed(output_bytes)?,
-                launch: Launch::Ggml { kargs, threadgroups },
+                launch: Launch::Ggml { kargs, threadgroups, threadgroup_bytes: GGML_VARIANT_SHARED_BYTES },
             });
         }
         arms.push(Arm {
             label: "ggml".into(),
             pipeline: compile(device, &ggml, "kernel_mul_mm_q4_0_f32")?,
             output: zeroed(output_bytes)?,
-            launch: Launch::Ggml { kargs, threadgroups },
+            launch: Launch::Ggml { kargs, threadgroups, threadgroup_bytes: ggml_shared_bytes(config) },
         });
         Ok(arms)
     }
