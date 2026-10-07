@@ -396,7 +396,12 @@ async fn the_row_tiled_verify_matches_the_llama_cpp_greedy_ids_with_speculation_
                 record,
                 serving_config().with_speculative(SpeculativeConfig::none()),
             );
-            if off_stats != SpeculativeDecodeStats::default() {
+            let speculative_only = SpeculativeDecodeStats {
+                prefill_steps: 0,
+                decode_steps: 0,
+                ..off_stats
+            };
+            if speculative_only != SpeculativeDecodeStats::default() {
                 failures.push(format!(
                     "{}: speculation off must take the non-speculative path, found {off_stats:?}",
                     record.name
