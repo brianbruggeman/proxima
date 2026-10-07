@@ -861,7 +861,7 @@ fn append_shared_expert_moe_ffn(
         expert_bias: None,
         expert_scale: None,
         activation: Activation::Silu,
-        strategy: MoeProjectionStrategy::PerRoute,
+        strategy: MoeProjectionStrategy::production(),
     };
     let (routed_out, moe_site) = append_moe_ffn(program, layer, normed, &moe_spec)?;
     let shared_out = append_sigmoid_gated_shared_expert(
