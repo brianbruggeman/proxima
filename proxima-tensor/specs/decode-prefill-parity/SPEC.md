@@ -313,7 +313,8 @@ prefill and decode). "Derived" targets subtract the table's class gap from the m
    (llama 483.00, the 7.9 to 8.3 TFLOP/s rate, derived); E2B prefill 2540 -> about 1560 ms (derived). First step: capture GPU counters
    or toggle the kernel's staging and fragment types to find the kernel-level cause, since it is untraced.
    LANDED 2026-10-07, class target not reached: Q4_0 class 1479.22 -> 577.77 ms (llama 483.00), E2B prefill 2397.95 ->
-   1494.01 ms (llama 571.98). See "slice 2 result".
+   1494.01 ms (llama 571.98). See "slice 2 result". Fixed 2026-10-07: class 489.99 ms own-cb against 482.99,
+   E2B prefill 1413.94 ms against 569.69 (target met on the class row, AC2 not met). See "slice 2 fix result".
 3. Prefill attention (E2B and granite): one fused kernel per layer. Target: E2B 749.70 -> at most 60 ms
    (llama 41.31), granite 286.28 -> at most 20 ms (llama 12.93). Removes about 690 ms from E2B prefill and 266
    ms from granite prefill.
@@ -862,7 +863,8 @@ source is emitted at plan time); peak GPU bytes are equal in `base` and `tip` fo
   scatter pattern, the fragment load addresses, the multiply operand order and the accumulator orientation. The only
   piece isolated is the transposed fragment load (row 3: 1.8% to 2.8%). The fused decode (row 7) is explained by the
   source (one fused multiply-add per element against shift, convert, subtract, multiply), not by a disassembly.
-- Why the kernel is still 1.17x to 1.22x llama's `mul_mm` on the same shapes: not explained. Facts: the geometry,
+- Why the kernel is still 1.17x to 1.22x llama's `mul_mm` on the same shapes: not explained. (Superseded: the ladder of "slice 2 fix result" toggles
+  it; the kernel is now 1.0131x to 1.0367x of ggml at 971 tokens.) Facts: the geometry,
   the weight and activation layouts, the decode form and the loop order now follow `mul_mm.metal`; `staticThreadgroup
   MemoryLength` is 8192 in both for 971 tokens; the multiply loop with no staging at all (row 15) already costs 1.03x
   llama's whole op at 6144 x 1536. The ratio is constant over the four K = 1536 shapes (1.215 to 1.219), which points
@@ -872,10 +874,10 @@ source is emitted at plan time); peak GPU bytes are equal in `base` and `tip` fo
   recorded the `gpu-counter-value` table (1.1 GB exported; counter ids 0 to 30 with no name table in the export), and
   was not decoded; nothing in this slice rests on it.
 - The attention class read 749.70 ms in slice 0 and reads 691.59 ms on the same kernels here, 58.1 ms lower; cause not
-  traced (slice 3 re-attributes it).
+  traced (slice 3 re-attributes it). (Traced in "slice 2 fix result": the same source tree measures 691 ms now; the slice 0 record sits in the slice 0 measurement.)
 - The granite peak RSS (+88.2 MB, limit 49.7) and footprint (+16.7 MB, limit 12.0) bound lines are red, with the
-  attribution above not resolving them from process-to-process spread.
-- `DIRECT_STORE` stays off: the kernel gain is 1.7% on interior tiles with an identity epilogue; 240 of the 275 Q4_0
+  attribution above not resolving them from process-to-process spread. (Re-measured with 5 processes per arm in "slice 2 fix result": both lines within=true; the spread traced to resident `MALLOC_MEDIUM` pages in both binaries.)
+- `DIRECT_STORE` stays off: (superseded by `888deca1`, which flips it on, with the census and ladder rows of "slice 2 fix result".) the kernel gain is 1.7% on interior tiles with an identity epilogue; 240 of the 275 Q4_0
   dispatches have one (410.0 of 577.8 warm ms in `census_tip/census_groups.csv`) and 35 carry a fused epilogue
   (167.8 ms), so the effect is about 7 ms of the 1494 ms prefill (derived), under the 2% bound; its default also
   covers the dense-batched attention path, where an earlier row measured no gain.
@@ -911,3 +913,443 @@ census and the probe have no saved baseline to diff against; the byte-identity t
 clippy and tier builds are the part that re-proves from the tree on a Mac. The variant rows (2, 3, 5, 6, 9 to 13, 15)
 re-prove only by applying the patches in `evidence/slice2/patches/` to `bf740944` and running the probe with the
 env tokens above.
+
+## slice 2 fix result (measured 2026-10-07)
+
+Slice 2 was returned with seven findings. This section is what was changed for each, with the measurement and its
+source. Every number is a measurement or a number derived from measurements; no row is a verdict. Evidence root:
+`evidence/slice2fix/` (this directory). Raw logs too large to commit (the census telemetry logs and timing samples,
+the per-process `time -l` raw reports, 123 MB of attention-trace censuses) sit in
+`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/`. Commits, in order: `2b0e56d2` (refactor), `7c5e25c4` (test),
+`ee640ea2` (ladder), `6e637861`, `888deca1`, `0c4ff281` (perf), `3a933038` (test), `6875fe1c` (render check), `07e261b2` (ladder
+shared memory), `2e2933e6` (rename); the docs commit that carries this section follows them. `ae2c5847` (the main thread's rewrite of the slice 4
+entry in `proposed slices`) landed between `3a933038` and `6875fe1c` and is not part of this fix.
+
+### the seven findings
+
+| finding | what was done | evidence |
+|---|---|---|
+| `#[allow(clippy::too_many_arguments)]` on `push_tiled_gemm_tile_writeback` (10 parameters), file allow count 14 to 15; `#![allow(clippy::unwrap_used, clippy::expect_used)]` in the new test file | the write-back tail is inlined back into `push_tiled_gemm_body` (the mm path now sets `mm_layout_active` and falls through to the one shared tail), so the helper and its allow are gone (`2b0e56d2`); the test helpers return `Result<_, String>` and the tests return it, so the file carries no allow (`7c5e25c4`). File allow count `grep -c 'allow(' omega/src/msl/tiled_gemm_cooperative_scan.rs`: 14 at `29b097b7` (before the slice), 14 now. `git diff 29b097b7..HEAD -- omega proxima-model-interop proxima-tensor/src` adds no `allow(` line | `gate/omega_clippy.tail` (exit 0, `-D warnings`, `omega --features metal --all-targets`), `gate/clippy_all.tail`, `gate/clippy_instrument.tail` |
+| AC2 not met: E2B prefill 1494.01 ms against llama 571.98 ms | not met, and not reachable by this slice: 1413.94 ms against 569.69 ms (+844.25 ms) after the fix; see "AC2" below | `interleaved/decode_arms.out` bound line `metric=prefill_ms arm=gemma4_e2b.tip vs=gemma4_e2b.llama-server` |
+| Q4_0 class target (at most 500 ms) not met: 577.77 ms against llama 483.00 | met on the own-cb basis the target was stated on: 489.99 ms against llama 482.99 (same basis, the six Q4_0 shapes), by three emitter changes found with the ladder below | `census_fix_tip/rank.md`, `census_fix_tip/stdout.log` |
+| granite peak RSS (+88.2 MB, limit 49.7) and footprint (+16.7 MB, limit 12.0) red, cause not traced | re-measured with 5 processes per arm and traced to a region class; see "granite memory" below | `interleaved/decode_arms.out`, `interleaved/granite_time_l_per_process.txt`, `granite_vmmap/` |
+| the timed tip binary was placed by mtime only | the timed binary is built from a clean tree at a named commit and rebuilt from scratch to the same sha256; see "provenance" | `interleaved/binaries.sha256`, `interleaved/tip_commit.txt` |
+| llama fixtures (4 to 72 prompt tokens) never reach the tiled kernel | new fixture `tests/fixtures/llama-parity/gemma4_e2b/long_prompt_llama_ids.json` (971 prompt ids, 128 greedy ids, produced by `decode_arms --dump-llama-ids` against llama-server `f1ea20621`) and test `prefill_width_parity_with_llama_gemma4_e2b` (`3a933038`); the test asserts at least 160 prompt tokens so it prefills on the tiled path | `fixture_gen/`, `gate/prefill_width_parity.tail` |
+| untraced mechanisms (why the layout is faster, why 1.17x to 1.22x remained, GPU counters, attention class 58.1 ms lower) | the first two are now toggled and measured (ladder); the attention difference is traced to the measurement environment; GPU counters remain undecoded | "mechanism ladder", "attention class", "not met, not traced, not done" below |
+
+### tool: the mm kernel ladder
+
+`omega/examples/mm_kernel_ladder.rs` (`ee640ea2`) times, under one GPU clock and interleaved, the production tiled
+`Q4_0` kernel (emitted by `omega::emit`), any number of hand-edited MSL variants of it, and ggml's own
+`kernel_mul_mm_q4_0_f32` assembled at run time from a llama.cpp `f1ea20621` checkout (local includes pasted in order,
+the six `function_constant`s replaced by the values ggml's host code computes for the shape, everything after the legacy
+`kernel_mul_mm` except the `q4_0_f32` instantiation dropped; nothing is copied into this repository). Timing is
+`GPUStartTime`/`GPUEndTime` of one dispatch; each cell is the 25th percentile of 21 dispatches after 30 warm-up
+dispatches; every variant prints how many output words differ from the production kernel, and ggml (which stages the
+activation as `half`) prints its scaled error. ggml's launch is `dispatchThreadgroups` with dynamic threadgroup memory of the length its host code picks (`ggml-metal-device.cpp`:
+`bc_out ? 8192 : (4096 + 2048)`, so 8192 where the output needs bounds checks, as at 971 tokens, and 6144 otherwise; the
+`float`-activation variants need 8192 and get it). Weights are synthetic Q4_0 blocks, activations random floats.
+The slice 2 probe (`tiled_gemm_q4_0_speed_probe`) timed the same kernel through the production plan path: 5620.2 us
+(12288 x 1536 x 971, final row, p25) against 5607.9 us for the ladder's `prod` at the slice 2 tip, 0.2% apart.
+
+### mechanism ladder (12288 x 1536 weights, 971 tokens)
+
+Raw: `evidence/slice2fix/ladder/run*.out` (CoV of every cell below is 0.02% to 0.13%, n = 21, except where stated);
+variants as diffs against the dumped emissions in `ladder/variants/` (`prod_slice2_tip.metal`, the slice 2 tip emission;
+the ggml diffs apply to the dump `LADDER_DUMP` writes). Every variant listed as "0 words" produced output identical
+to the production kernel it was derived from, word for word (11,931,648 words).
+
+First fact: ggml's kernel with its activation tile made `float` (one line, the template instantiation) produces output
+identical to the slice 2 tip kernel in 0 of 11,931,648 words and runs at 4575.3 us against 4520.9 us for ggml's own
+`half` form (+1.2%). The numerics of this kernel are therefore ggml's structure with a `float` activation, and the
+remaining 1.24x (5607.9 us against 4520.9 us) is structure, not precision or rounding.
+
+Toward the fast kernel, from the slice 2 tip (p25 us, one change added at a time except where marked):
+
+| rung | change | us | delta | words differing | pipeline `maxTotalThreadsPerThreadgroup` | run |
+|---|---|---|---|---|---|---|
+| slice 2 tip (`prod`) | none | 5607.9 | baseline | n/a | 896 | run0 |
+| p1 | `_Pragma("clang loop unroll(full)")` on the multiply loops | 5485.7 | -2.2% | 0 | 832 | run3 |
+| p2 | and on the decode and store loops | 5484.5 | -0.0% vs p1 | 0 | 832 | run3 |
+| p3 | p1 with ggml's multiply order (`mb[i/4]` outer) | 5484.8 | -0.0% vs p1 | 0 | 832 | run4 |
+| p4 | p1 with the activation moved as one `float2x4` | 5485.6 | 0.0% vs p1 | 0 | 832 | run5 |
+| p5 | p1 with the activation read through one carried pointer | 5420.5 | -1.2% vs p1 | 0 | 832 | run5 |
+| p6 | the multiply section transcribed from `mul_mm.metal:290-314`: fragment pointers walked by addition, `ma`/`mb` declared before the loop, three `simdgroup_barrier`s | 5143.4 | -8.3% vs prod, -6.2% vs p1 | 0 | 832 | run11 |
+| p7 | p6 and the carried activation pointer | 5066.9 | -1.5% vs p6 | 0 | 832 | run12 |
+| p6_dyn, p7_dyn | p6, p7 with the tile array as the `[[threadgroup(0)]]` argument and `setThreadgroupMemoryLength` at launch | 5007.4, 4929.0 | -2.6%, -2.7% vs p6, p7 | 0 | 832 | run12 |
+| p8_dyn | p7_dyn with ggml's barrier order: decode, barrier, store, barrier, multiply, no trailing barrier, one barrier after the loop | 4804.0 | -2.5% vs p7_dyn | 0 | 832 | run13 |
+| p9_dyn | p8_dyn with the direct device store for interior tiles | 4661.5 | -3.0% vs p8_dyn | 0 | 832 | run14 |
+| p9_static | p9_dyn with the array declared in the kernel again | 4803.5 | +3.0% vs p9_dyn | 0 | 832 | run15 |
+| ggml (`half` activation) | reference | 4520.9 | | n/a | 832 | run0 |
+
+Away from the fast kernel, from ggml's kernel with a `float` activation (4575.3 us), which is the same numerics:
+
+| change | us | delta vs 4575.3 | words differing | max threads | run |
+|---|---|---|---|---|---|
+| ggml's own restage-through-threadgroup branch forced for every tile (not our epilogue) | 4561.1 | -0.3% | 0 | 832 | run2 |
+| unroll pragmas removed from the multiply loops | 4920.6 | +7.5% | 0 | 896 | run2 |
+| the tile array declared in the kernel (static) | 4963.0 | +8.5% | 0 | 768 | run6 |
+| our weight decode and store | 4524.9 | -1.1% | 0 | 832 | run8 |
+| our activation transfer | 4575.0 | 0.0% | 0 | 832 | run8 |
+| both of ours | 4525.4 | -1.1% | 0 | 832 | run8 |
+| our multiply section (with `FOR_UNROLL`) | 4918.5 | +7.5% | 0 | 832 | run9 |
+| our multiply section plus ggml's two extra `simdgroup_barrier`s | 4910.1 | +7.3% | 0 | 832 | run10 |
+
+Reading the two tables together: weight decode, weight store and activation transfer do not move ggml's kernel; its
+epilogue form does not either (restage-always -0.3%); the multiply section's form moves it 7.5% in the direction the
+transcription moved ours, and the static tile array moves it 8.5% and ours 3.0%. What the ladder does not say, and the
+IR below confirms it cannot: why those forms cost what they cost on the device.
+
+IR read (`ladder/ir/ir_counts.txt`: `xcrun -sdk macosx metal -std=metal3.0 -fmetal-math-mode=relaxed -O2 -S -emit-llvm`,
+kernel function only). Every rung has one `simdgroup_matrix_8x8_multiply_accumulate` call site and one load site per
+type, so the AIR keeps the loops rolled and unrolling happens in the device compiler. The slice 2 tip IR carries 0
+`llvm.loop.unroll.full` nodes and every later rung 1; `ggml_float` and `ggml_float_static` differ by 4 lines
+(461, 457) with identical block, phi, barrier and call-site counts, and run 4575.3 us and 4963.0 us. So the unroll
+toggle (-2.2% and +7.5%) is a metadata fact the device compiler honours (the pipeline's `maxTotalThreadsPerThreadgroup`
+changes with it), and the static-versus-dynamic toggle is not visible in AIR at all. The cause of the static-array cost
+is untraced below the AIR.
+
+### what landed
+
+- `2b0e56d2` and `7c5e25c4`: the two lint findings (above). The refactor is emission-neutral: the render check
+  (`omega/examples/tiled_gemm_render_diff_check.rs`, fixed in `6875fe1c`) renders 12 kernels (Q4_0 and Q4_K tiled at 971 tokens, the dense-batched fold, each at the four explicit
+  `WIDE_WEIGHT_STAGE` x `DIRECT_STORE` combinations) at the slice 2 tip (`41736dc4`) and at `7c5e25c4`, and
+  `diff -r` of the two output directories exits 0 with 12 files in each (`evidence/slice2fix/render_identity/`, sha256
+  lists equal). That covers both arms of the restructured branch: the mm path (`WIDE_WEIGHT_STAGE=1`) and the row-major
+  path (`=0`), with the direct-store tail on and off.
+- the render check itself: before this fix it swept a 64-token program the tiled path does not admit, so all four of
+  its "combinations" rendered the same text (the four Q4_0 files shared one sha256) and a `diff` of two commits said
+  nothing; it now uses tiled-admitted shapes, pins each switch to an explicit `"0"` or `"1"` (an unset switch changed
+  meaning at slice 2), also renders Q4_K, and fails if any switch under test leaves the text unchanged.
+- `ee640ea2` the ladder (above).
+- `6e637861` the mm-layout K loop in `kernel_mul_mm`'s schedule: decode before the first barrier, one barrier after the
+  stores, multiply section transcribed (p8 minus the dynamic memory and the store), a barrier after the loop for the
+  epilogue (`push_mm_layout_k_loop`, `push_mm_layout_weight_decode`, `push_mm_layout_activation_stage`,
+  `push_mm_layout_multiply`). Tests: the 8 byte-identity cases of `tiled_gemm_mm_layout_parity` (Q4_0 and Q4_K, real
+  weights) pass; two emitter assertions updated; new `mm_layout_decodes_before_the_first_barrier_and_ends_the_loop_on_the_multiplies`,
+  which fails on the previous emitter (control: previous file restored, test run, `EXIT=100`, then reverted).
+- `888deca1` `PROXIMA_TILED_GEMM_DIRECT_STORE` default ON (unset admits; explicit `"0"` falls back), the existing arm
+  (`push_tiled_gemm_direct_store_arm`) and its identity-epilogue and `float` gates unchanged. The byte-identity tests
+  that named unset as off now pin `"0"`; `tiled_gemm_mm_layout_parity` gains the 971-token prefill-width case with the
+  default.
+- `0c4ff281` `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM` (default ON; `_dyn` identity suffix): the packed tiled kernel takes its
+  slim tile array as `threadgroup uchar *tg_shared [[threadgroup(0)]]`, and `Grid2DSpec::threadgroup_bytes`
+  (`tiled_gemm_shared_bytes()`, 8192 for the `64 x 32 x 32` tile) rides the launch to the one physical dispatch site
+  (`resident_nocopy_cache::dispatch`, `setThreadgroupMemoryLength`). One predicate (`dynamic_tgmem_active`: lever, packed
+  tiled path, slim store, grid launch) decides the kernel text, the launch length and the cache identity. Tests: 4 byte
+  identity cases of the default against `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM=0` (Q4_0 at the prefill width, Q4_0 with
+  partial tiles, Q4_0 on the row-major layout, Q4_K with partial tiles) and
+  `dynamic_tgmem_kernel_argument_and_launch_length_always_agree` (kernel argument present exactly when the spec's length
+  is 8192, for Q4_0 and Q4_K, absent when any of the three things it rides on is off, absent for the dense-batched
+  path). Control: with the spec forced to `0` and the kernel still declaring the argument, the prefill-width case fails
+  (`EXIT=100`).
+- `3a933038` the E2B prefill-width fixture and test (above).
+
+Abandoned: reading the 20% as an epilogue cost (ggml's own kernel with the restage epilogue forced is -0.3%, so in
+ggml's structure the epilogue form is free, while direct store is worth 3.0% on ours; both numbers are measured and the
+difference is not explained); a half-precision activation tile (slice 2 row 11; the `float`-activation ggml kernel is
+bit-identical to ours, so precision was never the gap); a toggle search over the old row-major kernel (replaced, as in
+slice 2, by transcription, now with a bit-exact `float` ggml arm as the oracle for each step); a new type to carry the
+write-back parameters (the helper was removed instead, so there is neither an `allow` nor a type).
+
+### before and after
+
+Isolated kernel, `mm_kernel_ladder`, p25 of 21 dispatches, 2 processes per cell, fix tip =
+`evidence/slice2fix/ladder/sweep_final_run{1,2}/`. The slice 2 tip column is the slice 2 probe
+(`tiled_gemm_q4_0_speed_probe`, p25 over 3 processes, `evidence/slice2/probe_final/`), a different harness timing the same
+production kernel with the same GPU-span timer. Ratio is production over ggml's own `half`-activation kernel
+(design-favors: incumbent), same dispatch, same data, same clock, from the ladder; ggml's launch binds the threadgroup
+memory its host code picks (`ggml-metal-device.cpp`: 8192 bytes when the output needs bounds checks, 6144 when not;
+the first sweeps of this fix gave ggml 8192 in every cell, and re-running the 512- and 160-token cells with 6144 moved
+ggml's microseconds by 0.0% to 0.1% in the cells with a CoV under 5%):
+
+| weight (rows x K) | tokens | slice 2 tip us (probe) | fix tip us (pass 1 / pass 2) | ggml us (pass 1 / pass 2) | fix tip / ggml (pass 1 / pass 2) |
+|---|---|---|---|---|---|
+| 12288 x 1536 | 971 | 5620.2, 5626.8, 5619.4 | 4686.9 / 4686.8 | 4520.9 / 4520.7 | 1.0367 / 1.0367 |
+| 6144 x 1536 | 971 | 2823.1, 2823.3, 2823.4 | 2354.7 / 2354.7 | 2272.7 / 2272.7 | 1.0361 / 1.0361 |
+| 4096 x 1536 | 971 | 1893.1, 1894.6, 1893.6 | 1578.3 / 1578.2 | 1523.2 / 1523.1 | 1.0362 / 1.0362 |
+| 2048 x 1536 | 971 | 964.4, 964.6, 965.1 | 801.6 / 801.9 | 774.2 / 773.8 | 1.0354 / 1.0363 |
+| 1536 x 6144 | 971 | 2880.6, 2879.9, 2879.9 | 2417.0 / 2419.5 | 2378.6 / 2381.6 | 1.0162 / 1.0159 |
+| 1536 x 12288 | 971 | 5741.6, 5738.0, 5737.4 | 4843.6 / 4839.8 | 4775.7 / 4777.4 | 1.0142 / 1.0131 |
+| 12288 x 1536 | 512 | n/a | 2430.2 / 2429.7 | 2320.8 / 2320.7 | 1.0471 / 1.0470 |
+| 12288 x 1536 | 160 | n/a | 776.6 / 776.0 | 741.7 / 741.4 | 1.0471 / 1.0466 |
+
+At the slice 2 tip the ladder's `prod` for 12288 x 1536 x 971 is 5607.9 us, 1.2404 of ggml (run0). The slice 2 spec
+table put the six shapes at 1.216, 1.215, 1.217, 1.219, 1.184 and 1.170 of llama's op, from `test-backend-ops` wall clock
+rather than a GPU span. The sweep after the loop schedule alone (`6e637861`, direct store off, static array;
+`ladder/sweep_after_k_loop_schedule/`, one pass, ggml given 8192 in every cell) reads 1.0494 to 1.0973 at 971 tokens;
+with direct store on (`ladder/sweep_direct_store/`, 12 cells at 512 and 971 tokens) every cell is 0.7% to 3.0% faster
+than without. All 18 fix-tip cells (6 shapes x 160, 512, 971 tokens) over both passes: 1.0131 to 1.0471 in the 28 cell
+measurements where neither arm has a CoV above 5%, and 1.0131 to 1.0988 over all 36. Eight of the 36 cell measurements
+have a production or ggml CoV above 5%, all at 160 or 512 tokens: pass 1, 2048 x 1536 x 160 (production 3.16%, ggml
+5.21%), 2048 x 1536 x 512 (11.38%, 11.40%), 4096 x 1536 x 160 (13.73%, 14.06%), 6144 x 1536 x 160 (10.87%, 12.75%, ratio
+1.0988); pass 2, 1536 x 6144 x 160 (10.94%, 9.65%), 2048 x 1536 x 160 (8.80%, 6.99%), 2048 x 1536 x 512 (10.47%,
+10.29%), 4096 x 1536 x 160 (13.82%, 13.26%). In all eight the ggml arm has a CoV above 5% (production does in seven), and the same
+cell differs between passes in absolute terms (6144 x 1536 x 160: 662.8 us in pass 1, 401.0 us in pass 2; 2048 x 1536
+x 512: 426.2 us and 566.1 us) while the ratios of the two arms stay near each other except the one 1.0988 cell.
+
+Census, `gemma4_decode_kernel_census` (`M0_CAPTURE_STEPS=0`, `prompt1k.txt`), one-command-buffer sequence replay, 7
+replays, Q4_0 class of 275 dispatches (`evidence/slice2fix/census_*/stdout.log`):
+
+| tree | Q4_0 class ms (CoV) | all 1568 dispatches ms (3 replays) | own-cb class (`rank.md`) |
+|---|---|---|---|
+| slice 2 tip (`6e8729fe`, slice 2 evidence) | 577.75 (0.04%) | 1429.34, 1430.86, 1429.73 | 577.77 |
+| `6e637861` (loop schedule) | 510.27 (0.02%) | 1361.91, 1361.47, 1362.85 | 510.70 |
+| `6e637861` with `DIRECT_STORE=1` | 502.77 (0.03%) | 1356.31, 1353.48, 1355.76 | 503.03 |
+| `0c4ff281` (fix tip, all defaults) | 489.41 (0.02%) | 1341.27, 1342.29, 1342.45 | 489.99 |
+
+At the fix tip the six Q4_0 shapes, own-cb ms against llama's (`census_fix_tip/rank.md`): 1536 x 12288 296.87 against
+284.91; 1536 x 6144 111.65 against 110.18; 1536 x 4096 22.39 against 22.83; 1536 x 2048 45.60 against 47.83; 1536 x 512
+1.38 against 1.57; 1536 x 256 12.10 against 15.67; class 489.99 against 482.99 (target at most 500). Direct store on the dense-batched folds: the census family
+`rope_copy_elementwise` (it holds the 168 dot and AV dispatches, the softmax and rope dispatches; `sequence_family` in
+`gemma4_decode_kernel_census.rs`) reads 377.24 ms with direct store off and 377.16 ms with it on, in the two censuses of
+`6e637861`: no signal there.
+
+Interleaved final run, `evidence/slice2fix/interleaved/decode_arms.out`: 5 processes x (1 warm-up + 7 timed) = 35 timed
+runs per arm, arms rotated per process, Ollama stopped (osascript refused; SIGTERM of the app and the server, `/api/ps`
+refused, no Ollama process), prompt `prompt1k.txt` (971 tokens E2B, 1000 granite), 128 new tokens. Arms: `base` =
+`decode_gbps_baseline_base_s2` (sha256 `e3db0a4b...f21`, HEAD before slice 2), `prev` = `decode_gbps_baseline_s2_mml`
+(sha256 `3f560083...b54`, the slice 2 tip), `tip` = `decode_gbps_baseline_s2fix_3a933038` (sha256 `4bb13cb5...eac6`),
+`tipcopy` = a byte copy of `tip` (same sha256), llama-server `f1ea20621`. Box before: load average 5.73;
+a background daemon in `~/.local/bin` 69.3% CPU, `mediaanalysisd` 61.0%, `mds_stores` 52.6%, iTerm2 30.7% (`box_load_before.txt`); after: load average 2.92,
+`suggestd` 90.3%, the same daemon 90.2% (`box_load_after.txt`). No cargo, GPU or Ollama process of mine ran during it.
+
+| arm | prefill ms (median kept, CoV all, range all) | TTFT ms | decode ms/token (median kept, CoV all) | peak RSS (median of 5) | peak footprint | peak GPU bytes |
+|---|---|---|---|---|---|---|
+| E2B base | 2403.96, 0.27%, 2395.97-2420.98 | 2404.0 | 11.910, 4.96% (one 15.05 run) | 3.964 GB | 709.9 MB | 5,608,554,496 |
+| E2B prev (slice 2 tip) | 1497.00, 0.46%, 1491.03-1516.01 | 1497.0 | 11.876, 4.71% | 3.949 GB | 718.4 MB | 5,608,554,496 |
+| E2B tip | 1413.94, 0.47%, 1404.05-1432.03 | 1413.5 | 11.9005, 6.19% (kept n=24: 0.34%) | 3.997 GB | 712.3 MB | 5,608,554,496 |
+| E2B tipcopy (control) | 1412.94, 0.43%, 1405.02-1425.99 | 1413.0 | 11.8905, 6.89% (kept n=24: 0.96%) | 3.968 GB | 725.0 MB | 5,608,554,496 |
+| E2B llama-server | 569.69, 0.39%, 567.58-576.87 | 572.77 | 8.9889, 0.50% | 3.751 GB | 219.5 MB | n/a |
+| granite base | 833.96, 1.82%, 827.97-889.06 | 834.0 | 14.804, 0.63% | 2.531 GB | 609.4 MB | 3,315,433,472 |
+| granite prev | 836.06, 1.06%, 830.95-872.05 | 836.0 | 14.823, 2.17% | 2.520 GB | 630.8 MB | 3,315,433,472 |
+| granite tip | 837.02, 1.47%, 832.00-874.95 | 837.0 | 14.810, 0.59% | 2.558 GB | 616.5 MB | 3,315,433,472 |
+| granite tipcopy (control) | 837.02, 0.96%, 829.98-864.96 | 837.0 | 14.8075, 0.74% | 2.491 GB | 601.1 MB | 3,315,433,472 |
+| granite llama-server | 150.19, 0.44% | 152.06 | 5.2336, 2.12% | 1.763 GB | 280.5 MB | n/a |
+
+Bound lines, E2B (`bound metric=... arm=tip vs=..., limit = max(2% of the reference median, twin gap)`): tip against
+base, prefill -990.02 ms (limit 48.08) within=true, TTFT -990.50 within=true, decode -0.0095 ms/token (limit 0.2382)
+within=true, RSS +33.0 MB (limit 79.3) within=true, footprint +2.4 MB (limit 14.2) within=true, GPU bytes 0; tip against
+prev, prefill -83.06 ms (limit 29.94) within=true, decode +0.0245 within=true, RSS +47.6 MB within=true, footprint -6.1
+MB within=true. Tip against llama-server: prefill +844.25 ms (limit 11.39) within=false, TTFT +840.73 within=false,
+decode +2.9116 ms/token (limit 0.1798) within=false, RSS +245.7 MB within=false, footprint +492.8 MB within=false. Granite,
+tip against base: prefill +3.06 (limit 16.68) within=true, decode +0.006 (limit 0.2961) within=true, RSS +27.2 MB
+(limit 50.6) within=true, footprint +7.1 MB (limit 12.2) within=true, GPU bytes 0; tip against llama-server `within=false`
+on every metric that has a llama value (prefill +686.83 ms, decode +9.58 ms/token). Token ids: `ids ... equal=true` on 320 of 320 proxima
+generations (2 models x 4 arms x 5 processes x 8 runs including the warm-ups), 128 ids each; `equal=false` 0.
+
+### AC2
+
+AC2 (`metric=prefill_ms arm=tip vs=llama` within=true on E2B) is not met: tip 1413.94 ms, llama 569.69 ms, +844.25 ms
+(2.48x), limit 11.39. What the census says the remaining gap is made of, own-cb ms at the fix tip against llama
+(`census_fix_tip/rank.md`, llama column from `evidence/slice0/llama_ops/e2b_ops.tsv`):
+
+| class | proxima ms | llama ms | gap ms |
+|---|---|---|---|
+| attention core (7 `cached attention partial` 337.7, 112 dot 177.1, 56 AV 140.8, softmax, rest) | 686.30 | 41.31 | +644.98 |
+| matmul (weights), of which Q4_0 489.99 against 482.99, F16 projection 107.73 against 4.35 | 597.74 | 487.35 | +110.39 |
+| rms norm | 24.03 | 13.68 | +10.35 |
+| rope | 9.34 | 3.37 | +5.98 |
+| output head | 1.12 | 0.94 | +0.18 |
+| elementwise, copy, other | 6.75 | 22.21 | -15.46 |
+| sum of classes | 1325.28 | 568.86 | +756.42 |
+
+The measured prefill gap is 844.25 ms and the class sum is 756.42 ms; the 87.83 ms between them is time the own-cb sum does not
+hold; the slice 0 timeline's host figures (plan prepare 23.0, pre-encode 8.6, readback 6.7, kv 6.2, commit to GPU start
+14.1) sum to 58.6 ms, and the rest of the 87.83 ms is untraced. The spec's own slice list (`proposed slices`, item 4) already states that
+after slices 2 to 4 E2B prefill is about 770 ms against llama's 573 and that parity "needs further slices after
+re-attribution". Slice 3 is the 644.98 ms attention row; the F16 projection (103.38 ms of the matmul row) is the last codec of slice 4
+as rewritten in `ae2c5847`. So AC2 is a program-level criterion reached by slices 3 and 4 and the further slices the
+spec names; slice 2's own measured target in the spec is the Q4_0 class row, which is met. Within slice 2, the
+matmul-class gap is +110.39 ms, of which +103.38 ms is the F16 projection and +7.0 ms the Q4_0 shapes.
+
+### granite memory
+
+The slice 2 interleaved run (3 processes per arm) read granite peak RSS +88.2 MB (limit 49.7) and footprint +16.7 MB
+(limit 12.0) for tip against base, `within=false`. In this run (5 processes per arm: the same two binaries plus the fix
+tip) the same two lines read +27.2 MB (limit 50.6) and +7.1 MB (limit 12.2), `within=true`. The same binary against
+its own copy moves as far as the binaries do: tipcopy against tip RSS -66.3 MB and footprint -15.4 MB; and on E2B,
+tipcopy against base footprint reads +15.04 MB (limit 14.20) `within=false` while tip against base reads +2.38 MB
+`within=true`, so one binary sits on both sides of the bound. The only other `within=false` between proxima arms in
+this run is granite `prev` against `base` footprint (+21.4 MB, limit 12.2). Per-process peak RSS
+(`interleaved/granite_time_l_per_process.txt`, `/usr/bin/time -l`): base 2475 to 2637 MB (span 161), prev 2492 to 2596
+(104), tip 2423 to 2726 (303), tipcopy 2471 to 2602 (131); footprint base 570 to 624 MB, prev 591 to 649, tip 585 to 651,
+tipcopy 565 to 640. The four arm medians span 2491 to 2558 MB (RSS) and 601 to 631 MB (footprint), 66 MB and 30 MB, and
+the identical-binary pair (tip, tipcopy) accounts for 66.3 MB and 15.4 MB of those; within one arm the spread is larger
+than any between-arm shift of a median.
+
+Where the spread lives, from `vmmap -summary` on live processes (`granite_vmmap/`: 3 rounds of base then tip, snapshots
+at 5, 11 and 17 seconds after launch, 6 processes, 18 snapshots, plus one more process at 9 seconds): `mapped file` is
+1.3 GB resident in all 19 snapshots (the model); `IOAccelerator (graphics)` is 256.5 MB resident at 5 and 9 seconds and
+119.9 MB at 11 and 17 seconds in every snapshot; `MALLOC_NANO` is 27.2 to 28.0 MB; `MALLOC_MEDIUM` is the class that
+moves: resident 354.3 to 629.0 MB across the 18 (base 378.9 to 572.0 MB, tip 354.3 to 629.0 MB), while its dirty size is
+111.8 to 132.6 MB in the four rows read in full (`tip_r1_t17` 365.9 resident / 132.6 dirty; `tip_r2_t17` 629.0 / 120.0;
+`base_r2_t17` 382.5 / 121.4; `base_r3_t17` 572.0 / 111.8). The `TOTAL` resident row moves with it (2.2 GB for
+`tip_r1_t11`, 2.6 GB for `tip_r2_t17`). Across the five tip processes RSS tracks `page reclaims` (321,809 to 343,214
+reclaims for 2422.2 to 2725.9 MB, 14.2 KB per reclaim, a 16 KB page being the unit). The same `MALLOC_MEDIUM` row also
+moves inside one process (`tip_r2`: 541.0, 607.0, 629.0 MB at 5, 11, 17 s; `base_r1`: 499.7, 381.0, 509.5 MB). So the
+spread is resident, mostly clean, medium-size malloc pages, in both binaries; why one process keeps more of those pages
+resident than another is not traced, and no between-binary signal was found.
+
+### provenance
+
+The timed `tip` binary is `decode_gbps_baseline` built with `cargo build --release -p proxima-model-interop --features
+std,metal --example decode_gbps_baseline`, `CARGO_TARGET_DIR=/private/tmp/cargo_target_arch`, from commit
+`3a9330380f9f04f9a9adccfcd0120928f551254f` with `git status --short` showing only the untracked
+`proxima-tensor/specs/decode-as-data/` (`interleaved/tip_commit.txt`); sha256 `4bb13cb53f7771c3cabd0f5d249c28ca8967e8566468fa62f862bc7c6dfeeac6`. After
+touching `omega/src/lib.rs` and `proxima-model-interop/src/lib.rs`, a rebuild recompiled both crates and produced the same
+sha256, and a second rebuild at `2e2933e6` (after a local-variable rename in `tiled_gemm_cooperative_scan.rs` and the example
+fixes) did too (`interleaved/rebuild_at_2e2933e6.sha256`), so the build re-proves the binary from the commit. `base` and `prev` hashes equal the ones the slice 2 run recorded
+(`slice2/interleaved/binaries.sha256`). `git diff --stat 3a933038..2e2933e6` lists four files: `omega/examples/mm_kernel_ladder.rs`,
+`omega/examples/tiled_gemm_render_diff_check.rs` (examples that `decode_gbps_baseline` does not link),
+`omega/src/msl/tiled_gemm_cooperative_scan.rs` (a local variable renamed and one line-number citation in a doc comment,
+10 lines) and this `SPEC.md` (`ae2c5847`); the rebuilt binary from that tree has the same sha256.
+
+### attention class
+
+Slice 0 recorded the attention core class at 749.70 ms and slice 2's re-attribution at 691.59 ms, with the cause of the
+58.1 ms not traced. Re-measurement (`attn_trace/`, interleaved: slice 0 source tree built from `c4810cb7`, whose omega,
+tensor and interop sources equal `f76b4a97`'s; the fix tip with every slice 1 and 2 switch pinned to `0`
+(`WIDE_WEIGHT_STAGE`, `GRID2D`, `MM_LAYOUT`, `DIRECT_STORE`, `DYNAMIC_TGMEM`); the fix tip with defaults; two rounds
+each, census as above, `attribution_rank rank` with the slice 0 llama file):
+
+| binary | attention core class ms (own-cb) | Q4_0 class ms (own-cb) | sequence replay ms |
+|---|---|---|---|
+| slice 0 source tree, round a / b | 691.66 / 691.07 | 1483.25 / 1478.63 | 2335.8, 2337.2, 2335.2 / 2333.0, 2334.5, 2335.5 |
+| fix tip, switches pinned to 0, a / b | 691.02 / 690.73 | 1479.02 / 1482.16 | 2336.2, 2333.9, 2333.6 / 2334.0, 2336.3, 2337.9 |
+| fix tip, defaults, a / b | 686.55 / 686.30 | 490.17 / 489.99 | 1342.1, 1342.4, 1342.6 / 1342.1, 1345.9, 1346.1 |
+
+The slice 0 source tree measures 691.66 and 691.07 ms now, where the slice 0 record was 749.70; the Q4_0 class of the
+same tree reads 1483.25 and 1478.63 now against 1479.66 recorded. The fix tip with the switches pinned off equals the slice
+0 tree to within 0.1% on the attention class and 0.3% on the Q4_0 class, so the code did not change the attention class
+between slice 0 and slice 2; the difference sits in the slice 0 measurement. By label, on the same own-cb basis (slice 0
+record `evidence/slice0/rank/e2b_prefill.md` against `attn_trace/slice0_a/rank.md`; the six labels are the whole
+346-dispatch class):
+
+| label | dispatches | slice 0 record ms (own-cb / marginal) | slice 0 tree now ms (own-cb / marginal) | difference ms (own-cb) |
+|---|---|---|---|---|
+| cached attention partial | 7 | 344.70 / 343.56 | 337.79 / 337.85 | -6.91 |
+| attention dot | 112 | 212.16 / 178.72 | 178.40 / 177.92 | -33.76 |
+| attention AV | 56 | 145.11 / 145.16 | 144.74 / 144.32 | -0.37 |
+| softmax exp | 56 | 22.87 / 22.71 | 13.83 / 13.82 | -9.04 |
+| softmax sum | 57 | 16.30 / 15.99 | 8.36 / 8.21 | -7.94 |
+| softmax max | 58 | 8.56 / 8.58 | 8.54 / 8.44 | -0.02 |
+| class | 346 | 749.70 | 691.66 | -58.04 |
+
+Inside the slice 0 record the dot row's own-cb figure (212.16) is 33.4 ms above its own marginal figure (178.72), where
+now they agree to 0.5 ms; the softmax exp and sum rows are 40% and 49% lower per dispatch now in both columns (408.3 and
+285.9 us then, 246.9 and 146.6 us now). Why those rows read higher in the slice 0 session is unmeasured (GPU clock
+state or another GPU tenant at the time are candidates; no clock or tenant record from that session exists). The fix
+tip's defaults take 4.5 ms (0.65%) off the class against the five switches pinned off; which of the switches does it is
+not isolated (direct store alone moved the `rope_copy_elementwise` family by 0.08 ms in the `6e637861` pair).
+
+### the three checks
+
+- correctness: `omega` 599 passed, 16 skipped (592 before this fix, plus the emitter assertion, 4 dynamic memory cases,
+  1 prefill-width direct-store case, 1 agreement test; `gate/omega_full.tail`); `proxima-tensor` 779 passed, 8 skipped
+  (`gate/tensor_suite.tail`); `proxima-model-interop` slice-gate 710 passed, 124 skipped (709 before plus the E2B
+  prefill-width test; `gate/interop_slice_gate.tail`); clippy `-D warnings` exit 0 for `proxima-tensor`,
+  `proxima-model-interop` and `omega` (`--features proxima-model-interop/std,proxima-model-interop/metal,omega/metal
+  --all-targets`) and for `omega` with `instrument`; tier builds exit 0: `omega --no-default-features --features
+  metal-core`, `metal-core,metal-tiled-gemm`, `alloc`; `proxima-model-interop --no-default-features`; `proxima-tensor
+  --no-default-features --features alloc` (the new code is behind `metal-tiled-gemm`, which implies `metal`; the
+  `metal-core` and `alloc` builds compile none of it, and `dynamic_tgmem_active` has a `not(metal-tiled-gemm)` arm that
+  returns false, which those builds do compile). The feature-gated allocation-count tests (`named_placement_alloc_count`, `plan_pipeline_alloc_count`, run with
+  `--features metal,alloc-count`: 6 passed, `gate/alloc_count.tail`, among them `a_warm_call_s_allocation_count_does_not_grow_with_extra_steps`)
+  and `decode_step_telemetry_budget` (in the 599) pass. Mm layout and dynamic memory against their
+  off form: 0 differing words of 248,576 (971 tokens x 256 rows) and of 51,000, 65,280, 65,536 in the other cases, each
+  printing its count (13 lines, 13 of 13 at `differing_words=0`, `gate/byte_identity_words.txt`). Allocation: the emitter allocates source text at plan time as
+  before; the launch adds one `setThreadgroupMemoryLength` call and no allocation per dispatch; hot-path budget stated 0,
+  measured: not separately instrumented (the existing tests above are the evidence).
+  The write-back refactor is emission-neutral: 12 rendered kernels byte-identical at `41736dc4` and `7c5e25c4`
+  (`render_identity/`, above).- semantic: ids equal to llama.cpp `f1ea20621` on 320 of 320 proxima generations of the interleaved run; owner gate sets
+  on the fix tree: `llama_parity_` 7 passed, `generic_verify_llama_parity_` 5 passed,
+  `prefill_width_parity_with_llama_granite_moe` and `prefill_width_parity_with_llama_gemma4_e2b` 2 passed (14 run,
+  `gate/owner_parity.tail`); the E2B fixture has 971 prompt ids so it prefills through the mm-layout, direct-store and
+  dynamic-memory kernel. Control: with one oracle id incremented the E2B test fails (`EXIT=100`), fixture restored
+  byte for byte.
+- performance: the tables above. E2B decode, RSS, footprint and GPU bytes sit inside the base and prev bounds; E2B
+  prefill and TTFT -990 ms against base and -83 ms against the slice 2 tip; granite prefill, decode, RSS, footprint and
+  GPU bytes sit inside the base bounds.
+
+### incumbent, home-turf arm
+
+llama.cpp `f1ea20621` `kernel_mul_mm_q4_0_f32`, run inside the ladder (not `test-backend-ops`): ggml's own kernel, grid,
+kargs and function-constant values for each shape, same dispatch clock as the production kernel, same data, interleaved,
+design-favors: incumbent. At 971 tokens the fix tip is 1.0131 to 1.0367 of ggml's time on the six E2B shapes; ggml with a
+`float` activation, which is bit-identical to production, is 1.0122 of ggml's own. Frequency: all 275 Q4_0 dispatches
+of one 971-token request run this op family (class 489.99 ms of the 1342 ms step at the fix tip).
+
+### discipline log, one row per tweak
+
+Ladder rows are p25 of 21 dispatches at 12288 x 1536 x 971, interleaved against the production kernel and ggml in one
+process, CoV 0.02% to 0.13%, box load 3 to 6 with the background processes listed above, release build of the example.
+Rows 1 to 10 are variants in `ladder/variants/`; rows 11 to 13 are the three landed commits; rows 14 and 15 are the
+production measurements.
+
+| row | change | measurement | delta vs prior | CoV, runs | status |
+|---|---|---|---|---|---|
+| 0 | slice 2 tip, ladder baseline | 5607.9 us, 1.2404x ggml (4520.9 us) | baseline | 0.02%, 21 | |
+| 1 | ggml with a `float` activation tile, the numerics oracle | 4575.3 us; 0 of 11,931,648 words differ from row 0 | n/a | 0.06%, 21 | informs |
+| 2 | unroll metadata on the multiply loops (p1) | 5485.7 us | -2.2% | 0.03%, 21 | kept, inside row 11 |
+| 3 | ggml's multiply order (p3) | 5484.8 us | -0.0% vs row 2 | 0.05%, 21 | not kept, no signal |
+| 4 | activation as one `float2x4` (p4) | 5485.6 us | 0.0% vs row 2 | 0.06%, 21 | not kept, no signal |
+| 5 | carried activation pointer (p5) | 5420.5 us | -1.2% vs row 2 | 0.03%, 21 | kept, inside row 11 |
+| 6 | multiply section transcribed from `mul_mm.metal` (p6) | 5143.4 us | -6.2% vs row 2 | 0.08%, 21 | kept, inside row 11 |
+| 7 | tile array as launch-bound dynamic memory (p6_dyn, p7_dyn) | 5007.4 us, 4929.0 us | -2.6%, -2.7% | 0.07%, 0.05%, 21 | kept, row 13 |
+| 8 | ggml barrier order (p8_dyn) | 4804.0 us | -2.5% vs p7_dyn | 0.03%, 21 | kept, inside row 11 |
+| 9 | direct device store (p9_dyn) | 4661.5 us | -3.0% vs p8_dyn | 0.08%, 21 | kept, row 12 |
+| 10 | same, static array (p9_static) | 4803.5 us | +3.0% vs p9_dyn | 0.05%, 21 | the static array is what row 7 removes |
+| 11 | `6e637861` loop schedule (rows 2, 5, 6, 8 minus the dynamic memory and the store) | emitter 4959.9 us; Q4_0 class census 577.75 -> 510.27 ms | -11.5% kernel, -11.7% class | 0.03%, 21; 0.02%, 7 | landed |
+| 12 | `888deca1` direct store default on | Q4_0 class 510.27 -> 502.77 ms; kernel cells -0.7% to -3.0% in 12 of 12 cells | -1.5% class | 0.03%, 7; ladder 21 | landed |
+| 13 | `0c4ff281` dynamic threadgroup memory | emitter 4687.3 us; class 502.77 -> 489.41 ms | -2.7% class, -16.4% kernel against row 0 | 0.06%, 21; 0.02%, 7 | landed |
+| 14 | production, 6 shapes x 3 token counts, 2 passes | 1.0131 to 1.0471 of ggml in the 28 cell measurements with both CoVs at or below 5%, 1.0131 to 1.0988 over all 36 | 1.170 to 1.219 before (spec table, llama op wall-clock timer, not the same timer) | 8 of 36 cell measurements have ggml CoV above 5% (production above 5% in 7 of them), all at 160 or 512 tokens | measured |
+| 15 | E2B prefill, interleaved, 35 runs per arm | 1497.00 -> 1413.94 ms against the slice 2 tip; 2403.96 against base | -83.1 ms (-5.5%) | 0.47%, 35 | landed |
+
+Rows that moved nothing are kept: p2, p3, p4 (rows 3, 4), the epilogue ablation (`ggml_grestage`, -0.3%), the
+decode and activation swaps inside ggml's kernel (-1.1%, 0.0%): no signal at the 21-sample CoV of 0.02% to 0.13%, so
+they are not the lever.
+
+### not met, not traced, not done
+
+- AC2 is not met (above), and cannot be met by this slice: the classes that hold it are the attention core (+644.98 ms,
+  slice 3) and the F16 projection (+103.38 ms, the last codec of slice 4 as rewritten in `ae2c5847`).
+- Why the multiply section's form, the unroll metadata and the static tile array cost what they cost on the device:
+  not traced. The AIR is the same size across them; the device compiler's allocation differs (`maxTotalThreadsPerThreadgroup`
+  768, 832, 896 across rungs) but nothing here decodes what it emits. GPU counters: the slice 2 `xctrace` recording is
+  still undecoded; nothing in this fix rests on it.
+- The remaining 1.3% to 3.7% against ggml's `half` kernel at 971 tokens (ggml's own `float`-activation form measures
+  1.2% above its `half` form): not isolated. Candidates not toggled: `short` against `long` index types in the loop prologue, the `u.*` uniform reads
+  against ggml's kargs, ggml's `il` state machine against the carried block pointer.
+- The dense-batched attention folds (`attention dot`, `attention AV`, 168 dispatches, 317.8 ms own-cb) still run the
+  row-major layout, static memory and the old multiply section; the ladder technique applies to them (slice 3).
+- Why one granite process keeps more resident clean `MALLOC_MEDIUM` pages than another (above).
+- The Q4_K path of the mm layout gets the same loop schedule and dynamic memory (byte-identity cases pass); no E2B
+  dispatch uses it, so its timing is not measured.
+- Large-N and `K`-tail shapes: the ladder covers K = 1536, 6144 and 12288 and 160, 512 and 971 tokens; the 275 dispatches of the census cover the real shapes.
+
+### re-prove
+
+```
+cargo nextest run -p omega --features metal --cargo-profile gate                                   # 599 tests
+cargo nextest run -p omega --features metal --cargo-profile gate -E 'binary(tiled_gemm_mm_layout_parity)'   # 13
+cargo clippy -p proxima-tensor -p proxima-model-interop -p omega --features proxima-model-interop/std,proxima-model-interop/metal,omega/metal --all-targets -- -D warnings
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate   # 710
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate \
+  -E 'test(llama_parity_) or test(generic_verify_llama_parity_) or test(prefill_width_parity_with_llama)'   # 14
+LADDER_ROWS=12288 LADDER_K=1536 LADDER_TOKENS=971 LADDER_VARIANTS=<variant.metal,...> LADDER_DUMP=<dir>/prod.metal \
+  cargo run --release -p omega --example mm_kernel_ladder --features metal    # needs a llama.cpp f1ea20621 checkout at LADDER_GGML_DIR
+xcrun -sdk macosx metal -std=metal3.0 -fmetal-math-mode=relaxed -O2 -S -emit-llvm -w -o out.ll <source>   # IR counts
+gemma4_decode_kernel_census with M0_CAPTURE_STEPS=0 M0_MAX_TOKENS=2 PROXIMA_PROMPT_FILE=prompt1k.txt   # switches pinned off: PROXIMA_TILED_GEMM_{WIDE_WEIGHT_STAGE,GRID2D,MM_LAYOUT,DIRECT_STORE,DYNAMIC_TGMEM}=0
+attribution_rank rank --census DIR --llama evidence/slice0/llama_ops/e2b_ops.tsv --ntok 512,455,4 --requests 3 --floor-us 4.0
+decode_arms --prompt-file prompt1k.txt --processes 5 --runs 7 --arm base=<e3db0a4b binary> --arm prev=<3f560083 binary> \
+  --arm tip=<4bb13cb5 binary> --arm tipcopy=<copy of tip> --llama-server <llama-server f1ea20621> --case granite_moe=<granite blob> --case gemma4_e2b=<E2B blob>
+decode_arms --processes 1 --runs 1 --llama-server <llama-server f1ea20621> --ignore-ollama --case gemma4_e2b=<E2B blob> --dump-llama-ids DIR   # the E2B fixture
+vmmap -summary <pid>   # granite snapshots, 5, 11 and 17 s after launch
+```
+
+Missing for CI, as in slices 0 to 2: no job runs a GPU test or bench on Apple hardware, so the ladder, census and
+interleaved numbers have no saved baseline to diff against; the byte-identity tests, the emitter tests, the clippy and
+tier builds, and the E2B prefill-width fixture are the part that re-proves from the tree on a Mac with the E2B blob. The
+ladder variants re-prove only by applying the diffs in `ladder/variants/` and running the ladder against a llama.cpp
+checkout.
