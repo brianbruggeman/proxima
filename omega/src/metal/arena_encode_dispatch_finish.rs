@@ -1514,6 +1514,17 @@ impl CapturedDispatch {
     /// [`MetalError::CompileFailed`] when this dispatch is unreplayable, has
     /// no output binding, or fails to run.
     pub fn replay_output(&self) -> Result<Vec<u8>, MetalError> {
+        self.replay_output_elements(None)
+    }
+
+    /// [`Self::replay_output`] over `elements` f32 values when the caller knows
+    /// the op writes more than `output_total` of them (a fused norm whose
+    /// epilogue writes the whole iteration space), `None` for the default span.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::replay_output`].
+    pub fn replay_output_elements(&self, elements: Option<u64>) -> Result<Vec<u8>, MetalError> {
         let output_index = self
             .bindings
             .iter()
@@ -1530,13 +1541,14 @@ impl CapturedDispatch {
             })?;
         let available = buffer.length().saturating_sub(*offset);
         let iteration_elements = self.extents.iter().product::<u64>();
-        let output_elements = self
-            .uniform_bytes
-            .first_chunk::<8>()
-            .map(|bytes| i64::from_le_bytes(*bytes))
-            .and_then(|total| u64::try_from(total).ok())
-            .filter(|total| *total > 0 && *total <= iteration_elements)
-            .unwrap_or(iteration_elements);
+        let output_elements = elements.unwrap_or_else(|| {
+            self.uniform_bytes
+                .first_chunk::<8>()
+                .map(|bytes| i64::from_le_bytes(*bytes))
+                .and_then(|total| u64::try_from(total).ok())
+                .filter(|total| *total > 0 && *total <= iteration_elements)
+                .unwrap_or(iteration_elements)
+        });
         let span = output_elements
             .saturating_mul(core::mem::size_of::<f32>() as u64)
             .try_into()
