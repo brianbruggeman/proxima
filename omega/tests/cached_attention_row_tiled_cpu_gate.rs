@@ -46,9 +46,10 @@ struct Cell {
 }
 
 /// The verify cells, then the prefill cells: rows past the old 64-row limit, a
-/// row count that leaves a scalar tail of new keys past the last whole
-/// fragment, and granite's two query groups, which put eight rows of one head
-/// in a fragment.
+/// window the new range itself crosses (the sliding layer's window set under
+/// `rows`), a row count that leaves a scalar tail of new keys past the last
+/// whole fragment, and granite's two query groups, which put eight rows of one
+/// head in a fragment.
 fn all_cells() -> Vec<Cell> {
     let e2b = Geometry::GEMMA4_E2B;
     let granite = Geometry::GRANITE_MOE;
@@ -60,8 +61,11 @@ fn all_cells() -> Vec<Cell> {
     });
     let prefill = [
         ("e2b past the old row limit", e2b, 70, 33),
+        ("e2b window crosses the new range", e2b.with_window(40), 130, 199),
+        ("e2b window crosses, ragged tail", e2b.with_window(48), 101, 1),
         ("granite eight rows", granite, 8, 33),
         ("granite ragged rows", granite, 37, 100),
+        ("granite window crosses the new range", granite.with_window(24), 50, 40),
     ]
     .map(|(label, geometry, rows, cached_len)| Cell {
         label,

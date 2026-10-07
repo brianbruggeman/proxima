@@ -197,17 +197,22 @@ fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_across_rows_and_cach
     );
 }
 
-/// Prefill-width cells: rows past the old 64-row limit, a ragged tail of new
-/// keys past the last whole fragment, and granite's two query groups, whose
-/// fragments are eight rows of one head.
+/// Prefill-width cells: rows past the old 64-row limit, a window the new range
+/// itself crosses, a ragged tail of new keys past the last whole fragment, and
+/// granite's two query groups, whose fragments are eight rows of one head.
 #[test]
 fn the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_at_prefill_widths() {
     let e2b = Geometry::GEMMA4_E2B;
     let granite = Geometry::GRANITE_MOE;
     let cells = [
         ("e2b past the old row limit", e2b, 70, 33),
+        ("e2b window crosses the new range", e2b.with_window(40), 130, 199),
+        ("e2b window crosses, ragged tail", e2b.with_window(48), 101, 1),
+        ("e2b whole prompt", e2b, 600, 33),
         ("granite eight rows", granite, 8, 33),
         ("granite ragged rows", granite, 37, 100),
+        ("granite window crosses the new range", granite.with_window(24), 50, 40),
+        ("granite whole prompt", granite, 600, 33),
     ];
     for (label, geometry, rows, cached_len) in cells {
         let (relative, control_relative) = one_cell(label, geometry, rows, cached_len);

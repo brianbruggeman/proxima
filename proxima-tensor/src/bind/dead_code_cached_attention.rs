@@ -1199,7 +1199,23 @@ pub(super) fn cached_attention_candidates(
         let _softmax_weights_eligible = false;
         #[cfg(feature = "metal-fuse-attn-decode")]
         {
-            if local_row_bound != u64::MAX && new_key_shape[0] > local_row_bound {
+            // the split-KV forms need both reassociations: the cross-threadgroup
+            // merge and the in-block tree reduce; `bit_exact` keeps the
+            // byte-exact `CachedSoftmaxWeights` lowering.
+            #[cfg(feature = "metal-attn-split-decode")]
+            let split_decode_admitted = admit(numeric_policy, NumericRewrite::ContextSplitMerge)
+                .is_ok()
+                && admit(numeric_policy, NumericRewrite::TreeReduce).is_ok();
+            #[cfg(not(feature = "metal-attn-split-decode"))]
+            let split_decode_admitted = false;
+            // a window that cuts the new range is carried by `cached_lower_inclusive`
+            // on the two-range `CachedAttention` op alone; the softmax-weights
+            // lowering and the single-range form do not read it for new keys.
+            let window_cut_carried = split_decode_admitted && cached_key_shape[0] > 0;
+            if local_row_bound != u64::MAX
+                && new_key_shape[0] > local_row_bound
+                && !window_cut_carried
+            {
                 #[cfg(feature = "instrument")]
                 debug!(
                     node = output.0,
@@ -1298,15 +1314,6 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
-            // the split-KV form needs both reassociations: the cross-threadgroup
-            // merge and the in-block tree reduce; `bit_exact` keeps the
-            // byte-exact `CachedSoftmaxWeights` lowering.
-            #[cfg(feature = "metal-attn-split-decode")]
-            let split_decode_admitted = admit(numeric_policy, NumericRewrite::ContextSplitMerge)
-                .is_ok()
-                && admit(numeric_policy, NumericRewrite::TreeReduce).is_ok();
-            #[cfg(not(feature = "metal-attn-split-decode"))]
-            let split_decode_admitted = false;
             softmax_weights_eligible = via_gemma_template && !split_decode_admitted;
         }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
