@@ -30,7 +30,12 @@ use super::*;
 /// it assumes `pair_dim * 2 == head_dim` -- to a value address computed
 /// straight from `head_dim`, mirroring `physical.rs`'s own separate
 /// `value_start`/`key_start` addressing.
-pub(super) fn cached_attention_scalar_score_body(pass_present: bool) -> String {
+pub(super) fn cached_attention_scalar_score_body(pass_present: bool, new_range_windowed: bool) -> String {
+    let lower_guard = if new_range_windowed {
+        "if (relative < cached_lower) { continue; }"
+    } else {
+        "if (cached && relative < cached_lower) { continue; }"
+    };
     let pair_expr = if pass_present { "pair_dim" } else { "head_dim / 2" };
     let value_addr = if pass_present { "value_base" } else { "kbase * 2" };
     let value_base_decl = if pass_present {
@@ -44,7 +49,7 @@ pub(super) fn cached_attention_scalar_score_body(pass_present: bool) -> String {
         String::new()
     };
     format!(
-        "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) {{ continue; }}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[{value_addr} + dimension] : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
+        "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        {lower_guard}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[{value_addr} + dimension] : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
     )
 }
 
@@ -91,6 +96,8 @@ pub(super) fn render_cached_attention(
     } else {
         format!("{cached_lower_inclusive}L")
     };
+    let new_range_windowed = *cached_lower_inclusive != i64::MIN
+        && i64::try_from(*new_key_rows).is_ok_and(|rows| rows > 1 - *cached_lower_inclusive);
     // The ninth operand slot carries two DIFFERENT runtime scalars,
     // discriminated by `cached_key_rows` (`BoundOpKind::CachedAttention`'s
     // own doc): `cached_key_rows == 0` is the single-range fusion's true
@@ -421,7 +428,7 @@ pub(super) fn render_cached_attention(
         if block_width <= 1 {
             source.push_str(&format!(
                 "    if (chunk < chunks) {{\n    for (long key = lo + chunk; key < hi; key += chunks) {{\n{}    }}\n    }}\n",
-                cached_attention_scalar_score_body(pass_present),
+                cached_attention_scalar_score_body(pass_present, new_range_windowed),
             ));
         } else {
             // The float4/ty-group V accumulate (llama.cpp's `kernel_flash_attn_
@@ -496,7 +503,7 @@ pub(super) fn render_cached_attention(
         // reduces the per-lane partial dot product within this simdgroup.
         source.push_str(&format!(
             "    for (long key = 0; key <= last_key; key++) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present),
+            cached_attention_scalar_score_body(pass_present, new_range_windowed),
         ));
         source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     } else {
@@ -521,7 +528,7 @@ pub(super) fn render_cached_attention(
         source.push_str(&format!("    {last_key_decl}"));
         source.push_str(&format!(
             "    for (long key = chunk; key <= last_key; key += context_chunks) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present),
+            cached_attention_scalar_score_body(pass_present, new_range_windowed),
         ));
         // Single cross-simdgroup merge: each chunk's own (max, sum,
         // weighted) is the same online-softmax state the `chunks<=1` body
