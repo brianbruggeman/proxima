@@ -1,0 +1,22 @@
+────────────
+ Nextest run ID d4945704-4e33-46ce-bc8a-993b05f578de with nextest profile: default
+    Starting 14 tests across 31 binaries (820 tests skipped)
+        PASS [   4.690s] ( 1/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [   9.677s] ( 2/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  74.623s] ( 3/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  12.647s] ( 4/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  64.388s] ( 5/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  17.343s] ( 6/14) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   3.612s] ( 7/14) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   3.315s] ( 8/14) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [  88.483s] ( 9/14) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [  18.340s] (10/14) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   3.658s] (11/14) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  17.488s] (12/14) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+        PASS [   5.120s] (13/14) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_gemma4_e2b
+        PASS [   3.838s] (14/14) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [ 327.228s] 14 tests run: 14 passed (3 slow), 820 skipped

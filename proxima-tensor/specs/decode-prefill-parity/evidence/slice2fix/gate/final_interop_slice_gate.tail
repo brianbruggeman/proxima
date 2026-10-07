@@ -1,0 +1,6 @@
+        PASS [   0.185s] (707/710) proxima-model-interop::swa_rope_from_metadata swa_rope_from_metadata_gemma4_e2b
+        PASS [   1.650s] (708/710) proxima-model-interop::tier_real_state tier_real_state_device_to_host
+        PASS [   1.664s] (709/710) proxima-model-interop::tier_real_state tier_real_state_disk_to_host
+        PASS [   1.743s] (710/710) proxima-model-interop::tier_real_state tier_real_state_host_to_disk
+────────────
+     Summary [ 114.146s] 710 tests run: 710 passed, 124 skipped

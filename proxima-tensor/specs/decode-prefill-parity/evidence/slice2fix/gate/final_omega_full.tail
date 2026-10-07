@@ -1,0 +1,4 @@
+        PASS [   0.100s] (598/599) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_minimum_holds_parity_on_ragged_extents
+        PASS [   0.140s] (599/599) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_multiply_holds_parity_on_ragged_extents
+────────────
+     Summary [  50.730s] 599 tests run: 599 passed, 16 skipped
