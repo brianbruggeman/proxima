@@ -459,6 +459,7 @@ pub(super) fn push_reduce_epilogue_write(
     push_epilogue_operand_reads(
         source,
         0..epilogue_operand_count,
+        &operand_aliases(epilogue_operands),
         output_rank,
         indent,
         &coord,
@@ -476,15 +477,26 @@ pub(super) fn push_reduce_epilogue_write(
 /// the current coordinate into `epi_scratch`. Pulled out once the hoist
 /// (ROW 370) needed to run it from inside a loop whose invariant steps are
 /// declared outside that same loop -- keeping one copy is what stops the two
-/// call sites drifting on the offset arithmetic.
+/// call sites drifting on the offset arithmetic. A slot that
+/// [`operand_aliases`] maps to an earlier slot copies that slot's value
+/// instead of loading the same address again, so `operand_indices` must visit
+/// an aliased slot's first mention before it.
 pub(super) fn push_epilogue_operand_reads(
     source: &mut String,
     operand_indices: impl Iterator<Item = usize>,
+    aliases: &[usize],
     output_rank: usize,
     indent: &str,
     coord: impl Fn(usize) -> String,
 ) {
     for index in operand_indices {
+        if aliases[index] != index {
+            source.push_str(&format!(
+                "{indent}epi_scratch[{index}] = epi_scratch[{}];\n",
+                aliases[index]
+            ));
+            continue;
+        }
         source.push_str(&format!(
             "{indent}long epi_off{index} = u.epilogue_operand_base[{index}];\n"
         ));
@@ -2259,4 +2271,3 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // renders `<codec>_element(wblk0` for every codec instead of `(in`/`(blk`
     "_element(wblk0",
 ];
-

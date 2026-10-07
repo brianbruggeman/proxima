@@ -124,6 +124,12 @@ pub(crate) struct MetalOnlyExtras {
     /// omits div/mod work for dense operands, so two stride layouts may emit
     /// different source even when every backend-neutral axis above agrees.
     pub elementwise_addressing: Option<String>,
+    /// Which fold and epilogue operand slots of a reduce read the same data
+    /// as an earlier slot, when any do. Metal loads such a slot once and
+    /// reuses it, so two reduces equal on every other axis but repeating
+    /// different operands render different loads and must not share a
+    /// pipeline.
+    pub operand_aliases: Option<String>,
     /// [`numeric_policy_cache_token`] for the `Plan` compiling this op —
     /// folded in here instead of `MathMode::cache_token()` (what this field
     /// held before): `NumericPolicy` is a 5-bit independent permission set,
@@ -846,6 +852,9 @@ mod gated {
         }
         if let Some(addressing) = metal.elementwise_addressing {
             identity.push_str(&addressing);
+        }
+        if let Some(aliases) = metal.operand_aliases {
+            identity.push_str(&aliases);
         }
         if let Some(width) = metal.cooperative_width {
             identity.push_str("_w");

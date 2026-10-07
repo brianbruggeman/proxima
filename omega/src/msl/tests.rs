@@ -7402,3 +7402,130 @@ mod expert_grouped_gemm {
         );
     }
 }
+
+mod epilogue_operand_reuse {
+    use super::*;
+
+    const ROWS: u32 = 8;
+    const REDUCTION: u32 = 256;
+
+    fn gate_operand(node: u32) -> (NodeId, Layout, Option<Lookup>) {
+        let layout = Layout {
+            base: 0,
+            strides: vec![0_i64, 1].into(),
+        };
+        (NodeId(node), layout, None)
+    }
+
+    /// A decode-shaped packed matvec whose epilogue is `sum * (gate * gate + gate)`:
+    /// the gate vector is mentioned three times, the way a fused `gelu`/`silu`
+    /// mentions it once per use. `gate_nodes` names the source of each mention.
+    fn matvec_with_gated_epilogue(gate_nodes: [u32; 3]) -> (BoundOp, PackedOperands) {
+        let mut bound = packed_row_multi_token_op(1, REDUCTION, ROWS);
+        let weight_node = bound.operands()[0].0;
+        let BoundOpKind::Reduce {
+            epilogue_body,
+            epilogue_operands,
+            ..
+        } = &mut bound.kind
+        else {
+            panic!("packed_row_multi_token_op always builds a Keep::Reduce fold")
+        };
+        *epilogue_operands = gate_nodes.iter().map(|node| gate_operand(*node)).collect();
+        *epilogue_body = ComposedBody {
+            steps: vec![
+                proxima_tensor::BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Operand(0), StepArg::Operand(1)],
+                },
+                proxima_tensor::BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Step(0), StepArg::Operand(2)],
+                },
+                proxima_tensor::BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Operand(3), StepArg::Step(1)],
+                },
+            ],
+        };
+        let mut packed = BTreeMap::new();
+        packed.insert(weight_node, Codec::Q4_0);
+        (bound, packed)
+    }
+
+    #[test]
+    fn aliases_map_every_mention_of_one_tensor_to_its_first() {
+        let operands = vec![
+            gate_operand(7),
+            gate_operand(7),
+            gate_operand(9),
+            gate_operand(7),
+            gate_operand(9),
+        ];
+
+        assert_eq!(operand_aliases(&operands), vec![0, 0, 2, 0, 2]);
+    }
+
+    #[test]
+    fn the_same_source_at_a_different_layout_is_not_an_alias() {
+        let mut shifted = gate_operand(7);
+        shifted.1.base = 4;
+
+        assert_eq!(operand_aliases(&[gate_operand(7), shifted]), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_repeated_epilogue_operand_is_loaded_from_device_memory_once() {
+        let (bound, packed) = matvec_with_gated_epilogue([7, 7, 7]);
+
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("emits")
+            .source;
+
+        assert_eq!(
+            source.matches("epi_scratch[0] = epi0[").count(),
+            1,
+            "the first mention loads the gate:\n{source}"
+        );
+        assert!(
+            !source.contains("= epi1[") && !source.contains("= epi2["),
+            "the second and third mentions must not load the gate again:\n{source}"
+        );
+        assert!(
+            source.contains("epi_scratch[1] = epi_scratch[0];")
+                && source.contains("epi_scratch[2] = epi_scratch[0];"),
+            "later mentions reuse the first load:\n{source}"
+        );
+    }
+
+    #[test]
+    fn distinct_epilogue_operands_each_keep_their_own_load() {
+        let (bound, packed) = matvec_with_gated_epilogue([7, 8, 9]);
+
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("emits")
+            .source;
+
+        assert!(
+            source.contains("= epi0[") && source.contains("= epi1[") && source.contains("= epi2["),
+            "three different tensors are three loads:\n{source}"
+        );
+    }
+
+    #[test]
+    fn the_repeat_pattern_is_part_of_the_pipeline_identity() {
+        let (repeated, packed) = matvec_with_gated_epilogue([7, 7, 7]);
+        let (distinct, _) = matvec_with_gated_epilogue([7, 8, 9]);
+        let policy = NumericPolicy::default();
+
+        let repeated_key = kernel_cache_key(&repeated, &packed, policy).expect("keys");
+        let distinct_key = kernel_cache_key(&distinct, &packed, policy).expect("keys");
+
+        assert_ne!(
+            repeated_key, distinct_key,
+            "two reduces that differ only in which epilogue operands repeat render different loads"
+        );
+        assert!(repeated_key.contains("_al_e_0_0_0"), "{repeated_key}");
+        assert!(!distinct_key.contains("_al"), "{distinct_key}");
+    }
+}

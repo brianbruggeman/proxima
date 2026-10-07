@@ -2798,6 +2798,7 @@ pub(super) fn push_broadcast_epilogue_write(
             width,
             unroll,
             &variant_operands,
+            &operand_aliases(epilogue_operands),
             &element_body,
             &epi_value,
             element_type,
@@ -2839,6 +2840,7 @@ pub(super) fn push_broadcast_epilogue_write(
         push_epilogue_operand_reads(
             source,
             (0..epilogue_operand_count).filter(|&index| !is_invariant_operand(index)),
+            &operand_aliases(epilogue_operands),
             rank,
             "        ",
             |dim| format!("full_coord[{dim}]"),
@@ -2884,7 +2886,14 @@ fn push_batched_accumulate_loop(
     source.push_str(&format!(
         "            bool in_range = (r + slot * {width}) < total_r;\n"
     ));
-    for index in 0..operand_count {
+    let aliases = operand_aliases(resolved.operands());
+    for (index, alias) in aliases.iter().copied().enumerate().take(operand_count) {
+        if alias != index {
+            source.push_str(&format!(
+                "            batch[slot][{index}] = batch[slot][{alias}];\n"
+            ));
+            continue;
+        }
         let read = operand_read(index, &format!("walk{index} + slot * advance{index}"), None);
         source.push_str(&format!(
             "            batch[slot][{index}] = in_range ? {read} : ({element_type})0;\n"
@@ -2950,11 +2959,24 @@ pub(super) fn broadcast_epilogue_prefetch_unroll(
     if !applies {
         return None;
     }
-    let variant_count = (0..epilogue_operands.len())
-        .filter(|&index| !epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index))
-        .count() as u64;
+    let variant_count = prefetch_loaded_operands(reduce_dims, epilogue_operands).len() as u64;
     let budgeted = crate::sized::COOPERATIVE_REDUCE_PREFETCH_REGISTERS / variant_count.max(1);
     Some(unroll.min(budgeted.max(1)))
+}
+
+/// The per-element epilogue operands a prefetch holds in `epi_pre{index}`:
+/// every operand that varies along the reduce axis and is the first mention of
+/// its data. A later mention of the same data (see [`operand_aliases`]) reads
+/// the first one's `epi_scratch` slot instead of holding a second copy.
+fn prefetch_loaded_operands(
+    reduce_dims: &[u16],
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+) -> Vec<usize> {
+    let aliases = operand_aliases(epilogue_operands);
+    (0..epilogue_operands.len())
+        .filter(|&index| aliases[index] == index)
+        .filter(|&index| !epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index))
+        .collect()
 }
 
 fn push_epilogue_scratch_and_invariant_reads(
@@ -2973,6 +2995,7 @@ fn push_epilogue_scratch_and_invariant_reads(
         source,
         (0..operand_count)
             .filter(|&index| epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index)),
+        &operand_aliases(epilogue_operands),
         rank,
         "    ",
         |dim| format!("full_coord[{dim}]"),
@@ -3050,10 +3073,8 @@ pub(super) fn push_broadcast_epilogue_preload(
         epilogue_operands,
         element_type,
     );
-    let variant_operands: Vec<usize> = (0..epilogue_operands.len())
-        .filter(|&index| !epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, index))
-        .collect();
-    for &index in &variant_operands {
+    let loaded_operands = prefetch_loaded_operands(reduce_dims, epilogue_operands);
+    for &index in &loaded_operands {
         source.push_str(&format!("    {element_type} epi_pre{index}[{unroll}];\n"));
     }
     push_epilogue_prefetch_slots(
@@ -3063,7 +3084,7 @@ pub(super) fn push_broadcast_epilogue_preload(
         reduce_dims[0],
         width,
         unroll,
-        &variant_operands,
+        &loaded_operands,
         "(long)lane",
         element_type,
     );
@@ -3077,11 +3098,17 @@ fn push_prefetched_broadcast_write_loop(
     width: u64,
     unroll: u64,
     variant_operands: &[usize],
+    aliases: &[usize],
     element_body: &str,
     epi_value: &str,
     element_type: &str,
 ) {
     let block = width * unroll;
+    let loaded_operands: Vec<usize> = variant_operands
+        .iter()
+        .copied()
+        .filter(|&index| aliases[index] == index)
+        .collect();
     source.push_str(&format!(
         "    for (long block_start = (long)lane; block_start < u.reduction_total; block_start += {block}) {{\n"
     ));
@@ -3093,7 +3120,7 @@ fn push_prefetched_broadcast_write_loop(
         reduce_dim,
         width,
         unroll,
-        variant_operands,
+        &loaded_operands,
         "block_start",
         element_type,
     );
@@ -3113,8 +3140,13 @@ fn push_prefetched_broadcast_write_loop(
         ));
     }
     for &index in variant_operands {
+        let source_slot = if aliases[index] == index {
+            format!("epi_pre{index}[slot]")
+        } else {
+            format!("epi_scratch[{}]", aliases[index])
+        };
         source.push_str(&format!(
-            "                epi_scratch[{index}] = epi_pre{index}[slot];\n"
+            "                epi_scratch[{index}] = {source_slot};\n"
         ));
     }
     source.push_str(element_body);
