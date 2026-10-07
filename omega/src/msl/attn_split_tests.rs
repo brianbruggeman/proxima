@@ -723,3 +723,28 @@ mod decode_split {
         f32::from_bits(value.to_bits() + 1) - value
     }
 }
+
+#[test]
+fn the_scalar_kernel_bounds_the_new_range_by_the_window_only_when_the_window_cuts_it() {
+    let policy = NumericPolicy::bit_exact();
+    let cached_only = "if (cached && relative < cached_lower) { continue; }";
+    let both_ranges = "if (relative < cached_lower) { continue; }";
+    let mut cells = 0_u32;
+    for (new_rows, windowed) in [(5_u64, false), (512, false), (513, true), (600, true)] {
+        let op = attention_op(9, 8, 256, 512, new_rows, -511);
+        assert_eq!(
+            cached_attention_form(&op.kind, policy),
+            Some(CachedAttentionForm::TwoRangeCachedBound),
+            "new rows {new_rows}: bit_exact keeps the scalar form"
+        );
+        let kernel = emit(&op, &PackedOperands::new(), policy).expect("the scalar kernel emits");
+        assert_eq!(
+            kernel.source.contains(both_ranges),
+            windowed,
+            "new rows {new_rows}: the new range is bounded by the window exactly when the window cuts it"
+        );
+        assert_eq!(kernel.source.contains(cached_only), !windowed, "new rows {new_rows}");
+        cells += 1;
+    }
+    assert_eq!(cells, 4);
+}
