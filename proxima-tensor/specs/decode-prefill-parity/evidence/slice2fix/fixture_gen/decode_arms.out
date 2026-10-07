@@ -1,0 +1,15 @@
+raw arm=llama-server process=0 run=0 ms_per_token=8.9749
+raw arm=llama-server process=0 run=1 ms_per_token=9.0022
+llama ids record case=gemma4_e2b path=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/fixture_gen/out/gemma4_e2b_llama_ids.json
+arm=llama-server metric=ms_per_token process=0 run=1 value=9.0022 outlier=false
+summary arm=llama-server metric=ms_per_token n_all=1 median_all=9.0022 cov_all_pct=0.00 min_all=9.0022 max_all=9.0022 | n_kept=1 median_kept=9.0022 mad_kept=0.0000 cov_kept_pct=0.00 min_kept=9.0022 max_kept=9.0022
+arm=llama-server metric=prefill_ms process=0 run=1 value=570.7830 outlier=false
+summary arm=llama-server metric=prefill_ms n_all=1 median_all=570.7830 cov_all_pct=0.00 min_all=570.7830 max_all=570.7830 | n_kept=1 median_kept=570.7830 mad_kept=0.0000 cov_kept_pct=0.00 min_kept=570.7830 max_kept=570.7830
+arm=llama-server metric=ttft_ms process=0 run=1 value=574.4350 outlier=false
+summary arm=llama-server metric=ttft_ms n_all=1 median_all=574.4350 cov_all_pct=0.00 min_all=574.4350 max_all=574.4350 | n_kept=1 median_kept=574.4350 mad_kept=0.0000 cov_kept_pct=0.00 min_kept=574.4350 max_kept=574.4350
+memory arm=llama-server metric=peak_rss_bytes process=0 value=3716022272
+summary arm=llama-server metric=peak_rss_bytes n=1 median=3716022272 max=3716022272
+memory arm=llama-server metric=peak_footprint_bytes process=0 value=207776128
+summary arm=llama-server metric=peak_footprint_bytes n=1 median=207776128 max=207776128
+extra arm=llama-server process=0 request=0 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=599.8290 ttft_ms=618.9028 ms_per_token=8.9749
+extra arm=llama-server process=0 request=1 prompt_n=971 predicted_n=128 ids_len=128 events=129 prefill_ms=570.7830 ttft_ms=574.4350 ms_per_token=9.0022

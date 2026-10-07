@@ -1,0 +1,10 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 18.06s
+────────────
+ Nextest run ID 45ff1f4c-2a17-4b95-b723-3a6b59672a83 with nextest profile: default
+    Starting 2 tests across 31 binaries (832 tests skipped)
+        PASS [   5.500s] (1/2) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_gemma4_e2b
+        PASS [   3.818s] (2/2) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [   9.325s] 2 tests run: 2 passed, 832 skipped

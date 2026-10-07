@@ -1,0 +1,9 @@
+ 5:20  up 6 days, 15:24, 5 users, load averages: 2.92 3.82 5.07
+  PID  %CPU COMM
+  792  90.3 /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd
+17029  90.2 a background daemon in ~/.local/bin
+31461  14.2 claude
+  716   4.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+83616   1.5 /bin/zsh
+  851   0.5 /Library/SystemExtensions/21F1E42E-E283-49B4-8071-6B9F3228D05F/at.obdev.littlesnitch.networkextension.systemextension/Contents/MacOS/at.obdev.littlesnitch.networkextension
+ 1010   0.4 /Applications/Docker.app/Contents/MacOS/com.docker.backend

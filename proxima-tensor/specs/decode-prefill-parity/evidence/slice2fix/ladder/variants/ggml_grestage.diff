@@ -1,0 +1,19 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.ggml.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/grestage.metal	2026-10-07 04:23:54
+@@ -4474,7 +4474,7 @@
+         }
+     }
+ 
+-    if (!FC_mul_mm_bc_out || (r0 + NR0 <= args.ne0 && r1 + NR1 <= args.ne1)) {
++    if (false) {
+         // if no bounds checks on the output are needed, we can directly write to device memory
+         device float * C = (device float *) dst +
+             (r0 + 32*(sgitg &  1)) + \
+@@ -4519,5 +4519,5 @@
+ 
+ #endif // GGML_METAL_HAS_TENSOR
+ 
+-typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
+-template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
++typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, float, float2x4, simdgroup_float8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
++template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   float,   float2x4,   simdgroup_float8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;

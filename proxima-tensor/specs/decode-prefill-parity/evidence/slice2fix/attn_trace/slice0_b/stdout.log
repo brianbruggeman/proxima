@@ -1,0 +1,54 @@
+m0 decode: generated_tokens=2 text="# Walk"
+m0 capture: step=0 dispatches_with_threads=1568
+m0 groups: 157 kernels-by-identity-and-geometry over 1568 dispatches
+m0 replay: group 0/157
+m0 replay: group 50/157
+m0 replay: group 100/157
+m0 replay: group 150/157
+m0 sequence replay: one command buffer, dispatches=1568 of 1568 captured, gpu_ms=[2332.991375005804, 2334.4617499969904, 2335.532583296299]
+m0 chunk sequence replay: chunks=1, gpu_ms=[[2335.1683750515804], [2336.783333332278], [2334.4543750863522]]
+m0 family sequence replay excludes 0 unreplayable dispatches of 1568
+m0 family sequence replay: family=attention dispatches=7 runs=7 gpu_ms_mean=338.2313 gpu_ms_min=337.1486 cov_pct=0.29
+m0 family sequence replay: family=head dispatches=1 runs=7 gpu_ms_mean=1.1712 gpu_ms_min=1.1648 cov_pct=0.36
+m0 family sequence replay: family=norms dispatches=446 runs=7 gpu_ms_mean=23.5187 gpu_ms_min=23.2880 cov_pct=0.52
+m0 family sequence replay: family=other_matvec dispatches=2 runs=7 gpu_ms_mean=107.7331 gpu_ms_min=107.7090 cov_pct=0.05
+m0 family sequence replay: family=q4_0_matvec dispatches=275 runs=7 gpu_ms_mean=1481.8543 gpu_ms_min=1481.2626 cov_pct=0.04
+m0 family sequence replay: family=rope_copy_elementwise dispatches=837 runs=7 gpu_ms_mean=380.0346 gpu_ms_min=379.1890 cov_pct=0.15
+
+class                                     disp/step us/disp cold  total us cold   % step | us/disp -flr   total -flr | us/disp marg   total marg
+matvec Q4_0                                     275      5376.88      1478641.7    62.9% |      5373.05    1477587.6 |      5392.24    1482864.9
+cached attention partial                          7     48277.04       337939.3    14.4% |     48273.21     337912.5 |     48250.43     337753.0
+attention dot                                   112      1610.46       180371.3     7.7% |      1606.63     179942.0 |      1593.57     178479.8
+attention AV                                     56      2621.25       146790.0     6.2% |      2617.42     146575.3 |      2569.04     143866.2
+matvec Float16                                    1    107748.06       107748.1     4.6% |    107744.23     107744.2 |    107693.90     107693.9
+norm apply                                      170        87.43        14863.4     0.6% |        83.60      14211.8 |        86.66      14733.0
+softmax exp                                      56       247.75        13874.0     0.6% |       243.92      13659.3 |       246.71      13815.5
+RoPE                                            128        73.17         9366.3     0.4% |        69.34       8875.6 |        71.31       9127.7
+softmax max                                      58       150.29         8717.0     0.4% |       146.46       8494.7 |       145.29       8427.0
+softmax sum                                      57       149.92         8545.2     0.4% |       146.08       8326.7 |       145.03       8266.9
+RMSNorm sumsq + fused epilogue                  106        50.52         5355.0     0.2% |        46.69       4948.7 |        47.17       5000.2
+elementwise fused_identity_o0__multiply_s0_o1_g10          2      2037.55         4075.1     0.2% |      2033.72       4067.4 |      2037.36       4074.7
+RMSNorm sumsq                                   170        21.75         3697.2     0.2% |        17.91       3045.5 |        18.98       3226.6
+identity copy                                    92        15.27         1405.2     0.1% |        11.44       1052.6 |        13.00       1196.3
+head                                              1      1175.25         1175.2     0.1% |      1171.42       1171.4 |      1119.32       1119.3
+constant                                        263         4.04         1062.8     0.0% |         0.21         54.6 |         1.68        441.3
+elementwise fused_greater_o0_o1__subtract_o2_o3__greater_s1_o4__maximum_s0_s2          1        55.87           55.9     0.0% |        52.04         52.0 |        55.97         56.0
+elementwise fused_subtract_o1_o2__subtract_s0_o3__greater_o0_s1__subtract_o4_o5__greater_s3_o6__maximum_s2_s4          1        42.21           42.2     0.0% |        38.38         38.4 |        42.47         42.5
+iota                                              6         4.44           26.6     0.0% |         0.60          3.6 |         2.29         13.7
+UNCLASSIFIED omega_reduce_r3_o2_n5_fused_equal_o0_o1__add_o2_o3__select_s0_s1_o4_minimum_positive_infinity          1        15.37           15.4     0.0% |        11.54         11.5 |        11.58         11.6
+matvec f32                                        1        12.87           12.9     0.0% |         9.04          9.0 |         9.76          9.8
+elementwise identity_g1                           1         6.33            6.3     0.0% |         2.50          2.5 |         3.84          3.8
+UNCLASSIFIED omega_reduce_r2_o1_n1_identity_minimum_positive_infinity          1         6.00            6.0     0.0% |         2.17          2.2 |         3.00          3.0
+elementwise add                                   1         5.37            5.4     0.0% |         1.54          1.5 |         3.14          3.1
+elementwise multiply                              1         5.27            5.3     0.0% |         1.44          1.4 |         2.95          3.0
+
+m0 floor: empty command buffer GPU span median=3.83 us min=3.37 us max=11.79 us n=200
+m0 step (captured step 0, last evaluation that ran): rows_evaluated=Some(1) tokens_committed=Some(1) gpu_busy_ms=Some(2349.390499992296) gpu_exec_ms=Some(2443.492708) physical_dispatch_calls=Some(1568)
+m0 step (median over logged evaluations at step >= 2, mixed widths): gpu_busy_ms=0.000 gpu_exec_ms=0.000
+m0 reconcile: sum(median x count) [cold]=2323802.9 us; ratio to gpu_busy_ms=0.989; ratio to gpu_exec_ms=0.951
+m0 reconcile: sum(median x count) [cold-minus-floor]=2317792.2 us; ratio to gpu_busy_ms=0.987; ratio to gpu_exec_ms=0.949
+m0 reconcile: sum(median x count) [warm]=2318780.7 us; ratio to gpu_busy_ms=0.987; ratio to gpu_exec_ms=0.949
+m0 reconcile: sum(median x count) [marginal]=2320232.8 us; ratio to gpu_busy_ms=0.988; ratio to gpu_exec_ms=0.950
+m0 invariant 1: sum(group members)=1568 captured_dispatches=1568 physical_dispatch_calls_logged=Some(1568) capture_step_is_last_logged_step=false
+m0 replay failures: 0
+m0 unreplayable by capture: groups=0 dispatches=0

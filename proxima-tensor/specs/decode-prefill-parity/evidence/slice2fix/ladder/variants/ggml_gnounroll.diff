@@ -1,0 +1,37 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.ggml.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/gnounroll.metal	2026-10-07 04:23:54
+@@ -4450,22 +4450,22 @@
+         threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
+         threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
+ 
+-        FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
++        for (short ik = 0; ik < NK/8; ik++) {
+             simdgroup_barrier(mem_flags::mem_none);
+ 
+-            FOR_UNROLL (short i = 0; i < 4; i++) {
++            for (short i = 0; i < 4; i++) {
+                 simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
+             }
+ 
+             simdgroup_barrier(mem_flags::mem_none);
+ 
+-            FOR_UNROLL (short i = 0; i < 2; i++) {
++            for (short i = 0; i < 2; i++) {
+                 simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+             }
+ 
+             simdgroup_barrier(mem_flags::mem_none);
+ 
+-            FOR_UNROLL (short i = 0; i < 8; i++){
++            for (short i = 0; i < 8; i++){
+                 simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
+             }
+ 
+@@ -4519,5 +4519,5 @@
+ 
+ #endif // GGML_METAL_HAS_TENSOR
+ 
+-typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
+-template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
++typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, float, float2x4, simdgroup_float8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
++template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   float,   float2x4,   simdgroup_float8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;

@@ -1,0 +1,6 @@
+        PASS [   2.055s] (776/779) proxima-tensor::neon_tile_full_output neon_tile_full_output_1023_row_remainder_boundary
+        PASS [   2.059s] (777/779) proxima-tensor::neon_tile_full_output neon_tile_full_output_1026_row_remainder_boundary
+        PASS [   2.262s] (778/779) proxima-tensor::neon_tile_full_output width_tile_full_output_1023_row_and_column_remainder
+        PASS [   2.498s] (779/779) proxima-tensor::neon_tile_full_output width_tile_full_output_1025_row_and_column_remainder
+────────────
+     Summary [   6.454s] 779 tests run: 779 passed, 8 skipped

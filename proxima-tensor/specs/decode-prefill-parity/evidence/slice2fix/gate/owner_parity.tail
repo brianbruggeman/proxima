@@ -1,0 +1,23 @@
+    Finished `gate` profile [optimized] target(s) in 0.20s
+────────────
+ Nextest run ID a0848528-fa68-412e-b1b2-f2d8cd1b997c with nextest profile: default
+    Starting 14 tests across 31 binaries (820 tests skipped)
+        PASS [   4.643s] ( 1/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [   9.699s] ( 2/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  74.462s] ( 3/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_openchat
+        PASS [  12.636s] ( 4/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen2
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  64.220s] ( 5/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_qwen3
+        PASS [  16.250s] ( 6/14) proxima-model-interop::arch_data_baseline llama_parity_gemma4_26b
+        PASS [   3.508s] ( 7/14) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   3.291s] ( 8/14) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [  88.432s] ( 9/14) proxima-model-interop::arch_data_baseline llama_parity_lfm2
+        PASS [  17.985s] (10/14) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   3.643s] (11/14) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  16.180s] (12/14) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+        PASS [   5.019s] (13/14) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_gemma4_e2b
+        PASS [   3.783s] (14/14) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [ 323.757s] 14 tests run: 14 passed (3 slow), 820 skipped

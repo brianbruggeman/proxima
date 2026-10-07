@@ -1,0 +1,15 @@
+FACTS arm=prod max_threads_per_threadgroup=896 static_threadgroup_bytes=8192
+FACTS arm=prod_dyn max_threads_per_threadgroup=896 static_threadgroup_bytes=0
+FACTS arm=p1_dyn max_threads_per_threadgroup=768 static_threadgroup_bytes=0
+FACTS arm=p5_dyn max_threads_per_threadgroup=768 static_threadgroup_bytes=0
+FACTS arm=ggml max_threads_per_threadgroup=832 static_threadgroup_bytes=0
+CHECK arm=prod_dyn differing_words=0/11931648 rms_relative_error=0.000e0
+CHECK arm=p1_dyn differing_words=0/11931648 rms_relative_error=0.000e0
+CHECK arm=p5_dyn differing_words=0/11931648 rms_relative_error=0.000e0
+CHECK arm=ggml differing_words=11929792/11931648 rms_relative_error=1.834e-4
+SHAPE rows=12288 k=1536 tokens=971 rounds=21
+TIME arm=prod p25_us=5607.1 median_us=5607.6 min_us=5605.0 cov_pct=0.04 tflops_p25=6.54 vs_ref_p25=1.2402 n=21
+TIME arm=prod_dyn p25_us=5732.5 median_us=5734.3 min_us=5730.9 cov_pct=0.04 tflops_p25=6.39 vs_ref_p25=1.2679 n=21
+TIME arm=p1_dyn p25_us=5395.2 median_us=5395.9 min_us=5393.0 cov_pct=0.04 tflops_p25=6.79 vs_ref_p25=1.1933 n=21
+TIME arm=p5_dyn p25_us=5324.6 median_us=5325.7 min_us=5323.6 cov_pct=0.04 tflops_p25=6.88 vs_ref_p25=1.1777 n=21
+TIME arm=ggml p25_us=4521.1 median_us=4521.6 min_us=4520.1 cov_pct=0.03 tflops_p25=8.11 vs_ref_p25=1.0000 n=21

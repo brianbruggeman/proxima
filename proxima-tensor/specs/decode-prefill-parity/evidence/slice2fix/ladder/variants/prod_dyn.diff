@@ -1,0 +1,18 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/prod.metal	2026-10-07 04:22:35
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/slice2fix/ladder/v/prod_dyn.metal	2026-10-07 04:26:01
+@@ -891,6 +891,7 @@
+     device const float* in1 [[buffer(1)]],
+     device float* out [[buffer(2)]],
+     constant Uniforms& u [[buffer(3)]],
++    threadgroup uchar *tg_shared [[threadgroup(0)]],
+     uint3 tgpig [[threadgroup_position_in_grid]],
+     ushort tiitg [[thread_index_in_threadgroup]],
+     ushort sgitg [[simdgroup_index_in_threadgroup]])
+@@ -901,7 +902,6 @@
+     long col_tile = (long)tgpig.x;
+     long row_half = sgitg & 1;
+     long col_half = sgitg >> 1;
+-    threadgroup uchar tg_shared[8192];
+     threadgroup half *weight_tile = (threadgroup half *)tg_shared;
+     threadgroup float *act_tile = (threadgroup float *)(tg_shared + 4096);
+     simdgroup_float8x8 acc[8];

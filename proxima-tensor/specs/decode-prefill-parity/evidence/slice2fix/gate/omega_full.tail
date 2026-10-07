@@ -1,0 +1,6 @@
+        PASS [   0.084s] (596/599) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_multiply_holds_parity_on_ragged_extents
+        PASS [   0.315s] (597/599) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_with_a_partial_edge_tile
+        PASS [   0.415s] (598/599) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_at_a_fully_interior_shape
+        PASS [   0.418s] (599/599) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_combined_with_direct_store
+────────────
+     Summary [  50.802s] 599 tests run: 599 passed, 16 skipped

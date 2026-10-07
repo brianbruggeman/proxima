@@ -1,0 +1,12 @@
+xcrun -sdk macosx metal -std=metal3.0 -fmetal-math-mode=relaxed -O2 -S -emit-llvm -w -o <rung>.ll <rung source>   (kernel function body of each .ll)
+rung sources: ladder/variants/prod_slice2_tip.metal (c0_prod), p1/p5/p6/p7/p8_dyn/p9_dyn applied as the .diff files to prod_slice2_tip.metal, prod_final.metal (c3_final), ggml_float = ggml dump with ggml_gfloatsb.diff, ggml_float_static = ggml_gstatic.diff
+c0_prod            lines=     359 blocks=28  phi=19  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=3   sg_barriers=1   stores=1   unroll_full_metadata_nodes=0
+p1                 lines=     359 blocks=28  phi=19  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=3   sg_barriers=1   stores=1   unroll_full_metadata_nodes=1
+p5                 lines=     359 blocks=28  phi=19  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=3   sg_barriers=1   stores=1   unroll_full_metadata_nodes=1
+p6                 lines=     353 blocks=26  phi=18  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=3   sg_barriers=3   stores=1   unroll_full_metadata_nodes=1
+p7                 lines=     353 blocks=26  phi=18  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=3   sg_barriers=3   stores=1   unroll_full_metadata_nodes=1
+p8_dyn             lines=     361 blocks=27  phi=18  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=4   sg_barriers=3   stores=1   unroll_full_metadata_nodes=1
+p9_dyn             lines=     412 blocks=31  phi=19  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=4   sg_barriers=3   stores=2   unroll_full_metadata_nodes=1
+c3_final           lines=     447 blocks=36  phi=22  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=4   sg_barriers=3   stores=2   unroll_full_metadata_nodes=1
+ggml_float         lines=     461 blocks=29  phi=19  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=4   sg_barriers=3   stores=2   unroll_full_metadata_nodes=1
+ggml_float_static  lines=     457 blocks=29  phi=19  mma_call_sites=1   ld_half_sites=1   ld_float_sites=1   wg_barriers=4   sg_barriers=3   stores=2   unroll_full_metadata_nodes=1

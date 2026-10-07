@@ -1,0 +1,9 @@
+FACTS arm=prod max_threads_per_threadgroup=896 static_threadgroup_bytes=8192
+FACTS arm=p6 max_threads_per_threadgroup=832 static_threadgroup_bytes=8192
+FACTS arm=ggml max_threads_per_threadgroup=832 static_threadgroup_bytes=0
+CHECK arm=p6 differing_words=0/11931648 rms_relative_error=0.000e0
+CHECK arm=ggml differing_words=11929792/11931648 rms_relative_error=1.834e-4
+SHAPE rows=12288 k=1536 tokens=971 rounds=21
+TIME arm=prod p25_us=5606.8 median_us=5608.5 min_us=5605.1 cov_pct=0.04 tflops_p25=6.54 vs_ref_p25=1.2402 n=21
+TIME arm=p6 p25_us=5143.4 median_us=5144.4 min_us=5141.7 cov_pct=0.08 tflops_p25=7.13 vs_ref_p25=1.1377 n=21
+TIME arm=ggml p25_us=4520.7 median_us=4521.3 min_us=4520.0 cov_pct=0.02 tflops_p25=8.11 vs_ref_p25=1.0000 n=21
