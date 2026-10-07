@@ -1,4 +1,4 @@
-//! Interleaved decode ms/token arms: proxima builds, llama-server, Ollama.
+//! Interleaved decode ms/token arms: proxima builds and llama-server.
 //!
 //! One driver, no scripts: every arm is launched here under a cleared
 //! environment, the GPU-peer gate is checked before every launch, every launch
@@ -6,9 +6,8 @@
 //! any summary. Proxima arms are `decode_gbps_baseline` binaries (one per
 //! build under comparison); they run as `processes` rounds of
 //! `warmup + runs` generations each, rounds interleaved A B A B so a drifting
-//! GPU clock or background load lands on every arm alike. llama-server and
-//! Ollama are driven over HTTP with `std::net`, temperature 0, the same prompt
-//! text, `n_predict`/`num_predict` 128 unless `--new-tokens N` says otherwise.
+//! GPU clock or background load lands on every arm alike. llama-server is driven over HTTP with `std::net`, temperature 0, the same prompt
+//! text, `n_predict` 128 unless `--new-tokens N` says otherwise.
 //!
 //! Outlier rule, fixed before any run: a run is an outlier when its distance
 //! from its arm's pooled median exceeds `3 * 1.4826 * MAD` of that pool. Raw
@@ -28,7 +27,7 @@
 //! cargo run --release -p proxima-model-interop --example decode_arms -- \
 //!   --prompt-file prompt1k.txt --log launches.log --processes 2 --runs 7 \
 //!   --arm base=/path/decode_gbps_baseline_base --arm tip=/path/decode_gbps_baseline_tip \
-//!   --llama-server /path/llama-server --ollama gemma4:e2b-it-qat
+//!   --llama-server /path/llama-server
 //! ```
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -37,7 +36,6 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -56,9 +54,7 @@ const PEER_NAMES: [&str; 7] = [
 ];
 const PEER_WAIT: Duration = Duration::from_secs(3600);
 const LLAMA_ENGINE: &str = "llama-server";
-const OLLAMA_ENGINE: &str = "ollama";
 const LLAMA_PORT: u16 = 8097;
-const OLLAMA_PORT: u16 = 11434;
 const DEFAULT_NEW_TOKENS: usize = 128;
 const CONTEXT_TOKENS: usize = 4096;
 const OUTLIER_MAD_SCALE: f64 = 3.0 * 1.4826;
@@ -91,7 +87,6 @@ fn kill_registered_server() {
 struct Case {
     name: String,
     model: String,
-    ollama_tag: Option<String>,
 }
 
 struct Arguments {
@@ -101,10 +96,16 @@ struct Arguments {
     runs: usize,
     arms: Vec<(String, PathBuf)>,
     llama_server: Option<PathBuf>,
-    ollama_tag: Option<String>,
     model: String,
     cases: Vec<Case>,
     dump_llama_ids: Option<PathBuf>,
+}
+
+fn refuse_ollama_arm() -> ! {
+    eprintln!(
+        "decode_arms: the Ollama arm is removed; the Ollama numbers are recorded in proxima-tensor/specs/decode-prefill-parity/evidence/slice0/ac1/"
+    );
+    std::process::exit(2);
 }
 
 fn parse_arguments() -> Arguments {
@@ -115,7 +116,6 @@ fn parse_arguments() -> Arguments {
         runs: 7,
         arms: Vec::new(),
         llama_server: None,
-        ollama_tag: None,
         model: MODEL_PATH.to_string(),
         cases: Vec::new(),
         dump_llama_ids: None,
@@ -135,11 +135,10 @@ fn parse_arguments() -> Arguments {
             "--case" => arguments.cases.push(parse_case(&value())),
             "--llama-server" => arguments.llama_server = Some(PathBuf::from(value())),
             "--dump-llama-ids" => arguments.dump_llama_ids = Some(PathBuf::from(value())),
-            "--ollama" => arguments.ollama_tag = Some(value()),
+            "--ollama" => refuse_ollama_arm(),
             "--new-tokens" => NEW_TOKENS.store(value().parse().expect("integer"), Ordering::SeqCst),
             "--ignore-ollama" => {
-                // a token-id correctness run, not a timing run, so an idle
-                // resident Ollama is not a GPU peer
+                // a token-id correctness run, not a timing run: Ollama is neither quit nor a GPU peer
                 IGNORE_OLLAMA.store(true, Ordering::SeqCst);
             }
             "--arm" => {
@@ -161,20 +160,18 @@ fn parse_arguments() -> Arguments {
         arguments.cases.push(Case {
             name: String::new(),
             model: arguments.model.clone(),
-            ollama_tag: arguments.ollama_tag.clone(),
         });
     }
     arguments
 }
 
 fn parse_case(spec: &str) -> Case {
-    let mut parts = spec.splitn(3, '=');
-    let name = parts.next().expect("--case name=gguf[=ollama_tag]");
-    let model = parts.next().expect("--case name=gguf[=ollama_tag]");
+    let mut parts = spec.splitn(2, '=');
+    let name = parts.next().expect("--case name=gguf");
+    let model = parts.next().expect("--case name=gguf");
     Case {
         name: name.to_string(),
         model: model.to_string(),
-        ollama_tag: parts.next().map(str::to_string),
     }
 }
 
@@ -216,7 +213,7 @@ fn log_line(arguments: &Arguments, text: &str) {
     writeln!(file, "{} {text}", utc_now()).expect("write launches log");
 }
 
-fn running_peers(ollama_is_a_peer: bool) -> Vec<String> {
+fn running_peers() -> Vec<String> {
     let output = Command::new("ps")
         .args(["-axo", "comm"])
         .output()
@@ -225,8 +222,7 @@ fn running_peers(ollama_is_a_peer: bool) -> Vec<String> {
         .lines()
         .filter(|line| {
             PEER_NAMES.iter().any(|name| line.contains(name))
-                || (ollama_is_a_peer
-                    && !IGNORE_OLLAMA.load(Ordering::SeqCst)
+                || (!IGNORE_OLLAMA.load(Ordering::SeqCst)
                     && line.to_ascii_lowercase().contains("ollama"))
         })
         .map(str::to_string)
@@ -236,7 +232,7 @@ fn running_peers(ollama_is_a_peer: bool) -> Vec<String> {
 fn require_quiet_gpu(what: &str) {
     let started = Instant::now();
     loop {
-        let peers = running_peers(what != "ollama");
+        let peers = running_peers();
         if peers.is_empty() {
             return;
         }
@@ -397,7 +393,7 @@ fn print_memory(arm: &ArmRuns) {
 
 // bound: each arm against every earlier arm: median <= reference median + max(reference MAD, 2% of reference median), outliers removed
 fn is_server_arm(arm: &ArmRuns) -> bool {
-    arm.engine == LLAMA_ENGINE || arm.engine == OLLAMA_ENGINE
+    arm.engine == LLAMA_ENGINE
 }
 
 fn bound_references(arms: &[ArmRuns], index: usize) -> Vec<&ArmRuns> {
@@ -532,7 +528,7 @@ fn run_proxima_process(
             arm.label, output.status
         ),
     );
-    let peers_after = running_peers(true);
+    let peers_after = running_peers();
     arm.extra.push(format!(
         "process={process} peers_present_at_exit={peers_after:?}"
     ));
@@ -963,128 +959,6 @@ fn quit_ollama(arguments: &Arguments) {
     log_line(arguments, "ollama quit requested");
 }
 
-// sums the rss of every process whose executable path contains ollama, kept as the running maximum
-struct OllamaRssSampler {
-    stop: Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<f64>,
-}
-
-fn ollama_rss_bytes() -> f64 {
-    let output = Command::new("ps")
-        .args(["-axo", "rss=,comm="])
-        .output()
-        .expect("ps runs");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.to_ascii_lowercase().contains("ollama"))
-        .filter_map(|line| line.split_whitespace().next()?.parse::<f64>().ok())
-        .sum::<f64>()
-        * 1024.0
-}
-
-impl OllamaRssSampler {
-    fn start() -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&stop);
-        let handle = std::thread::spawn(move || {
-            let mut peak = 0.0f64;
-            while !flag.load(Ordering::SeqCst) {
-                peak = peak.max(ollama_rss_bytes());
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            peak
-        });
-        Self { stop, handle }
-    }
-
-    fn finish(self) -> f64 {
-        self.stop.store(true, Ordering::SeqCst);
-        self.handle.join().expect("rss sampler thread")
-    }
-}
-
-// keep_alive 0 drops the runner and with it Ollama's prompt prefix cache, so every request prefills the whole prompt
-fn ollama_unload(tag: &str) {
-    let body = json!({"model": tag, "keep_alive": 0}).to_string();
-    http_request(OLLAMA_PORT, "POST", "/api/generate", &body, Duration::from_secs(60));
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(60) {
-        let listing: Value = serde_json::from_str(&http_request(
-            OLLAMA_PORT,
-            "GET",
-            "/api/ps",
-            "",
-            Duration::from_secs(5),
-        ))
-        .expect("ollama ps json");
-        if listing["models"].as_array().is_some_and(Vec::is_empty) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    panic!("ollama still holds a model 60 s after keep_alive 0");
-}
-
-// ttft is the client clock to the first streamed chunk minus the server's own load_duration, so a reload is not billed as prefill
-fn ollama_request(tag: &str, prompt: &str) -> ServerRun {
-    let body = json!({"model": tag, "prompt": prompt, "raw": true, "stream": true, "options": {"temperature": 0, "top_k": 1, "num_predict": new_tokens(), "seed": 1, "num_ctx": CONTEXT_TOKENS}}).to_string();
-    let exchange = http_exchange(OLLAMA_PORT, "POST", "/api/generate", &body, Duration::from_secs(300));
-    let events = json_lines(&exchange.body, "");
-    let last = events.last().expect("ollama stream had no events");
-    assert!(
-        last["done"].as_bool().unwrap_or(false),
-        "ollama stream ended without done: {last}"
-    );
-    let eval_count = last["eval_count"].as_u64().expect("eval_count");
-    let eval_duration = last["eval_duration"].as_u64().expect("eval_duration");
-    let load_ms = last["load_duration"].as_f64().unwrap_or(0.0) / 1e6;
-    ServerRun {
-        prefill_ms: last["prompt_eval_duration"].as_f64().expect("prompt_eval_duration") / 1e6,
-        per_token_ms: eval_duration as f64 / eval_count as f64 / 1e6,
-        ttft_ms: exchange.first_chunk.as_secs_f64() * 1000.0 - load_ms,
-        note: format!(
-            "eval_count={eval_count} prompt_eval_count={} load_ms={load_ms:.1} events={}",
-            last["prompt_eval_count"],
-            events.len()
-        ),
-        ids: Vec::new(),
-    }
-}
-
-fn run_ollama_round(
-    arguments: &Arguments,
-    tag: &str,
-    prompt: &str,
-    process: usize,
-    arm: &mut ArmRuns,
-) {
-    require_quiet_gpu("ollama");
-    log_line(
-        arguments,
-        &format!(
-            "LAUNCH decode_arms ollama arm={} tag={tag} process={process} requests={}",
-            arm.label,
-            arguments.runs + 1
-        ),
-    );
-    Command::new("open")
-        .args(["-a", "Ollama"])
-        .status()
-        .expect("open Ollama");
-    wait_for_http(OLLAMA_PORT, "/api/tags", 120);
-    let sampler = OllamaRssSampler::start();
-    for request in 0..=arguments.runs {
-        ollama_unload(tag);
-        record_server_run(arm, process, request, ollama_request(tag, prompt));
-    }
-    arm.rss_by_process.push((process, 0, sampler.finish()));
-    quit_ollama(arguments);
-    log_line(
-        arguments,
-        &format!("EXIT decode_arms ollama arm={} process={process}", arm.label),
-    );
-}
-
 fn compare_ids(arms: &[ArmRuns]) {
     for reference_arm in arms.iter().filter(|arm| arm.engine == LLAMA_ENGINE) {
         let Some(reference) = reference_arm.ids_by_run.last() else {
@@ -1121,19 +995,15 @@ fn case_arms(arguments: &Arguments, case: &Case, qualified: bool) -> Vec<ArmRuns
     if arguments.llama_server.is_some() {
         arms.push(ArmRuns::new(&case.name, LLAMA_ENGINE, qualified));
     }
-    if case.ollama_tag.is_some() {
-        arms.push(ArmRuns::new(&case.name, OLLAMA_ENGINE, qualified));
-    }
     arms
 }
 
 fn run_arm(arguments: &Arguments, case: &Case, prompt: &str, process: usize, arm: &mut ArmRuns) {
-    match (arm.engine.as_str(), &arguments.llama_server, &case.ollama_tag) {
-        (LLAMA_ENGINE, Some(binary), _) => {
+    match (arm.engine.as_str(), &arguments.llama_server) {
+        (LLAMA_ENGINE, Some(binary)) => {
             run_llama_round(arguments, &case.model, binary, prompt, process, arm);
         }
-        (OLLAMA_ENGINE, _, Some(tag)) => run_ollama_round(arguments, tag, prompt, process, arm),
-        (label, _, _) => {
+        (label, _) => {
             let binary = &arguments
                 .arms
                 .iter()
@@ -1148,6 +1018,9 @@ fn run_arm(arguments: &Arguments, case: &Case, prompt: &str, process: usize, arm
 fn main() {
     install_server_cleanup_hook();
     let arguments = parse_arguments();
+    if !IGNORE_OLLAMA.load(Ordering::SeqCst) {
+        quit_ollama(&arguments);
+    }
     let prompt = std::fs::read_to_string(&arguments.prompt_file).expect("read prompt file");
     let qualified = arguments.cases.len() > 1;
     let mut per_case: Vec<Vec<ArmRuns>> = arguments
