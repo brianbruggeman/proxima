@@ -10,10 +10,13 @@ const CAPACITIES: [u64; 3] = [32, 512, 2048];
 const THREADGROUP_BUDGET: u64 = 32_768;
 
 fn assert_default_sizing() {
-    assert_eq!(crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK, 64);
+    assert_eq!(crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK, 128);
+    assert_eq!(crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT, 64);
     assert_eq!(crate::sized::ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP, 64);
+    assert_eq!(crate::sized::ATTENTION_ROWS_MIN_SIMDGROUPS, 2);
     assert_eq!(crate::sized::ATTENTION_ROWS_MMA_MIN_QUERY_ROWS, 2);
-    assert_eq!(crate::sized::ATTENTION_ROWS_MAX_QUERY_ROWS, 64);
+    assert_eq!(crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE, 2);
+    assert_eq!(crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS, 16);
     assert_eq!(crate::sized::ATTENTION_ROWS_TARGET_THREADGROUPS, 256);
     assert_eq!(
         crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
@@ -34,48 +37,55 @@ fn relaxed_form(op: &BoundOp) -> Option<CachedAttentionForm> {
     cached_attention_form(&op.kind, NumericPolicy::llama_relaxed())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chosen {
+    Decode,
+    RowTiled,
+    OneDispatch,
+}
+
+fn chosen(form: Option<CachedAttentionForm>) -> Chosen {
+    match form {
+        Some(CachedAttentionForm::TwoRangeDecodeSplit { .. }) => Chosen::Decode,
+        Some(CachedAttentionForm::TwoRangeRowTiled { .. }) => Chosen::RowTiled,
+        Some(CachedAttentionForm::TwoRangeCachedBound) => Chosen::OneDispatch,
+        other => panic!("not a two-range form: {other:?}"),
+    }
+}
+
 #[test]
 fn the_row_count_the_policy_and_the_head_group_choose_the_form() {
     assert_default_sizing();
-    let tiled = Some(CachedAttentionForm::TwoRangeRowTiled {
-        splits: 9,
-        rows_per_threadgroup: 3,
-        simdgroups: 4,
-    });
-    let decode = Some(CachedAttentionForm::TwoRangeDecodeSplit {
-        splits: 17,
-        chunks: 4,
-    });
-    let one_dispatch = Some(CachedAttentionForm::TwoRangeCachedBound);
     let mut cells = 0_u32;
 
-    for rows in [1_u64, 2, 5, 17, 49, 64, 65] {
-        for groups in [8_u64, 4] {
-            let op = attention_rows_op(9, groups, 256, 512, rows, SLIDING_LOWER);
+    for rows in [1_u64, 2, 5, 7, 8, 17, 49, 64, 65, 971] {
+        for groups in [8_u64, 2] {
+            let head_dim = if groups == 8 { 256 } else { 64 };
+            let op = attention_rows_op(9, groups, head_dim, 512, rows, SLIDING_LOWER);
             let relaxed_expected = match (rows, groups) {
-                (1, _) => decode,
-                (2..=64, 8) => tiled,
-                _ => one_dispatch,
+                (1, _) => Chosen::Decode,
+                (2.., 8) => Chosen::RowTiled,
+                (8.., _) => Chosen::RowTiled,
+                _ => Chosen::OneDispatch,
             };
             assert_eq!(
-                relaxed_form(&op),
+                chosen(relaxed_form(&op)),
                 relaxed_expected,
                 "relaxed, rows {rows}, groups {groups}"
             );
             assert_eq!(
-                cached_attention_form(&op.kind, NumericPolicy::bit_exact()),
-                one_dispatch,
+                chosen(cached_attention_form(&op.kind, NumericPolicy::bit_exact())),
+                Chosen::OneDispatch,
                 "bit_exact withholds both reassociations: rows {rows}, groups {groups}"
             );
             cells += 2;
         }
     }
-    assert_eq!(cells, 28, "7 row counts x 2 group counts x 2 policies");
+    assert_eq!(cells, 40, "10 row counts x 2 group counts x 2 policies");
 }
 
 #[test]
 fn shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form() {
-    let one_dispatch = Some(CachedAttentionForm::TwoRangeCachedBound);
     let mut misfits: Vec<(&str, BoundOp)> = Vec::new();
 
     let mut unequal = sliding_op(512, 5);
@@ -99,19 +109,27 @@ fn shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form() {
         attention_rows_op(9, 8, 272, 512, 5, SLIDING_LOWER),
     ));
     misfits.push((
-        "a group count that is not whole 8-row tiles",
-        attention_rows_op(9, 12, 256, 512, 5, SLIDING_LOWER),
+        "fewer rows than one fragment of a group count that is not whole 8-row blocks",
+        attention_rows_op(9, 2, 64, 512, 5, SLIDING_LOWER),
     ));
     misfits.push((
-        "a row whose tile exceeds the threadgroup memory",
+        "a group count whose eight-row unit exceeds the threadgroup memory",
+        attention_rows_op(9, 12, 256, 512, 9, SLIDING_LOWER),
+    ));
+    misfits.push((
+        "a vector block whose output fragments exceed the register budget",
         attention_rows_op(9, 8, 4096, 512, 5, SLIDING_LOWER),
+    ));
+    misfits.push((
+        "a group count whose eight-row unit exceeds the register budget",
+        attention_rows_op(9, 4, 256, 512, 9, SLIDING_LOWER),
     ));
 
     let cells = misfits.len();
     for (label, op) in misfits {
-        assert_eq!(relaxed_form(&op), one_dispatch, "{label}");
+        assert_eq!(chosen(relaxed_form(&op)), Chosen::OneDispatch, "{label}");
     }
-    assert_eq!(cells, 7, "every misfit must have been classified");
+    assert_eq!(cells, 9, "every misfit must have been classified");
 }
 
 fn set_new_key_rows(op: &mut BoundOp, rows: u64) {
@@ -128,92 +146,134 @@ fn set_rotary_dim(op: &mut BoundOp, rotary: u64) {
     *rotary_dim = rotary;
 }
 
-#[test]
-fn rows_per_threadgroup_fits_the_threadgroup_memory_budget() {
-    assert_default_sizing();
-    let expected = [
-        (8_u64, 512_u64, 1_u64),
-        (8, 256, 3),
-        (8, 128, 5),
-        (16, 256, 1),
-    ];
+/// `(query rows, kv heads, query groups, head dim, bucket capacity, expected
+/// rows per threadgroup)`: a prefill takes the full tile height its vector
+/// block budget allows, a verify of a few rows keeps one unit per tile.
+const TILE_CASES: [(u64, u64, u64, u64, u64, u64); 9] = [
+    (971, 1, 8, 512, 1942, 2),
+    (971, 1, 8, 256, 1483, 2),
+    (1000, 8, 2, 64, 2024, 8),
+    (600, 8, 2, 128, 1240, 8),
+    (600, 8, 8, 128, 1240, 2),
+    (600, 8, 16, 256, 1240, 1),
+    (4, 1, 8, 512, 1636, 1),
+    (49, 1, 8, 256, 561, 1),
+    (17, 1, 8, 512, 2065, 2),
+];
 
-    for (groups, head_dim, rows) in expected {
+#[test]
+fn rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets() {
+    assert_default_sizing();
+    for (query_rows, kv_heads, groups, head_dim, capacity, rows) in TILE_CASES {
+        let cell = format!("rows {query_rows} kv {kv_heads} groups {groups} head_dim {head_dim}");
         assert_eq!(
-            rows_per_threadgroup(groups, head_dim),
+            rows_per_threadgroup(query_rows, kv_heads, groups, head_dim, capacity),
             rows,
-            "groups {groups}, head_dim {head_dim}"
+            "{cell}"
         );
-        let bytes = row_tile_bytes(groups, head_dim);
+        let (unit_rows, unit_blocks) = tile_unit(groups);
+        let units = rows / unit_rows;
+        assert!(units >= 1 && rows % unit_rows == 0, "{cell}: whole units");
         assert!(
-            rows * bytes <= THREADGROUP_BUDGET,
-            "{rows} rows of {bytes} bytes exceed the budget"
+            units * unit_blocks <= crate::sized::ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE.max(unit_blocks),
+            "{cell}: the tile shares more vector blocks than the reuse budget"
         );
         assert!(
-            (rows + 1) * bytes > THREADGROUP_BUDGET,
-            "one more row of {bytes} bytes would still fit, so the rule left memory unused"
+            units == 1
+                || units * tile_unit_fragments(groups, head_dim)
+                    <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS,
+            "{cell}: {units} units exceed the register budget"
         );
+        let bytes = row_tile_bytes(rows, groups, row_tiled_block(head_dim));
+        assert!(bytes <= THREADGROUP_BUDGET, "{cell}: {bytes} bytes");
     }
-    assert_eq!(row_tile_bytes(8, 512), 4 * 8 * (512 + 64 + 2));
-    assert_eq!(row_tile_bytes(8, 256), 4 * 8 * (256 + 64 + 2));
+    assert_eq!(
+        row_tile_bytes(2, 8, 128),
+        4 * 16 * (128 + 6),
+        "a score block, three f32 and three i32 per query vector"
+    );
 }
 
 #[test]
 fn the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape() {
     let mut shapes = 0_u32;
-    for (groups, head_dim) in [(8_u64, 512_u64), (8, 256), (8, 128), (8, 64), (16, 256)] {
-        let rows = rows_per_threadgroup(groups, head_dim);
-        let block = crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK;
+    for (groups, head_dim) in [(8_u64, 512_u64), (8, 256), (8, 128), (8, 64), (16, 256), (2, 64), (2, 128)] {
+        let op = attention_rows_op(9, groups, head_dim, 512, 971, SLIDING_LOWER);
+        let Some(CachedAttentionForm::TwoRangeRowTiled {
+            rows_per_threadgroup: rows,
+            simdgroups,
+            ..
+        }) = relaxed_form(&op)
+        else {
+            panic!("groups {groups} head_dim {head_dim}: not the row-tiled form");
+        };
+        let block = row_tiled_block(head_dim);
         let vectors = rows * groups;
-        let declared = 4 * (vectors * head_dim + vectors * block + 2 * vectors);
+        let declared = 4 * (vectors * block + 3 * vectors + 3 * vectors);
         assert_eq!(
             declared,
-            rows * row_tile_bytes(groups, head_dim),
+            row_tile_bytes(rows, groups, block),
             "groups {groups} head_dim {head_dim}: the sizing rule must count exactly what the kernel declares"
         );
         assert!(
             declared <= THREADGROUP_BUDGET,
             "groups {groups} head_dim {head_dim}: {declared} bytes declared"
         );
+        let kernel = emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
+            .expect("the row-tiled kernel emits");
+        for declaration in [
+            format!("constexpr long tile_rows = {rows};"),
+            format!("constexpr long block = {block};"),
+            format!("constexpr long simdgroups = {simdgroups};"),
+            format!("constexpr long split_keys = {};", crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT),
+            "threadgroup float score_tile[tile_vectors * block];".to_string(),
+            "threadgroup int vector_row[tile_vectors];".to_string(),
+        ] {
+            assert!(
+                kernel.source.contains(&declaration),
+                "groups {groups} head_dim {head_dim}: the kernel does not carry `{declaration}`"
+            );
+        }
         shapes += 1;
     }
-    assert_eq!(shapes, 5);
+    assert_eq!(shapes, 7);
 }
 
 #[test]
-fn simdgroups_follow_llamas_head_dim_rule() {
-    for (head_dim, simdgroups) in [
-        (64_u64, 1_u64),
-        (128, 2),
-        (256, 4),
-        (512, 8),
-        (1024, 8),
-        (8, 1),
+fn simdgroups_follow_llamas_head_dim_rule_and_never_fall_below_two() {
+    for (head_dim, simdgroups, block) in [
+        (64_u64, 2_u64, 64_u64),
+        (128, 2, 64),
+        (256, 4, 128),
+        (512, 8, 128),
+        (1024, 8, 128),
+        (8, 2, 64),
     ] {
         assert_eq!(
             row_tiled_simdgroups(head_dim),
             simdgroups,
             "head_dim {head_dim}"
         );
+        assert_eq!(row_tiled_block(head_dim), block, "head_dim {head_dim}");
     }
 }
 
-/// `(rows, [(cached 32), (cached 512), (cached 2048)])`, each cell `(splits,
-/// threadgroups)` at one kv head.
-type GridRow = (u64, [(u64, u64); 3]);
+/// `(rows, [(cached 32), (cached 512), (cached 2048)])`, each cell `(rows per
+/// threadgroup, splits, threadgroups)` at one kv head.
+type GridRow = (u64, [(u64, u64, u64); 3]);
 
 const GLOBAL_GRID: [GridRow; 4] = [
-    (2, [(1, 2), (9, 18), (32, 64)]),
-    (5, [(1, 5), (9, 45), (32, 160)]),
-    (17, [(1, 17), (9, 153), (16, 272)]),
-    (49, [(2, 98), (6, 294), (6, 294)]),
+    (2, [(1, 1, 2), (1, 9, 18), (1, 32, 64)]),
+    (5, [(1, 1, 5), (1, 9, 45), (1, 32, 160)]),
+    (17, [(1, 1, 17), (1, 9, 153), (2, 29, 261)]),
+    (49, [(1, 2, 98), (1, 6, 294), (2, 11, 275)]),
 ];
 
 const SLIDING_GRID: [GridRow; 4] = [
-    (2, [(1, 1), (9, 9), (32, 32)]),
-    (5, [(1, 2), (9, 18), (32, 64)]),
-    (17, [(1, 6), (9, 54), (32, 192)]),
-    (49, [(2, 34), (9, 153), (16, 272)]),
+    (2, [(1, 1, 2), (1, 9, 18), (1, 32, 64)]),
+    (5, [(1, 1, 5), (1, 9, 45), (1, 32, 160)]),
+    (17, [(1, 1, 17), (1, 9, 153), (2, 29, 261)]),
+    (49, [(1, 2, 98), (1, 6, 294), (2, 11, 275)]),
 ];
 
 #[test]
@@ -230,10 +290,11 @@ fn row_tiled_splits_matches_the_grid_table() {
         ("sliding", 256, &SLIDING_GRID, sliding_op),
     ] {
         for (rows, per_capacity) in grid {
-            for (capacity, (splits, threadgroups)) in CAPACITIES.iter().zip(per_capacity) {
+            for (capacity, (rows_tile, splits, threadgroups)) in
+                CAPACITIES.iter().zip(per_capacity)
+            {
                 let op = build(*capacity, *rows);
-                let rows_tile = rows_per_threadgroup(8, head_dim);
-                let tiles = rows.div_ceil(rows_tile);
+                let tiles = rows.div_ceil(*rows_tile);
                 assert_eq!(
                     row_tiled_splits(capacity + rows, 1, tiles),
                     *splits,
@@ -243,13 +304,13 @@ fn row_tiled_splits_matches_the_grid_table() {
                     relaxed_form(&op),
                     Some(CachedAttentionForm::TwoRangeRowTiled {
                         splits: *splits,
-                        rows_per_threadgroup: rows_tile,
+                        rows_per_threadgroup: *rows_tile,
                         simdgroups: row_tiled_simdgroups(head_dim),
                     }),
                     "{label} rows {rows} cached {capacity}: form"
                 );
                 assert_eq!(
-                    row_tiled_threadgroups(&op.kind, rows_tile, *splits),
+                    row_tiled_threadgroups(&op.kind, *rows_tile, *splits),
                     *threadgroups,
                     "{label} rows {rows} cached {capacity}: threadgroups"
                 );
@@ -279,7 +340,7 @@ fn the_partial_dispatches_one_threadgroup_per_kv_head_row_tile_and_split() {
         (&SLIDING_GRID, sliding_op, 128),
     ] {
         for (rows, per_capacity) in grid {
-            for (capacity, (_, threadgroups)) in CAPACITIES.iter().zip(per_capacity) {
+            for (capacity, (_, _, threadgroups)) in CAPACITIES.iter().zip(per_capacity) {
                 let op = build(*capacity, *rows);
                 assert_eq!(
                     threadgroup_layout(&op),
@@ -323,17 +384,20 @@ fn the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store(
                     "ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]",
                     "long total_rows = u.total_elements / (kv_heads * query_groups);",
                     "long split = (long)tgid % splits;",
-                    "long tile = ((long)tgid / splits) % tiles;",
+                    "long tile = tiles - 1L - ((long)tgid / splits) % tiles;",
                     "long kv_head = (long)tgid / (splits * tiles);",
                     "long live = (long)in8[0];",
                     "long first_key = max(0L, live + cached_lower + row0) & ~7L;",
-                    "long new_blocks = (split == splits - 1L) ? (total_rows + block - 1L) / block : 0L;",
-                    "simdgroup_multiply_accumulate(scores[vector_block], query_even, key_even, scores[vector_block]);",
-                    "simdgroup_multiply_accumulate(scores[vector_block], query_odd, key_odd, scores[vector_block]);",
+                    "long new_blocks = (last_split && mma_end > new_start) ? (mma_end - new_start + block - 1L) / block : 0L;",
+                    "long tail_steps = (last_split && new_end > total_aligned && new_first < total_rows) ? 1L : 0L;",
+                    "long slice = ((((band + splits - 1L) / splits) + split_keys - 1L) / split_keys) * split_keys;",
+                    "simdgroup_multiply_accumulate(scores[group][vector_block], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_block]);",
+                    "simdgroup_multiply_accumulate(scores[group][vector_block], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_block]);",
                     "(key - live - query_row) >= cached_lower",
-                    "(key0 + column - query_row) <= new_upper",
+                    "relative <= new_upper && relative >= cached_lower",
+                    "accumulated[slot][vector_block].thread_elements()[0] *= row_scale;",
                     "long stats_index = u.total_elements * head_dim * splits + (query_index * splits + split) * 2L;",
-                    "attn_scratch[((query_index * (head_dim / 4L) + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L)]",
+                    "long base = ((query_index * (head_dim / 4L) + (dimension >> 2)) * splits + split) * 4L + (dimension & 3L);",
                 ] {
                     assert!(
                         kernel.source.contains(required),
@@ -345,11 +409,8 @@ fn the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store(
                     "{cell}: the bucket extent is read from the ninth operand"
                 );
 
-                let tile_rows = rows_per_threadgroup(8, groups_head_dim);
-                let vectors = tile_rows * 8;
-                let block = crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK;
-                let declared = 4 * (vectors * groups_head_dim + vectors * block + 2 * vectors);
-                assert_eq!(declared, tile_rows * row_tile_bytes(8, groups_head_dim), "{cell}");
+                let tile_rows = rows_per_threadgroup(rows, 1, 8, groups_head_dim, capacity + rows);
+                let declared = row_tile_bytes(tile_rows, 8, row_tiled_block(groups_head_dim));
                 assert!(declared <= THREADGROUP_BUDGET, "{cell}: {declared} bytes");
 
                 sources.insert((groups_head_dim, kernel.source));
@@ -361,10 +422,10 @@ fn the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store(
     assert_eq!(emitted, 24, "2 layers x 4 row counts x 3 capacities");
     assert_eq!(
         sources.len(),
-        2,
-        "one compiled kernel per layer shape serves every K and every bucket"
+        4,
+        "a layer shape compiles one kernel per tile height (one and two rows) and serves every bucket"
     );
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), sources.len(), "one entry name per kernel text");
 }
 
 #[test]
@@ -378,7 +439,7 @@ fn the_split_binds_scratch_and_the_merge_runs_one_threadgroup_per_row_and_head()
         (sliding_op, &SLIDING_GRID),
     ] {
         for (rows, per_capacity) in grid {
-            for (capacity, (splits, _)) in CAPACITIES.iter().zip(per_capacity) {
+            for (capacity, (_, splits, _)) in CAPACITIES.iter().zip(per_capacity) {
                 let op = build(*capacity, *rows);
                 let cell = format!("rows {rows} cached {capacity}");
                 let kernel = emit(&op, &PackedOperands::new(), policy).expect("emits");
@@ -472,17 +533,17 @@ fn the_row_tiled_kernel_declines_a_half_precision_op() {
 }
 
 /// The kernel's band arithmetic, transcribed: the aligned first key of a
-/// tile, each split's slice, and the blocks of the new range.
+/// tile and each split's slice, a multiple of the split granule.
 fn kernel_slices(
     live: i64,
     lower: i64,
     row0: i64,
     splits: i64,
-    block: i64,
+    granule: i64,
 ) -> (i64, Vec<(i64, i64)>) {
     let first_key = (live + lower + row0).max(0) & !7;
     let band = (live - first_key).max(0);
-    let slice = ((band + splits - 1) / splits + block - 1) / block * block;
+    let slice = ((band + splits - 1) / splits + granule - 1) / granule * granule;
     let slices = (0..splits)
         .map(|split| {
             let start = first_key + split * slice;
@@ -498,11 +559,11 @@ fn kernel_slices(
 /// `the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store`).
 #[test]
 fn every_cached_and_new_key_is_scored_by_exactly_one_split() {
-    let block = i64::try_from(crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK).expect("small");
+    let granule = i64::try_from(crate::sized::ATTENTION_ROWS_KEYS_PER_SPLIT).expect("small");
     let mut cases = 0_u64;
 
     for rows in 1..=64_i64 {
-        for tile_rows in [1_i64, 3] {
+        for tile_rows in [1_i64, 2, 3, 8, 16, 24] {
             let tiles = (rows + tile_rows - 1) / tile_rows;
             let mut covered_rows = 0;
             for tile in 0..tiles {
@@ -511,19 +572,12 @@ fn every_cached_and_new_key_is_scored_by_exactly_one_split() {
             }
             assert_eq!(covered_rows, rows, "tiles partition the {rows} rows");
         }
-        let new_blocks = (rows + block - 1) / block;
-        let mut covered_new = 0;
-        for step in 0..new_blocks {
-            let key0 = step * block;
-            covered_new += block.min(rows - key0);
-        }
-        assert_eq!(covered_new, rows, "the new-range blocks tile [0, {rows})");
 
         for live in (1..=2048_i64).step_by(7) {
             for lower in [-511_i64, -9_223_372_036_854_775_807] {
                 for splits in 1..=32_i64 {
                     for row0 in [0_i64, rows - 1] {
-                        let (first_key, slices) = kernel_slices(live, lower, row0, splits, block);
+                        let (first_key, slices) = kernel_slices(live, lower, row0, splits, granule);
                         let mut next = first_key;
                         for (start, end) in
                             slices.iter().copied().filter(|(start, end)| start < end)
@@ -556,6 +610,69 @@ fn every_cached_and_new_key_is_scored_by_exactly_one_split() {
         "the property must have run over the whole domain"
     );
     println!("every_cached_and_new_key_is_scored_by_exactly_one_split: {cases} cases");
+}
+
+/// The kernel's new-range schedule, transcribed: the fragment blocks from the
+/// aligned first visible key to the last whole fragment, then the scalar tail.
+/// Returns the keys visited as `(fragment keys, tail keys)`.
+fn new_range_keys(rows: i64, row0: i64, rows_here: i64, lower: i64, upper: i64, block: i64) -> Vec<i64> {
+    let total_aligned = rows & !7;
+    let last_row = row0 + rows_here - 1;
+    let new_first = (row0 + lower).max(0);
+    let new_end = rows.min(last_row + upper + 1);
+    let new_start = new_first & !7;
+    let mma_end = new_end.min(total_aligned);
+    let blocks = if mma_end > new_start {
+        (mma_end - new_start + block - 1) / block
+    } else {
+        0
+    };
+    let mut keys = Vec::new();
+    for step in 0..blocks {
+        let key0 = new_start + step * block;
+        keys.extend(key0..key0 + block.min(mma_end - key0));
+    }
+    if new_end > total_aligned && new_first < rows {
+        keys.extend(total_aligned..rows);
+    }
+    keys
+}
+
+/// Every new key a row of the tile can see is visited exactly once, whatever
+/// the row count, tile height, window and upper bound, so the skip of blocks
+/// above the causal diagonal and below the window never drops a visible key and
+/// the aligned fragments and the scalar tail never overlap.
+#[test]
+fn the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once() {
+    let block = i64::try_from(crate::sized::ATTENTION_ROWS_KEYS_PER_BLOCK).expect("small");
+    let mut cases = 0_u64;
+    for rows in 1..=200_i64 {
+        for tile_rows in [1_i64, 2, 3, 8, 16, 24] {
+            for (lower, upper) in [(i64::MIN / 2, 0_i64), (-511, 0), (-39, 0), (-7, 0), (-3, 2)] {
+                for row0 in (0..rows).step_by(tile_rows as usize) {
+                    let rows_here = tile_rows.min(rows - row0);
+                    let keys = new_range_keys(rows, row0, rows_here, lower, upper, block);
+                    let mut sorted = keys.clone();
+                    sorted.sort_unstable();
+                    sorted.dedup();
+                    assert_eq!(sorted.len(), keys.len(), "rows {rows} row0 {row0}: a key is visited twice");
+                    for key in 0..rows {
+                        let visible = (row0..row0 + rows_here)
+                            .any(|row| key - row >= lower && key - row <= upper);
+                        if visible {
+                            assert!(
+                                keys.contains(&key),
+                                "rows {rows} tile {tile_rows} row0 {row0} lower {lower} upper {upper}: visible key {key} is skipped"
+                            );
+                        }
+                    }
+                    assert!(keys.iter().all(|key| (0..rows).contains(key)), "a key outside the new range");
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert!(cases > 20_000, "the property must have run over the whole domain: {cases}");
 }
 
 /// The K-row `CachedSoftmaxWeights` the recognizer binds for gemma4-E2B at

@@ -4560,8 +4560,8 @@ pub(super) mod attention_scratch_len_tests {
 
         let splits = crate::msl::cached_attention_live_splits(&bound.kind, policy);
         assert_eq!(
-            splits, 6,
-            "49 row tiles at 1 row each, 1681 keys: 256/49 -> 6 splits"
+            splits, 11,
+            "25 row tiles at 2 rows each, 1681 keys: 256 threadgroups over 25 tiles -> 11 splits"
         );
         assert_eq!(elements, 49 * 8 * splits * (2 + 512));
         assert_ne!(
@@ -4571,14 +4571,14 @@ pub(super) mod attention_scratch_len_tests {
         );
         assert_eq!(
             elements * 4,
-            4_835_712,
-            "4.84 MB of scratch for the widest op"
+            8_865_472,
+            "8.87 MB of scratch for the widest op"
         );
     }
 
     /// 35 attention positions of one verify plan (7 global, 28 sliding) share
     /// one scratch buffer sized at the widest, where one buffer per position
-    /// would reserve 135.8 MB.
+    /// would reserve 130.0 MB.
     #[cfg(feature = "metal-attn-split-rows")]
     #[test]
     fn the_row_tiled_positions_of_a_plan_share_one_scratch_sized_at_the_widest() {
@@ -4616,11 +4616,11 @@ pub(super) mod attention_scratch_len_tests {
         let shared = shared_scratch_elements(&resolved, policy)
             .expect("35 sharing positions need one buffer");
         assert_eq!(
-            shared, 1_208_928,
-            "the widest op: 392 vectors x 6 splits x 514 floats"
+            shared, 2_216_368,
+            "the widest op: 392 vectors x 11 splits x 514 floats"
         );
-        assert_eq!(per_position, 33_948_768, "7 x 4.84 MB + 28 x 3.64 MB");
-        assert_eq!(per_position * 4, 135_795_072);
+        assert_eq!(per_position, 32_505_424, "7 x 8.87 MB + 28 x 2.43 MB");
+        assert_eq!(per_position * 4, 130_021_696);
     }
 
     /// The single-row decode keeps its per-position reservation at the compiled

@@ -40,15 +40,54 @@ pub struct Fixture {
     pub named: Vec<(String, Vec<f32>)>,
 }
 
+/// The attention geometry of the two layers: query heads, kv heads, the head
+/// dim of the sliding layer and of the global layer, and the sliding window.
+#[derive(Clone, Copy)]
+pub struct Geometry {
+    pub query_heads: u32,
+    pub kv_heads: u32,
+    pub sliding_head_dim: u32,
+    pub global_head_dim: u32,
+    pub window: u32,
+}
+
+impl Geometry {
+    /// gemma4-E2B: eight query heads on one kv head, head dims 256 and 512,
+    /// a 512-key window.
+    pub const GEMMA4_E2B: Self = Self {
+        query_heads: QUERY_HEADS,
+        kv_heads: KV_HEADS,
+        sliding_head_dim: SLIDING_HEAD_DIM,
+        global_head_dim: GLOBAL_HEAD_DIM,
+        window: SLIDING_WINDOW,
+    };
+
+    /// granite-3.1 MoE 1B: sixteen query heads on eight kv heads, two query
+    /// groups of head dim 64 in both layers.
+    pub const GRANITE_MOE: Self = Self {
+        query_heads: 16,
+        kv_heads: 8,
+        sliding_head_dim: 64,
+        global_head_dim: 64,
+        window: SLIDING_WINDOW,
+    };
+
+    #[must_use]
+    pub fn with_window(self, window: u32) -> Self {
+        Self { window, ..self }
+    }
+}
+
 fn attention(
     head_dim: u32,
+    kv_heads: u32,
     window: Option<u32>,
     value: ValueSourceKind,
     full: bool,
 ) -> LayerAttentionConfig {
     LayerAttentionConfig {
         head_dim,
-        kv_heads: KV_HEADS,
+        kv_heads,
         mask_window: window,
         value_source_kind: value,
         key_source_kind: KeySourceKind::ProjectedK,
@@ -71,13 +110,14 @@ fn attention(
     }
 }
 
-fn schedule() -> Vec<LayerSchedule> {
+fn schedule(geometry: Geometry) -> Vec<LayerSchedule> {
     vec![
         LayerSchedule {
             kind: LayerKind::Attention,
             attention: attention(
-                SLIDING_HEAD_DIM,
-                Some(SLIDING_WINDOW),
+                geometry.sliding_head_dim,
+                geometry.kv_heads,
+                Some(geometry.window),
                 ValueSourceKind::ProjectedV,
                 false,
             ),
@@ -85,7 +125,13 @@ fn schedule() -> Vec<LayerSchedule> {
         },
         LayerSchedule {
             kind: LayerKind::Attention,
-            attention: attention(GLOBAL_HEAD_DIM, None, ValueSourceKind::SharedWithKey, true),
+            attention: attention(
+                geometry.global_head_dim,
+                geometry.kv_heads,
+                None,
+                ValueSourceKind::SharedWithKey,
+                true,
+            ),
             ffn: LayerFfnConfig::exclusive(),
         },
     ]
@@ -159,18 +205,25 @@ fn named_block(
 /// at the capacity bucket `bucket_for(cached_len)`.
 #[must_use]
 pub fn fixture(rows: usize, cached_len: usize) -> Fixture {
+    fixture_with(rows, cached_len, Geometry::GEMMA4_E2B)
+}
+
+/// [`fixture`] at another attention geometry: a window under `rows` is one the
+/// new range itself crosses, the prefill shape.
+#[must_use]
+pub fn fixture_with(rows: usize, cached_len: usize, geometry: Geometry) -> Fixture {
     let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
         scheduled_two_range_cached_forward_program_with_experts(
             VOCAB,
             EMBEDDING,
             FEED_FORWARD,
             FEED_FORWARD,
-            QUERY_HEADS,
+            geometry.query_heads,
             BLOCK_COUNT,
             0,
             0,
             BLOCK_COUNT,
-            &schedule(),
+            &schedule(geometry),
             Some(EmbeddingScale::Sqrt),
             None,
             false,
