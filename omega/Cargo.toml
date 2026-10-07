@@ -391,8 +391,8 @@ metal-gathered-packed-row = ["metal"]
 # kernel with one z slice per expert; each threadgroup scans the route for the
 # tokens that name its expert. Joined `metal`'s default after granite moe 1b's
 # 1000-token prefill measured 6459.0 -> 831.9 ms (21 interleaved runs per arm)
-# with token ids equal to llama.cpp f1ea20621 on all 24 runs per arm
-# (`proxima-tensor/specs/decode-prefill-parity/SPEC.md`, slice 1).
+# with token ids equal to llama.cpp on all 24 runs per arm (evidence:
+# `proxima-tensor/specs/decode-prefill-parity/evidence/`, granite prefill).
 metal-grouped-gemm = ["metal-tiled-gemm"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
