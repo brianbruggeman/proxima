@@ -1,6 +1,8 @@
-//! Renders the Q4_0 tiled and dense batched kernels via [`omega::emit`]
-//! across all four `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` x
-//! `PROXIMA_TILED_GEMM_DIRECT_STORE` on/off combinations, and dumps each
+//! Renders the Q4_0 and Q4_K tiled kernels (971 tokens, the shape the tiled path admits) and the dense batched
+//! kernel via [`omega::emit`] across the four explicit `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` x
+//! `PROXIMA_TILED_GEMM_DIRECT_STORE` "0"/"1" combinations (an unset switch means different things at
+//! different commits, so each is pinned), asserts that every switch under test changes the rendered text
+//! (a sweep whose arms render identically proves nothing), and dumps each
 //! rendered `.metal` text to a temp dir for an external, artifact-grounded
 //! comparison against a prior kernel-body revision (see
 //! `docs/model-interop/discipline.md` ROWs C4.15/C4.16, both rolled back:
@@ -21,7 +23,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(all(feature = "metal", feature = "metal-tiled-gemm", target_os = "macos"))]
 fn run() -> anyhow::Result<()> {
     use anyhow::Context;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use proxima_tensor::{
         DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp,
@@ -35,11 +37,11 @@ fn run() -> anyhow::Result<()> {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
-            Op::Input { dtype: DType::UInt8, shape: vec![Extent::Static(256), Extent::Static(128)], name: None },
+            Op::Input { dtype: DType::UInt8, shape: vec![Extent::Static(1536), Extent::Static(256)], name: None },
         );
         let activation = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(64), Extent::Static(128)], name: None },
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(971), Extent::Static(1536)], name: None },
         );
         let product = append(
             &mut program,
@@ -48,7 +50,7 @@ fn run() -> anyhow::Result<()> {
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(projection(3, &[1, 2]))),
-                    (activation, IndexMap::Affine(projection(3, &[0, 2]))),
+                    (activation, IndexMap::Affine(projection(3, &[0, 1]))),
                 ],
                 name: None,
             },
@@ -61,7 +63,7 @@ fn run() -> anyhow::Result<()> {
                 init: ReduceInit::Zero,
                 operand: product,
                 in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
-                out_map: IndexMap::Affine(projection(3, &[0, 1])),
+                out_map: IndexMap::Affine(projection(3, &[0, 2])),
                 keep: Keep::Reduce,
                 name: None,
             }),
@@ -80,7 +82,7 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(32), Extent::Static(4), Extent::Static(64)],
+                shape: vec![Extent::Static(512), Extent::Static(8), Extent::Static(128)],
                 name: None,
             },
         );
@@ -88,7 +90,7 @@ fn run() -> anyhow::Result<()> {
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(16), Extent::Static(4), Extent::Static(64)],
+                shape: vec![Extent::Static(510), Extent::Static(8), Extent::Static(128)],
                 name: None,
             },
         );
@@ -133,7 +135,6 @@ fn run() -> anyhow::Result<()> {
     correct_packed_matmul_layouts(&mut q4_bound_ops, &q4_packed_set);
     let q4_bound =
         q4_bound_ops.into_iter().find(|op| op.node == q4_gate).context("q4 gate bound op present")?;
-    let q4_packed_operands: omega::PackedOperands = std::collections::BTreeMap::from([(q4_weight, omega::Codec::Q4_0)]);
 
     // -- dense batched: no packed operand, WWS x DIRECT_STORE swept --
     let (dense_program, dense_sum) = dense_batched_program();
@@ -144,43 +145,49 @@ fn run() -> anyhow::Result<()> {
         dense_bound_ops.into_iter().find(|op| op.node == dense_sum).context("dense sum bound op present")?;
     let dense_packed_operands: omega::PackedOperands = std::collections::BTreeMap::new();
 
-    for wws in [false, true] {
-        for dstore in [false, true] {
-            let wws_env = if wws { Some("1") } else { None };
-            let dstore_env = if dstore { Some("1") } else { None };
-            let label = format!("wws{}_dstore{}", wws as u8, dstore as u8);
-
-            let q4_source: anyhow::Result<String> = temp_env::with_vars(
-                [
-                    ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", wws_env),
-                    ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_env),
-                ],
-                || Ok(omega::emit(&q4_bound, &q4_packed_operands, numeric_policy).context("q4 kernel emits")?.source),
-            );
-            let q4_source = q4_source?;
-            let dense_source: anyhow::Result<String> = temp_env::with_vars(
-                [
-                    ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", wws_env),
-                    ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_env),
-                ],
-                || {
-                    Ok(omega::emit(&dense_bound, &dense_packed_operands, numeric_policy)
-                        .context("dense kernel emits")?
-                        .source)
-                },
-            );
-            let dense_source = dense_source?;
-
-            std::fs::write(output_dir.join(format!("render_q4_{label}.metal")), &q4_source).context("write q4 render")?;
-            std::fs::write(output_dir.join(format!("render_dense_{label}.metal")), &dense_source)
-                .context("write dense render")?;
-            println!(
-                "RENDERED label={label} q4_bytes={} dense_bytes={} q4_has_half_act=false q4_has_blocked_tile=false dir={}",
-                q4_source.len(),
-                dense_source.len(),
-                output_dir.display()
-            );
+    let codecs = [("q4_0", omega::Codec::Q4_0), ("q4k", omega::Codec::Q4K)];
+    let mut renders: BTreeMap<String, String> = BTreeMap::new();
+    for wide_weight_stage in ["0", "1"] {
+        for direct_store in ["0", "1"] {
+            let label = format!("wws{wide_weight_stage}_dstore{direct_store}");
+            let env = [
+                ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some(wide_weight_stage)),
+                ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some(direct_store)),
+            ];
+            for (codec_label, codec) in codecs {
+                let packed: omega::PackedOperands = BTreeMap::from([(q4_weight, codec)]);
+                let source = temp_env::with_vars(env, || -> anyhow::Result<String> {
+                    Ok(omega::emit(&q4_bound, &packed, numeric_policy).context("tiled kernel emits")?.source)
+                })?;
+                renders.insert(format!("{codec_label}_{label}"), source);
+            }
+            let dense_source = temp_env::with_vars(env, || -> anyhow::Result<String> {
+                Ok(omega::emit(&dense_bound, &dense_packed_operands, numeric_policy)
+                    .context("dense kernel emits")?
+                    .source)
+            })?;
+            renders.insert(format!("dense_{label}"), dense_source);
         }
     }
+
+    for (key, source) in &renders {
+        std::fs::write(output_dir.join(format!("render_{key}.metal")), source).context("write render")?;
+        println!("RENDERED key={key} bytes={} dir={}", source.len(), output_dir.display());
+    }
+
+    let differ = |left: &str, right: &str| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            renders.get(left) != renders.get(right),
+            "{left} and {right} rendered the same text: the switch under test changed nothing, so the sweep proves nothing"
+        );
+        Ok(())
+    };
+    for codec_label in ["q4_0", "q4k"] {
+        differ(&format!("{codec_label}_wws0_dstore0"), &format!("{codec_label}_wws1_dstore0"))?;
+        differ(&format!("{codec_label}_wws0_dstore0"), &format!("{codec_label}_wws0_dstore1"))?;
+        differ(&format!("{codec_label}_wws1_dstore0"), &format!("{codec_label}_wws1_dstore1"))?;
+    }
+    differ("dense_wws0_dstore0", "dense_wws0_dstore1")?;
+    anyhow::ensure!(renders.len() == 12, "expected 12 renders, produced {}", renders.len());
     Ok(())
 }
