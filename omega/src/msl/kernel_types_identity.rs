@@ -2152,17 +2152,16 @@ pub(super) const fn tiled_gemm_direct_store_override() -> bool {
     false
 }
 
-/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE=1` (see `docs/model-interop/
+/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` (see `docs/model-interop/
 /// discipline.md` ROW C4.12): see
 /// [`crate::identity::MetalOnlyExtras::tiled_gemm_wide_weight_stage`]'s own
-/// doc for what this switch changes. Default OFF: unset or any value other
-/// than `"1"` keeps today's one-thread-per-row weight-staging loop; only
-/// explicit `"1"` opts in.
+/// doc for what this switch changes. Default ON: unset admits, and only an
+/// explicit `"0"` keeps the one-thread-per-row weight-staging loop.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_wide_weight_stage_override() -> bool {
-    let active = matches!(
+    let active = !matches!(
         std::env::var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE"),
-        Ok(value) if value.trim() == "1"
+        Ok(value) if value.trim() == "0"
     );
     log_tiled_gemm_wide_weight_stage_once(active);
     active
@@ -2182,20 +2181,19 @@ fn log_tiled_gemm_wide_weight_stage_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn tiled_gemm_wide_weight_stage_override() -> bool {
-    false
+    true
 }
 
-/// `PROXIMA_TILED_GEMM_GRID2D=1` (see `docs/model-interop/
+/// `PROXIMA_TILED_GEMM_GRID2D` (see `docs/model-interop/
 /// discipline.md` ROW C4.19): see
 /// [`crate::identity::MetalOnlyExtras::tiled_gemm_grid2d`]'s own doc for
-/// what this switch changes. Default OFF: unset or any value other than
-/// `"1"` keeps today's flattened `gid`/`dispatchThreads` form; only
-/// explicit `"1"` opts in.
+/// what this switch changes. Default ON: unset admits, and only an explicit
+/// `"0"` keeps the flattened `gid`/`dispatchThreads` form.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_grid2d_override() -> bool {
-    let active = matches!(
+    let active = !matches!(
         std::env::var("PROXIMA_TILED_GEMM_GRID2D"),
-        Ok(value) if value.trim() == "1"
+        Ok(value) if value.trim() == "0"
     );
     log_tiled_gemm_grid2d_once(active);
     active
@@ -2215,7 +2213,7 @@ fn log_tiled_gemm_grid2d_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn tiled_gemm_grid2d_override() -> bool {
-    false
+    true
 }
 
 /// `PROXIMA_MULTI_ROW_UNROLL` A/B switch: literal indices let the `sumf`

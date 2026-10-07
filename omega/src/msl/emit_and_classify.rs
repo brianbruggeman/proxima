@@ -3228,7 +3228,7 @@ pub(super) fn direct_store_active(
 }
 
 /// see `docs/model-interop/discipline.md` ROW C4.12: `true` only when `PROXIMA_TILED_GEMM_WIDE_WEIGHT_
-/// STAGE` admits (default OFF) AND `resolved` takes the packed (quantized)
+/// STAGE` admits (default ON: unset admits, only explicit `"0"` declines) AND `resolved` takes the packed (quantized)
 /// tiled-GEMM path -- unlike [`direct_store_active`],
 /// this NEVER applies to [`push_dense_batched_gemm_body`]: that body has no
 /// codec-decode arm at all (both operands are plain `float`), so there is no
@@ -3259,7 +3259,7 @@ pub(super) fn wide_weight_stage_active(
 }
 
 /// see `docs/model-interop/discipline.md` ROW C4.19: `true` only when `PROXIMA_TILED_GEMM_GRID2D` admits
-/// (default OFF) AND `resolved` takes either the tiled (packed) or the
+/// (default ON: unset admits, only explicit `"0"` declines) AND `resolved` takes either the tiled (packed) or the
 /// dense-batched GEMM path -- unlike [`wide_weight_stage_active`], this
 /// applies to BOTH bodies: the 2D-attribute signature/dispatch swap is
 /// orthogonal to whether the weight operand is quantized.

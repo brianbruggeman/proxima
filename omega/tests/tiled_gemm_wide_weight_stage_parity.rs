@@ -206,7 +206,7 @@ fn run_wide_weight_stage_byte_identity(
 
     let off = temp_env::with_vars(
         [
-            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>),
+            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0")),
             ("PROXIMA_TILED_GEMM_DIRECT_STORE", direct_store_value),
         ],
         || {

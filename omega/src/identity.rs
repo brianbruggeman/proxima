@@ -292,8 +292,8 @@ pub(crate) struct MetalOnlyExtras {
     /// `q4_0_run8_wide`'s `ushort` loads instead of `q4_0_run8`'s per-byte
     /// `uchar` loads, and carries a per-thread block pointer/slot across the
     /// `k0` reduction loop instead of re-deriving it from a division every
-    /// step. Default OFF (unset keeps today's one-thread-per-row staging;
-    /// only explicit `"1"` opts in) -- this changes who computes which
+    /// step. Default ON (unset admits; only explicit `"0"` keeps the
+    /// one-thread-per-row staging) -- this changes who computes which
     /// element and how its bytes are loaded/stored, never the decoded value
     /// (ROW C4.12's own byte-parity tables), so the on/off kernels
     /// are two distinct compiled pipelines and must never share a cache
@@ -311,8 +311,8 @@ pub(crate) struct MetalOnlyExtras {
     /// from a flattened `uint gid [[thread_position_in_grid]]` under
     /// `dispatchThreads`. Also narrows the K-reduction loop counter from
     /// `long` to `int` (ROW C4.19's own `for (int k0 ...)` change).
-    /// Default OFF (unset keeps today's flattened `gid` + `dispatchThreads`
-    /// form; only explicit `"1"` opts in) -- the harness proved this
+    /// Default ON (unset admits; only explicit `"0"` keeps the flattened
+    /// `gid` + `dispatchThreads` form) -- the harness proved this
     /// bit-identical to the flattened form on every validated shape, but the
     /// EMITTED SOURCE and the dispatch call both differ, so two ops
     /// agreeing on every other axis but disagreeing on this flag must still

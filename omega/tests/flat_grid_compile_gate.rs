@@ -468,7 +468,7 @@ fn expected_kernel_count() -> usize {
 
 #[test]
 fn every_flat_form_kernel_compiles_with_the_metal_toolchain() {
-    let kernels = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, flat_kernels);
+    let kernels = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), flat_kernels);
     let expected = expected_kernel_count();
     assert_eq!(
         kernels.len(),
@@ -524,7 +524,7 @@ fn the_packed_row_fixtures_take_the_launch_widths_their_labels_name() {
     let (even, even_codecs) = packed_row_q4k_matvec(4_000_000_000);
     let (odd, odd_codecs) = packed_row_q4k_matvec(4_000_000_004);
 
-    let (even_kernel, odd_kernel) = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+    let (even_kernel, odd_kernel) = temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
         (
             emit_flat("packed row even", &even, &even_codecs, default_policy),
             emit_flat("packed row odd", &odd, &odd_codecs, default_policy),

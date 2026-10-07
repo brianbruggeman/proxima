@@ -2743,7 +2743,9 @@ fn wide_weight_stage_msl_dump_for_the_real_q4_0_shape() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let off_source = emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source;
+    let off_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
+        emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source
+    });
     let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1"), || {
         emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source
     });
@@ -2878,9 +2880,9 @@ fn non_q4k_codec_never_takes_the_tiled_gemm_path() {
     );
 }
 
-/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` default OFF: unset emits today's
+/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` default ON: explicit `"0"` emits the
 /// one-thread-per-row staging loop (no `wws_`-prefixed locals at all);
-/// explicit `"1"` emits the per-thread block-pointer setup and `half4`
+/// unset or `"1"` emits the per-thread block-pointer setup and `half4`
 /// vector stores this switch adds, and a `Q4_K` weight decodes through
 /// `q4k_header_for`/`q4k_run8` unchanged -- never `Q4_0`'s own
 /// `q4_0_run8_wide`.
@@ -2892,13 +2894,15 @@ fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
 
-    let off_source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+    let off_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
+        emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
+    });
     assert!(
         !off_source.contains("wws_blk0"),
-        "the default (unset) path must not emit the wide-weight-stage schedule:\n{off_source}"
+        "the explicitly disabled path must not emit the wide-weight-stage schedule:\n{off_source}"
     );
 
-    let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1"), || {
+    let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>, || {
         emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source
     });
     assert!(
@@ -2933,44 +2937,46 @@ fn wide_weight_stage_emits_ushort_wide_q4_0_decode_when_switch_on() {
     );
 }
 
-/// [`preamble`]'s own doc: `Q4_0_RUN8_WIDE_MSL` must never appear -- neither
-/// its call site nor its own definition text -- while `PROXIMA_TILED_GEMM_
-/// WIDE_WEIGHT_STAGE` is unset, the same "switch unset renders identically
-/// to the switch explicitly disabled" contract [`staging_switches_default_
-/// on_render_unless_explicitly_disabled`] proves for the crate's default-ON
-/// switches, mirrored here for this default-OFF one. Checked for BOTH a
-/// Q4_0 shape that actually admits the tiled-GEMM path AND a Q4_0 shape
-/// below `TILED_GEMM_MIN_TOKENS` that takes the packed-row-blocked path
-/// instead -- the second case is exactly what `packed_row_blocked_s1_byte_
-/// identity.rs`'s own fixture pins, and is the shape the unconditional-
-/// prelude splice bloated before this gate existed.
+/// [`preamble`]'s own doc: `Q4_0_RUN8_WIDE_MSL` is spliced only into a kernel
+/// that calls it. With `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` unset (default
+/// ON) a Q4_0 shape that admits the tiled-GEMM path renders byte-identically
+/// to explicit `"1"` and carries the wide decoder; explicit `"0"` renders
+/// without it. A Q4_0 shape below `TILED_GEMM_MIN_TOKENS` takes the
+/// packed-row-blocked path, where the switch does not apply: unset and
+/// explicit `"0"` render identically and never carry the wide decoder's text
+/// -- the shape `packed_row_blocked_s1_byte_identity.rs`'s own fixture pins,
+/// and the one the unconditional-prelude splice bloated before this gate
+/// existed.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
-fn wide_weight_stage_unset_is_byte_identical_to_switch_disabled_for_tiled_and_packed_row_q4_0() {
+fn wide_weight_stage_unset_renders_the_wide_decoder_for_tiled_q4_0_and_never_for_packed_row_q4_0() {
     let tiled_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let tiled_weight = tiled_bound.operands()[0].0;
     let mut tiled_q4_0 = BTreeMap::new();
     tiled_q4_0.insert(tiled_weight, Codec::Q4_0);
     temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-        let unset_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>, || {
-            emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default())
-                .expect("emits")
-                .source
-        });
-        let disabled_source =
-            temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
+        let render = |value: Option<&str>| {
+            temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", value, || {
                 emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default())
                     .expect("emits")
                     .source
-            });
+            })
+        };
+        let unset_source = render(None);
         assert_eq!(
-            unset_source, disabled_source,
+            unset_source,
+            render(Some("1")),
             "a Q4_0 tiled-GEMM shape must render identically whether the switch is unset or \
-             explicitly disabled"
+             explicitly enabled"
         );
         assert!(
-            !unset_source.contains("q4_0_run8_wide"),
-            "the wide Q4_0 decoder must not appear while the switch is off:\n{unset_source}"
+            unset_source.contains("q4_0_run8_wide"),
+            "the default must decode Q4_0 through the wide decoder:\n{unset_source}"
+        );
+        let disabled_source = render(Some("0"));
+        assert!(
+            !disabled_source.contains("q4_0_run8_wide"),
+            "the wide Q4_0 decoder must not appear while the switch is explicitly off:\n{disabled_source}"
         );
     });
 
@@ -3051,7 +3057,7 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
 
     let dense_bound = dense_batched_score_shaped_op(510, 512, 8, 128);
 
-    for grid2d_env in [None, Some("1")] {
+    for grid2d_env in [Some("0"), None] {
         temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", grid2d_env, || {
             let tiled_kernel =
                 emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default()).expect("tiled emits");
@@ -3193,38 +3199,44 @@ fn q4_0_takes_the_tiled_gemm_path_with_the_switch_on() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-        assert!(
-            tiled_gemm_block(
-                &bound,
-                &operand_codecs(&bound, &q4_0),
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                &[1, 0]
-            )
-            .is_some(),
-            "a Q4_0 weight must take the tiled GEMM path with the switch on"
-        );
-        let source = emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("emits")
-            .source;
-        assert!(
-            source.contains("simdgroup_multiply_accumulate"),
-            "a Q4_0 weight with the switch on must take the tiled GEMM path:\n{source}"
-        );
-        assert!(
-            source.contains("q4_0_block_scale(blk)") && source.contains("q4_0_run8(blk"),
-            "the Q4_0 tiled-GEMM arm must decode through the batched q4_0_run8 arm:\n{source}"
-        );
-        // the prelude declares `q4k_header_for`/`q4k_run8` unconditionally
-        // (every decode helper is always emitted, see `signature_tokens_
-        // prelude.rs`'s own comment), so this checks the BODY invocation
-        // pattern, not mere textual presence of the declaration.
-        assert!(
-            !source.contains("q4k_header_for(blk") && !source.contains("q4k_run8(blk"),
-            "a Q4_0 weight must never call the Q4_K decode helpers:\n{source}"
-        );
-    });
+    temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_Q4_0", Some("1")),
+            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0")),
+        ],
+        || {
+            assert!(
+                tiled_gemm_block(
+                    &bound,
+                    &operand_codecs(&bound, &q4_0),
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    &[1, 0]
+                )
+                .is_some(),
+                "a Q4_0 weight must take the tiled GEMM path with the switch on"
+            );
+            let source = emit(&bound, &q4_0, NumericPolicy::default())
+                .expect("emits")
+                .source;
+            assert!(
+                source.contains("simdgroup_multiply_accumulate"),
+                "a Q4_0 weight with the switch on must take the tiled GEMM path:\n{source}"
+            );
+            assert!(
+                source.contains("q4_0_block_scale(blk)") && source.contains("q4_0_run8(blk"),
+                "the Q4_0 tiled-GEMM arm must decode through the batched q4_0_run8 arm:\n{source}"
+            );
+            // the prelude declares `q4k_header_for`/`q4k_run8` unconditionally
+            // (every decode helper is always emitted, see `signature_tokens_
+            // prelude.rs`'s own comment), so this checks the BODY invocation
+            // pattern, not mere textual presence of the declaration.
+            assert!(
+                !source.contains("q4k_header_for(blk") && !source.contains("q4k_run8(blk"),
+                "a Q4_0 weight must never call the Q4_K decode helpers:\n{source}"
+            );
+        },
+    );
 }
 
 /// [`TiledGemmRejection::BroadcastEpilogueNotSupported`]'s own admission
@@ -6451,7 +6463,7 @@ mod flat_grid_form {
         let weight = wide.operands()[0].0;
         let packed = BTreeMap::from([(weight, Codec::Q4_0)]);
 
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
             let kernel = emit(&wide, &packed, NumericPolicy::default()).expect("wide tiled emits");
             let sibling = emit(&narrow, &packed, NumericPolicy::default()).expect("narrow tiled emits");
 
@@ -6489,7 +6501,7 @@ mod flat_grid_form {
     fn the_dense_batched_gemm_one_d_form_past_the_thread_index_reads_its_batch_from_the_flat_group_z() {
         let bound = dense_batched_score_shaped_op(2_000_000, 2_000_000, 8, 128);
 
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
             let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("dense batched emits");
 
             assert!(kernel.grid.threads > u64::from(u32::MAX));
@@ -6509,7 +6521,7 @@ mod flat_grid_form {
     fn a_batched_launch_whose_slice_fits_but_whose_whole_grid_does_not_takes_the_flat_form() {
         let bound = dense_batched_score_shaped_op(102_400, 200_000, 8, 128);
 
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", None::<&str>, || {
+        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
             let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("emits");
 
             assert!(kernel.grid.threads <= u64::from(u32::MAX), "one z slice fits: {}", kernel.grid.threads);
