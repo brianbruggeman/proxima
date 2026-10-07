@@ -1,0 +1,6 @@
+        PASS [  18.073s] (10/13) proxima-model-interop::arch_data_baseline llama_parity_openchat
+        PASS [   3.644s] (11/13) proxima-model-interop::arch_data_baseline llama_parity_qwen2
+        PASS [  15.996s] (12/13) proxima-model-interop::arch_data_baseline llama_parity_qwen3
+        PASS [   3.794s] (13/13) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [ 316.698s] 13 tests run: 13 passed (3 slow), 820 skipped

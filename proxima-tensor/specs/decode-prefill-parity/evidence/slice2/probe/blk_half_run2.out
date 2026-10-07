@@ -1,0 +1,13 @@
+probe=tiled_gemm_q4_0 runs=21 unit=us gpu_clock=GPUStartTime..GPUEndTime
+shape=ffn_gate_up tokens=160 rows=12288 k=1536 median_us=1318.9 cov_pct=40.73 tflops=4.580 output_fnv=90c70488eedae708
+shape=ffn_gate_up tokens=512 rows=12288 k=1536 median_us=3037.4 cov_pct=61.51 tflops=6.363 output_fnv=5514b6928855ddcc
+shape=ffn_gate_up tokens=971 rows=12288 k=1536 median_us=9307.2 cov_pct=39.74 tflops=3.938 output_fnv=abdf20a9e41ca0c7
+shape=ffn_down tokens=160 rows=6144 k=1536 median_us=503.1 cov_pct=52.87 tflops=6.003 output_fnv=dde7f678a50c4fa4
+shape=ffn_down tokens=512 rows=6144 k=1536 median_us=1534.2 cov_pct=48.35 tflops=6.299 output_fnv=32db498d0124ec6a
+shape=ffn_down tokens=971 rows=6144 k=1536 median_us=2937.8 cov_pct=61.68 tflops=6.238 output_fnv=1f01715032664e42
+shape=attn_q tokens=160 rows=4096 k=1536 median_us=352.2 cov_pct=57.18 tflops=5.716 output_fnv=b176fd4fc39af3da
+shape=attn_q tokens=512 rows=4096 k=1536 median_us=1034.9 cov_pct=59.18 tflops=6.225 output_fnv=3787c5e5914a3906
+shape=attn_q tokens=971 rows=4096 k=1536 median_us=1971.2 cov_pct=34.34 tflops=6.198 output_fnv=f5af7db6534308b1
+shape=attn_o tokens=160 rows=2048 k=1536 median_us=187.6 cov_pct=54.24 tflops=5.366 output_fnv=0735630d693ef33b
+shape=attn_o tokens=512 rows=2048 k=1536 median_us=535.0 cov_pct=0.23 tflops=6.021 output_fnv=d9cf1994ae23b513
+shape=attn_o tokens=971 rows=2048 k=1536 median_us=1000.8 cov_pct=62.97 tflops=6.104 output_fnv=50dd53f2aa656a73

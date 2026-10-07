@@ -1,0 +1,6 @@
+        PASS [   0.138s] (589/592) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_multiply_holds_parity_on_ragged_extents
+        PASS [   0.292s] (590/592) omega::training_step_parity a_training_step_runs_on_metal_at_cpu_parity
+        PASS [   4.377s] (591/592) omega::packed_row_multi_row_unroll_ab q4k_tokens27_k1536_rows12288_not_admitted
+        PASS [   4.465s] (592/592) omega::packed_row_multi_row_unroll_ab q4k_tokens600_k1536_rows12288_not_admitted
+────────────
+     Summary [  49.604s] 592 tests run: 592 passed, 16 skipped
