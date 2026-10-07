@@ -7529,6 +7529,67 @@ mod epilogue_operand_reuse {
         assert!(!distinct_key.contains("_al"), "{distinct_key}");
     }
 
+    /// `sum(x * x)` over `[rows, k]`: bind keeps one operand slot per mention,
+    /// so the fold reads `x` twice.
+    fn sum_of_squares_op(rows: u32, k: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let x = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let squared = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (x, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (x, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: squared,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: Some("sumsq".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("sum of squares infers");
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+            .expect("sum of squares lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    #[test]
+    fn a_cooperative_fold_keeps_its_duplicate_operand_load() {
+        let bound = sum_of_squares_op(4, 1536);
+        assert_eq!(bound.operands().len(), 2, "bind keeps one slot per mention");
+
+        let source = emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed())
+            .expect("emits")
+            .source;
+
+        assert!(
+            source.contains("in0[walk0") && source.contains("in1[walk1"),
+            "the fold loads each mention: a 26B prefill norm kernel read the same data \
+             with one load and cost the step 1.4% more:\n{source}"
+        );
+    }
+
     #[test]
     fn a_fused_epilogue_finishes_each_row_of_the_simdgroup_on_its_own_lane() {
         let (bound, packed) = matvec_with_gated_epilogue([7, 8, 9]);

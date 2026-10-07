@@ -2886,14 +2886,7 @@ fn push_batched_accumulate_loop(
     source.push_str(&format!(
         "            bool in_range = (r + slot * {width}) < total_r;\n"
     ));
-    let aliases = operand_aliases(resolved.operands());
-    for (index, alias) in aliases.iter().copied().enumerate().take(operand_count) {
-        if alias != index {
-            source.push_str(&format!(
-                "            batch[slot][{index}] = batch[slot][{alias}];\n"
-            ));
-            continue;
-        }
+    for index in 0..operand_count {
         let read = operand_read(index, &format!("walk{index} + slot * advance{index}"), None);
         source.push_str(&format!(
             "            batch[slot][{index}] = in_range ? {read} : ({element_type})0;\n"
