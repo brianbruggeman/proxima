@@ -224,12 +224,12 @@ fn run_grid2d_byte_identity(
         QuantizedBlock::Float32(&activation),
     ];
 
-    let wws_value = if wide_weight_stage { Some("1") } else { None };
+    let wws_value = if wide_weight_stage { Some("1") } else { Some("0") };
     let dstore_value = if direct_store { Some("1") } else { None };
 
     let off = temp_env::with_vars(
         [
-            ("PROXIMA_TILED_GEMM_GRID2D", None::<&str>),
+            ("PROXIMA_TILED_GEMM_GRID2D", Some("0")),
             ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", wws_value),
             ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_value),
         ],
@@ -532,12 +532,12 @@ fn run_dense_grid2d_byte_identity(
     label: &str,
 ) {
     let blocks = [QuantizedBlock::Float32(weight), QuantizedBlock::Float32(other)];
-    let wws_value = if wide_weight_stage { Some("1") } else { None };
+    let wws_value = if wide_weight_stage { Some("1") } else { Some("0") };
     let dstore_value = if direct_store { Some("1") } else { None };
 
     let off = temp_env::with_vars(
         [
-            ("PROXIMA_TILED_GEMM_GRID2D", None::<&str>),
+            ("PROXIMA_TILED_GEMM_GRID2D", Some("0")),
             ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", wws_value),
             ("PROXIMA_TILED_GEMM_DIRECT_STORE", dstore_value),
             ("PROXIMA_TILED_GEMM_DENSE", None::<&str>),
