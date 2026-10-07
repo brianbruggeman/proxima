@@ -1677,6 +1677,72 @@ fn cached_attention_bound_step_runs_online_softmax() {
     assert!((output[1] - (3.0 * cached_weight + 5.0 * (1.0 - cached_weight))).abs() < 1e-6);
 }
 
+/// Three query rows over one live cached key and three new keys, every score
+/// zero so each row's output is the mean of the values it can see. With a
+/// two-key window (`cached_lower_inclusive = -1`) row 2 loses the new key 0
+/// and the cached key, which only a lower bound on the NEW range removes; the
+/// unwindowed control keeps them and lands elsewhere.
+#[test]
+fn cached_attention_window_bounds_the_new_range_too() {
+    let inputs = [
+        vec![0.0f32; 3],
+        vec![0.0; 3],
+        vec![0.0],
+        vec![0.0],
+        vec![0.0; 3],
+        vec![0.0; 3],
+        vec![10.0, 20.0],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    ];
+    let buffers: Vec<Option<&[f32]>> = inputs.iter().map(|input| Some(input.as_slice())).collect();
+    let operands: Vec<_> = (0..inputs.len())
+        .map(|index| {
+            (
+                NodeId(index as u32),
+                bind::Layout {
+                    base: 0,
+                    strides: smallvec::smallvec![1],
+                },
+                None,
+            )
+        })
+        .collect();
+    let attention = |cached_lower_inclusive: i64| BoundOp {
+        node: NodeId(8),
+        dtype: DType::Float32,
+        extents: vec![3, 1, 1, 2],
+        kind: BoundOpKind::CachedAttention {
+            operands: operands.clone(),
+            query_rows: 3,
+            cached_key_rows: 1,
+            new_key_rows: 3,
+            kv_heads: 1,
+            query_groups: 1,
+            head_dim: 2,
+            rotary_dim: 2,
+            scale: 1.0,
+            cached_lower_inclusive,
+            new_upper_inclusive: 0,
+        },
+    };
+
+    let mut windowed = vec![0.0; 6];
+    run_node_into(&attention(-1), &buffers, None, None, None, false, &mut windowed)
+        .expect("a windowed cached attention step runs");
+    let windowed_expected = [5.5f32, 11.0, 2.0, 3.0, 4.0, 5.0];
+    for (got, want) in windowed.iter().zip(windowed_expected) {
+        assert!((got - want).abs() < 1e-5, "windowed {windowed:?} != {windowed_expected:?}");
+    }
+
+    let mut unwindowed = vec![0.0; 6];
+    run_node_into(&attention(i64::MIN), &buffers, None, None, None, false, &mut unwindowed)
+        .expect("an unwindowed cached attention step runs");
+    let unwindowed_expected = [5.5f32, 11.0, 14.0 / 3.0, 26.0 / 3.0, 4.75, 8.0];
+    for (got, want) in unwindowed.iter().zip(unwindowed_expected) {
+        assert!((got - want).abs() < 1e-5, "unwindowed {unwindowed:?} != {unwindowed_expected:?}");
+    }
+}
+
 /// [`BoundOpKind::CachedSoftmaxWeights`]'s whole computation
 /// (`run_cached_softmax_weights`), hand-computed the same way
 /// [`cached_attention_bound_step_runs_online_softmax`] cross-checks
