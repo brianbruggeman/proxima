@@ -317,8 +317,33 @@ prefill and decode). "Derived" targets subtract the table's class gap from the m
 3. Prefill attention (E2B and granite): one fused kernel per layer. Target: E2B 749.70 -> at most 60 ms
    (llama 41.31), granite 286.28 -> at most 20 ms (llama 12.93). Removes about 690 ms from E2B prefill and 266
    ms from granite prefill.
-4. Weights outside the K-quant tiled path: E2B F16 per-layer projection 107.77 -> at most 5 ms (llama 4.35),
-   granite Q8_0 1024x1024 118.21 -> at most 16 ms (llama 15.08). Removes about 103 ms each.
+4. Codec-generic tiled GEMM, dense and expert-grouped (rewritten 2026-10-07 by the main thread). Both fast
+   paths are specialized by codec today:
+   - the dense tiled path admits Q4_0 and Q4_K only (`emit_and_classify.rs` ~2548 whitelist and ~2859
+     `NotQ4K`);
+   - the expert-grouped path admits Q8_0 only (~3005, repeated at `expert_grouped_gemm.rs` ~66);
+   - each decode is a hand-written arm (`tiled_gemm_cooperative_scan.rs` ~361, ~709, ~927;
+     `expert_grouped_gemm.rs` ~393, ~442).
+
+   That is why each test model's codec happens to be fast. gemma4 26B (experts Q3_K / Q5_0 / Q5_1; attn
+   q/k and dense FFN Q3_K and Q5_0, per its `.bound` fixture) gets neither path. llama.cpp covers every
+   codec with one `kernel_mul_mm` / `kernel_mul_mm_id` template plus a per-codec `dequantize_*` function
+   (`ggml-metal/kernels/mul_mm.metal` :19, :151, :509; `kernels/dequantize.h`).
+
+   Do the same:
+   - one per-codec decode description (block elements, block bytes, a decode of 8 or 16 consecutive
+     elements into half, the scale/min layout), selected by one function;
+   - one stager consuming it for both the dense and the grouped path;
+   - the three admission sites follow the description instead of whitelists;
+   - the grouped K step derives from the codec's block size.
+
+   Add codecs with a parity test against the CPU dequant path before each is turned on:
+   - first the ones the models use: Q8_0 on the dense path (granite 1024x1024 118.21 -> at most 16 ms,
+     llama 15.08), Q3_K, Q5_0, Q5_1, Q5_K, Q6_K (gemma4 26B prefill, then the E2B Q6_K head);
+   - then F16 (E2B per-layer projection 107.77 -> at most 5 ms, llama 4.35).
+
+   Measure gemma4 26B prefill before and after, against llama, alongside E2B and granite. A codec added
+   without its own parity test does not land.
    After slices 2 to 4 E2B prefill is about 770 ms (derived: 2540 - 980 - 690 - 103) against llama 573.
    The 195 ms left: own-cb class gaps of about +40 ms (matmul +17, attention +19, norms +12.9, rope +6.0,
    elementwise -15.1 at those targets), and about 155 ms between the own-cb sum and the step wall (live GPU
