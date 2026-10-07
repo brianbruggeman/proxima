@@ -21,7 +21,6 @@
 //! it compared, so a skip is visible as the absence of that line.
 
 #![cfg(all(feature = "metal", feature = "metal-tiled-gemm", target_os = "macos"))]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -45,15 +44,27 @@ fn real_q4k_gguf_path() -> String {
     })
 }
 
-fn real_gguf_header(path: &std::path::Path) -> Option<(ParsedGguf, u64, std::fs::File)> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
+type TestResult<T> = Result<T, String>;
+
+fn real_gguf_header(
+    path: &std::path::Path,
+) -> TestResult<Option<(ParsedGguf, u64, std::fs::File)>> {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("stat {}: {error}", path.display()))?
+        .len();
 
     let mut prefix_len = 1usize << 20;
     loop {
         let mut buf = vec![0u8; prefix_len];
-        file.seek(SeekFrom::Start(0)).expect("seek to start");
-        let read = file.read(&mut buf).expect("read gguf prefix");
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| format!("seek to start of {}: {error}", path.display()))?;
+        let read = file
+            .read(&mut buf)
+            .map_err(|error| format!("read gguf prefix of {}: {error}", path.display()))?;
         buf.truncate(read);
 
         if let Ok((parser, events)) = GgufParser::new().push(&buf) {
@@ -78,7 +89,9 @@ fn real_gguf_header(path: &std::path::Path) -> Option<(ParsedGguf, u64, std::fs:
                 }
             }
             if let (Some(version), Some((data_offset, alignment))) = (version, completion) {
-                parser.finish().expect("parser reports complete and clean");
+                parser
+                    .finish()
+                    .map_err(|error| format!("gguf parser did not finish clean: {error:?}"))?;
                 let parsed = ParsedGguf {
                     version,
                     tensor_count: tensors.len() as u64,
@@ -88,11 +101,11 @@ fn real_gguf_header(path: &std::path::Path) -> Option<(ParsedGguf, u64, std::fs:
                     data_offset,
                     alignment,
                 };
-                return Some((parsed, file_len, file));
+                return Ok(Some((parsed, file_len, file)));
             }
         }
         if prefix_len as u64 >= file_len {
-            return None;
+            return Ok(None);
         }
         prefix_len *= 2;
     }
@@ -104,29 +117,32 @@ fn real_tensor_bytes(
     file_len: u64,
     name: &str,
     expect_type: GgmlType,
-) -> Option<(Vec<u8>, usize, usize)> {
-    let tensor = parsed
+) -> TestResult<Option<(Vec<u8>, usize, usize)>> {
+    let Some(tensor) = parsed
         .tensors
         .iter()
-        .find(|candidate| candidate.name == name)?;
+        .find(|candidate| candidate.name == name)
+    else {
+        return Ok(None);
+    };
     if tensor.ggml_type != expect_type {
         eprintln!(
             "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
             tensor.ggml_type
         );
-        return None;
+        return Ok(None);
     }
     let in_dim = tensor.dims[0] as usize;
     let out_dim = tensor.dims[1] as usize;
     let range = parsed
         .tensor_data_range(tensor, file_len)
-        .expect("tensor byte range within file bounds");
+        .map_err(|error| format!("tensor {name} byte range outside the file: {error:?}"))?;
     let mut buf = vec![0u8; (range.end - range.start) as usize];
     file.seek(SeekFrom::Start(range.start))
-        .expect("seek to tensor data");
+        .map_err(|error| format!("seek to tensor {name}: {error}"))?;
     file.read_exact(&mut buf)
-        .expect("read exact tensor byte range");
-    Some((buf, in_dim, out_dim))
+        .map_err(|error| format!("read tensor {name} bytes: {error}"))?;
+    Ok(Some((buf, in_dim, out_dim)))
 }
 
 /// Same iteration-space convention as `tiled_gemm_direct_store_parity.rs`'s
@@ -187,7 +203,7 @@ fn run_mm_layout_byte_identity(
     tokens: usize,
     extra_env: &[(&str, Option<&str>)],
     label: &str,
-) {
+) -> TestResult<()> {
     let mut lcg = Lcg(31001 + tokens as u64 + rows as u64);
     let activation: Vec<f32> = (0..tokens * in_dim)
         .map(|_| lcg.next_unit() * 4.0 - 2.0)
@@ -211,11 +227,11 @@ fn run_mm_layout_byte_identity(
                 &[packed_sum],
                 NumericPolicy::default(),
             )
-            .expect("metal executes the tiled matmul")
+            .map_err(|error| format!("{label}: metal did not execute the tiled matmul: {error:?}"))
         })
     };
-    let row_major = run(Some("0"));
-    let mm_layout = run(None);
+    let row_major = run(Some("0"))?;
+    let mm_layout = run(None)?;
 
     let row_major_root = row_major.root();
     let mm_layout_root = mm_layout.root();
@@ -237,91 +253,104 @@ fn run_mm_layout_byte_identity(
         "{label} codec={codec:?} tokens={tokens} rows={rows}: the mm tile layout must produce \
          BIT-IDENTICAL output to the row-major tile layout -- {differing}/{element_count} words differed"
     );
+    Ok(())
 }
 
-fn check_q4_0(tensor_name: &str, tokens: usize, rows_wanted: usize, extra_env: &[(&str, Option<&str>)], label: &str) {
+fn check_q4_0(
+    tensor_name: &str,
+    tokens: usize,
+    rows_wanted: usize,
+    extra_env: &[(&str, Option<&str>)],
+    label: &str,
+) -> TestResult<()> {
     let path = std::path::Path::new(REAL_GEMMA4_GGUF_PATH);
-    let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+    let Some((parsed, file_len, mut file)) = real_gguf_header(path)? else {
         eprintln!("real gguf file not found at {REAL_GEMMA4_GGUF_PATH}; test skipped");
-        return;
+        return Ok(());
     };
     let Some((weight_bytes, in_dim, out_dim)) =
-        real_tensor_bytes(&mut file, &parsed, file_len, tensor_name, GgmlType::Q4_0)
+        real_tensor_bytes(&mut file, &parsed, file_len, tensor_name, GgmlType::Q4_0)?
     else {
         eprintln!("{tensor_name} not found or not Q4_0 in this checkpoint; test skipped");
-        return;
+        return Ok(());
     };
     let row_bytes = in_dim / q4_0::QK4_0 * q4_0::BLOCK_BYTES;
     let rows = rows_wanted.min(out_dim);
-    run_mm_layout_byte_identity(Codec::Q4_0, &weight_bytes[..rows * row_bytes], in_dim, rows, tokens, extra_env, label);
+    run_mm_layout_byte_identity(Codec::Q4_0, &weight_bytes[..rows * row_bytes], in_dim, rows, tokens, extra_env, label)
 }
 
-fn check_q4k(tensor_name: &str, tokens: usize, rows_wanted: usize, extra_env: &[(&str, Option<&str>)], label: &str) {
+fn check_q4k(
+    tensor_name: &str,
+    tokens: usize,
+    rows_wanted: usize,
+    extra_env: &[(&str, Option<&str>)],
+    label: &str,
+) -> TestResult<()> {
     let path_string = real_q4k_gguf_path();
     let path = std::path::Path::new(&path_string);
-    let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+    let Some((parsed, file_len, mut file)) = real_gguf_header(path)? else {
         eprintln!("real gguf file not found at {path_string}; test skipped");
-        return;
+        return Ok(());
     };
     let Some((weight_bytes, in_dim, out_dim)) =
-        real_tensor_bytes(&mut file, &parsed, file_len, tensor_name, GgmlType::Q4_K)
+        real_tensor_bytes(&mut file, &parsed, file_len, tensor_name, GgmlType::Q4_K)?
     else {
         eprintln!("{tensor_name} not found or not Q4_K in this checkpoint; test skipped");
-        return;
+        return Ok(());
     };
     let row_bytes = in_dim / q4_k::QK_K * q4_k::BLOCK_BYTES;
     let rows = rows_wanted.min(out_dim);
-    run_mm_layout_byte_identity(Codec::Q4K, &weight_bytes[..rows * row_bytes], in_dim, rows, tokens, extra_env, label);
+    run_mm_layout_byte_identity(Codec::Q4K, &weight_bytes[..rows * row_bytes], in_dim, rows, tokens, extra_env, label)
 }
 
 #[test]
-fn q4_0_mm_layout_matches_row_major_with_a_full_tile_grid() {
-    check_q4_0("blk.0.attn_q.weight", 512, 128, &[], "full_tile_grid");
+fn q4_0_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
+    check_q4_0("blk.0.attn_q.weight", 512, 128, &[], "full_tile_grid")
 }
 
 #[test]
-fn q4_0_mm_layout_matches_row_major_with_a_partial_token_tile() {
-    check_q4_0("blk.0.attn_q.weight", 510, 128, &[], "partial_token_tile");
+fn q4_0_mm_layout_matches_row_major_with_a_partial_token_tile() -> TestResult<()> {
+    check_q4_0("blk.0.attn_q.weight", 510, 128, &[], "partial_token_tile")
 }
 
 #[test]
-fn q4_0_mm_layout_matches_row_major_with_a_partial_feature_tile() {
-    check_q4_0("blk.0.attn_q.weight", 510, 100, &[], "partial_feature_tile");
+fn q4_0_mm_layout_matches_row_major_with_a_partial_feature_tile() -> TestResult<()> {
+    check_q4_0("blk.0.attn_q.weight", 510, 100, &[], "partial_feature_tile")
 }
 
 #[test]
-fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width() {
-    check_q4_0("blk.0.ffn_gate.weight", 971, 256, &[], "prefill_width");
+fn q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width() -> TestResult<()> {
+    check_q4_0("blk.0.ffn_gate.weight", 971, 256, &[], "prefill_width")
 }
 
 #[test]
-fn q4_0_mm_layout_matches_row_major_combined_with_direct_store() {
+fn q4_0_mm_layout_matches_row_major_combined_with_direct_store() -> TestResult<()> {
     check_q4_0(
         "blk.0.attn_q.weight",
         510,
         128,
         &[("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("1"))],
         "combined_with_direct_store",
-    );
+    )
 }
 
 #[test]
-fn q4_0_mm_layout_matches_row_major_on_the_generic_activation_read() {
+fn q4_0_mm_layout_matches_row_major_on_the_generic_activation_read() -> TestResult<()> {
     check_q4_0(
         "blk.0.attn_q.weight",
         510,
         128,
         &[("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0"))],
         "generic_activation_read",
-    );
+    )
 }
 
 #[test]
-fn q4k_mm_layout_matches_row_major_with_a_full_tile_grid() {
-    check_q4k("blk.0.attn_q.weight", 512, 128, &[], "full_tile_grid");
+fn q4k_mm_layout_matches_row_major_with_a_full_tile_grid() -> TestResult<()> {
+    check_q4k("blk.0.attn_q.weight", 512, 128, &[], "full_tile_grid")
 }
 
 #[test]
-fn q4k_mm_layout_matches_row_major_with_partial_tiles() {
-    check_q4k("blk.0.attn_q.weight", 510, 100, &[], "partial_tiles");
+fn q4k_mm_layout_matches_row_major_with_partial_tiles() -> TestResult<()> {
+    check_q4k("blk.0.attn_q.weight", 510, 100, &[], "partial_tiles")
 }
