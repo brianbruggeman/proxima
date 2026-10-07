@@ -33,7 +33,8 @@
 //!   --features std,metal,instrument,metal-fuse-attn-decode --example gemma4_decode_kernel_census
 //! ```
 //! Knobs: `M0_MAX_TOKENS` (24), `M0_ITERS` (50), `M0_BATCH` (16),
-//! `M0_FLUSH_MIB` (256), `M0_OUT_DIR`, `PROXIMA_PROMPT`, or
+//! `M0_FLUSH_MIB` (256), `M0_OUT_DIR`, `M0_CAPTURE_STEPS` (comma list; default every
+//! decode step 1..), `M0_MODEL_GGUF` (default the gemma4 E2B blob), `PROXIMA_PROMPT`, or
 //! `PROXIMA_PROMPT_FILE`.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -458,7 +459,7 @@ mod harness {
     }
 
     fn arm_capture(max_tokens: usize) {
-        let steps = capture_steps_arg(max_tokens);
+        let steps = std::env::var("M0_CAPTURE_STEPS").unwrap_or_else(|_| capture_steps_arg(max_tokens));
         // SAFETY: called from `main` before any thread is spawned, so no
         // concurrent environment reader exists.
         unsafe {
@@ -469,9 +470,10 @@ mod harness {
     }
 
     fn decode(config: &Config) -> (usize, String) {
-        let file = File::open(MODEL_PATH).expect("open gemma4-E2B blob");
+        let model_path = std::env::var("M0_MODEL_GGUF").unwrap_or_else(|_| MODEL_PATH.to_string());
+        let file = File::open(&model_path).unwrap_or_else(|error| panic!("open {model_path}: {error}"));
         // SAFETY: read-only mapping of a checkpoint no other process writes.
-        let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map gemma4-E2B blob");
+        let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map checkpoint blob");
         let parsed = parse_complete(&bytes).expect("parse gemma4-E2B header");
         let model = LoadedModel::load(&parsed, &bytes).expect("bind gemma4-E2B");
         let numeric_policy = match std::env::var("PROXIMA_EPILOGUE_SOURCES").as_deref() {
