@@ -75,6 +75,24 @@ block_n = 32
 # loop) — see sized::TILED_GEMM_BLOCK_K.
 block_k = 32
 
+[grouped_gemm]
+# `feature = "metal-grouped-gemm"`-only; the tile shape itself (64 rows by 32
+# tokens by 32 deep, 4 simdgroups) is ggml-metal's `kernel_mul_mm_id` geometry,
+# fixed in `push_expert_grouped_gemm_body`, not a tunable.
+# Threadgroups that split one (expert, row tile)'s token tiles between them.
+# One threadgroup scans the route once and walks every token tile of its
+# expert; raising this runs the tiles of a heavily routed expert in parallel
+# at the price of one extra route scan per part. Granite moe 1b, 1000-token
+# prompt, whole-prefill wall time at parts 1/2/4/8 (3 runs each, interleaved,
+# CoV 0.7-1.4%): 864 / 828 / 848 / 870 ms.
+col_parts = 2
+# Route chunks (`block_threads` tokens each) whose entries one scan step
+# loads back to back before voting on the first. The loads are independent, so
+# one memory round trip serves the whole batch; a larger batch hides more
+# latency and keeps more registers live, and entries loaded past the point a
+# tile fills are fetched again by the next scan step.
+scan_ahead = 4
+
 [wide_cooperative_reduce]
 # upper bound on the threadgroup width `msl::cooperative_reduce_width` picks
 # for a cooperative reduce (`feature = "metal-wide-cooperative-reduce"` only)

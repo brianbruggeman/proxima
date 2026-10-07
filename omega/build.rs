@@ -313,6 +313,19 @@ fn emit_sizing_consts() {
         out.push_str(&format!("pub const TILED_GEMM_BLOCK_K: u64 = {block_k};\n"));
     }
 
+    if env::var_os("CARGO_FEATURE_METAL_GROUPED_GEMM").is_some() {
+        let col_parts = require_nonzero(
+            "grouped_gemm.col_parts",
+            resolve_int(&root, "grouped_gemm", "col_parts"),
+        );
+        let scan_ahead = require_nonzero(
+            "grouped_gemm.scan_ahead",
+            resolve_int(&root, "grouped_gemm", "scan_ahead"),
+        );
+        out.push_str(&format!("pub const GROUPED_GEMM_COL_PARTS: u64 = {col_parts};\n"));
+        out.push_str(&format!("pub const GROUPED_GEMM_SCAN_AHEAD: u64 = {scan_ahead};\n"));
+    }
+
     if env::var_os("CARGO_FEATURE_METAL_WIDE_COOPERATIVE_REDUCE").is_some() {
         let max_width = require_multiple_of_thirty_two(
             "wide_cooperative_reduce.max_width",

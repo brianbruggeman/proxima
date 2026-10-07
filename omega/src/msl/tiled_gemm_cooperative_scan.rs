@@ -98,6 +98,7 @@ pub(super) fn push_tiled_gemm_body(
         ref token_axes,
         ref feature_axes,
         codec,
+        ..
     } = *block;
     // innermost (fastest, last-listed) of each group -- the single stride
     // the per-element reads below use; see `TiledGemmBlock`'s own doc.
@@ -1818,6 +1819,18 @@ pub(super) fn push_cooperative_reduce_body(
     // `kernel_cache_key`'s own comment for why the two are mutually
     // exclusive by construction.
     if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
+        if is_expert_grouped(&block) {
+            push_expert_grouped_gemm_body(
+                source,
+                resolved,
+                output_axes,
+                &block,
+                element_type,
+                epilogue_body,
+                epilogue_operands,
+            )?;
+            return Ok(());
+        }
         push_tiled_gemm_body(
             source,
             resolved.node,

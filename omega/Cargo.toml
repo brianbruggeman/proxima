@@ -384,6 +384,13 @@ metal-packed-row-nsg2 = ["metal"]
 # across tokens. Default-off until the real Metal parity and decode cells seal
 # the descriptor rebasing path.
 metal-gathered-packed-row = ["metal"]
+# Expert-grouped tiled GEMM: a gathered Q8_0 expert weight whose route index
+# varies only along the token axis is dispatched one threadgroup column per
+# (expert, row tile, token tile) on the `simdgroup_matrix` tiled path
+# (`push_tiled_gemm_body`), each threadgroup selecting its own tokens by
+# scanning the route index. Default-off until a real granite prefill A/B and
+# the llama token-id gate seal it.
+metal-grouped-gemm = ["metal-tiled-gemm"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA
