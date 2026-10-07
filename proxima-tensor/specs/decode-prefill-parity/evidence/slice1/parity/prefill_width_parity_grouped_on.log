@@ -1,0 +1,8 @@
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 2.29s
+────────────
+ Nextest run ID cadd91ad-8a86-4055-b21b-913e673c244c with nextest profile: slice-gate
+    Starting 1 test across 31 binaries (832 tests skipped)
+        PASS [   3.857s] (1/1) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [   3.860s] 1 test run: 1 passed, 832 skipped

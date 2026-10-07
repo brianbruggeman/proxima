@@ -1,0 +1,8 @@
+Wed Oct  7 06:12:45 UTC 2026
+ 1:12  up 6 days, 11:16, 5 users, load averages: 5.48 5.02 5.01
+126.4 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 77.9 a background daemon in ~/.local/bin
+ 36.7 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access.xpc/Contents/MacOS/mediaanalysisd-access
+ 34.4 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+ 17.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 16.7 claude

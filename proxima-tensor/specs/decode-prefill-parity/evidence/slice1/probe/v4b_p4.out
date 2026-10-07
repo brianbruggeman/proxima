@@ -1,0 +1,6 @@
+probe=expert_grouped_gemm experts=32 runs=21 unit=us gpu_clock=GPUStartTime..GPUEndTime
+shape=gate_up tokens=160 routing=balanced median_us=1463.0 cov_pct=4.99 useful_tflops=0.115
+Error: metal warm-up executes on a real device
+
+Caused by:
+    node %4 gather fetched index 0, which is out of range for extent 32
