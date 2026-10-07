@@ -1313,6 +1313,11 @@ pub fn take_captured_dispatches() -> Vec<CapturedDispatch> {
 #[cfg(feature = "instrument")]
 const FAULT_REPLAY_BYTES: usize = 4096;
 
+/// A no-copy buffer backing a whole checkpoint mmap, whose host mapping a
+/// harness may already have released; its contents are never read here.
+#[cfg(feature = "instrument")]
+const RESIDENT_WEIGHT_BUFFER_BYTES: usize = 1 << 28;
+
 #[cfg(feature = "instrument")]
 fn live_extra_buffers(
     bound: &BoundOp,
@@ -1436,8 +1441,70 @@ impl CapturedDispatch {
         })
     }
 
-    /// Poisons the output region (the op's iteration-space element count in
-    /// f32 bytes, an upper bound on its output), runs this dispatch once, and
+    /// One line per bound buffer: binding index, buffer address, byte offset,
+    /// the buffer's length, and its first four f32 values at that offset, so a
+    /// harness can tell which bindings of a fused kernel read the same data.
+    #[must_use]
+    pub fn describe_buffers(&self) -> Vec<String> {
+        self.buffers
+            .iter()
+            .map(|(index, buffer, offset)| {
+                let length = buffer.length();
+                let available = length.saturating_sub(*offset);
+                let resident_weights = length > RESIDENT_WEIGHT_BUFFER_BYTES;
+                let count = if resident_weights {
+                    0
+                } else {
+                    (available / core::mem::size_of::<f32>()).min(4)
+                };
+                let base = buffer.contents().as_ptr().cast::<u8>();
+                // SAFETY: shared-storage buffer idle between replays; `offset + count * 4 <= length` by `available`.
+                let head: Vec<f32> = (0..count)
+                    .map(|element| unsafe {
+                        base.add(*offset + element * core::mem::size_of::<f32>())
+                            .cast::<f32>()
+                            .read_unaligned()
+                    })
+                    .collect();
+                format!(
+                    "binding={index} buffer={:p} offset={offset} length={length} head={head:?}",
+                    buffer.contents().as_ptr()
+                )
+            })
+            .collect()
+    }
+
+    /// This dispatch's buffers and uniform bytes bound to the pipeline and
+    /// launch shape `template` carries (a [`Self::with_kernel_variant`] result
+    /// built from a sibling in the same kernel group), so every member of a
+    /// group replays through ONE pipeline object, as the live step does,
+    /// instead of paying a pipeline switch per dispatch.
+    #[must_use]
+    pub fn with_pipeline_of(&self, template: &Self) -> Self {
+        Self {
+            step: self.step,
+            node: self.node,
+            kind_name: self.kind_name,
+            entry: template.entry.clone(),
+            msl_sha256: String::new(),
+            operands: self.operands.clone(),
+            chunk_index: self.chunk_index,
+            extents: self.extents.clone(),
+            grid: template.grid,
+            bindings: self.bindings.clone(),
+            unreplayable: self.unreplayable.clone(),
+            uniform_bytes: self.uniform_bytes.clone(),
+            pipeline: template.pipeline.clone(),
+            buffers: self.buffers.clone(),
+            uniforms_index: self.uniforms_index,
+            fault_index: self.fault_index,
+        }
+    }
+
+    /// Poisons the output region (`output_total`, the first `i64` of the bound
+    /// uniforms, in f32 elements, bounded by the iteration-space element count:
+    /// a reduce's iteration space includes its reduction axis and would
+    /// overwrite neighbouring tensors of a pooled buffer), runs this dispatch once, and
     /// returns that region's bytes, so two kernels bound to the same buffers
     /// compare element for element on the data the production kernel ran on,
     /// and a kernel that fails to write an element cannot match one that did.
@@ -1462,10 +1529,15 @@ impl CapturedDispatch {
                 log: "captured dispatch output buffer was not recoverable".to_string(),
             })?;
         let available = buffer.length().saturating_sub(*offset);
-        let span = self
-            .extents
-            .iter()
-            .product::<u64>()
+        let iteration_elements = self.extents.iter().product::<u64>();
+        let output_elements = self
+            .uniform_bytes
+            .first_chunk::<8>()
+            .map(|bytes| i64::from_le_bytes(*bytes))
+            .and_then(|total| u64::try_from(total).ok())
+            .filter(|total| *total > 0 && *total <= iteration_elements)
+            .unwrap_or(iteration_elements);
+        let span = output_elements
             .saturating_mul(core::mem::size_of::<f32>() as u64)
             .try_into()
             .map_or(available, |bytes: usize| bytes.min(available));
