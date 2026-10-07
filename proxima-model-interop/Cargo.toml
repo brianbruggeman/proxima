@@ -525,6 +525,12 @@ required-features = ["std", "metal"]
 name = "decode_arms"
 required-features = ["std"]
 
+# Ranks proxima census time against llama.cpp per-op timing, and tabulates the
+# decode loop telemetry timeline (slice 0 of the decode-prefill-parity spec).
+[[example]]
+name = "attribution_rank"
+required-features = ["std"]
+
 # `metal-fuse-attn-decode` byte-equivalence harness: fused vs. unfused
 # `BoundOpKind::CachedAttention` parity on the real gemma4-E2B checkpoint,
 # read via `PROXIMA_METAL_FUSE_ATTN_PARITY_STEPS` in `decode.rs`.
