@@ -6221,7 +6221,7 @@ impl<'file> LoadedModel<'file> {
                         #[cfg(feature = "instrument")]
                         {
                             emit_token_breakdown(&TokenBreakdown {
-                                step: step,
+                                step,
                                 new_count,
                                 cached_len_before: cached_len_before_step,
                                 step_wall_ticks: elapsed_ticks(step_started),

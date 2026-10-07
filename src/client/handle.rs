@@ -551,7 +551,6 @@ impl ClientBuilder {
     /// The destination hostname remains derived from each request URL; the
     /// config supplies the root source, custom CA bundle paths, and ALPN.
     #[cfg(feature = "http-prime-deps")]
-    #[must_use]
     pub fn tls_client(
         mut self,
         config: proxima_tls::TlsClientConfig,
