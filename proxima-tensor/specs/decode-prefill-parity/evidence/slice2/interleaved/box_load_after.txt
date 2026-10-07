@@ -1,0 +1,10 @@
+Wed Oct  7 08:39:42 UTC 2026
+ 3:39  up 6 days, 13:43, 5 users, load averages: 2.86 3.99 4.35
+brianbruggeman     792  82.0  0.2 427367584 118880   ??  R    Wed02PM 1559:39.34 /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd
+brianbruggeman   17029  80.5  0.5 571989456 343488   ??  R    Wed05PM 5530:26.32 a background daemon in ~/.local/bin
+brianbruggeman     716  22.8  1.6 414636624 1056752   ??  S    Wed02PM 1180:40.25 /Applications/iTerm.app/Contents/MacOS/iTerm2
+brianbruggeman   31461   7.7  1.3 417959040 870352 s001  R+   Wed02PM 120:14.23 claude --resume 1335e0df-153c-4279-b3f4-eede0bf4a680
+root               542   1.7  0.0 426995632  28320   ??  Ss   Wed02PM 347:46.03 /usr/libexec/syspolicyd
+root               467   0.4  0.0 427002512  26304   ??  Ss   Wed02PM  43:50.14 /usr/sbin/bluetoothd
+brianbruggeman     936   0.4  0.1 412504784  51632   ??  S    Wed02PM  73:32.51 /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS
+brianbruggeman    1010   0.3  0.2 414395968 146272   ??  S    Wed02PM 100:12.00 /Applications/Docker.app/Contents/MacOS/com.docker.backend services --autostart

@@ -1,0 +1,9 @@
+EXP=none footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=1024 width=32
+EXP=blk footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=896 width=32
+EXP=blkfma footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=896 width=32
+EXP=blkfmaunitk footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=896 width=32
+EXP=blkpipe footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=704 width=32
+EXP=blkhalffmaunitk footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=896 width=32
+EXP=blkfmaunitknostage footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=1024 width=32
+EXP=blkfmaunitkahead footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=896 width=32
+HEAD-equivalent (WWS=0 GRID2D=0) footprint entry=omega_reduce_r3_o2_n2_multiply_add_zero static_tg=8192 max_threads=832 width=32

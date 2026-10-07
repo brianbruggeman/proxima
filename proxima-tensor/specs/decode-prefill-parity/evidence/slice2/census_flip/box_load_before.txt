@@ -1,0 +1,7 @@
+ 1:57  up 6 days, 12:01, 5 users, load averages: 4.61 5.62 6.07
+brianbruggeman   17029  81.3  0.5 571989456 343488   ??  R    Wed05PM 5452:03.86 a background daemon in ~/.local/bin
+brianbruggeman    1418  68.8  0.5 427442320 350544   ??  S    Wed02PM 1365:48.15 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+root               587  50.3  0.5 450045808 361632   ??  Rs   Wed02PM 2135:07.90 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/
+brianbruggeman   29286   9.0  3.5 414322288 2349968   ??  Ss   Wed02PM 262:59.10 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/me
+brianbruggeman   31461   8.8  1.2 417962400 832912 s001  S+   Wed02PM 118:31.84 claude --resume 1335e0df-153c-4279-b3f4-eede0bf4a680
+brianbruggeman     716   3.3  1.5 414637184 1024048   ??  S    Wed02PM 1166:13.74 /Applications/iTerm.app/Contents/MacOS/iTerm2

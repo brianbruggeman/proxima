@@ -1,0 +1,48 @@
+2026-10-07T08:06:44Z LAUNCH decode_arms proxima arm=granite_moe.base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_base_s2
+2026-10-07T08:07:06Z EXIT decode_arms proxima arm=granite_moe.base process=0 status=exit status: 0
+2026-10-07T08:07:07Z LAUNCH decode_arms proxima arm=granite_moe.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml
+2026-10-07T08:07:29Z EXIT decode_arms proxima arm=granite_moe.tip process=0 status=exit status: 0
+2026-10-07T08:07:29Z LAUNCH decode_arms proxima arm=granite_moe.tipcopy process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml_copy
+2026-10-07T08:07:52Z EXIT decode_arms proxima arm=granite_moe.tipcopy process=0 status=exit status: 0
+2026-10-07T08:07:52Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=0 port=8097 requests=8
+2026-10-07T08:07:59Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=0
+2026-10-07T08:07:59Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_base_s2
+2026-10-07T08:08:33Z EXIT decode_arms proxima arm=gemma4_e2b.base process=0 status=exit status: 0
+2026-10-07T08:08:33Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml
+2026-10-07T08:09:00Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=0 status=exit status: 0
+2026-10-07T08:09:00Z LAUNCH decode_arms proxima arm=gemma4_e2b.tipcopy process=0 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml_copy
+2026-10-07T08:09:26Z EXIT decode_arms proxima arm=gemma4_e2b.tipcopy process=0 status=exit status: 0
+2026-10-07T08:09:26Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=0 port=8097 requests=8
+2026-10-07T08:09:42Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=0
+2026-10-07T08:09:42Z LAUNCH decode_arms proxima arm=granite_moe.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml
+2026-10-07T08:10:04Z EXIT decode_arms proxima arm=granite_moe.tip process=1 status=exit status: 0
+2026-10-07T08:10:04Z LAUNCH decode_arms proxima arm=granite_moe.tipcopy process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml_copy
+2026-10-07T08:10:27Z EXIT decode_arms proxima arm=granite_moe.tipcopy process=1 status=exit status: 0
+2026-10-07T08:10:27Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=1 port=8097 requests=8
+2026-10-07T08:10:34Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=1
+2026-10-07T08:10:34Z LAUNCH decode_arms proxima arm=granite_moe.base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_base_s2
+2026-10-07T08:10:56Z EXIT decode_arms proxima arm=granite_moe.base process=1 status=exit status: 0
+2026-10-07T08:10:56Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml
+2026-10-07T08:11:23Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=1 status=exit status: 0
+2026-10-07T08:11:23Z LAUNCH decode_arms proxima arm=gemma4_e2b.tipcopy process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml_copy
+2026-10-07T08:11:49Z EXIT decode_arms proxima arm=gemma4_e2b.tipcopy process=1 status=exit status: 0
+2026-10-07T08:11:49Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=1 port=8097 requests=8
+2026-10-07T08:12:05Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=1
+2026-10-07T08:12:05Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=1 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_base_s2
+2026-10-07T08:12:38Z EXIT decode_arms proxima arm=gemma4_e2b.base process=1 status=exit status: 0
+2026-10-07T08:12:38Z LAUNCH decode_arms proxima arm=granite_moe.tipcopy process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml_copy
+2026-10-07T08:13:01Z EXIT decode_arms proxima arm=granite_moe.tipcopy process=2 status=exit status: 0
+2026-10-07T08:13:01Z LAUNCH decode_arms llama-server arm=granite_moe.llama-server process=2 port=8097 requests=8
+2026-10-07T08:13:08Z EXIT decode_arms llama-server arm=granite_moe.llama-server process=2
+2026-10-07T08:13:08Z LAUNCH decode_arms proxima arm=granite_moe.base process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_base_s2
+2026-10-07T08:13:31Z EXIT decode_arms proxima arm=granite_moe.base process=2 status=exit status: 0
+2026-10-07T08:13:31Z LAUNCH decode_arms proxima arm=granite_moe.tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml
+2026-10-07T08:13:53Z EXIT decode_arms proxima arm=granite_moe.tip process=2 status=exit status: 0
+2026-10-07T08:13:53Z LAUNCH decode_arms proxima arm=gemma4_e2b.tipcopy process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml_copy
+2026-10-07T08:14:19Z EXIT decode_arms proxima arm=gemma4_e2b.tipcopy process=2 status=exit status: 0
+2026-10-07T08:14:19Z LAUNCH decode_arms llama-server arm=gemma4_e2b.llama-server process=2 port=8097 requests=8
+2026-10-07T08:14:35Z EXIT decode_arms llama-server arm=gemma4_e2b.llama-server process=2
+2026-10-07T08:14:35Z LAUNCH decode_arms proxima arm=gemma4_e2b.base process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_base_s2
+2026-10-07T08:15:08Z EXIT decode_arms proxima arm=gemma4_e2b.base process=2 status=exit status: 0
+2026-10-07T08:15:09Z LAUNCH decode_arms proxima arm=gemma4_e2b.tip process=2 bin=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/parity_perf/bin/decode_gbps_baseline_s2_mml
+2026-10-07T08:15:35Z EXIT decode_arms proxima arm=gemma4_e2b.tip process=2 status=exit status: 0

@@ -1,0 +1,18 @@
+--- a/tests/test-backend-ops.cpp	2026-10-07 02:28:25
++++ b/tests/test-backend-ops.cpp	2026-10-07 03:51:30
+@@ -11300,6 +11300,15 @@
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
++    for (int n : {160, 512, 971}) {
++        for (int m : {12288, 6144, 4096, 2048}) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, m, n, 1536, {1, 1}, {1, 1}));
++        }
++        for (int k : {6144, 12288}) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536, n, k, {1, 1}, {1, 1}));
++        }
++    }
++
+     for (int n : {160, 512, 1000, 2048}) {
+         test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 32, 8, true, 512, n, 1024));
+         test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 32, 8, false, 1024, n, 512));

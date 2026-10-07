@@ -1,0 +1,108 @@
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_compile_all: compiled 'fa_aux' library in 0.020 sec
+ggml_metal_library_compile_all: compiled 'fa_f16' library in 0.031 sec
+ggml_metal_library_compile_all: compiled 'fa_f32' library in 0.032 sec
+ggml_metal_library_compile_all: compiled 'fa_q4_0' library in 0.020 sec
+ggml_metal_library_compile_all: compiled 'fa_q4_1' library in 0.032 sec
+ggml_metal_library_compile_all: compiled 'fa_q5_0' library in 0.026 sec
+ggml_metal_library_compile_all: compiled 'fa_q5_1' library in 0.031 sec
+ggml_metal_library_compile_all: compiled 'fa_q8_0' library in 0.035 sec
+ggml_metal_library_compile_all: compiled 'fa_vec_f16' library in 0.023 sec
+ggml_metal_library_compile_all: compiled 'fa_vec_f32' library in 0.030 sec
+ggml_metal_library_compile_all: compiled 'fa_vec_q4_0' library in 0.033 sec
+ggml_metal_library_compile_all: compiled 'fa_vec_q4_1' library in 0.028 sec
+ggml_metal_library_compile_all: compiled 'fa_vec_q5_0' library in 0.029 sec
+ggml_metal_library_compile_all: compiled 'fa_vec_q5_1' library in 0.034 sec
+ggml_metal_library_compile_all: compiled 'fa_vec_q8_0' library in 0.026 sec
+ggml_metal_library_compile_all: compiled 'mul_mv' library in 0.021 sec
+ggml_metal_library_compile_all: compiled 'mul_mm' library in 0.024 sec
+ggml_metal_library_compile_all: compiled 'quantize' library in 0.027 sec
+ggml_metal_library_compile_all: compiled 'softmax' library in 0.019 sec
+ggml_metal_library_compile_all: compiled 'norm' library in 0.030 sec
+ggml_metal_library_compile_all: compiled 'unary' library in 0.019 sec
+ggml_metal_library_compile_all: compiled 'binbcast' library in 0.024 sec
+ggml_metal_library_compile_all: compiled 'reduce' library in 0.030 sec
+ggml_metal_library_compile_all: compiled 'tri' library in 0.019 sec
+ggml_metal_library_compile_all: compiled 'ssm' library in 0.030 sec
+ggml_metal_library_compile_all: compiled 'wkv' library in 0.019 sec
+ggml_metal_library_compile_all: compiled 'gated_delta_net' library in 0.019 sec
+ggml_metal_library_compile_all: compiled 'solve_tri' library in 0.027 sec
+ggml_metal_library_compile_all: compiled 'rope' library in 0.024 sec
+ggml_metal_library_compile_all: compiled 'conv' library in 0.030 sec
+ggml_metal_library_compile_all: compiled 'upscale' library in 0.027 sec
+ggml_metal_library_compile_all: compiled 'argsort' library in 0.024 sec
+ggml_metal_library_compile_all: compiled 'pool' library in 0.032 sec
+ggml_metal_library_compile_all: compiled 'misc' library in 0.026 sec
+ggml_metal_library_compile_all: loaded 34 libraries from embedded data in 0.035 sec (max single = 0.035 sec)
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M1 Max)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple7  (1007)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal3  (5001)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 51539.61 MB
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M1 Max
+ggml_metal_init: picking default device: Apple M1 Max
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q4_0_f32', name = 'kernel_mul_mm_q4_0_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q4_0_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1      0x145f0e920 | th_max =  896 | th_width =   32
+Testing 3 devices
+
+Backend 1/3: MTL0
+  Device description: Apple M1 Max
+  Device memory: 49152 MB (49151 MB free)
+
+  MUL_MAT(type_a=q4_0,type_b=f32,m=12288,n=160,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):                     1309 runs -   768.71 us/run -   6.04 GFLOP/run - [1;34m  7.86 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=6144,n=160,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              2584 runs -   389.95 us/run -   3.02 GFLOP/run - [1;34m  7.74 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=160,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              3650 runs -   276.20 us/run -   2.01 GFLOP/run - [1;34m  7.29 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=2048,n=160,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              7000 runs -   144.63 us/run -   1.01 GFLOP/run - [1;34m  6.96 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=1536,n=160,k=6144,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              2176 runs -   465.48 us/run -   3.02 GFLOP/run - [1;34m  6.49 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=1536,n=160,k=12288,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):                     1088 runs -   924.26 us/run -   6.04 GFLOP/run - [1;34m  6.53 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=12288,n=512,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):                      420 runs -  2381.51 us/run -  19.33 GFLOP/run - [1;34m  8.12 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=6144,n=512,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               836 runs -  1198.85 us/run -   9.66 GFLOP/run - [1;34m  8.06 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=512,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              1248 runs -   809.26 us/run -   6.44 GFLOP/run - [1;34m  7.96 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=2048,n=512,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              2432 runs -   416.29 us/run -   3.22 GFLOP/run - [1;34m  7.74 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=1536,n=512,k=6144,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               814 runs -  1239.58 us/run -   9.66 GFLOP/run - [1;34m  7.80 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=1536,n=512,k=12288,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):                      408 runs -  2466.14 us/run -  19.33 GFLOP/run - [1;34m  7.84 TFLOPS[0m
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q4_0_f32', name = 'kernel_mul_mm_q4_0_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q4_0_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1      0x1470045f0 | th_max =  832 | th_width =   32
+  MUL_MAT(type_a=q4_0,type_b=f32,m=12288,n=971,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):                      219 runs -  4620.90 us/run -  36.65 GFLOP/run - [1;34m  7.93 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=6144,n=971,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               432 runs -  2323.98 us/run -  18.33 GFLOP/run - [1;34m  7.89 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=971,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               648 runs -  1555.83 us/run -  12.22 GFLOP/run - [1;34m  7.85 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=2048,n=971,k=1536,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              1275 runs -   791.32 us/run -   6.11 GFLOP/run - [1;34m  7.72 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=1536,n=971,k=6144,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               414 runs -  2433.20 us/run -  18.33 GFLOP/run - [1;34m  7.53 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=1536,n=971,k=12288,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):                      204 runs -  4905.97 us/run -  36.65 GFLOP/run - [1;34m  7.47 TFLOPS[0m
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_q4_0_f32', name = 'kernel_mul_mv_q4_0_f32_nsg=2_ne12=1_r2=1_r3=1_split=0'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_q4_0_f32_nsg=2_ne12=1_r2=1_r3=1_split=0      0x145f11b40 | th_max =  640 | th_width =   32
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=1,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):              11928 runs -    85.15 us/run - 117.44 MFLOP/run - [1;34m  1.38 TFLOPS[0m
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_ext_q4_0_f32_r1_2', name = 'kernel_mul_mv_ext_q4_0_f32_r1_2_nsg=2_nxpsg=16_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_ext_q4_0_f32_r1_2_nsg=2_nxpsg=16_ne12=1_r2=1_r3=1      0x104604f40 | th_max =  832 | th_width =   32
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=2,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               5112 runs -   198.98 us/run - 234.88 MFLOP/run - [1;34m  1.18 TFLOPS[0m
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_ext_q4_0_f32_r1_3', name = 'kernel_mul_mv_ext_q4_0_f32_r1_3_nsg=2_nxpsg=8_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_ext_q4_0_f32_r1_3_nsg=2_nxpsg=8_ne12=1_r2=1_r3=1      0x145e11750 | th_max =  704 | th_width =   32
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=3,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               5112 runs -   199.13 us/run - 352.32 MFLOP/run - [1;34m  1.77 TFLOPS[0m
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_ext_q4_0_f32_r1_4', name = 'kernel_mul_mv_ext_q4_0_f32_r1_4_nsg=2_nxpsg=8_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_ext_q4_0_f32_r1_4_nsg=2_nxpsg=8_ne12=1_r2=1_r3=1      0x104704ed0 | th_max =  640 | th_width =   32
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=4,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               4047 runs -   248.57 us/run - 469.76 MFLOP/run - [1;34m  1.89 TFLOPS[0m
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_ext_q4_0_f32_r1_5', name = 'kernel_mul_mv_ext_q4_0_f32_r1_5_nsg=2_nxpsg=8_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_ext_q4_0_f32_r1_5_nsg=2_nxpsg=8_ne12=1_r2=1_r3=1      0x1470062c0 | th_max =  640 | th_width =   32
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=5,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               3591 runs -   288.96 us/run - 587.20 MFLOP/run - [1;34m  2.03 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=8,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):               2140 runs -   485.26 us/run - 939.52 MFLOP/run - [1;34m  1.94 TFLOPS[0m
+  MUL_MAT(type_a=q4_0,type_b=f32,m=4096,n=512,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0,m_v=0,pad=0):                      136 runs -  7412.61 us/run -  60.13 GFLOP/run - [1;34m  8.11 TFLOPS[0m
+ggml_metal_free: deallocating
+  Backend MTL0: [1;32mOK[0m
+Backend 2/3: BLAS
+  Skipping
+Backend 3/3: CPU
+  Skipping
+3/3 backends passed
+[1;32mOK[0m

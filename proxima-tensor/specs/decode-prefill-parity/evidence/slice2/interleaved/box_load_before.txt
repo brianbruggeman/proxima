@@ -1,0 +1,9 @@
+ 3:06  up 6 days, 13:10, 5 users, load averages: 3.80 3.60 4.00
+brianbruggeman   66625  68.3  0.1 427013952  41168   ??  R     2:08AM  44:45.31 /System/Library/Frameworks/CoreSpotlight.framework/spotlightknowledged
+brianbruggeman   17029  66.0  0.5 571989456 343488   ??  R    Wed05PM 5504:09.35 a background daemon in ~/.local/bin
+brianbruggeman     716  30.3  1.6 414636624 1051168   ??  S    Wed02PM 1176:06.71 /Applications/iTerm.app/Contents/MacOS/iTerm2
+brianbruggeman   31461  16.6  1.3 417962400 865408 s001  S+   Wed02PM 119:43.12 claude --resume 1335e0df-153c-4279-b3f4-eede0bf4a680
+brianbruggeman     689   8.0  0.3 431651984 204384   ??  S    Wed02PM  21:26.39 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A
+brianbruggeman    1010   5.0  0.2 414395968 146256   ??  S    Wed02PM  99:53.90 /Applications/Docker.app/Contents/MacOS/com.docker.backend services --autostart
+brianbruggeman     853   3.1  0.0 426984176  24560   ??  S    Wed02PM   3:12.77 /usr/libexec/networkserviceproxy
+root               851   1.4  0.2 412043136 114640   ??  Ss   Wed02PM  37:42.87 /Library/SystemExtensions/21F1E42E-E283-49B4-8071-6B9F3228D05F/at.obdev.littlesnitch.netwo
