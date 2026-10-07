@@ -210,6 +210,7 @@ metal = [
     "metal-q4k-ggml-port",
     "metal-q4_0-native",
     "metal-tiled-gemm",
+    "metal-grouped-gemm",
     "metal-attn-split-decode",
     "metal-attn-split-rows",
 ]
@@ -384,12 +385,14 @@ metal-packed-row-nsg2 = ["metal"]
 # across tokens. Default-off until the real Metal parity and decode cells seal
 # the descriptor rebasing path.
 metal-gathered-packed-row = ["metal"]
-# Expert-grouped tiled GEMM: a gathered Q8_0 expert weight whose route index
-# varies only along the token axis is dispatched one threadgroup column per
-# (expert, row tile, token tile) on the `simdgroup_matrix` tiled path
-# (`push_tiled_gemm_body`), each threadgroup selecting its own tokens by
-# scanning the route index. Default-off until a real granite prefill A/B and
-# the llama token-id gate seal it.
+# Expert-grouped tiled GEMM (`msl::push_expert_grouped_gemm_body`): a gathered
+# Q8_0 expert weight whose route index varies only along the token axis, at
+# `TILED_GEMM_MIN_TOKENS` rows or more, runs on a `simdgroup_matrix` tile
+# kernel with one z slice per expert; each threadgroup scans the route for the
+# tokens that name its expert. Joined `metal`'s default after granite moe 1b's
+# 1000-token prefill measured 6459.0 -> 831.9 ms (21 interleaved runs per arm)
+# with token ids equal to llama.cpp f1ea20621 on all 24 runs per arm
+# (`proxima-tensor/specs/decode-prefill-parity/SPEC.md`, slice 1).
 metal-grouped-gemm = ["metal-tiled-gemm"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
