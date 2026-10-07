@@ -35,6 +35,11 @@ pub(super) struct BufferArena {
     pub(super) slot_bytes: Vec<usize>,
     /// Parallel to `prepared.resolved`.
     pub(super) position_slot: Vec<usize>,
+    /// Every extra output node an op writes beyond its own (`extra_output_nodes`),
+    /// with the slot backing it, grouped by position.
+    pub(super) extra_slots: Vec<(NodeId, usize)>,
+    /// Parallel to `prepared.resolved`: the range of `extra_slots` one position owns.
+    pub(super) position_extras: Vec<core::ops::Range<usize>>,
     /// Live-bytes high-water mark reached while building -- MG-3's own
     /// witness against [`ARENA_TRANSIENT_CAP`].
     pub(super) peak_bytes: usize,
@@ -54,6 +59,15 @@ impl BufferArena {
     /// only" doc.
     fn placement_for(&self, position: usize) -> (&MetalBuffer, usize) {
         (&self.slots[self.position_slot[position]], 0)
+    }
+
+    /// The `(node, buffer)` pairs a position's extra outputs bind to, so a
+    /// multi-output op writes into plan-owned storage instead of a fresh
+    /// allocation per call.
+    fn extra_placements(&self, position: usize) -> impl Iterator<Item = (NodeId, &MetalBuffer)> {
+        self.extra_slots[self.position_extras[position].clone()]
+            .iter()
+            .map(|(node, slot)| (*node, &self.slots[*slot]))
     }
 
     /// Physical slot count -- the direct witness of how much reuse
@@ -76,6 +90,33 @@ impl BufferArena {
     #[cfg(feature = "instrument")]
     pub(super) fn slot_is_recycled(&self, position: usize) -> bool {
         self.slot_occupancy[self.position_slot[position]] > 1
+    }
+}
+
+/// Output nodes an op writes besides its own `bound.node`, each with its
+/// element count: the dispatch writes them through extra buffer bindings that
+/// `bindings` does not name, so the arena gives each a dedicated slot and
+/// `encode_op` falls back to a fresh allocation only when the caller did not
+/// resolve them.
+fn extra_output_nodes(bound: &BoundOp) -> Vec<(NodeId, usize)> {
+    match &bound.kind {
+        BoundOpKind::MoeTopK { .. } => {
+            let token_count = bound.extents.iter().product::<u64>() as usize;
+            bound.kind.moe_topk_extra_outputs(token_count)
+        }
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_weight_sum,
+            new_weight_sum,
+            new_attended,
+            attention_rows,
+            head_dim,
+            ..
+        } => vec![
+            (*cached_weight_sum, *attention_rows as usize),
+            (*new_weight_sum, *attention_rows as usize),
+            (*new_attended, (*attention_rows * *head_dim) as usize),
+        ],
+        _ => Vec::new(),
     }
 }
 
@@ -158,6 +199,8 @@ pub(super) fn build_buffer_arena(
     let mut slots: Vec<MetalBuffer> = Vec::new();
     let mut slot_bytes: Vec<usize> = Vec::new();
     let mut position_slot: Vec<usize> = Vec::with_capacity(resolved.len());
+    let mut extra_slots: Vec<(NodeId, usize)> = Vec::new();
+    let mut position_extras: Vec<core::ops::Range<usize>> = Vec::with_capacity(resolved.len());
     let mut node_slot: BTreeMap<NodeId, usize> = BTreeMap::new();
     let mut live_bytes: usize = 0;
     let mut peak_bytes: usize = 0;
@@ -207,6 +250,17 @@ pub(super) fn build_buffer_arena(
         position_slot.push(slot);
         node_slot.insert(bound.node, slot);
 
+        let extras_start = extra_slots.len();
+        for (extra_node, element_count) in extra_output_nodes(bound) {
+            let index = slots.len();
+            slots.push(allocate_buffer(device, element_count, bound.dtype)?);
+            slot_bytes.push(element_count.max(1) * bound.dtype.size_bytes());
+            #[cfg(feature = "instrument")]
+            slot_occupancy.push(1);
+            extra_slots.push((extra_node, index));
+        }
+        position_extras.push(extras_start..extra_slots.len());
+
         for retired in &retires[position] {
             debug_assert!(
                 !outputs.contains(retired),
@@ -247,6 +301,8 @@ pub(super) fn build_buffer_arena(
         slots,
         slot_bytes,
         position_slot,
+        extra_slots,
+        position_extras,
         peak_bytes,
         #[cfg(feature = "instrument")]
         slot_occupancy,
@@ -359,6 +415,32 @@ pub(super) fn arena_placement(
         let _ = plan.arena.set(arena);
     }
     Ok(plan.arena.get().map(|arena| arena.placement_for(position)))
+}
+/// Registers a position's extra output buffers in `device_buffers` before
+/// `encode_op` runs, so a multi-output op binds plan-owned storage instead
+/// of allocating one `MTLBuffer` per extra output per step. A node already
+/// present keeps its buffer. Call after [`arena_placement`] has built the arena.
+#[cfg(feature = "metal-plan-stable-buffers")]
+pub(super) fn bind_arena_extras(
+    plan: &Plan,
+    position: usize,
+    device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
+) {
+    let Some(arena) = plan.arena.get() else {
+        return;
+    };
+    for (node, buffer) in arena.extra_placements(position) {
+        device_buffers
+            .entry(node)
+            .or_insert_with(|| (buffer.clone(), 0));
+    }
+}
+#[cfg(not(feature = "metal-plan-stable-buffers"))]
+pub(super) fn bind_arena_extras(
+    _plan: &Plan,
+    _position: usize,
+    _device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
+) {
 }
 #[cfg(not(feature = "metal-plan-stable-buffers"))]
 pub(super) fn arena_placement(
@@ -2223,78 +2305,24 @@ pub(super) fn encode_op(
         }
         device_buffers.insert(*state_out, (state_buffer, state_offset));
     }
-    // `render_moe_topk`'s own 16 extra outputs (ROW 569, `docs/discipline.md`):
-    // `bindings` above only ever names ONE `Binding::Output` (the same
-    // single-output limit `GatedDeltaNet`'s own `state_out` arm names), so
-    // every one of `routes[1..]`/`weights`/`weight_total` binds at the next
-    // free slot manually, right before dispatch -- unlike `state_out`, none
-    // of these needs a caller-supplied placement (`BoundOpKind::MoeTopK`'s
-    // own doc: nothing here is cross-decode-step persistent recurrent
-    // state), so this is the plain "resolve from `device_buffers`, or
-    // allocate fresh" path with no placement lookup at all.
-    if matches!(&bound.kind, BoundOpKind::MoeTopK { .. }) {
-        let token_count = bound.extents.iter().product::<u64>() as usize;
-        let extra_outputs = bound.kind.moe_topk_extra_outputs(token_count);
-        for (offset, (extra_node, element_count)) in extra_outputs.iter().enumerate() {
-            let buffer_index = bindings.len() + offset;
-            let existing = device_buffers.get(extra_node).cloned();
-            let (extra_buffer, extra_offset) = match existing {
-                Some(buffer) => buffer,
-                None => (allocate_buffer(device, *element_count, bound.dtype)?, 0),
-            };
-            unsafe {
-                encoder.setBuffer_offset_atIndex(
-                    Some(&extra_buffer),
-                    extra_offset,
-                    buffer_index,
-                );
-            }
-            if let Some(tracker) = hazard.as_deref_mut() {
-                tracker.record(&[], Some(Retained::as_ptr(&extra_buffer)));
-            }
-            device_buffers.insert(*extra_node, (extra_buffer, extra_offset));
+    // a `MoeTopK` writes 16 extra outputs (routes[1..], weights, weight_total)
+    // and a `CachedSoftmaxWeights` three, each through a buffer slot after
+    // `bindings` -- `bind_buffers`' single `output` cannot carry them, so they
+    // bind here, resolved from `device_buffers` (the plan arena pre-resolves
+    // them on the placements path) or allocated fresh on the cold paths.
+    for (offset, (extra_node, element_count)) in extra_output_nodes(bound).into_iter().enumerate() {
+        let buffer_index = bindings.len() + offset;
+        let (extra_buffer, extra_offset) = match device_buffers.get(&extra_node).cloned() {
+            Some(buffer) => buffer,
+            None => (allocate_buffer(device, element_count, bound.dtype)?, 0),
+        };
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(&extra_buffer), extra_offset, buffer_index);
         }
-    }
-    // `render_cached_softmax_weights`'s own three extra outputs (buffers 5,
-    // 6, 7 -- `bindings.len()` is already 5: three operand inputs, the
-    // primary output, the uniforms slot): same "resolve from `device_
-    // buffers`, or allocate fresh" shape as `MoeTopK`'s own arm just above,
-    // but each buffer's real element count (not a placeholder `1`) --
-    // `cached_weight_sum`/`new_weight_sum` are one value per attention row,
-    // `new_attended` is `attention_rows * head_dim` (this op's own doc).
-    if let BoundOpKind::CachedSoftmaxWeights {
-        cached_weight_sum,
-        new_weight_sum,
-        new_attended,
-        attention_rows,
-        head_dim,
-        ..
-    } = &bound.kind
-    {
-        let extra_nodes_and_counts: [(NodeId, usize); 3] = [
-            (*cached_weight_sum, *attention_rows as usize),
-            (*new_weight_sum, *attention_rows as usize),
-            (*new_attended, (*attention_rows * *head_dim) as usize),
-        ];
-        for (offset, (extra_node, element_count)) in extra_nodes_and_counts.iter().enumerate() {
-            let buffer_index = bindings.len() + offset;
-            let existing = device_buffers.get(extra_node).cloned();
-            let (extra_buffer, extra_offset) = match existing {
-                Some(buffer) => buffer,
-                None => (allocate_buffer(device, *element_count, bound.dtype)?, 0),
-            };
-            unsafe {
-                encoder.setBuffer_offset_atIndex(
-                    Some(&extra_buffer),
-                    extra_offset,
-                    buffer_index,
-                );
-            }
-            if let Some(tracker) = hazard.as_deref_mut() {
-                tracker.record(&[], Some(Retained::as_ptr(&extra_buffer)));
-            }
-            device_buffers.insert(*extra_node, (extra_buffer, extra_offset));
+        if let Some(tracker) = hazard.as_deref_mut() {
+            tracker.record(&[], Some(Retained::as_ptr(&extra_buffer)));
         }
+        device_buffers.insert(extra_node, (extra_buffer, extra_offset));
     }
     // `splice_round_batched_reduce_base_table`'s own `round_table [[buffer(N)]]`
     // parameter, bound OUTSIDE `bindings` at the exact slot the splice's own
