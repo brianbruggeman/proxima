@@ -288,12 +288,12 @@ pub(super) fn push_tiled_gemm_body(
     let total_halves = block_m * num_chunks * 2;
     let half_units = total_halves.div_ceil(block_threads);
 
-    let mm_layout_active = metal.tiled_gemm_mm_layout
+    let mm_layout_schedule = metal.tiled_gemm_mm_layout
         && wide_weight_stage_eligible
         && mm_layout_geometry_supported()
         && half_width == 16;
 
-    if mm_layout_active {
+    if mm_layout_schedule {
         push_mm_layout_k_loop(source, block, token_axis, feature_axis, metal, grid2d_active);
     } else {
         if wide_weight_stage_eligible {
@@ -551,7 +551,7 @@ pub(super) fn push_tiled_gemm_body(
             block_n,
             thread_mat_m,
             thread_mat_n,
-            mm_layout_active,
+            mm_layout_schedule,
         );
         source.push_str("    } else {\n");
     }
@@ -571,7 +571,7 @@ pub(super) fn push_tiled_gemm_body(
         element_type,
         epilogue_body,
         epilogue_operands,
-        mm_layout_active,
+        mm_layout_schedule,
     );
     if direct_store_eligible {
         source.push_str("    }\n");
@@ -767,7 +767,7 @@ fn push_mm_layout_activation_stage(source: &mut String, block: &TiledGemmBlock, 
 }
 
 /// The four 8-deep multiply steps of one K-step, in `kernel_mul_mm`'s own
-/// form (`mul_mm.metal:288-310`): fragment pointers walked by addition, the
+/// form (`mul_mm.metal:290-314`): fragment pointers walked by addition, the
 /// loads grouped ahead of the multiplies by `simdgroup_barrier`s, every loop
 /// fully unrolled. `acc[(i % 4) * 2 + i / 4]` is ggml's flat `mc[i]` renamed to
 /// the `[feature][token]` index the write-back reads.
