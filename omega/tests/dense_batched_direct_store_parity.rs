@@ -107,7 +107,7 @@ fn check_dense_direct_store_byte_identity(
 
     let direct_store_off = temp_env::with_vars(
         [
-            ("PROXIMA_TILED_GEMM_DIRECT_STORE", None::<&str>),
+            ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0")),
             ("PROXIMA_TILED_GEMM_DENSE", None::<&str>),
         ],
         || {
@@ -256,7 +256,7 @@ fn check_dense_batch_innermost_byte_identity(
 
     let direct_store_off = temp_env::with_vars(
         [
-            ("PROXIMA_TILED_GEMM_DIRECT_STORE", None::<&str>),
+            ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0")),
             ("PROXIMA_TILED_GEMM_DENSE", None::<&str>),
         ],
         || {

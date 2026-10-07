@@ -2129,7 +2129,7 @@ pub(super) const fn slim_tgmem_override() -> bool {
     true
 }
 
-/// `PROXIMA_TILED_GEMM_DIRECT_STORE=1` (see `docs/model-interop/
+/// `PROXIMA_TILED_GEMM_DIRECT_STORE` (see `docs/model-interop/
 /// discipline.md` ROW C4.11): for an
 /// output tile fully inside `feature_extent`/`token_extent` (no boundary
 /// row/col needs masking) AND with an identity epilogue AND a unit-stride
@@ -2140,12 +2140,14 @@ pub(super) const fn slim_tgmem_override() -> bool {
 /// tiles, a non-identity epilogue, or a non-unit output token stride all
 /// keep today's threadgroup-restage path; this is a pure store-path change
 /// with the SAME accumulator values, so it is bit-identical by construction
-/// wherever it admits. Default OFF: unset or any value other than `"1"`
-/// keeps today's restage path; only explicit `"1"` opts in.
+/// wherever it admits. Default ON: unset admits, and only an explicit `"0"`
+/// keeps the restage path.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_direct_store_override() -> bool {
-    let active =
-        matches!(std::env::var("PROXIMA_TILED_GEMM_DIRECT_STORE"), Ok(value) if value.trim() == "1");
+    let active = !matches!(
+        std::env::var("PROXIMA_TILED_GEMM_DIRECT_STORE"),
+        Ok(value) if value.trim() == "0"
+    );
     log_tiled_gemm_direct_store_once(active);
     active
 }
@@ -2164,7 +2166,7 @@ fn log_tiled_gemm_direct_store_once(_active: bool) {}
 
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn tiled_gemm_direct_store_override() -> bool {
-    false
+    true
 }
 
 /// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` (see `docs/model-interop/

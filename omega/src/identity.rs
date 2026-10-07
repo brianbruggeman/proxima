@@ -271,8 +271,8 @@ pub(crate) struct MetalOnlyExtras {
     /// when [`crate::msl::push_tiled_gemm_body`]/[`crate::msl::
     /// push_dense_batched_gemm_body`] emit the device-direct
     /// `simdgroup_store` fast path for an interior output tile instead of
-    /// always restaging through `out_tile` threadgroup memory. Default OFF
-    /// (unset keeps the restage path; only explicit `"1"` opts in) -- unlike
+    /// always restaging through `out_tile` threadgroup memory. Default ON
+    /// (unset admits; only explicit `"0"` keeps the restage path) -- unlike
     /// [`Self::tiled_gemm_wide_act_load`]/[`Self::tiled_gemm_slim_tgmem`],
     /// this changes accumulated bits nowhere (the fast path is chosen or not
     /// PER TILE at kernel run time, not baked into the source text), but the

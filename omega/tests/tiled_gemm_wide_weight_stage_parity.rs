@@ -202,7 +202,7 @@ fn run_wide_weight_stage_byte_identity(
         QuantizedBlock::Float32(&activation),
     ];
 
-    let direct_store_value = if also_direct_store { Some("1") } else { None };
+    let direct_store_value = if also_direct_store { Some("1") } else { Some("0") };
 
     let off = temp_env::with_vars(
         [

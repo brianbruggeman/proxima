@@ -225,7 +225,7 @@ fn run_grid2d_byte_identity(
     ];
 
     let wws_value = if wide_weight_stage { Some("1") } else { Some("0") };
-    let dstore_value = if direct_store { Some("1") } else { None };
+    let dstore_value = if direct_store { Some("1") } else { Some("0") };
 
     let off = temp_env::with_vars(
         [
@@ -533,7 +533,7 @@ fn run_dense_grid2d_byte_identity(
 ) {
     let blocks = [QuantizedBlock::Float32(weight), QuantizedBlock::Float32(other)];
     let wws_value = if wide_weight_stage { Some("1") } else { Some("0") };
-    let dstore_value = if direct_store { Some("1") } else { None };
+    let dstore_value = if direct_store { Some("1") } else { Some("0") };
 
     let off = temp_env::with_vars(
         [
