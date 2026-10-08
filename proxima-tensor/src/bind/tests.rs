@@ -2665,6 +2665,133 @@ fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_co
     );
 }
 
+/// [`correct_packed_matmul_layouts`]/[`native_packed_layout`] on the
+/// **selection fold** (`sequence`, `selected`, `k`, `rows`): a stacked expert
+/// weight gathered by a `[sequence, selected]` route, with `selected` AND `k`
+/// both reduced. The weight never varies along `selected` (the route picks
+/// the expert), so `selected` holds no bytes of a weight row: a row is `k`
+/// elements wide, not `selected * k`; counting `selected` in the width makes
+/// every row after the first read `selected` rows too far.
+#[test]
+fn correct_packed_matmul_layouts_leaves_a_routed_reduced_axis_out_of_the_row_width() {
+    const SEQUENCE: u32 = 3;
+    const SELECTED: u32 = 2;
+    const EXPERTS: u32 = 4;
+    const ROWS: u32 = 5;
+    const K: u32 = 32;
+
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::UInt8,
+            shape: alloc::vec![Extent::Static(EXPERTS), Extent::Static(ROWS), Extent::Static(K)],
+            name: None,
+        },
+    );
+    let route = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(SEQUENCE), Extent::Static(SELECTED)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: alloc::vec![
+                Extent::Static(SEQUENCE),
+                Extent::Static(SELECTED),
+                Extent::Static(K)
+            ],
+            name: None,
+        },
+    );
+    let gathered_weight = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(4, &[0, 1]),
+        base: map::IndexPattern {
+            iter_rank: 4,
+            axes: alloc::vec![
+                map::AxisIndex::default(),
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (weight, gathered_weight),
+                (activation, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: crate::op::ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 3])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+
+    let shapes = shape::infer(&program, &[]).expect("selection fold infers");
+    let mut built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("selection fold binds");
+    let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
+    correct_packed_matmul_layouts(&mut built, &packed);
+
+    let reduce = built
+        .iter()
+        .find(|op| op.node == sum)
+        .expect("reduce emitted");
+    let (_, weight_layout, weight_gather) = reduce
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == weight)
+        .expect("weight operand present in the reduce");
+
+    assert_eq!(weight_layout.stride(2), 1, "k is the contiguous axis of a weight row");
+    assert_eq!(
+        weight_layout.stride(3),
+        i64::from(K),
+        "a row is k elements wide; selected adds nothing to it"
+    );
+    assert_eq!(weight_layout.stride(1), 0, "the weight does not vary along selected");
+    assert_eq!(weight_layout.stride(0), 0, "the weight does not vary along the sequence");
+    assert_eq!(
+        weight_gather.as_ref().map(|lookup| lookup.element_stride),
+        Some(i64::from(ROWS * K)),
+        "one expert is rows * k elements"
+    );
+}
+
 fn elementwise_op() -> BoundOp {
     let mut program = Vec::new();
     let source = append(
