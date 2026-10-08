@@ -65,7 +65,9 @@ pub(super) fn parse_operand_pattern(notation: &str) -> Result<IndexPattern, Tens
 /// One comma-separated axis expression: a sum of `[coeff*]letter` terms and
 /// bare-integer constants, e.g. `2*i+1`. Constants fold into `offset` rather
 /// than becoming a term, since [`AxisTerm`] only carries a coefficient over
-/// an iteration axis.
+/// an iteration axis. An axis made of constants alone (`"s,3,d"`) reads one
+/// fixed position of that operand axis and contributes no iteration axis --
+/// how a `[s, layers, d]` tensor yields one layer's `[s, d]` slice.
 ///
 /// A trailing `@length` (`"i@4"`) states [`AxisIndex::len`] directly: the
 /// axis's true iteration extent, when it is narrower than the operand's own
@@ -104,7 +106,7 @@ pub(super) fn parse_axis_expr(
             terms.push(AxisTerm::scaled(axis, sign));
         }
     }
-    if terms.is_empty() {
+    if terms.is_empty() && (len.is_some() || offset < 0) {
         return Err(TensorError::MalformedMap(notation.to_string()));
     }
     let axis = AxisIndex {

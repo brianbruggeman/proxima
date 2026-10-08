@@ -1108,6 +1108,25 @@ async fn a_len_declaration_parses_regardless_of_address_shape(#[case] notation: 
     assert!(len_bearing.len_target_axis().is_some());
 }
 
+/// An axis of constants alone reads one fixed position and adds no term to
+/// the iteration space: `"s,3,d->sd"` is layer 3's slice of `[s, layers, d]`.
+#[test]
+fn a_constant_axis_parses_as_a_fixed_index_with_no_terms() {
+    let pattern = parse_operand_pattern("s,3,d->sd").expect("a constant axis parses");
+
+    assert_eq!(pattern.axes.len(), 3);
+    assert!(pattern.axes[1].terms.is_empty());
+    assert_eq!(pattern.axes[1].offset, 3);
+    assert_eq!(pattern.axes[1].len, None);
+}
+
+#[test]
+fn a_constant_axis_with_a_declared_len_is_rejected_at_parse_time() {
+    let error = parse_operand_pattern("s,3@2,d->sd").expect_err("a constant has no extent to declare");
+
+    assert!(matches!(error, TensorError::MalformedMap(_)), "{error}");
+}
+
 /// `i+j@2` has two equally-plain (`coeff == 1`) terms -- `len` cannot
 /// say which one it describes, so this is malformed at parse time
 /// rather than accepted and silently ignored (or rejected far later, at
