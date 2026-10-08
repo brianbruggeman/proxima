@@ -48,11 +48,6 @@ gated-delta-net-fusion = ["proxima-tensor/gated-delta-net-fusion"]
 # `BoundOpKind::MoeTopK` bind-time matcher) -- same shape as
 # `gated-delta-net-fusion` above.
 moe-topk-fusion = ["proxima-tensor/moe-topk-fusion"]
-# Passthrough to `proxima-tensor/moe-stacked-experts`: the model builders lower each routed
-# feed-forward projection as one operation over a `[sequence, selected]` route stack, which
-# `metal-grouped-gemm` runs as one expert-grouped dispatch (tiled rows) or one packed matvec
-# dispatch (decode and verify widths). Implies `moe-topk-fusion`.
-moe-stacked-experts = ["moe-topk-fusion", "proxima-tensor/moe-stacked-experts"]
 # Default-off passthrough to `proxima-tensor/top-fraction-fusion`: the Metal prepare path binds with
 # `bind_with_top_fraction`, so a rank-count top-fraction mask at or above
 # `selection.top_fraction_min_rows` lowers to the selection kernel instead of the plain expression.
