@@ -1,4 +1,4 @@
-//! Device-resident KV for the two-range decode loop.
+//! Device-resident KV for the two-range decode loop, prefill included.
 //!
 //! The host [`LayerCache`] is the source of truth between calls
 //! ([`PrefixState`], the prompt cache), but inside one decode call it only
@@ -11,8 +11,10 @@
 //! (`omega::execute_plan_named_with_placements`): the leaf the program reads
 //! is an input placement over the buffer, the freshly computed rows are an
 //! output placement written into the buffer's tail, and the host touches
-//! neither. A call adopts its host caches once ([`DeviceKv::adopt`]) and hands
-//! them back once ([`DeviceKv::flush`]), so everything that reads
+//! neither. A call adopts its host caches once ([`DeviceKv::adopt`]), before its
+//! first evaluation, so a prefill's K and V rows are written by the device into
+//! the buffers at their cache offsets and never read back during the call, and
+//! hands them back once ([`DeviceKv::flush`]), so everything that reads
 //! `layer_caches` after the loop is unchanged.
 //!
 //! A full layer's rows live at their absolute position. A sliding layer keeps
@@ -209,17 +211,23 @@ impl DeviceKv {
     /// (`SharedFromLayer` layers are fine: they own nothing) or a host cache
     /// does not hold exactly `cached_len` rows. Host copies are released here
     /// and rebuilt by [`Self::flush`], so a long context is held once.
+    ///
+    /// `capacity_positions` is the most positions any step can reach: the call's
+    /// `positions_needed` plus the rows of a speculative draft. `max_step_rows` is
+    /// the widest step of any kind, a prefill batch included, and bounds every
+    /// step and sizes a sliding layer's linear buffer. A prefill batch ends inside
+    /// `positions_needed`, so it adds no full-layer rows.
     pub(super) fn adopt(
         layer_caches: &mut [LayerCacheState],
         layer_row_widths: &[LayerPadRowWidths],
         cached_len: usize,
-        positions_needed: usize,
+        capacity_positions: usize,
         bucket_tokens: usize,
         max_step_rows: usize,
         source: KvBufferSource,
     ) -> Result<Option<Self>, InteropError> {
         let full_capacity_rows =
-            kv_extent(positions_needed + max_step_rows, usize::MAX, bucket_tokens) + bucket_tokens;
+            kv_extent(capacity_positions, usize::MAX, bucket_tokens) + bucket_tokens;
         let mut layers: Vec<Option<DeviceKvLayer>> = Vec::with_capacity(layer_caches.len());
         for (state, widths) in layer_caches.iter().zip(layer_row_widths) {
             match (state, widths) {
@@ -601,6 +609,110 @@ mod tests {
             rows(0, positions, EVEN_ODD_ROW, 0),
             "the kept rows are the host rows, in order"
         );
+    }
+
+    fn adopted_before_prefill(
+        window: Option<usize>,
+        total_positions: usize,
+        prefill_rows: usize,
+    ) -> (DeviceKv, Vec<LayerCacheState>) {
+        let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(window, 0))];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let device = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            0,
+            total_positions + 3,
+            4,
+            prefill_rows,
+            allocate_placed_buffer,
+        )
+            .expect("device kv allocates on the real Metal device")
+            .expect("an empty attention cache is adoptable");
+        (device, caches)
+    }
+
+    fn write_prefill_rows(device: &DeviceKv, rows_written: usize) {
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        let row = layer.output_row(0);
+        omega::write_placed_buffer_f32(
+            &layer.k_even,
+            row * layer.even_odd_row_bytes,
+            &rows(0, rows_written, EVEN_ODD_ROW, 0),
+        );
+        omega::write_placed_buffer_f32(
+            &layer.k_odd,
+            row * layer.even_odd_row_bytes,
+            &rows(0, rows_written, EVEN_ODD_ROW, 1),
+        );
+        omega::write_placed_buffer_f32(
+            &layer.v,
+            row * layer.v_row_bytes,
+            &rows(0, rows_written, V_ROW, 2),
+        );
+    }
+
+    #[test]
+    fn a_prefill_written_into_an_empty_adoption_flushes_back_as_host_rows() {
+        let prefill_rows = 21;
+        let (device, mut caches) = adopted_before_prefill(None, 40, prefill_rows);
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        assert_eq!(
+            layer.capacity_rows,
+            kv_extent(40 + 3, usize::MAX, 4) + 4,
+            "a prefill batch ends inside positions_needed, so it adds no full-layer rows"
+        );
+        assert_eq!(layer.output_row(0), 0, "the prefill's rows start at the buffer's first row");
+
+        write_prefill_rows(&device, prefill_rows);
+        device.flush(&mut caches, prefill_rows, 40);
+
+        let LayerCacheState::Attention(restored) = &caches[0] else {
+            panic!("layer 0 stays an attention cache");
+        };
+        assert_eq!(restored.k_even, rows(0, prefill_rows, EVEN_ODD_ROW, 0));
+        assert_eq!(restored.k_odd, rows(0, prefill_rows, EVEN_ODD_ROW, 1));
+        assert_eq!(restored.v, rows(0, prefill_rows, V_ROW, 2));
+    }
+
+    #[test]
+    fn a_sliding_layer_holds_a_whole_prefill_longer_than_its_window_and_keeps_its_ring() {
+        let prefill_rows = 21;
+        let (mut device, mut caches) = adopted_before_prefill(Some(8), 60, prefill_rows);
+        let layer = device.layers[0].as_mut().expect("layer 0 is resident");
+        assert!(
+            layer.capacity_rows >= prefill_rows,
+            "the linear buffer must hold the whole prefill batch, saw {} rows",
+            layer.capacity_rows
+        );
+        layer.make_room(0, prefill_rows, 8);
+        assert_eq!(layer.base_position, 0, "a prefill from an empty cache never compacts");
+
+        write_prefill_rows(&device, prefill_rows);
+        device.flush(&mut caches, prefill_rows, 60);
+
+        let LayerCacheState::Attention(restored) = &caches[0] else {
+            panic!("layer 0 stays an attention cache");
+        };
+        let ring = restored
+            .ring_geometry()
+            .copied()
+            .expect("sliding layer keeps its ring");
+        for position in prefill_rows - ring.capacity..prefill_rows {
+            let slot = position % ring.capacity;
+            assert_eq!(
+                restored.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
+                row_values(position, EVEN_ODD_ROW, 0)[..],
+                "position {position} of the prefill survives in its ring slot"
+            );
+            assert_eq!(
+                restored.v[slot * V_ROW..(slot + 1) * V_ROW],
+                row_values(position, V_ROW, 2)[..]
+            );
+        }
     }
 
     static REQUESTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
