@@ -404,17 +404,20 @@ fn rmsnorm_unfused_vs_fused_prefill_shape() {
 /// no-op" shape (`docs/discipline.md` ROW 350: `output_extents[0]==1` made
 /// the packed-row preamble's own `%`/`/` pair unreachable data; here it is
 /// `reduce_dims.len()==1` making the write loop's pair unreachable data).
+/// The emitter now writes `full_coord[1] = r;` directly (ROW 368 landed), so
+/// this puts the generic pair back to rebuild the shape that landing replaced.
 /// `assert!` on the exact literal (never a regex/best-effort match) so a
 /// silent divergence from the real emitted text fails loudly rather than
 /// applying to the wrong bytes.
-fn row368_direct_write_loop_rewrite(source: &str) -> String {
-    let old = "        long reduction_coord[1];\n        long remaining_r = r;\n        reduction_coord[0] = remaining_r % u.reduction_extents[0]; remaining_r /= u.reduction_extents[0];\n        full_coord[1] = reduction_coord[0];\n";
-    let new = "        full_coord[1] = r;\n";
-    assert!(
-        source.contains(old),
-        "row368 write-loop pattern not found in emitted source -- emitted text changed shape"
+fn row368_division_pair_write_loop(source: &str) -> String {
+    let direct = "                full_coord[1] = r;\n";
+    let pair = "                long reduction_coord[1];\n                long remaining_r = r;\n                reduction_coord[0] = remaining_r % u.reduction_extents[0]; remaining_r /= u.reduction_extents[0];\n                full_coord[1] = reduction_coord[0];\n";
+    assert_eq!(
+        source.matches(direct).count(),
+        1,
+        "row368 direct write-loop line not found exactly once in the emitted source -- emitted text changed shape"
     );
-    source.replace(old, new)
+    source.replace(direct, pair)
 }
 
 /// AIR division-class instruction counts for one compiled kernel --
@@ -494,14 +497,18 @@ fn air_division_count_for_shape(label: &str, seq: u32, dim: u32) {
     let kernel = omega::msl::emit(bound, &packed_operands, NumericPolicy::bit_exact())
         .expect("fused rmsnorm reduce emits MSL");
 
-    let rewritten = row368_direct_write_loop_rewrite(&kernel.source);
+    assert!(
+        !kernel.source.contains("remaining_r"),
+        "{label}: the emitted write loop must be the direct form, with no coordinate division pair"
+    );
+    let division_pair = row368_division_pair_write_loop(&kernel.source);
     assert_ne!(
-        kernel.source, rewritten,
-        "{label}: rewrite must change the source it was applied to"
+        kernel.source, division_pair,
+        "{label}: restoring the pair must change the source it was applied to"
     );
 
-    let (_baseline_air, baseline) = compile_to_air(&kernel.source, &format!("{label}-baseline"));
-    let (_rewrite_air, rewrite) = compile_to_air(&rewritten, &format!("{label}-rewrite"));
+    let (_baseline_air, baseline) = compile_to_air(&division_pair, &format!("{label}-baseline"));
+    let (_rewrite_air, rewrite) = compile_to_air(&kernel.source, &format!("{label}-rewrite"));
 
     println!(
         "ROW 368 {label} seq={seq} dim={dim} AIR division-class instruction count: \
