@@ -627,7 +627,7 @@ thread_local! {
     /// of exactly a power of two wastes nothing). DERIVED, not measured.
     /// [`crate::sized::OUTPUT_POOL_MAX_PER_BUCKET`] caps retained-buffer growth per bucket
     /// on top of that.
-    static OUTPUT_BUFFER_POOL: RefCell<HashMap<(usize, DType), Vec<MetalBuffer>>> =
+    pub(super) static OUTPUT_BUFFER_POOL: RefCell<HashMap<(usize, DType), Vec<MetalBuffer>>> =
         RefCell::new(HashMap::new());
 }
 
