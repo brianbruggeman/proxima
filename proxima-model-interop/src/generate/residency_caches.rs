@@ -2330,6 +2330,14 @@ impl BackendRuntime {
         runtime
     }
 
+    /// Drops every decode-shaped plan. The host-cache steps before a device-KV
+    /// adoption bind f32 cached K/V; a plan built then and found again by key
+    /// after a half-width adoption would read binary16 bytes as f32.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn drop_decode_plans(&mut self) {
+        self.decode_plans.clear();
+    }
+
     /// Whether this call's [`ServingConfig`] selected the Gpu engine --
     /// [`Self::engine`] is private (this struct's whole job is hiding which
     /// arm was picked), so [`Self::run_decode_loop`]'s own choice of the

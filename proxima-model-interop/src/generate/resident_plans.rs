@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use omega::metal::{DispatchType, MathMode, Plan};
+use proxima_gguf::GgmlType;
 use proxima_tensor::NumericPolicy;
 use proxima_tensor::op::NodeId;
 
@@ -101,6 +102,9 @@ pub(super) struct PlanIdentity {
     prefill_one_evaluation: bool,
     /// Positions per chunk of that alternate program.
     prefill_chunk_positions: usize,
+    /// Element type of the device-resident KV: a plan binds its cached K/V
+    /// operands with this codec, so a plan built for one cannot serve the other.
+    kv_cache_element: GgmlType,
 }
 
 impl PlanIdentity {
@@ -112,7 +116,8 @@ impl PlanIdentity {
             context_length: _,
             rope_scaling: _,
             parallel_sequences: _,
-            kv_cache_key_quant: _,
+            kv_cache_key_quant,
+            // equal to the key type for every admitted config
             kv_cache_value_quant: _,
             flash_attention: _,
             // chunk widths pick which shapes occur, and the shape is in the plan key
@@ -198,6 +203,7 @@ impl PlanIdentity {
             moe_residency_budget_bytes,
             prefill_one_evaluation,
             prefill_chunk_positions,
+            kv_cache_element: kv_cache_key_quant,
         }
     }
 }
@@ -510,6 +516,18 @@ mod tests {
         put(&owner, identity, ResidentPlans::default());
 
         assert_eq!(entry_count(), 0);
+    }
+
+    #[test]
+    fn identity_separates_plans_bound_to_an_f32_cache_from_those_bound_to_an_f16_one() {
+        let f32_cache = ServingConfig::default();
+        let f16_cache = ServingConfig {
+            kv_cache_key_quant: GgmlType::F16,
+            kv_cache_value_quant: GgmlType::F16,
+            ..ServingConfig::default()
+        };
+
+        assert_ne!(PlanIdentity::of(&f32_cache), PlanIdentity::of(&f16_cache));
     }
 
     #[test]
