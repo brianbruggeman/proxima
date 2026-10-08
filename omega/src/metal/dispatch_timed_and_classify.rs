@@ -589,7 +589,7 @@ pub fn execute_plan_with_placements_op_timed(
     for (position, bound) in prepared.resolved.iter().enumerate() {
         let placement = match output_placed.get(&bound.node).copied() {
             Some(placement) => Some(placement),
-            None => arena_placement(plan, position)?,
+            None => arena_placement(plan, position, |node| output_placed.contains_key(&node))?,
         };
         // row 555: `bound.node` above can never be a fused `state_out` node
         // (`encode_op`'s own doc); this is the SAME `output_placed` map,
@@ -974,7 +974,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     for (position, bound) in prepared.resolved.iter().enumerate() {
         let placement = match output_placed.get(&bound.node).copied() {
             Some(placement) => Some(placement),
-            None => arena_placement(plan, position)?,
+            None => arena_placement(plan, position, |node| output_placed.contains_key(&node))?,
         };
         // row 555: same fused-`state_out`-key gap `encode_op`'s own doc names.
         let state_out_placement = match &bound.kind {
