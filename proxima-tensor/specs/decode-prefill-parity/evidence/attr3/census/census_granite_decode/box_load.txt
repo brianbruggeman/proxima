@@ -1,0 +1,7 @@
+pre-util granite: 0 0 0 0 0 0 0 0 0 0 0 0 
+  PID  %CPU COMM
+  716  66.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+17029  59.7 <background daemon>
+ 1418  52.9 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  587  34.6 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 5:43  up 7 days, 15:47, 7 users, load averages: 4.61 6.88 7.72

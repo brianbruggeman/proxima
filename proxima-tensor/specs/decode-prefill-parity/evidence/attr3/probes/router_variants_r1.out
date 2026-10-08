@@ -1,0 +1,16 @@
+ab capture excludes 24 unreplayable dispatches of 369
+ab capture: step=0 dispatches=345 groups=20
+ab bits sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] arm=base elements=32000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] arm=7cc38fcbaefaa4ee.r0_control elements=32000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] arm=7cc38fcbaefaa4ee.r1_no_weight_loads elements=32000 differing=32000 max_ulp=2231216597 max_abs=5.370378e2 max_abs_over_largest=6.356513e1
+ab bits sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] arm=7cc38fcbaefaa4ee.r2_no_act_loads elements=32000 differing=32000 max_ulp=2137401873 max_abs=8.641409e0 max_abs_over_largest=1.0228187e0
+ab bits sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] arm=7cc38fcbaefaa4ee.r3_no_loads elements=32000 differing=32000 max_ulp=2240228751 max_abs=1.0324486e3 max_abs_over_largest=1.22203186e2
+ab bits sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] arm=7cc38fcbaefaa4ee.r4_no_mma elements=32000 differing=32000 max_ulp=1090989455 max_abs=8.448623e0 max_abs_over_largest=1e0
+ab bits sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] arm=7cc38fcbaefaa4ee.r5_weight_preload elements=32000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab group sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] tg=Some(128) count=24 pass=0 arm=base marginal_us=475.714 single_us=480.625
+ab group sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] tg=Some(128) count=24 pass=0 arm=7cc38fcbaefaa4ee.r0_control marginal_us=476.256 single_us=480.667
+ab group sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] tg=Some(128) count=24 pass=0 arm=7cc38fcbaefaa4ee.r1_no_weight_loads marginal_us=147.988 single_us=151.250
+ab group sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] tg=Some(128) count=24 pass=0 arm=7cc38fcbaefaa4ee.r2_no_act_loads marginal_us=434.345 single_us=439.875
+ab group sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] tg=Some(128) count=24 pass=0 arm=7cc38fcbaefaa4ee.r3_no_loads marginal_us=90.173 single_us=96.375
+ab group sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] tg=Some(128) count=24 pass=0 arm=7cc38fcbaefaa4ee.r4_no_mma marginal_us=435.732 single_us=439.000
+ab group sha=7cc38fcbaefaa4ee threads=4096 extents=[1000, 1024, 32] tg=Some(128) count=24 pass=0 arm=7cc38fcbaefaa4ee.r5_weight_preload marginal_us=207.762 single_us=212.667

@@ -1,0 +1,9 @@
+  PID  %CPU COMM
+  587 127.0 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+17029  68.8 <background daemon>
+31461  43.3 claude
+  716  37.2 /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 5:44  up 7 days, 15:48, 7 users, load averages: 5.12 6.68 7.58
+Utilization %"=0
+Utilization %"=0
+Utilization %"=0

@@ -1,0 +1,8 @@
+Thu Oct  8 06:08:00 CDT 2026
+ 6:08  up 7 days, 16:12, 2 users, load averages: 6.74 5.07 5.45
+"Device Utilization %"=97
+  PID  %CPU COMM
+17029  56.5 <background daemon>
+  476  36.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 1675  31.3 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+ 3170  18.8 /usr/libexec/duetexpertd

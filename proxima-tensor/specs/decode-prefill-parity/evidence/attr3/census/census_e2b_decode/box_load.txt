@@ -1,0 +1,7 @@
+pre-util e2b: 0 0 0 0 0 0 0 0 0 0 0 0 
+  PID  %CPU COMM
+  587 102.4 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+17029  79.5 <background daemon>
+  716  26.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+ 1418  19.5 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+ 5:43  up 7 days, 15:47, 7 users, load averages: 5.45 6.97 7.73

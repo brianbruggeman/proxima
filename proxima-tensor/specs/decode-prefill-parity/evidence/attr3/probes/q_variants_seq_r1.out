@@ -1,0 +1,12 @@
+ab capture excludes 24 unreplayable dispatches of 369
+ab capture: step=0 dispatches=345 groups=20
+ab bits sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] arm=base elements=512000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] arm=17b21f30b4c6bf95.t0_control elements=512000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] arm=17b21f30b4c6bf95.t1_no_extra_out elements=512000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] arm=17b21f30b4c6bf95.t2_no_out elements=512000 differing=512000 max_ulp=2561544227 max_abs=1.4660155e13 max_abs_over_largest=4.8991994e10
+ab bits sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] arm=17b21f30b4c6bf95.t3_extra_via_bound_out elements=512000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab sequence sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] tg=None count=24 pass=0 arm=base per_dispatch_us=978.625
+ab sequence sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] tg=None count=24 pass=0 arm=17b21f30b4c6bf95.t0_control per_dispatch_us=988.266
+ab sequence sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] tg=None count=24 pass=0 arm=17b21f30b4c6bf95.t1_no_extra_out per_dispatch_us=30.158
+ab sequence sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] tg=None count=24 pass=0 arm=17b21f30b4c6bf95.t2_no_out per_dispatch_us=982.500
+ab sequence sha=17b21f30b4c6bf95 threads=512000 extents=[1000, 16, 32] tg=None count=24 pass=0 arm=17b21f30b4c6bf95.t3_extra_via_bound_out per_dispatch_us=31.215

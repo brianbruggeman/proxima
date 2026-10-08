@@ -1,0 +1,7 @@
+Thu Oct  8 06:13:49 CDT 2026
+ 6:13  up 7 days, 16:18, 2 users, load averages: 2.50 3.61 4.67
+"Device Utilization %"=0
+  PID  %CPU COMM
+17029  79.0 <background daemon>
+  476  50.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 1010  17.9 /Applications/Docker.app/Contents/MacOS/com.docker.backend
