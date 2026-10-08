@@ -821,3 +821,77 @@ fn the_one_row_softmax_weights_kernel_is_unchanged_with_the_rows_feature_on() {
         );
     }
 }
+
+fn packed_operands_at(op: &BoundOp, indices: &[usize], codec: Codec) -> PackedOperands {
+    indices
+        .iter()
+        .map(|&index| (op.operands()[index].0, codec))
+        .collect()
+}
+
+#[test]
+fn a_float16_cached_kv_makes_the_decode_split_read_half_pointers_for_the_cached_triple_only() {
+    let op = attention_op(9, 8, 256, 512, 1, SLIDING_LOWER);
+    let policy = NumericPolicy::llama_relaxed();
+    let packed = packed_operands_at(&op, &[2, 3, 6], Codec::Float16);
+
+    let half = emit(&op, &packed, policy).expect("a Float16 cached K/V emits on the decode split");
+    let plain = emit(&op, &PackedOperands::new(), policy).expect("the plain decode split emits");
+
+    for index in [2, 3, 6] {
+        assert!(
+            half.source
+                .contains(&format!("device const half* in{index} [[buffer({index})]]")),
+            "cached operand {index} must bind as half"
+        );
+    }
+    for index in [0, 1, 4, 5, 7, 8] {
+        assert!(
+            !half
+                .source
+                .contains(&format!("device const half* in{index} [[buffer({index})]]")),
+            "operand {index} keeps the op's own element type"
+        );
+    }
+    assert!(half.source.contains("kr4_cached"));
+    assert!(half.source.contains("if (cached) { value_row[step][slot]"));
+    assert!(
+        !plain.source.contains("half"),
+        "the plain decode split must not mention half"
+    );
+    assert!(plain.source.contains("(cached ? in2 : in4) + kbase"));
+}
+
+#[test]
+fn the_row_tiled_form_declines_a_float16_cached_kv_instead_of_reading_it_as_f32() {
+    let op = sliding_op(512, 5);
+    let packed = packed_operands_at(&op, &[2, 3, 6], Codec::Float16);
+
+    let error = emit(&op, &packed, NumericPolicy::llama_relaxed())
+        .expect_err("the MMA row-tiled kernel reads f32 K/V");
+
+    assert!(matches!(
+        error,
+        EmitError::CachedAttentionKvCodecNotSupported { node, .. } if node == op.node
+    ));
+}
+
+#[test]
+fn a_partly_packed_or_misplaced_codec_is_declined_on_the_decode_split() {
+    let op = attention_op(9, 8, 256, 512, 1, SLIDING_LOWER);
+    let policy = NumericPolicy::llama_relaxed();
+
+    for (label, indices, codec) in [
+        ("only the K even plane", vec![2], Codec::Float16),
+        ("the query plane", vec![0], Codec::Float16),
+        ("the new V rows", vec![7], Codec::Float16),
+        ("a quantized cached triple", vec![2, 3, 6], Codec::Q8_0),
+    ] {
+        let packed = packed_operands_at(&op, &indices, codec);
+        let error = emit(&op, &packed, policy).expect_err(label);
+        assert!(
+            matches!(error, EmitError::CachedAttentionKvCodecNotSupported { .. }),
+            "{label}: {error:?}"
+        );
+    }
+}
