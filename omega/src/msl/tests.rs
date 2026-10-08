@@ -7878,7 +7878,7 @@ mod expert_grouped_gemm {
         assert_eq!(kernel.grid.depth, u64::from(EXPERTS));
         assert_eq!(
             kernel.grid.threads,
-            row_tiles * crate::sized::GROUPED_GEMM_COL_PARTS * 128
+            row_tiles * crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS * 128
         );
         assert_eq!(kernel.grid.threadgroup_width, Some(128));
         assert!(kernel.grid.grid2d.is_none());
