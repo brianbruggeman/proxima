@@ -303,6 +303,10 @@ struct ArmRuns {
     prefill_runs: Vec<(usize, usize, f64)>,
     ttft_runs: Vec<(usize, usize, f64)>,
     gpu_peak_runs: Vec<(usize, usize, f64)>,
+    wall_runs: Vec<(usize, usize, f64)>,
+    token_runs: Vec<(usize, usize, f64)>,
+    cpu_ms_runs: Vec<(usize, usize, f64)>,
+    cpu_pct_runs: Vec<(usize, usize, f64)>,
     rss_by_process: Vec<(usize, usize, f64)>,
     footprint_by_process: Vec<(usize, usize, f64)>,
     ids_by_run: Vec<Vec<u64>>,
@@ -324,6 +328,10 @@ impl ArmRuns {
             prefill_runs: Vec::new(),
             ttft_runs: Vec::new(),
             gpu_peak_runs: Vec::new(),
+            wall_runs: Vec::new(),
+            token_runs: Vec::new(),
+            cpu_ms_runs: Vec::new(),
+            cpu_pct_runs: Vec::new(),
             rss_by_process: Vec::new(),
             footprint_by_process: Vec::new(),
             ids_by_run: Vec::new(),
@@ -378,6 +386,16 @@ fn print_summary(arm: &ArmRuns) {
     }
     if !arm.ttft_runs.is_empty() {
         print_metric(&arm.label, "ttft_ms", &arm.ttft_runs);
+    }
+    for (name, series) in [
+        ("wall_ms", &arm.wall_runs),
+        ("tokens_generated", &arm.token_runs),
+        ("cpu_ms", &arm.cpu_ms_runs),
+        ("cpu_pct", &arm.cpu_pct_runs),
+    ] {
+        if !series.is_empty() {
+            print_metric(&arm.label, name, series);
+        }
     }
     print_memory(arm);
     for line in &arm.extra {
@@ -435,6 +453,8 @@ fn print_bounds(arms: &[ArmRuns]) {
             bound_line(arm, reference, "ms_per_token", |each| &each.runs);
             bound_line(arm, reference, "prefill_ms", |each| &each.prefill_runs);
             bound_line(arm, reference, "ttft_ms", |each| &each.ttft_runs);
+            bound_line(arm, reference, "wall_ms", |each| &each.wall_runs);
+            bound_line(arm, reference, "cpu_ms", |each| &each.cpu_ms_runs);
             memory_bound_line(arm, reference, "peak_rss_bytes", |each| &each.rss_by_process);
             memory_bound_line(arm, reference, "peak_footprint_bytes", |each| &each.footprint_by_process);
             memory_bound_line(arm, reference, "peak_gpu_bytes", |each| &each.gpu_peak_runs);
@@ -524,6 +544,10 @@ fn run_proxima_process(
             binary.display()
         ),
     );
+    arm.extra.push(format!(
+        "process={process} box_gpu_device_utilization_pct_before_launch={:?} (ioreg sampler, box-level, not this process)",
+        gpu_device_utilization()
+    ));
     let output = Command::new("/usr/bin/time")
         .arg("-l")
         .arg(binary)
@@ -597,6 +621,8 @@ fn run_proxima_process(
                 .parse()
                 .expect("float");
             let prefill_ms = wall_ms - value * (tokens - 1.0);
+            let cpu_ms = field_after(line, "cpu_ms=").and_then(|text| text.parse::<f64>().ok());
+            let cpu_pct = field_after(line, "cpu_pct=").and_then(|text| text.parse::<f64>().ok());
             let ttft = field_after(line, "ttft_ms=").and_then(|text| text.parse::<f64>().ok());
             if let Some(ttft) = ttft.filter(|_| run_index > 0) {
                 arm.ttft_runs.push((process, run_index, ttft));
@@ -607,6 +633,12 @@ fn run_proxima_process(
             if run_index > 0 {
                 arm.runs.push((process, run_index, value));
                 arm.prefill_runs.push((process, run_index, prefill_ms));
+                arm.wall_runs.push((process, run_index, wall_ms));
+                arm.token_runs.push((process, run_index, tokens));
+                if let (Some(cpu_ms), Some(cpu_pct)) = (cpu_ms, cpu_pct) {
+                    arm.cpu_ms_runs.push((process, run_index, cpu_ms));
+                    arm.cpu_pct_runs.push((process, run_index, cpu_pct));
+                }
             }
             println!(
                 "raw arm={} process={process} run={run_index} ms_per_token={value:.4}",
@@ -1067,4 +1099,16 @@ fn main() {
     }
     print_bounds(&arms);
     compare_ids(&arms);
+}
+
+// the sample is the whole box's accelerator, taken once before the child starts; it says whether a peer was using the GPU, not what the child used
+fn gpu_device_utilization() -> Option<u32> {
+    let output = Command::new("/usr/sbin/ioreg")
+        .args(["-r", "-d", "1", "-c", "IOAccelerator"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let tail = text.split("\"Device Utilization %\"=").nth(1)?;
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
