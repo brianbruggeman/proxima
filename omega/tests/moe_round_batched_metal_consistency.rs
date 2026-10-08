@@ -488,9 +488,9 @@ fn a_warm_round_batched_step_allocates_no_device_buffers() {
     .expect("metal plans the routes-first moe projections");
 
     let _ = omega::metal::metal_stage_totals();
-    let cold = omega::execute_plan_named(&plan, &named).expect("cold step resolves the folds and runs");
+    let cold = omega::execute_plan_named_with_placements(&plan, &named, &[], &[]).expect("cold step resolves the folds and runs");
     let cold_totals = omega::metal::metal_stage_totals();
-    let warm = omega::execute_plan_named(&plan, &named).expect("warm step runs");
+    let warm = omega::execute_plan_named_with_placements(&plan, &named, &[], &[]).expect("warm step runs");
     let warm_totals = omega::metal::metal_stage_totals();
 
     assert!(
