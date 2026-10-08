@@ -37,6 +37,9 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
+pub mod command_buffer_plan;
+
 #[cfg(feature = "std")]
 pub mod backend;
 #[cfg(feature = "std")]

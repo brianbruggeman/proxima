@@ -288,6 +288,26 @@ uniform_cache_entries = 4096
 # per-build via `OMEGA_COMMAND_BUFFER_FIRST_CHUNK_OPS`.
 first_chunk_ops = 24
 
+# growth of each chunk after the head, in permille of the chunk before it: the
+# ops after the head are split into K-1 chunks whose sizes form a geometric
+# series with this ratio. 1000 is the even tail (with `first_chunk_ops = 24`,
+# the schedule before this key existed). A chunk must run on the device at
+# least as long as the next chunk takes to encode, so the ratio is bounded by
+# device time per op over encode time per op. Measured on one decode step of
+# two plans (`chunk_record` events, median-shaped step): the 24 op head ran
+# 0.262 ms (10.9 us/op) and 0.273 ms (11.4 us/op); encoding the second chunk
+# cost 7.1 us/op (116 ops) and 9.6 us/op (51 ops), ratios 1.54 and 1.19. The
+# chunks after the second ran 10.0-16.4 us/op (first plan, chunks 3-7) and
+# 12.7-15.3 us/op (second plan, chunks 3-8) on the device, ratios 1.41 and
+# 1.33 at their lowest. 1350 sits just above the lowest (1.33) and puts the
+# second chunk of the longer plan at about 40 ops, 0.28 ms to encode against
+# the head's 0.262 ms. At 1000 that chunk was 116 and 51 ops, 0.823 and
+# 0.488 ms to encode, leaving the device idle 0.552 and 0.212 ms. Cost of
+# raising it: the last chunks grow, so the tail encodes longer behind a larger
+# device buffer; cost of lowering it: the second chunk outlasts the head.
+# Overridable per-build via `OMEGA_COMMAND_BUFFER_GROWTH_PERMILLE`.
+growth_permille = 1350
+
 [output_pool]
 # per-`(bucket, dtype)` cap on retained buffers in `metal::OUTPUT_BUFFER_POOL`
 # (`feature = "metal-buffer-pool"`-only) -- see sized::OUTPUT_POOL_MAX_PER_BUCKET
