@@ -263,6 +263,7 @@ mod dispatch_timed_and_classify;
 mod prepare_uniforms_pack;
 #[macro_use]
 mod pipeline_buffers_upload;
+mod pipeline_disk_cache;
 #[macro_use]
 mod resident_nocopy_cache;
 #[macro_use]
@@ -274,6 +275,8 @@ pub use placements_execute_named::*;
 pub use dispatch_timed_and_classify::*;
 use prepare_uniforms_pack::*;
 pub use pipeline_buffers_upload::*;
+use pipeline_disk_cache::*;
+pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
 pub use resident_nocopy_cache::*;
 use arena_encode_dispatch_finish::*;
 #[cfg(feature = "instrument")]
