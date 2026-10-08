@@ -162,8 +162,10 @@ use selection_render::render_top_fraction_select;
 use cached_attention_render::render_cached_attention_merge;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) use cached_attention_render::emit_cached_attention_merge;
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
-pub(crate) use expert_grouped_gemm::{ROUTE_COMPACTION_MISMATCH_FAULT, route_prepass, route_prepass_active};
+#[cfg(any(all(test, feature = "metal-grouped-gemm"), all(feature = "metal", target_os = "macos")))]
+pub(crate) use expert_grouped_gemm::{route_prepass, route_prepass_active};
+#[cfg(any(feature = "metal-grouped-gemm", all(feature = "metal", target_os = "macos")))]
+pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
 pub(crate) use elementwise_reduce_core::*;
 use packed_row_blocked_ggml::*;
 use tiled_gemm_cooperative_scan::*;
