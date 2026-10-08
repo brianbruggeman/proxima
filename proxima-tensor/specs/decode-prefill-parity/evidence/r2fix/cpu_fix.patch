@@ -1,0 +1,52 @@
+diff --git a/proxima-tensor/src/cpu/run_reduce_scan.rs b/proxima-tensor/src/cpu/run_reduce_scan.rs
+index 7b3add32..4c4377dc 100644
+--- a/proxima-tensor/src/cpu/run_reduce_scan.rs
++++ b/proxima-tensor/src/cpu/run_reduce_scan.rs
+@@ -442,7 +442,13 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
+             return Err(shape_error());
+         }
+     }
+-    if output.len() != leading_total * rows || activation.len() != leading_total * k {
++    // A gathered weight resolves each position's activation row through the
++    // activation's own layout below, so several positions (the experts one
++    // token selects) may read the same row; the dense one-row-per-position
++    // length only binds the paths that index the activation by position.
++    if output.len() != leading_total * rows
++        || (weight_gather.is_none() && activation.len() != leading_total * k)
++    {
+         return Err(shape_error());
+     }
+ 
+@@ -585,9 +591,7 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
+     #[cfg(feature = "instrument")]
+     counter!(instrument::MATMUL_POSITION_LOOP_ITERS, leading_total as u64);
+     for position in 0..leading_total {
+-        let activation_row = &activation[position * k..(position + 1) * k];
+-        let mut expert_entry: Option<ExpertEntry<'_>> = None;
+-        let weights: &[u8] = if let Some(gather) = weight_gather.as_ref() {
++        if weight_gather.is_some() {
+             unflatten_into(position as u64, &leading_extents, &mut leading_coordinate);
+             merge_coordinates_into(
+                 &leading_axes,
+@@ -596,6 +600,21 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
+                 &[],
+                 &mut full_coordinate,
+             );
++        }
++        // the activation's stride along an axis its weight gathers over is
++        // zero when one row feeds every expert a token selects, so the row
++        // start comes from the activation's own layout, not the position
++        let activation_start = if weight_gather.is_some() {
++            usize::try_from(activation_layout.offset_of(&full_coordinate))
++                .map_err(|_| shape_error())?
++        } else {
++            position * k
++        };
++        let activation_row = activation
++            .get(activation_start..activation_start + k)
++            .ok_or_else(shape_error)?;
++        let mut expert_entry: Option<ExpertEntry<'_>> = None;
++        let weights: &[u8] = if let Some(gather) = weight_gather.as_ref() {
+             let index_buffer = buffer_of(buffers, gather.indices)?;
+             let index_offset = usize::try_from(gather.index_layout.offset_of(&full_coordinate))
+                 .map_err(|_| shape_error())?;

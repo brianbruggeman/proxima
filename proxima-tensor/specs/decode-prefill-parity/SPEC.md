@@ -2398,3 +2398,126 @@ cargo nextest run -p proxima-tensor --cargo-profile gate --no-fail-fast         
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate --no-fail-fast -E 'not test(~gemma4_26b) and not (binary(arch_data_baseline) and (test(~openchat) or test(~qwen) or test(~lfm2)))'   # 716 passed, 143 skipped
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<ab69ec03 build> --arm tip=<tip build> --arm control=<byte copy of tip> --case gemma4_e2b=<gguf> --case granite_moe=<gguf>
 ```
+
+## r2 stacked default restored (measured 2026-10-07, c63d839d to the commit that adds this section)
+
+Evidence root: `evidence/r2fix/` (sibling of `evidence/combine/`). Raw per-process bench logs, the gate logs, the digest diff and the CPU fix patch are in it; the
+binaries are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/r2fix/bench/bin/` with sha256 in `evidence/r2fix/bench/binaries.sha256`. Test models: gemma4 E2B and granite moe 1b only.
+The status of a sentence is the status of its weakest cell; no verdict is stated.
+
+### what changed
+
+| commit | change |
+|---|---|
+| `3158dbf0` | the CPU quantized reduce reads a gathered weight's activation row through the activation's own layout; test `stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count` |
+| `9c7a8819` | `b18a6537` reverted (stacked experts are in `metal` again) plus the recapture of three op-graph fixtures the default moves |
+
+### CPU mechanism (read, then reproduced)
+
+Reproduced before the fix, `evidence/r2fix/repro_paging.log`: with `std,metal,moe-stacked-experts`, `external_expert_paging` ran 4, 2 passed, 2 failed
+(`paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues`, `q2k_paging_actually_changes_the_decoded_ids`), both with `NotLowerable { node: NodeId(132), reason: "quantized matmul batch shape does not evenly divide by its packed weight rows" }`.
+
+Cause, `run_reduce_quantized` in `proxima-tensor/src/cpu/run_reduce_scan.rs`: `leading_total` is the product of the output axes the weight does not vary over (`:330-358`). A stacked gate or up has output axes
+`[token, selected, row]` with the expert gathered on `selected`, so `leading_total = tokens x selected`, while the activation holds `tokens x k` elements (stride 0 on `selected`; inferred from the layout-indexed read passing, the stride itself was not printed). The check at c63d839d
+`:445` (`activation.len() != leading_total * k`) rejected it, and the loop at c63d839d `:588` (`&activation[position * k..(position + 1) * k]`) would have read the wrong row had the check passed.
+
+Fix: `:448-452` keeps the dense length check only when the weight is not gathered; `:607-616` computes the activation row start from `activation_layout.offset_of(&full_coordinate)` (the same coordinate the gather
+index already used) and slices `k` elements with a bounds check. No new type, no model name, no special case: a gathered weight reads each position's activation through the layout that owns the activation, so one row may feed
+every expert a token selects. The non-gathered paths (wide folds, per-position loop) are unchanged and still index by position.
+
+Test (`proxima-tensor/src/spec/tests.rs:3323`): `append_moe_ffn` with `Stacked` against `PerRoute` over packed Q4_K gate/up/down stacks (4 experts, 3 used, 256 x 256), tokens 1, 3 and 8, worst relative difference
+(denominator floored at 1e-3) bound 1e-6. Passes with the fix (`cpu_parity.log`: 2 run, 2 passed, together with the existing f32 stacked test). Control, the same test with the fix patch reverse-applied
+(`cpu_parity_control.log`): FAILS with `NotLowerable { node: NodeId(55), ... }`. The measured drift value was not printed; only the bound is asserted.
+
+### gates at the re-applied tip (`evidence/r2fix/`)
+
+| gate | result | log |
+|---|---|---|
+| `external_expert_paging` | 4 run, 4 passed (was 2 passed, 2 failed) | `after_fix_paging.log`, `gate_targeted.log` |
+| clippy `-p proxima-tensor -p proxima-model-interop --features .../std,.../metal --all-targets -D warnings` | exit 0 | `gate_head_static.log` |
+| `cargo check -p proxima-tensor --no-default-features --features alloc` | exit 0 | `gate_head_static.log` |
+| `cargo check -p proxima-model-interop --no-default-features` | exit 0 | `gate_head_static.log` |
+| `cargo nextest run -p proxima-tensor --cargo-profile gate` | 800 passed, 8 skipped (799 passed at `3158dbf0`, `tensor1.log`) | `gate_tip.log` |
+| interop `slice-gate` at the re-applied default before the digest recapture | fail-fast run: 618 of 736 run, 617 passed, 1 failed; `--no-fail-fast`: 736 run, 730 passed, 6 failed, 124 skipped | `gate_tip.log`, `gate_tip_slice_nofailfast.log` |
+| interop `slice-gate` after the recapture | 736 run, 736 passed, 124 skipped | `gate_tip_slice2.log` |
+| targeted: `llama_parity_` (gemma4_e2b, granite_moe), `generic_verify_llama_parity_` (2), `prefill_width_parity_with_llama_` (2), r7 `serving_default_ubatch_prefill_parity` (2, 971 tokens each), `external_expert_paging` (4), `moe_stacked_default` (1) | 13 run, 13 passed | `gate_targeted.log` |
+
+The 6 failures with the default on were `arch_data_digest_` and `model_config_roundtrip_` of granite moe, qwen35moe and gemma4 26B: their op-graph fixtures pin the per-route program. No parity test failed.
+
+### digests recaptured (`PROXIMA_ARCH_DATA_CAPTURE=1`, `capture.log`; before and after in `digests_before/` and `digest_diff.patch`)
+
+| fixture | ops before -> after | delta | per layer | logits_root |
+|---|---|---|---|---|
+| `granite_moe.digest` bind | 6394 -> 5602 | -792 | 24 layers x 33 | 6393 -> 5601 |
+| `qwen35moe.digest` bind | 14982 -> 13662 | -1320 | 40 layers x 33 | 14981 -> 13661 |
+| `gemma4_26b.digest` bind / verify | 13314 -> 10434 / 13312 -> 10432 | -2880 / -2880 | 30 layers x 96 | 13313 -> 10433 / 13311 -> 10431 |
+
+granite matches the expected -792 = 24 x 33. The two other fixtures are the same mechanism and were recaptured because the gate cannot pass otherwise; `arch_data_digest_gemma4_26b` also hardcoded 13314 / 13313,
+now 10434 / 10433. No parity test of qwen35moe or gemma4 26B was run (order: E2B and granite only). `gemma4_e2b.digest` did not change.
+
+### bench (`decode_arms`, release std+metal, granite moe 1b, `prompt1k.txt` sha256 `46cb9a5b...`, 3 processes x (1 warmup + 7 runs), arms interleaved; `evidence/r2fix/bench/run1/`)
+
+Arms: base = c63d839d (`git archive` export built release), tip = `9c7a8819`, control = byte copy of the tip (identical sha256), ref = the ab69ec03 build from `evidence/combine` (added for the memory question).
+Box: Ollama down (curl :11434 refused), no cargo or nextest job (only an idle `sccache`), load average 3.84 / 5.67 / 7.18 before and 3.34 / 4.66 / 6.47 after, `suggestd` 78-82% and a background daemon in ~/.local/bin 78-81% CPU during the run (its name is replaced by `<background daemon>` in the two box_load files)
+(`box_load_before.txt`, `box_load_after.txt`), GPU device utilization 0 before. The example forces `batch_size: 0, ubatch_size: 0`.
+
+| metric | base | tip | control | ref (ab69ec03) | tip vs base |
+|---|---|---|---|---|---|
+| decode ms/token, all 21 runs | 9.618 (CoV 1.12%) | 6.822 (0.89%) | 6.892 (1.03%) | 14.545 (0.43%) | -2.796 (-29.1%) |
+| decode ms/token, outliers removed | 9.614 (n=18, 0.40%) | 6.820 (n=20, 0.74%) | 6.892 (n=17, 0.45%) | 14.5445 (n=20, 0.28%) | -2.794 (-29.1%) |
+| prefill ms (= ttft), all 21 runs | 368.061 (2.41%) | 371.054 (2.14%) | 385.035 (2.19%) | 853.960 (2.21%) | +2.993 (+0.8%) |
+| prefill ms, outliers removed | 368.061 (n=21) | 369.527 (n=16, 1.40%) | 386.953 (n=19, 1.89%) | 853.960 (n=21) | +1.466 |
+
+Bound for decode and prefill: max(2% of base, |control - tip|). Decode: max(0.192, 0.072) = 0.192; the tip is 2.794 below base, outside the bound in the faster direction. Prefill: max(7.361, 17.426 kept) = 17.426;
+the tip is +1.466 (kept), inside. The two same-binary arms differ by 14.0 ms over all runs because prefill is bimodal (values near 367-370 and near 386-390 in both tip and control, `decode_arms.out`).
+
+Memory, per process (bytes):
+
+| metric | arm | process 0 | process 1 | process 2 | median | max - min |
+|---|---|---|---|---|---|---|
+| RSS | base | 2,522,251,264 | 2,491,465,728 | 2,648,621,056 | 2,522,251,264 | 157,155,328 |
+| RSS | tip | 2,357,886,976 | 2,351,579,136 | 2,502,868,992 | 2,357,886,976 | 151,289,856 |
+| RSS | control | 2,358,427,648 | 2,236,907,520 | 2,389,639,168 | 2,358,427,648 | 152,731,648 |
+| RSS | ref | 2,477,342,720 | 2,619,146,240 | 2,487,910,400 | 2,487,910,400 | 141,803,520 |
+| footprint | base | 593,926,592 | 617,126,144 | 598,170,048 | 598,170,048 | 23,199,552 |
+| footprint | tip | 664,836,032 | 701,765,696 | 649,517,376 | 664,836,032 | 52,248,320 |
+| footprint | control | 654,825,344 | 626,480,960 | 642,242,560 | 642,242,560 | 28,344,384 |
+| footprint | ref | 610,769,216 | 655,399,680 | 673,585,792 | 655,399,680 | 62,816,576 |
+| GPU bytes | base | 1,697,382,400 | 1,697,382,400 | 1,697,382,400 | 1,697,382,400 | 0 |
+| GPU bytes | tip and control | 1,736,818,688 | 1,736,818,688 | 1,736,818,688 | 1,736,818,688 | 0 |
+| GPU bytes | ref | 3,315,433,472 | 3,315,433,472 | 3,315,433,472 | 3,315,433,472 | 0 |
+
+Bound lines (bound = max(2% of base, |control - tip|), medians of 3):
+
+| metric | base | tip | control | bound | tip - base | against the bound |
+|---|---|---|---|---|---|---|
+| RSS | 2,522,251,264 | 2,357,886,976 | 2,358,427,648 | 50,445,025 | -164,364,288 | below base, but the per-arm spread is 151-157 MB and the ranges overlap (tip max 2,502,868,992 exceeds base min 2,491,465,728) |
+| footprint | 598,170,048 | 664,836,032 | 642,242,560 | 22,593,472 | +66,665,984 | OUTSIDE (+11.1%); every tip and control value (626.5-701.8 MB) exceeds every base value (593.9-617.1 MB) |
+| GPU bytes | 1,697,382,400 | 1,736,818,688 | 1,736,818,688 | 33,947,648 | +39,436,288 | OUTSIDE (+2.3%); identical in all 3 processes |
+
+The open memory question (granite RSS +140 MB and footprint +19 MB outside the bound at c63d839d against ab69ec03), re-measured with ref = ab69ec03 and base = c63d839d in one matrix:
+RSS c63d839d - ab69ec03 = 2,522,251,264 - 2,487,910,400 = +34,340,864 (bound 2% of ref = 49,758,208: inside); footprint = 598,170,048 - 655,399,680 = -57,229,632 (c63d839d lower, the opposite sign to the +18,939,904 seen before).
+The earlier +139,886,592 RSS is not reproduced; the per-arm process-to-process spread in this matrix is 141.8-157.2 MB for RSS and 23.2-62.8 MB for footprint, the same size as that earlier step. n = 3 processes per cell: plausible (spread), not proven.
+
+Does the stacked path change them: the GPU allocation does (+39,436,288 bytes, deterministic across 3 processes), and the footprint moves by +44 to +67 MB (control and tip against base) on the 1000-token prompt. RSS does not separate from the spread.
+Short-prompt check (`prompt_short_hippo.txt`, 3 processes x (1 warmup + 3 runs), base and tip, `evidence/r2fix/bench/run2/`): GPU bytes 1,463,025,664 (base) -> 1,464,090,624 (tip), +1,064,960; footprint medians 145,396,480 -> 132,846,208
+(tip lower); RSS 1,624,342,528 -> 1,607,548,928. The +39 MB GPU and the footprint increase therefore scale with prompt length; which buffers they are was not itemized, so the mechanism is open. Short-prompt decode ms/token 8.343 (CoV 17.21%, kept 8.324, n=6) -> 5.631 (0.24%); prefill 72.972 -> 38.987.
+
+Against the recorded llama-server numbers (a different session, `evidence/slice0/ac1`): granite decode tip / recording = 6.822 / 5.25 = 1.30 (1.86 at the combined tip), granite prefill 371.054 / 151 = 2.46. Dispatch counts per prefill and per decode token were not re-counted here;
+the program op count (-792) is the only structural measure.
+
+### what this does not establish
+
+- Which of the removed ops carry the -2.79 ms decode step: no run-time switch exists for the stacked default, so the base-to-tip step is the whole effect and is not split.
+- qwen35moe and gemma4 26B execution under the default: only their programs' op counts changed (digests); no run.
+- The mechanism of the GPU and footprint increase (above).
+- E2B timing under this default: E2B has no routed experts, its digest did not change, and it was not re-benched.
+
+### re-prove
+
+```
+cargo nextest run -p proxima-tensor --cargo-profile gate -E 'test(stacked_projection)'                                      # 2 passed
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate -E 'binary(external_expert_paging)'    # 4 passed
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate                   # 736 passed, 124 skipped
+decode_arms --prompt-file evidence/r2fix/bench/prompt1k.txt --processes 3 --runs 7 --arm base=<c63d839d build> --arm tip=<tip build> --arm control=<byte copy of tip> --arm ref=<ab69ec03 build> --case granite_moe=<gguf>
+```

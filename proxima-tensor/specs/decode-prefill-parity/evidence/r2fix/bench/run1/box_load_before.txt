@@ -1,0 +1,13 @@
+Thu Oct  8 04:15:51 UTC 2026
+23:15  up 7 days,  9:20, 7 users, load averages: 3.84 5.67 7.18
+  PID  %CPU COMM
+  792  78.4 /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd
+17029  77.7 /Users/brianbruggeman/.local/bin/<background daemon>
+99796  15.6 /usr/sbin/httpd
+  716  12.5 /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461   7.0 claude
+99802   4.4 /bin/zsh
+  740   1.4 /Applications/ExpressVPN.app/Contents/MacOS/expressvpnd
+"Device Utilization %"=0
+curl: (7) Failed to connect to localhost port 11434 after 0 ms: Couldn't connect to server
+38098 /Users/brianbruggeman/.cargo/bin/sccache

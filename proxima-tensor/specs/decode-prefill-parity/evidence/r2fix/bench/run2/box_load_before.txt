@@ -1,0 +1,2 @@
+23:19  up 7 days,  9:23, 7 users, load averages: 3.27 4.50 6.34
+curl: (7) Failed to connect to localhost port 11434 after 0 ms: Couldn't connect to server

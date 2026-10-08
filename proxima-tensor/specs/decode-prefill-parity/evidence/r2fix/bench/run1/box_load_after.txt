@@ -1,0 +1,10 @@
+Thu Oct  8 04:18:46 UTC 2026
+23:18  up 7 days,  9:22, 7 users, load averages: 3.34 4.66 6.47
+  PID  %CPU COMM
+  792  82.4 /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd
+17029  80.9 /Users/brianbruggeman/.local/bin/<background daemon>
+  716  19.0 /Applications/iTerm.app/Contents/MacOS/iTerm2
+31461   1.2 claude
+ 1010   0.6 /Applications/Docker.app/Contents/MacOS/com.docker.backend
+80183   0.4 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+  476   0.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer

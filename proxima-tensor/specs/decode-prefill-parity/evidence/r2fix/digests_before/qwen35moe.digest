@@ -1,0 +1,12 @@
+checkpoint=qwen35moe
+architecture=qwen35moe
+kv_layout=SlidingRing
+bind.ops=14982
+bind.ops_sha256=673ac8ff40188127fafd1cf7c8a99ad278d4aee1d5d01c4f8b70a1c940e0ee87
+bind.logits_root=NodeId(14981)
+bind.hidden_root=Some(NodeId(14976))
+bind.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+bind.layer_roots=40 sha256=c3c70db45e2ef3f8a5247e3677cb9a30ff8ff22636a5c5981918370594543f1a
+bind.router_roots=40 sha256=6c9e57c40d26838335e4e882e2fd2cd8e2973431ecbc8f97b42e2cdd44f68927
+bind.single_position_step=true
+verify=absent
