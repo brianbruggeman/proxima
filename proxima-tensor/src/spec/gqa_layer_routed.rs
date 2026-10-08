@@ -832,10 +832,25 @@ pub enum MoeProjectionStrategy {
     /// lowers each projection as one operation whose route varies along the
     /// selected axis, which is `ggml`'s `mul_mat_id` / `mul_mv_id` shape.
     Stacked,
+    /// [`Self::Stacked`] with the routing weights applied to the hidden
+    /// activation and the down projection folded over the selected axis in the
+    /// same reduce ([`slotwise_gathered_expert_product`] reduced over both the
+    /// selected and the hidden axes), so the `[sequence, selected, width]`
+    /// down output is never materialized. A backend lowers that reduce as a
+    /// gathered fold whose route index varies along a reduced axis.
+    StackedCombined,
 }
 
 impl MoeProjectionStrategy {
-    /// The strategy the model builders use: [`Self::Stacked`] when the
+    /// Whether gate, up and down run over one `[sequence, selected]` stack of
+    /// routes rather than once per selected expert.
+    #[must_use]
+    pub const fn stacks_routes(self) -> bool {
+        matches!(self, Self::Stacked | Self::StackedCombined)
+    }
+
+    /// The strategy the model builders use: [`Self::StackedCombined`] when
+    /// `moe-stacked-combine` is on, else [`Self::Stacked`] when the
     /// `moe-stacked-experts` feature is on (`proxima-model-interop`'s `metal`
     /// set turns it on, with the `moe-topk-fusion` it implies), so a routed
     /// feed-forward block is one gate, one up and one down operation at any
@@ -844,12 +859,32 @@ impl MoeProjectionStrategy {
     /// route stack faster than one operation per selected expert.
     #[must_use]
     pub const fn production() -> Self {
-        if cfg!(feature = "moe-stacked-experts") {
+        if cfg!(feature = "moe-stacked-combine") {
+            Self::StackedCombined
+        } else if cfg!(feature = "moe-stacked-experts") {
             Self::Stacked
         } else {
             Self::PerRoute
         }
     }
+}
+
+fn stacked_slot_weights(
+    program: &mut Vec<Op>,
+    expert_scale: Option<NodeId>,
+    routes: NodeId,
+    stacked_weights: NodeId,
+) -> Result<NodeId, TensorError> {
+    let Some(scale) = expert_scale else {
+        return Ok(stacked_weights);
+    };
+    let gathered_scale = gather_expert_scale(program, scale, routes, 2);
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(stacked_weights, "sk->sk"), (gathered_scale, "sk->sk")],
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -966,7 +1001,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     // a stacked route only ever feeds the float elementwise stack, never a gather index
     // directly, so an `Int32` tag would put it outside the f32 evaluator's index-node allowance
-    let route_dtype = if projection_strategy == MoeProjectionStrategy::Stacked {
+    let route_dtype = if projection_strategy.stacks_routes() {
         DType::Float32
     } else {
         DType::Int32
@@ -1056,7 +1091,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         // `topk_weights = topk_weights * expert_scales` fold applied AFTER
         // renormalization, not before it.
         let combine_weight = match expert_scale {
-            Some(scale) if projection_strategy != MoeProjectionStrategy::Stacked => {
+            Some(scale) if !projection_strategy.stacks_routes() => {
                 let gathered_scale = gather_expert_scale(program, scale, route, 1);
                 elementwise(
                     program,
@@ -1202,7 +1237,7 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         }
     }
 
-    if projection_strategy == MoeProjectionStrategy::Stacked {
+    if projection_strategy.stacks_routes() {
         let routes = stack_selected_routes(program, &selected_routes)?;
         let stacked_weights = stack_selected_routes(program, &round_weights)?;
         let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x);
@@ -1232,43 +1267,56 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             ScalarOp::Multiply,
             &[(activated_gate, "sko->sko"), (up, "sko->sko")],
         )?;
-        let down_product = slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
-        let down = reduce(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            down_product,
-            "skio->skio",
-            "sko->skio",
-        )?;
-        let slot_weights = match expert_scale {
-            Some(scale) => {
-                let gathered_scale = gather_expert_scale(program, scale, routes, 2);
-                elementwise(
-                    program,
-                    DType::Float32,
-                    ScalarOp::Multiply,
-                    &[(stacked_weights, "sk->sk"), (gathered_scale, "sk->sk")],
-                )?
-            }
-            None => stacked_weights,
-        };
-        let weighted = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(down, "sko->sko"), (slot_weights, "sk->sko")],
-        )?;
-        weighted_sum = Some(reduce(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            weighted,
-            "sko->sko",
-            "so->sko",
-        )?);
+        weighted_sum = Some(if projection_strategy == MoeProjectionStrategy::StackedCombined {
+            let slot_weights =
+                stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
+            let weighted_hidden = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(hidden, "sko->sko"), (slot_weights, "sk->sko")],
+            )?;
+            let down_product =
+                slotwise_gathered_expert_product(program, expert_w_down, routes, weighted_hidden);
+            reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                down_product,
+                "skio->skio",
+                "so->skio",
+            )?
+        } else {
+            let down_product =
+                slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
+            let down = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                down_product,
+                "skio->skio",
+                "sko->skio",
+            )?;
+            let slot_weights =
+                stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
+            let weighted = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(down, "sko->sko"), (slot_weights, "sk->sko")],
+            )?;
+            reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                weighted,
+                "sko->sko",
+                "so->sko",
+            )?
+        });
         for weight in round_weights.iter().copied() {
             weight_total = Some(match weight_total {
                 Some(accumulated) => elementwise(

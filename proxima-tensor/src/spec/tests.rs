@@ -210,6 +210,18 @@ fn grouped_gate_up_matches_the_per_route_moe_graph_on_cpu() {
 
 #[test]
 fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_projection() {
+    assert_stacked_strategy_matches_per_route_in_f32(MoeProjectionStrategy::Stacked, 4.0e-7);
+}
+
+#[test]
+fn stacked_combined_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_projection() {
+    assert_stacked_strategy_matches_per_route_in_f32(MoeProjectionStrategy::StackedCombined, 1.0e-6);
+}
+
+fn assert_stacked_strategy_matches_per_route_in_f32(
+    stacked_strategy: MoeProjectionStrategy,
+    tolerance: f32,
+) {
     const EXPERT_COUNT: u32 = 6;
     const EXPERT_USED_COUNT: u32 = 3;
     const EMBEDDING: u32 = 4;
@@ -323,7 +335,7 @@ fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_
             )
             .unwrap_or_else(|error| panic!("{case}: the per-route graph evaluates: {error:?}"));
             let (stacked_program, stacked_root) =
-                build(tokens, MoeProjectionStrategy::Stacked, scaled, activation);
+                build(tokens, stacked_strategy, scaled, activation);
             let stacked = crate::cpu::evaluate_parallel(
                 &stacked_program,
                 &[],
@@ -343,8 +355,8 @@ fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_
                 .fold(0.0_f32, f32::max);
             assert_eq!(stacked.root().len(), (tokens * EMBEDDING) as usize, "{case}");
             assert!(
-                worst_relative_difference <= 4.0e-7,
-                "{case}, {tokens} tokens: the stacked graph drifted {worst_relative_difference:e} from the per-route outputs; \
+                worst_relative_difference <= tolerance,
+                "{stacked_strategy:?}, {case}, {tokens} tokens: the stacked graph drifted {worst_relative_difference:e} from the per-route outputs; \
                  the only allowed difference is the reduce folding each product into its sum"
             );
             assert_eq!(
@@ -362,8 +374,10 @@ fn stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_
 }
 
 #[test]
-fn the_production_strategy_is_stacked_exactly_when_the_stacked_experts_feature_is_on() {
-    let expected = if cfg!(feature = "moe-stacked-experts") {
+fn the_production_strategy_follows_the_stacked_experts_and_combine_features() {
+    let expected = if cfg!(feature = "moe-stacked-combine") {
+        MoeProjectionStrategy::StackedCombined
+    } else if cfg!(feature = "moe-stacked-experts") {
         MoeProjectionStrategy::Stacked
     } else {
         MoeProjectionStrategy::PerRoute
@@ -3321,6 +3335,21 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
 
 #[test]
 fn stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count() {
+    assert_stacked_strategy_matches_per_route_over_packed_q4k(MoeProjectionStrategy::Stacked, 1.0e-6);
+}
+
+#[test]
+fn stacked_combined_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count() {
+    assert_stacked_strategy_matches_per_route_over_packed_q4k(
+        MoeProjectionStrategy::StackedCombined,
+        1.0e-4,
+    );
+}
+
+fn assert_stacked_strategy_matches_per_route_over_packed_q4k(
+    stacked_strategy: MoeProjectionStrategy,
+    tolerance: f32,
+) {
     use proxima_gguf::quant::q4_k::QK_K;
 
     const EMBEDDING: usize = QK_K;
@@ -3402,7 +3431,7 @@ fn stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_eve
         let per_route =
             crate::cpu::evaluate_quantized(&per_route_program, &[], &blocks, &[per_route_root])
                 .expect("the per-route graph evaluates over packed Q4_K experts");
-        let (stacked_program, stacked_root) = build(tokens, MoeProjectionStrategy::Stacked);
+        let (stacked_program, stacked_root) = build(tokens, stacked_strategy);
         let stacked =
             crate::cpu::evaluate_quantized(&stacked_program, &[], &blocks, &[stacked_root])
                 .expect("the stacked graph evaluates over packed Q4_K experts");
@@ -3418,8 +3447,8 @@ fn stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_eve
             })
             .fold(0.0_f32, f32::max);
         assert!(
-            worst_relative_difference <= 1.0e-6,
-            "{tokens} tokens: the stacked graph drifted {worst_relative_difference:e} from the \
+            worst_relative_difference <= tolerance,
+            "{stacked_strategy:?}, {tokens} tokens: the stacked graph drifted {worst_relative_difference:e} from the \
              per-route outputs over packed Q4_K experts"
         );
     }

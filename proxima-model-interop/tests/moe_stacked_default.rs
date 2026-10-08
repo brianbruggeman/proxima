@@ -11,10 +11,13 @@ use proxima_tensor::spec::MoeProjectionStrategy;
 
 #[test]
 fn the_metal_feature_set_builds_routed_experts_as_stacked_projections() {
-    assert_eq!(
-        MoeProjectionStrategy::production(),
+    let expected = if cfg!(feature = "moe-stacked-combine") {
+        MoeProjectionStrategy::StackedCombined
+    } else {
         MoeProjectionStrategy::Stacked
-    );
+    };
+
+    assert_eq!(MoeProjectionStrategy::production(), expected);
 }
 
 const _: () = assert!(
