@@ -1510,12 +1510,17 @@ pub(super) fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> L
 /// ([`crate::symbols::KV_BOUND`]). Both are read together by every layer's
 /// fill: a full layer pads to `bound_extent`, a ring layer unrolls its
 /// `cached_len`-relative window. `device_resident` flags the layers whose rows
-/// live on the device (`DeviceKv`), which fill nothing and name empty blocks.
+/// live on the device (`DeviceKv`), which fill nothing and name empty blocks;
+/// `device_codec` is the packed codec those blocks carry when the device cache
+/// is not f32 (`DeviceKv::cache_codec`), so the planner binds the placed leaf
+/// with that element type. An empty block is enough: a placed input is never
+/// shape-checked and its bytes live in the placed buffer.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KvStep<'resident> {
     pub(super) cached_len: usize,
     pub(super) bound_extent: usize,
     pub(super) device_resident: &'resident [bool],
+    pub(super) device_codec: Option<Codec>,
 }
 
 /// One step's KV-cache `Op::Input` leaves, named and padded off whatever
@@ -1549,6 +1554,7 @@ pub(super) fn push_kv_named_blocks<'call>(
         cached_len,
         bound_extent: kv_bound_extent,
         device_resident,
+        device_codec,
     } = step;
     for (layer, cache) in layer_caches.iter().enumerate() {
         match (cache, &layer_row_widths[layer]) {
@@ -1600,10 +1606,14 @@ pub(super) fn push_kv_named_blocks<'call>(
             ) => {
                 let shape = KvPadShape::for_cache(cache, kv_bound_extent, *even_odd_row, *v_row);
                 if device_resident.get(layer).copied().unwrap_or(false) {
+                    let resident_leaf = device_codec.map_or(
+                        QuantizedBlock::Float32(&[]),
+                        |codec| QuantizedBlock::Packed { codec, bytes: &[] },
+                    );
                     named_blocks.extend([
-                        (k_even.as_str(), QuantizedBlock::Float32(&[])),
-                        (k_odd.as_str(), QuantizedBlock::Float32(&[])),
-                        (v.as_str(), QuantizedBlock::Float32(&[])),
+                        (k_even.as_str(), resident_leaf),
+                        (k_odd.as_str(), resident_leaf),
+                        (v.as_str(), resident_leaf),
                     ]);
                     continue;
                 }

@@ -50,6 +50,14 @@ struct DeviceKvLayer {
     k_even: PlacedBuffer,
     k_odd: PlacedBuffer,
     v: PlacedBuffer,
+    /// `Some` for a half-width layer: the graph writes this step's rows as f32
+    /// here (the cache buffers are binary16, so the program cannot place its
+    /// f32 outputs in them), and [`DeviceKvLayer::commit`] rounds them into
+    /// the cache once the step's command buffers have completed.
+    staging: Option<[PlacedBuffer; 3]>,
+    element: GgmlType,
+    even_odd_row: usize,
+    v_row: usize,
     even_odd_row_bytes: usize,
     v_row_bytes: usize,
     capacity_rows: usize,
@@ -66,6 +74,7 @@ struct DeviceKvLayer {
 pub(super) struct DeviceKv {
     layers: Vec<Option<DeviceKvLayer>>,
     max_step_rows: usize,
+    element: GgmlType,
 }
 
 impl DeviceKvLayer {
@@ -76,7 +85,9 @@ impl DeviceKvLayer {
         full_capacity_rows: usize,
         max_step_rows: usize,
         source: KvBufferSource,
+        element: GgmlType,
     ) -> Result<Self, InteropError> {
+        let element_bytes = element_bytes(element)?;
         let window = cache.ring_geometry().map(|ring| ring.window);
         let retain = cache.ring_geometry().map_or(0, |ring| ring.capacity);
         let capacity_rows = if window.is_some() {
@@ -84,15 +95,29 @@ impl DeviceKvLayer {
         } else {
             full_capacity_rows
         };
-        let even_odd_row_bytes = even_odd_row * core::mem::size_of::<f32>();
-        let v_row_bytes = v_row * core::mem::size_of::<f32>();
+        let even_odd_row_bytes = even_odd_row * element_bytes;
+        let v_row_bytes = v_row * element_bytes;
         let k_even = source(capacity_rows * even_odd_row_bytes)?;
         let k_odd = source(capacity_rows * even_odd_row_bytes)?;
         let v = source(capacity_rows * v_row_bytes)?;
+        let staging = if element == GgmlType::F32 {
+            None
+        } else {
+            let f32_bytes = core::mem::size_of::<f32>();
+            Some([
+                allocate_placed_buffer(max_step_rows * even_odd_row * f32_bytes)?,
+                allocate_placed_buffer(max_step_rows * even_odd_row * f32_bytes)?,
+                allocate_placed_buffer(max_step_rows * v_row * f32_bytes)?,
+            ])
+        };
         Ok(Self {
             k_even,
             k_odd,
             v,
+            staging,
+            element,
+            even_odd_row,
+            v_row,
             even_odd_row_bytes,
             v_row_bytes,
             capacity_rows,
@@ -118,8 +143,8 @@ impl DeviceKvLayer {
     /// head is overwritten here, so zeroing it first is a second pass over
     /// every byte of a long context.
     fn seed(&mut self, cache: &LayerCache, cached_len: usize) {
-        let even_odd_row = self.even_odd_row_bytes / core::mem::size_of::<f32>();
-        let v_row = self.v_row_bytes / core::mem::size_of::<f32>();
+        let even_odd_row = self.even_odd_row;
+        let v_row = self.v_row;
         let first = self.first_kept(cached_len);
         let kept = cached_len - first;
         self.base_position = first;
@@ -153,17 +178,17 @@ impl DeviceKvLayer {
     ) {
         let even_odd = slot_start * even_odd_row..(slot_start + rows) * even_odd_row;
         let value = slot_start * v_row..(slot_start + rows) * v_row;
-        omega::write_placed_buffer_f32(
+        self.store_f32(
             &self.k_even,
             target_row * self.even_odd_row_bytes,
             &cache.k_even[even_odd.clone()],
         );
-        omega::write_placed_buffer_f32(
+        self.store_f32(
             &self.k_odd,
             target_row * self.even_odd_row_bytes,
             &cache.k_odd[even_odd],
         );
-        omega::write_placed_buffer_f32(&self.v, target_row * self.v_row_bytes, &cache.v[value]);
+        self.store_f32(&self.v, target_row * self.v_row_bytes, &cache.v[value]);
     }
 
     fn make_room(&mut self, cached_len: usize, new_count: usize, bound_extent: usize) {
@@ -203,6 +228,59 @@ impl DeviceKvLayer {
     fn output_row(&self, cached_len: usize) -> usize {
         cached_len - self.base_position
     }
+
+    fn store_f32(&self, buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
+        match self.element {
+            GgmlType::F16 => omega::write_placed_buffer_f32_as_f16(buffer, byte_offset, values),
+            _ => omega::write_placed_buffer_f32(buffer, byte_offset, values),
+        }
+    }
+
+    fn load_f32(&self, buffer: &PlacedBuffer, byte_offset: usize, count: usize) -> Vec<f32> {
+        match self.element {
+            GgmlType::F16 => omega::read_placed_buffer_f16_as_f32(buffer, byte_offset, count),
+            _ => omega::read_placed_buffer_f32(buffer, byte_offset, count),
+        }
+    }
+
+    /// Rounds the `new_count` rows a finished step left in the f32 staging
+    /// buffers into the cache at the rows [`Self::output_row`] names. A layer
+    /// whose cache is f32 has its outputs placed in the cache itself, so there
+    /// is nothing to do. Must run after the step's command buffers completed
+    /// (`evaluate_with_placements` waits) and before the next step reads the
+    /// cache.
+    fn commit(&self, cached_len: usize, new_count: usize) {
+        let Some([staging_even, staging_odd, staging_value]) = &self.staging else {
+            return;
+        };
+        let output_row = self.output_row(cached_len);
+        for (staging, cache, row_bytes, row) in [
+            (staging_even, &self.k_even, self.even_odd_row_bytes, self.even_odd_row),
+            (staging_odd, &self.k_odd, self.even_odd_row_bytes, self.even_odd_row),
+            (staging_value, &self.v, self.v_row_bytes, self.v_row),
+        ] {
+            omega::narrow_placed_buffer_f32_to_f16(
+                staging,
+                0,
+                cache,
+                output_row * row_bytes,
+                new_count * row,
+            );
+        }
+    }
+}
+
+/// Bytes per stored element of a device cache of type `element`: a plain f32
+/// buffer, or binary16 that the cached-attention decode kernel reads as
+/// `Codec::Float16`.
+fn element_bytes(element: GgmlType) -> Result<usize, InteropError> {
+    match element {
+        GgmlType::F32 => Ok(core::mem::size_of::<f32>()),
+        GgmlType::F16 => Ok(core::mem::size_of::<u16>()),
+        other => Err(InteropError::UnsupportedServingConfig(alloc::format!(
+            "device kv cache type {other:?}: the device-resident cache stores f32 or f16"
+        ))),
+    }
 }
 
 impl DeviceKv {
@@ -217,6 +295,9 @@ impl DeviceKv {
     /// the widest step of any kind, a prefill batch included, and bounds every
     /// step and sizes a sliding layer's linear buffer. A prefill batch ends inside
     /// `positions_needed`, so it adds no full-layer rows.
+    // clippy::too_many_arguments: the caches and their widths, the position
+    // geometry, and the buffer hook plus the element type it allocates for
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn adopt(
         layer_caches: &mut [LayerCacheState],
         layer_row_widths: &[LayerPadRowWidths],
@@ -225,6 +306,7 @@ impl DeviceKv {
         bucket_tokens: usize,
         max_step_rows: usize,
         source: KvBufferSource,
+        element: GgmlType,
     ) -> Result<Option<Self>, InteropError> {
         let full_capacity_rows =
             kv_extent(capacity_positions, usize::MAX, bucket_tokens) + bucket_tokens;
@@ -251,6 +333,7 @@ impl DeviceKv {
                         full_capacity_rows,
                         max_step_rows,
                         source,
+                        element,
                     )?;
                     device_layer.seed(cache, cached_len);
                     layers.push(Some(device_layer));
@@ -271,6 +354,7 @@ impl DeviceKv {
         Ok(Some(Self {
             layers,
             max_step_rows,
+            element,
         }))
     }
 
@@ -278,25 +362,44 @@ impl DeviceKv {
         self.max_step_rows
     }
 
+    /// The packed codec the leaf placements read this cache as: `Some(Float16)`
+    /// for a binary16 cache, `None` for f32 (a plain buffer needs none).
+    pub(super) fn cache_codec(&self) -> Option<Codec> {
+        (self.element == GgmlType::F16).then_some(Codec::Float16)
+    }
+
+    /// Moves what a finished step wrote into the cache, for every layer whose
+    /// outputs landed in f32 staging ([`DeviceKvLayer::commit`]). `cached_len`
+    /// and `new_count` are the values [`Self::placements`] ran with.
+    pub(super) fn commit_step(&self, cached_len: usize, new_count: usize) {
+        for layer in self.layers.iter().flatten() {
+            layer.commit(cached_len, new_count);
+        }
+    }
+
     /// One flag per layer, for the host paths that must skip a resident one.
     pub(super) fn resident_layers(&self) -> Vec<bool> {
         self.layers.iter().map(Option::is_some).collect()
     }
 
-    /// Readies every sliding layer for a step at `cached_len` positions,
-    /// then names the placements the step runs under. `sliding_bound` is the
-    /// program's sliding extent this step (`KvRing::bound_extent`).
-    pub(super) fn placements<'buffers>(
-        &'buffers mut self,
-        cached_len: usize,
-        new_count: usize,
-        sliding_bound: usize,
-        leaves: &[Option<KvLeafNodes>],
-        layer_roots: &[LayerCacheRoots],
-    ) -> KvPlacements<'buffers> {
+    /// Readies every sliding layer for a step at `cached_len` positions.
+    /// `sliding_bound` is the program's sliding extent this step
+    /// (`KvRing::bound_extent`). Separate from [`Self::placements`] so the
+    /// placements borrow the cache shared, and [`Self::commit_step`] can run
+    /// while the step's placement lists are still alive.
+    pub(super) fn ready_step(&mut self, cached_len: usize, new_count: usize, sliding_bound: usize) {
         for layer in self.layers.iter_mut().flatten() {
             layer.make_room(cached_len, new_count, sliding_bound);
         }
+    }
+
+    /// Names the placements a step runs under, after [`Self::ready_step`].
+    pub(super) fn placements<'buffers>(
+        &'buffers self,
+        cached_len: usize,
+        leaves: &[Option<KvLeafNodes>],
+        layer_roots: &[LayerCacheRoots],
+    ) -> KvPlacements<'buffers> {
         let mut inputs = Vec::with_capacity(self.layers.len() * 3);
         let mut outputs = Vec::with_capacity(self.layers.len() * 3);
         for (index, slot) in self.layers.iter().enumerate() {
@@ -310,9 +413,18 @@ impl DeviceKv {
             inputs.push((leaf.k_even, &layer.k_even, input_row * layer.even_odd_row_bytes));
             inputs.push((leaf.k_odd, &layer.k_odd, input_row * layer.even_odd_row_bytes));
             inputs.push((leaf.v, &layer.v, input_row * layer.v_row_bytes));
-            outputs.push((*even, &layer.k_even, output_row * layer.even_odd_row_bytes));
-            outputs.push((*odd, &layer.k_odd, output_row * layer.even_odd_row_bytes));
-            outputs.push((*value, &layer.v, output_row * layer.v_row_bytes));
+            match &layer.staging {
+                Some([staging_even, staging_odd, staging_value]) => {
+                    outputs.push((*even, staging_even, 0));
+                    outputs.push((*odd, staging_odd, 0));
+                    outputs.push((*value, staging_value, 0));
+                }
+                None => {
+                    outputs.push((*even, &layer.k_even, output_row * layer.even_odd_row_bytes));
+                    outputs.push((*odd, &layer.k_odd, output_row * layer.even_odd_row_bytes));
+                    outputs.push((*value, &layer.v, output_row * layer.v_row_bytes));
+                }
+            }
         }
         KvPlacements { inputs, outputs }
     }
@@ -332,19 +444,19 @@ impl DeviceKv {
             let first = layer.first_kept(cached_len);
             let live = cached_len - first;
             let first_row = first - layer.base_position;
-            let even_odd_row = layer.even_odd_row_bytes / core::mem::size_of::<f32>();
-            let v_row = layer.v_row_bytes / core::mem::size_of::<f32>();
-            let even = omega::read_placed_buffer_f32(
+            let even_odd_row = layer.even_odd_row;
+            let v_row = layer.v_row;
+            let even = layer.load_f32(
                 &layer.k_even,
                 first_row * layer.even_odd_row_bytes,
                 live * even_odd_row,
             );
-            let odd = omega::read_placed_buffer_f32(
+            let odd = layer.load_f32(
                 &layer.k_odd,
                 first_row * layer.even_odd_row_bytes,
                 live * even_odd_row,
             );
-            let value = omega::read_placed_buffer_f32(
+            let value = layer.load_f32(
                 &layer.v,
                 first_row * layer.v_row_bytes,
                 live * v_row,
@@ -449,6 +561,7 @@ mod tests {
             4,
             3,
             allocate_placed_buffer,
+            GgmlType::F32,
         )
             .expect("device kv allocates on the real Metal device")
             .expect("a plain attention cache is adoptable");
@@ -583,6 +696,7 @@ mod tests {
             capacity_rows,
             3,
             allocate_placed_buffer,
+            GgmlType::F32,
         )
             .expect("device kv allocates on the real Metal device");
         let dirty = alloc::vec![f32::NAN; capacity_rows * EVEN_ODD_ROW.max(V_ROW)];
@@ -629,6 +743,7 @@ mod tests {
             4,
             prefill_rows,
             allocate_placed_buffer,
+            GgmlType::F32,
         )
             .expect("device kv allocates on the real Metal device")
             .expect("an empty attention cache is adoptable");
@@ -742,7 +857,16 @@ mod tests {
             },
         ];
 
-        let device = DeviceKv::adopt(&mut caches, &widths, 37, 80, 4, 3, recording_source)
+        let device = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            37,
+            80,
+            4,
+            3,
+            recording_source,
+            GgmlType::F32,
+        )
             .expect("device kv allocates on the real Metal device");
 
         assert!(device.is_some(), "two plain attention layers are adoptable");
@@ -768,7 +892,16 @@ mod tests {
             even_odd_row: EVEN_ODD_ROW,
             v_row: V_ROW,
         }];
-        let adopted = DeviceKv::adopt(&mut caches, &widths, 12, 40, 4, 3, allocate_placed_buffer)
+        let adopted = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            12,
+            40,
+            4,
+            3,
+            allocate_placed_buffer,
+            GgmlType::F32,
+        )
             .expect("the allocation path itself succeeds");
         assert!(
             adopted.is_none(),
@@ -782,6 +915,195 @@ mod tests {
             10 * EVEN_ODD_ROW,
             "a declined cache keeps its host rows"
         );
+    }
+
+    /// Quarter-step values: every one is exactly representable in binary16
+    /// (at most 80.25 here, where the spacing is 0.0625), so a round trip
+    /// through a half-width cache must return them bit for bit.
+    fn half_exact_rows(first: usize, count: usize, width: usize, leaf: usize) -> Vec<f32> {
+        (first..first + count)
+            .flat_map(|position| {
+                (0..width).map(move |column| {
+                    (position * 8 + column) as f32 * 0.25 + leaf as f32 * 0.5
+                })
+            })
+            .collect()
+    }
+
+    fn half_exact_cache(positions: usize) -> LayerCache {
+        let mut cache = attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
+        cache.append_at(
+            0,
+            &half_exact_rows(0, positions, EVEN_ODD_ROW, 0),
+            &half_exact_rows(0, positions, EVEN_ODD_ROW, 1),
+            &half_exact_rows(0, positions, V_ROW, 2),
+        );
+        cache
+    }
+
+    fn adopted_half(positions: usize, total_positions: usize) -> (DeviceKv, Vec<LayerCacheState>) {
+        let mut caches = alloc::vec![LayerCacheState::Attention(half_exact_cache(positions))];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let device = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            positions,
+            total_positions,
+            4,
+            3,
+            allocate_placed_buffer,
+            GgmlType::F16,
+        )
+        .expect("device kv allocates on the real Metal device")
+        .expect("a plain attention cache is adoptable");
+        (device, caches)
+    }
+
+    #[test]
+    fn a_half_width_cache_round_trips_binary16_exact_rows_in_half_the_bytes() {
+        let (device, mut caches) = adopted_half(37, 80);
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        assert_eq!(layer.even_odd_row_bytes, EVEN_ODD_ROW * 2, "binary16 rows");
+        assert_eq!(layer.v_row_bytes, V_ROW * 2, "binary16 rows");
+        assert_eq!(device.cache_codec(), Some(Codec::Float16));
+
+        device.flush(&mut caches, 37, 80);
+
+        let LayerCacheState::Attention(restored) = &caches[0] else {
+            panic!("layer 0 stays an attention cache");
+        };
+        assert_eq!(restored.k_even, half_exact_rows(0, 37, EVEN_ODD_ROW, 0));
+        assert_eq!(restored.k_odd, half_exact_rows(0, 37, EVEN_ODD_ROW, 1));
+        assert_eq!(restored.v, half_exact_rows(0, 37, V_ROW, 2));
+    }
+
+    #[test]
+    fn committing_a_step_rounds_the_staged_f32_rows_into_the_half_cache_at_the_output_row() {
+        let cached_len = 5;
+        let (device, _caches) = adopted_half(cached_len, 80);
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        let [staging_even, staging_odd, staging_value] = layer
+            .staging
+            .as_ref()
+            .expect("a half-width layer stages its f32 outputs");
+        let even: Vec<f32> = (0..EVEN_ODD_ROW).map(|column| 0.1 + column as f32 / 3.0).collect();
+        let odd: Vec<f32> = (0..EVEN_ODD_ROW).map(|column| -0.7 - column as f32 / 7.0).collect();
+        let value: Vec<f32> = (0..V_ROW).map(|column| 1.0 / (column as f32 + 3.0)).collect();
+        omega::write_placed_buffer_f32(staging_even, 0, &even);
+        omega::write_placed_buffer_f32(staging_odd, 0, &odd);
+        omega::write_placed_buffer_f32(staging_value, 0, &value);
+
+        device.commit_step(cached_len, 1);
+
+        let rounded = |values: &[f32]| -> Vec<f32> {
+            values
+                .iter()
+                .map(|value| half::f16::from_f32(*value).to_f32())
+                .collect()
+        };
+        let row = layer.output_row(cached_len);
+        assert_eq!(
+            omega::read_placed_buffer_f16_as_f32(
+                &layer.k_even,
+                row * layer.even_odd_row_bytes,
+                EVEN_ODD_ROW
+            ),
+            rounded(&even)
+        );
+        assert_eq!(
+            omega::read_placed_buffer_f16_as_f32(
+                &layer.k_odd,
+                row * layer.even_odd_row_bytes,
+                EVEN_ODD_ROW
+            ),
+            rounded(&odd)
+        );
+        assert_eq!(
+            omega::read_placed_buffer_f16_as_f32(&layer.v, row * layer.v_row_bytes, V_ROW),
+            rounded(&value)
+        );
+        assert_ne!(
+            rounded(&even),
+            even,
+            "the staged values are not binary16-exact, so equality above proves the rounding ran"
+        );
+    }
+
+    #[test]
+    fn a_half_width_step_reads_the_cache_and_writes_its_rows_to_staging() {
+        let cached_len = 5;
+        let (mut device, _caches) = adopted_half(cached_len, 80);
+        let leaves = [Some(KvLeafNodes {
+            k_even: NodeId(1),
+            k_odd: NodeId(2),
+            v: NodeId(3),
+        })];
+        let roots = [LayerCacheRoots::Attention((NodeId(10), NodeId(11), NodeId(12)))];
+
+        device.ready_step(cached_len, 1, 0);
+        let placements = device.placements(cached_len, &leaves, &roots);
+
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        let [staging_even, ..] = layer.staging.as_ref().expect("half-width layers stage");
+        assert!(core::ptr::eq(placements.inputs[0].1, &layer.k_even));
+        assert_eq!(placements.inputs[0].2, 0, "a full layer reads from row 0");
+        assert!(core::ptr::eq(placements.outputs[0].1, staging_even));
+        assert!(
+            placements.outputs.iter().all(|(_, _, offset)| *offset == 0),
+            "staged rows start at the front of their buffer"
+        );
+    }
+
+    #[test]
+    fn an_f32_step_places_its_rows_straight_in_the_cache_and_commits_nothing() {
+        let cached_len = 5;
+        let (mut device, _caches) = adopted(None, cached_len, 80);
+        let leaves = [Some(KvLeafNodes {
+            k_even: NodeId(1),
+            k_odd: NodeId(2),
+            v: NodeId(3),
+        })];
+        let roots = [LayerCacheRoots::Attention((NodeId(10), NodeId(11), NodeId(12)))];
+
+        device.ready_step(cached_len, 1, 0);
+        let placements = device.placements(cached_len, &leaves, &roots);
+
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        assert!(layer.staging.is_none(), "an f32 cache needs no staging");
+        assert!(core::ptr::eq(placements.outputs[0].1, &layer.k_even));
+        assert_eq!(
+            placements.outputs[0].2,
+            cached_len * layer.even_odd_row_bytes,
+            "the new row lands at the end of the cached rows"
+        );
+        assert_eq!(device.cache_codec(), None);
+    }
+
+    #[test]
+    fn a_quantized_device_cache_is_refused_at_adoption() {
+        let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 10))];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+
+        let error = DeviceKv::adopt(
+            &mut caches,
+            &widths,
+            10,
+            40,
+            4,
+            3,
+            allocate_placed_buffer,
+            GgmlType::Q8_0,
+        )
+        .err()
+        .expect("a Q8_0 device cache has no read path");
+
+        assert!(error.to_string().contains("device kv cache type"));
     }
 
     #[test]

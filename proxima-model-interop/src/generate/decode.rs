@@ -1689,6 +1689,7 @@ impl<'file> LoadedModel<'file> {
         dense_attention_pad_scratch: &'call mut [DenseAttentionPadScratch],
         step_input_scratch: &'call mut Vec<StepInput>,
         device_resident: &[bool],
+        device_codec: Option<Codec>,
         named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
         single_position_step: bool,
     ) -> Result<Vec<u64>, InteropError> {
@@ -1754,6 +1755,7 @@ impl<'file> LoadedModel<'file> {
                 cached_len: new_start,
                 bound_extent: kv_bound_extent,
                 device_resident,
+                device_codec,
             },
             kv_pad_scratch,
             dense_attention_pad_scratch,
@@ -3146,6 +3148,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if !force_two_range
             && runtime.is_metal()
+            && serving_config.kv_cache_key_quant == GgmlType::F32
             && let Some(single_range) = &self.single_range
         {
             let (generated_ids, text, stopped_by_eos) = self.run_decode_loop_placed_kv(
@@ -3608,6 +3611,13 @@ impl<'file> LoadedModel<'file> {
         // speculation stays off for that call rather than rewinding inexactly.
         let speculative_enabled = (!drafter_set.is_empty() || forced_draft_width.is_some())
             && rings_cover_speculation(&layer_caches, draft_limit);
+        if speculative_enabled && serving_config.kv_cache_key_quant == GgmlType::F16 {
+            return Err(InteropError::UnsupportedServingConfig(String::from(
+                "kv_cache_key_quant=f16 with speculative decoding: a verify step attends several \
+query rows against the cached range through the row-tiled kernel, which reads an f32 cache; \
+only the single-row decode kernel reads the half-width device cache",
+            )));
+        }
         // One draft buffer, reused every step -- every drafter's own
         // `draft()` clears and refills it, never allocates, and never
         // appends onto a stale draft (the "else" branch below clears it
@@ -4062,9 +4072,13 @@ impl<'file> LoadedModel<'file> {
                     // calls -- position/RoPE inputs, `cached_len`/`lm_head_row`,
                     // `sliding_rope_inputs`' leaves, and every KV/SSM
                     // cache leaf -- so the leaf names are fed identically whether decoding or tapping one node.
+                    // a binary16 cache is read only by the decode-split kernel, so it is adopted at the first
+                    // decode step; an f32 cache is adopted before the first evaluation and takes the prefill rows
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if !device_kv_attempted
                         && device_kv_eligible
+                        && (serving_config.kv_cache_key_quant != GgmlType::F16
+                            || (cached_len > 0 && is_last_step_batch))
                         && new_count <= device_kv_step_rows
                     {
                         device_kv_attempted = true;
@@ -4076,6 +4090,7 @@ impl<'file> LoadedModel<'file> {
                             serving_config.kv_bucket_tokens,
                             device_kv_step_rows,
                             self.kv_buffer_source,
+                            serving_config.kv_cache_key_quant,
                         )?;
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
@@ -4097,6 +4112,20 @@ impl<'file> LoadedModel<'file> {
                         }
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let device_kv_resident = device_kv.is_some();
+                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                    let device_kv_resident = false;
+                    if cached_len > 0
+                        && serving_config.kv_cache_key_quant == GgmlType::F16
+                        && !device_kv_resident
+                    {
+                        return Err(InteropError::UnsupportedServingConfig(String::from(
+                            "kv_cache_key_quant=f16: the half-width cache lives in the device-resident KV, \
+which this decode did not adopt (a non-Metal backend, a recurrent layer, or a host cache that \
+did not hold every cached position)",
+                        )));
+                    }
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if device_kv
                         .as_ref()
                         .is_some_and(|device| new_count > device.max_step_rows())
@@ -4109,6 +4138,10 @@ impl<'file> LoadedModel<'file> {
                     let device_resident_view: &[bool] = &device_resident_flags;
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let device_resident_view: &[bool] = &[];
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let device_cache_codec = device_kv.as_ref().and_then(DeviceKv::cache_codec);
+                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                    let device_cache_codec: Option<Codec> = None;
                     let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, cached_len);
                     let symbols = self.push_step_named_blocks(
                         &inputs,
@@ -4125,6 +4158,7 @@ impl<'file> LoadedModel<'file> {
                         &mut dense_attention_pad_scratch,
                         &mut step_input_scratch,
                         device_resident_view,
+                        device_cache_codec,
                         &mut named_blocks,
                         active_single_position_step,
                     )?;
@@ -4582,6 +4616,12 @@ impl<'file> LoadedModel<'file> {
 
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if let Some(device) = device_kv.as_mut() {
+                        let sliding_bound = sliding_ring_geometry(&layer_caches)
+                            .map_or(0, |ring| ring.bound_extent(kv_bound_extent));
+                        device.ready_step(cached_len, new_count, sliding_bound);
+                    }
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if let Some(device) = device_kv.as_ref() {
                         let leaves = if speculative_step {
                             &mut device_kv_leaves_verify
                         } else {
@@ -4589,15 +4629,8 @@ impl<'file> LoadedModel<'file> {
                         };
                         let leaves = leaves
                             .get_or_insert_with(|| kv_leaf_nodes(active_program, &cache_names));
-                        let sliding_bound = sliding_ring_geometry(&layer_caches)
-                            .map_or(0, |ring| ring.bound_extent(kv_bound_extent));
-                        let placements = device.placements(
-                            cached_len,
-                            new_count,
-                            sliding_bound,
-                            leaves,
-                            active_layer_roots,
-                        );
+                        let placements =
+                            device.placements(cached_len, leaves, active_layer_roots);
                         ssm_input_placements.extend(placements.inputs);
                         ssm_output_placements.extend(placements.outputs);
                     }
@@ -5282,6 +5315,18 @@ impl<'file> LoadedModel<'file> {
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                     let metal_stage = metal_stage_totals();
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    if let Some(device) = device_kv.as_ref() {
+                        #[cfg(feature = "instrument")]
+                        let narrow_started = read_ticks();
+                        device.commit_step(cached_len, new_count);
+                        #[cfg(feature = "instrument")]
+                        debug!(
+                            step = step as u64,
+                            narrow_ms = ticks_to_nanos(elapsed_ticks(narrow_started)) as f64 / 1e6,
+                            "device_kv_narrow"
+                        );
+                    }
                     // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
                     // brackets everything between evaluate() returning and the
                     // KV-append host memcpy starting -- expert-routing telemetry
@@ -7261,6 +7306,7 @@ impl<'file> LoadedModel<'file> {
             &mut dense_attention_pad_scratch,
             &mut step_input_scratch,
             &[],
+            None,
             &mut named_blocks,
             self.single_position_step,
         )?;
