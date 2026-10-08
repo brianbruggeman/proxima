@@ -475,6 +475,7 @@ fn expected_split_k_factor(_base_simdgroups: u64, _rows: u64) -> u64 {
 /// internal lock serializes `with_var` calls against each other but not
 /// against an unguarded read, so every baseline capture must ALSO go
 /// through `with_var` (explicitly unset) to take that same lock.
+#[cfg(feature = "metal-core")]
 fn with_every_multi_row_env_unset<T>(closure: impl FnOnce() -> T) -> T {
     temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", None::<&str>, || {
         temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", None::<&str>, || {
@@ -488,6 +489,7 @@ fn with_every_multi_row_env_unset<T>(closure: impl FnOnce() -> T) -> T {
 /// `[sequence, selected]` tensor. `activation_per_selected` gives the
 /// activation its own `[sequence, selected, k]` rows (a down projection)
 /// instead of one `[sequence, k]` row shared by every selected expert (gate and up).
+#[cfg(feature = "metal-grouped-gemm")]
 fn stacked_gathered_matmul_op(
     sequence: u32,
     selected: u32,
@@ -2558,6 +2560,7 @@ fn decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in() {
 /// cache key/source/grid/threadgroup_width must be identical regardless of
 /// `PROXIMA_MULTI_ROW_UNROLL`, since unroll changes only body text, never
 /// dispatch geometry.
+#[cfg(feature = "metal-core")]
 #[test]
 fn multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width() {
     let bound = packed_row_multi_token_op(1, 256, 256);
@@ -2731,6 +2734,7 @@ fn reduction_literal_decode_mode_is_some_for_a_single_token_op() {
 /// `_u` cache-key suffix, but its dispatch geometry is UNCHANGED (unroll
 /// touches body text only, never `grid_threads`/`tiled_gemm_threadgroup_
 /// width`).
+#[cfg(feature = "metal-core")]
 #[test]
 fn multi_row_unroll_27_token_shape_gets_u_suffix_with_unchanged_geometry() {
     let bound = packed_row_multi_token_op(27, 256, 256);
@@ -2769,6 +2773,7 @@ fn multi_row_unroll_27_token_shape_gets_u_suffix_with_unchanged_geometry() {
 /// [`multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width`]'s
 /// index32 counterpart: checked both alone and with
 /// `PROXIMA_MULTI_ROW_UNROLL` also on, since index32 composes with unroll.
+#[cfg(feature = "metal-core")]
 #[test]
 fn multi_row_index32_decode_shape_keeps_current_key_source_grid_and_width() {
     let bound = packed_row_multi_token_op(1, 256, 256);
@@ -2831,6 +2836,7 @@ fn multi_row_index32_decode_shape_keeps_current_key_source_grid_and_width() {
 /// UNCHANGED dispatch geometry either way (index32 touches body text only,
 /// same as unroll -- neither changes `grid_threads`/`tiled_gemm_
 /// threadgroup_width`).
+#[cfg(feature = "metal-core")]
 #[test]
 fn multi_row_index32_27_token_shape_gets_i32_suffix_with_unchanged_geometry() {
     let bound = packed_row_multi_token_op(27, 256, 256);
@@ -2880,6 +2886,7 @@ fn multi_row_index32_27_token_shape_gets_i32_suffix_with_unchanged_geometry() {
 /// multiples of 256 so `classify_packed_row_block`'s own block-multiple gate
 /// still admits the op structurally -- this is a rejection purely from the
 /// index32 fit check, not from any other admission gate.
+#[cfg(feature = "metal-core")]
 #[test]
 fn multi_row_index32_oversized_shape_not_admitted() {
     let bound = packed_row_multi_token_op(27, 65792, 65536);
@@ -2942,6 +2949,7 @@ fn multi_row_index32_oversized_shape_not_admitted() {
 /// line-level diff, not just "not equal" -- carry the `_c32` suffix alone,
 /// and leave `grid_threads`/`threadgroup_width` unchanged (this experiment
 /// narrows body text only).
+#[cfg(feature = "metal-core")]
 #[test]
 fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
     let bound = matmul_op(4, 65536, 5);
@@ -6448,6 +6456,7 @@ fn cached_softmax_weights_op(attention_rows: u64, cached_key_rows: u64, head_dim
 /// narrow shape's direct `simd_max`/`simd_sum`, `push_cooperative_fold`'s
 /// own doc). Both texts are also saved to a temp dir as a readable artifact
 /// of what got gated here.
+#[cfg(feature = "metal-wide-cooperative-reduce")]
 #[test]
 fn cached_softmax_weights_render_is_deterministic_and_width_dependent() {
     let narrow_a = cached_softmax_weights_op(8, 32, 256);
@@ -6677,8 +6686,10 @@ mod flat_grid_form {
     use super::*;
 
     const FLAT_MARKER: &str = "ulong wide_group_index";
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     const LINEAR_SIGNATURE: &str = "uint gid [[thread_position_in_grid]]";
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     struct FlatCase {
         label: &'static str,
         bound: BoundOp,
@@ -6687,6 +6698,7 @@ mod flat_grid_form {
         policy: NumericPolicy,
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn elementwise_tanh_op_2d(rows: u32, columns: u32) -> BoundOp {
         let mut program = Vec::new();
         let source = append(
@@ -6714,6 +6726,7 @@ mod flat_grid_form {
             .expect("one bound emitted")
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn cumsum_rank3_op(outer: u32, middle: u32, inner: u32) -> BoundOp {
         let mut program = Vec::new();
         let source = append(
@@ -6754,6 +6767,7 @@ mod flat_grid_form {
     /// the tiled GEMM now (it has a `tiled_decode` description), so this fixture
     /// stands the shape with a BF16 weight, which has none and stays a
     /// cooperative reduce at `wide_cooperative_reduce_width(k)` lanes.
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn per_layer_projection_op(
         rows: u32,
         reduction: u32,
@@ -6811,6 +6825,7 @@ mod flat_grid_form {
         (bound, BTreeMap::from([(weight_node, Codec::BFloat16)]))
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn unpacked(
         label: &'static str,
         bound: BoundOp,
@@ -6826,6 +6841,7 @@ mod flat_grid_form {
         }
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn gated_delta_net_op(num_v_heads: u64) -> BoundOp {
         let operands = (0..6)
             .map(|index| {
@@ -6858,12 +6874,14 @@ mod flat_grid_form {
         }
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn cached_attention_with_query_vectors(query_vectors: u64) -> BoundOp {
         let mut bound = cached_attention_op_dynamic(0, 8);
         bound.extents = vec![query_vectors, 1, 1, 4];
         bound
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn position_only_op(kind: BoundOpKind, extent: u64) -> BoundOp {
         BoundOp {
             node: NodeId(0),
@@ -6877,6 +6895,7 @@ mod flat_grid_form {
     /// narrow)` pair: the same op structure at a shape past `u32::MAX` threads
     /// and at one that fits. The wide shapes only ever reach `emit` and
     /// `kernel_dispatch_shape`, so no tensor data exists for any of them.
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     fn flat_cases() -> Vec<FlatCase> {
         let packed_row = packed_row_multi_token_op(1, 256, 4_000_000_000);
         let packed_narrow = packed_row_multi_token_op(1, 256, 64);
@@ -6949,6 +6968,7 @@ mod flat_grid_form {
         ]
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     #[test]
     fn every_kernel_past_the_thread_index_renders_and_dispatches_the_flat_form_together() {
         let limit = u64::from(u32::MAX);
@@ -7035,6 +7055,7 @@ mod flat_grid_form {
         }
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     #[test]
     fn the_flat_form_gets_its_own_pipeline_identity_and_the_linear_sibling_keeps_its_own() {
         for case in flat_cases() {
@@ -7048,6 +7069,7 @@ mod flat_grid_form {
         }
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     #[test]
     fn a_grid_that_fits_a_32_bit_thread_index_keeps_the_linear_form() {
         let (bound, packed) = per_layer_projection_op(1872, 1536, 8960);
@@ -7061,6 +7083,7 @@ mod flat_grid_form {
         assert!(!kernel.source.contains(FLAT_MARKER));
     }
 
+    #[cfg(feature = "metal-core")]
     #[test]
     fn a_thread_count_that_wraps_u64_is_rejected_instead_of_truncated() {
         let bound = BoundOp {
@@ -7081,6 +7104,7 @@ mod flat_grid_form {
         );
     }
 
+    #[cfg(feature = "metal-core")]
     #[test]
     fn a_grid_with_more_threadgroups_than_two_axes_can_hold_is_rejected() {
         let bound = BoundOp {
@@ -7146,6 +7170,7 @@ mod flat_grid_form {
         assert_eq!(spec.threadgroups_x * spec.threadgroups_y, threads.div_ceil(SIMD_WIDTH));
     }
 
+    #[cfg(feature = "metal-wide-cooperative-reduce")]
     #[test]
     fn expert_source_substitution_refuses_the_flat_form() {
         let (bound, packed) = per_layer_projection_op(1873, 1536, 8960);
@@ -7677,6 +7702,7 @@ fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
 /// the grid by that same cap. Token counts needing the full group keep
 /// today's key. Stays below 8 tokens: with `metal-tiled-gemm` compiled in,
 /// 8 and up belong to the tiled kernel, not this body.
+#[cfg(feature = "metal-core")]
 #[test]
 fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
     let cases: [(u32, Option<&str>, &str, u64); 4] = [
@@ -8929,6 +8955,7 @@ mod expert_grouped_decode_description {
     }
 }
 
+#[cfg(all(feature = "metal-q4k-ggml-port", feature = "metal-q4_0-native"))]
 fn trimmed_line_above(source: &str, needle: &str, lines_up: usize) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let index = lines
