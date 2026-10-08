@@ -2942,3 +2942,79 @@ decode_arms ... --arm nospec=<tipx> --arm nospec_f16=<tipx> --arm-env gemma4_e2b
 ```
 
 Missing for CI: no job runs the Metal tests, a GPU bench or `decode_arms`; the nextest runs and the bench numbers re-prove only on this box. The bench binaries are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine2/bin/` (sha256 in `bench/binaries.sha256`), not in the tree.
+
+## round two follow-up (measured 2026-10-08, main f6a85722; commits `356e44e4`, `bbdbef55` and the one adding this section)
+
+Two items from the round two result: the E2B decode regression traced to the broadcast width cap, and the 8 omega tests that failed under `--features metal-q4k-split-k`. Test models: gemma4 E2B and granite moe 1b; Ollama was not running (a process listing for ollama, cargo, rustc, nextest and decode_gbps printed only `sccache` before run A; session only) and no cargo or GPU peer ran during a timed run (the driver gates every launch on its peer list). Evidence is `evidence/round2fix/` (`bench/`, `census/`, `kernel/`, `gates/`). Nothing here is a verdict.
+
+### 1. broadcast width cap back to 256 (`bbdbef55`, `omega/omega-runtime.toml` `[wide_cooperative_reduce] broadcast_max_width`)
+
+The default went from 512 to 256; the key and its build-time override are unchanged, so `OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=512` rebuilds the previous shape. Arms: `base` = the working tree built with that override at 512 (the codegen of f6a85722; the commit between them changes only `cfg(test)` code and the toml, and the example binary has no other input), `tip` = 256, `control` = a byte copy of `tip` (same sha256, `bench/binaries.sha256`). `decode_arms`, 3 processes x (1 warm-up + 7 timed) = 21 timed runs per arm, arms interleaved per process, run twice per prompt with the arm order rotated (base,tip,control; tip,control,base). Medians are the driver's kept-run medians (outlier rule 3 x 1.4826 x MAD, fixed before the run); the CoV and range are over all 21 runs, because five arms exceed 5% over all 21 on a few spikes (the max column) and are reported as ranges. Box: load average 4.2 to 5.9 at launch, a private background daemon 55-70% CPU and `suggestd` 70% in every run (`box_load_before.txt`); GPU utilization was not sampled this pass.
+
+Decode ms/token (kept median; CoV all, range all):
+
+| prompt | order | base (512) | tip (256) | control (copy of tip) | tip - base | limit | control - tip |
+|---|---|---|---|---|---|---|---|
+| E2B 971 tokens | base,tip,control | 11.366 (2.68%, 11.012-12.103) | 10.9565 (5.22%, 10.796-13.646) | 11.229 (3.91%, 10.814-12.794) | **-0.4095** | 0.2273 | **+0.2725, limit 0.2191, within=false** |
+| E2B 971 tokens | tip,control,base | 11.138 (0.81%, 11.051-11.413) | 10.9825 (5.49%, 10.847-13.841) | 10.9535 (5.73%, 10.888-13.447) | -0.1555 | 0.2197 | -0.029 |
+| E2B 25 tokens | base,tip,control | 10.838 (4.82%, 10.797-12.834) | 10.6715 (6.49%, 10.615-13.737) | 10.6675 (7.46%, 10.602-14.465) | -0.1665 | 0.2168 | -0.004 |
+| E2B 25 tokens | tip,control,base | 10.897 (6.79%, 10.834-13.933) | 10.6415 (4.96%, 10.596-13.151) | 10.654 (0.24%, 10.587-10.715) | **-0.2555, limit 0.2128, within=false** | 0.2128 | +0.0125 |
+| granite 1000 tokens | base,tip,control | 6.640 (1.77%, 6.451-6.809) | 6.521 (1.37%, 6.423-6.745) | 6.579 (1.53%, 6.450-6.835) | -0.119 | 0.1328 | +0.058 |
+| granite 1000 tokens | tip,control,base | 6.522 (2.44%, 6.442-7.225) | 6.5495 (2.54%, 6.470-7.267) | 6.541 (0.78%, 6.459-6.639) | +0.0275 | 0.1310 | -0.0085 |
+
+Prefill ms (kept median): E2B 971 tokens base 591.989 / 592.0085, tip 585.993 / 585.975 (tip - base -5.996 and -6.034; control 586.024 and 586.023); E2B 25 tokens base 87.998 / 87.985, tip 87.028 / 87.503 (-0.970 and -0.482, limits 1.76 and 1.75); granite base 265.952 / 265.045, tip 265.015 / 265.504 (-0.937 and +0.459, limit about 5.3). Peak RSS, footprint and GPU bytes moved by less than their limits in the one order that printed them (`runA_long`: E2B RSS +15.4 MB, footprint +0.5 MB, GPU +0.5 MB; granite +4.3 MB, +0.9 MB, 0 B). Generated-text hashes: one hash per model across all 72 generations of every arm in each of the four runs (`launches.raw.*.err`, `text_hash`), so 256 and 512 produce the same text on these prompts.
+
+What the table supports: tip is below base on E2B decode in 4 of 4 runs (-0.4095, -0.1555, -0.1665, -0.2555), and the 971-token prefill by 6.0 ms in both orders with the copy of tip agreeing to 0.03 ms. Two runs breach the control bound (E2B 971 first order, control above tip by 0.2725; E2B 25 tokens rotated, base above tip by 0.2555 against a 0.2128 limit), so the size of the decode delta is uncertain by about 0.25 ms between copies of one binary in the worst run; the sign is stable and the magnitude lies between -0.16 and -0.41. Granite decode: tip - base is -0.119 and +0.0275 against limits 0.131-0.133, both within, with the sign changing. Mechanism for granite: its hidden width is 1024 (`embedding_length` u32 at the blob's header, bytes `00 04 00 00`), `quarter_width` gives 1024/4 = 256 lanes, which both caps leave alone (`tiled_gemm_cooperative_scan.rs:1926-1941`), so the broadcast-reduce kernels of granite's hidden-width norms are the same at 256 and 512 (derived from that formula; not diffed for granite), and its delta is the run-to-run spread.
+
+### mechanism: where the 0.18 ms goes (traced to the kernel group; the last link is not traced)
+
+1. Kernel source: the hidden-width norm kernel for a 1536-wide row emitted at cap 256 and at 512 differs in constants only (`kernel/kernel_cap256.metal` against `kernel_cap512.metal`, `diff` is 15 hunks, 30 changed lines): `gid / 256` against `gid / 384`, `lane = gid % N`, `slot * N`, the walk stride `8N` (2048 against 3072), `partials[8]` against `partials[12]`, and the second-level `simd_sum((lane % 32u) < 8u ? ...)` against `< 12u`. 384 lanes is `quarter_width(1536) = 1536/4` held to the cap; 256 lanes is the cap.
+2. Census (`gemma4_decode_kernel_census`, the 25-token prompt, last decode step, 653 dispatches, groups replayed alone in a cold command buffer; 4 runs per cap interleaved 512,256, `census/census_{512,256}_r{1..4}.out`): the class "RMSNorm sumsq + fused epilogue" (242 dispatches per step) reads 12.63 us per dispatch cold at 512 (12.63, 12.68, 12.54, 12.67) against 11.81 at 256 (11.65, 11.83, 11.86, 11.91); the norms family replayed in one command buffer (242 dispatches, 7 runs each) reads gpu_ms_mean 2.5955 at 512 against 2.3088 at 256 (+0.287 ms). The Q4_0 matvec and head rows sit inside their run-to-run spread between the two (Q4_0 matvec 18.60-18.83 us per dispatch at 512 against 18.59-19.19 at 256; head 1140.7-1142.1 against 1142.4-1145.7); the other classes were not tabulated.
+3. Group level (`census_groups.csv`): the groups whose threadgroup width changes are the three hidden-width groups (71, 70 and 35 dispatches per step, grid = threadgroup width = 384 at 512, 256 at 256); every other norm group has an identical width in both builds and a cold time within about 0.5 us in run pair 1 (`census_512_r1` against `census_256_r1`). Cold ns, mean of 3 interleaved runs per cap (`census/sweep_<cap>_r{1..3}.groups.csv`), width 256 then 384: group of 71 dispatches 11681 then 12361; of 70, 12583 then 13917; of 35, 12514 then 13410. Weighted by dispatch count this is +173 us per step cold (derived from those means; the end-to-end figure above is 0.16-0.41 ms per token, measured).
+4. Width sweep on the same three groups (cap 128, 192, 256, 320, 512, 3 runs each; widths 128, 192, 256, 320, 384), cold ns for the 70-dispatch group: 19035, 14465, 12583, 13785, 13917. Per-lane element count falls monotonically with width (12, 8, 6, 5, 4 of the 1536 elements per lane), yet the time is minimal at 256 and rises by about 1.2 us at 320 and 384. The other two groups show the same shape (71-dispatch group 16326, 12292, 11681, 12215, 12361; 35-dispatch group 18660, 14049, 12514, 13681, 13410).
+5. Not traced: why a wider group is slower once the per-lane element count is already down to 5 or 4. Three candidates are not separated by any run here: the cross-simdgroup combine growing from 8 to 10 or 12 partials behind the same barrier, the integer divide and modulo by a non-power-of-two (`gid / 384`, `gid % 384u`; 320 and 192 are non-powers of two as well, and 192 sits on the falling side), and threadgroup residency of a 320 or 384-thread group on one core. Separating them needs an ISA read or a counter capture of the 384-lane kernel, or a kernel variant that holds the divisor a power of two while keeping 12 simdgroups; none was done.
+
+The cap's own doc in the toml now records that 512 costs 0.18 ms/token and 6 ms of prefill on E2B; 1024 stays unmeasured.
+
+### 2. the 8 omega tests under `--features metal-q4k-split-k` (`356e44e4`)
+
+Before: `nextest run -p omega --features metal,metal-q4k-split-k` on the 8 names printed 15 run, 7 passed, 8 failed (`gates/splitk_8_before.log`). The route the classifier selects when the feature is on is the split-aware body: `packed_row_dispatch` returns `(groups, split)` with `split = target_simdgroups(2048) / base_simdgroups` held to `max_split(8)` and to `split_k_max_rows(4096)`, `use_q4_0_native` and the ggml-port bodies require split-k off (`packed_row_blocked_ggml.rs:176,204,219`), the `ib` walk is strided by `sgitg` and `split`, and the tail is `push_packed_row_combine_and_write`'s split arm: `partial_sums` in threadgroup memory, a barrier, simdgroup 0 lane 0 adds the partials. Each test now asserts that route when the feature is on and its previous expectation when it is off; none was skipped, no assertion was removed:
+
+| test | feature off (unchanged) | feature on (new) |
+|---|---|---|
+| `q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup` | dispatch `(groups, 1)` | `(groups, split)` with split from the build-time keys (4, 8 at 8 rows), plus the partial/barrier/combine tail in the source |
+| `multi_row_kernel_folds_only_the_activation_rows_the_op_has` | threads = simdgroups x token groups x 32 | the same times `split` (16384 for 2 tokens, 64 simdgroups, split 8) and `threadgroup_width == 32 x split` |
+| `q4_0_codec_takes_the_row_blocked_path_at_a_256_extent`, `push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel`, `default_env_emits_node_94_shape_for_diffing_against_the_capture` | native inline dot (`sumy * -8.0f`), no `q4_0_pair_dot` | `q4_0_pair_dot(blk` and no `sumy * -8.0f`; the combine tail present (node 94's shape: `ib_first` strided by `sgitg`, `partial_sums`, the sgitg-0 lane-0 combine); off: none of `partial_sums`, `sgitg`, `split` in the source |
+| `ported_matvec_bodies_unroll_their_row_and_lane_loops_fully` | the unroll pragmas on the row loop, the block-pointer setup and advance | neither ported body renders (`sumy * -8.0f`, `int ib_step = 2;` absent), `ib_first`/`ib_step` strided by `sgitg`/`split`, the row loop still opens one line above `blk_ptr[q]`, the block pointers set up and advanced, the combine tail present |
+| `epilogue_operand_reuse::a_fused_epilogue_finishes_each_row_of_the_simdgroup_on_its_own_lane` | `if (lane < 4u)`, `reduced_row3 = simd_sum(sumf[3])`, no lane-0 row loop | each row's `simd_sum` parked in `partial_sums[q][sgitg]`, the combine after the barrier on simdgroup 0 lane 0, `epi_scratch[3] = total` feeding the fused epilogue, no `if (lane < 4u)` |
+| `epilogue_operand_reuse::a_plain_matvec_finishes_each_row_of_the_simdgroup_on_its_own_lane` | `if (lane < 4u)`, one-term store | the combine tail, the store at the cached coordinate (`out[out_offset] = total;`), no `if (lane < 4u)` and no per-row lane-0 test |
+
+Not asserted for the feature-on route: that the generic body carries the unroll pragma the ported bodies have; it does not (`splitk_8_before.log` prints the kernel), and pinning its absence would pin a missing optimization as expected. Observed by reading, not executed: under split-k a multi-token op (2 to 7 tokens, `push_packed_row_multi_row_body`) is dispatched `split` simdgroups per group (the 16384 above) while that body reads no `sgitg`, so each simdgroup of a group appears to compute and store the same rows; the cost and whether it matters for any model path are unmeasured, and `metal-q4k-split-k` is not in the `metal` feature list.
+
+### gates at the tip (`gates/`; N is the count the run printed)
+
+| gate | command | N | source |
+|---|---|---|---|
+| clippy `-D warnings --all-targets` | tensor + interop (`std,metal`) | exit 0 | `gate_clippy.log` |
+| clippy | omega `metal`; omega `metal,metal-q4k-split-k` | exit 0 each | `clippy_omega_metal.log`, `clippy_omega_splitk.log` |
+| tiers | `check -p proxima-tensor --no-default-features --features alloc` (builds none of the changed code); `check -p proxima-model-interop --no-default-features` | exit 0 each | `gate_check_alloc.log`, `gate_check_interop_nd.log` |
+| tensor | `nextest run -p proxima-tensor --cargo-profile gate` | 803 passed, 8 skipped | `gate_nextest_tensor.log` |
+| omega metal | `nextest run -p omega --features metal --cargo-profile gate` | 809 passed, 16 skipped | `nextest_omega_metal.log` |
+| omega split-k | `... --features metal,metal-q4k-split-k` | run 1: 801 run, 800 passed, **1 failed** (`packed_row_multi_row_unroll_ab::q8_0_tokens600_k12288_rows1536`: `CommandBufferFailed` `0000000e`); run 2: 801 passed, 16 skipped; the failed test alone: 2 run, 2 passed | `nextest_omega_splitk.log`, `nextest_omega_splitk_run2.log`, `rerun_q8_alone.log` |
+| interop slice-gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'` | 741 passed, 128 skipped | `gate_nextest_interop_slice.log` |
+| parity, E2B and granite | `llama_parity_`, `generic_verify_llama_parity_`, `prefill_width_parity_with_llama_` for `gemma4_e2b` and `granite_moe` | 6 of 6 passed | `gate_parity.log` |
+
+The one split-k failure is the `0000000e` command-buffer failure the round two section recorded under GPU contention (a heavy 600-token Q8_0 dispatch while other omega tests run); load average was 8.9 at the rerun. It passed alone and in the second full run, and its mechanism was not isolated here. Before this pass split-k read 801 run, 793 passed, 8 failed; it now reads 801 run, 801 passed in one of two full runs.
+
+### re-prove
+
+```
+cargo nextest run -p omega --features metal --cargo-profile gate                                   # 809
+cargo nextest run -p omega --features metal,metal-q4k-split-k --cargo-profile gate                 # 801
+OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=512 cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal   # base arm
+cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal                                                          # tip arm
+decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<512 binary> --arm tip=<256 binary> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
+OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=<128|192|320|512> cargo build --release -p proxima-model-interop --features std,metal,instrument,metal-fuse-attn-decode --example gemma4_decode_kernel_census
+```
+
+Missing for CI: no job runs the Metal tests, `decode_arms` or the census; they re-prove only on this box. The binaries are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/round2fix/bin/` (sha256 in `evidence/round2fix/bench/binaries.sha256`).
