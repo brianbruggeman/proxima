@@ -1,0 +1,8 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 4.77s
+────────────
+ Nextest run ID 1db55b03-825b-45b8-be8a-c87166746690 with nextest profile: default
+    Starting 1 test across 106 binaries (826 tests skipped)
+        PASS [   0.009s] (1/1) omega msl::tests::zz_probe_dump_fold_source
+────────────
+     Summary [   0.012s] 1 test run: 1 passed, 826 skipped

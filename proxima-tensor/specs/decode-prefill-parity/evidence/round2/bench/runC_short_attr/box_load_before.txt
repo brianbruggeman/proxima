@@ -1,0 +1,8 @@
+Thu Oct  8 08:45:30 UTC 2026
+ 3:45  up 7 days, 13:49, 7 users, load averages: 5.75 6.40 7.44
+  587  75.0 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+17029  72.6 a background daemon in ~/.local/bin
+ 1418  60.7 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+29286  17.2 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access.xpc/Contents/MacOS/mediaanalysisd-access
+31461  11.6 claude
+37991 /Users/brianbruggeman/.cargo/bin/sccache

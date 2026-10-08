@@ -1,0 +1,36 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 7.83s
+────────────
+ Nextest run ID f86364d3-7bdd-47a1-9898-a9267da3f4c8 with nextest profile: default
+    Starting 1 test across 1 binary (419 tests skipped)
+        FAIL [   0.010s] (1/1) omega msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+  stdout ───
+
+    running 1 test
+    test msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision ... FAILED
+
+    failures:
+
+    failures:
+        msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 419 filtered out; finished in 0.00s
+
+  stderr ───
+    encode_allocations label=q4k_matvec_decode measured=259
+    encode_allocations label=q6k_matvec_decode measured=259
+    encode_allocations label=tiled_gemm_prefill measured=262
+    encode_allocations label=f32_matmul measured=118
+    encode_allocations label=elementwise_tanh measured=11
+    encode_allocations label=cached_attention measured=12
+    encode_allocations label=cached_softmax_weights measured=8
+
+    thread 'msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision' (74902819) panicked at omega/src/msl/tests.rs:7438:9:
+    (label, measured, base) over budget: [("q6k_matvec_decode", 259, 258), ("tiled_gemm_prefill", 262, 254)]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.012s] 1 test run: 0 passed, 1 failed, 419 skipped
+        FAIL [   0.010s] (1/1) omega msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+error: test run failed

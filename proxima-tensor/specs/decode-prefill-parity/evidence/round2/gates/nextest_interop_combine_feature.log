@@ -1,0 +1,119 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 45.16s
+────────────
+ Nextest run ID c2531878-9463-45ee-a76c-cfc7a637ac8e with nextest profile: default
+    Starting 14 tests across 35 binaries (855 tests skipped)
+        FAIL [   0.036s] ( 1/14) proxima-model-interop::arch_data_baseline arch_data_digest_granite_moe
+  stdout ───
+
+    running 1 test
+    test arch_data_digest_granite_moe ... FAILED
+
+    failures:
+
+    failures:
+        arch_data_digest_granite_moe
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 64 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'arch_data_digest_granite_moe' (74991930) panicked at proxima-model-interop/tests/arch_data_baseline.rs:403:9:
+    granite_moe digest differs from the incumbent baseline /Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop/tests/fixtures/llama-parity/granite_moe.digest
+    expected 12 lines, got 12
+    only in the baseline: [
+        "bind.hidden_root=Some(NodeId(5596))",
+        "bind.layer_roots=24 sha256=aa2a05ac7b82885ca6bac2a714ccf4c64b2d07ef908d9383065cc80e882d8427",
+        "bind.logits_root=NodeId(5601)",
+        "bind.ops=5602",
+        "bind.ops_sha256=7240c7067a8b46d76e4328071e885c8631347f83d7fc3e2ef8c2a5c32bb104b3",
+        "bind.residual_roots=24 sha256=b1d7c9ba0647d158ea13d24eabba9ff283b5f8339aecb77067e6dd943c1864b4",
+    ]
+    only in the run: [
+        "bind.hidden_root=Some(NodeId(5572))",
+        "bind.layer_roots=24 sha256=e51d7ca1f6e8da9a6b2926cd29824cda2a44bcd81b2a824ec68271a046bb18d3",
+        "bind.logits_root=NodeId(5577)",
+        "bind.ops=5578",
+        "bind.ops_sha256=c861e4897cb591c3dbdedca98b12098d661e5e1ef186ecfcdcf75b478b6eff9b",
+        "bind.residual_roots=24 sha256=9291253493518dbf613a5f98b315d55b6df29a77e7410b2eab27aa1b84579db8",
+    ]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.765s] ( 2/14) proxima-model-interop::arch_data_baseline generic_binder_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [>180.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [>240.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        SLOW [>300.000s] (─────) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        PASS [ 319.529s] ( 3/14) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        PASS [   0.010s] ( 4/14) proxima-model-interop::arch_data_baseline granite_moe_config_with_the_hf_split_half_pairing_is_refused_by_the_lowering
+        PASS [   0.013s] ( 5/14) proxima-model-interop::arch_data_baseline granite_moe_header_declares_the_scales_the_profile_cannot_carry
+        PASS [   0.017s] ( 6/14) proxima-model-interop::arch_data_baseline granite_moe_program_carries_the_header_scales
+        PASS [   0.013s] ( 7/14) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_equals_the_gguf_header_descriptor
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_reproduces_llama_ids
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_reproduces_llama_ids
+        PASS [ 159.904s] ( 8/14) proxima-model-interop::arch_data_baseline hand_written_granite_moe_config_reproduces_llama_ids
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline kv_in_caller_memory_granite_moe
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline kv_in_caller_memory_granite_moe
+        SLOW [>180.000s] (─────) proxima-model-interop::arch_data_baseline kv_in_caller_memory_granite_moe
+        SLOW [>240.000s] (─────) proxima-model-interop::arch_data_baseline kv_in_caller_memory_granite_moe
+        SLOW [>300.000s] (─────) proxima-model-interop::arch_data_baseline kv_in_caller_memory_granite_moe
+        PASS [ 319.066s] ( 9/14) proxima-model-interop::arch_data_baseline kv_in_caller_memory_granite_moe
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        PASS [ 159.911s] (10/14) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        FAIL [   0.030s] (11/14) proxima-model-interop::arch_data_baseline model_config_roundtrip_granite_moe
+  stdout ───
+
+    running 1 test
+    test model_config_roundtrip_granite_moe ... FAILED
+
+    failures:
+
+    failures:
+        model_config_roundtrip_granite_moe
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 64 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'model_config_roundtrip_granite_moe' (75030768) panicked at proxima-model-interop/tests/arch_data_baseline.rs:590:13:
+    granite_moe bind: the restored config lowers to `bind.ops=5578`, which the incumbent digest /Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop/tests/fixtures/llama-parity/granite_moe.digest lacks
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        SLOW [> 60.000s] (─────) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+        SLOW [>120.000s] (─────) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+        SLOW [>180.000s] (─────) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+        SLOW [>240.000s] (─────) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+        PASS [ 255.217s] (12/14) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+        PASS [   0.010s] (13/14) proxima-model-interop::moe_stacked_default the_metal_feature_set_builds_routed_experts_as_stacked_projections
+        SLOW [> 60.000s] (─────) proxima-model-interop::serving_default_ubatch_prefill_parity granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens
+        FAIL [  60.068s] (14/14) proxima-model-interop::serving_default_ubatch_prefill_parity granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens
+  stdout ───
+
+    running 1 test
+    test granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens has been running for over 60 seconds
+    test granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens ... FAILED
+
+    failures:
+
+    failures:
+        granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 60.01s
+
+  stderr ───
+
+    thread 'granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens' (75054011) panicked at proxima-test/src/harness.rs:174:21:
+    proxima::test: body did not complete within the timeout
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [1274.598s] 14 tests run: 11 passed (5 slow), 3 failed, 855 skipped
+        FAIL [   0.036s] ( 1/14) proxima-model-interop::arch_data_baseline arch_data_digest_granite_moe
+        FAIL [   0.030s] (11/14) proxima-model-interop::arch_data_baseline model_config_roundtrip_granite_moe
+        FAIL [  60.068s] (14/14) proxima-model-interop::serving_default_ubatch_prefill_parity granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens
+error: test run failed

@@ -1,0 +1,47 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 5.22s
+────────────
+ Nextest run ID 938b95a8-577f-4e9d-be9b-a5d36f289a96 with nextest profile: default
+    Starting 1 test across 106 binaries (825 tests skipped)
+       START [         ] (1/1) omega msl::attn_rows_tests::zz_probe_plain_half_lines
+
+running 1 test
+PROBE 17:     float d = (float)as_type<half>(d_bits);
+PROBE 18:     float dmin = (float)as_type<half>(dmin_bits);
+PROBE 53:     float d = (float)as_type<half>(d_bits);
+PROBE 136:     float d = (float)as_type<half>(d_bits);
+PROBE 137:     float dmin = (float)as_type<half>(dmin_bits);
+PROBE 172:     header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+PROBE 173:     header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+PROBE 287: // sub-block boundary, so all eight share a group and a nibble half, and
+PROBE 334: // half); this issues it ONCE and reads out both halves, which is the whole
+PROBE 385: // sub-block: `chunk` and "low or high half" are both fixed for it).
+PROBE 400:     header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+PROBE 401:     header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+PROBE 482:     header.d = (float)as_type<half>(d_bits);
+PROBE 490:     uint half_index = index / 128u;
+PROBE 494:     uint sub_block_in_half = l / 16u;
+PROBE 496:     device const uchar *ql = block + half_index * 64u;
+PROBE 497:     device const uchar *qh = block + 128u + half_index * 32u;
+PROBE 505:     uchar scale_byte = scales[half_index * 8u + sub_block_in_half + lane * 2u];
+PROBE 724:     float d = (float)as_type<half>(d_bits);
+PROBE 738:     float d = (float)as_type<half>(d_bits);
+PROBE 752:     float d = (float)as_type<half>(d_bits);
+PROBE 767:     float d = (float)as_type<half>(d_bits);
+PROBE 783:     return (float)as_type<half>(d_bits);
+PROBE 802:     float delta = (float)as_type<half>(d_bits);
+PROBE 803:     float minimum = (float)as_type<half>(m_bits);
+PROBE 805:     bool high_half = index >= 16u;
+PROBE 806:     uint local = high_half ? (index - 16u) : index;
+PROBE 809:     if (high_half) {
+PROBE 824:     float delta = (float)as_type<half>(d_bits);
+PROBE 826:     bool high_half = index >= 16u;
+PROBE 827:     uint local = high_half ? (index - 16u) : index;
+PROBE 830:     if (high_half) {
+test msl::attn_rows_tests::zz_probe_plain_half_lines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 419 filtered out; finished in 0.00s
+
+        PASS [   0.011s] (1/1) omega msl::attn_rows_tests::zz_probe_plain_half_lines
+────────────
+     Summary [   0.015s] 1 test run: 1 passed, 825 skipped

@@ -1,0 +1,11 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-example-new-platform v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/examples/new-platform)
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+    Checking proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-onnx)
+    Checking proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-autograd)
+    Checking proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Checking proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.34s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
