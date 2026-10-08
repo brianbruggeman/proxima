@@ -2204,7 +2204,7 @@ impl Plan {
         #[cfg(feature = "metal-plan-stable-buffers")]
         {
             let arena = self.arena.get()?;
-            let slot = *arena.position_slot.get(position)?;
+            let slot = (*arena.position_slot.get(position)?)?;
             Some(arena.slot_byte_len(slot))
         }
         #[cfg(not(feature = "metal-plan-stable-buffers"))]

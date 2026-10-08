@@ -1036,7 +1036,7 @@ pub(super) fn execute_plan_with_placements_inner(
         let placement_is_arena_sourced = !output_placed.contains_key(&bound.node);
         let placement = match output_placed.get(&bound.node).copied() {
             Some(placement) => Some(placement),
-            None => arena_placement(plan, position)?,
+            None => arena_placement(plan, position, |node| output_placed.contains_key(&node))?,
         };
         // default mode: skip this op's kernel and blit the captured bytes
         // into the same destination `encode_op` would have resolved, on a
