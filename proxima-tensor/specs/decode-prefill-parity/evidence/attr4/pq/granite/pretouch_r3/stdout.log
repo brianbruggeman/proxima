@@ -1,0 +1,4 @@
+pq cell label=load wall_ms=299.796 cpu_ms=567.917 cpu_pct=189.4 rss_peak_mb=6843.5 footprint_mb=5480.8 gpu_alloc_mb=0.4 load_before=4.61 load_after=4.61
+pq stage=pretouch index=0 checksum=10953236 cell label=pretouch wall_ms=0.957 cpu_ms=0.957 cpu_pct=100.0 rss_peak_mb=6843.5 footprint_mb=5480.9 gpu_alloc_mb=0.4 load_before=4.61 load_after=4.61
+pq stage=prefill index=1 generated=1 cell label=prefill wall_ms=377.927 cpu_ms=142.736 cpu_pct=37.8 rss_peak_mb=7074.2 footprint_mb=5748.2 gpu_alloc_mb=1518.0 load_before=4.61 load_after=4.61
+pq stage=prefill index=2 generated=1 cell label=prefill wall_ms=298.848 cpu_ms=69.856 cpu_pct=23.4 rss_peak_mb=7278.0 footprint_mb=6003.1 gpu_alloc_mb=1676.2 load_before=4.61 load_after=4.61

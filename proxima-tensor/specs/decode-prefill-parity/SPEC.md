@@ -3293,3 +3293,399 @@ attribution_rank rank --census evidence/round3/census/census_granite_prefill_seg
 step_timeline evidence/round3/census/census_granite_decode/telemetry_events.log evidence/round3/census/census_granite_decode/census_dispatches.csv 23   # tools/step_timeline.rs
 ```
 Missing for CI: no job runs the Metal tests, the arms bench or the censuses; every row re-proves on this box only. Bench binaries and raw logs are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine3/` (`bin/`, `logs/`, `raw/` holds the 21-33 MB telemetry logs and timing samples that the evidence directories keep only as `telemetry_events.log`).
+
+## round four attribution (measured 2026-10-08 on `fc5da99b`; library code changed only in the instrument-gated capture, tooling commits listed below)
+
+Evidence root: `evidence/attr4/` (`census/` four decode censuses and one granite prefill census, `timeline/` per-chunk tables and step-23 timelines, `seb/` the zero-encode runs, `pq/` the queueing toggles, `ab/` every variant run with its box files, `summaries/` the medians and CoV the tables below quote, `probes/` base emitted sources plus one diff per variant, `sample/` the `sample` reports, `cpu/` the host cpu comparison, `rank/` the attribution tables, `tools/` the Rust summarizers). Raw logs, the 18 MB telemetry logs and the release binaries (sha256 of the binaries the runs used in `evidence/attr4/bin_measured.sha256` and `bin_measured_early.sha256`; the example binaries were rebuilt as the tooling commits landed, so the gemm-only and prepass-only runs used the build after `b6032d00`/`d3f3931d`; sha256 of the builds at `d3f3931d` in `bin_head.sha256`) are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/`. Test models: gemma4 E2B (blob `sha256-3646b4c1...`) and granite 3.1 moe 1b (blob `sha256-cd60b3e8...`); Ollama did not run; llama.cpp was not run (the llama side is `evidence/slice0/llama_ops/*.tsv`, `evidence/slice0/ac1/decode_arms.out`, recorded 2026-10-07 on another box state). Nothing in this section is a verdict.
+
+Tooling commits on top of `fc5da99b` (each one change, clippy `-D warnings` and `nextest -p omega --features metal,instrument` 903 run / 903 passed, `--features metal` 850 / 850): `9a001991` capture the route prepass buffer for replay; `536e8d78` expose replay resources and an f16 copy of a dispatch; `f2dc0fbb` report resources per arm in the kernel variant tool; `8ea05220` step encode bound and prefill queueing examples; `b6032d00` refill the compaction buffer with the prepass alone (the first gemm-only runs replayed all 72 pairs to fill the compaction buffers and the replays overwrote arena slots that later gemms read as activations, so gemm-only arms ran on zeroed activations and their bit compare was void; the reported gemm-only tables are the rerun after this fix, 3 runs); `06829981` and `d3f3931d` read back and poison a bound buffer, and compare the route compaction of prepass variants.
+
+Cell columns. Every timed cell carries wall, process CPU (`getrusage` user+sys, all threads), CPU % of wall, peak RSS, physical footprint (`proc_pid_rusage`), Metal allocated bytes (`MTLDevice.currentAllocatedSize`) and the one-minute load average before and after (`examples/cell_resources/cell.rs`); a variant arm adds its static threadgroup bytes (`staticThreadgroupMemoryLength`) and the bytes of the buffers it binds (sum of length minus offset over bound buffers under 256 MiB; the checkpoint mapping is excluded and the bytes a kernel touches are DERIVED where stated). Per-arm cells are 50 back-to-back replays of one dispatch (`AB_RESOURCE_ITERS`), so their CPU is the host cost of submitting and waiting, not the kernel. Processes: `/usr/bin/time -l` peak RSS and peak footprint are in each run's `time_summary.txt`. The time columns are medians of 3 processes x 30 interleaved rounds unless noted, CoV across the 3 process medians in brackets.
+Box. Load average 3.0 to 5.9 at launch for every timed run except the two `sample` runs of row 5 (17.1 and 12.7: a stray `find /` of mine was still draining; those runs are used only for frame counts and the row 5 cpu comparison was rerun, `cpu/settled/`, at 3.3 to 3.9). GPU `Device Utilization %` first sample after idle read 80 to 98 on 72 of the 73 box files and was discarded (the 73rd read 0); the two settled samples read 0 and 0 on 72 of 73 files (`ab/norm/step_r2/box_before.txt` read 71 and 0: that run is the noisy one of the step replay). A peer `sccache` server process (pid in each box file) was resident, idle. The instrument builds differ from the release bench binaries (capture hooks off when `PROXIMA_CAPTURE_NODES` is unset, a `getenv` per dispatch remains): the live arm below reads 11.07 ms/token in the instrument census process against 11.16 in the round three release bench for E2B.
+
+### 0. where the host sits in the decode step (E2B 11.16 vs llama 9.02, granite 6.66 vs 5.22; step 23 of 24, 21 steady steps)
+
+Question asked: is the gap in how the step is composed (653 dispatches encoded per token)? Four measurements.
+
+**0.1 per chunk, steady steps** (`evidence/attr4/timeline/chunks_{e2b,granite}_{base,tip}.md`; `tools/chunk_table.rs` over the `chunk_record` events of steps 2 to 22, the capture step 23 excluded; the median is of 21 steps, host-encode CoV is the spread of the encode window). E2B tip (the file for the base build, the 0688ae5b library, has chunks of 24/116/117 ops):
+
+steady decode steps used: 21 (steps >= 2, excluding [23]); medians, CoV% in brackets
+
+| chunk | ops | dispatches (capture step) | host encode us | encode us/op | gpu busy us | gpu us/dispatch | commit to gpu start us | gpu idle before us | steps where the chunk was committed after the previous chunk's gpu end |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 24 | 16 | 62 [22.4] | 2.60 | 259 [2.1] | 16.22 | 149 | 221 | 0 of 21 |
+| 2 | 39 | 28 | 99 [22.2] | 2.54 | 336 [1.6] | 12.01 | 325 | 23 | 0 of 21 |
+| 3 | 54 | 44 | 150 [23.3] | 2.77 | 453 [0.3] | 10.30 | 537 | 22 | 0 of 21 |
+| 4 | 73 | 61 | 206 [22.2] | 2.83 | 690 [0.4] | 11.30 | 815 | 26 | 0 of 21 |
+| 5 | 98 | 81 | 265 [22.5] | 2.70 | 916 [3.8] | 11.31 | 1265 | 25 | 0 of 21 |
+| 6 | 133 | 103 | 337 [22.6] | 2.54 | 1318 [3.2] | 12.80 | 1882 | 31 | 0 of 21 |
+| 7 | 179 | 139 | 465 [21.7] | 2.59 | 2254 [1.6] | 16.22 | 2747 | 32 | 0 of 21 |
+| 8 | 242 | 181 | 574 [20.7] | 2.37 | 3986 [1.4] | 22.02 | 4462 | 39 | 0 of 21 |
+
+| per step | median ms | CoV % | min | max |
+|---|---|---|---|---|
+| step wall ms | 11.121 | 7.37 | 10.659 | 14.864 |
+| evaluate ms | 11.077 | 7.38 | 10.614 | 14.804 |
+| sum of host encode windows ms | 2.099 | 21.72 | 2.051 | 3.452 |
+| sum of chunk gpu busy ms | 10.195 | 1.05 | 9.846 | 10.348 |
+| lead idle (entry to first gpu start) ms | 0.221 | 37.25 | 0.188 | 0.614 |
+| inter-chunk gpu idle ms | 0.195 | 4.82 | 0.177 | 0.213 |
+|   of which chunk committed after previous gpu end (waiting on encode) ms | -0.000 | NaN | -0.000 | -0.000 |
+| last gpu end ms | 10.613 | 1.25 | 10.228 | 10.966 |
+| evaluate minus last gpu end ms (tail on the host) | 0.410 | 125.25 | 0.368 | 3.837 |
+| wall minus evaluate ms (sampling, token feedback) | 0.049 | 17.06 | 0.042 | 0.069 |
+
+granite tip (`timeline/chunks_granite_tip.md`):
+
+steady decode steps used: 21 (steps >= 2, excluding [23]); medians, CoV% in brackets
+
+| chunk | ops | dispatches (capture step) | host encode us | encode us/op | gpu busy us | gpu us/dispatch | commit to gpu start us | gpu idle before us | steps where the chunk was committed after the previous chunk's gpu end |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 24 | 21 | 68 [8.8] | 2.82 | 262 [0.9] | 12.48 | 136 | 204 | 0 of 21 |
+| 2 | 17 | 18 | 60 [8.9] | 3.53 | 222 [1.0] | 12.35 | 353 | 21 | 0 of 21 |
+| 3 | 24 | 26 | 88 [4.2] | 3.66 | 391 [0.6] | 15.03 | 503 | 22 | 0 of 21 |
+| 4 | 32 | 34 | 111 [8.4] | 3.47 | 460 [2.2] | 13.53 | 803 | 21 | 0 of 21 |
+| 5 | 43 | 46 | 149 [4.0] | 3.47 | 673 [3.0] | 14.64 | 1137 | 25 | 0 of 21 |
+| 6 | 58 | 62 | 193 [2.7] | 3.33 | 872 [3.0] | 14.06 | 1639 | 27 | 0 of 21 |
+| 7 | 78 | 83 | 260 [2.9] | 3.33 | 1208 [2.8] | 14.56 | 2280 | 26 | 0 of 21 |
+| 8 | 107 | 108 | 318 [4.6] | 2.97 | 1594 [2.2] | 14.76 | 3180 | 32 | 0 of 21 |
+
+| per step | median ms | CoV % | min | max |
+|---|---|---|---|---|
+| step wall ms | 6.330 | 1.35 | 6.064 | 6.480 |
+| evaluate ms | 6.280 | 1.34 | 6.010 | 6.432 |
+| sum of host encode windows ms | 1.243 | 3.66 | 1.219 | 1.401 |
+| sum of chunk gpu busy ms | 5.662 | 1.38 | 5.360 | 5.716 |
+| lead idle (entry to first gpu start) ms | 0.204 | 9.56 | 0.189 | 0.260 |
+| inter-chunk gpu idle ms | 0.173 | 5.87 | 0.154 | 0.198 |
+|   of which chunk committed after previous gpu end (waiting on encode) ms | -0.000 | NaN | -0.000 | -0.000 |
+| last gpu end ms | 6.042 | 1.35 | 5.723 | 6.099 |
+| evaluate minus last gpu end ms (tail on the host) | 0.241 | 13.13 | 0.228 | 0.367 |
+| wall minus evaluate ms (sampling, token feedback) | 0.052 | 16.24 | 0.047 | 0.077 |
+
+Host encode is 2.1 ms (E2B) and 1.24 ms (granite) of the step, 2.3 to 3.7 us per op, and 18.9% / 19.6% of the step wall; in the tip build no chunk was committed after the previous chunk's GPU end in any of 21 steps in either model (the GPU never waited on encode), in the base build chunk 2 was late in 4 of 21 E2B steps (idle up to 0.204 ms, median 0) and 0 of 21 granite steps. The 7 us per op of the round three timeline (0.82 ms for 116 ops) is the capture step: chunk 2 of step 23 in the base build encodes in 1.069 ms for 116 ops (9.2 us per op) against 0.307 ms (2.6 us per op) in the steady median, because `capture_dispatch` runs inside the encode window (`arena_encode_dispatch_finish.rs`, called from `encode_op`); the sum of the eight encode windows at step 23 is 7.43 ms (E2B base) and 8.02 ms (E2B tip) against 2.16 and 2.10 ms in the steady medians (`timeline/step23_e2b_*.md`), 3.5x and 3.8x. Per step, E2B tip: wall 11.121 ms (CoV 7.4% across 21 steps, max 14.864; the median is the figure), chunk GPU busy sum 10.195, lead idle 0.221, inter-chunk idle 0.195, evaluate minus last GPU end 0.410, wall minus evaluate 0.049. Granite tip: wall 6.330, busy 5.662, lead 0.204, inter 0.173, tail 0.241, wall minus evaluate 0.052.
+
+**0.2 the zero-encode bound** (`examples/step_encode_bound.rs`; step 23 captured once, then 21 rounds, each round one `live` arm (a 24-token generation, the figure is the median gap between token events from the fourth token), one `replay_one` arm (the captured step as ONE command buffer, GPU span) and one `replay_chunks` arm (one command buffer per original chunk, sum of the GPU spans), arm order rotating per round, all in one process; `evidence/attr4/seb/`, `summaries/zero_encode_*`):
+
+| model | live ms/token | replay, one command buffer ms | replay, chunks ms | live minus replay_one | live minus replay_chunks | llama ms/token (recorded) |
+|---|---|---|---|---|---|---|
+| E2B (653 dispatches) | 11.0719 [CoV 1.48%] (10.4085-11.1304) | 10.5252 [0.92%] (10.2583-10.6088) | 10.4936 [1.56%] (9.9740-10.6353) | **0.5467** | 0.5783 | 9.017 |
+| granite (398 dispatches) | 6.3644 [1.50%] (6.3020-6.7540) | 5.8619 [0.92%] (5.7499-5.9496) | 5.8367 [1.12%] (5.6875-5.9598) | **0.5025** | 0.5278 | 5.215 |
+
+Resources of the same cells (median of 21): E2B live decode window 244.1 ms wall, 50.3 ms CPU (20.7%); replay_one 13.76 ms wall, 2.88 ms CPU (20.6%: the replay encodes the 653 dispatches on the host too, and its CPU is above the live step's encode); replay_chunks 15.39 ms wall, 3.46 ms CPU. Process: peak RSS 3.59 GB, footprint 348 MB, Metal 3439.7 MB, load 5.04 (CoV of RSS 1.2%, footprint 0.5%). Granite: live window 139.9 ms wall, 30.6 ms CPU (21.9%), replay_one 8.09 ms wall and 1.80 ms CPU, replay_chunks 8.94 ms and 1.86 ms; RSS 1.98 GB (4.8% CoV), footprint 324 MB, Metal 1630.0 MB, load 4.67. The ceiling a step encoded once and patched per token could remove is the live minus replay figure: 0.55 ms of the 2.14 ms E2B distance to llama's 9.017 (the replay itself is 1.51 ms above it) and 0.50 ms of granite's 1.45 ms (the replay is 0.65 ms above). Its memory cost is not measured (an encoded plan holds the 653 dispatch records; the capture's per-dispatch records are the nearest bytes in hand and were not sized).
+
+**0.3 host time outside encode.** From the steady-step table: evaluate minus last GPU end 0.41 ms E2B / 0.24 granite (the host after the last chunk: readback and KV append; the `step_phase` events carry no finer split, so the parts are unmeasured), wall minus evaluate 0.05 / 0.05 (token feedback, sampling), prepare 0.00 and pre_encode 0.10 to 0.11 for E2B (`timeline/step23_e2b_tip.md`, the per-step rows). A 3 s `sample` of the live E2B release decode (`decode_gbps_baseline_tip`, 12 generations of 128 tokens, 1 ms interval, load 5.9; `sample/e2b_tip/sample.txt`): the main thread has 2302 samples, of which `-[_MTLCommandBuffer waitUntilCompleted]` 1895 (82.3%), `execute_plan_with_placements_inner` outside the wait 247 (10.7%), `encode_op` 194 (8.4%) and `__findenv_locked` 138 top-of-stack samples (6.0%), all of them reached from `resident_nocopy_cache::bind_buffers`, which reads `std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST")` at `omega/src/metal/resident_nocopy_cache.rs:1214` and `:1283`, once per bound buffer per dispatch. Every other thread was idle for the window: the 10 proxima-bg threads parked in `__psynch_cvwait` for all 2302 samples, two libdispatch workers in `__workq_kernreturn`, and the Metal command-queue and completion queues had 37 and 11 samples. The getenv is host CPU inside the encode windows of 0.1: it is not on the GPU's critical path in the steady steps above.
+
+**0.4 llama, from its recording only.** `llama_ops/{e2b,granite}_ops.tsv`: 381 decode graphs per request set, 818 (E2B) and 534 (granite) ops per decode graph (`sum count / 381` over `ntok=1` rows: 311658 / 381 and 203454 / 381), per-op GPU sum 11.10 and 6.49 ms; `e2b_server.log` reports `graphs reused = 126, 251, 376` after three requests of 128 tokens. Ours: 653 and 398 dispatches. The recording was made with a patch that runs each profiled command buffer serially (`ggml_metal_prof_enabled()` forces `n_cb == 0`-style single-threaded encoding and `use_concurrency && !profile`, `llama_per_op.patch`), so its per-op sum (11.10 ms) is a serial per-op figure while the server's wall per token is 9.017 ms (`decode_arms.out`); the recording says nothing about llama's encode time, its command buffer count in production, or how much of 11.10 - 9.017 = 2.08 ms is concurrent dispatch overlap: unknown.
+
+**0.5 head chunk growth, where the removed idle went** (decode step 23 and the 21 steady steps, base build = the 56d7d21d census binary, library-identical to 0688ae5b outside the spec; tip = this section's census binary; `timeline/chunks_*`, `timeline/step23_*`). Steady steps, median ms (n = 21):
+
+| | E2B base | E2B tip | granite base | granite tip |
+|---|---|---|---|---|
+| step wall | 11.106 | 11.121 | 6.323 | 6.330 |
+| lead idle (entry to first GPU start) | 0.221 | 0.221 | 0.201 | 0.204 |
+| inter-chunk GPU idle | 0.218 | 0.195 | 0.210 | 0.173 |
+| of which chunk committed after the previous GPU end | 0.000 (4 of 21 steps nonzero, max 0.204) | 0.000 (0 of 21) | 0.000 (0 of 21) | 0.000 (0 of 21) |
+| chunk GPU busy sum | 10.180 | 10.195 | 5.613 | 5.662 |
+| evaluate minus last GPU end | 0.418 | 0.410 | 0.246 | 0.241 |
+| wall minus evaluate | 0.048 | 0.049 | 0.057 | 0.052 |
+| sum of host encode windows | 2.163 | 2.099 | 1.254 | 1.243 |
+
+The inter-chunk idle fell by 0.023 (E2B) and 0.037 ms (granite) and the busy sum rose by 0.015 and 0.049; the step-to-step spread of the busy sum is 0.1 ms (CoV 1.05 and 1.38%). Step 23, the capture step, boundary by boundary (idle before chunk N, ms; `step23_*.md`): E2B base 0.802 (chunk 2), 0.103, 0.099, 0.025, 0.032, 0.030, 0.032 = 1.123 with the lead 0.353; E2B tip 0.046, 0.260, 0.337, 0.342, 0.448, 0.482, 0.031 = 1.946 with the lead 0.384; granite base 0.189, 0.027, 0.032, 0.028, 0.030, 0.028, 0.036 = 0.370, lead 0.507; granite tip 0.021, 0.021, 0.021, 0.025, 0.028, 0.025, 0.034 = 0.175, lead 0.330. In the capture step the idle at the chunk 2 boundary moved to boundaries 3 to 7 of the tip build (their encode windows are 3.5x the steady ones; the tip chunks are shorter than the base chunk 2), and the E2B step sum is larger in the tip; in steady steps the removed idle is 0.02 to 0.04 ms, below the spread of the busy sum, and the bench ms/token did not move (round three: E2B +0.020, granite +0.0295).
+
+### 1. granite prefill attention (24 ops, 27.5 ms own-cb against llama's 12.93; kernel `omega_cached_attention_h8_g2_d64_..._r8_n2_b64_rt`, `cached_attention_row_tiled.rs:95`)
+
+Captured dispatch: step 0 of the 1000-token prompt, group sha `1388fb73`, extents `[1000, 8, 2, 64]`, 24 members, 1000 threadgroups of 64 threads (2 simdgroups; 8 kv heads x 125 row tiles of 8 rows), block 64 keys, f32 K/V; `live` (binding 8) reads 0, so every visited block takes the new-range MMA path. Variants are the emitted source with one phase deleted (diffs in `probes/diffs/attention/`, base `probes/base/attn_base_emitted.metal`), compiled against the captured dispatch's own buffers and timed interleaved with the production kernel (`AB_SPAN_FULL=1`: the bit compare covers all 1,024,000 outputs). Box: load 3.9 to 4.2 at launch, settled GPU utilization 0. Process (all arms): peak RSS 1625.6 MB, footprint 187.6 MB, Metal 1521.7 MB; `time -l` peak footprint 309 MB. Own-cb single-dispatch times (floor included, ~4 us); `summaries/attention_{single,marginal}_us.md` carry the marginal basis.
+
+| group | extents | arm | us median [CoV%] (min-max), 3 runs | bit compare vs base, full output | cpu ms per replay | cpu % of wall | static tg bytes, bound buffer MB |
+|---|---|---|---|---|---|---|---|
+| 1388fb73 | [1000, 8, 2, 64] | base |  1153.875 [0.49] (1145.208-1155.792)  |  differing=0/1024000 max_ulp=0  |  0.068  |  4.6  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | ctrl |  1143.542 [0.57] (1137.375-1150.500)  |  differing=0/1024000 max_ulp=0  |  0.065  |  4.7  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | f16kv |  1097.750 [0.25] (1093.542-1098.792)  |  differing=1023906/1024000 max_ulp=1998121882  |  0.067  |  5.0  |  tg_static=4480 bound_MB=127.6  |
+| 1388fb73 | [1000, 8, 2, 64] | nocausal |  1932.875 [0.24] (1928.750-1938.000)  |  differing=0/1024000 max_ulp=0  |  0.067  |  3.1  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | nopv |  889.417 [0.53] (884.750-894.125)  |  differing=1024000/1024000 max_ulp=1093834401  |  0.065  |  5.8  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | nopvloads |  1083.667 [0.33] (1080.667-1087.708)  |  differing=1024000/1024000 max_ulp=2148997014  |  0.066  |  5.0  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | noqk |  643.583 [1.13] (634.833-649.250)  |  differing=1022976/1024000 max_ulp=2162838343  |  0.060  |  6.9  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | noqkloads |  735.208 [0.15] (734.250-736.458)  |  differing=1022976/1024000 max_ulp=2162838343  |  0.061  |  6.3  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | nosoftmax |  703.375 [0.57] (703.250-710.250)  |  differing=1024000/1024000 max_ulp=1093834401  |  0.061  |  6.7  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | pvonly |  318.750 [0.13] (318.500-319.292)  |  differing=1024000/1024000 max_ulp=1093834401  |  0.058  |  10.6  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | qkonly |  452.917 [0.15] (452.583-453.875)  |  differing=1024000/1024000 max_ulp=1093834401  |  0.062  |  9.3  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | skeleton |  110.292 [0.45] (109.750-110.750)  |  differing=1024000/1024000 max_ulp=1093834401  |  0.058  |  16.7  |  tg_static=4480 bound_MB=131.8  |
+| 1388fb73 | [1000, 8, 2, 64] | smonly |  424.208 [0.50] (422.875-427.000)  |  differing=1024000/1024000 max_ulp=1093834401  |  0.059  |  9.1  |  tg_static=4480 bound_MB=131.8  |
+
+Arms: `ctrl` the unmodified source recompiled; `noqk` the Q.K^T depth loop deleted (`cached_attention_row_tiled.rs:174-199`, scores stay zero); `noqkloads` the K and Q fragment loads replaced by constants, MMAs kept; `nosoftmax` the per-vector max/exp/sum loop deleted (`:240-275`); `nopv` the P.V key-tile loop deleted (`:287-297`); `nopvloads` the V fragment load replaced by a constant (`:293`); `nocausal` the causal block skip disabled (`new_end = total_rows`, `:158`; masked scores are -inf so the output is bit-identical); `f16kv` K and V read as `half` (the six K/V bindings narrowed from f32, Q converted to half for the MMA, P converted to half for P.V, accumulators float); `qkonly`, `smonly`, `pvonly` each phase alone and `skeleton` none of the three (setup, the block loop, barriers, write-out).
+
+| quantity (us per op) | value | derivation |
+|---|---|---|
+| production kernel (AB base) | 1153.9 [0.49%] (ctrl 1143.5) | table |
+| llama FLASH_ATTN_EXT per layer | 538.7 | 12.93 ms / 24 layers, DERIVED from `rank/granite_prefill.md` |
+| gap per op | 615 | 1153.9 - 538.7 |
+| Q.K^T removed | -510.3 (-418.7 with the MMAs kept and only the loads removed) | base - noqk (643.6), base - noqkloads (735.2) |
+| softmax removed | -450.5 | base - nosoftmax (703.4) |
+| P.V removed | -264.5 (-70.2 with only the V loads replaced) | base - nopv (889.4), base - nopvloads (1083.7) |
+| each phase alone above the skeleton (110.3) | Q.K^T 342.6, softmax 313.9, P.V 208.5 | qkonly 452.9, smonly 424.2, pvonly 318.8 minus skeleton |
+| causal block skip disabled | +779.0 (+67.5%) | nocausal 1932.9; the kernel visits 1040 of 2000 block slots per kv head with the skip (8.32 of 16 blocks per row tile, DERIVED from tile 8 and block 64): 1.92x the blocks, 1.68x the time |
+| f16 K/V (not bit-identical: 1,023,906 of 1,024,000 elements differ, max_abs/largest 2.2e-3) | -56.1 (-4.9%) | f16kv 1097.8; bound buffer bytes 127.6 MB against 131.8 MB, K/V bytes halved |
+
+Which phase holds the gap: removing Q.K^T frees 510 us, softmax 451 us, P.V 265 us, each against a 615 us distance to llama's per-layer figure; the three removals sum to 1225 us against the 1154 us kernel (they overlap by 71 us under removal) and the three phases alone plus the skeleton sum to 975 us (179 us of the kernel exists only when the phases run together). The softmax loop at `cached_attention_row_tiled.rs:240-275` runs on 16 query vectors per threadgroup between two threadgroup barriers (`:239`, `:276`), with the two simdgroups taking 8 vectors each: per vector two `simd_max`/`simd_sum` reductions and `exp` on two columns per lane plus one `exp` per vector; Q.K^T (`:174-199`) loads 32 K and 16 Q fragments per simdgroup per block from device memory and issues 64 MMAs; the three phases are separated by barriers (`:239`, `:276`, `:313`), so no phase overlaps another within a threadgroup. Memory: no variant changes the static threadgroup bytes (4480) or, except `f16kv`, the bound bytes; the K/V traffic of the kernel is re-read per row tile (DERIVED: 8320 tile-block visits per layer x 32 KB = 272.6 MB per op, 236 GB/s at 1154 us); the f16 arm halves those bytes and moves the kernel 4.9%, and removing only the Q and K loads (`noqkloads`) frees 419 of the 510 us of Q.K^T, so the loads cost less than the barriers and MMA issue they sit between. Why the 179 us interaction exists: untraced.
+
+### 2. E2B decode rms norm (242 ops, 2.90 ms own-cb against llama's 1.80 ms; the three hidden-width groups are 176 of the 242)
+
+Captured dispatches: step 5 of the E2B decode (971-token prompt), the three groups with extents `[1, 1536]`: `23d555d5` (epilogue 4, 71 dispatches), `f41c3c0e` (epilogue 5, 70), `d8ad59bf` (epilogue 6, 35); one 256-thread threadgroup per row. The remaining 66 norm dispatches (q/k/v norms at widths 256 and 512, the per-layer-input norm at `[1, 35, 256]`) were not varied. Variants are the emitted source (`probes/base/norm_base_{94,179,250}.metal`, diffs in `probes/diffs/norm/`) with: `nosumsq` the sum-of-squares loop emptied (`tiled_gemm_cooperative_scan.rs:2881-2911`); `noreduce` the `simd_sum`, threadgroup partials, barrier and second `simd_sum` replaced by the lane's own accumulator (`:2626-2642`); `nowrite` the output store guarded by an impossible compare (`:3110` loop kept); `noweights` the epilogue weight prefetch (`epi_pre0`, `epi_pre1`, 6 slots per lane each, `:3021-3037`, declared `:3075`) replaced by 1.0, which is also the "fused multiply chain removed" arm because the compiler drops the two weight loads with it; `w128/w192/w384/w512` the threadgroup width with the slot count and the partials array resized (`.width` files). Bases: own-cb single dispatch (floor included), in-family sequence (all 71/70/35 members in one command buffer, weights warm, per dispatch) and the whole captured step with the group's members swapped (30 interleaved rounds, 3 processes). Process (all norm arms): peak RSS 3435 to 3445 MB, footprint 102 to 108 MB, Metal 3247.5 MB, load 4.0 to 5.0; `time -l` peak footprint 329 to 344 MB. Pair fusion: not built (see below).
+
+Own-cb single dispatch, us (`summaries/norm_single_us.md`, marginal basis in `norm_marginal_us.md`); bit compare is over all 1536 outputs:
+
+| group | extents | arm | us median [CoV%] (min-max), 3 runs | bit compare vs base | cpu ms per replay | cpu % of wall | static tg bytes, bound buffer MB |
+|---|---|---|---|---|---|---|---|
+| 23d555d5 | [1, 1536] | base |  11.375 [1.67] (11.250-11.625)  |  differing=0/1536 max_ulp=0  |  0.058  |  23.0  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | ctrl |  11.500 [1.25] (11.500-11.750)  |  differing=0/1536 max_ulp=0  |  0.054  |  22.2  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | noreduce |  11.000 [1.57] (10.917-11.250)  |  differing=1536/1536 max_ulp=47332110  |  0.055  |  24.2  |  tg_static=0 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | nosumsq |  9.625 [2.21] (9.500-9.917)  |  differing=1536/1536 max_ulp=102946670  |  0.054  |  24.8  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | noweights |  9.125 [1.74] (8.875-9.167)  |  differing=1536/1536 max_ulp=2166759632  |  0.055  |  24.7  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | nowrite |  10.833 [0.89] (10.833-11.000)  |  differing=1536/1536 max_ulp=2552462657  |  0.057  |  24.2  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w128 |  18.042 [0.23] (18.000-18.083)  |  differing=0/1536 max_ulp=0  |  0.055  |  22.3  |  tg_static=16 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w192 |  13.000 [0.19] (13.000-13.042)  |  differing=0/1536 max_ulp=0  |  0.056  |  23.6  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w384 |  9.375 [1.33] (9.250-9.500)  |  differing=0/1536 max_ulp=0  |  0.057  |  25.0  |  tg_static=48 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w512 |  8.417 [1.74] (8.250-8.542)  |  differing=0/1536 max_ulp=0  |  0.059  |  25.6  |  tg_static=64 bound_MB=3.6  |
+| d8ad59bf | [1, 1536] | base |  13.292 [1.88] (13.042-13.542)  |  differing=0/1536 max_ulp=0  |  0.055  |  23.8  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | ctrl |  13.250 [0.55] (13.125-13.250)  |  differing=0/1536 max_ulp=0  |  0.055  |  24.0  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | noreduce |  12.625 [2.19] (12.458-13.000)  |  differing=1536/1536 max_ulp=2130907226  |  0.055  |  23.6  |  tg_static=0 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | nosumsq |  11.833 [1.92] (11.792-12.208)  |  differing=1536/1536 max_ulp=2213008107  |  0.055  |  24.2  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | noweights |  8.958 [0.71] (8.917-9.042)  |  differing=1536/1536 max_ulp=2094070297  |  0.056  |  24.2  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | nowrite |  13.750 [0.35] (13.667-13.750)  |  differing=1536/1536 max_ulp=2506033712  |  0.055  |  23.4  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w128 |  14.958 [0.98] (14.833-15.125)  |  differing=810/1536 max_ulp=2506033712  |  0.055  |  23.4  |  tg_static=16 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w192 |  15.000 [0.42] (14.917-15.042)  |  differing=456/1536 max_ulp=86  |  0.054  |  23.1  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w384 |  10.000 [0.24] (10.000-10.042)  |  differing=0/1536 max_ulp=0  |  0.057  |  24.6  |  tg_static=48 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w512 |  8.667 [1.28] (8.500-8.708)  |  differing=0/1536 max_ulp=0  |  0.057  |  24.8  |  tg_static=64 bound_MB=5.0  |
+| f41c3c0e | [1, 1536] | base |  13.042 [0.18] (13.042-13.083)  |  differing=0/1536 max_ulp=0  |  0.053  |  23.4  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | ctrl |  12.958 [1.28] (12.792-13.125)  |  differing=0/1536 max_ulp=0  |  0.055  |  24.1  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | noreduce |  12.667 [1.42] (12.625-12.958)  |  differing=1536/1536 max_ulp=47419168  |  0.055  |  24.4  |  tg_static=0 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | nosumsq |  11.458 [2.56] (11.125-11.708)  |  differing=1536/1536 max_ulp=112935967  |  0.054  |  23.9  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | noweights |  9.000 [2.36] (8.875-9.292)  |  differing=1536/1536 max_ulp=2190476367  |  0.055  |  24.1  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | nowrite |  13.667 [1.56] (13.542-13.958)  |  differing=1536/1536 max_ulp=2556056418  |  0.056  |  22.7  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w128 |  15.125 [0.83] (15.000-15.250)  |  differing=711/1536 max_ulp=2556056418  |  0.057  |  22.5  |  tg_static=16 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w192 |  15.250 [1.68] (14.833-15.292)  |  differing=0/1536 max_ulp=0  |  0.057  |  22.7  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w384 |  9.792 [3.41] (9.708-10.333)  |  differing=0/1536 max_ulp=0  |  0.057  |  24.4  |  tg_static=48 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w512 |  9.083 [0.53] (9.000-9.083)  |  differing=0/1536 max_ulp=0  |  0.057  |  24.8  |  tg_static=64 bound_MB=4.8  |
+
+In-family sequence, us per dispatch (`summaries/norm_sequence_per_dispatch_us.md`):
+
+| group | extents | arm | us per dispatch median [CoV%] (min-max), 3 runs | bit compare vs base | cpu ms per replay | cpu % of wall | static tg bytes, bound buffer MB |
+|---|---|---|---|---|---|---|---|
+| 23d555d5 | [1, 1536] | base |  5.927 [0.83] (5.894-5.991)  |  differing=0/1536 max_ulp=0  |  0.057  |  23.2  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | ctrl |  5.960 [0.80] (5.954-6.040)  |  differing=0/1536 max_ulp=0  |  0.056  |  22.7  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | noreduce |  5.826 [1.09] (5.791-5.915)  |  differing=1536/1536 max_ulp=47332110  |  0.055  |  23.9  |  tg_static=0 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | nosumsq |  4.722 [1.87] (4.702-4.865)  |  differing=1536/1536 max_ulp=102946670  |  0.055  |  24.2  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | noweights |  4.787 [1.13] (4.783-4.879)  |  differing=1536/1536 max_ulp=2166759632  |  0.056  |  24.3  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | nowrite |  5.808 [0.28] (5.786-5.818)  |  differing=1536/1536 max_ulp=2552462657  |  0.057  |  24.8  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w128 |  9.126 [0.83] (9.079-9.227)  |  differing=0/1536 max_ulp=0  |  0.057  |  22.7  |  tg_static=16 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w192 |  6.180 [0.60] (6.125-6.195)  |  differing=0/1536 max_ulp=0  |  0.058  |  24.8  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w384 |  5.775 [0.93] (5.690-5.789)  |  differing=0/1536 max_ulp=0  |  0.056  |  24.3  |  tg_static=48 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w512 |  4.914 [1.71] (4.860-5.025)  |  differing=0/1536 max_ulp=0  |  0.058  |  25.5  |  tg_static=64 bound_MB=3.6  |
+| d8ad59bf | [1, 1536] | base |  6.892 [0.21] (6.867-6.893)  |  differing=0/1536 max_ulp=0  |  0.053  |  23.3  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | ctrl |  6.877 [0.09] (6.875-6.886)  |  differing=0/1536 max_ulp=0  |  0.054  |  23.8  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | noreduce |  6.621 [0.61] (6.611-6.686)  |  differing=1351/1536 max_ulp=2125143253  |  0.055  |  24.0  |  tg_static=0 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | nosumsq |  6.036 [0.71] (5.975-6.057)  |  differing=1466/1536 max_ulp=2192492937  |  0.054  |  23.9  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | noweights |  5.044 [0.72] (4.996-5.067)  |  differing=1536/1536 max_ulp=2080356578  |  0.056  |  24.8  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | nowrite |  6.775 [0.52] (6.732-6.802)  |  differing=1536/1536 max_ulp=2493437832  |  0.056  |  22.9  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w128 |  7.507 [1.04] (7.375-7.511)  |  differing=512/1536 max_ulp=2433717696  |  0.057  |  23.0  |  tg_static=16 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w192 |  7.285 [0.19] (7.261-7.286)  |  differing=0/1536 max_ulp=0  |  0.057  |  23.4  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w384 |  6.044 [0.51] (6.018-6.079)  |  differing=545/1536 max_ulp=192  |  0.057  |  24.3  |  tg_static=48 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w512 |  5.896 [0.81] (5.881-5.970)  |  differing=0/1536 max_ulp=0  |  0.056  |  24.9  |  tg_static=64 bound_MB=5.0  |
+| f41c3c0e | [1, 1536] | base |  6.546 [1.08] (6.486-6.627)  |  differing=0/1536 max_ulp=0  |  0.054  |  23.9  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | ctrl |  6.587 [0.53] (6.573-6.639)  |  differing=0/1536 max_ulp=0  |  0.054  |  23.7  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | noreduce |  6.452 [0.66] (6.379-6.454)  |  differing=940/1536 max_ulp=2174991425  |  0.054  |  23.7  |  tg_static=0 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | nosumsq |  5.786 [0.69] (5.745-5.825)  |  differing=1045/1536 max_ulp=2208429346  |  0.054  |  24.1  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | noweights |  4.835 [1.57] (4.793-4.941)  |  differing=1536/1536 max_ulp=2204021410  |  0.055  |  24.8  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | nowrite |  6.484 [0.87] (6.461-6.568)  |  differing=1536/1536 max_ulp=2558685089  |  0.056  |  23.2  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w128 |  7.418 [1.35] (7.278-7.471)  |  differing=512/1536 max_ulp=2558685089  |  0.057  |  22.7  |  tg_static=16 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w192 |  6.952 [1.15] (6.918-7.071)  |  differing=0/1536 max_ulp=0  |  0.051  |  22.7  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w384 |  5.906 [0.35] (5.879-5.920)  |  differing=0/1536 max_ulp=0  |  0.051  |  24.1  |  tg_static=48 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w512 |  5.714 [0.81] (5.684-5.775)  |  differing=0/1536 max_ulp=0  |  0.052  |  24.3  |  tg_static=64 bound_MB=4.8  |
+
+Whole captured step (653 dispatches in one command buffer) with the group's members swapped, ms (`summaries/norm_step_replay_ms.md`; `omit_group` is the step without the group's dispatches; the three groups are measured in the same process in sequence, so each has its own base):
+
+| group | extents | arm | step ms median [CoV%] (min-max), 3 runs | bit compare vs base | cpu ms per replay | cpu % of wall | static tg bytes, bound buffer MB |
+|---|---|---|---|---|---|---|---|
+| 23d555d5 | [1, 1536] | base |  10.533 [4.01] (9.828-10.553)  |  differing=0/1536 max_ulp=0  |  0.058  |  23.2  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | omit_group |  9.819 [3.77] (9.194-9.826)  |  -  |  -  |  -  |  -  |
+| 23d555d5 | [1, 1536] | ctrl |  10.546 [3.48] (9.923-10.547)  |  differing=0/1536 max_ulp=0  |  0.055  |  22.8  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | noreduce |  10.538 [1.21] (10.322-10.544)  |  differing=1536/1536 max_ulp=47332110  |  0.055  |  24.4  |  tg_static=0 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | nosumsq |  10.422 [2.16] (10.040-10.431)  |  differing=1536/1536 max_ulp=102946670  |  0.054  |  24.6  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | noweights |  10.374 [3.81] (9.709-10.386)  |  differing=1536/1536 max_ulp=2166759632  |  0.056  |  24.7  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | nowrite |  10.527 [1.70] (10.230-10.545)  |  differing=1536/1536 max_ulp=2552462657  |  0.058  |  24.8  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w128 |  11.039 [3.63] (10.373-11.067)  |  differing=0/1536 max_ulp=0  |  0.057  |  22.5  |  tg_static=16 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w192 |  10.645 [2.25] (10.245-10.665)  |  differing=0/1536 max_ulp=0  |  0.052  |  23.7  |  tg_static=32 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w384 |  10.396 [1.57] (10.121-10.407)  |  differing=0/1536 max_ulp=0  |  0.055  |  24.6  |  tg_static=48 bound_MB=3.6  |
+| 23d555d5 | [1, 1536] | w512 |  10.347 [4.82] (9.511-10.356)  |  differing=0/1536 max_ulp=0  |  0.057  |  25.5  |  tg_static=64 bound_MB=3.6  |
+| d8ad59bf | [1, 1536] | base |  10.479 [3.92] (9.814-10.542)  |  differing=0/1536 max_ulp=0  |  0.053  |  24.3  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | omit_group |  10.055 [1.43] (9.882-10.168)  |  -  |  -  |  -  |  -  |
+| d8ad59bf | [1, 1536] | ctrl |  10.440 [1.33] (10.258-10.529)  |  differing=0/1536 max_ulp=0  |  0.052  |  22.8  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | noreduce |  10.477 [0.73] (10.370-10.518)  |  differing=1536/1536 max_ulp=2101225195  |  0.052  |  23.4  |  tg_static=0 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | nosumsq |  10.432 [1.10] (10.288-10.515)  |  differing=1536/1536 max_ulp=2169216576  |  0.054  |  23.9  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | noweights |  10.313 [4.67] (9.529-10.370)  |  differing=1536/1536 max_ulp=2066188503  |  0.052  |  25.0  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | nowrite |  10.522 [4.68] (9.711-10.563)  |  differing=1536/1536 max_ulp=2477568106  |  0.054  |  23.4  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w128 |  10.590 [2.01] (10.248-10.633)  |  differing=512/1536 max_ulp=2465238884  |  0.053  |  23.4  |  tg_static=16 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w192 |  10.569 [1.38] (10.335-10.600)  |  differing=0/1536 max_ulp=0  |  0.054  |  23.3  |  tg_static=32 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w384 |  10.401 [1.01] (10.234-10.425)  |  differing=0/1536 max_ulp=0  |  0.053  |  24.1  |  tg_static=48 bound_MB=5.0  |
+| d8ad59bf | [1, 1536] | w512 |  10.341 [1.36] (10.101-10.343)  |  differing=0/1536 max_ulp=0  |  0.053  |  24.9  |  tg_static=64 bound_MB=5.0  |
+| f41c3c0e | [1, 1536] | base |  10.572 [0.31] (10.523-10.586)  |  differing=0/1536 max_ulp=0  |  0.052  |  24.7  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | omit_group |  9.734 [0.66] (9.644-9.768)  |  -  |  -  |  -  |  -  |
+| f41c3c0e | [1, 1536] | ctrl |  10.568 [0.35] (10.508-10.576)  |  differing=0/1536 max_ulp=0  |  0.051  |  24.1  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | noreduce |  10.530 [0.47] (10.450-10.539)  |  differing=1536/1536 max_ulp=2223453031  |  0.051  |  24.0  |  tg_static=0 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | nosumsq |  10.416 [0.27] (10.396-10.450)  |  differing=1536/1536 max_ulp=2301017904  |  0.050  |  24.2  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | noweights |  10.281 [0.04] (10.276-10.284)  |  differing=1536/1536 max_ulp=2192056857  |  0.051  |  24.9  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | nowrite |  10.607 [0.62] (10.496-10.611)  |  differing=1536/1536 max_ulp=2557621261  |  0.054  |  23.6  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w128 |  10.694 [0.44] (10.633-10.724)  |  differing=512/1536 max_ulp=2557621261  |  0.058  |  23.3  |  tg_static=16 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w192 |  10.683 [0.40] (10.615-10.694)  |  differing=0/1536 max_ulp=0  |  0.057  |  23.2  |  tg_static=32 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w384 |  10.341 [0.40] (10.298-10.380)  |  differing=0/1536 max_ulp=0  |  0.058  |  24.6  |  tg_static=48 bound_MB=4.8  |
+| f41c3c0e | [1, 1536] | w512 |  10.285 [0.63] (10.184-10.303)  |  differing=0/1536 max_ulp=0  |  0.058  |  24.8  |  tg_static=64 bound_MB=4.8  |
+
+Step-level deltas against each group's base (ms; negative = the swapped step is shorter; the base itself varies by CoV 0.3% to 4.0% across the three processes, one process (`step_r2`, GPU utilization 80/71 at launch) is the noisy one, so every delta below carries that spread):
+
+| | epi4 (71 ops) | epi5 (70 ops) | epi6 (35 ops) | sum |
+|---|---|---|---|---|
+| group omitted (in-situ cost of the group) | 0.714 (10.1 us/op) | 0.838 (12.0 us/op) | 0.424 (12.1 us/op) | 1.976 |
+| `noweights` | -0.159 | -0.291 | -0.166 | -0.616 |
+| `nosumsq` | -0.111 | -0.156 | -0.047 | -0.314 |
+| `noreduce` | +0.005 | -0.042 | -0.002 | -0.039 |
+| `nowrite` | -0.006 | +0.035 | +0.043 | +0.072 |
+| `w512` (bit-identical in all three groups) | -0.186 | -0.287 | -0.138 | -0.611 |
+| `w384` | -0.137 (bit-identical) | -0.231 (bit-identical) | -0.078 (545 of 1536 differ, 192 ulp max: reduction order) | -0.446 |
+| `w192` | +0.112 | +0.111 | +0.090 | +0.313 |
+| `w128` | +0.506 | +0.122 (512 of 1536 differ: variant source not valid for this group) | +0.111 (same) | not summed |
+
+What the table says about the 1.1 ms: the hidden-width groups cost 1.976 ms in situ; the epilogue weight prefetch (12 device loads per lane at 6 slots x 2 operands, 24.6 KB per op of which 12.3 KB are the two weight vectors) accounts for 0.62 ms of it, the sum-of-squares loop 0.31 ms, the reduction 0.04 ms, the output store 0 within the spread; moving the same kernel from 256 to 512 lanes (the 8 unrolled slots of 256, 6 of them live, become 3 slots of 512, `partials[16]`) shortens the step by 0.61 ms with `differing=0` on all 1536 outputs of all three groups, while 128 and 192 lanes lengthen it. The 512-lane arm needs `tg_static` 64 bytes against 32 and binds the same buffers. The in-family sequence basis shows a smaller change per dispatch (`w512` -0.87, -0.95, -0.92 us for epi4/5/6 = 0.16 ms over 176 dispatches) than the step basis (0.61 ms): the sequence replays each group's members back to back with warm weights, the step basis includes the dependency latency between a norm and its neighbours, and which of the two the live step pays is not separated by this pass. Own-cb single: 11.50 (ctrl) to 8.42 us (`w512`) for epi4, 13.1 to 9.08 for epi5, 13.1 to 8.71 for epi6. The mechanism of why a wider group is faster (fewer slots per lane, one more simdgroup of latency hiding per row, fewer serial 64-bit address computations per lane) is not isolated by these arms: untraced. Pair fusion of the dependent pairs (epi5 then epi4 at dispatch 17 and 18, epi6 then epi4 at 25 and 26 of every layer, 70 pairs): not built, because the replay record binds one dispatch's buffers and uniforms and a fused kernel needs two (an API to append a second record's bindings is the missing tool); the in-situ bound from this table is the epi4 group's omission cost, 0.714 ms, which is an upper bound on what removing the second norm of every pair could save and includes the arithmetic a fused kernel would still do.
+
+### 3. granite prefill step 0: 49.9 ms between `commit` and `scheduled`
+
+Instrument: `examples/prefill_queueing.rs` (one process runs the stages named in `PQ_STAGES`; `chunk_phase` and `step_phase` events to a file exporter; `tools/queueing_summary.rs` splits step 0 of every generation; `evidence/attr4/pq/`). Stages: `prefill` is a one-token generation from the 1000-token prompt with its first letter changed per occurrence so the prompt cache cannot skip it (token counts 1000, then 1002); `pretouch` reads one byte of every 16 KiB page of the checkpoint mapping (0.9 ms wall: the pages were already resident after `LoadedModel::load`); `dry` commits three empty command buffers (a one-thread kernel on a 16-byte buffer, 14.5 ms wall for the three, the first includes compiling its library) through the same device queue; `small` generates two tokens from the 25-token prompt (36 tokens in granite's tokenizer, 27 in E2B's). Commit end to scheduled callback, ms, per run (3 processes per toggle; `pq/*/*/queueing.md`):
+
+| toggle before the long prefill | model | first command buffer of the process (tokens) | commit end to scheduled | the 1000-token step 0 when it is not first | pipeline misses (compile ms) of the first | scheduled to GPU start |
+|---|---|---|---|---|---|---|
+| none | granite | 1000 | 50.047, 51.561, 52.041 | second prefill (1002 tokens): 4.576, 8.682, 8.767 | 20 (34.3, 19.2, 19.5) | 0.011-0.308 |
+| `pretouch` (all checkpoint pages touched) | granite | 1000 | 48.724, 51.709, 53.650 | second prefill: 4.679, 9.826, 4.533 | 20 (18.7, 19.6, 19.1) | 0.035-0.409 |
+| `dry` (three empty command buffers, no checkpoint buffer bound) | granite | 1000 | 50.625, 55.437, 49.496 | second prefill: 5.453, 8.464, 5.327 | 20 (10.8, 10.8, 11.3) | 0.051-0.313 |
+| `small` (a 36-token generation first) | granite | 36 | 43.498, 45.564, 44.429 | the 1000-token prefill: 8.699, 5.291, 5.083; the 1002-token one: 5.952, 5.019, 4.349 | 33 (162.6, 26.8, 26.0) then 8 (4.0) then 1 (0.8) | 0.033-0.288 |
+| `pretouch` then `small` | granite | 36 | 48.532, 44.006, 47.763 | 8.879, 5.123, 9.471; then 8.350, 4.790, 8.592 | 33 (24.7, 23.6, 24.0) then 8 (4.0) | 0.017-0.068 |
+| none | E2B | 971 | 93.686, 101.267, 96.613 | second prefill (972): 6.834, 7.240, 6.711 | 36 (25.9, 24.9, 24.3) | 0.160-0.201 |
+| `small` (27 tokens first) | E2B | 27 | 85.922, 82.009, 86.092 | the 971-token prefill: 13.337, 12.658, 13.644; then 7.452, 6.990, 7.237 | 48 (199.0, 30.0, 31.8) then 11 (5.7-6.2) | 0.192-0.432 |
+
+Decode for comparison: commit to scheduled of a steady decode chunk is 0.05 to 0.07 ms (granite step 23, round three). Resources of the stage cells (median of 3; the telemetry ring of these examples holds 262,144 events, which is why a process shows 5.5 GB of footprint after `load` where the bench shows 0.37 GB; the columns are the example's, not the bench's): granite first 1000-token prefill 383.7 ms wall, 145.2 ms CPU (38.1%), peak RSS 7071 MB, footprint 5745 MB, Metal 1518.0 MB, load 4.94; second prefill 310.8 ms, 79.9 ms CPU (25.7%), Metal 1676.2 MB; third 273.7 ms, 43.3 ms CPU; `small` stage 218.3 ms (CoV 32.8%), 169.9 ms CPU (78.5%), Metal 1378.2 MB; the long prefill after `small` 318.8 ms, 76.0 ms CPU, Metal 1536.3 MB; `dry` stage 14.5 ms, 14.1 ms CPU, Metal 0.4 MB. E2B first prefill 753.4 ms wall, 174.0 ms CPU (23.2%), RSS 8885 MB, footprint 5755 MB, Metal 3387.0 MB; second 628.1 ms, 56.4 ms CPU (9.0%), Metal 3579.3 MB; `small` stage 290.2 ms (CoV 28.8%), 195.6 ms CPU, Metal 3217.3 MB. The census step 0 reads 102.6 ms (E2B, 971 tokens) and 51.3 ms (granite) in the same field (`census/*/telemetry_events.log`).
+
+What the toggles separate, as measured: (1) new pipeline states are not the queueing: their compile time sits in `pre_encode` (11 to 44 ms for 20 misses in granite, `pq/granite/*/queueing.md`), before `commit`, and the queueing does not follow their count: eight new states in the long prefill after `small` leave 5.1 to 9.5 ms, while a first command buffer pays 44 to 55 ms with 20 or 33 new states. (2) The first command buffer of the process is not the cause by itself: three empty command buffers through the same queue ahead of step 0 leave 49.5 to 55.4 ms. (3) First touch of the checkpoint pages by the host is not the cause: all pages touched, 48.7 to 53.7 ms. (4) The cost follows the first command buffer that references the model's device buffers, whatever its shape: the 36-token first command buffer pays 43.5 to 48.5 ms, the 1000-token one 48.7 to 55.4 ms (+5 ms for the larger activations), and the 1000-token one after the 36-token one pays 5.1 to 9.5 ms. (5) It scales with the model: 51.6 ms with 1518 MB allocated on Metal (granite) and 96.6 ms with 3387 MB (E2B), 29.4 MB/ms and 35.1 MB/ms (DERIVED, about 30 to 35 GB/s). (6) The warm queueing of a prefill command buffer is 4.5 to 9.8 ms, bimodal in granite (4.5 to 5.5 in five of nine runs, 8.4 to 9.8 in four), 6.7 to 7.4 in E2B, against 0.05 to 0.07 ms for a decode chunk; its cause is not isolated. Mechanism as far as it is traced: the commit path is `closing_command_buffer.commit()` at `omega/src/metal/placements_execute_named.rs:1019` and the scheduled handler is registered at `:79` (event `:63`); the buffers the command buffer references are created by `newBufferWithBytesNoCopy_length_options_deallocator` for the checkpoint mapping (`resident_nocopy_cache.rs:217`) and by `allocate_buffer` for the arena; the toggles identify the first reference to those buffers in a command buffer as the event the 44 to 52 ms (granite) follows; the driver-side work (residency of the referenced buffers is the candidate the size scaling points to) was not observed, and the weights, the arena and the KV buffers cannot be separated because every real command buffer references all three. The cold step 0 is a fresh-process cost: the round three bench prefill (245 ms granite, 588 ms E2B) is a median over runs after a warm-up and does not contain it.
+
+### 4. stacked expert GEMM at granite prefill, compacted route (72 ops, 165.0 ms own-cb class total; llama per op 1536.7 / 1538.4 / 1512.7 us for gate / up / down)
+
+The capture now records the compaction buffer and the prepass (`9a001991`), so the pair replays: the census of the default (compacted) build times all 383 dispatches (`rank/granite_prefill.md`: 231.06 ms own-cb sum; the class `Q8_0 4194304` 72 ops 165.00 ms; matmul class 198.63 ms against llama 131.89, +66.74; attention +14.58; rms norm +1.15; the live chunk busy of the same build is 241.8 ms). Census own-cb pair, us per op (`census/census_granite_prefill_cap/census_groups.csv`, warm): gate `[1000,8,1024,512]` 2179.9, up+silu `[1000,8,1024,512]` with the epilogue 2268.1, down `[1000,8,512,1024]` 2436.1. The route compaction is 32,260 bytes per op (8000 token ids + 65 header words, 4 B each) bound at slot `bindings.len()` (6 here; prepass kernel `expert_grouped_gemm.rs:992-1090`, prepass launch `:1133`).
+
+Three bases on the AB replay (sha `49f88ec4`, gate and down members 0, 24 members each; box load 3.1 to 4.6; process peak RSS 1617 to 1619 MB, footprint 197 to 204 MB, Metal 1516.5 MB; `time -l` peak footprint 387 to 393 MB): **pair** = prepass then gemm as the live step runs them; **gemm only** = the gemm alone against the compaction the prepass left in place (the buffer is refilled by the prepass alone before timing, the activations are intact: `describe_gemmonly.out` binding 1 head `[-0.53, 2.47, -26.4, -2.18]` as in the pair); **prepass alone**.
+
+| | gate (us) | down (us) | llama (us) | ratio gate / down |
+|---|---|---|---|---|
+| pair | 2163.6 [CoV 0.05%] | 2406.3 [0.04%] | 1536.7 / 1512.7 | 1.408 / 1.591 |
+| gemm only | 1737.5 [0.09%] | 1979.4 [0.01%] | | 1.131 / 1.309 |
+| prepass alone | 426.1 [0.10%] | 426.3 [0.05%] | (llama `kernel_mul_mm_id_map0`: not in the recording) | |
+| pair minus gemm only | 426.1 | 426.9 | | |
+
+The prepass is 426 us per op, 20% of the pair, 72 x 426.3 us = 30.7 ms of the class's 165.0 ms.
+
+Gemm-only ablations, us single dispatch, 3 processes x 30 rounds (`summaries/gemm_gemmonly_single_us.md`, marginal basis `gemm_gemmonly_marginal_us.md`; the same arms on the pair basis, `summaries/gemm_pair_single_us.md`, differ from these by 426 +/- 2 us in every row). Bit compare over all 4,096,000 (gate) and 8,192,000 (down) outputs:
+
+| group | extents | arm | us median [CoV%] (min-max), 3 runs | bit compare vs base | cpu ms per replay | cpu % of wall | static tg bytes, bound buffer MB |
+|---|---|---|---|---|---|---|---|
+| 49f88ec4 | [1000, 8, 1024, 512] | base |  1737.500 [0.09] (1735.000-1737.625)  |  differing=0/4096000 max_ulp=0  |  0.056  |  2.8  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | ctrl |  1735.500 [0.04] (1735.417-1736.667)  |  differing=0/4096000 max_ulp=0  |  0.054  |  2.6  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | floatstage |  1965.750 [0.06] (1964.625-1967.042)  |  differing=0/4096000 max_ulp=0  |  0.056  |  2.4  |  tg_static=14464 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | noact |  1663.500 [0.05] (1663.208-1664.875)  |  differing=4094342/4096000 max_ulp=2169906365  |  0.055  |  2.9  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | nodequant |  1506.833 [0.04] (1505.833-1507.000)  |  differing=4096000/4096000 max_ulp=2241602652  |  0.054  |  3.1  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | noloads |  1461.542 [0.02] (1461.125-1461.750)  |  differing=4096000/4096000 max_ulp=2241612536  |  0.054  |  3.2  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | nomma |  848.750 [0.02] (848.583-848.875)  |  differing=4094342/4096000 max_ulp=1113561453  |  0.052  |  4.9  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | nostage |  1260.083 [0.05] (1259.500-1260.792)  |  differing=4096000/4096000 max_ulp=3252439800  |  0.054  |  3.5  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | nowrite |  1740.167 [0.10] (1738.792-1742.250)  |  differing=4096000/4096000 max_ulp=2540806221  |  0.055  |  2.7  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | tile64 |  1795.375 [0.04] (1794.208-1795.583)  |  differing=0/4096000 max_ulp=0  |  0.056  |  2.6  |  tg_static=18560 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 1024, 512] | unroll2 |  1752.250 [0.03] (1752.083-1753.000)  |  differing=0/4096000 max_ulp=0  |  0.055  |  2.7  |  tg_static=14464 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | base |  1979.417 [0.01] (1979.125-1979.500)  |  differing=0/8192000 max_ulp=0  |  0.056  |  2.8  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | ctrl |  1978.417 [0.01] (1978.333-1978.750)  |  differing=0/8192000 max_ulp=0  |  0.054  |  2.6  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | floatstage |  2237.292 [0.02] (2236.625-2237.542)  |  differing=0/8192000 max_ulp=0  |  0.056  |  2.4  |  tg_static=14464 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | noact |  1908.750 [0.02] (1908.583-1909.167)  |  differing=8192000/8192000 max_ulp=2173098903  |  0.055  |  2.9  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | nodequant |  1662.750 [0.03] (1662.625-1663.500)  |  differing=8192000/8192000 max_ulp=2257730749  |  0.054  |  3.1  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | noloads |  1616.292 [0.03] (1616.125-1617.083)  |  differing=8192000/8192000 max_ulp=2240298780  |  0.054  |  3.2  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | nomma |  1110.250 [0.37] (1109.625-1117.125)  |  differing=8192000/8192000 max_ulp=1116225308  |  0.052  |  4.9  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | nostage |  1418.292 [0.00] (1418.250-1418.292)  |  differing=8192000/8192000 max_ulp=3259514652  |  0.054  |  3.5  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | nowrite |  1981.583 [0.01] (1981.292-1981.750)  |  differing=8192000/8192000 max_ulp=2547881073  |  0.055  |  2.7  |  tg_static=10368 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | tile64 |  2097.625 [0.03] (2096.958-2098.375)  |  differing=0/8192000 max_ulp=0  |  0.056  |  2.6  |  tg_static=18560 bound_MB=86.3  |
+| 49f88ec4 | [1000, 8, 512, 1024] | unroll2 |  2049.875 [0.07] (2049.292-2052.083)  |  differing=0/8192000 max_ulp=0  |  0.055  |  2.7  |  tg_static=14464 bound_MB=86.3  |
+
+Arms (diffs in `probes/diffs/gemm/`, base `probes/base/gemm_base_emitted.metal`): `unroll2` the K loop unrolled 2x (64 K per iteration, 8 k-blocks per MMA pass, two barriers per 64 K, `tg_shared` 8192 to 12288 bytes); `tile64` the token tile 64 (64 rows x 64 tokens x 32 K: two tokens per activation-staging thread, `acc[16]`, 32 tokens per simdgroup pair, `tg_shared` 16384 bytes, locate with 64-token tiles); `floatstage` float tiles and `simdgroup_float8x8` MMA in place of half (`tg_shared` 12288); `nomma` the MMA block with its fragment loads deleted (`expert_grouped_gemm.rs:753`); `nostage` the staging stores deleted (`:735`, barriers kept); `nodequant` the weight decode replaced by a constant (`:696`); `noact` the activation loads replaced by a constant; `noloads` both; `nowrite` the output store guarded by an impossible compare (`:789`). Not bit-identical arms are timing instruments. Tile `32x32x32` and 8 simdgroups: **not run**, because the weight stager decodes one 16-element run per thread with two threads per row (`push_grouped_stage_pointers`, `DECODE_RUN_ELEMENTS`) and both shapes change that thread-to-row mapping and the accumulator layout; neither variant was written.
+
+Deltas against base, gemm only (us; gate / down): `unroll2` +14.8 / +70.5 (bit-identical); `tile64` +57.9 / +118.2 (bit-identical, `tg_static` 16384 against 10368); `floatstage` +228.3 / +257.9 (bit-identical, 14464); `nowrite` +2.7 / +2.2; `noact` -74.0 / -70.7; `nodequant` -230.7 / -316.7; `noloads` -276.0 / -363.1; `nostage` -477.4 / -561.1; `nomma` -888.8 / -869.2. As fractions of the gemm-only time: MMA with its fragment loads 51.2% / 43.9%, staging stores and their barriers 27.5% / 28.3%, weight decode 13.3% / 16.0%, activation loads 4.3% / 3.6%, output write 0%. The pair numbers add the prepass: `nomma` 1276.5 / 1544.9 on the pair basis.
+
+Prepass alone (`summaries/prepass_variants_single_us.md`, `prepass_alone_single_us.md`; one threadgroup of 1024 threads, one simdgroup per expert scanning the 8000 route entries 32 at a time in a count pass and again in a place pass, `expert_grouped_gemm.rs:992-1090`), us single dispatch, 3 processes (process peak RSS 1621 to 1624 MB, footprint 215 to 217 MB): base 426.5; count pass only 191.5, place pass only 237.0 (sum 428.5); loads batched 4 / 8 / 16 per iteration with the same arithmetic and order 407.2 / 405.3 / 640.1 (compaction bytes identical to the base in all three: `ab compaction ... differing=0` of 32,260 bytes in both extents); the same kernel with one threadgroup per expert (32 threadgroups of one simdgroup, timing only: the offsets are not computed, 30,412 of 32,260 compaction bytes differ) 201.8, its count pass 109.2 and place pass 117.4. Static threadgroup bytes 256 (the two 32-word tables); bound buffers 70.6 MB (the arena and the compaction). The prepass is therefore a chain of 250 dependent iterations per simdgroup per pass: moving it from one core to 32 shortens it by 224 us (53%), batching its loads by 4 or 8 by 19 to 21 us (5%); an iteration costs about 0.4 us in the lone-simdgroup shape and 0.85 us in the 32-simdgroup shape, which is the part not explained (a load round trip is the candidate; batching eight loads does not remove it).
+
+Route sharing: gate (node 226) and down (node 236) members 0 bind the same route buffer (arena offset 53,248,768, first values `[21, 23, 12, 4]`, `describe_granite_prefill.out`) and each owns its own 32,260-byte compaction; the up group (`4e16f8fc`) binds its route at a different binding index in a different layout and was not compared. The compaction is a function of the route alone, so for gate and down of one layer two prepasses produce the same bytes (the compaction buffers of the three were not diffed against each other).
+
+What this does to the per-op comparison with llama: gemm only 1737.5 / 1979.4 us against 1536.7 / 1512.7 (+200.8 / +466.7 us per op, +4.8 / +11.2 ms over 24 layers); the pair 2163.6 / 2406.3 (+626.9 / +893.6, +15.0 / +21.4 ms). The census's `Q8_0 4194304` 165.00 ms and 24 x (AB gate 2163.6 + census up+silu 2268.1 + AB down 2406.3) = 164.1 ms, 0.5% below it.
+
+### 5. granite short-prompt cpu, +6.7 ms per generation at round three
+
+Settled pass (`cpu/settled/`, 3 rounds, each round one process of the base binary then one of the tip binary, `decode_gbps_baseline_{base,tip}` of round three (0688ae5b plus the arms-bench commit against the final tip), 15 generations per process with the first dropped, 25-token prompt (35 tokens in granite's tokenizer), 128 new tokens, speculation off; box load 3.3 to 3.9 at launch, GPU utilization settled 0; peak RSS and footprint from `time -l`). CPU is user+sys of the process over one generation:
+
+| round | base cpu ms [CoV%] (min-max) | tip cpu ms [CoV%] (min-max) | tip minus base | base / tip wall ms | base / tip decode ms/token | base / tip TTFT ms | base / tip peak RSS MB, footprint MB |
+|---|---|---|---|---|---|---|---|
+| 1 | 182.240 [1.27] (178.0-187.5) | 181.288 [2.32] (178.9-193.8) | -0.95 | 747.2 / 746.7 | 5.556 / 5.573 | 42 / 39 | 1533, 127.5 / 1518, 127.5 |
+| 2 | 182.753 [2.12] (179.6-193.5) | 184.164 [1.20] (180.4-188.0) | +1.41 | 745.5 / 751.1 | 5.538 / 5.607 | 42 / 39 | 1549, 127.0 / 1526, 127.4 |
+| 3 | 179.772 [0.89] (177.2-183.3) | 180.846 [1.77] (177.8-190.8) | +1.07 | 745.5 / 750.5 | 5.540 / 5.601 | 42 / 39 | 1537, 126.4 / 1517, 128.2 |
+
+The +6.72 ms (limit 3.33) of the round three bench does not reproduce in this pass: the differences are -0.95, +1.41 and +1.07 ms with within-process CoV of 0.9 to 2.3% (1.6 to 4.2 ms) of the base figure. The first pass of this comparison (`cpu/first_pass_loaded/`, 1-minute load 4.8 to 5.8 but 5-minute load 7.1 to 7.7 after the stray `find /`, 3 rounds) read base 224.3 / 223.5 / 216.8 and tip 412.4 (CoV 40.9%, no peer visible in its box file, unexplained) / 219.2 / 240.3 (CoV 9.4%): a box that was not settled, not used. Decode ms/token is 0.017 to 0.069 higher in the tip processes of the settled pass (+2 to +9 ms per 128 tokens) with TTFT 3 ms lower; neither is outside the round three bound.
+
+Frames (`sample/granite_short_{base,tip}/sample.txt`, 3 s `sample` at 1 ms during 30 generations of the same prompt, taken at load 17.1 and 12.7, so used for frame shares only; `sample/granite_short_frame_diff.md`): non-parked top-of-stack samples on all threads 901 (base) and 794 (tip). The hottest frame in both is `__findenv_locked`, 268 samples (29.7% of the busy samples) in base and 215 (27.1%) in tip, reached from `resident_nocopy_cache::bind_buffers` (`std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST")`, `resident_nocopy_cache.rs:1214` and `:1283`, once per bound buffer). Frames that grew in the tip: `resolve_named_blocks_with_placed_inputs` (`placements_execute_named.rs:2147`) 15 to 32 samples (+17), `ShapeTable::unify_iteration_space` (`proxima-tensor/src/shape.rs:236`) 0 to 8, `bind_buffers` 34 to 40 (+6); frames that shrank: `__findenv_locked` -53, `_platform_memmove` -17, `MTLRangeAllocatorGetMaxFreeSize` -15, `os_unfair_lock_unlock` -13. With 4 generations in the window one sample is about 0.25 ms per generation, so the largest growth (+17) is about 4 ms per generation (DERIVED); it is not in the settled-pass CPU figures, which show no growth. Status: not reproduced on a settled box; the frame that grew most in the loaded sample is named, its growth is not confirmed by the settled CPU comparison.
+
+### head-chunk idle accounting
+
+Section 0.5 above (steady steps: inter-chunk idle -0.023 ms E2B and -0.037 ms granite, lead idle +0.000 and +0.003, tail -0.008 and -0.005, wall minus evaluate +0.001 and -0.005, GPU busy +0.015 and +0.049, wall +0.015 and +0.007; step 23: the chunk 2 boundary idle moves from 0.802 to 0.046 ms (E2B) and 0.189 to 0.021 (granite) and the E2B tip's boundaries 3 to 7 gain 0.157, 0.238, 0.317, 0.416, 0.452 ms).
+
+### proposed round four slices (each changes one cost; ranked by the measured bound; own-cb ms at granite 1000-token prefill, step ms at decode; memory stated beside the time)
+
+The first slice proposed in the brief (encode the decode step once and patch it per token) has a measured bound of 0.55 ms (E2B) and 0.50 ms (granite): 26% and 35% of the 2.14 and 1.45 ms distances to llama, so it is ranked by that figure, not first. Where the per-token encode loop lives for a later slice: `omega/src/metal/placements_execute_named.rs` (`execute_plan_with_placements_inner`, `encode_op` calls via `arena_encode_dispatch_finish.rs`); the per-token varying bytes are the uniform buffers of the position-dependent ops (the cached-attention `live` word, positions, KV lengths) and the per-dispatch arena offsets; which of the 653 dispatches carry a per-token uniform is not enumerated in this pass.
+
+| rank | change | measured bound | basis | memory / cpu beside it |
+|---|---|---|---|---|
+| 1 | share one route compaction among the gate, up and down gemms of a layer (72 prepasses become 24) | -20.5 ms own-cb (48 x 426.3 us); -10.2 ms if only gate and down share (the up group's route binding was not compared) | prepass alone 426.1 / 426.3 us, route buffer identical for gate and down | device bytes -48 x 32,260 B = -1.55 MB; dispatches -48 per step (the prefill encode window is 3.1 to 3.8 ms for 383 ops, 8 to 10 us per op: about -0.4 ms of host CPU, DERIVED) |
+| 2 | spread the route prepass over the cores (one threadgroup per expert and a second stage for offsets) | -16.1 ms own-cb at 72 ops if it reaches 201.8 us (timing-only ceiling: 32 threadgroups, offsets not computed, compaction not valid); the bit-identical batching variants reach -1.5 ms (405.3 us) | `ab/gemm/ppphase_r*`, `ppgrid_r*` | compaction bytes unchanged; threadgroup bytes 256 per group |
+| 3 | attention softmax phase (`cached_attention_row_tiled.rs:240-275`) | upper bound -10.8 ms (24 x 450.5 us, the phase removed); Q.K^T phase upper bound -12.2 ms (24 x 510.3 us); the gap to llama is -14.7 ms | `ab/attn` | tg bytes 4480 unchanged by every arm; f16 K/V: -1.3 ms (24 x 56.1 us), not bit-identical, bound buffer bytes -4.2 MB per op |
+| 4 | the cold first command buffer (fresh process only) | granite TTFT -46.1 ms (51.56 - 5.45), E2B -89.8 ms (96.61 - 6.83), moved to model load by committing one real weight-referencing command buffer there; the `small` toggle moved 44 ms into its own command buffer | `pq/` | no added device bytes; load grows by the same milliseconds; CPU of the extra command buffer not measured |
+| 5 | E2B hidden-width norms at 512 lanes in place of 256 (`tiled_gemm_cooperative_scan.rs:2881-3110` width) | -0.61 ms per step (per-group -0.19 / -0.29 / -0.14; the three base steps vary by 0.3 to 4.0% CoV), bit-identical | `ab/norm/step_r*` | static tg bytes 32 to 64; same bound buffers; the own-cb dispatch 11.5 to 8.4 us (epi4) |
+| 6 | encode the decode step once, patch the per-token uniforms | -0.55 ms E2B, -0.50 ms granite per step (ceiling) | `seb/` | host CPU is 50.3 ms over a 244.1 ms E2B decode window (20.7%) and would fall by the encode share; the held plan's bytes are unmeasured |
+| 7 | read `PROXIMA_DEBUG_SEGMENT_HOST` once, not per bound buffer (`resident_nocopy_cache.rs:1214`, `:1283`) | host CPU only: `__findenv_locked` 6.0% of E2B decode main-thread samples, 27 to 30% of the busy samples of the loaded granite short sample; no wall effect shown (encode is hidden behind the GPU after chunk 1) | `sample/` | wall target 0 ms; CPU target unmeasured (the settled granite short cpu is 180 to 184 ms per generation) |
+| 8 | the warm prefill queueing (4.5 to 9.8 ms per command buffer against 0.05 ms for a decode chunk) | up to -4.5 to -9.8 ms per prefill | `pq/` | cause not isolated; no slice until it is |
+
+Decode attention at granite (1.38 ms against llama's 0.73) was not re-attributed in this round; its row stays as recorded in the round three section.
+
+### not established, unexplained, unmeasured
+
+- Pair fusion of two dependent norms (row 2): not built; the bound given is an omission cost, not a fused kernel's time.
+- GEMM tile `32x32x32` and 8 simdgroups (row 4): not written.
+- The up+silu group (`4e16f8fc`) was not put through the gemm-only and prepass-only arms; its pair figure is the census's.
+- Why the norm width arm is worth 0.61 ms on the step basis and 0.16 ms on the sequence basis (row 2); why the attention phases sum to 975 us alone and 1154 us together (row 1); why the prepass costs 0.85 us per iteration with 32 simdgroups and 0.40 with one (row 4); the warm prefill queueing (row 3); what in the driver the 44 to 52 ms is (row 3).
+- Granite prefill `prepare` reads 29.9 to 30.8 ms in every generation in the example processes, cold or warm (`pq/*/queueing.md`), and `pre_encode` 7.2 to 7.5 ms warm; the round three bench prefill is 245 ms of which GPU busy is about 230 to 240; where the remaining bench time sits was not decomposed.
+- The pq and zero-encode processes carry a telemetry ring of 262,144 events (footprint 5.5 GB after load in `pq/`); their footprint columns are the example's, not the bench's.
+- llama: its production encode time, command buffer count and concurrency are not in the recording (row 0.4). `PROXIMA_DISPATCH=concurrent` was not run against serial in this round.
+- The live arm of the zero-encode run is the instrument build with capture env vars removed after the capture generation (11.07 ms/token E2B, 6.36 granite); the round three release bench read 11.16 and 6.66. The bound is live minus replay inside one process.
+- Three CPU/memory columns are process-wide `getrusage`, `proc_pid_rusage` and `currentAllocatedSize` readings; a per-kernel device-bytes-touched figure is DERIVED only for attention (272.6 MB per op) and the norms (24.6 KB per op).
+
+### re-prove
+
+```
+cargo build --release -p proxima-model-interop --features std,metal,instrument --example gemma4_decode_kernel_census --example norm_variant_ab --example step_encode_bound --example prefill_queueing --example attribution_rank
+step_encode_bound:   PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt SEB_STEP=23 SEB_ROUNDS=21 SEB_TOKENS=24 step_encode_bound
+census (decode):     M0_OUT_DIR=<dir> M0_MODEL_GGUF=<blob> M0_MAX_TOKENS=24 M0_CAPTURE_STEPS=23 PROXIMA_PROMPT_FILE=prompt1k.txt gemma4_decode_kernel_census     # census (prefill): M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=0
+chunk table:         chunk_table <census>/decode_telemetry.log <census>/census_dispatches.csv 23          # tools/chunk_table.rs; step_timeline: tools/step_timeline.rs
+queueing:            PQ_STAGES=prefill,prefill PQ_OUT=<dir> PQ_SMALL_PROMPT=prompt_short_hippo.txt PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt prefill_queueing; queueing_summary <dir>/telemetry.log
+variants:            patch -o <sha16>.<tag>.metal probes/base/<base>.metal probes/diffs/<kind>/<sha16>.<tag>.diff   (copy the .width / .scale / .f16 files beside them)
+gemm:                AB_VARIANT_DIR=<dir> AB_SHA=49f88ec4 AB_PACKED=1 AB_STEP=0 AB_ROUNDS=30 AB_FLUSH_MIB=0 [AB_GEMM_ONLY=1 | AB_PREPASS_ONLY=1] norm_variant_ab        # granite blob, prompt1k.txt
+attention:           AB_SPAN_FULL=1 AB_SHA=1388fb73 AB_STEP=0 AB_ROUNDS=30 AB_FLUSH_MIB=0 ...                          # granite blob
+norm:                [AB_SEQUENCE=1 | AB_STEP_SEQUENCE=1] AB_SPAN_FULL=1 AB_STEP=5 AB_ROUNDS=30 AB_FLUSH_MIB=0 ...    # E2B blob
+summaries:           ab_summary <group|sequence|step> <single_us|marginal_us|per_dispatch_us|step_ms> <stdout.log>...   # tools/ab_summary.rs; key_stats, sample_diff, queueing_summary alongside
+```
+Missing for CI: no job runs the Metal tests, the censuses, the AB tool or the examples; every row re-proves on this box only. The binaries and raw logs are under `.long_ctx_backups/attr4/` (`bin/`, `bin_head/`); the `d3f3931d` build of `norm_variant_ab` re-run on the attention variants (1 process, `headcheck_attention/`) reads base 1145.6, ctrl 1145.4, f16kv 1098.0, nocausal 1937.9, nopv 889.6 us against the 3-process medians 1153.9, 1143.5, 1097.8, 1932.9, 889.4.

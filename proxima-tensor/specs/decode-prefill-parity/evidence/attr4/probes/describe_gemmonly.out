@@ -1,0 +1,15 @@
+ab capture excludes 0 unreplayable dispatches of 369
+ab capture: step=0 dispatches=369 groups=21
+ab describe sha=49f88ec486a7766a extents=[1000, 8, 1024, 512] count=24 entry=omega_reduce_r4_o3_n2_multiply_add_zero_g10
+ab describe   binding=0 buffer=0x300000000 offset=55220256 length=1422245888 head=[]
+ab describe   binding=1 buffer=0x12ea00000 offset=16384256 length=53348096 head=[-0.5312376, 2.4718025, -26.37518, -2.1808577]
+ab describe   binding=2 buffer=0x12ea00000 offset=53248768 length=53348096 head=[21.0, 23.0, 12.0, 4.0]
+ab describe   binding=3 buffer=0x12ea00000 offset=0 length=53348096 head=[-7.67334, -20.892958, 13.978429, -4.553549]
+ab describe   binding=6 buffer=0x1125f8000 offset=0 length=32260 head=[1.121e-41, 5.93e-43, 6.63e-43, 4.55e-43]
+ab describe sha=49f88ec486a7766a extents=[1000, 8, 512, 1024] count=24 entry=omega_reduce_r4_o3_n2_multiply_add_zero_g10
+ab describe   binding=0 buffer=0x300000000 offset=90871840 length=1422245888 head=[]
+ab describe   binding=1 buffer=0x12ea00000 offset=32768256 length=53348096 head=[-4.834197, -12.808712, 9.267197, -2.9335616]
+ab describe   binding=2 buffer=0x12ea00000 offset=53248768 length=53348096 head=[21.0, 23.0, 12.0, 4.0]
+ab describe   binding=3 buffer=0x12ea00000 offset=0 length=53348096 head=[-7.67334, -20.892958, 13.978429, -4.553549]
+ab describe   binding=6 buffer=0x12a79c000 offset=0 length=32260 head=[1.121e-41, 5.93e-43, 6.63e-43, 4.55e-43]
+ab cell label=process wall_ms=749.145 cpu_ms=726.253 cpu_pct=96.9 rss_peak_mb=1623.5 footprint_mb=184.4 gpu_alloc_mb=1516.5 load_before=4.43 load_after=4.43

@@ -1,0 +1,103 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/attn_base_emitted.metal	2026-10-08 10:51:06
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_attn/1388fb736f661844.f16kv.metal	2026-10-08 10:52:10
+@@ -852,7 +852,7 @@
+ 
+ #define FOR_UNROLL _Pragma("clang loop unroll(full)")
+ 
+-kernel void omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], device const float* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const float* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
++kernel void omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const half* in2 [[buffer(2)]], device const half* in3 [[buffer(3)]], device const half* in4 [[buffer(4)]], device const half* in5 [[buffer(5)]], device const half* in6 [[buffer(6)]], device const half* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+     constexpr long kv_heads = 8; constexpr long query_groups = 2; constexpr long head_dim = 64; constexpr long half_dim = head_dim / 2; constexpr float scale = 0.015625; constexpr long cached_lower = -9223372036854775807L; constexpr long new_upper = 0L;
+     constexpr long tile_rows = 8; constexpr long simdgroups = 2; constexpr long block = 64; constexpr long split_keys = 64;
+     constexpr bool rows_in_fragment = (query_groups % 8) != 0;
+@@ -922,18 +922,18 @@
+         long key0 = mode == 0L ? slice_start + step * block : (mode == 1L ? new_start + (step - cached_blocks) * block : total_aligned);
+         long columns = mode == 0L ? min(block, slice_end - key0) : (mode == 1L ? min(block, mma_end - key0) : total_rows - total_aligned);
+         if (mode != 2L) {
+-            device const float* key_even = mode == 0L ? in2 : in4;
+-            device const float* key_odd = mode == 0L ? in3 : in5;
++            device const half* key_even = mode == 0L ? in2 : in4;
++            device const half* key_odd = mode == 0L ? in3 : in5;
+             int fragments = (int)((columns + 7L) / 8L);
+             simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];
+             FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) { FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { scores[group][vector_block] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
+             for (int depth = 0; depth < (int)half_dim; depth += 8 * (int)depth_unroll) {
+-                simdgroup_float8x8 key_even_tile[key_tiles_per_group][depth_unroll]; simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];
++                simdgroup_half8x8 key_even_tile[key_tiles_per_group][depth_unroll]; simdgroup_half8x8 key_odd_tile[key_tiles_per_group][depth_unroll];
+                 FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                     int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
+                     if (key_tile < fragments) {
+-                        device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+-                        device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
++                        device const half* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
++                        device const half* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                             simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                             simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+@@ -947,11 +947,16 @@
+                         simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
+                         simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                     }
++                    simdgroup_half8x8 query_even_h[depth_unroll]; simdgroup_half8x8 query_odd_h[depth_unroll];
++                    FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
++                        query_even_h[step_index].thread_elements()[0] = half(query_even[step_index].thread_elements()[0]); query_even_h[step_index].thread_elements()[1] = half(query_even[step_index].thread_elements()[1]);
++                        query_odd_h[step_index].thread_elements()[0] = half(query_odd[step_index].thread_elements()[0]); query_odd_h[step_index].thread_elements()[1] = half(query_odd[step_index].thread_elements()[1]);
++                    }
+                     FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                         if ((int)simdgroup_slot + group * (int)simdgroups < fragments) {
+                             FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+-                                simdgroup_multiply_accumulate(scores[group][vector_block], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_block]);
+-                                simdgroup_multiply_accumulate(scores[group][vector_block], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_block]);
++                                simdgroup_multiply_accumulate(scores[group][vector_block], query_even_h[step_index], key_even_tile[group][step_index], scores[group][vector_block]);
++                                simdgroup_multiply_accumulate(scores[group][vector_block], query_odd_h[step_index], key_odd_tile[group][step_index], scores[group][vector_block]);
+                             }
+                         }
+                     }
+@@ -979,11 +984,11 @@
+                     long key_offset = (key0 + column) * (kv_heads * half_dim) + kv_head * half_dim;
+                     device const float4* query_even4 = (device const float4*)(in0 + query_index * half_dim);
+                     device const float4* query_odd4 = (device const float4*)(in1 + query_index * half_dim);
+-                    device const float4* key_even4 = (device const float4*)(in4 + key_offset);
+-                    device const float4* key_odd4 = (device const float4*)(in5 + key_offset);
++                    device const half4* key_even4 = (device const half4*)(in4 + key_offset);
++                    device const half4* key_odd4 = (device const half4*)(in5 + key_offset);
+                     for (short index = tx; index < (short)(half_dim / 4L); index += 8) {
+-                        partial_score += dot(key_even4[index], query_even4[index]);
+-                        partial_score += dot(key_odd4[index], query_odd4[index]);
++                        partial_score += dot(float4(key_even4[index]), query_even4[index]);
++                        partial_score += dot(float4(key_odd4[index]), query_odd4[index]);
+                     }
+                 }
+                 partial_score += simd_shuffle_down(partial_score, 4);
+@@ -1038,16 +1043,18 @@
+             }
+         }
+         if (mode != 2L) {
+-            device const float* value_ptr = (mode == 0L ? in6 : in7) + key0 * (kv_heads * head_dim) + kv_head * head_dim;
++            device const half* value_ptr = (mode == 0L ? in6 : in7) + key0 * (kv_heads * head_dim) + kv_head * head_dim;
+             int fragments = (int)((columns + 7L) / 8L);
+             for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                 simdgroup_float8x8 weights[tile_blocks];
+                 FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_load(weights[vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
++                simdgroup_half8x8 weights_h[tile_blocks];
++                FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { weights_h[vector_block].thread_elements()[0] = half(weights[vector_block].thread_elements()[0]); weights_h[vector_block].thread_elements()[1] = half(weights[vector_block].thread_elements()[1]); }
+                 FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+                     int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
+-                    simdgroup_float8x8 value;
++                    simdgroup_half8x8 value;
+                     simdgroup_load(value, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+-                    FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value, accumulated[slot][vector_block]); }
++                    FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights_h[vector_block], value, accumulated[slot][vector_block]); }
+                 }
+             }
+         } else {
+@@ -1058,8 +1065,8 @@
+                     for (long column = 0L; column < columns; column++) {
+                         float weight = score_tile[(vector_block * 8 + fragment_row) * block + column];
+                         long value_offset = (key0 + column) * (kv_heads * head_dim) + kv_head * head_dim + dimension;
+-                        sum_even += weight * in7[value_offset];
+-                        sum_odd += weight * in7[value_offset + 1L];
++                        sum_even += weight * (float)in7[value_offset];
++                        sum_odd += weight * (float)in7[value_offset + 1L];
+                     }
+                     accumulated[slot][vector_block].thread_elements()[0] += sum_even;
+                     accumulated[slot][vector_block].thread_elements()[1] += sum_odd;

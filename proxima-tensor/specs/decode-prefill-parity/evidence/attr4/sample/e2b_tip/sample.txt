@@ -1,0 +1,900 @@
+Analysis of sampling decode_gbps_baseline_tip (pid 61367) every 1 millisecond
+Process:         decode_gbps_baseline_tip [61367]
+Path:            /Users/USER/*/decode_gbps_baseline_tip
+Load Address:    0x102d54000
+Identifier:      decode_gbps_baseline_tip
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  time [61364]
+Target Type:     live task
+
+Date/Time:       2026-10-08 10:25:12.531 -0500
+Launch Time:     2026-10-08 10:25:06.442 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         380.1M
+Physical footprint (peak):  384.6M
+Idle exit:                  untracked
+----
+
+Call graph:
+    2302 Thread_78227660   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 2302 start  (in dyld) + 6076  [0x18746ab98]
+    +   2302 main  (in decode_gbps_baseline_tip) + 852  [0x102d68314]
+    +     2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECsaykuNZ8fj1y_20decode_gbps_baseline  (in decode_gbps_baseline_tip) + 12  [0x102d555f4]
+    +       2300 _RNvCsaykuNZ8fj1y_20decode_gbps_baseline4main  (in decode_gbps_baseline_tip) + 16168  [0x102d596e8]
+    +       ! 2293 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel24run_decode_loop_observed  (in decode_gbps_baseline_tip) + 364  [0x102ecd4ac]
+    +       ! : 2293 _RNvMs7_NtNtCsg4GU838z6hU_21proxima_model_interop8generate12prompt_cacheNtNtB7_10load_model11LoadedModel29run_decode_loop_through_cache  (in decode_gbps_baseline_tip) + 376  [0x102ecd6f8]
+    +       ! :   2254 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 26852  [0x102e443e4]
+    +       ! :   | 2213 _RNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB5_14BackendRuntime24evaluate_with_placements  (in decode_gbps_baseline_tip) + 5128  [0x102e4f298]
+    +       ! :   | + 1895 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 20172  [0x102eb9c4c]
+    +       ! :   | + ! 1895 -[_MTLCommandBuffer waitUntilCompleted]  (in Metal) + 76  [0x192c345d8]
+    +       ! :   | + !   1895 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +       ! :   | + !     1895 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    +       ! :   | + 247 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 17784  [0x102eb92f8]
+    +       ! :   | + ! 194 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish9encode_op  (in decode_gbps_baseline_tip) + 4364  [0x102df628c]
+    +       ! :   | + ! : 81 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip) + 392  [0x102e00744]
+    +       ! :   | + ! : | 77 _RNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv  (in decode_gbps_baseline_tip) + 292  [0x103060c24]
+    +       ! :   | + ! : | + 76 _RNCNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv0B9_  (in decode_gbps_baseline_tip) + 472  [0x10305a234]
+    +       ! :   | + ! : | + ! 71 getenv  (in libsystem_c.dylib) + 64  [0x18769cef8]
+    +       ! :   | + ! : | + ! : 71 __findenv_locked  (in libsystem_c.dylib) + 100,68,...  [0x18769cf88,0x18769cf68,...]
+    +       ! :   | + ! : | + ! 2 getenv  (in libsystem_c.dylib) + 76  [0x18769cf04]
+    +       ! :   | + ! : | + ! : 2 os_unfair_lock_unlock  (in libsystem_platform.dylib) + 0  [0x187842884]
+    +       ! :   | + ! : | + ! 1 DYLD-STUB$$getenv  (in decode_gbps_baseline_tip) + 4  [0x103089ce0]
+    +       ! :   | + ! : | + ! 1 getenv  (in libsystem_c.dylib) + 44  [0x18769cee4]
+    +       ! :   | + ! : | + ! : 1 os_unfair_lock_lock_with_options  (in libsystem_platform.dylib) + 4  [0x187842864]
+    +       ! :   | + ! : | + ! 1 getenv  (in libsystem_c.dylib) + 48  [0x18769cee8]
+    +       ! :   | + ! : | + !   1 _NSGetEnviron  (in libsystem_c.dylib) + 0  [0x18769cf18]
+    +       ! :   | + ! : | + 1 _RNCNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv0B9_  (in decode_gbps_baseline_tip) + 60  [0x10305a098]
+    +       ! :   | + ! : | 3 _RNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv  (in decode_gbps_baseline_tip) + 52  [0x103060b34]
+    +       ! :   | + ! : | + 2 DYLD-STUB$$memcpy  (in decode_gbps_baseline_tip) + 4  [0x103089d40]
+    +       ! :   | + ! : | + 1 _platform_memmove  (in libsystem_platform.dylib) + 0  [0x1878452c0]
+    +       ! :   | + ! : | 1 _RNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv  (in decode_gbps_baseline_tip) + 136  [0x103060b88]
+    +       ! :   | + ! : 77 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip) + 756  [0x102e008b0]
+    +       ! :   | + ! : | 71 _RNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv  (in decode_gbps_baseline_tip) + 292  [0x103060c24]
+    +       ! :   | + ! : | + 69 _RNCNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv0B9_  (in decode_gbps_baseline_tip) + 472  [0x10305a234]
+    +       ! :   | + ! : | + ! 67 getenv  (in libsystem_c.dylib) + 64  [0x18769cef8]
+    +       ! :   | + ! : | + ! : 67 __findenv_locked  (in libsystem_c.dylib) + 68,100,...  [0x18769cf68,0x18769cf88,...]
+    +       ! :   | + ! : | + ! 2 getenv  (in libsystem_c.dylib) + 76  [0x18769cf04]
+    +       ! :   | + ! : | + !   1 DYLD-STUB$$os_unfair_lock_unlock  (in libsystem_c.dylib) + 8  [0x187715fa0]
+    +       ! :   | + ! : | + !   1 os_unfair_lock_unlock  (in libsystem_platform.dylib) + 0  [0x187842884]
+    +       ! :   | + ! : | + 2 _RNCNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv0B9_  (in decode_gbps_baseline_tip) + 92,460  [0x10305a0b8,0x10305a228]
+    +       ! :   | + ! : | 6 _RNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv  (in decode_gbps_baseline_tip) + 252,4,...  [0x103060bfc,0x103060b04,...]
+    +       ! :   | + ! : 16 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip) + 1276,1304,...  [0x102e00ab8,0x102e00ad4,...]
+    +       ! :   | + ! : 13 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip) + 624  [0x102e0082c]
+    +       ! :   | + ! : | 6 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::setBuffer_impl<AGXBuffer>(AGXBuffer const*, unsigned long, unsigned int, unsigned long)  (in AGXMetalG13X) + 100,0,...  [0x1049218ec,0x104921888,...]
+    +       ! :   | + ! : | 5 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::setBuffer_impl<AGXBuffer>(AGXBuffer const*, unsigned long, unsigned int, unsigned long)  (in AGXMetalG13X) + 292  [0x1049219ac]
+    +       ! :   | + ! : | + 3 MTLResourceListAddResource  (in Metal) + 124,76  [0x192c28090,0x192c28060]
+    +       ! :   | + ! : | + 1 MTLResourceListAddResource  (in Metal) + 136  [0x192c2809c]
+    +       ! :   | + ! : | + ! 1 MTLResourceListAddHashValue(MTLResourceListPrivate&, unsigned long long)  (in Metal) + 136  [0x192d8cf08]
+    +       ! :   | + ! : | + 1 objc_retain  (in libobjc.A.dylib) + 28  [0x18741793c]
+    +       ! :   | + ! : | 1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::setBuffer_impl<AGXBuffer>(AGXBuffer const*, unsigned long, unsigned int, unsigned long)  (in AGXMetalG13X) + 232  [0x104921970]
+    +       ! :   | + ! : | + 1 AGX::ResourceGroupUsage<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::setResource(IOGPUMetalResource const*, ResourceGroupBindingType, unsigned int)  (in AGXMetalG13X) + 204  [0x104a1edd0]
+    +       ! :   | + ! : | 1 objc_msgSend  (in libobjc.A.dylib) + 52  [0x187419834]
+    +       ! :   | + ! : 4 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip) + 1364  [0x102e00b10]
+    +       ! :   | + ! : | 2 DYLD-STUB$$objc_retain  (in decode_gbps_baseline_tip) + 4  [0x103089e00]
+    +       ! :   | + ! : | 2 objc_retain  (in libobjc.A.dylib) + 0,24  [0x187417920,0x187417938]
+    +       ! :   | + ! : 2 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip) + 568  [0x102e007f4]
+    +       ! :   | + ! : | 2 objc_retain  (in libobjc.A.dylib) + 0,56  [0x187417920,0x187417958]
+    +       ! :   | + ! : 1 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip) + 640  [0x102e0083c]
+    +       ! :   | + ! :   1 DYLD-STUB$$objc_release  (in decode_gbps_baseline_tip) + 4  [0x103089df4]
+    +       ! :   | + ! 41 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish9encode_op  (in decode_gbps_baseline_tip) + 7472  [0x102df6eb0]
+    +       ! :   | + ! : 41 _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache8dispatch  (in decode_gbps_baseline_tip) + 168  [0x102e01798]
+    +       ! :   | + ! :   40 -[AGXG13XFamilyComputeContext dispatchThreads:threadsPerThreadgroup:]  (in AGXMetalG13X) + 288  [0x104925c34]
+    +       ! :   | + ! :   | 40 AGX::ComputeService<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::executeKernelWithThreadsPerGridImpl(eAGXDataBufferPools, MTLSize, MTLSize)  (in AGXMetalG13X) + 524  [0x104922dbc]
+    +       ! :   | + ! :   |   21 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::performEnqueueKernel(eAGXDataBufferPools, unsigned long long, AGX::G13::ComputePipeline const*, unsigned int, unsigned long long*)  (in AGXMetalG13X) + 1400  [0x1049235b8]
+    +       ! :   | + ! :   |   + 11 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::bindBufferResourceToCommand(unsigned int, bool)  (in AGXMetalG13X) + 172  [0x10491f584]
+    +       ! :   | + ! :   |   + ! 6 AGX::ResourceGroupUsage<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::bindResource(_IOGPUMetalResource const*, ResourceGroupBindingType, unsigned int, unsigned int)  (in AGXMetalG13X) + 208,12,...  [0x104a1ef04,0x104a1ee40,...]
+    +       ! :   | + ! :   |   + ! 5 AGX::ResourceGroupUsage<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::bindResource(_IOGPUMetalResource const*, ResourceGroupBindingType, unsigned int, unsigned int)  (in AGXMetalG13X) + 208  [0x104a1ef04]
+    +       ! :   | + ! :   |   + !   5 AGX::PassiveResourceGroupUsage<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::bindPassiveResource(_PassiveResourceInfo const&)  (in AGXMetalG13X) + 252,284,...  [0x104a1e1d8,0x104a1e1f8,...]
+    +       ! :   | + ! :   |   + 5 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::bindBufferResourceToCommand(unsigned int, bool)  (in AGXMetalG13X) + 192  [0x10491f598]
+    +       ! :   | + ! :   |   + ! 2 _ioGPUResourceListAddResourceEntry  (in IOGPU) + 60,204  [0x1a935dd38,0x1a935ddc8]
+    +       ! :   | + ! :   |   + ! 1 DYLD-STUB$$IOGPUResourceListAddResource  (in AGXMetalG13X) + 8  [0x104d73f78]
+    +       ! :   | + ! :   |   + ! 1 IOGPUResourceListAddResource  (in IOGPU) + 88  [0x1a935da4c]
+    +       ! :   | + ! :   |   + ! 1 _ioGPUResourceListAddResourceEntry  (in IOGPU) + 176  [0x1a935ddac]
+    +       ! :   | + ! :   |   + !   1 ioGPUResourceListAddHashValue  (in IOGPU) + 172  [0x1a935df40]
+    +       ! :   | + ! :   |   + 3 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::bindBufferResourceToCommand(unsigned int, bool)  (in AGXMetalG13X) + 52,60  [0x10491f50c,0x10491f514]
+    +       ! :   | + ! :   |   + 1 AGX::ResourceGroupUsage<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::bindResource(_IOGPUMetalResource const*, ResourceGroupBindingType, unsigned int, unsigned int)  (in AGXMetalG13X) + 220  [0x104a1ef10]
+    +       ! :   | + ! :   |   + 1 _ioGPUResourceListAddResourceEntry  (in IOGPU) + 364  [0x1a935de68]
+    +       ! :   | + ! :   |   9 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::performEnqueueKernel(eAGXDataBufferPools, unsigned long long, AGX::G13::ComputePipeline const*, unsigned int, unsigned long long*)  (in AGXMetalG13X) + 1836  [0x10492376c]
+    +       ! :   | + ! :   |   + 6 AGX::ComputeUSCStateLoader<AGX::G13::Encoders, AGX::G13::Classes>::emitComputeProgramVariantAndArguments(eAGXDataBufferPools, AGX::G13::DataBufferAllocator&, AGX::G13::ComputeProgramVariant const*, AGX::G13::ComputeArgumentTable&, AGX::ComputeDriverArgumentTable<AGX::G13::Classes>&, unsigned int, unsigned long long, unsigned int, AGX::ThreadgroupDistribution, unsigned long long*, unsigned int*)  (in AGXMetalG13X) + 1124  [0x104906148]
+    +       ! :   | + ! :   |   + ! 4 AGX::ESLStateLoadEncoderGen1<AGX::G13::Classes, AGX::G13::Encoders>::emitUscStateLoad<LdShdrTransformCompute<AGX::G13::Encoders>>(unsigned long long*, unsigned long long**, unsigned int, unsigned long long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int const*, unsigned long long const*, LdShdrTransformCompute<AGX::G13::Encoders>) const  (in AGXMetalG13X) + 848,76,...  [0x10492c578,0x10492c274,...]
+    +       ! :   | + ! :   |   + ! 2 AGX::ESLStateLoadEncoderGen1<AGX::G13::Classes, AGX::G13::Encoders>::emitUscStateLoad<LdShdrTransformCompute<AGX::G13::Encoders>>(unsigned long long*, unsigned long long**, unsigned int, unsigned long long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int const*, unsigned long long const*, LdShdrTransformCompute<AGX::G13::Encoders>) const  (in AGXMetalG13X) + 848  [0x10492c578]
+    +       ! :   | + ! :   |   + !   2 AGX::ESLInstructionEncoderGen2_3<AGX::G13::Encoders>::SpecLM::setComputeImageBlockData(unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)  (in AGXMetalG13X) + 0,320  [0x10492c5dc,0x10492c71c]
+    +       ! :   | + ! :   |   + 1 ???  (in <unknown binary>)  [0x108fdf680]
+    +       ! :   | + ! :   |   + ! 1 AGX::ComputeUSCStateLoader<AGX::G13::Encoders, AGX::G13::Classes>::emitComputeProgramVariantAndArguments(eAGXDataBufferPools, AGX::G13::DataBufferAllocator&, AGX::G13::ComputeProgramVariant const*, AGX::G13::ComputeArgumentTable&, AGX::ComputeDriverArgumentTable<AGX::G13::Classes>&, unsigned int, unsigned long long, unsigned int, AGX::ThreadgroupDistribution, unsigned long long*, unsigned int*)  (in AGXMetalG13X) + 412  [0x104905e80]
+    +       ! :   | + ! :   |   + 1 ???  (in <unknown binary>)  [0x10ae28b00]
+    +       ! :   | + ! :   |   + ! 1 AGX::ComputeUSCStateLoader<AGX::G13::Encoders, AGX::G13::Classes>::emitComputeProgramVariantAndArguments(eAGXDataBufferPools, AGX::G13::DataBufferAllocator&, AGX::G13::ComputeProgramVariant const*, AGX::G13::ComputeArgumentTable&, AGX::ComputeDriverArgumentTable<AGX::G13::Classes>&, unsigned int, unsigned long long, unsigned int, AGX::ThreadgroupDistribution, unsigned long long*, unsigned int*)  (in AGXMetalG13X) + 312  [0x104905e1c]
+    +       ! :   | + ! :   |   + 1 ???  (in <unknown binary>)  [0x10ae28e80]
+    +       ! :   | + ! :   |   +   1 AGX::ComputeUSCStateLoader<AGX::G13::Encoders, AGX::G13::Classes>::emitComputeProgramVariantAndArguments(eAGXDataBufferPools, AGX::G13::DataBufferAllocator&, AGX::G13::ComputeProgramVariant const*, AGX::G13::ComputeArgumentTable&, AGX::ComputeDriverArgumentTable<AGX::G13::Classes>&, unsigned int, unsigned long long, unsigned int, AGX::ThreadgroupDistribution, unsigned long long*, unsigned int*)  (in AGXMetalG13X) + 328  [0x104905e2c]
+    +       ! :   | + ! :   |   4 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::performEnqueueKernel(eAGXDataBufferPools, unsigned long long, AGX::G13::ComputePipeline const*, unsigned int, unsigned long long*)  (in AGXMetalG13X) + 1380,1484,...  [0x1049235a4,0x10492360c,...]
+    +       ! :   | + ! :   |   3 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::performEnqueueKernel(eAGXDataBufferPools, unsigned long long, AGX::G13::ComputePipeline const*, unsigned int, unsigned long long*)  (in AGXMetalG13X) + 68  [0x104923084]
+    +       ! :   | + ! :   |   + 1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::prepareForEnqueue(bool)  (in AGXMetalG13X) + 420  [0x104921bb8]
+    +       ! :   | + ! :   |   + ! 1 AGX::Mempool<16u, 0u, true, AGX::ImageStateEncoderGen6<kAGXRevG13>::ImageStateFields, AGX::ImageStateEncoderGen6<kAGXRevG13>::ImageStateFields, unsigned int>::addToResourceList(std::array<AGX::Mempool<16u, 0u, true, AGX::ImageStateEncoderGen6<kAGXRevG13>::ImageStateFields, AGX::ImageStateEncoderGen6<kAGXRevG13>::ImageStateFields, unsigned int>::ChunkInfo, 3ul>&&, MTLResourceList*)  (in AGXMetalG13X) + 140  [0x104a2a1dc]
+    +       ! :   | + ! :   |   + !   1 DYLD-STUB$$MTLResourceListAddResource  (in AGXMetalG13X) + 8  [0x104d741d8]
+    +       ! :   | + ! :   |   + 1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::prepareForEnqueue(bool)  (in AGXMetalG13X) + 1136  [0x104921e84]
+    +       ! :   | + ! :   |   + ! 1 MTLResourceListAddResource  (in Metal) + 112  [0x192c28084]
+    +       ! :   | + ! :   |   + 1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::prepareForEnqueue(bool)  (in AGXMetalG13X) + 84  [0x104921a68]
+    +       ! :   | + ! :   |   1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::bindBufferResourceToCommand(unsigned int, bool)  (in AGXMetalG13X) + 312  [0x10491f610]
+    +       ! :   | + ! :   |   1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::performEnqueueKernel(eAGXDataBufferPools, unsigned long long, AGX::G13::ComputePipeline const*, unsigned int, unsigned long long*)  (in AGXMetalG13X) + 1480  [0x104923608]
+    +       ! :   | + ! :   |   + 1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::reserveEnqueueDatabufferSpace(eAGXDataBufferPools, bool)  (in AGXMetalG13X) + 188  [0x104923c40]
+    +       ! :   | + ! :   |   +   1 agxaReserveCDMTokenSpace<AGX::G13::Encoders, AGX::G13::DataBufferAllocator>(eAGXDataBufferPools, AGX::G13::DataBufferAllocator&, unsigned long, bool, bool, unsigned int, AGX::FlagsConfiguration<eAGXDataBufferReserveFlags> const&)  (in AGXMetalG13X) + 100  [0x104906568]
+    +       ! :   | + ! :   |   1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::performEnqueueKernel(eAGXDataBufferPools, unsigned long long, AGX::G13::ComputePipeline const*, unsigned int, unsigned long long*)  (in AGXMetalG13X) + 2716  [0x104923adc]
+    +       ! :   | + ! :   |     1 IOGPUDeviceTraceEvent  (in IOGPU) + 0  [0x1a935ac1c]
+    +       ! :   | + ! :   1 -[AGXG13XFamilyComputeContext dispatchThreads:threadsPerThreadgroup:]  (in AGXMetalG13X) + 228  [0x104925bf8]
+    +       ! :   | + ! 5 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish9encode_op  (in decode_gbps_baseline_tip) + 10312  [0x102df79c8]
+    +       ! :   | + ! : 4 _RNvMsi_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3mapINtB5_8BTreeMapNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB1X_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjEE6insertCs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 36,80,...  [0x102e01374,0x102e013a0,...]
+    +       ! :   | + ! : 1 _RNvMsi_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3mapINtB5_8BTreeMapNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB1X_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjEE6insertCs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 164  [0x102e013f4]
+    +       ! :   | + ! :   1 _RNvMs4_NtNtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3map5entryINtB5_11VacantEntryNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB29_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjEE12insert_entryCs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 540  [0x102df8edc]
+    +       ! :   | + ! :     1 _platform_memmove  (in libsystem_platform.dylib) + 668  [0x18784555c]
+    +       ! :   | + ! 3 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish9encode_op  (in decode_gbps_baseline_tip) + 408  [0x102df5318]
+    +       ! :   | + ! : 3 objc_retain  (in libobjc.A.dylib) + 64,8  [0x187417960,0x187417928]
+    +       ! :   | + ! 3 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish9encode_op  (in decode_gbps_baseline_tip) + 4060,5880,...  [0x102df615c,0x102df6878,...]
+    +       ! :   | + ! 1 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish9encode_op  (in decode_gbps_baseline_tip) + 10316  [0x102df79cc]
+    +       ! :   | + !   1 _RINvNtCsjIpoRzUjyHQ_4core3ptr9drop_glueINtNtB4_6option6OptionINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB14_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEEECs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 16  [0x102e01f10]
+    +       ! :   | + !     1 -[AGXG13XFamilyBuffer dealloc]  (in AGXMetalG13X) + 76  [0x1048f6108]
+    +       ! :   | + !       1 -[AGXBuffer dealloc]  (in AGXMetalG13X) + 44  [0x1048a42fc]
+    +       ! :   | + !         1 -[IOGPUMetalBuffer dealloc]  (in IOGPU) + 320  [0x1a9344504]
+    +       ! :   | + !           1 -[IOGPUMetalResource dealloc]  (in IOGPU) + 244  [0x1a9356344]
+    +       ! :   | + !             1 _CFRelease  (in CoreFoundation) + 296  [0x1879cb544]
+    +       ! :   | + !               1 ioGPUResourceFinalize  (in IOGPU) + 104  [0x1a935d008]
+    +       ! :   | + !                 1 iokit_user_client_trap  (in IOKit) + 8  [0x18b6b61ac]
+    +       ! :   | + 38 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 17984,18224,...  [0x102eb93c0,0x102eb94b0,...]
+    +       ! :   | + 7 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 8000  [0x102eb6cc0]
+    +       ! :   | + ! 7 -[AGXG13XFamilyCommandBuffer computeCommandEncoderWithDispatchType:]  (in AGXMetalG13X) + 140  [0x1048f8a30]
+    +       ! :   | + !   7 -[AGXG13XFamilyCommandBuffer computeCommandEncoderWithConfig:]  (in AGXMetalG13X) + 164  [0x1048f8b54]
+    +       ! :   | + !     4 -[AGXG13XFamilyComputeContext initWithCommandBuffer:config:]  (in AGXMetalG13X) + 2424  [0x10492a614]
+    +       ! :   | + !     : 3 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::beginComputePass(bool, eAGXDataBufferPools)  (in AGXMetalG13X) + 200  [0x10491e524]
+    +       ! :   | + !     : | 2 AGX::ContextCommon<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::newCommand(unsigned long)  (in AGXMetalG13X) + 124  [0x104906ff4]
+    +       ! :   | + !     : | + 2 IOGPUMetalCommandBufferStorageBeginSegment  (in IOGPU) + 132  [0x1a9347a40]
+    +       ! :   | + !     : | +   2 IOGPUResourceListReset  (in IOGPU) + 128  [0x1a935dc14]
+    +       ! :   | + !     : | +     2 _platform_memset  (in libsystem_platform.dylib) + 140,160  [0x18784507c,0x187845090]
+    +       ! :   | + !     : | 1 AGX::ContextCommon<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::newCommand(unsigned long)  (in AGXMetalG13X) + 272  [0x104907088]
+    +       ! :   | + !     : |   1 _ioGPUResourceListAddResourceEntry  (in IOGPU) + 104  [0x1a935dd64]
+    +       ! :   | + !     : 1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::beginComputePass(bool, eAGXDataBufferPools)  (in AGXMetalG13X) + 720  [0x10491e72c]
+    +       ! :   | + !     :   1 AGX::ContextSwitcherGen3<AGX::G13::Encoders, AGX::G13::Classes>::setupComputeCommand(AGXComputeCommandRec*, IOGPUResourceList*, AGX::G13::DataBufferAllocator&)  (in AGXMetalG13X) + 132  [0x104907d68]
+    +       ! :   | + !     :     1 AGX::DataBufferAllocator<34ul>::grow(unsigned int, bool)  (in AGXMetalG13X) + 220  [0x1049080c4]
+    +       ! :   | + !     :       1 _ioGPUResourceListAddResourceEntry  (in IOGPU) + 60  [0x1a935dd38]
+    +       ! :   | + !     2 -[AGXG13XFamilyComputeContext initWithCommandBuffer:config:]  (in AGXMetalG13X) + 180  [0x104929d50]
+    +       ! :   | + !     : 2 __bzero  (in libsystem_platform.dylib) + 68  [0x187844fd4]
+    +       ! :   | + !     1 -[AGXG13XFamilyComputeContext initWithCommandBuffer:config:]  (in AGXMetalG13X) + 1152  [0x10492a11c]
+    +       ! :   | + !       1 _platform_memset  (in libsystem_platform.dylib) + 140  [0x18784507c]
+    +       ! :   | + 7 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 18264  [0x102eb94d8]
+    +       ! :   | + ! 5 _RINvMsi_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3mapINtB6_8BTreeMapNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB1Y_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjEE6removeB18_ECs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 60,88,...  [0x102df8914,0x102df8930,...]
+    +       ! :   | + ! 2 _RINvMsi_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3mapINtB6_8BTreeMapNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB1Y_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjEE6removeB18_ECs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 380  [0x102df8a54]
+    +       ! :   | + !   1 _RINvMs_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree6removeINtNtB7_4node6HandleINtBY_7NodeRefNtNtBY_6marker3MutNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB2B_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjENtB1v_4LeafENtB1v_2KVE14remove_leaf_kvNCNvMs5_NtNtB7_3map5entryINtB63_13OccupiedEntryB1L_B2t_E9remove_kv0NtNtBb_5alloc6GlobalECs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 84  [0x102dfcb20]
+    +       ! :   | + !   | 1 _platform_memmove  (in libsystem_platform.dylib) + 420  [0x187845464]
+    +       ! :   | + !   1 _RINvMs_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree6removeINtNtB7_4node6HandleINtBY_7NodeRefNtNtBY_6marker3MutNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB2B_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjENtB1v_4LeafENtB1v_2KVE14remove_leaf_kvNCNvMs5_NtNtB7_3map5entryINtB63_13OccupiedEntryB1L_B2t_E9remove_kv0NtNtBb_5alloc6GlobalECs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 104  [0x102dfcb34]
+    +       ! :   | + !     1 _platform_memmove  (in libsystem_platform.dylib) + 428  [0x18784546c]
+    +       ! :   | + 6 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 5756  [0x102eb63fc]
+    +       ! :   | + ! 6 _RNvNtNtCs5PvGzj9jth_5omega5metal23pipeline_buffers_upload12upload_block  (in decode_gbps_baseline_tip) + 1944  [0x102dfa494]
+    +       ! :   | + !   6 _RNvNtNtCs5PvGzj9jth_5omega5metal23pipeline_buffers_upload21upload_block_as_float  (in decode_gbps_baseline_tip) + 496  [0x102dfb310]
+    +       ! :   | + !     4 -[AGXG13XFamilyDevice newBufferWithBytes:length:options:]  (in AGXMetalG13X) + 92  [0x104a48c04]
+    +       ! :   | + !     : 4 -[AGXBuffer initWithDevice:length:options:isSuballocDisabled:pinnedGPULocation:]  (in AGXMetalG13X) + 32  [0x1048a4228]
+    +       ! :   | + !     :   4 -[AGXBuffer(Internal) initWithDevice:length:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 44  [0x1048a4658]
+    +       ! :   | + !     :     4 -[AGXBuffer(Internal) initWithDevice:length:alignment:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 44  [0x1048a4620]
+    +       ! :   | + !     :       3 -[AGXBuffer(Internal) initWithDevice:length:alignment:pointerTag:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 388  [0x1048a4534]
+    +       ! :   | + !     :       | 3 -[IOGPUMetalBuffer initWithPrimaryBuffer:heapIndex:bufferIndex:bufferOffset:length:args:argsSize:gpuTag:]  (in IOGPU) + 276  [0x1a9344060]
+    +       ! :   | + !     :       |   2 -[IOGPUMetalResource initWithDevice:remoteStorageResource:options:args:argsSize:]  (in IOGPU) + 484  [0x1a9355e38]
+    +       ! :   | + !     :       |   + 2 IOGPUResourceCreate  (in IOGPU) + 248  [0x1a935c654]
+    +       ! :   | + !     :       |   +   2 IOConnectCallMethod  (in IOKit) + 236  [0x18b691d70]
+    +       ! :   | + !     :       |   +     2 io_connect_method  (in IOKit) + 520  [0x18b691fa4]
+    +       ! :   | + !     :       |   +       2 mach_msg2_internal  (in libsystem_kernel.dylib) + 76  [0x1877dc338]
+    +       ! :   | + !     :       |   +         2 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x1877c9c34]
+    +       ! :   | + !     :       |   1 -[IOGPUMetalResource initWithDevice:remoteStorageResource:options:args:argsSize:]  (in IOGPU) + 672  [0x1a9355ef4]
+    +       ! :   | + !     :       |     1 objc_storeWeak  (in libobjc.A.dylib) + 472  [0x18741ea74]
+    +       ! :   | + !     :       |       1 weak_register_no_lock  (in libobjc.A.dylib) + 268  [0x18741ec00]
+    +       ! :   | + !     :       |         1 weak_entry_insert(weak_table_t*, weak_entry_t*)  (in libobjc.A.dylib) + 128  [0x18741ee6c]
+    +       ! :   | + !     :       1 -[AGXBuffer(Internal) initWithDevice:length:alignment:pointerTag:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 336  [0x1048a4500]
+    +       ! :   | + !     :         1 -[IOGPUMetalDevice allocBufferSubDataWithLength:options:alignment:heapIndex:bufferIndex:bufferOffset:parentAddress:parentLength:]  (in IOGPU) + 112  [0x1a934cf18]
+    +       ! :   | + !     :           1 IOGPUMetalSuballocatorAllocate  (in IOGPU) + 528  [0x1a935e5d4]
+    +       ! :   | + !     :             1 MTLRangeAllocatorGetMaxFreeSize  (in Metal) + 80  [0x192c77f20]
+    +       ! :   | + !     2 -[AGXG13XFamilyDevice newBufferWithBytes:length:options:]  (in AGXMetalG13X) + 116  [0x104a48c1c]
+    +       ! :   | + !       2 _platform_memmove  (in libsystem_platform.dylib) + 88  [0x187845318]
+    +       ! :   | + 3 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 20996  [0x102eb9f84]
+    +       ! :   | + ! 2 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish6finish  (in decode_gbps_baseline_tip) + 252  [0x102df38e8]
+    +       ! :   | + ! : 2 _RNvMsi_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3mapINtB5_8BTreeMapNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdNtNtB7_7set_val9SetValZSTE6insertCs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 84,108  [0x102d86094,0x102d860ac]
+    +       ! :   | + ! 1 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish6finish  (in decode_gbps_baseline_tip) + 812  [0x102df3b18]
+    +       ! :   | + 2 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 6032  [0x102eb6510]
+    +       ! :   | + ! 2 -[AGXG13XFamilyCommandBuffer computeCommandEncoderWithDispatchType:]  (in AGXMetalG13X) + 140  [0x1048f8a30]
+    +       ! :   | + !   1 -[AGXG13XFamilyCommandBuffer computeCommandEncoderWithConfig:]  (in AGXMetalG13X) + 120  [0x1048f8b28]
+    +       ! :   | + !   : 1 objc_msgSend  (in libobjc.A.dylib) + 0  [0x187419800]
+    +       ! :   | + !   1 -[AGXG13XFamilyCommandBuffer computeCommandEncoderWithConfig:]  (in AGXMetalG13X) + 164  [0x1048f8b54]
+    +       ! :   | + !     1 -[AGXG13XFamilyComputeContext initWithCommandBuffer:config:]  (in AGXMetalG13X) + 76  [0x104929ce8]
+    +       ! :   | + !       1 -[IOGPUMetalCommandEncoder initWithCommandBuffer:]  (in IOGPU) + 56  [0x1a9348228]
+    +       ! :   | + !         1 -[_MTLCommandEncoder initWithCommandBuffer:]  (in Metal) + 96  [0x192c26f04]
+    +       ! :   | + !           1 -[_MTLObjectWithLabel init]  (in Metal) + 44  [0x192c1898c]
+    +       ! :   | + !             1 -[NSObject init]  (in libobjc.A.dylib) + 0  [0x18741e00c]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 5592  [0x102eb6358]
+    +       ! :   | + ! 1 _RNvNtNtCs5PvGzj9jth_5omega5metal23pipeline_buffers_upload27upload_block_int32_as_float  (in decode_gbps_baseline_tip) + 388  [0x102df9548]
+    +       ! :   | + !   1 _RNvNtNtCs5PvGzj9jth_5omega5metal23pipeline_buffers_upload21upload_block_as_float  (in decode_gbps_baseline_tip) + 496  [0x102dfb310]
+    +       ! :   | + !     1 -[AGXG13XFamilyDevice newBufferWithBytes:length:options:]  (in AGXMetalG13X) + 92  [0x104a48c04]
+    +       ! :   | + !       1 -[AGXBuffer initWithDevice:length:options:isSuballocDisabled:pinnedGPULocation:]  (in AGXMetalG13X) + 32  [0x1048a4228]
+    +       ! :   | + !         1 -[AGXBuffer(Internal) initWithDevice:length:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 44  [0x1048a4658]
+    +       ! :   | + !           1 -[AGXBuffer(Internal) initWithDevice:length:alignment:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 44  [0x1048a4620]
+    +       ! :   | + !             1 -[AGXBuffer(Internal) initWithDevice:length:alignment:pointerTag:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 336  [0x1048a4500]
+    +       ! :   | + !               1 -[IOGPUMetalDevice allocBufferSubDataWithLength:options:alignment:heapIndex:bufferIndex:bufferOffset:parentAddress:parentLength:]  (in IOGPU) + 112  [0x1a934cf18]
+    +       ! :   | + !                 1 IOGPUMetalSuballocatorAllocate  (in IOGPU) + 1032  [0x1a935e7cc]
+    +       ! :   | + !                   1 MTLRangeAllocatorGetMaxFreeSize  (in Metal) + 80  [0x192c77f20]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 7944  [0x102eb6c88]
+    +       ! :   | + ! 1 _RNvNtCs5PvGzj9jth_5omega5metal26new_labeled_command_buffer  (in decode_gbps_baseline_tip) + 204  [0x102de5850]
+    +       ! :   | + !   1 -[AGXG13XFamilyCommandQueue commandBufferWithDescriptor:]  (in AGXMetalG13X) + 68  [0x1048fba94]
+    +       ! :   | + !     1 -[AGXG13XFamilyCommandBuffer initWithQueue:retainedReferences:]  (in AGXMetalG13X) + 476  [0x1048f9a1c]
+    +       ! :   | + !       1 operator new(unsigned long)  (in libc++abi.dylib) + 52  [0x1877c53e0]
+    +       ! :   | + !         1 nanov2_malloc_type  (in libsystem_malloc.dylib) + 472  [0x18762fbac]
+    +       ! :   | + !           1 nanov2_allocate_outlined  (in libsystem_malloc.dylib) + 376  [0x18763140c]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 8008  [0x102eb6cc8]
+    +       ! :   | + ! 1 objc_retain  (in libobjc.A.dylib) + 24  [0x187417938]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 8240  [0x102eb6db0]
+    +       ! :   | + ! 1 -[AGXG13XFamilyCommandBuffer commit]  (in AGXMetalG13X) + 564  [0x1048fab8c]
+    +       ! :   | + !   1 -[AGXG13XFamilyCommandBuffer commitEncoder]  (in AGXMetalG13X) + 96  [0x1048f80b0]
+    +       ! :   | + !     1 -[AGXG13XFamilyComputeContext deferredEndEncoding]  (in AGXMetalG13X) + 168  [0x104929434]
+    +       ! :   | + !       1 AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::endComputePass(bool, eAGXDataBufferPools)  (in AGXMetalG13X) + 724  [0x10491e3c8]
+    +       ! :   | + !         1 AGX::ContextCommon<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::endCommand()  (in AGXMetalG13X) + 1536  [0x1049077d0]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 17620  [0x102eb9254]
+    +       ! :   | + ! 1 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish17bind_arena_extras  (in decode_gbps_baseline_tip) + 84  [0x102e114a0]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 17672  [0x102eb9288]
+    +       ! :   | + ! 1 _RNvNtNtCs5PvGzj9jth_5omega5metal19execute_and_hazards18expert_buffers_for  (in decode_gbps_baseline_tip) + 48  [0x102df428c]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 20136  [0x102eb9c28]
+    +       ! :   | + ! 1 -[AGXG13XFamilyCommandBuffer commit]  (in AGXMetalG13X) + 856  [0x1048facb0]
+    +       ! :   | + !   1 -[IOGPUMetalCommandBuffer commit]  (in IOGPU) + 228  [0x1a9345298]
+    +       ! :   | + !     1 -[_MTLCommandQueue commitCommandBuffer:wake:]  (in Metal) + 268  [0x192c2f528]
+    +       ! :   | + !       1 dispatch_source_merge_data  (in libdispatch.dylib) + 92  [0x1876698cc]
+    +       ! :   | + !         1 _dispatch_event_loop_poke  (in libdispatch.dylib) + 336  [0x187675ec0]
+    +       ! :   | + !           1 _dispatch_kq_poll  (in libdispatch.dylib) + 228  [0x1876769c8]
+    +       ! :   | + !             1 kevent_id  (in libsystem_kernel.dylib) + 8  [0x1877cb934]
+    +       ! :   | + 1 _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip) + 20564  [0x102eb9dd4]
+    +       ! :   | +   1 _RINvXsd_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3setINtB6_8BTreeSetNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdEINtNtNtNtCsjIpoRzUjyHQ_4core4iter6traits7collect12FromIteratorB18_E9from_iterINtNtNtB1Y_8adapters6copied6CopiedINtNtB8_3map4KeysB18_TRINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB48_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjEEEECsg4GU838z6hU_21proxima_model_interop  (in decode_gbps_baseline_tip) + 332  [0x102ebb658]
+    +       ! :   | +     1 _RINvMse_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3setINtB6_8BTreeSetNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdE16from_sorted_iterINtNtNtBc_3vec9into_iter8IntoIterB18_EECs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip) + 144  [0x102d85a80]
+    +       ! :   | 30 _RNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB5_14BackendRuntime24evaluate_with_placements  (in decode_gbps_baseline_tip) + 4524  [0x102e4f03c]
+    +       ! :   | + 21 _RNvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named39resolve_named_blocks_with_placed_inputs  (in decode_gbps_baseline_tip) + 584,608,...  [0x102e07b90,0x102e07ba8,...]
+    +       ! :   | + 9 _RNvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named39resolve_named_blocks_with_placed_inputs  (in decode_gbps_baseline_tip) + 624  [0x102e07bb8]
+    +       ! :   | +   6 DYLD-STUB$$memcmp  (in decode_gbps_baseline_tip) + 4  [0x103089d34]
+    +       ! :   | +   3 _platform_memcmp  (in libsystem_platform.dylib) + 0,56,...  [0x187842e90,0x187842ec8,...]
+    +       ! :   | 9 _RNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB5_14BackendRuntime24evaluate_with_placements  (in decode_gbps_baseline_tip) + 2196  [0x102e4e724]
+    +       ! :   | + 6 _RNvMs4_NtNtCs5PvGzj9jth_5omega5metal25device_buffers_arena_planNtB5_4Plan13refit_symbols  (in decode_gbps_baseline_tip) + 72  [0x102d94f50]
+    +       ! :   | + ! 2 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape5infer  (in decode_gbps_baseline_tip) + 1364  [0x102fc6354]
+    +       ! :   | + ! : 1 _RNvMs_NtCsko2uclGGfqc_14proxima_tensor5shapeNtB4_10ShapeTable21unify_iteration_space  (in decode_gbps_baseline_tip) + 2136  [0x102f31814]
+    +       ! :   | + ! : 1 _nanov2_free  (in libsystem_malloc.dylib) + 612  [0x18762fe7c]
+    +       ! :   | + ! 1 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape5infer  (in decode_gbps_baseline_tip) + 576  [0x102fc6040]
+    +       ! :   | + ! : 1 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape9check_map  (in decode_gbps_baseline_tip) + 732  [0x102f31e18]
+    +       ! :   | + ! 1 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape5infer  (in decode_gbps_baseline_tip) + 1212  [0x102fc62bc]
+    +       ! :   | + ! : 1 nanov2_malloc_type  (in libsystem_malloc.dylib) + 292  [0x18762faf8]
+    +       ! :   | + ! 1 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape5infer  (in decode_gbps_baseline_tip) + 1696  [0x102fc64a0]
+    +       ! :   | + ! : 1 _RNvMs_NtCsko2uclGGfqc_14proxima_tensor5shapeNtB4_10ShapeTable21unify_iteration_space  (in decode_gbps_baseline_tip) + 80  [0x102f3100c]
+    +       ! :   | + ! :   1 nanov2_calloc_type  (in libsystem_malloc.dylib) + 120  [0x18762fff4]
+    +       ! :   | + ! 1 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape5infer  (in decode_gbps_baseline_tip) + 1528  [0x102fc63f8]
+    +       ! :   | + 1 _RNvMs4_NtNtCs5PvGzj9jth_5omega5metal25device_buffers_arena_planNtB5_4Plan13refit_symbols  (in decode_gbps_baseline_tip) + 848  [0x102d95258]
+    +       ! :   | + ! 1 _RNvNtNtCs5PvGzj9jth_5omega5metal28arena_encode_dispatch_finish12resolve_step  (in decode_gbps_baseline_tip) + 1372  [0x102d9714c]
+    +       ! :   | + !   1 free_medium  (in libsystem_malloc.dylib) + 2292  [0x187612dac]
+    +       ! :   | + !     1 mvm_madvise_free_plat  (in libsystem_malloc.dylib) + 108  [0x187626f48]
+    +       ! :   | + !       1 mvm_madvise  (in libsystem_malloc.dylib) + 16  [0x187626ec0]
+    +       ! :   | + !         1 madvise  (in libsystem_kernel.dylib) + 8  [0x1877cc870]
+    +       ! :   | + 1 _RNvMs4_NtNtCs5PvGzj9jth_5omega5metal25device_buffers_arena_planNtB5_4Plan13refit_symbols  (in decode_gbps_baseline_tip) + 5184  [0x102d96348]
+    +       ! :   | + ! 1 _free  (in libsystem_malloc.dylib) + 64  [0x18763dba8]
+    +       ! :   | + 1 _RNvMs4_NtNtCs5PvGzj9jth_5omega5metal25device_buffers_arena_planNtB5_4Plan13refit_symbols  (in decode_gbps_baseline_tip) + 1776  [0x102d955f8]
+    +       ! :   | 2 _RNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB5_14BackendRuntime24evaluate_with_placements  (in decode_gbps_baseline_tip) + 236,4648  [0x102e4df7c,0x102e4f0b8]
+    +       ! :   8 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 19792  [0x102e42850]
+    +       ! :   | 7 _RINvXs2J_NtNtCsjIpoRzUjyHQ_4core5slice4iterINtB7_4IterNtNtCsko2uclGGfqc_14proxima_tensor2op2OpENtNtNtNtBb_4iter6traits8iterator8Iterator3anyNCNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB2l_10load_model11LoadedModel18drive_serving_loopsf_0EB2n_  (in decode_gbps_baseline_tip) + 180,80,...  [0x102e591a0,0x102e5913c,...]
+    +       ! :   | 1 _RINvXs2J_NtNtCsjIpoRzUjyHQ_4core5slice4iterINtB7_4IterNtNtCsko2uclGGfqc_14proxima_tensor2op2OpENtNtNtNtBb_4iter6traits8iterator8Iterator3anyNCNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB2l_10load_model11LoadedModel18drive_serving_loopsf_0EB2n_  (in decode_gbps_baseline_tip) + 220  [0x102e591c8]
+    +       ! :   |   1 _platform_memcmp  (in libsystem_platform.dylib) + 128  [0x187842f10]
+    +       ! :   7 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 18608  [0x102e423b0]
+    +       ! :   | 4 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5adopt  (in decode_gbps_baseline_tip) + 1996  [0x102e56ba4]
+    +       ! :   | + 4 __bzero  (in libsystem_platform.dylib) + 64  [0x187844fd0]
+    +       ! :   | 1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5adopt  (in decode_gbps_baseline_tip) + 496  [0x102e565c8]
+    +       ! :   | + 1 _RNvNtNtCs5PvGzj9jth_5omega5metal19execute_and_hazards22allocate_placed_buffer  (in decode_gbps_baseline_tip) + 144  [0x102e14684]
+    +       ! :   | +   1 -[AGXBuffer initWithDevice:length:alignment:options:isSuballocDisabled:pinnedGPULocation:]  (in AGXMetalG13X) + 32  [0x1048a41fc]
+    +       ! :   | +     1 -[AGXBuffer(Internal) initWithDevice:length:alignment:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 44  [0x1048a4620]
+    +       ! :   | +       1 -[AGXBuffer(Internal) initWithDevice:length:alignment:pointerTag:options:isSuballocDisabled:resourceInArgs:pinnedGPULocation:]  (in AGXMetalG13X) + 456  [0x1048a4578]
+    +       ! :   | +         1 -[IOGPUMetalBuffer initWithDevice:pointer:length:alignment:options:sysMemSize:gpuAddress:gpuTag:args:argsSize:deallocator:]  (in IOGPU) + 316  [0x1a9343c90]
+    +       ! :   | +           1 -[IOGPUMetalResource initWithDevice:remoteStorageResource:options:args:argsSize:]  (in IOGPU) + 484  [0x1a9355e38]
+    +       ! :   | +             1 IOGPUResourceCreate  (in IOGPU) + 248  [0x1a935c654]
+    +       ! :   | +               1 IOConnectCallMethod  (in IOKit) + 236  [0x18b691d70]
+    +       ! :   | +                 1 io_connect_method  (in IOKit) + 520  [0x18b691fa4]
+    +       ! :   | +                   1 mach_msg2_internal  (in libsystem_kernel.dylib) + 76  [0x1877dc338]
+    +       ! :   | +                     1 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x1877c9c34]
+    +       ! :   | 1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5adopt  (in decode_gbps_baseline_tip) + 1904  [0x102e56b48]
+    +       ! :   | + 1 __bzero  (in libsystem_platform.dylib) + 64  [0x187844fd0]
+    +       ! :   | 1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5adopt  (in decode_gbps_baseline_tip) + 1944  [0x102e56b70]
+    +       ! :   |   1 __bzero  (in libsystem_platform.dylib) + 64  [0x187844fd0]
+    +       ! :   7 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 43892  [0x102e48674]
+    +       ! :   | 4 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5flush  (in decode_gbps_baseline_tip) + 352  [0x102e7cf90]
+    +       ! :   | + 2 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate7kv_ringNtNtB6_16residency_caches10LayerCache9append_at  (in decode_gbps_baseline_tip) + 248  [0x102e7d8c4]
+    +       ! :   | + ! 2 _platform_memmove  (in libsystem_platform.dylib) + 180  [0x187845374]
+    +       ! :   | + 1 _RNvMs0_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB5_10LayerCache6append  (in decode_gbps_baseline_tip) + 88  [0x102e80f70]
+    +       ! :   | + ! 1 _platform_memmove  (in libsystem_platform.dylib) + 88  [0x187845318]
+    +       ! :   | + 1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate7kv_ringNtNtB6_16residency_caches10LayerCache9append_at  (in decode_gbps_baseline_tip) + 192  [0x102e7d88c]
+    +       ! :   | +   1 _platform_memmove  (in libsystem_platform.dylib) + 180  [0x187845374]
+    +       ! :   | 1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5flush  (in decode_gbps_baseline_tip) + 196  [0x102e7cef4]
+    +       ! :   | + 1 _RNvNtNtCs5PvGzj9jth_5omega5metal19execute_and_hazards22read_placed_buffer_f32  (in decode_gbps_baseline_tip) + 140  [0x102e147bc]
+    +       ! :   | +   1 _platform_memmove  (in libsystem_platform.dylib) + 88  [0x187845318]
+    +       ! :   | 1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5flush  (in decode_gbps_baseline_tip) + 244  [0x102e7cf24]
+    +       ! :   | + 1 _RNvNtNtCs5PvGzj9jth_5omega5metal19execute_and_hazards22read_placed_buffer_f32  (in decode_gbps_baseline_tip) + 140  [0x102e147bc]
+    +       ! :   | +   1 _platform_memmove  (in libsystem_platform.dylib) + 88  [0x187845318]
+    +       ! :   | 1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate9device_kvNtB4_8DeviceKv5flush  (in decode_gbps_baseline_tip) + 292  [0x102e7cf54]
+    +       ! :   |   1 _RNvNtNtCs5PvGzj9jth_5omega5metal19execute_and_hazards22read_placed_buffer_f32  (in decode_gbps_baseline_tip) + 140  [0x102e147bc]
+    +       ! :   |     1 _platform_memmove  (in libsystem_platform.dylib) + 88  [0x187845318]
+    +       ! :   6 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 17636  [0x102e41fe4]
+    +       ! :   | 3 _RNvNtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_caches21build_position_inputs  (in decode_gbps_baseline_tip) + 2300  [0x102e4aad8]
+    +       ! :   | + 2 powf  (in libsystem_m.dylib) + 24,64  [0x1959cee78,0x1959ceea0]
+    +       ! :   | + 1 DYLD-STUB$$powf  (in decode_gbps_baseline_tip) + 4  [0x103089e60]
+    +       ! :   | 3 _RNvNtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_caches21build_position_inputs  (in decode_gbps_baseline_tip) + 2348  [0x102e4ab08]
+    +       ! :   |   3 __sincosf_stret  (in libsystem_m.dylib) + 36,40,...  [0x1959d0270,0x1959d0274,...]
+    +       ! :   6 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 19220  [0x102e42614]
+    +       ! :   | 5 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel22push_step_named_blocks  (in decode_gbps_baseline_tip) + 592  [0x102e575e0]
+    +       ! :   | + 3 _RNvNtCsg4GU838z6hU_21proxima_model_interop8lowering19sliding_rope_inputs  (in decode_gbps_baseline_tip) + 512  [0x102e96d0c]
+    +       ! :   | + ! 2 _RNvNtCsg4GU838z6hU_21proxima_model_interop8lowering19sliding_rope_inputs  (in decode_gbps_baseline_tip) + 476,512  [0x102e96ce8,0x102e96d0c]
+    +       ! :   | + ! 1 __sincosf_stret  (in libsystem_m.dylib) + 140  [0x1959d02d8]
+    +       ! :   | + 2 _RNvNtCsg4GU838z6hU_21proxima_model_interop8lowering19sliding_rope_inputs  (in decode_gbps_baseline_tip) + 504  [0x102e96d04]
+    +       ! :   | +   1 _RNvNtCsg4GU838z6hU_21proxima_model_interop8lowering19sliding_rope_inputs  (in decode_gbps_baseline_tip) + 504  [0x102e96d04]
+    +       ! :   | +   1 powf  (in libsystem_m.dylib) + 260  [0x1959cef64]
+    +       ! :   | 1 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel22push_step_named_blocks  (in decode_gbps_baseline_tip) + 680  [0x102e57638]
+    +       ! :   2 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 19416  [0x102e426d8]
+    +       ! :   | 2 _RNvNtNtCsg4GU838z6hU_21proxima_model_interop8generate13greedy_device18with_greedy_argmax  (in decode_gbps_baseline_tip) + 1736  [0x102e58fc8]
+    +       ! :   |   1 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape5infer  (in decode_gbps_baseline_tip) + 1212  [0x102fc62bc]
+    +       ! :   |   + 1 nanov2_malloc_type  (in libsystem_malloc.dylib) + 68  [0x18762fa18]
+    +       ! :   |   1 _RNvNtCsko2uclGGfqc_14proxima_tensor5shape5infer  (in decode_gbps_baseline_tip) + 1364  [0x102fc6354]
+    +       ! :   |     1 _RNvMs_NtCsko2uclGGfqc_14proxima_tensor5shapeNtB4_10ShapeTable21unify_iteration_space  (in decode_gbps_baseline_tip) + 100  [0x102f31020]
+    +       ! :   |       1 nanov2_malloc_type  (in libsystem_malloc.dylib) + 56  [0x18762fa0c]
+    +       ! :   1 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 10276  [0x102e40324]
+    +       ! :   | 1 _RNvXNtNtCsjIpoRzUjyHQ_4core4iter8adaptersINtB2_12GenericShuntINtNtB2_3map3MapINtNtB2_9enumerate9EnumerateINtNtB2_3zip3ZipINtNtNtB6_5slice4iter4IterNtNtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_caches15LayerCacheNamesEIB1W_NtB2n_17LayerPadRowWidthsEEENCNvMNtB2p_6decodeNtNtB2p_10load_model11LoadedModel18fresh_layer_caches0EINtNtB6_6result6ResultNtNtB6_7convert10InfallibleNtNtB2r_5error12InteropErrorEENtNtNtB4_6traits8iterator8Iterator4nextB2r_  (in decode_gbps_baseline_tip) + 732  [0x102eb40f0]
+    +       ! :   |   1 _RNvMs_NtNtCsg4GU838z6hU_21proxima_model_interop8generate7kv_ringNtNtB6_16residency_caches10LayerCache17reserve_ring_rows  (in decode_gbps_baseline_tip) + 180  [0x102e4ff6c]
+    +       ! :   |     1 __bzero  (in libsystem_platform.dylib) + 68  [0x187844fd4]
+    +       ! :   1 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 40084  [0x102e47794]
+    +       ! :   | 1 _RNvNtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_caches21seal_attention_layers  (in decode_gbps_baseline_tip) + 116  [0x102e7ba00]
+    +       ! :   1 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel18drive_serving_loop  (in decode_gbps_baseline_tip) + 44544  [0x102e48900]
+    +       ! :     1 _RINvNtCsjIpoRzUjyHQ_4core3ptr9drop_glueINtNtB4_6option6OptionTINtNtCs6zY7rJBZy9D_5alloc3vec3VecNtNtCsko2uclGGfqc_14proxima_tensor2op2OpENtB1x_6NodeIdB2a_INtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB2y_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEEEECsg4GU838z6hU_21proxima_model_interop  (in decode_gbps_baseline_tip) + 32  [0x102e590d4]
+    +       ! :       1 _RINvNtCsjIpoRzUjyHQ_4core3ptr9drop_glueINtNtCs6zY7rJBZy9D_5alloc3vec3VecNtNtCsko2uclGGfqc_14proxima_tensor2op2OpEECsg4GU838z6hU_21proxima_model_interop  (in decode_gbps_baseline_tip) + 336  [0x102e36960]
+    +       ! 6 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel24run_decode_loop_observed  (in decode_gbps_baseline_tip) + 128  [0x102ecd3c0]
+    +       ! : 6 _RNvNtCsIYW2rJHPns_17proxima_tokenizer4pipe19encode_with_bos_eos  (in decode_gbps_baseline_tip) + 216  [0x10302e7e0]
+    +       ! :   6 _RNvNtCsIYW2rJHPns_17proxima_tokenizer4pipe6encode  (in decode_gbps_baseline_tip) + 332  [0x10302ea94]
+    +       ! :     4 _RNvNtCsIYW2rJHPns_17proxima_tokenizer4pipe15encode_ordinary  (in decode_gbps_baseline_tip) + 2292,3260,...  [0x10302f6c0,0x10302fa88,...]
+    +       ! :     1 _RNvNtCsIYW2rJHPns_17proxima_tokenizer4pipe15encode_ordinary  (in decode_gbps_baseline_tip) + 1840  [0x10302f4fc]
+    +       ! :     | 1 _RNvXs0_NtNtNtCsjIpoRzUjyHQ_4core4iter8adapters3mapINtB5_3MapNtNtNtBb_3str4iter11CharIndicesNCNvNtCsIYW2rJHPns_17proxima_tokenizer3bpe20encode_char_pretokens_0ENtNtNtB9_6traits8iterator8Iterator4nextB1x_  (in decode_gbps_baseline_tip) + 424  [0x10302c3e8]
+    +       ! :     |   1 _platform_memcmp  (in libsystem_platform.dylib) + 260  [0x187842f94]
+    +       ! :     1 _RNvNtCsIYW2rJHPns_17proxima_tokenizer4pipe15encode_ordinary  (in decode_gbps_baseline_tip) + 2212  [0x10302f670]
+    +       ! :       1 _RNvNtCsIYW2rJHPns_17proxima_tokenizer3bpe11push_bigram  (in decode_gbps_baseline_tip) + 308  [0x10302c5dc]
+    +       ! 1 _RNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB4_10load_model11LoadedModel24run_decode_loop_observed  (in decode_gbps_baseline_tip) + 460  [0x102ecd50c]
+    +       !   1 _RINvNtCsjIpoRzUjyHQ_4core3ptr9drop_glueNtNtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_caches15LayerCacheStateEBH_  (in decode_gbps_baseline_tip) + 196  [0x102e35434]
+    +       !     1 free_medium  (in libsystem_malloc.dylib) + 2292  [0x187612dac]
+    +       !       1 mvm_madvise_free_plat  (in libsystem_malloc.dylib) + 108  [0x187626f48]
+    +       !         1 mvm_madvise  (in libsystem_malloc.dylib) + 16  [0x187626ec0]
+    +       !           1 madvise  (in libsystem_kernel.dylib) + 8  [0x1877cc870]
+    +       1 _RNvCsaykuNZ8fj1y_20decode_gbps_baseline4main  (in decode_gbps_baseline_tip) + 16788  [0x102d59954]
+    +       ! 1 _RNvXso_NtNtCs1SSuMAdGM58_3std2io5stdioRNtB5_6StderrNtNtNtCsjIpoRzUjyHQ_4core2io5write5Write9write_fmt  (in decode_gbps_baseline_tip) + 216  [0x10305fff4]
+    +       !   1 _RNvNtCsjIpoRzUjyHQ_4core3fmt5write  (in decode_gbps_baseline_tip) + 144  [0x102d6b038]
+    +       !     1 _RNvXNvNtNtCsjIpoRzUjyHQ_4core2io5write17default_write_fmtINtB2_7AdapterNtNtNtCs1SSuMAdGM58_3std2io5stdio10StderrLockENtNtB8_3fmt5Write9write_strB1d_  (in decode_gbps_baseline_tip) + 48  [0x103060124]
+    +       !       1 _RNvYNtNtNtNtCs1SSuMAdGM58_3std3sys5stdio4unix6StderrNtNtNtCsjIpoRzUjyHQ_4core2io5write5Write9write_allBa_  (in decode_gbps_baseline_tip) + 112  [0x103059bec]
+    +       !         1 write  (in libsystem_kernel.dylib) + 8  [0x1877cd6f4]
+    +       1 _RNvCsaykuNZ8fj1y_20decode_gbps_baseline4main  (in decode_gbps_baseline_tip) + 17120  [0x102d59aa0]
+    +         1 _RNvXso_NtNtCs1SSuMAdGM58_3std2io5stdioRNtB5_6StderrNtNtNtCsjIpoRzUjyHQ_4core2io5write5Write9write_fmt  (in decode_gbps_baseline_tip) + 216  [0x10305fff4]
+    +           1 _RNvNtCsjIpoRzUjyHQ_4core3fmt5write  (in decode_gbps_baseline_tip) + 96  [0x102d6b008]
+    +             1 _RNvXsh_NtCsjIpoRzUjyHQ_4core3fmteNtB5_5Debug3fmt  (in decode_gbps_baseline_tip) + 452  [0x102d72838]
+    +               1 _RNvXNvNtNtCsjIpoRzUjyHQ_4core2io5write17default_write_fmtINtB2_7AdapterNtNtNtCs1SSuMAdGM58_3std2io5stdio10StderrLockENtNtB8_3fmt5Write9write_strB1d_  (in decode_gbps_baseline_tip) + 48  [0x103060124]
+    +                 1 _RNvYNtNtNtNtCs1SSuMAdGM58_3std3sys5stdio4unix6StderrNtNtNtCsjIpoRzUjyHQ_4core2io5write5Write9write_allBa_  (in decode_gbps_baseline_tip) + 112  [0x103059bec]
+    +                   1 write  (in libsystem_kernel.dylib) + 8  [0x1877cd6f4]
+    2302 Thread_78227664: proxima-bg-0
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227665: proxima-bg-1
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227666: proxima-bg-2
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227667: proxima-bg-3
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227668: proxima-bg-4
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227669: proxima-bg-5
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227670: proxima-bg-6
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227671: proxima-bg-7
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 232  [0x102d77280]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227672: proxima-bg-8
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2302 Thread_78227673: proxima-bg-9
+    + 2302 thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+    +   2302 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+    +     2302 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+    +       2302 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+    +         2302 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+    +           2302 _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 232  [0x102d77280]
+    +             2302 _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+    +               2302 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x1877cd3cc]
+    2287 Thread_78227706
+    + 2232 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x187806b74]
+    + ! 2231 _pthread_wqthread  (in libsystem_pthread.dylib) + 368  [0x187807e6c]
+    + ! : 2231 __workq_kernreturn  (in libsystem_kernel.dylib) + 8  [0x1877cb8b0]
+    + ! 1 _pthread_wqthread  (in libsystem_pthread.dylib) + 292  [0x187807e20]
+    + !   1 _dispatch_workloop_worker_thread  (in libdispatch.dylib) + 512  [0x187666acc]
+    + !     1 _dispatch_event_loop_merge  (in libdispatch.dylib) + 148  [0x1876765fc]
+    + !       1 _dispatch_mach_merge_msg  (in libdispatch.dylib) + 144  [0x18766dec0]
+    + !         1 dispatch_mach_msg_create  (in libdispatch.dylib) + 0  [0x187671538]
+    + 55 start_wqthread  (in libsystem_pthread.dylib) + 0  [0x187806b6c]
+    2268 Thread_78227662
+    + 2226 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x187806b74]
+    + ! 2226 _pthread_wqthread  (in libsystem_pthread.dylib) + 368  [0x187807e6c]
+    + !   2226 __workq_kernreturn  (in libsystem_kernel.dylib) + 8  [0x1877cb8b0]
+    + 42 start_wqthread  (in libsystem_pthread.dylib) + 0  [0x187806b6c]
+    37 Thread_<multiple>   DispatchQueue_68: com.Metal.CommandQueueDispatch  (serial)
+    + 37 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x187806b74]
+    +   37 _pthread_wqthread  (in libsystem_pthread.dylib) + 292  [0x187807e20]
+    +     37 _dispatch_workloop_worker_thread  (in libdispatch.dylib) + 540  [0x187666ae8]
+    +       37 _dispatch_root_queue_drain_deferred_wlh  (in libdispatch.dylib) + 292  [0x187667264]
+    +         37 _dispatch_lane_invoke  (in libdispatch.dylib) + 388  [0x18765ce2c]
+    +           37 _dispatch_lane_serial_drain  (in libdispatch.dylib) + 332  [0x18765c1b8]
+    +             37 _dispatch_source_invoke  (in libdispatch.dylib) + 844  [0x18766a2f8]
+    +               37 _dispatch_source_latch_and_call  (in libdispatch.dylib) + 396  [0x18766b620]
+    +                 37 _dispatch_continuation_pop  (in libdispatch.dylib) + 596  [0x1876585e0]
+    +                   37 _dispatch_client_callout  (in libdispatch.dylib) + 16  [0x18766d85c]
+    +                     37 -[_MTLCommandQueue _submitAvailableCommandBuffers]  (in Metal) + 512  [0x192c2f80c]
+    +                       37 -[IOGPUMetalCommandQueue submitCommandBuffers:count:]  (in IOGPU) + 72  [0x1a9348df4]
+    +                         37 -[IOGPUMetalCommandQueue _submitCommandBuffers:count:]  (in IOGPU) + 356  [0x1a9348f84]
+    +                           37 IOGPUCommandQueueSubmitCommandBuffers  (in IOGPU) + 164  [0x1a935c140]
+    +                             37 iokit_user_client_trap  (in IOKit) + 8  [0x18b6b61ac]
+    11 Thread_<multiple>   DispatchQueue_71: com.Metal.CompletionQueueDispatch  (serial)
+    + 11 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x187806b74]
+    +   11 _pthread_wqthread  (in libsystem_pthread.dylib) + 292  [0x187807e20]
+    +     11 _dispatch_workloop_worker_thread  (in libdispatch.dylib) + 540  [0x187666ae8]
+    +       11 _dispatch_root_queue_drain_deferred_wlh  (in libdispatch.dylib) + 292  [0x187667264]
+    +         11 _dispatch_lane_invoke  (in libdispatch.dylib) + 388  [0x18765ce2c]
+    +           11 _dispatch_lane_serial_drain  (in libdispatch.dylib) + 332  [0x18765c1b8]
+    +             11 _dispatch_lane_invoke  (in libdispatch.dylib) + 440  [0x18765ce60]
+    +               11 _dispatch_lane_serial_drain  (in libdispatch.dylib) + 332  [0x18765c1b8]
+    +                 10 _dispatch_mach_invoke  (in libdispatch.dylib) + 472  [0x187670e74]
+    +                 ! 10 _dispatch_lane_serial_drain  (in libdispatch.dylib) + 332  [0x18765c1b8]
+    +                 !   9 _dispatch_mach_msg_invoke  (in libdispatch.dylib) + 464  [0x187670110]
+    +                 !   : 9 _dispatch_client_callout4  (in libdispatch.dylib) + 16  [0x18766d8a4]
+    +                 !   :   8 __IOGPUNotificationQueueSetDispatchQueue_block_invoke  (in IOGPU) + 64  [0x1a9351d84]
+    +                 !   :   | 8 IOGPUNotificationQueueDispatchAvailableCompletionNotifications  (in IOGPU) + 136  [0x1a9351c74]
+    +                 !   :   |   7 -[_MTLCommandQueue commandBufferDidComplete:startTime:completionTime:error:]  (in Metal) + 108  [0x192c2fff4]
+    +                 !   :   |   + 7 -[IOGPUMetalCommandBuffer didCompleteWithStartTime:endTime:error:]  (in IOGPU) + 240  [0x1a9345064]
+    +                 !   :   |   +   7 IOGPUMetalCommandBufferStorageDealloc  (in IOGPU) + 76  [0x1a9346f94]
+    +                 !   :   |   +     6 IOGPUMetalCommandBufferStorageReset  (in IOGPU) + 40  [0x1a9346ffc]
+    +                 !   :   |   +     ! 6 -[MTLResourceList releaseAllObjectsAndReset]  (in Metal) + 68  [0x192c305e4]
+    +                 !   :   |   +     !   6 MTLResourceListChunkFreeEntries(MTLResourceListChunk*)  (in Metal) + 60  [0x192d8cdb4]
+    +                 !   :   |   +     !     4 -[AGXG13XFamilyBuffer dealloc]  (in AGXMetalG13X) + 76  [0x1048f6108]
+    +                 !   :   |   +     !     : 4 -[AGXBuffer dealloc]  (in AGXMetalG13X) + 44  [0x1048a42fc]
+    +                 !   :   |   +     !     :   4 -[IOGPUMetalBuffer dealloc]  (in IOGPU) + 320  [0x1a9344504]
+    +                 !   :   |   +     !     :     3 -[IOGPUMetalResource dealloc]  (in IOGPU) + 244  [0x1a9356344]
+    +                 !   :   |   +     !     :     | 3 _CFRelease  (in CoreFoundation) + 296  [0x1879cb544]
+    +                 !   :   |   +     !     :     |   3 ioGPUResourceFinalize  (in IOGPU) + 104  [0x1a935d008]
+    +                 !   :   |   +     !     :     |     3 iokit_user_client_trap  (in IOKit) + 8  [0x18b6b61ac]
+    +                 !   :   |   +     !     :     1 -[IOGPUMetalResource dealloc]  (in IOGPU) + 300  [0x1a935637c]
+    +                 !   :   |   +     !     :       1 -[_MTLObjectWithLabel dealloc]  (in Metal) + 64  [0x192c2eda4]
+    +                 !   :   |   +     !     :         1 _objc_rootDealloc  (in libobjc.A.dylib) + 72  [0x18741b384]
+    +                 !   :   |   +     !     :           1 objc_destructInstance_nonnull_realized(objc_object*)  (in libobjc.A.dylib) + 76  [0x18744b7c8]
+    +                 !   :   |   +     !     :             1 object_cxxDestructFromClass(objc_object*, objc_class*)  (in libobjc.A.dylib) + 116  [0x187423e00]
+    +                 !   :   |   +     !     :               1 objc_destroyWeak  (in libobjc.A.dylib) + 152  [0x187424de0]
+    +                 !   :   |   +     !     2 objc_release  (in libobjc.A.dylib) + 16,24  [0x187418028,0x187418030]
+    +                 !   :   |   +     1 IOGPUMetalCommandBufferStorageReset  (in IOGPU) + 120  [0x1a934704c]
+    +                 !   :   |   +       1 _iogpuMetalCommandBufferStorageReleaseCurrentResources  (in IOGPU) + 60  [0x1a93471fc]
+    +                 !   :   |   +         1 IOGPUMetalPooledResourceRelease  (in IOGPU) + 200  [0x1a9354a60]
+    +                 !   :   |   +           1 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x1877ca0f0]
+    +                 !   :   |   1 -[_MTLCommandBuffer didScheduleWithStartTime:endTime:error:]  (in Metal) + 232  [0x192c2fe54]
+    +                 !   :   |     1 FPCommandBufferScheduled  (in FramePacing) + 0  [0x23bbaaa88]
+    +                 !   :   1 __IOGPUNotificationQueueSetDispatchQueue_block_invoke  (in IOGPU) + 12  [0x1a9351d50]
+    +                 !   1 _dispatch_mach_msg_invoke  (in libdispatch.dylib) + 484  [0x187670124]
+    +                 !     1 dispatch_release  (in libdispatch.dylib) + 152  [0x18765432c]
+    +                 !       1 objc_msgSend$dealloc  (in libdispatch.dylib) + 16  [0x187698690]
+    +                 1 _dispatch_mach_invoke  (in libdispatch.dylib) + 524  [0x187670ea8]
+    +                   1 _dispatch_unote_resume_direct  (in libdispatch.dylib) + 0  [0x187675d3c]
+    1 Thread_78227706   DispatchQueue_69: com.Metal.CompletionQueueDispatch  (serial)
+      1 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x187806b74]
+        1 _pthread_wqthread  (in libsystem_pthread.dylib) + 292  [0x187807e20]
+          1 _dispatch_workloop_worker_thread  (in libdispatch.dylib) + 540  [0x187666ae8]
+            1 _dispatch_root_queue_drain_deferred_wlh  (in libdispatch.dylib) + 292  [0x187667264]
+              1 _dispatch_lane_invoke  (in libdispatch.dylib) + 388  [0x18765ce2c]
+                1 _dispatch_lane_serial_drain  (in libdispatch.dylib) + 332  [0x18765c1b8]
+                  1 _dispatch_lane_invoke  (in libdispatch.dylib) + 716  [0x18765cf74]
+
+Total number in stack (recursive counted multiple, when >=5):
+        11       __psynch_cvwait  (in libsystem_kernel.dylib) + 0  [0x1877cd3c4]
+        11       _platform_memmove  (in libsystem_platform.dylib) + 0  [0x1878452c0]
+        11       _pthread_cond_wait  (in libsystem_pthread.dylib) + 984  [0x18780c09c]
+        10       _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB1c_21ProximaBackgroundPool12with_threads0uEB1g_  (in decode_gbps_baseline_tip) + 244  [0x102e1b774]
+        10       _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNvMNtNtCsi0Ncu1Y1Rkg_5prime2os10backgroundNtB18_21ProximaBackgroundPool12with_threads0uEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1c_  (in decode_gbps_baseline_tip) + 60  [0x102e1c1cc]
+        10       _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in decode_gbps_baseline_tip) + 380  [0x10305be10]
+        10       _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18780bbc8]
+        10       thread_start  (in libsystem_pthread.dylib) + 8  [0x187806b80]
+        8       _RNvMs0_NtNtCs53DMRRT6ppB_15crossbeam_utils4sync6parkerNtB5_6Parker4park  (in decode_gbps_baseline_tip) + 180  [0x102d7724c]
+        5       __bzero  (in libsystem_platform.dylib) + 0  [0x187844f90]
+        5       _dispatch_lane_serial_drain  (in libdispatch.dylib) + 332  [0x18765c1b8]
+        5       objc_retain  (in libobjc.A.dylib) + 0  [0x187417920]
+        5       start_wqthread  (in libsystem_pthread.dylib) + 8  [0x187806b74]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __psynch_cvwait  (in libsystem_kernel.dylib)        24915
+        __workq_kernreturn  (in libsystem_kernel.dylib)        4457
+        __findenv_locked  (in libsystem_c.dylib)        138
+        start_wqthread  (in libsystem_pthread.dylib)        97
+        iokit_user_client_trap  (in IOKit)        41
+        _RINvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named34execute_plan_with_placements_innerNCNvMsa_NtNtCsg4GU838z6hU_21proxima_model_interop8generate16residency_cachesNtB1D_14BackendRuntime24evaluate_with_placementss_0EB1H_  (in decode_gbps_baseline_tip)        38
+        _RNvNtNtCs5PvGzj9jth_5omega5metal24placements_execute_named39resolve_named_blocks_with_placed_inputs  (in decode_gbps_baseline_tip)        21
+        _RNvNtNtCs5PvGzj9jth_5omega5metal21resident_nocopy_cache12bind_buffers  (in decode_gbps_baseline_tip)        16
+        _platform_memmove  (in libsystem_platform.dylib)        13
+        __bzero  (in libsystem_platform.dylib)        9
+        objc_retain  (in libobjc.A.dylib)        9
+        AGX::ResourceGroupUsage<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::bindResource(_IOGPUMetalResource const*, ResourceGroupBindingType, unsigned int, unsigned int)  (in AGXMetalG13X)        7
+        _RINvXs2J_NtNtCsjIpoRzUjyHQ_4core5slice4iterINtB7_4IterNtNtCsko2uclGGfqc_14proxima_tensor2op2OpENtNtNtNtBb_4iter6traits8iterator8Iterator3anyNCNvMNtNtCsg4GU838z6hU_21proxima_model_interop8generate6decodeNtNtB2l_10load_model11LoadedModel18drive_serving_loopsf_0EB2n_  (in decode_gbps_baseline_tip)        7
+        _RNvNtNtNtCs1SSuMAdGM58_3std3sys3env4unix6getenv  (in decode_gbps_baseline_tip)        7
+        AGX::ComputeContext<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses, AGX::G13::EncoderComputeServiceClasses>::setBuffer_impl<AGXBuffer>(AGXBuffer const*, unsigned long, unsigned int, unsigned long)  (in AGXMetalG13X)        6
+        DYLD-STUB$$memcmp  (in decode_gbps_baseline_tip)        6
+        AGX::PassiveResourceGroupUsage<AGX::G13::Encoders, AGX::G13::Classes, AGX::G13::ObjClasses>::bindPassiveResource(_PassiveResourceInfo const&)  (in AGXMetalG13X)        5
+        _RINvMsi_NtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3mapINtB6_8BTreeMapNtNtCsko2uclGGfqc_14proxima_tensor2op6NodeIdTINtNtNtCs7RF9nbmxAI0_5objc22rc8retained8RetainedINtNtNtB1Y_7runtime15protocol_object14ProtocolObjectDNtNtNtCs1wcKiOvY7IM_11objc2_metal9generated11___MTLBuffer9MTLBufferEL_EEjEE6removeB18_ECs5PvGzj9jth_5omega  (in decode_gbps_baseline_tip)        5
+        _ioGPUResourceListAddResourceEntry  (in IOGPU)        5
+        _platform_memcmp  (in libsystem_platform.dylib)        5
+
+Binary Images:
+       0x102d54000 -        0x1030eafcf +decode_gbps_baseline_tip (0) <EA97C3E4-F739-3B9B-B7CF-B0EC47484393> /Users/*/decode_gbps_baseline_tip
+       0x104738000 -        0x104dccdff  com.apple.AGXMetalG13X (329.2 - 329.2) <EF112F45-F546-3299-BE33-38BA106F65CF> /System/Library/Extensions/AGXMetalG13X.bundle/Contents/MacOS/AGXMetalG13X
+       0x187410000 -        0x1874638c3  libobjc.A.dylib (940.4) <B2301EC8-BFAE-329D-889D-3A3C247A3C34> /usr/lib/libobjc.A.dylib
+       0x187464000 -        0x1874ff577  dyld (1.0.0 - 1286.10) <B162DAB5-4E3E-3F74-95CC-18B792B2C476> /usr/lib/dyld
+       0x187500000 -        0x187503168  libsystem_blocks.dylib (96) <FFD241C6-CD72-374B-85DB-641978DE5EDA> /usr/lib/system/libsystem_blocks.dylib
+       0x187504000 -        0x18754e97f  libxpc.dylib (2894.140.12.705.2) <43A78CA2-7FF2-30F2-947B-B032ED42E9D9> /usr/lib/system/libxpc.dylib
+       0x18754f000 -        0x18756a87f  libsystem_trace.dylib (1643.120.5) <464A597C-198A-3079-8DBF-B73462BF4538> /usr/lib/system/libsystem_trace.dylib
+       0x18756b000 -        0x1876093b7  libcorecrypto.dylib (1736.140.2) <731C1CED-5F52-3583-8A8D-EDFF604BC2D3> /usr/lib/system/libcorecrypto.dylib
+       0x18760a000 -        0x18765106f  libsystem_malloc.dylib (715.140.5) <1CAA25D3-6AE9-39FC-8A75-0450353D3AB9> /usr/lib/system/libsystem_malloc.dylib
+       0x187652000 -        0x18769875f  libdispatch.dylib (1521.140.2) <DB1D6C51-05ED-35AB-A8B5-4132A24E9753> /usr/lib/system/libdispatch.dylib
+       0x187699000 -        0x18769bd1b  libsystem_featureflags.dylib (97) <868DC641-E42E-34C0-A0B5-0DFE2055F362> /usr/lib/system/libsystem_featureflags.dylib
+       0x18769c000 -        0x18771d34b  libsystem_c.dylib (1698.140.3.705.1) <06B987DD-B857-3BE0-BC83-A5C72AA292B2> /usr/lib/system/libsystem_c.dylib
+       0x18771e000 -        0x1877aaff7  libc++.1.dylib (1900.181) <2189A7FF-48C7-3886-B9E4-4F57DEC923C5> /usr/lib/libc++.1.dylib
+       0x1877ab000 -        0x1877c8fff  libc++abi.dylib (1900.181) <0490774F-1932-3DE2-8375-5FEA7F2DC595> /usr/lib/libc++abi.dylib
+       0x1877c9000 -        0x1878045f3  libsystem_kernel.dylib (11417.140.69.712.68) <54664556-33BB-3081-9DB3-13DAFB2926B5> /usr/lib/system/libsystem_kernel.dylib
+       0x187805000 -        0x187811a77  libsystem_pthread.dylib (536.0.0.702.1) <7DA8FCD5-D60E-32F7-B055-6CE3F1615B9E> /usr/lib/system/libsystem_pthread.dylib
+       0x187812000 -        0x187841ba3  libdyld.dylib (1286.10) <D76600A2-B862-3FF9-AF06-F860B37184EB> /usr/lib/system/libdyld.dylib
+       0x187842000 -        0x187849e0b  libsystem_platform.dylib (349.140.6) <D67E2CE2-F8E7-3EA8-8361-F7205551848F> /usr/lib/system/libsystem_platform.dylib
+       0x18784a000 -        0x187879d83  libsystem_info.dylib (597.0.0.701.2) <6B05F821-534F-3D8F-B03D-B9F35E6955FF> /usr/lib/system/libsystem_info.dylib
+       0x18787a000 -        0x187db9fff  com.apple.CoreFoundation (6.9 - 3603.1.416) <E931A369-D11A-3D94-9CFD-E52A5C88698C> /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+       0x187dba000 -        0x1880ac41f  com.apple.LaunchServices (1141.1 - 1141.1) <40B06025-8A8A-3F09-B4F0-6819F7F2E7F6> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices
+       0x1880ad000 -        0x18823157f  com.apple.gpusw.MetalTools (1.0 - 1) <509BFB82-8341-3136-A1C9-3DE99433C8FD> /System/Library/PrivateFrameworks/MetalTools.framework/Versions/A/MetalTools
+       0x188232000 -        0x1888c572f  libBLAS.dylib (1545) <8EFD75B0-4B41-3062-AF1D-511387A1FFF2> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib
+       0x1888c6000 -        0x1889d22df  com.apple.Lexicon-framework (1.0 - 173.9) <4FD8164F-8CED-339F-9205-1A3CD564F5E7> /System/Library/PrivateFrameworks/Lexicon.framework/Versions/A/Lexicon
+       0x1889d3000 -        0x188acebd7  libSparse.dylib (127.120.9) <510C65CC-58F8-3883-AC19-0236F6D409EE> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libSparse.dylib
+       0x188acf000 -        0x188b62b9b  com.apple.SystemConfiguration (1.21 - 1.21) <2F8B56D4-B051-3635-816D-D7EFFB5BAB7A> /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration
+       0x188b63000 -        0x188b97bb7  libCRFSuite.dylib (55) <26961311-A2C6-350C-BE73-1A31500E54A4> /usr/lib/libCRFSuite.dylib
+       0x188e6c000 -        0x189c567ff  com.apple.Foundation (6.9 - 3603.1.416) <45CDCD3D-8B33-34E6-AB9C-07E5D189D74F> /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+       0x189e12000 -        0x189f3275f  com.apple.CoreDisplay (288 - 288) <B1FBB6D7-1B13-3154-ABB3-B81D2C104D32> /System/Library/Frameworks/CoreDisplay.framework/Versions/A/CoreDisplay
+       0x189f33000 -        0x18a2ea79f  com.apple.audio.AudioToolboxCore (1.0 - 1456.717) <25122FA1-E365-3945-9B79-31E4373B9B49> /System/Library/PrivateFrameworks/AudioToolboxCore.framework/Versions/A/AudioToolboxCore
+       0x18a2eb000 -        0x18a50aadf  com.apple.CoreText (844.20.0.3 - 844.20.0.3) <FD02993B-4D1B-30F4-AF2C-C10E9B5DCC4E> /System/Library/Frameworks/CoreText.framework/Versions/A/CoreText
+       0x18a50b000 -        0x18ac3d17f  com.apple.audio.CoreAudio (5.0 - 5.0) <A9FE5477-1CA0-356A-BF03-675DC1145055> /System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio
+       0x18ac3e000 -        0x18b0426bf  com.apple.security (7.0 - 61439.140.12.707.2) <D9973664-0052-34FC-B7D4-F74483E82CC6> /System/Library/Frameworks/Security.framework/Versions/A/Security
+       0x18b043000 -        0x18b30ec1b  libicucore.A.dylib (76104.4.200) <1C33E27F-BF86-3CEF-B871-C530FF37702C> /usr/lib/libicucore.A.dylib
+       0x18b30f000 -        0x18b319397  libsystem_darwin.dylib (1698.140.3.705.1) <FE3BD229-0A83-3397-9996-3E597A5D22A6> /usr/lib/system/libsystem_darwin.dylib
+       0x18b31a000 -        0x18b60ccbf  com.apple.CoreServices.CarbonCore (1333 - 1333) <8FC6E9A1-73E7-356C-AE7C-C086A6E9EA32> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore
+       0x18b60d000 -        0x18b64d603  com.apple.CoreServicesInternal (505 - 505) <75B9E983-AB25-3E29-953D-9A99690EB627> /System/Library/PrivateFrameworks/CoreServicesInternal.framework/Versions/A/CoreServicesInternal
+       0x18b64e000 -        0x18b68e4df  com.apple.CSStore (1141.1 - 1141.1) <AEC64135-DEEB-3ACD-95A6-0459739F6D4F> /System/Library/PrivateFrameworks/CoreServicesStore.framework/Versions/A/CoreServicesStore
+       0x18b68f000 -        0x18b77131f  com.apple.framework.IOKit (2.0.2 - 100150.120.2.701.1) <CF1B0836-8F45-36A8-A4F9-8CECBBB00CA4> /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+       0x18b772000 -        0x18b783ff3  libsystem_notify.dylib (342.0.0.701.1) <414C11DC-AE3D-3D95-B43A-1D56C2A0E346> /usr/lib/system/libsystem_notify.dylib
+       0x18ce22000 -        0x18ce37d1f  com.apple.UniformTypeIdentifiers (709 - 709) <ABF8D27C-9C29-35DB-B1B5-C956AFEBCD01> /System/Library/Frameworks/UniformTypeIdentifiers.framework/Versions/A/UniformTypeIdentifiers
+       0x18d2d9000 -        0x18d3a965f  libboringssl.dylib (486.140.6) <4AEE6FD4-03B6-3300-9E77-F30B4A1A8E05> /usr/lib/libboringssl.dylib
+       0x18d3aa000 -        0x18d3aa3d7  libnetwork.dylib (4277.140.33.703.1) <ED2C1581-B791-37B8-8E74-F66CEA227712> /usr/lib/libnetwork.dylib
+       0x18d3ab000 -        0x18d7751bf  com.apple.CFNetwork (1.0 - 3826.600.41.1.1) <D9937C97-77D3-379B-87DF-697B2EF4D771> /System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork
+       0x18d776000 -        0x18d790e8f  libsystem_networkextension.dylib (2063.140.6.701.3) <57D3AC78-B98A-3FAA-B850-720E4B16E786> /usr/lib/system/libsystem_networkextension.dylib
+       0x18d791000 -        0x18d792067  libenergytrace.dylib (23) <068F515F-2B05-3E5B-88FB-8B201A17C669> /usr/lib/libenergytrace.dylib
+       0x18d793000 -        0x18d80ce5f  libMobileGestalt.dylib (1414.140.6) <DC345289-7569-3636-B2D0-17407FD26DD4> /usr/lib/libMobileGestalt.dylib
+       0x18d80d000 -        0x18d824fdb  libsystem_asl.dylib (402) <9DFAA6B8-B95A-3340-8DC0-1115FC1B8CF4> /usr/lib/system/libsystem_asl.dylib
+       0x18d825000 -        0x18d847113  com.apple.TCC (1.0 - 1) <4AA8A197-A646-3EDF-88C6-6AB59F41A091> /System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC
+       0x18d848000 -        0x18dd6e7bf  com.apple.SkyLight (1.600.0 - 891.10.2.1) <47E1B4A5-0E0C-34A0-A54C-562CA2385D07> /System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight
+       0x18dd6f000 -        0x18e4a127f  com.apple.CoreGraphics (2.0 - 1889.7.2) <0DCE35B4-4F1E-3627-A7A9-24F052F0A315> /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+       0x18e4a2000 -        0x18e657d97  com.apple.ColorSync (4.13.0 - 3777.4.1) <2E684CFD-30C9-303E-862F-283489E95DC6> /System/Library/Frameworks/ColorSync.framework/Versions/A/ColorSync
+       0x18ead2000 -        0x18ef2ce3f  com.apple.CoreData (120 - 1448.1) <14AC1529-F036-3BEA-AFB2-4BA90AE9D5D5> /System/Library/Frameworks/CoreData.framework/Versions/A/CoreData
+       0x18ef2d000 -        0x18ef470ff  com.apple.ProtocolBuffer (1 - 303.26.4.18.3) <48C67456-B482-3498-A144-DFCD7A6083AC> /System/Library/PrivateFrameworks/ProtocolBuffer.framework/Versions/A/ProtocolBuffer
+       0x18ef48000 -        0x18f0fcc67  libsqlite3.dylib (360.4) <D2B8F0FC-E27C-3643-A842-F80B1E126527> /usr/lib/libsqlite3.dylib
+       0x18f195000 -        0x18f279a7f  com.apple.BaseBoard (694.5.5 - 694.5.5) <9C0CC9B4-634A-3E76-B89E-8C7AED7D1C51> /System/Library/PrivateFrameworks/BaseBoard.framework/Versions/A/BaseBoard
+       0x18f27a000 -        0x18f2e21ff  com.apple.RunningBoardServices (1.0 - 961.100.17) <D0CBA4B0-A89C-3FF6-B362-2CFC3EAE2BE9> /System/Library/PrivateFrameworks/RunningBoardServices.framework/Versions/A/RunningBoardServices
+       0x18f2e3000 -        0x18f35704f  com.apple.AE (944 - 944) <4C3E72F1-64FE-3489-A7CB-CA55AD0B1ABE> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/AE.framework/Versions/A/AE
+       0x18f358000 -        0x18f368247  libdns_services.dylib (2600.140.3.704.1) <185BFAC4-D433-3C64-BC19-9909EB7AC9E1> /usr/lib/libdns_services.dylib
+       0x18f369000 -        0x18f3713a7  libsystem_symptoms.dylib (2022.140.4.702.1) <E08B8791-9709-3FAB-9002-EF551BE521ED> /usr/lib/system/libsystem_symptoms.dylib
+       0x18f372000 -        0x19041b37f  com.apple.Network (1.0 - 4277.140.33.703.1) <2E241BFD-6159-3FB5-8250-8366314F180C> /System/Library/Frameworks/Network.framework/Versions/A/Network
+       0x19041c000 -        0x19044c2ff  com.apple.analyticsd (1.0 - 1) <AB017EEB-DFA0-3B5B-A10E-5775830D2728> /System/Library/PrivateFrameworks/CoreAnalytics.framework/Versions/A/CoreAnalytics
+       0x19044d000 -        0x19044e8d3  libDiagnosticMessagesClient.dylib (113) <7752AC6E-DCF7-3676-AEA9-A96322346934> /usr/lib/libDiagnosticMessagesClient.dylib
+       0x19044f000 -        0x1904afeff  com.apple.spotlight.metadata.utilities (1.0 - 2333.57.1.11) <126AA44E-E532-3110-95A3-AAE6E995E567> /System/Library/PrivateFrameworks/MetadataUtilities.framework/Versions/A/MetadataUtilities
+       0x1904b0000 -        0x19053a0bf  com.apple.Metadata (15.8 - 2333.57.1.11) <6D4D9DEB-97EA-32D3-B21F-39D646F2D57E> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Metadata
+       0x19053b000 -        0x19054420b  com.apple.DiskArbitration (2.7 - 2.7) <3CD289BD-84C1-342F-903E-2E8184812395> /System/Library/Frameworks/DiskArbitration.framework/Versions/A/DiskArbitration
+       0x190545000 -        0x1909549fb  com.apple.vImage (8.1 - 611.140.2.700.1) <48EC069C-AF82-31FE-8FD9-FDED95F55412> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vImage.framework/Versions/A/vImage
+       0x190955000 -        0x190d28c7f  com.apple.QuartzCore (1.11 - 1156.18.3) <C10ABF6D-7FEB-3FC3-A607-62363C70BF17> /System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+       0x190d29000 -        0x190d7a27f  libFontRegistry.dylib (391.20.0.5) <37239AC4-784C-3BFF-96E7-EC7AF9A44597> /System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/ATS.framework/Versions/A/Resources/libFontRegistry.dylib
+       0x191010000 -        0x19101da7f  com.apple.OpenDirectory (15.8 - 643) <75D8A63D-26A8-3A6D-94BA-C5113FF80283> /System/Library/Frameworks/OpenDirectory.framework/Versions/A/OpenDirectory
+       0x19101e000 -        0x19103c053  com.apple.CFOpenDirectory (15.8 - 643) <9E46C67F-A57E-3632-B04D-A892D9033C37> /System/Library/Frameworks/OpenDirectory.framework/Versions/A/Frameworks/CFOpenDirectory.framework/Versions/A/CFOpenDirectory
+       0x19103d000 -        0x19104a83b  com.apple.CoreServices.FSEvents (1400.100.1 - 1400.100.1) <ED51CAE0-72B8-3D0B-BD64-36305DF999A2> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/FSEvents
+       0x19104b000 -        0x19107483f  com.apple.coreservices.SharedFileList (225 - 225) <53CAC3A2-265C-350A-976A-3B2A2C7DF01E> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/SharedFileList.framework/Versions/A/SharedFileList
+       0x191075000 -        0x1910780af  libapp_launch_measurement.dylib (17) <D9BC7831-CFE5-35CE-8BFF-0C953D76907D> /usr/lib/libapp_launch_measurement.dylib
+       0x191079000 -        0x1910c255f  com.apple.CoreAutoLayout (1.0 - 33) <71D8792B-CCB3-3B49-9E78-2ED87C014794> /System/Library/PrivateFrameworks/CoreAutoLayout.framework/Versions/A/CoreAutoLayout
+       0x1910c3000 -        0x1911acf83  libxml2.2.dylib (38.19) <9E9DF0CE-80F8-30A8-AD64-4C8086DB57CC> /usr/lib/libxml2.2.dylib
+       0x1911ad000 -        0x19120e09f  com.apple.CoreVideo (1.8 - 0.0) <D9C031E3-CAB8-3BCF-BA83-0D87C45F00E4> /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo
+       0x19120f000 -        0x191211e7f  com.apple.loginsupport (3.0 - 259.5.1.101) <3B5B1918-AFF7-3328-A0F6-083C3EA66660> /System/Library/PrivateFrameworks/login.framework/Versions/A/Frameworks/loginsupport.framework/Versions/A/loginsupport
+       0x19124f000 -        0x19127957f  com.apple.UserManagement (1.0 - 1) <DCDB2DE7-0002-3870-A02A-23B4A77340B5> /System/Library/PrivateFrameworks/UserManagement.framework/Versions/A/UserManagement
+       0x192bbb000 -        0x192beb213  libsystem_containermanager.dylib (689.100.6.702.2) <2735B015-D4FE-3170-8C46-68D0D9E44C11> /usr/lib/system/libsystem_containermanager.dylib
+       0x192bec000 -        0x192c04edf  com.apple.IOSurface (372.5.2 - 372.5.2) <B32DB0D3-7893-3EBA-A6AC-3E3121FFB7D5> /System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface
+       0x192c05000 -        0x192c0ee9f  com.apple.IOAccelerator (485.2 - 485.2) <4A16518C-8E44-3850-B7A8-B205B1058C3F> /System/Library/PrivateFrameworks/IOAccelerator.framework/Versions/A/IOAccelerator
+       0x192c0f000 -        0x192e81a1f  com.apple.Metal (368.53 - 368.53) <8EC8EA6B-03C1-35C5-83DA-9704BB81910A> /System/Library/Frameworks/Metal.framework/Versions/A/Metal
+       0x192e82000 -        0x192eaa11f  com.apple.audio.caulk (1.0 - 181.700.1) <11880386-B2C2-381B-BCF6-939274619838> /System/Library/PrivateFrameworks/caulk.framework/Versions/A/caulk
+       0x192eab000 -        0x193006c7f  com.apple.CoreMedia (1.0 - 3235.14.105.8) <7EA53324-BD04-39BF-84BB-CF4064BBB1AE> /System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia
+       0x193007000 -        0x1932d943f  libFontParser.dylib (423.20.0.5) <7EBB5435-19CD-3849-9C06-738509ED83CD> /System/Library/PrivateFrameworks/FontServices.framework/libFontParser.dylib
+       0x193637000 -        0x1939bd15f  com.apple.ImageIO (3.3.0 - 2661.9.2) <B47E6C29-7167-32D2-BE22-69350C5642E5> /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO
+       0x1939be000 -        0x193d7897f  com.apple.CoreImage (19.0.0 - 1510.140.2) <B41128F0-9304-3D94-BFEC-47A93B8B2A81> /System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage
+       0x193d79000 -        0x193e28ddf  com.apple.MetalPerformanceShaders.MPSCore (1.0 - 1) <082CFDB5-3FBF-3BA0-9CC7-E2594F70FA2E> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSCore.framework/Versions/A/MPSCore
+       0x193e29000 -        0x193e2d5df  libsystem_configuration.dylib (1351.140.5.703.3) <9DFC3F49-5273-3EE5-94E9-820F007B8ED4> /usr/lib/system/libsystem_configuration.dylib
+       0x193e2e000 -        0x193e346ff  libsystem_sandbox.dylib (2401.140.15.705.3) <9CD2D046-A67B-3056-A7E5-C70974ED448B> /usr/lib/system/libsystem_sandbox.dylib
+       0x193e35000 -        0x193e3617f  com.apple.AggregateDictionary (1.0 - 1) <2952819B-0D93-3E51-BF6D-0679BF8A038F> /System/Library/PrivateFrameworks/AggregateDictionary.framework/Versions/A/AggregateDictionary
+       0x193e37000 -        0x193e3b59b  com.apple.AppleSystemInfo (3.1.5 - 3.1.5) <C1B408CC-F419-3ACB-ACBB-4897ACB78D82> /System/Library/PrivateFrameworks/AppleSystemInfo.framework/Versions/A/AppleSystemInfo
+       0x193e3c000 -        0x193e3d44f  liblangid.dylib (140) <7B8DEF7A-5FFB-391F-ABB1-0F5907ECB608> /usr/lib/liblangid.dylib
+       0x193e3e000 -        0x193f5afbf  com.apple.CoreNLP (1.0 - 313) <01202D36-C4E7-3966-80F7-F529C6A996FB> /System/Library/PrivateFrameworks/CoreNLP.framework/Versions/A/CoreNLP
+       0x193f5b000 -        0x193f6155f  com.apple.LinguisticData (1.0 - 483.10) <5B71745E-C40A-3751-AB32-9DCEE228A021> /System/Library/PrivateFrameworks/LinguisticData.framework/Versions/A/LinguisticData
+       0x193f62000 -        0x194a0ebb7  libBNNS.dylib (1497.120.5) <4ACBBB5D-DA03-3DC8-9908-73CEC2E2AF9B> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBNNS.dylib
+       0x194a0f000 -        0x194b00cff  libvDSP.dylib (1068.100.12) <2845B1AF-9BBF-3F05-B27E-6249642CDE3A> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib
+       0x194b34000 -        0x194b447e7  com.apple.IOMobileFramebuffer (343.0.0 - 343.0.0) <41CED59B-B76F-31FB-8785-3E39CA6AAE9E> /System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/Versions/A/IOMobileFramebuffer
+       0x194d44000 -        0x194d60ddf  com.apple.MobileKeyBag (2.0 - 1.0) <6ADADE2F-8148-37F2-8083-ACFE276A6C09> /System/Library/PrivateFrameworks/MobileKeyBag.framework/Versions/A/MobileKeyBag
+       0x194d61000 -        0x194d6f15f  com.apple.AssertionServices (1.0 - 961.100.17) <C8F3AC06-839E-3585-B639-80DA0F8FAC41> /System/Library/PrivateFrameworks/AssertionServices.framework/Versions/A/AssertionServices
+       0x194d70000 -        0x194dfe9df  com.apple.securityfoundation (6.0 - 55290) <6EFECE6D-E595-3174-9DDE-95C82944DC97> /System/Library/Frameworks/SecurityFoundation.framework/Versions/A/SecurityFoundation
+       0x194dff000 -        0x194e2d15f  com.apple.coreservices.BackgroundTaskManagement (1.0 - 104) <C77EEBA9-4AB0-3A0F-BE88-CFF3B9F5F0FD> /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Versions/A/BackgroundTaskManagement
+       0x194e39000 -        0x194e3bfe3  libquarantine.dylib (181.120.2.701.3) <713E7FD6-51DE-3E62-935D-13885C2C7F29> /usr/lib/system/libquarantine.dylib
+       0x194e3c000 -        0x194e47323  libCheckFix.dylib (33) <56DD7A36-EC43-31E3-9DCE-8E5507018EEA> /usr/lib/libCheckFix.dylib
+       0x194e48000 -        0x194e5f44f  libcoretls.dylib (186) <07FE0911-3AD0-3FEC-8D06-F74FBFD1D260> /usr/lib/libcoretls.dylib
+       0x194e60000 -        0x194e7126b  libbsm.0.dylib (89) <BCD9BF61-0BA9-36F7-8D44-2F20EA89D38D> /usr/lib/libbsm.0.dylib
+       0x194e72000 -        0x194ed181f  libmecab.dylib (1093.502) <E2E9851C-55E4-3D25-AE4B-8EBB249EFC2A> /usr/lib/libmecab.dylib
+       0x194ed2000 -        0x194ed444b  libgermantok.dylib (31) <864087DE-71C3-37C6-A7F5-3EA04E802DE6> /usr/lib/libgermantok.dylib
+       0x194ed5000 -        0x194ee9a5f  libLinearAlgebra.dylib (1545) <244D290C-D9FD-30DF-B2A2-43EEEA96C5EE> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLinearAlgebra.dylib
+       0x194eea000 -        0x19513531f  com.apple.MetalPerformanceShaders.MPSNeuralNetwork (1.0 - 1) <9752A2E2-33A1-39D1-8F17-AFC96B698805> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSNeuralNetwork.framework/Versions/A/MPSNeuralNetwork
+       0x195136000 -        0x19518a7df  com.apple.MetalPerformanceShaders.MPSRayIntersector (1.0 - 1) <F692BC62-5A59-3915-9AE8-8BFF0555EA41> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSRayIntersector.framework/Versions/A/MPSRayIntersector
+       0x195321000 -        0x19535223f  com.apple.MetalPerformanceShaders.MPSMatrix (1.0 - 1) <50C757EB-68C4-377D-8B4D-F5F768D654F6> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSMatrix.framework/Versions/A/MPSMatrix
+       0x195353000 -        0x1954a0d7f  com.apple.MetalPerformanceShaders.MPSNDArray (1.0 - 1) <68DB193E-F350-33AB-9747-B621815C294E> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSNDArray.framework/Versions/A/MPSNDArray
+       0x1954a1000 -        0x19553515f  com.apple.MetalPerformanceShaders.MPSImage (1.0 - 1) <C29780F8-B498-3B51-82B5-06905FFC639D> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSImage.framework/Versions/A/MPSImage
+       0x195536000 -        0x1955411b3  com.apple.AppleFSCompression (170.0.0.700.1 - 1.0) <856AC511-FE27-39B7-8420-BE283A65EE0B> /System/Library/PrivateFrameworks/AppleFSCompression.framework/Versions/A/AppleFSCompression
+       0x195542000 -        0x19554e56b  libbz2.1.0.dylib (46) <5EEA26C1-67C0-3CAF-992D-F90C1119EE5F> /usr/lib/libbz2.1.0.dylib
+       0x19554f000 -        0x195555fa3  libsystem_coreservices.dylib (178.6.9) <FF33CA2D-C09E-3C32-9F6C-132DBA72056C> /usr/lib/system/libsystem_coreservices.dylib
+       0x195556000 -        0x19558829f  com.apple.CoreServices.OSServices (1141.1 - 1141.1) <D680025A-1635-3BA7-82FA-A34B5B382885> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/OSServices.framework/Versions/A/OSServices
+       0x1959be000 -        0x1959cceb7  libz.1.dylib (98.0.0.700.1) <672B8FB8-CBB3-3A65-A9B4-A1060AB6C1F0> /usr/lib/libz.1.dylib
+       0x1959cd000 -        0x195a0a2b7  libsystem_m.dylib (3291.100.4) <BD64331C-5999-3884-9FB7-36A2BEB204B6> /usr/lib/system/libsystem_m.dylib
+       0x195a0b000 -        0x195a0bc9b  libcharset.1.dylib (109.100.2.701.1) <989837A8-0C44-3E6D-93BB-58E05B67C31B> /usr/lib/libcharset.1.dylib
+       0x195a0c000 -        0x195a0f4e7  libmacho.dylib (1024.3) <DE7963A2-B790-3081-86F8-887A48D90FB0> /usr/lib/system/libmacho.dylib
+       0x195a10000 -        0x195a28dfb  libkxld.dylib (11417.140.69.712.68) <7C0AE28B-EB56-3799-8EFA-653A104F7DF8> /usr/lib/system/libkxld.dylib
+       0x195a29000 -        0x195a365ef  libcommonCrypto.dylib (600035) <17FE8FEC-FB07-3FE5-A7A5-FADCAD4DB24B> /usr/lib/system/libcommonCrypto.dylib
+       0x195a37000 -        0x195a40ad7  libunwind.dylib (1900.125) <E34460B4-37E4-30AB-9F67-8D14D52332E8> /usr/lib/system/libunwind.dylib
+       0x195a41000 -        0x195a48109  liboah.dylib (349) <9C6BE278-D18F-365D-97BE-E27C0DC5E9CE> /usr/lib/liboah.dylib
+       0x195a49000 -        0x195a53ab3  libcopyfile.dylib (224.0.0.702.1) <B5807A84-8EF8-3309-97AC-0E430093F48A> /usr/lib/system/libcopyfile.dylib
+       0x195a54000 -        0x195a5798f  libcompiler_rt.dylib (103.3) <2CF1F4A7-0D75-38B0-9FE9-93FE10E6E76C> /usr/lib/system/libcompiler_rt.dylib
+       0x195a58000 -        0x195a5ca1b  libsystem_collections.dylib (1698.140.3.705.1) <239A6D71-1325-3D88-B8D6-876E714143D1> /usr/lib/system/libsystem_collections.dylib
+       0x195a5d000 -        0x195a602c7  libsystem_secinit.dylib (153.140.2) <2D3D6117-DB58-35F4-B7BE-DE04FD8FBD6D> /usr/lib/system/libsystem_secinit.dylib
+       0x195a61000 -        0x195a63b6f  libremovefile.dylib (81) <08848440-1868-3FCF-A466-2FA44038B4DE> /usr/lib/system/libremovefile.dylib
+       0x195a64000 -        0x195a64f27  libkeymgr.dylib (31) <56163FDF-F247-3B51-A7F8-6E968BA3A2B5> /usr/lib/system/libkeymgr.dylib
+       0x195a65000 -        0x195a6dd5f  libsystem_dnssd.dylib (2600.140.3.704.1) <6B5D6255-2C72-3B3B-9942-D8A2F1BBF35F> /usr/lib/system/libsystem_dnssd.dylib
+       0x195a6e000 -        0x195a730b3  libcache.dylib (95) <A19B4E8F-D340-3195-B473-A920E01DFD66> /usr/lib/system/libcache.dylib
+       0x195a74000 -        0x195a75ca3  libSystem.B.dylib (1351) <E8CBD68D-5444-3924-83E2-A9B8731CDAA9> /usr/lib/libSystem.B.dylib
+       0x195a76000 -        0x195a7803f  libfakelink.dylib (5) <A713BFFB-B8CF-3067-91CF-D1DEAB7E8B02> /usr/lib/libfakelink.dylib
+       0x195a79000 -        0x195a79a63  com.apple.SoftLinking (1.0 - 65) <03785B47-CC04-3EBC-88C6-0613DB3CA906> /System/Library/PrivateFrameworks/SoftLinking.framework/Versions/A/SoftLinking
+       0x195ab0000 -        0x195ab72db  libiconv.2.dylib (109.100.2.701.1) <73C34EE1-DBB3-3F45-B906-EBE49352A0DC> /usr/lib/libiconv.2.dylib
+       0x195acb000 -        0x195bc3057  libarchive.2.dylib (151.140.2.704.3) <CF49F7E2-19DE-3462-9D28-1A428216EFDF> /usr/lib/libarchive.2.dylib
+       0x195bc4000 -        0x195c2b57f  com.apple.SearchKit (1.4.2 - 1.4.2) <DCA7FDE1-6B05-3D83-A8FB-40100363F353> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/SearchKit.framework/Versions/A/SearchKit
+       0x195c2c000 -        0x195c3409f  libThaiTokenizer.dylib (28) <6F1BD9FF-D922-399B-9149-29D743457131> /usr/lib/libThaiTokenizer.dylib
+       0x195c35000 -        0x195c59187  com.apple.applesauce (1.0 - 16.62) <31A4C545-E7FC-316D-BCA6-411C62B941C7> /System/Library/PrivateFrameworks/AppleSauce.framework/Versions/A/AppleSauce
+       0x195c5a000 -        0x195c739ff  libapple_nghttp2.dylib (29) <58E705B3-A719-3EE4-9362-CE911EE935FE> /usr/lib/libapple_nghttp2.dylib
+       0x195c74000 -        0x195c9aac3  libSparseBLAS.dylib (1545) <B0396350-6F84-395B-8E05-CA884D8681D6> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libSparseBLAS.dylib
+       0x195c9b000 -        0x195c9c59f  com.apple.MetalPerformanceShaders.MetalPerformanceShaders (1.0 - 1) <0DC73DE1-DC98-3AFD-8630-FCD090C2050D> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/MetalPerformanceShaders
+       0x195c9d000 -        0x195ca2f7f  libpam.2.dylib (34) <D41E436A-E58B-3DCB-AB20-BA9F889D58C5> /usr/lib/libpam.2.dylib
+       0x195ca3000 -        0x195d7384f  libcompression.dylib (181.100.1) <9FB9A9AB-7EC7-33F7-BDF6-78BBA6E0EA0C> /usr/lib/libcompression.dylib
+       0x195d74000 -        0x195d781e7  libQuadrature.dylib (8) <AF2C3194-BDAB-34A9-9CE6-2F7DC90830A9> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libQuadrature.dylib
+       0x195d79000 -        0x196fda2df  libLAPACK.dylib (1545) <CAF15B22-55B4-341C-B163-D37DECE3364D> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLAPACK.dylib
+       0x196fdb000 -        0x19703131f  com.apple.DictionaryServices (1.2 - 368.203) <24D6336A-8A80-37C1-8081-0DAB4763FCA6> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/DictionaryServices.framework/Versions/A/DictionaryServices
+       0x197032000 -        0x1970508bf  liblzma.5.dylib (20) <2227756F-0083-3EA8-891A-B5A707B814BC> /usr/lib/liblzma.5.dylib
+       0x197051000 -        0x197052867  libcoretls_cfhelpers.dylib (186) <29AF21F1-3B85-3CF0-A9E6-4DA9E2D85B31> /usr/lib/libcoretls_cfhelpers.dylib
+       0x197053000 -        0x1970c4aaf  com.apple.APFS (2332.140.13 - 2332.140.13) <402897CA-09C5-3724-9F93-8C0DC25DF89E> /System/Library/PrivateFrameworks/APFS.framework/Versions/A/APFS
+       0x1970c5000 -        0x1970d36c3  libxar.1.dylib (501.0.0.701.1) <BBB685C5-6DC5-362D-A9F1-7D6E22A13E16> /usr/lib/libxar.1.dylib
+       0x1970d4000 -        0x1970d77fb  libutil.dylib (72) <45B3C4F9-10CC-3A23-BC5F-33B74A37A882> /usr/lib/libutil.dylib
+       0x1970d8000 -        0x19710374f  libxslt.1.dylib (21.11.1) <E30173BA-85FB-3016-AA3F-E40E8AA66FD0> /usr/lib/libxslt.1.dylib
+       0x19710c000 -        0x1971857c7  libvMisc.dylib (1068.100.12) <12DEE118-5FC8-32C2-A8B3-67A4B7CD1B74> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvMisc.dylib
+       0x197186000 -        0x1972164ff  libate.dylib (3.0.12) <CF7E77F1-8FFF-3EAE-8292-F6F61D3BECD1> /usr/lib/libate.dylib
+       0x197220000 -        0x19723391f  com.apple.CrashReporterSupport (10.13 - 15131) <77833B9C-9D90-3200-9AE3-692428567D52> /System/Library/PrivateFrameworks/CrashReporterSupport.framework/Versions/A/CrashReporterSupport
+       0x197374000 -        0x1973b54bf  com.apple.pluginkit.framework (1.0 - 1) <B4FFDEFE-2D23-317A-AA87-60C4D1BD6C92> /System/Library/PrivateFrameworks/PlugInKit.framework/Versions/A/PlugInKit
+       0x19742c000 -        0x197474ef7  com.apple.AppleVAFramework (6.2.10 - 6.2.10) <28FDF0EC-DC93-3DC4-A4B6-DA9612BD7F6B> /System/Library/PrivateFrameworks/AppleVA.framework/Versions/A/AppleVA
+       0x197475000 -        0x19748fd57  libexpat.1.dylib (43.0.0.702.1) <8183AD33-E71E-3106-88A2-669CF9F59E88> /usr/lib/libexpat.1.dylib
+       0x197490000 -        0x197499bb3  libheimdal-asn1.dylib (693.140.2.702.2) <0354DFB7-ECFE-335E-B39D-CE428378C8F1> /usr/lib/libheimdal-asn1.dylib
+       0x19757a000 -        0x1976207ff  com.apple.MediaExperience (1.0 - 1) <7B0E57A4-21FC-370D-A53C-5137D37E3327> /System/Library/PrivateFrameworks/MediaExperience.framework/Versions/A/MediaExperience
+       0x19764d000 -        0x197658eff  com.apple.GraphVisualizer (1.0 - 120.1) <B904056A-9DAA-3EFC-9EF3-7D0704714969> /System/Library/PrivateFrameworks/GraphVisualizer.framework/Versions/A/GraphVisualizer
+       0x197659000 -        0x19769979f  com.apple.OTSVG (1.0 - 844.20.0.3) <244E8889-3DC5-3A75-947B-D75256B71F1F> /System/Library/PrivateFrameworks/OTSVG.framework/Versions/A/OTSVG
+       0x19769a000 -        0x1976a3a9f  com.apple.xpc.AppServerSupport (1.0 - 2894.140.12.705.2) <9E5C9EFE-E65D-3540-A1C8-A86812123C4D> /System/Library/PrivateFrameworks/AppServerSupport.framework/Versions/A/AppServerSupport
+       0x1976a4000 -        0x1976aa67f  libspindump.dylib (383.17) <0EDD6F58-3CDF-3727-B039-4132AB7D1C30> /usr/lib/libspindump.dylib
+       0x1976ab000 -        0x19776bd1f  com.apple.Heimdal (4.0 - 2.0) <6F721B65-7BC8-3314-82EA-5620C64C3A58> /System/Library/PrivateFrameworks/Heimdal.framework/Versions/A/Heimdal
+       0x1979d4000 -        0x197a1937f  com.apple.AppleJPEG (1.0 - 1) <D440F66C-56B9-3B0C-9099-6B0B721D8D9D> /System/Library/PrivateFrameworks/AppleJPEG.framework/Versions/A/AppleJPEG
+       0x197a1a000 -        0x197b0a5ef  libJP2.dylib (2661.9.3) <727C22D5-F76F-3914-B410-2E33D6708DE5> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libJP2.dylib
+       0x197b0b000 -        0x197b0cd53  com.apple.WatchdogClient.framework (1.0 - 299.140.5) <4A1CC763-EC31-33D0-844C-2A6BB74BFB3E> /System/Library/PrivateFrameworks/WatchdogClient.framework/Versions/A/WatchdogClient
+       0x197b0d000 -        0x197b527ff  com.apple.MultitouchSupport.framework (8440.6.1 - 8440.6.1) <624557C4-C989-3FBA-B045-8E56826E6200> /System/Library/PrivateFrameworks/MultitouchSupport.framework/Versions/A/MultitouchSupport
+       0x197b53000 -        0x197ff7edf  com.apple.VideoToolbox (1.0 - 3235.14.105.8) <245DF307-406B-3160-A44A-B374DD910F76> /System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox
+       0x197ff8000 -        0x19802d63f  libAudioToolboxUtility.dylib (1456.717) <4077E637-579E-3270-BE81-662A4B270B92> /usr/lib/libAudioToolboxUtility.dylib
+       0x19802e000 -        0x19805751f  libPng.dylib (2661.9.3) <C0423E41-9364-3DEA-A949-B831DAB16BB1> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libPng.dylib
+       0x198058000 -        0x1980ba3db  libTIFF.dylib (2661.9.3) <4B28F8C0-545C-3C02-BE32-F8EB182EFAAB> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libTIFF.dylib
+       0x1980bb000 -        0x1980da983  com.apple.IOPresentment (67 - 67) <068B0D85-E670-3EEF-A376-2694DFBD296B> /System/Library/PrivateFrameworks/IOPresentment.framework/Versions/A/IOPresentment
+       0x1980db000 -        0x1980df7e3  com.apple.GPUWrangler (8.1.10 - 8.1.10) <3B2F867A-7CFA-311A-BB37-11DC4C8B3D70> /System/Library/PrivateFrameworks/GPUWrangler.framework/Versions/A/GPUWrangler
+       0x1980e0000 -        0x1980e294b  libRadiance.dylib (2661.9.3) <35BE576B-963B-3DF8-83B1-1439434CA7C1> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libRadiance.dylib
+       0x1980e3000 -        0x1980e864f  com.apple.DSExternalDisplay (3.1 - 380) <0B252FD0-9E1B-3BC9-A1B0-BCDFEB14EACF> /System/Library/PrivateFrameworks/DSExternalDisplay.framework/Versions/A/DSExternalDisplay
+       0x1980e9000 -        0x198113e87  libJPEG.dylib (2661.9.3) <AEAE6E77-43F6-381B-BBFE-17506B72DE11> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libJPEG.dylib
+       0x198142000 -        0x1981477a3  libGIF.dylib (2661.9.3) <C723E902-8749-3F7E-854F-C4501E87D074> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libGIF.dylib
+       0x198148000 -        0x198156d1f  com.apple.CMCaptureCore (1.0 - 587.140.11.0.1) <339AF947-E2A1-33CB-B3E8-A6DFAA198039> /System/Library/PrivateFrameworks/CMCaptureCore.framework/Versions/A/CMCaptureCore
+       0x198f72000 -        0x198fe27af  libusrtcp.dylib (4277.140.33.703.1) <C0C6536F-0FBB-314F-94FE-64BEB9F5D291> /usr/lib/libusrtcp.dylib
+       0x198fe3000 -        0x19955311f  libswiftCore.dylib (6.1.2 - 6.1.2.1.102) <B0B67B37-EEF6-31D2-9125-B9FB67992F40> /usr/lib/swift/libswiftCore.dylib
+       0x199609000 -        0x19964fe5f  libSessionUtility.dylib (321.702) <78578824-A388-33C2-88F3-CFA3FD1B19F2> /System/Library/PrivateFrameworks/AudioSession.framework/libSessionUtility.dylib
+       0x199650000 -        0x1997fab7f  com.apple.audio.toolbox.AudioToolbox (1.14 - 1.14) <F5DEDA17-9C27-3AC5-BCE7-29FDCF4F86A6> /System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox
+       0x1997fb000 -        0x199858d7f  com.apple.audio.AudioSession (1.0 - 321.702) <B5048668-609F-3227-9969-D8847A04B68F> /System/Library/PrivateFrameworks/AudioSession.framework/Versions/A/AudioSession
+       0x199859000 -        0x19987189f  libAudioStatistics.dylib (235.601) <BF8B11E6-46D6-34E5-8142-8C86DE9CE61A> /usr/lib/libAudioStatistics.dylib
+       0x1998e8000 -        0x199904003  libresolv.9.dylib (91) <5E6380F8-71C5-3410-8AE6-BDBCA6FE7177> /usr/lib/libresolv.9.dylib
+       0x199905000 -        0x1999176e7  libsasl2.2.dylib (215) <AA6AA0F9-8155-3C51-BCFA-2D5FDB427783> /usr/lib/libsasl2.2.dylib
+       0x199b07000 -        0x199be7a0f  libSMC.dylib (38) <B503D65C-8F77-3FE8-A415-2E4DC457C437> /usr/lib/libSMC.dylib
+       0x199c47000 -        0x199c542df  com.apple.NetAuth (6.2 - 6.2) <1A1B31ED-0E1B-3E96-BB65-C4649DB947CF> /System/Library/PrivateFrameworks/NetAuth.framework/Versions/A/NetAuth
+       0x199c67000 -        0x199c7449f  com.apple.perfdata (1.0 - 121) <8AF7A10D-9C29-3B82-950B-2D4D14D026A5> /System/Library/PrivateFrameworks/perfdata.framework/Versions/A/perfdata
+       0x199c75000 -        0x199c82cdf  libperfcheck.dylib (46) <F57B52A5-56CE-39D5-B8D3-50A1D89BE4EF> /usr/lib/libperfcheck.dylib
+       0x199c83000 -        0x199c93fbf  com.apple.Kerberos (3.0 - 1) <FFEC3547-53A7-3588-B8BC-4141FF818CB3> /System/Library/Frameworks/Kerberos.framework/Versions/A/Kerberos
+       0x199c94000 -        0x199ce5a4f  com.apple.GSS (4.0 - 2.0) <102EC73F-FD21-386F-835B-5D4B38E87F7D> /System/Library/Frameworks/GSS.framework/Versions/A/GSS
+       0x199ce6000 -        0x199cf6daf  com.apple.CommonAuth (4.0 - 2.0) <E477BE6F-A5BD-381E-9A55-C6F32D934C10> /System/Library/PrivateFrameworks/CommonAuth.framework/Versions/A/CommonAuth
+       0x19b397000 -        0x19b4ae537  com.apple.combine (1.0 - 3022) <6A9C7FE5-4E33-3257-9FEB-6FC24A4BDB3E> /System/Library/Frameworks/Combine.framework/Versions/A/Combine
+       0x19d477000 -        0x19d47786f  com.apple.Accelerate.vecLib (3.11 - vecLib 3.11) <0F8CA44B-CABD-34F6-94E9-3B7AA47167E4> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/vecLib
+       0x19d49c000 -        0x19d49c98f  com.apple.CoreServices (1226 - 1226) <BA0E9EDC-5FB5-3799-A33B-E54F34236887> /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
+       0x19d748000 -        0x19d748417  com.apple.Accelerate (1.11 - Accelerate 1.11) <2DC6A4D3-235C-307E-BE8F-23D331501D4E> /System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
+       0x19e458000 -        0x19e48687f  com.apple.PowerLog (1.0 - 1) <9B3F2E57-641C-3B3E-A982-A89F079D981F> /System/Library/PrivateFrameworks/PowerLog.framework/Versions/A/PowerLog
+       0x19e494000 -        0x19e54831f  com.apple.DiscRecording (9.0.3 - 9030.4.5) <B7A7CC32-80C9-38A8-BA50-02DA964FDCCD> /System/Library/Frameworks/DiscRecording.framework/Versions/A/DiscRecording
+       0x19e549000 -        0x19e57a25f  com.apple.MediaKit (16 - 938) <83B81EDE-A0A4-3013-9210-D86405E7188C> /System/Library/PrivateFrameworks/MediaKit.framework/Versions/A/MediaKit
+       0x19ef97000 -        0x19efadaf8  libswiftDispatch.dylib (54) <ED6ED67E-6246-3C89-9943-27C6E9814A70> /usr/lib/swift/libswiftDispatch.dylib
+       0x19f2fc000 -        0x19f36aabf  com.apple.BoardServices (1.0 - 694.5.5) <F3F34F99-A919-3649-AB34-6A477D72B321> /System/Library/PrivateFrameworks/BoardServices.framework/Versions/A/BoardServices
+       0x19f709000 -        0x19f72c721  com.apple.DebugSymbols (216 - 217) <2E8B4E57-B57E-3860-A232-169F33669ECF> /System/Library/PrivateFrameworks/DebugSymbols.framework/Versions/A/DebugSymbols
+       0x19f72d000 -        0x19f839ea3  com.apple.CoreSymbolication (16.0 - 64570.35.1) <2B20C85E-F463-33FF-A4F0-5991244D4D11> /System/Library/PrivateFrameworks/CoreSymbolication.framework/Versions/A/CoreSymbolication
+       0x19f83a000 -        0x19f84417f  com.apple.CoreTime (334.0.4.1) <472582C0-A244-34BE-AB9E-951969339748> /System/Library/PrivateFrameworks/CoreTime.framework/Versions/A/CoreTime
+       0x1a0fa9000 -        0x1a0fe4967  com.apple.LDAPFramework (2.4.28 - 194.5) <A7E0AC45-5487-3420-9129-D07DACF1F1B3> /System/Library/Frameworks/LDAP.framework/Versions/A/LDAP
+       0x1a0fe5000 -        0x1a0fe67a7  com.apple.TrustEvaluationAgent (2.0 - 38) <5923AB55-40EF-34F0-BE16-908E054A6EE3> /System/Library/PrivateFrameworks/TrustEvaluationAgent.framework/Versions/A/TrustEvaluationAgent
+       0x1a1113000 -        0x1a11d0a3f  com.apple.DiskImagesFramework (671.140.2.702.5 - 671.140.2.702.5) <CD7AE763-473F-3FB8-91A1-1BF7BBF45DCD> /System/Library/PrivateFrameworks/DiskImages.framework/Versions/A/DiskImages
+       0x1a12d1000 -        0x1a13521d7  libcurl.4.dylib (160.0.0.704.2) <9B13B254-53C7-3B60-8202-905CEB6AB8D9> /usr/lib/libcurl.4.dylib
+       0x1a1b71000 -        0x1a1b713f7  libHeimdalProxy.dylib (87.100.1) <04A7D652-CF1B-385E-8B55-F09CB634232E> /System/Library/Frameworks/Kerberos.framework/Versions/A/Libraries/libHeimdalProxy.dylib
+       0x1a1c1a000 -        0x1a1c1dbdd  libswiftObjectiveC.dylib (940.4) <26C21FDC-CE66-33FA-8B27-A472459A863A> /usr/lib/swift/libswiftObjectiveC.dylib
+       0x1a1c1e000 -        0x1a1c371ff  libswiftos.dylib (1062.100.1) <879E993A-CAB4-3D75-8697-7A1235C59604> /usr/lib/swift/libswiftos.dylib
+       0x1a2d5d000 -        0x1a2d92fff  com.apple.ASEProcessing (1.41.51 - 1.41.51) <D1813996-783B-3312-81FB-7F7093936F74> /System/Library/PrivateFrameworks/ASEProcessing.framework/Versions/A/ASEProcessing
+       0x1a3e67000 -        0x1a3f21d1f  com.apple.audio.midi.CoreMIDI (2.0 - 88) <A0EF9C86-2E46-3EEE-B719-E7A1E3E3262F> /System/Library/Frameworks/CoreMIDI.framework/Versions/A/CoreMIDI
+       0x1a4948000 -        0x1a494c547  com.apple.IOSurfaceAccelerator (1.0.0 - 1.0.0) <7847865F-7643-3567-98DC-9210A13FDC2D> /System/Library/PrivateFrameworks/IOSurfaceAccelerator.framework/Versions/A/IOSurfaceAccelerator
+       0x1a9331000 -        0x1a9341dbf  com.apple.HID (1.0 - 1) <9DF68979-5915-31BF-8A22-DF2A3E1051B5> /System/Library/PrivateFrameworks/HID.framework/Versions/A/HID
+       0x1a9342000 -        0x1a9385e5f  com.apple.IOGPU (104.6.5 - 104.6.5) <A9CD6D6D-8462-3C8D-BCCC-E9B20DAC1ECE> /System/Library/PrivateFrameworks/IOGPU.framework/Versions/A/IOGPU
+       0x1ad625000 -        0x1ad63469f  com.apple.NetFS (6.0 - 4.0) <2531AD63-8BCC-3107-BEEB-305905552EFA> /System/Library/Frameworks/NetFS.framework/Versions/A/NetFS
+       0x1adafc000 -        0x1adafdd3b  libswiftDarwin.dylib (310.100.8.0.1) <7FA47C56-7EE0-3607-B148-A23108D8201B> /usr/lib/swift/libswiftDarwin.dylib
+       0x1af82d000 -        0x1af91b4df  libquic.dylib (4277.140.33.703.1) <B3615817-CD8A-394C-B0AA-5A1784A17949> /usr/lib/libquic.dylib
+       0x1af926000 -        0x1af94bebf  com.apple.private.SystemPolicy (1.0 - 1) <F9F2E713-A978-3971-B2C5-D15CFDFDDDC3> /System/Library/PrivateFrameworks/SystemPolicy.framework/Versions/A/SystemPolicy
+       0x1b067e000 -        0x1b07065ff  com.apple.LoggingSupport (1.0 - 1643.120.5) <AF884C9E-22A1-3AEF-89FB-BBF902288B10> /System/Library/PrivateFrameworks/LoggingSupport.framework/Versions/A/LoggingSupport
+       0x1b0707000 -        0x1b071362b  com.apple.MallocStackLogging (1.0 - 64570.58.1) <1689CC58-472A-3B7D-93C7-472DE80A316E> /System/Library/PrivateFrameworks/MallocStackLogging.framework/Versions/A/MallocStackLogging
+       0x1b0739000 -        0x1b076d47f  libmis.dylib (436.100.18) <ED1D01B7-B528-3F62-9A42-C8BB8429D84D> /usr/lib/libmis.dylib
+       0x1b076e000 -        0x1b0771c7f  com.apple.gpusw.GPURawCounter (34 - 34) <423CC5C0-4AE8-3947-B67B-47B5D32FB435> /System/Library/PrivateFrameworks/GPURawCounter.framework/Versions/A/GPURawCounter
+       0x1b0793000 -        0x1b0799fff  libswiftCoreFoundation.dylib (2401) <6A594D79-0571-36F5-AEC2-9AB24C1C7E56> /usr/lib/swift/libswiftCoreFoundation.dylib
+       0x1b07a5000 -        0x1b07ecb7a  libswiftXPC.dylib (69.120.3.701.1) <43D91D84-C98E-38F0-B721-A4702651EEFD> /usr/lib/swift/libswiftXPC.dylib
+       0x1b07ee000 -        0x1b07eeab3  libswiftIOKit.dylib (1) <E7056659-3007-3E61-B43E-9F0B975C2A0E> /usr/lib/swift/libswiftIOKit.dylib
+       0x1b4046000 -        0x1b405da4b  libswiftsimd.dylib (21) <5189F6BA-9C49-32AA-A21A-8BA2DA1A105E> /usr/lib/swift/libswiftsimd.dylib
+       0x1b53ef000 -        0x1b53f829f  com.apple.IOAccelMemoryInfo (1.0 - 1) <8AC6ECD6-BD2F-31A7-BB88-FE409ED7ABBC> /System/Library/PrivateFrameworks/IOAccelMemoryInfo.framework/Versions/A/IOAccelMemoryInfo
+       0x1bd363000 -        0x1bd36a3b8  libswiftMetal.dylib (368.53) <678CFC8E-FB57-396E-ABC4-BC7E67FB0E72> /usr/lib/swift/libswiftMetal.dylib
+       0x1c133f000 -        0x1c139d01f  com.apple.osanalytics.OSAnalytics (1.0 - 1) <18181076-E759-3A14-A61A-894728EE750B> /System/Library/PrivateFrameworks/OSAnalytics.framework/Versions/A/OSAnalytics
+       0x1c270b000 -        0x1c270ce25  libswiftQuartzCore.dylib (4) <FA29553F-44CA-39E2-9C5D-8CD8EE507DE2> /usr/lib/swift/libswiftQuartzCore.dylib
+       0x1c2b00000 -        0x1c2b05967  com.apple.kperf (1.0 - 1) <BB6B4BC7-B44F-31D5-B074-697F32638781> /System/Library/PrivateFrameworks/kperf.framework/Versions/A/kperf
+       0x1c2c0a000 -        0x1c2c0f45f  com.apple.MobileSystemServices (1.0 - 1) <87C0812C-9976-3B4C-BC51-9CA0B7FB797C> /System/Library/PrivateFrameworks/MobileSystemServices.framework/Versions/A/MobileSystemServices
+       0x1c6d67000 -        0x1c6d75815  libswiftUniformTypeIdentifiers.dylib (840.10) <D816F4FA-D05C-3212-9BA8-8B924222C866> /usr/lib/swift/libswiftUniformTypeIdentifiers.dylib
+       0x1cc310000 -        0x1cc311d8b  libswiftOSLog.dylib (8) <968F4440-8097-33FD-B25B-7E54760BA327> /usr/lib/swift/libswiftOSLog.dylib
+       0x1cfe50000 -        0x1cff4cbdf  com.apple.Symbolication (16.0 - 64570.58.1) <1AA8FA81-E3B6-33D1-9AD0-6FFE2F86B9DA> /System/Library/PrivateFrameworks/Symbolication.framework/Versions/A/Symbolication
+       0x1d3f4f000 -        0x1d3f5f21f  com.apple.OSLog (1.0 - 1643.120.5) <21D510B6-1C6D-35B9-8588-89C203430178> /System/Library/Frameworks/OSLog.framework/Versions/A/OSLog
+       0x1d4188000 -        0x1d42917dc  com.apple.InternalSwiftProtobuf (1.0 - 1.26.0) <20DFCB3A-CC38-39E9-8257-D096B8CB5589> /System/Library/PrivateFrameworks/InternalSwiftProtobuf.framework/Versions/A/InternalSwiftProtobuf
+       0x1d4356000 -        0x1d43612ff  com.apple.HIDDisplay (1.0 - 1) <9D6F6240-F955-3757-8CF3-111AF0A184E8> /System/Library/PrivateFrameworks/HIDDisplay.framework/Versions/A/HIDDisplay
+       0x1db4cf000 -        0x1db4cfc5b  com.apple.FeatureFlags (1.0 - 97) <DB954DC0-AB7A-3E95-88B6-1013E117A874> /System/Library/PrivateFrameworks/FeatureFlags.framework/Versions/A/FeatureFlags
+       0x1e4d71000 -        0x1e4d7365f  com.apple.ConfigProfileHelper (17.1 - 1722) <ADF6DC91-DF96-3D9B-B115-2BD5840B659A> /System/Library/PrivateFrameworks/ConfigProfileHelper.framework/Versions/A/ConfigProfileHelper
+       0x1e7d15000 -        0x1e7d1c2f7  libCoreFSCache.dylib (301) <E5DBA601-784D-3E0B-AF1E-416D98D7E9A7> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libCoreFSCache.dylib
+       0x1e7d1d000 -        0x1e7d22907  libCoreVMClient.dylib (301) <09E729B3-80D4-3B64-A8D4-FEBAFB5460B3> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libCoreVMClient.dylib
+       0x1e7d23000 -        0x1e7d33277  com.apple.opengl (21.1.1 - 21.1.1) <45F78623-1CE4-30C1-85D1-A6D724CF4CDB> /System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL
+       0x1e7d34000 -        0x1e7d367af  libCVMSPluginSupport.dylib (21.1.2) <B88F508D-11D3-386B-AAF4-2AC74FDD2865> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libCVMSPluginSupport.dylib
+       0x1e7d37000 -        0x1e7d3f6bf  libGFXShared.dylib (21.1.2) <2FA5B1EA-736E-3BB7-9DBE-F9B4C780ECFC> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGFXShared.dylib
+       0x1e7d40000 -        0x1e7d72ce3  libGLImage.dylib (21.1.2) <6AFEB489-C740-358B-95D7-639A1C6D3208> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGLImage.dylib
+       0x1e7d73000 -        0x1e7dad32f  libGLU.dylib (21.1.2) <A1AADEDB-2EB9-3E68-A81E-86590F51A3D9> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGLU.dylib
+       0x1e7eff000 -        0x1e7f08bcf  libGL.dylib (21.1.2) <A5E9AA0A-65C6-3F7A-A99F-6EB4D8CADE30> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib
+       0x1e9944000 -        0x1e9a0e07f  com.apple.ExtensionFoundation (97 - 97) <BC432606-DD35-3D9C-A0FF-1AF55D676552> /System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/ExtensionFoundation
+       0x1eb5f8000 -        0x1eb61509f  com.apple.MPSBenchmarkLoop (1.0 - 1) <E5BC8783-E168-3F85-BA24-6C82963CC1E1> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSBenchmarkLoop.framework/Versions/A/MPSBenchmarkLoop
+       0x1eb616000 -        0x1eb62a1bf  com.apple.MPSFunctions (1.0 - 1) <D8729B59-B83D-3343-A298-A2D062AE55EB> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSFunctions.framework/Versions/A/MPSFunctions
+       0x1ee228000 -        0x1ee362022  com.apple.SwiftData (1.0 - 98.1) <F745FA67-A378-35EB-9628-2971DE32D4D0> /System/Library/Frameworks/SwiftData.framework/Versions/A/SwiftData
+       0x2316f1000 -        0x23174720f  com.apple.AppleKeyStore (1.0 - 1.0) <213DF606-B6FC-364E-99A9-F9CB53FE9A85> /System/Library/PrivateFrameworks/AppleKeyStore.framework/Versions/A/AppleKeyStore
+       0x231e7f000 -        0x231e97c5f  com.apple.private.AppleMobileFileIntegrity-fmk (1.0 - 1) <02A94184-A162-3009-8F73-6816E90661D5> /System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework/Versions/A/AppleMobileFileIntegrity
+       0x23226f000 -        0x23229d57f  com.apple.imgaudio.AudioAnalytics (1.0 - 1) <087D406A-DFE6-307E-A900-3867BA7B3AD0> /System/Library/PrivateFrameworks/AudioAnalytics.framework/Versions/A/AudioAnalytics
+       0x23588a000 -        0x2359cd297  com.apple.CollectionsInternal (1.1.0 - 103.5) <70871CAA-041D-32B7-8930-ECCC9ED81E63> /System/Library/PrivateFrameworks/CollectionsInternal.framework/Versions/A/CollectionsInternal
+       0x23bade000 -        0x23bade6e3  com.apple.FontServices (1.0 - 1) <20AAC7D8-AF87-3165-B87D-F441B96D256D> /System/Library/PrivateFrameworks/FontServices.framework/Versions/A/FontServices
+       0x23badf000 -        0x23bba7def  libXTFontStaticRegistryData.dylib (309.6.0.2) <7450EC99-13A7-35C9-BA10-1B8300C8AE5B> /System/Library/PrivateFrameworks/FontServices.framework/libXTFontStaticRegistryData.dylib
+       0x23bba9000 -        0x23bbb4fdf  com.apple.FramePacing (1.0 - 1) <68394E6B-E870-3D4A-A724-DCF5A84D32EE> /System/Library/PrivateFrameworks/FramePacing.framework/Versions/A/FramePacing
+       0x23c71e000 -        0x23c723747  libGPUCompilerUtils.dylib (32023.622) <0FAB94DE-77D1-3DD4-85B6-D5EDEC8B5F9B> /System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/libGPUCompilerUtils.dylib
+       0x2407ad000 -        0x2407ed01f  libllvm-flatbuffers.dylib (32023.622) <C9DAD5B4-1615-387C-AE11-B34773ACB99F> /System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/libllvm-flatbuffers.dylib
+       0x2452ff000 -        0x2453e3c3f  com.apple.InstalledContentLibrary (1.0 - 1.0) <2001F302-53F5-390B-A748-9EF1C209D126> /System/Library/PrivateFrameworks/InstalledContentLibrary.framework/Versions/A/InstalledContentLibrary
+       0x249acb000 -        0x24a15c7cf  com.apple.MIL (3405.2 - 3405.2.1) <37FFC654-920B-318C-91DE-A41B90261853> /System/Library/PrivateFrameworks/MIL.framework/Versions/A/MIL
+       0x24c6dc000 -        0x24c731c3f  com.apple.MessageSecurity (1.0 - 115.100.9) <D7E527BE-2131-39EF-A4A7-8C7F4E116C2C> /System/Library/PrivateFrameworks/MessageSecurity.framework/Versions/A/MessageSecurity
+       0x25097c000 -        0x250a9b7af  com.apple.ParsingInternal (0.0.1 - 103.5) <B1257868-649D-3DFD-97DF-286A2B9F7D87> /System/Library/PrivateFrameworks/ParsingInternal.framework/Versions/A/ParsingInternal
+       0x253be5000 -        0x253c0467f  com.apple.accessibility.PhotosensitivityProcessing (1.0 - 1) <A1CB17AC-8C62-34E9-BBAE-4C719CA27A27> /System/Library/PrivateFrameworks/PhotosensitivityProcessing.framework/Versions/A/PhotosensitivityProcessing
+       0x254a78000 -        0x254afb47f  com.apple.ProDisplayLibrary (9.4.6 - 9.4.6) <E31D3CE6-1C91-3953-8CE8-13F2A11856AD> /System/Library/PrivateFrameworks/ProDisplayLibrary.framework/Versions/A/ProDisplayLibrary
+       0x25573a000 -        0x255742efb  com.apple.ReflectionInternal (1.0.0 - 103.5) <EB2B16D8-78C0-392E-8188-A47AEB53C6B8> /System/Library/PrivateFrameworks/ReflectionInternal.framework/Versions/A/ReflectionInternal
+       0x256411000 -        0x256425a87  com.apple.RuntimeInternal (1.0.0 - 103.5) <169F7C44-8330-3000-AF94-5C845A7B9DA9> /System/Library/PrivateFrameworks/RuntimeInternal.framework/Versions/A/RuntimeInternal
+       0x25f9a4000 -        0x25f9d000f  com.apple.security.SwiftASN1Internal (1.0 - 1) <2575D972-55B0-3DAD-99FE-E7D22F5FADD7> /System/Library/PrivateFrameworks/SwiftASN1Internal.framework/Versions/A/SwiftASN1Internal
+       0x265caa000 -        0x265cab197  com.apple.VideoToolboxParavirtualizationSupport (40.8 - 40.8) <FC39FAFC-3864-3E46-838A-44B4E911469C> /System/Library/PrivateFrameworks/VideoToolboxParavirtualizationSupport.framework/Versions/A/VideoToolboxParavirtualizationSupport
+       0x26ebde000 -        0x26ec76fe7  libAppleArchive.dylib (423.100.6.701.1) <0AE49E67-861C-32D0-B3EE-99D160C28829> /usr/lib/libAppleArchive.dylib
+       0x26ed13000 -        0x26ed1d6df  libCoreEntitlements.dylib (69.100.2) <D7494AAB-D51A-3892-B4A1-61A14683133C> /usr/lib/libCoreEntitlements.dylib
+       0x26eebb000 -        0x26eec2109  libRosetta.dylib (349) <9C6BE278-D18F-365D-97BE-E27C0DC5E9CE> /usr/lib/libRosetta.dylib
+       0x26ef1e000 -        0x26ef2741f  libTLE.dylib (69.100.2) <5A69D2AA-DB36-3156-8A6B-F91BF5D84A62> /usr/lib/libTLE.dylib
+       0x26f152000 -        0x26f2624b7  libcrypto.46.dylib (107) <462334E0-8AE2-31E3-8BA0-4C8F452AFE94> /usr/lib/libcrypto.46.dylib
+       0x26f2a0000 -        0x26f2bb567  libhvf.dylib (9) <BD9544F3-5CA5-367A-9054-1BE95F8C2676> /usr/lib/libhvf.dylib
+       0x26fc7c000 -        0x26fcb41d7  libssl.48.dylib (107) <97432847-958E-3A05-A0AC-D82D6B68F019> /usr/lib/libssl.48.dylib
+       0x26fe9f000 -        0x26feb3a7f  libswiftDistributed.dylib (6.1.2 - 6.1.2.1.102) <01085FF6-758A-3C2B-AD7B-796E08C07393> /usr/lib/swift/libswiftDistributed.dylib
+       0x26fecb000 -        0x26fed8e97  libswiftObservation.dylib (6.1.2 - 6.1.2.1.102) <D293E344-3457-3429-9E74-3291D14109DE> /usr/lib/swift/libswiftObservation.dylib
+       0x26fee8000 -        0x26fef4847  libswiftRegexBuilder.dylib (6.1.2 - 6.1.2.1.102) <B228F204-19C4-3E6D-946C-2971E3CD6AE2> /usr/lib/swift/libswiftRegexBuilder.dylib
+       0x26ff38000 -        0x26ff4197f  libswiftSynchronization.dylib (6.1.2 - 6.1.2.1.102) <AE82D0C1-98D2-3787-9CCC-9935EC8BC57E> /usr/lib/swift/libswiftSynchronization.dylib
+       0x26ff42000 -        0x26ff5c6f7  libswiftSystem.dylib (64) <5FA9E1E8-2C26-3E5B-8099-AF2A65D29B87> /usr/lib/swift/libswiftSystem.dylib
+       0x26ffb1000 -        0x26ffb37ef  libswift_Builtin_float.dylib (6.1.2 - 6.1.2.1.102) <73165970-A173-31E4-82F8-17595250F5A6> /usr/lib/swift/libswift_Builtin_float.dylib
+       0x26ffb4000 -        0x270034c63  libswift_Concurrency.dylib (6.1.2 - 6.1.2.1.102) <3865239A-4590-37C4-8CD9-8086823A980E> /usr/lib/swift/libswift_Concurrency.dylib
+       0x270070000 -        0x2701122cf  libswift_RegexParser.dylib (6.1.2 - 6.1.2.1.102) <1E15995C-5FC4-34B3-83ED-79D11B86EF49> /usr/lib/swift/libswift_RegexParser.dylib
+       0x270113000 -        0x2701a2e57  libswift_StringProcessing.dylib (6.1.2 - 6.1.2.1.102) <19291C95-F6FA-3E26-855A-25E0D72D392C> /usr/lib/swift/libswift_StringProcessing.dylib
+       0x2701a6000 -        0x2701a7497  libswift_errno.dylib (310.100.8.0.1) <DEA7E675-B213-369B-BF12-481604513F69> /usr/lib/swift/libswift_errno.dylib
+       0x2701a8000 -        0x2701aa77f  libswift_math.dylib (310.100.8.0.1) <0E19F230-BB4B-3DAF-B7CF-BEB8E17A1242> /usr/lib/swift/libswift_math.dylib
+       0x2701ab000 -        0x2701ab565  libswift_signal.dylib (310.100.8.0.1) <7BF0442B-44F4-3B9B-8922-7EB1F09A8926> /usr/lib/swift/libswift_signal.dylib
+       0x2701ac000 -        0x2701acdcf  libswift_stdio.dylib (310.100.8.0.1) <EACB6AEF-7EB8-3B7C-8694-2656AF7F7BE3> /usr/lib/swift/libswift_stdio.dylib
+       0x2701ad000 -        0x2701ad7c7  libswift_time.dylib (310.100.8.0.1) <A9F3E35F-8549-3F3D-9146-BEB222AB6146> /usr/lib/swift/libswift_time.dylib
+       0x2701ae000 -        0x2701ae737  libswiftsys_time.dylib (310.100.8.0.1) <57E2C2D6-3192-3133-B38E-960601D4F0EC> /usr/lib/swift/libswiftsys_time.dylib
+       0x2701af000 -        0x2701af98f  libswiftunistd.dylib (310.100.8.0.1) <0781DDBF-8254-3A00-AFB5-0FB84237D4FB> /usr/lib/swift/libswiftunistd.dylib
+       0x2702e6000 -        0x2702e9deb  libsystem_darwindirectory.dylib (122) <A27318B8-3F5A-31CC-9653-F73E9E32EFB9> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x2702ea000 -        0x2702f1523  libsystem_eligibility.dylib (181.140.5) <61FAFCE2-C744-3FD2-9715-A2EFDCCD9844> /usr/lib/system/libsystem_eligibility.dylib
+       0x2702f2000 -        0x2702f76c5  libsystem_sanitizers.dylib (19) <E4AF519D-1473-302A-BCE7-5B7317667050> /usr/lib/system/libsystem_sanitizers.dylib

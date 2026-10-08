@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/attn_base_emitted.metal	2026-10-08 10:51:06
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_attn/1388fb736f661844.nocausal.metal	2026-10-08 10:51:39
+@@ -911,7 +911,7 @@
+     long cached_blocks = slice_start < slice_end ? (slice_end - slice_start + block - 1L) / block : 0L;
+     long total_aligned = total_rows & ~7L;
+     long new_first = max(0L, row0 + cached_lower);
+-    long new_end = min(total_rows, last_row + new_upper + 1L);
++    long new_end = total_rows;
+     long new_start = new_first & ~7L;
+     long mma_end = min(new_end, total_aligned);
+     bool last_split = split == splits - 1L;
