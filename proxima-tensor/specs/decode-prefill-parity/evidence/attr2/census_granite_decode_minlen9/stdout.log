@@ -1,0 +1,42 @@
+m0 decode: generated_tokens=24 text="\n## WORK IN PROGRESS — EXPERIMENTAL\n\n### proxima is under heavy active development: not stable,"
+m0 capture: step=23 dispatches_with_threads=398
+m0 groups: 27 kernels-by-identity-and-geometry over 398 dispatches
+m0 replay: group 0/27
+m0 sequence replay: one command buffer, dispatches=374 of 398 captured, gpu_ms=[6.001375033520162, 6.01120840292424, 5.895375041291118]
+m0 chunk sequence replay: chunks=8, gpu_ms=[[0.30133326072245836, 0.8098332909867167, 0.844125053845346, 0.8241250179708004, 0.8417916251346469, 0.7896249881014228, 0.8112917421385646, 0.8347916882485151], [0.29587489552795887, 0.7763749454170465, 0.8232500404119492, 0.8196249837055802, 0.8298333268612623, 0.7871250854805112, 0.8076666854321957, 0.8154583629220724], [0.2964166924357414, 0.767999910749495, 0.8145000319927931, 0.8278749883174896, 0.8362500229850411, 0.7711249636486173, 0.7760833250358701, 0.8132082875818014]]
+m0 family sequence replay excludes 24 unreplayable dispatches of 398
+m0 family sequence replay: family=attention dispatches=48 runs=7 gpu_ms_mean=1.2850 gpu_ms_min=1.2697 cov_pct=0.74
+m0 family sequence replay: family=norms dispatches=49 runs=7 gpu_ms_mean=0.2950 gpu_ms_min=0.2889 cov_pct=1.39
+m0 family sequence replay: family=other_matvec dispatches=218 runs=7 gpu_ms_mean=3.7412 gpu_ms_min=3.6631 cov_pct=1.09
+m0 family sequence replay: family=rope_copy_elementwise dispatches=59 runs=7 gpu_ms_mean=0.3385 gpu_ms_min=0.3279 cov_pct=2.53
+
+class                                     disp/step us/disp cold  total us cold   % step | us/disp -flr   total -flr | us/disp marg   total marg
+matvec Q8_0                                     169        20.03         3384.7    56.1% |        12.11       2046.8 |        14.99       2532.8
+cached attention partial                         24        49.33         1184.0    19.6% |        41.42        994.0 |        47.48       1139.5
+matvec f32                                       49        12.84          629.3    10.4% |         4.93        241.3 |        11.10        543.9
+RMSNorm sumsq + fused epilogue                   49        11.35          556.4     9.2% |         3.44        168.4 |         5.94        290.9
+UNCLASSIFIED omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1         24         8.85          212.5     3.5% |         0.94         22.5 |         6.98        167.5
+UNCLASSIFIED omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1         24         7.12          171.0     2.8% |         0.00          0.0 |         4.75        113.9
+cached attention merge                           24         7.00          168.0     2.8% |         0.00          0.0 |         4.49        107.8
+elementwise fused_identity_o0__multiply_s0_o1_g10          1        24.27           24.3     0.4% |        16.35         16.4 |        17.47         17.5
+softmax max                                       2         6.25           12.5     0.2% |         0.00          0.0 |         3.19          6.4
+UNCLASSIFIED omega_reduce_r3_o2_n5_fused_equal_o0_o1__add_o2_o3__select_s0_s1_o4_minimum_positive_infinity          1         9.58            9.6     0.2% |         1.67          1.7 |         5.86          5.9
+iota                                              2         4.23            8.5     0.1% |         0.00          0.0 |         2.21          4.4
+elementwise identity_g1                           1         6.35            6.4     0.1% |         0.00          0.0 |         4.17          4.2
+softmax sum                                       1         5.88            5.9     0.1% |         0.00          0.0 |         2.54          2.5
+UNCLASSIFIED omega_reduce_r2_o1_n1_identity_minimum_positive_infinity          1         5.88            5.9     0.1% |         0.00          0.0 |         2.51          2.5
+identity copy                                     1         5.81            5.8     0.1% |         0.00          0.0 |         3.50          3.5
+elementwise multiply                              1         5.38            5.4     0.1% |         0.00          0.0 |         2.77          2.8
+UNCLASSIFIED omega_moe_topk_e32_k8_stacked         24         0.00            0.0     0.0% |         0.00          0.0 |         0.00          0.0
+
+m0 floor: empty command buffer GPU span median=7.92 us min=6.75 us max=11.42 us n=200
+m0 step (captured step 23, last evaluation that ran): rows_evaluated=Some(1) tokens_committed=Some(1) gpu_busy_ms=Some(6.031041615642607) gpu_exec_ms=Some(3.447416) physical_dispatch_calls=Some(398)
+m0 step (median over logged evaluations at step >= 2, mixed widths): gpu_busy_ms=6.037 gpu_exec_ms=3.493
+m0 reconcile: sum(median x count) [cold]=6389.9 us; ratio to gpu_busy_ms=1.060; ratio to gpu_exec_ms=1.854
+m0 reconcile: sum(median x count) [cold-minus-floor]=3491.1 us; ratio to gpu_busy_ms=0.579; ratio to gpu_exec_ms=1.013
+m0 reconcile: sum(median x count) [warm]=6385.0 us; ratio to gpu_busy_ms=1.059; ratio to gpu_exec_ms=1.852
+m0 reconcile: sum(median x count) [marginal]=4946.1 us; ratio to gpu_busy_ms=0.820; ratio to gpu_exec_ms=1.435
+m0 invariant 1: sum(group members)=398 captured_dispatches=398 physical_dispatch_calls_logged=Some(398) capture_step_is_last_logged_step=true
+m0 replay failures: 1
+m0 replay failure: class=UNCLASSIFIED omega_moe_topk_e32_k8_stacked entry=omega_moe_topk_e32_k8_stacked reason=metal driver error: moe_topk binds extra outputs outside `bindings`
+m0 unreplayable by capture: groups=1 dispatches=24

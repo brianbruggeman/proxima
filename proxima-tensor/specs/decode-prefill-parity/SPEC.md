@@ -2659,3 +2659,148 @@ cargo build --release -p proxima-model-interop --example decode_gbps_baseline --
 RUST_LOG=debug PROXIMA_DECODE_MODEL_GGUF=<granite> PROXIMA_PROMPT="$(cat evidence/memfix/bench/prompt1k.txt)" PROXIMA_MAX_TOKENS=4 PROXIMA_RUNS=1 decode_gbps_baseline   # grep 'buffer arena'
 decode_arms --prompt-file evidence/memfix/bench/prompt1k.txt --processes 3 --runs 7 --arm base=<e9375ac2 build> --arm tip=<tip build> --arm control=<byte copy of tip> --arm ref=<c63d839d build> --arm refpacked=<c63d839d with the arena files> --case granite_moe=<gguf>
 ```
+
+## attribution after the combined landing (measured 2026-10-08 on `0ca915e8`; the omission binary adds `eace68a8`, a tool-only change)
+
+Evidence root: `evidence/attr2/` (`census_*` the kernel censuses, `census_*_minlen9` the same with one build constant changed, `rank/` the `attribution_rank` tables and step timelines, `timeline/` the `token_breakdown` event lines,
+`omission/` the captured-step omission runs, `binaries.sha256`). Raw stderr and the binaries are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/next/`. Test models: gemma4 E2B and granite moe 1b only.
+llama.cpp and Ollama were not run: the llama side of every comparison is `evidence/slice0/llama_ops/*.tsv` and `evidence/slice0/ac1/decode_arms.out`, recorded 2026-10-07 on a different box state.
+Every number names its basis: **own-cb** = median GPU span of one dispatch alone in its own command buffer (floor of about 4 us included on both sides), **in-situ** = a captured step replayed in one command buffer with the group's dispatches removed
+(`norm_variant_ab`, `AB_OMIT_ALL`, the r8 method) or a family replayed in program order, **wall** = host clock. DERIVED marks arithmetic on measured numbers; ASSUMED marks a spec-sheet or upstream-default value.
+
+### the four gaps, with the numbers they come from
+
+| model, phase | proxima | llama (recording) | ratio | proxima source |
+|---|---|---|---|---|
+| granite prefill, 1000 tokens | 381.0 ms (CoV 2.39%, 370.0-406.1, 21 runs) | 151 | 2.52 | `evidence/memfix/bench/decode_arms.out` arm `tip` (this session, `ubatch 0`); 371 at e9375ac2 in `evidence/r2fix` |
+| granite decode | 6.83 ms/token (all 21 runs, CoV 1.91%) | 5.25 | 1.30 | same file |
+| E2B decode, 971 tokens | 11.06 ms/token | 9.15 | 1.21 | `evidence/combine/bench/runA3` (not re-run this session) |
+| E2B prefill, 971 tokens | 594 ms | 572 | 1.04 | same |
+
+Box during the censuses and timelines: Ollama down (curl :11434 refused), no cargo job, `mds_stores`, `mediaanalysisd` and a background daemon at 40-110% CPU, GPU "Device Utilization %" sampled 0 before each run with
+one-sample spikes of 80-99% from other processes (`census_*/box_load.txt`, `timeline/*_box_load.txt`). The `decode_arms` bench above ran with the same background load (`evidence/memfix/bench/box_load_before.txt`).
+
+### GPU stalls during this pass (kept, not buried)
+
+Four `norm_variant_ab` omission runs stopped producing output while the process sat at 0% CPU: the full run (00:35, five groups printed, killed 00:46), the `AB_SHA=49f4a864` probe (00:50), a run with the first group skipped (00:56, no output in 135 s because the GPU was already busy),
+and the same run again (01:04, 25 groups printed, killed 01:07). After each kill "Device Utilization %" read 100 until 01:04:22 (17 minutes after the first kill) and until 01:25:17 (18 minutes after the last), with 4.1 GB of GPU memory in use that fell back to 0.1 GB.
+While it read 100, a tiny omega test ran in 0.12 s and an E2B decode ran at 29.7-32.5 ms/token (3x) with 2.4-2.8 s TTFT (`decode_gbps_tip`, 24 tokens). The runs that printed a stall point stopped at the omission of a q-norm group: `49f4a864... [1, 8, 256]` (28 dispatches)
+and `cdf3715b... [1, 8, 512]` (7 dispatches); omitting the `[1, 1, N]` groups of the same kernels did not stall. Cause: not isolated. One hypothesis, untested: the arena now packs released outputs into shared ranges, so an omitted producer leaves its output range holding another node's
+bytes. The final omission runs skip those two groups (`AB_SKIP_GROUPS`, `eace68a8`) and completed in 45 s each (E2B) and 10 s (granite). The reported timings were taken with the GPU reading 0 before each run except the first granite prefill census, whose pre-run sample read 94 and whose following eight samples read 0 with one 98
+(`census_granite_prefill/` has no box file; the sample is in the session log only, so treat that census as plausible, not proven); the sequence replay of that census (361.9 / 360.4 / 362.0 ms) sits 8% above the live `gpu_busy` (335-356 ms).
+`omission/probe49f4.out` and `omission/e2b_decode_unpacked_partial_run1.out` are the stalled runs.
+
+### granite prefill, one 1000-token evaluation (`census_granite_prefill/`, `rank/granite_prefill.md`)
+
+Dispatches 383 (1847 at slice 0). Census sequence replay 361.9 / 360.4 / 362.0 ms for 359 replayable dispatches (24 `moe_topk_stacked` are not replayable); live step 0: `gpu_busy` 335.3-355.5 ms, wall 378.9-401.5 ms
+(`rank/granite_steps.md` runs 1-2, `rank/granite128_steps.md`). Sum of own-cb 396.3 ms against `gpu_busy` 335 (1.18x). Ranked by own-cb milliseconds recovered if the row reached its reference:
+
+| rank | row | ops | proxima ms (us/op) | reference | recovered ms | efficiency (DERIVED) | mechanism |
+|---|---|---|---|---|---|---|---|
+| 1 | MoE combine fold: reduce over the 8 selected experts, epilogue of 10 operands (`omega_reduce_r3_o2_n2_multiply_add_zero_epi10_...`, extents `[1000, 8, 1024]`) | 24 | 99.23 (4134) | **567.7 us/op measured with the serial route** (13.6 ms) | **85.6** | 36.9 MB in 4134 us = 8.9 GB/s; 2.2% of the 400 GB/s spec (ASSUMED); at 568 us 65 GB/s | The fold is 8 long, so `reduce_is_cooperative` (`omega/src/msl/emit_and_classify.rs:1669`, length gate `meets_cooperative_min_len` `:1992`, `min_len = 2` at `omega/omega-runtime.toml:125`) takes the cooperative body (`tiled_gemm_cooperative_scan.rs:1994`) and the grid is 32,768,000 = 1000 x 1024 x `SIMD_WIDTH` 32 (`census_dispatches.csv`, node 249): one 32-lane simdgroup per output, 24 lanes idle. Toggle, measured: build with `OMEGA_COOPERATIVE_REDUCE_MIN_LEN=9`: grid 1,024,000, 567.7 us/op, whole-step replay 361.9 / 360.4 / 362.0 -> 299.4 / 278.2 / 277.0 ms (-82 to -85 on the last two samples) |
+| 2 | expert gate, up (+ silu epilogue) and down, stacked `[1000, 8, .., ..]`, plus the K/V projections, Q8_0 1024x512 | 72 + 48 | 203.05 (gate 2921, up 2737, down 2430 us/op cold; K/V 170 us/op) | llama 114.41 ms for the same shape class (237 ops) | 88.6 | 8.39 GFLOP per expert op: 2.87 / 3.06 / 3.45 TFLOP/s; per layer proxima 8.46 ms against llama 4.77 ms (the class includes the K/V projections on both sides), llama 25.2 GFLOP of experts per layer = 5.3 TFLOP/s | grouped-GEMM body `push_expert_grouped_gemm_body` (`omega/src/msl/expert_grouped_gemm.rs:60`); the tile and occupancy cause of the 1.7x per layer is untraced |
+| 3 | rope as two fused elementwise "twin" kernels (`omega_elementwise_twin_r3_n4_..._subtract/_add_...`) on Q `[1000, 16, 32]` and K `[1000, 8, 32]` | 48 | 35.20 (Q 974, K 493) | llama 1.71 ms, 96 ops | 33.5 | Q: 8.2 MB in 974 us = 8.4 GB/s; K: 4.1 MB in 493 us = 8.3 GB/s | `ElementwiseTwin` (`proxima-tensor/src/bind/types_layout_boundop.rs`) renders through `signature_tokens_prelude.rs:404`; 512,000 threads, `tg=None`; why one pass over 4 MB takes 974 us: untraced |
+| 4 | cached attention partial (`q1000 c1024 h8 g2 d64`) | 24 | 27.66 (1153) | llama 12.93 ms, 95 ops | 14.8 | 4.10 GFLOP per layer: 3.6 TFLOP/s; llama 7.6 (crude, DERIVED with one non-causal count for both; llama runs two graphs of 512 and 488 tokens) | row-tiled kernel from r1; untraced below the kernel |
+| 5 | router matvec F32 1024x32 | 24 | 11.55 (481) | llama 2.17 ms, 47 ops | 9.4 | 65.5 MFLOP in 481 us = 0.14 TFLOP/s; 4.4 MB = 9.1 GB/s | grid 4096 threads in threadgroups of 128 for 32,000 outputs; occupancy, untraced |
+| 6 | Q8_0 1024x1024 projections, rms norm, head | 48 + 49 + 1 | 16.09 + 2.87 + 0.16 | llama 15.08 + 1.77 + 0.22 | 1.0 + 1.1 | | within 1.07x and 1.62x |
+| host | outside the GPU: `wall - gpu_busy` | | 31-54 ms (readback 10.2-20.2, kv append 8.0-19.7, kv named 5.5-8.9; the fields overlap) | | up to 40 | | the 98 MB of pinned K/V rows (`evidence/memfix`) are read back and appended on the host |
+
+Own-cb recoverable total of rows 1-5: 232 ms; scaled by the 0.85 ratio of `gpu_busy` to own-cb it is about 196 ms, which would put the step near 185 ms against llama 151, the rest being the host row. Rows 1 and 2 are 75% of it.
+
+### granite decode, one step after the 1000-token prompt (census step 23, omission step 5; `census_granite_decode/`, `omission/granite_decode.out`, `rank/granite_decode.md`)
+
+Dispatches 398 (926 at slice 0). Own-cb sum 6.27 ms against llama 6.49: the kernels are at parity by that measure (matmul 3.87 against 3.99, `-0.12`). Census sequence replay of 374 dispatches 5.14-5.20 ms; omission harness base replay
+5.81-6.04 ms (median 5.92, 26 groups; it replays the same dispatches without the census's flush, a 0.7 ms difference between the two replays that is not explained). Live step, 128-token run (`rank/granite128_steps.md`, n=112-126 steps per run, instrumented build): wall 6.48-6.71,
+evaluate 6.42-6.63, `gpu_busy` 5.92-5.94, `gpu_exec` 5.25-5.29, encode 0.46-0.47, 8 chunks; 16-token run: wall 6.21-6.25, `gpu_busy` 5.65-5.68. Release bench: 6.83 ms/token.
+
+By omission (ms the step loses without the group; base 5.92 ms; the noise is the spread of the 26 base figures, 0.22 ms, so rows under 0.2 ms are unresolved):
+
+| rank | group | ops | ms | us/op | llama own-cb class | note |
+|---|---|---|---|---|---|---|
+| 1 | cached attention partial `[1, 8, 2, 64]` | 24 | 1.231 | 51.3 | attention 0.73 ms, 48 ops (15 us/op) | the one class above llama on own-cb (+0.66 ms) |
+| 2 | expert down `[1, 8, 512, 1024]` | 24 | 0.869 | 36.2 | matmul class 3.99 ms vs 3.87 | 4.46 MB per op: 123 GB/s (DERIVED) |
+| 3 | expert up + silu `[1, 8, 1024, 512]` | 24 | 0.791 | 33.0 | | 135 GB/s |
+| 4 | expert gate `[1, 8, 1024, 512]` | 24 | 0.624 | 26.0 | | 172 GB/s |
+| 5 | rms norm + epilogue `[1, 1024]` | 49 | 0.557 | 11.4 | norm 0.37 ms | +0.19 ms on own-cb |
+| 6 | K/V projections `[1, 8, 64, 1024]` | 48 | 0.426 | 8.9 | | |
+| 7 | combine fold, 10 epilogue operands `[1, 8, 1024]` | 24 | 0.298 | 12.4 | | at decode the cooperative route is the right one: the same constant at 9 slows the step (below) |
+| 8 | attention out, q projection, router, head, rope twins, attention merge | | 0.277, 0.240, 0.214, 0.176, 0.176 + 0.154, 0.159 | | | |
+
+Where the 6.83 ms goes against llama's 5.25 (wall basis, 128-token timeline, n=3 runs): `gpu_busy` 5.92-5.94 is 0.67-0.69 above llama's whole step; `evaluate - gpu_busy` is 0.49-0.69 ms of host time that is not hidden behind the GPU; `wall - evaluate` is 0.06-0.08;
+and the release per-token mean (6.83) sits 0.12-0.35 ms above the instrumented steps' median wall (6.48-6.71). The kernels do not carry this gap on the own-cb basis; the structure around them does, and nothing in this pass attributes the 0.49-0.69 ms.
+
+### E2B decode, one step after the 971-token prompt (census step 23, omission step 5; `census_e2b_decode/`, `omission/e2b_decode_packed.out`, `rank/e2b_decode.md`)
+
+Dispatches 653 (941 at slice 0). Own-cb sum 11.96 ms against llama 11.10 (+0.86). Census sequence replay 10.58-10.67 ms; omission base replay 10.61-10.71 (45 groups, spread 0.095 ms, 30 rounds); live step wall 10.61-11.00, `gpu_busy` 9.91-10.32,
+`evaluate` 10.56-10.95 (`rank/e2b_steps.md`, 16-token runs). Family replays in program order sum to 10.55 ms: Q4_0 matvec 5.16, norms 2.48, attention 1.11, head 1.10, rope/copy/elementwise 0.575, other 0.13.
+
+| rank | group | ops | omission ms | us/op | llama own-cb | bytes rate (DERIVED) | recoverable ms |
+|---|---|---|---|---|---|---|---|
+| 1 | head Q6_K `[1, 1536, 262144]` | 1 | 1.061 | 1060.7 | 0.94 ms | 330 MB in 1061 us = 311 GB/s; llama 351 | 0.12 |
+| 2 | ffn_down Q4_0 K=12288 | 20 | 0.943 | 47.15 | 38.3 us/op (60 ops of 1536x12288, 2.30 ms) | 10.6 MB in 47.2 us = 225 GB/s; llama 277 | 0.18 |
+| 3 | ffn_gate + gelu epilogue K=1536 N=12288 | 20 | 0.884 | 44.21 (73.0 before r8) | 38.3 | 240 GB/s | 0.12 |
+| 4 | rms norm epilogue `[1, 1536]` (epi5) | 70 | 0.864 | 12.34 | 7.4 us/op (242 ops, 1.80 ms) | | |
+| 5 | ffn_up plain N=12288 | 20 | 0.842 | 42.09 | 38.3 | 252 GB/s | 0.08 |
+| 6 | rms norm epilogue `[1, 1536]` (epi4) | 71 | 0.728 | 10.26 | 7.4 | | |
+| 7 | sliding attention partial `[1, 1, 8, 256]` | 28 | 0.727 | 25.96 | attention 1.21 ms, 35 ops (all) | | |
+| 8 | attn q projection `[1, 8, 256, 1536]`, attn output `[1, 1, 8, 256, 1536]` | 28 + 28 | 0.404 + 0.389 | 14.4, 13.9 | | | |
+| 9 | global attention partial `[1, 1, 8, 512]` | 7 | 0.389 | 55.5 | | | |
+| 10 | per-layer norms `[1, 1536]` epi6, `[1, 1536, 256]` epi5 | 35 + 35 | 0.366 + 0.340 | 10.4, 9.7 | | | |
+
+The four rms-norm groups in ranks 4, 6 and 10 add to 2.30 ms in situ over 211 dispatches (10.9 us each) against llama's 1.80 ms own-cb over 242 (7.4 us each, floor included on llama's side only): about 0.7 ms at llama's per-dispatch cost. The 12288-wide Q4_0 groups (gate, up, down) total 2.67 ms and would lose 0.37 ms at llama's
+38.3 us/op; the 6144-wide ones (21.7-24.0 us/op, 1.03 ms) are at llama's 23.6 us/op. Two q-norm groups (28 + 7 dispatches) are not in this table (stalled, above); their cost is inside the 2.48 ms norm family replay.
+Wall basis: `gpu_busy` 9.91-10.32 is 0.8-1.2 ms above llama's whole step of 9.15; wall 10.6-11.0.
+
+### E2B prefill
+
+No census was taken (not requested). Timeline (`rank/e2b_steps.md`, step 0, warm, runs 1-2): wall 589.2-591.4, `gpu_busy` 567.3-568.6, readback 4.8-4.9, kv_named 5.7-6.4, kv_append 3.6-3.9. The GPU span is at llama's whole prefill (572); the 22 ms above it is host time.
+
+### one build constant, three censuses (`census_*_minlen9/`)
+
+`OMEGA_COOPERATIVE_REDUCE_MIN_LEN=9` (default 2; `omega/omega-runtime.toml:125`) sends reduces shorter than 9 to the one-thread-per-output body. Whole-step replay, three samples each, default -> 9:
+
+| step | default | min_len 9 | change |
+|---|---|---|---|
+| granite prefill | 361.9 / 360.4 / 362.0 | 299.4 / 278.2 / 277.0 | -63 to -85 ms |
+| granite decode | 5.14 / 5.20 / 5.15 | 6.00 / 6.01 / 5.90 | +0.7 to +0.9 ms |
+| E2B decode | 10.67 / 10.63 / 10.58 | 11.84 / 11.73 / 12.52 | +1.1 to +1.9 ms |
+
+The length gate cannot serve both: the same constant that removes 85 ms from prefill adds about 1 ms to a decode step. What differs is the number of outputs (1,024,000 in the prefill fold; a few thousand at decode), which the gate does not read.
+`omega-runtime.toml` already records that a global threshold made 64-element attention folds slower at decode.
+
+### proposed next slices, each with a target and the number it moves
+
+1. **Short cooperative folds by output count** (rank 1, granite prefill). Choose the serial body for a fold shorter than `min_len`-class lengths only when it has at least about 64K outputs (the prefill combine has 1,024,000; decode folds have under 10,000); keep the cooperative body otherwise. Target: combine 4134 -> at most 600 us/op, granite prefill own-cb -85 ms,
+   step 381 -> at most 300 ms (derived from the toggle, whole-step replay -82 to -85 ms). Gates: the three censuses above must show decode replay unchanged (5.14-5.20, 10.58-10.67), `llama_parity_`, `generic_verify_llama_parity_`, the digests, and a `decode_arms` run with a control arm. The fold order of 8 elements changes from a 32-lane tree to a sequential sum, so a parity test over the combine at 1000 tokens is part of the slice.
+2. **Fuse the combine into the down projection** (rank 1 and the memory finding). The combine reads a `[1000, 8, 1024]` buffer that exists only to be reduced over the selected axis. Removing it removes 32,735,232 bytes of arena (`evidence/memfix`) and the 568 us/op after slice 1. Needs a gathered quantized fold with a second reduced axis, which both executors reject today (`evidence/memfix/rejected/probe_multiaxis_combine.patch`).
+   Target: arena -32.7 MB, prefill a further -13 ms. Larger and later than slice 1.
+3. **Stacked expert GEMM occupancy** (rank 2). Trace first: read the per-threadgroup occupancy and tile shape of `push_expert_grouped_gemm_body` for the three projections against llama's `kernel_mul_mm_id`, then change one parameter at a time under the r3 parity test. Target: 203 -> at most 115 ms own-cb (llama 114.4), -88 ms.
+4. **Rope twin kernels** (rank 3). Capture one Q twin dispatch and replay variants with `norm_variant_ab` (the tool already compiles a variant against a captured dispatch's own buffers). Target 35.2 -> at most 3 ms, -32 ms; the mechanism is untraced, so the first deliverable is the trace.
+5. **Place the prefill K/V rows** (host row; also memory). Write the K even/odd and V outputs of the prefill plan straight into the device KV buffers, as the decode plan does (`decode.rs:6702-6726`), instead of reading back 98 MB and appending. Target: wall - `gpu_busy` 31-54 ms -> at most 15 ms, and the 98,205,696 pinned bytes leave the prefill arena.
+6. **Prefill attention and router** (ranks 4 and 5): 27.7 -> 13 ms and 11.6 -> 3 ms own-cb, -24 ms together; trace before changing.
+7. **Granite decode structure** (the 0.49-0.69 ms of `evaluate - gpu_busy`, the 0.67 ms of `gpu_busy` above llama, and attention at 51 us/op). First slice is instrumentation only: timestamps of the first dispatch start and last end against the host commit for each of the 8 chunks, to split the 0.5-0.7 ms; the attention row has one stated hypothesis to test,
+   that proxima's decode example stores K and V as `F32` (`decode_gbps_baseline.rs`, `kv_cache_key_quant: GgmlType::F32`) while `llama-server` was launched without `-ctk`/`-ctv` (`decode_arms.rs:838-856`) and the upstream default is f16 (ASSUMED, not read from the recorded server log). Target: step 6.83 -> at most 6.0 ms.
+8. **E2B decode norms and Q4_0 widths** (ranks 1-6). 211 measured norm dispatches at 10.9 us in situ against llama's 7.4 us own-cb: target -0.7 ms; Q4_0 1536x12288 at 38.3 us/op like llama: -0.37 ms; head: -0.12 ms (in-situ against own-cb, an unequal pair). Target: 11.06 -> at most 9.9 ms.
+
+### what this section does not establish
+
+- Rows 2-5 of the prefill table have a reference (llama's recorded class time) and no cause; only row 1 has a toggle that moves the number. The recovered milliseconds of rows 2-5 are the distance to llama, not a measured change.
+- The omission runs exclude two q-norm groups (35 dispatches) and the 24 `moe_topk_stacked` dispatches the capture cannot replay; their cost is inside the family replays only.
+- The omission base replay of granite decode (5.92 ms) is 0.7 ms above the census sequence replay of the same dispatches (5.14-5.20); the difference is unexplained.
+- E2B decode and prefill wall figures are from the 16-token instrumented timeline and from the previous session's matrix; E2B was not re-benched here.
+- Own-cb sums exceed `gpu_busy` (1.18x for granite prefill), so own-cb recoveries overstate wall time by about that factor.
+- Efficiency percentages use 400 GB/s (ASSUMED, the spec sheet) and llama's recorded per-op rates; no ceiling for this GPU was measured in this pass (`proxima-tensor/docs/rooflines.md:411` records the GPU streaming bandwidth as not measured).
+- The stalls above: cause not isolated.
+
+### re-prove
+
+```
+attribution_rank rank --census evidence/attr2/census_granite_prefill --llama evidence/slice0/llama_ops/granite_ops.tsv --ntok 512,488 --requests 3 --floor-us 4.0
+attribution_rank rank --census evidence/attr2/census_granite_decode --llama evidence/slice0/llama_ops/granite_ops.tsv --ntok 1 --requests 381 --floor-us 4.0
+attribution_rank rank --census evidence/attr2/census_e2b_decode --llama evidence/slice0/llama_ops/e2b_ops.tsv --ntok 1 --requests 381 --floor-us 4.0
+attribution_rank steps --events evidence/attr2/timeline/granite128_token_breakdown.log
+M0_OUT_DIR=<dir> M0_MODEL_GGUF=<granite> M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=0 PROXIMA_PROMPT_FILE=prompt1k.txt gemma4_decode_kernel_census      # granite prefill; decode: omit M0_MAX_TOKENS and M0_CAPTURE_STEPS
+OMEGA_COOPERATIVE_REDUCE_MIN_LEN=9 cargo build --release -p proxima-model-interop --example gemma4_decode_kernel_census --features std,metal,instrument   # the toggle
+PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_VARIANT_DIR=<empty dir> AB_OMIT_ALL=1 AB_PACKED=1 AB_STEP=5 AB_ROUNDS=30 AB_FLUSH_MIB=0 AB_SKIP_GROUPS='49f4a86451846a3b:[1, 8, 256];cdf3715b4db55454:[1, 8, 512]' norm_variant_ab   # E2B; granite: same with its blob and no skip list
+cargo test -p proxima-model-interop --features std --example attribution_rank                                                              # the table generator's own tests
+```

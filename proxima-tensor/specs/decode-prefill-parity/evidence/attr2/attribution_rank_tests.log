@@ -1,0 +1,46 @@
+   Compiling sha2-asm v0.6.4
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-protocols)
+   Compiling bit-vec v0.8.0
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-gguf)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling wait-timeout v0.2.1
+   Compiling quick-error v1.2.3
+   Compiling rand_xorshift v0.4.0
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-test)
+   Compiling unarray v0.1.4
+   Compiling sha2 v0.10.9
+   Compiling proxima-auth v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-auth)
+   Compiling bit-set v0.8.0
+   Compiling rusty-fork v0.3.1
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tokenizer)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-patterns)
+   Compiling antlr4rust v0.3.0-rc2
+   Compiling proptest v1.11.0
+   Compiling cel-parser v0.10.1
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-net)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-process)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-recording)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-listen)
+   Compiling cel-interpreter v0.10.0
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-quic)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-http)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.93s
+     Running unittests examples/attribution_rank.rs (/private/tmp/cargo_target_arch/debug/examples/attribution_rank-1870dda0d0c1a1e1)
+
+running 10 tests
+test tests::fused_and_plain_norm_labels_share_one_class ... ok
+test tests::extents_with_inner_axes_multiply_into_the_row_count ... ok
+test tests::a_q4_0_projection_maps_to_the_same_shape_key_on_both_sides ... ok
+test tests::the_proxima_head_label_is_the_head_class ... ok
+test tests::the_e2b_decode_table_reproduces_from_the_committed_census_and_llama_ops ... ok
+test tests::the_granite_decode_table_reproduces_from_the_committed_census_and_llama_ops ... ok
+test tests::a_decode_filter_over_prefill_evidence_does_not_reproduce_the_prefill_table ... ok
+test tests::the_e2b_prefill_table_reproduces_from_the_committed_census_and_llama_ops ... ok
+test tests::the_granite_prefill_table_reproduces_from_the_committed_census_and_llama_ops ... ok
+test tests::the_step_timelines_reproduce_from_the_committed_token_breakdown_events ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
