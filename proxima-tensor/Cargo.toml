@@ -155,11 +155,9 @@ top-fraction-fusion = ["config"]
 metal-moe-mul-mat-id = []
 # The model builders lower a routed feed-forward block with `MoeProjectionStrategy::Stacked`
 # (one gate, one up and one down operation over a `[sequence, selected]` route stack) instead of
-# one operation per selected expert, at every token count from a decode step up. Implies
-# `moe-topk-fusion`, which is what folds the route stacks into one `MoeTopK`; without it the stack
-# stays a chain of elementwise nodes. `proxima-model-interop`'s `metal` set turns it on; the strategy
-# itself is always available to a caller that names it.
-moe-stacked-experts = ["moe-topk-fusion"]
+# one operation per selected expert. Default-off until a real-model A/B lands; the strategy itself
+# is always available to a caller that names it.
+moe-stacked-experts = []
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc

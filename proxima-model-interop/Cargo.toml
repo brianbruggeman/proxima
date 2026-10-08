@@ -149,7 +149,6 @@ metal = [
     "metal-q4_0-native",
     "gated-delta-net-fusion",
     "moe-topk-fusion",
-    "moe-stacked-experts",
     "metal-attn-split-decode",
     "metal-attn-split-rows",
 ]
@@ -229,17 +228,11 @@ moe-topk-fusion = [
     "proxima-tensor/moe-topk-fusion",
     "omega?/moe-topk-fusion",
 ]
-# Passthrough to `proxima-tensor/moe-stacked-experts` and `omega/moe-stacked-experts`: the routed
-# feed-forward blocks the model builders emit run gate, up and down once over every selected expert
-# (`MoeProjectionStrategy::Stacked`) instead of once per selected expert, at prefill and at decode.
-# In `metal`'s list above, so serving builds lower one expert dispatch per (layer, projection).
-# Implies `moe-topk-fusion`, which fuses the route stacks.
-moe-stacked-experts = [
-    "dep:omega",
-    "moe-topk-fusion",
-    "proxima-tensor/moe-stacked-experts",
-    "omega?/moe-stacked-experts",
-]
+# Passthrough to `proxima-tensor/moe-stacked-experts`: the routed feed-forward blocks the
+# model builders emit run gate, up and down once over every selected expert
+# (`MoeProjectionStrategy::Stacked`) instead of once per selected expert. Default-off until
+# a real-model A/B lands; it needs `moe-topk-fusion` to fuse the route stacks.
+moe-stacked-experts = ["proxima-tensor/moe-stacked-experts"]
 # Passthrough to `proxima-tensor/reduce-epilogue-fusion` and
 # `omega/reduce-epilogue-fusion` -- folded into `metal`'s default shape above
 # but kept individually selectable so this crate's own harness can exercise
