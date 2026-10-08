@@ -537,6 +537,15 @@ accumulator_fragments = 16
 # capacity moves this, not code. must be nonzero. override via
 # OMEGA_ATTENTION_ROWS_TARGET_SIMDGROUPS.
 target_simdgroups = 256
+# most threadgroup bytes the staged query tile may take (the tile also has to fit beside the
+# score tile in `[cached_attention].threadgroup_memory_bytes`). staging pays one global read
+# of the query tile per threadgroup instead of one per key block, and costs threadgroup bytes
+# the occupancy of the GPU spends on resident threadgroups. MEASURED (1000-token prefill
+# attention, head dim 64, 5120 staged bytes): staging is 36 us/op faster. Sliding head dim
+# 256, 17408 staged bytes: staging is about 181 us/op slower. 8192 stages the first shape and
+# not the second; the full `threadgroup_memory_bytes` value stages every shape
+# that fits. override via OMEGA_ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES.
+max_staged_query_bytes = 8192
 
 [selection]
 # smallest row count at which the rank-count top-fraction expression lowers to one selection
