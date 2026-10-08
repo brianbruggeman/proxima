@@ -1118,6 +1118,14 @@ pub struct ServingConfig<'model> {
     /// serial ordering, unchanged; the overlap arm is not wired to any
     /// call site yet (ROW 587's own residual).
     pub overlap_transfer_compute: bool,
+    /// Not an upstream serving flag -- whether a caller that has just loaded a
+    /// model runs [`crate::generate::LoadedModel::warm_resident_buffers`], which
+    /// declares the checkpoint mapping and every resident buffer to the driver in
+    /// one waited command buffer so the first prefill does not pay the driver's
+    /// first-reference cost. `true` (this field's default) pays it at load; `false`
+    /// leaves it to the first command buffer that references the buffers. No
+    /// device bytes differ either way.
+    pub warm_model_buffers_at_load: bool,
     /// I11 scheduling level 1 of 3: request admission. See
     /// `AdmissionSchedule`'s own doc for the one site that consults it.
     pub admission_schedule: AdmissionSchedule,
@@ -1267,6 +1275,7 @@ impl Default for ServingConfig<'static> {
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
+            warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
             },
@@ -1743,6 +1752,7 @@ mod tests {
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
+            warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
             },
@@ -1920,6 +1930,7 @@ mod tests {
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
+            warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
             },
@@ -2042,6 +2053,7 @@ mod tests {
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
+            warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
             },
@@ -2137,6 +2149,7 @@ mod tests {
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
+            warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
             },
@@ -2222,6 +2235,7 @@ mod tests {
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             overlap_transfer_compute: false,
+            warm_model_buffers_at_load: true,
             admission_schedule: AdmissionSchedule {
                 max_concurrent_requests: 0,
             },

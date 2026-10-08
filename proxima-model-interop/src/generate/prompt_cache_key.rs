@@ -174,6 +174,7 @@ impl CacheKey {
             // device memory held for plans between calls: never changes rows
             resident_prefill_plan_bytes: _,
             overlap_transfer_compute: _,
+            warm_model_buffers_at_load: _,
             // request ordering and residency scheduling levels
             admission_schedule: _,
             phase_schedule: _,
