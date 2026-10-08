@@ -1038,11 +1038,14 @@ pub type PlacedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 #[cfg(feature = "metal-output-placement")]
 pub fn allocate_placed_buffer(byte_len: usize) -> Result<PlacedBuffer, MetalError> {
     let (device, _queue) = device_and_queue()?;
-    device
+    let buffer = device
         .newBufferWithLength_options(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
             log: "device refused to allocate a placed buffer".to_string(),
-        })
+        })?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("placed_buffer", "session", "", byte_len.max(1), false);
+    Ok(buffer)
 }
 
 /// Wraps memory the caller owns as a placed buffer without copying it, so the
@@ -1070,7 +1073,10 @@ pub unsafe fn allocate_placed_buffer_over(
         });
     }
     let (device, _queue) = device_and_queue()?;
-    create_no_copy_buffer(&device, base.cast(), byte_len)
+    let buffer = create_no_copy_buffer(&device, base.cast(), byte_len)?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("placed_buffer_over", "session", "", byte_len, true);
+    Ok(buffer)
 }
 
 /// Zero-fills the first `byte_len` bytes of `buffer`. A freshly allocated

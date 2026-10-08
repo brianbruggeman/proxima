@@ -1359,7 +1359,13 @@ pub(super) fn ensure_merged_group_resolved(
         None
     } else {
         let member_elements = dispatch.member_bytes / dispatch.dtype.size_bytes();
-        Some(allocate_buffer(device, member_elements * dispatch.members.len(), dispatch.dtype)?)
+        Some(allocate_buffer_for(
+            "merged_output",
+            "plan",
+            device,
+            member_elements * dispatch.members.len(),
+            dispatch.dtype,
+        )?)
     };
     // Every offset pushed below is relative to THIS value -- 0 for a fresh
     // allocation (the leader's own slice starts the buffer), or the leader's
@@ -1448,10 +1454,13 @@ pub(super) fn upload_base_table(
     // single-copy contract `upload_uniforms` relies on for its own
     // `newBufferWithBytes_length_options` call just above it in this file.
     let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-    unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
+    let buffer = unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
         .ok_or_else(|| MetalError::CompileFailed {
             log: "device refused to allocate the horizontal-merge base table".to_string(),
-        })
+        })?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("merge_base_table", "plan", "", bytes.len(), false);
+    Ok(buffer)
 }
 
 /// One `RoundBatchedReduce` op's own contiguous output buffer and uploaded
@@ -1502,7 +1511,9 @@ pub(super) fn ensure_round_group_resolved(
     };
     let round_count = round_routes.len();
     let output_member_bytes = bound_output_len(bound) * bound.dtype.size_bytes();
-    let output_buffer = allocate_buffer(
+    let output_buffer = allocate_buffer_for(
+        "merged_output",
+        "call",
         device,
         (output_member_bytes * round_count) / bound.dtype.size_bytes(),
         bound.dtype,
