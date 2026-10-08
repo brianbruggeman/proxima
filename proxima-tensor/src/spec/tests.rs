@@ -12266,6 +12266,10 @@ mod gemma4_synthetic_parity {
     }
 
     fn max_abs_diff(engine: &[f32], reference: &[f32]) -> f32 {
+        assert!(
+            engine.iter().chain(reference).all(|value| value.is_finite()),
+            "non-finite logits: f32::max drops a NaN difference, so a NaN engine would read as parity"
+        );
         engine
             .iter()
             .zip(reference)
@@ -17846,7 +17850,9 @@ mod forward_scales {
 
     const DENSE_PRE_CHANGE_NODES: usize = 219;
     const DENSE_PRE_CHANGE_DIGEST: u64 = 17540776033648518689;
+    #[cfg(not(feature = "moe-stacked-experts"))]
     const MOE_PRE_CHANGE_NODES: usize = 291;
+    #[cfg(not(feature = "moe-stacked-experts"))]
     const MOE_PRE_CHANGE_DIGEST: u64 = 15757248836318508347;
 
     pub(super) fn profile_text(rope_layout: &str) -> String {
@@ -17921,6 +17927,7 @@ mod forward_scales {
     }
 
     #[test]
+    #[cfg(not(feature = "moe-stacked-experts"))]
     fn moe_default_graph_equals_the_pre_change_graph() {
         let (program, _logits) = built(&descriptor(4, 2));
 
