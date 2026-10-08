@@ -6906,6 +6906,11 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             crate::bind::BoundOpKind::TopFractionSelect { .. } => {
                 panic!("this Mistral cached-forward program never binds a TopFractionSelect op")
             }
+            // The twin pass runs after bind, on the pruned plan, so a bind
+            // alone never produces this kind.
+            crate::bind::BoundOpKind::ElementwiseTwin { .. } => {
+                panic!("this Mistral cached-forward program never binds an ElementwiseTwin op")
+            }
         }
     }
     assert_eq!(
