@@ -111,7 +111,6 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     constexpr long tile_vectors = tile_blocks * 8; constexpr long threads = simdgroups * 32;
     constexpr long dims_per_group = head_dim / 8 / simdgroups; constexpr long depth_unroll = ((half_dim / 8) % 2 == 0) ? 2 : 1;
     constexpr long key_tiles_per_group = (block / 8) / simdgroups;
-    constexpr long vectors_per_simdgroup = (tile_vectors + simdgroups - 1L) / simdgroups;
     constexpr long query_stride = rows_in_fragment ? kv_heads * query_groups * half_dim : half_dim;
     long splits = u.splits;
     long total_rows = u.total_elements / (kv_heads * query_groups);
@@ -263,44 +262,41 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        FOR_UNROLL for (long turn = 0L; turn < vectors_per_simdgroup; turn++) {
-            long vector = (long)simdgroup_slot + turn * simdgroups;
-            if (vector < tile_vectors) {
-                long query_row = (long)vector_row[vector];
-                float local_scores[block / 32];
-                float block_maximum = -INFINITY;
-                FOR_UNROLL for (long item = 0L; item < block / 32L; item++) {
-                    long column = (long)lane + item * 32L;
-                    float raw_score = -INFINITY;
-                    if (item * 32L < columns) {
-                        if (mode == 2L) {
-                            if (column < columns) { raw_score = score_tile[vector * block + column]; }
-                        } else if (mode == 1L) {
-                            long relative = key0 + column - query_row;
-                            if (column < columns && relative <= new_upper && relative >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
-                        } else {
-                            long key = key0 + column;
-                            if (key < slice_end && (key - live - query_row) >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
-                        }
-                    }
-                    local_scores[item] = raw_score;
-                    block_maximum = max(block_maximum, raw_score);
-                }
-                block_maximum = simd_max(block_maximum);
-                float previous_maximum = row_maximum[vector];
-                float next_maximum = max(previous_maximum, block_maximum);
-                float rescale = (previous_maximum == -INFINITY) ? 0.0f : (previous_maximum == next_maximum ? 1.0f : exp(previous_maximum - next_maximum));
-                float block_sum = 0.0f;
-                FOR_UNROLL for (long item = 0L; item < block / 32L; item++) {
-                    if (item * 32L < columns) {
-                        float weight = (local_scores[item] == -INFINITY) ? 0.0f : exp(local_scores[item] - next_maximum);
-                        score_tile[vector * block + (long)lane + item * 32L] = weight;
-                        block_sum += weight;
+        for (long vector = (long)simdgroup_slot; vector < tile_vectors; vector += simdgroups) {
+            long query_row = (long)vector_row[vector];
+            float local_scores[block / 32];
+            float block_maximum = -INFINITY;
+            FOR_UNROLL for (long item = 0L; item < block / 32L; item++) {
+                long column = (long)lane + item * 32L;
+                float raw_score = -INFINITY;
+                if (item * 32L < columns) {
+                    if (mode == 2L) {
+                        if (column < columns) { raw_score = score_tile[vector * block + column]; }
+                    } else if (mode == 1L) {
+                        long relative = key0 + column - query_row;
+                        if (column < columns && relative <= new_upper && relative >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
+                    } else {
+                        long key = key0 + column;
+                        if (key < slice_end && (key - live - query_row) >= cached_lower) { raw_score = score_tile[vector * block + column] * scale; }
                     }
                 }
-                block_sum = simd_sum(block_sum);
-                if (lane == 0) { row_maximum[vector] = next_maximum; row_sum[vector] = row_sum[vector] * rescale + block_sum; rescale_tile[vector] = rescale; }
+                local_scores[item] = raw_score;
+                block_maximum = max(block_maximum, raw_score);
             }
+            block_maximum = simd_max(block_maximum);
+            float previous_maximum = row_maximum[vector];
+            float next_maximum = max(previous_maximum, block_maximum);
+            float rescale = (previous_maximum == -INFINITY) ? 0.0f : (previous_maximum == next_maximum ? 1.0f : exp(previous_maximum - next_maximum));
+            float block_sum = 0.0f;
+            FOR_UNROLL for (long item = 0L; item < block / 32L; item++) {
+                if (item * 32L < columns) {
+                    float weight = (local_scores[item] == -INFINITY) ? 0.0f : exp(local_scores[item] - next_maximum);
+                    score_tile[vector * block + (long)lane + item * 32L] = weight;
+                    block_sum += weight;
+                }
+            }
+            block_sum = simd_sum(block_sum);
+            if (lane == 0) { row_maximum[vector] = next_maximum; row_sum[vector] = row_sum[vector] * rescale + block_sum; rescale_tile[vector] = rescale; }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
