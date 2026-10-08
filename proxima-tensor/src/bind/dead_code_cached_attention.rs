@@ -62,10 +62,14 @@ pub(super) fn native_packed_layout(
 ) -> Layout {
     let rank = extents.len();
     let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, rank);
+    let broadcasts = |axis: u16| declared.stride(axis) == 0;
 
+    // an axis the operand never varies along (a sequence batch, or the
+    // selected-expert axis of a gathered fold, whose expert comes from the
+    // route) holds no bytes of the weight, so it widens no row.
     let mut in_dim = 1i64;
     for axis in 0..rank as u16 {
-        if !output_axes.contains(&axis) {
+        if !output_axes.contains(&axis) && !broadcasts(axis) {
             in_dim *= extents[axis as usize] as i64;
         }
     }
@@ -75,7 +79,7 @@ pub(super) fn native_packed_layout(
     // this axis subset.
     let mut accumulator = 1i64;
     for axis in (0..rank as u16).rev() {
-        if output_axes.contains(&axis) {
+        if output_axes.contains(&axis) || broadcasts(axis) {
             continue;
         }
         strides[axis as usize] = accumulator;
@@ -86,14 +90,11 @@ pub(super) fn native_packed_layout(
     // the whole reduction group's flat width since it sits inside them.
     let mut accumulator = in_dim;
     for axis in output_axes.iter().rev() {
+        if broadcasts(*axis) {
+            continue;
+        }
         strides[*axis as usize] = accumulator;
         accumulator *= extents[*axis as usize] as i64;
-    }
-
-    for axis in 0..rank {
-        if declared.stride(axis as u16) == 0 {
-            strides[axis] = 0;
-        }
     }
 
     Layout {
