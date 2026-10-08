@@ -273,7 +273,7 @@ thread_local! {
     /// a legitimate cache hit. [`upload_resident_copy`] checks both against
     /// what the caller offers on every lookup and refuses to serve a
     /// mismatch -- see that function's own doc.
-    static RESIDENT_BUFFERS: RefCell<BTreeMap<String, (usize, usize, MetalBuffer)>> =
+    pub(super) static RESIDENT_BUFFERS: RefCell<BTreeMap<String, (usize, usize, MetalBuffer)>> =
         RefCell::new(BTreeMap::new());
 }
 
