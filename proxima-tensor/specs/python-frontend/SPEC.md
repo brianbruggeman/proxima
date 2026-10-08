@@ -124,7 +124,7 @@ Source inspection and the Sol review of the current `codex/preserve-main-work-20
 
 - `proxima-tensor/src/lib.rs:1-20` describes the stored program as `Vec<Op>` and says there is no separate graph arena.
 - `proxima-tensor/src/spec/descriptor.rs:594-615` builds a model-specific forward program from `ModelDescriptor`.
-- `proxima-tensor/src/spec/primitives.rs:9-13,59-110,331-447` defines TOML `ProgramSpec`/`NodeSpec` and converts the program into `Vec<Op>`; `program_spec.rs` is a stale prompt path.
+- `proxima-tensor/src/spec/program_spec.rs:9-18,68-115,184-202` defines TOML `ProgramSpec`/`NodeSpec` and converts the program into `Vec<Op>`.
 - `proxima-tensor/src/op.rs:150-163,191-281` defines the current reduction and operation variants. `Reduce::keep` is not the general home for argmax/scatter/contraction; verify each requested mapping against current source.
 - `proxima-tensor/src/spec/tests.rs:850-932` represents matrix multiplication as elementwise multiplication followed by an additive reduction and compares TOML-built operations with Rust-built operations. It does not prove serialization back to TOML.
 - `proxima-tensor/src/bind/gdn_moe_fusion_apply.rs:16-23,73-98` exposes the existing bind path.
@@ -134,4 +134,4 @@ Source inspection and the Sol review of the current `codex/preserve-main-work-20
 - `proxima-test/src/harness.rs:35-57` selects cassette mode and derives its cassette path relative to the package manifest. The card must add an external-root option before generated cassettes can satisfy this spec's artifact-location rule.
 - `Cargo.toml` and tensor manifests had no PyO3 dependency in the inspected checkout. Cards 01a and 01e must recheck the fetched main tree, target matrix, feature policy, and Python packaging toolchain.
 
-Memory MCP tools were not exposed to the planning session. Repository-resident `ai_docs/AGENT.md`, `index.jsonl`, `task-routes.jsonl`, and matching invariants were consulted. This card set adds the Python frontend route/index entry; Card 01f verifies exactly one record of each and refreshes them if the architecture investigation changes the path.
+Memory MCP tools were not exposed to the planning session. Repository-resident `ai_docs/AGENT.md`, `ai_docs/index.jsonl`, `ai_docs/task-routes.jsonl`, and `ai_docs/invariants.jsonl` were consulted. This card set adds the Python frontend route/index entry; Card 01f verifies exactly one record of each and refreshes them if the architecture investigation changes the path.
