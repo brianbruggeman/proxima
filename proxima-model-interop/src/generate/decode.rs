@@ -3620,11 +3620,15 @@ impl<'file> LoadedModel<'file> {
         // the two-layer cache checksum walks whole caches every step; only the diag knob pays for it
         #[cfg(feature = "instrument")]
         let cache_checksum_diag = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
-        // the sliding-pattern family's attention layers keep their KV on the device once decode starts
-        // (`DeviceKv`'s own doc); every other architecture keeps the host path
+        // the sliding-pattern family's attention layers keep their KV on the device from the call's first
+        // evaluation (`DeviceKv`'s own doc); every other architecture keeps the host path
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let device_kv_eligible = runtime.is_metal()
             && self.ring_write_offset == 0
+            && !moe_pre_gather_enabled(
+                serving_config.moe_pre_gather,
+                self.ffn_routing == FfnRouting::Routed,
+            )
             && layer_caches
                 .iter()
                 .any(|state| matches!(state, LayerCacheState::Attention(_)))
@@ -3635,7 +3639,14 @@ impl<'file> LoadedModel<'file> {
                 )
             });
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let device_kv_step_rows = draft_limit + 1;
+        let device_kv_decode_rows = draft_limit + 1;
+        // the widest evaluation of the call, a prefill batch included: the first evaluation
+        // places its K and V rows straight into the device buffers instead of reading them back
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let device_kv_step_rows = device_kv_decode_rows.max(match serving_config.ubatch_size {
+            0 => ids.len(),
+            ubatch => ids.len().min(ubatch as usize),
+        });
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv: Option<DeviceKv> = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -4054,8 +4065,6 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if !device_kv_attempted
                         && device_kv_eligible
-                        && cached_len > 0
-                        && is_last_step_batch
                         && new_count <= device_kv_step_rows
                     {
                         device_kv_attempted = true;
@@ -4063,7 +4072,7 @@ impl<'file> LoadedModel<'file> {
                             &mut layer_caches,
                             &layer_row_widths,
                             cached_len,
-                            positions_needed,
+                            positions_needed + device_kv_decode_rows,
                             serving_config.kv_bucket_tokens,
                             device_kv_step_rows,
                             self.kv_buffer_source,
@@ -6422,6 +6431,13 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if let Some(device) = device_kv.as_ref() {
             device.flush(&mut layer_caches, cached_len, positions_needed);
+            seal_attention_layers(
+                &mut layer_caches,
+                &layer_row_widths,
+                block_tokens,
+                seal_horizon_rows,
+                summarizer,
+            );
         }
 
         #[cfg(feature = "moe-expert-prefetch")]
