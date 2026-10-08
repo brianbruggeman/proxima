@@ -2152,7 +2152,10 @@ pub(crate) fn row_tiled_splits(
 /// forms' bind-time `splits`, otherwise [`splits_for`] over the compiled
 /// capacity. One source for the split writer's `u.splits` and the merge's, so
 /// the two dispatches cannot disagree on the scratch stride.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    all(test, feature = "metal-attn-split-rows"),
+    all(feature = "metal", target_os = "macos")
+))]
 #[must_use]
 pub(crate) fn cached_attention_live_splits(kind: &BoundOpKind, policy: NumericPolicy) -> u64 {
     match cached_attention_form(kind, policy) {
