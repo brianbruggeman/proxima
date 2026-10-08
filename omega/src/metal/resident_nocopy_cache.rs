@@ -1211,7 +1211,7 @@ pub(super) fn buffer_for(
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     node: NodeId,
 ) -> Result<DeviceBuffer, MetalError> {
-    if std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some()
+    if env_flags::segment_host()
         && !device_buffers.contains_key(&node)
     {
         eprintln!(
@@ -1280,7 +1280,7 @@ pub(super) fn bind_buffers(
                     })?
             }
             Binding::Input(node) | Binding::Indices(node) => {
-                if std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some()
+                if env_flags::segment_host()
                     && !device_buffers.contains_key(node)
                 {
                     eprintln!("metal binding missing node={node:?} bindings={bindings:?}");
