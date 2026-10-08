@@ -1629,19 +1629,26 @@ pub(super) fn checkpoint_mapping_offset(
     if address < base || address + byte_length > base + mapping_length {
         return None;
     }
-    let page = page_size();
-    let rounded_length = mapping_length.div_ceil(page) * page;
     counter!(MAPPING_OFFSET_UPLOADS, 1);
     counter!(BLOCK_OFFSET_BOUND_BYTES, byte_length as u64);
     Some(
-        upload_block_no_copy(
-            device,
-            CHECKPOINT_MAPPING_NOCOPY_NAME,
-            base as *const c_void,
-            rounded_length,
-        )
-        .map(|buffer| (buffer, address - base)),
+        mapping_buffer(device, CHECKPOINT_MAPPING_NOCOPY_NAME, base, mapping_length)
+            .map(|buffer| (buffer, address - base)),
     )
+}
+
+/// The whole-mapping no-copy buffer for a registered mapping, created once
+/// under `name` and served from the no-copy cache after. The length is
+/// rounded up to a page because `newBufferWithBytesNoCopy` requires it.
+pub(super) fn mapping_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    name: &str,
+    base: usize,
+    mapping_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    let page = page_size();
+    let rounded_length = mapping_length.div_ceil(page) * page;
+    upload_block_no_copy(device, name, base as *const c_void, rounded_length)
 }
 
 pub(super) fn expert_mapping_offset(
@@ -1656,17 +1663,11 @@ pub(super) fn expert_mapping_offset(
     if address < base || end > mapping_end {
         return None;
     }
-    let rounded_length = mapping_length.div_ceil(page_size()) * page_size();
     counter!(MAPPING_OFFSET_UPLOADS, 1);
     counter!(BLOCK_OFFSET_BOUND_BYTES, byte_length as u64);
     Some(
-        upload_block_no_copy(
-            device,
-            EXPERT_MAPPING_NOCOPY_NAME,
-            base as *const c_void,
-            rounded_length,
-        )
-        .map(|buffer| (buffer, address - base)),
+        mapping_buffer(device, EXPERT_MAPPING_NOCOPY_NAME, base, mapping_length)
+            .map(|buffer| (buffer, address - base)),
     )
 }
 

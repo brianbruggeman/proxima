@@ -267,6 +267,7 @@ mod pipeline_disk_cache;
 #[macro_use]
 mod resident_nocopy_cache;
 mod env_flags;
+mod warm_resident_buffers;
 #[macro_use]
 mod arena_encode_dispatch_finish;
 #[cfg(feature = "metal-plan-stable-buffers")]
@@ -281,6 +282,7 @@ pub use pipeline_buffers_upload::*;
 use pipeline_disk_cache::*;
 pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
 pub use resident_nocopy_cache::*;
+pub use warm_resident_buffers::warm_resident_buffers;
 use arena_encode_dispatch_finish::*;
 #[cfg(feature = "metal-plan-stable-buffers")]
 use arena_layout::{Allocation, lay_out_packed, lay_out_whole_slots, peak_live_bytes};
