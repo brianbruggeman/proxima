@@ -263,7 +263,7 @@ fn command_buffer_chunk_count(plan_chunks: u32, decode_shaped: bool) -> usize {
     // consumer below is compiled out) does not trip `unused_variables`.
     let _ = source;
     #[cfg(feature = "instrument")]
-    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+    if env_flags::debug_metal_stages() {
         let plan_shape = if decode_shaped { "decode" } else { "prefill" };
         eprintln!("command_buffer_chunks={chunks} source={source} plan_shape={plan_shape}");
     }
@@ -587,7 +587,7 @@ pub(super) fn execute_plan_with_placements_inner(
         .iter()
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
         .collect();
-    if std::env::var_os("PROXIMA_DEBUG_PLACEMENT_KEYS").is_some() {
+    if env_flags::debug_placement_keys() {
         eprintln!(
             "metal placement keys inputs={:?} blocks={:?}",
             input_placed.keys().collect::<Vec<_>>(),
@@ -817,7 +817,7 @@ pub(super) fn execute_plan_with_placements_inner(
     // off by default: lets the explicit-boundary diagnostic also split a
     // prefill-shaped plan's step-0 command stream.
     let boundaries_prefill_allowed =
-        plan.command_buffer_chunks_decode_shaped || std::env::var_os("PROXIMA_BOUNDARIES_PREFILL").is_some();
+        plan.command_buffer_chunks_decode_shaped || env_flags::boundaries_prefill();
     // `PROXIMA_CAPTURE_NODES=packed-multi-token` matches every projection in
     // the step, so the boundary list can only be computed here, after the
     // admission predicate has run.
@@ -872,15 +872,15 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let substitute_buffers: BTreeMap<NodeId, (MetalBuffer, usize)> =
         if CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed) == 0 {
-            std::env::var_os("PROXIMA_SUBSTITUTE_DUMP_DIR")
-                .map(|dir| upload_substitute_buffers(&device, std::path::Path::new(&dir)))
+            env_flags::substitute_dump_dir()
+                .map(|dir| upload_substitute_buffers(&device, std::path::Path::new(dir)))
                 .unwrap_or_default()
         } else {
             BTreeMap::new()
         };
     #[cfg(feature = "instrument")]
     let substitute_blit_after_kernel =
-        std::env::var("PROXIMA_SUBSTITUTE_MODE").as_deref() == Ok("blit-after-kernel");
+        env_flags::substitute_blit_after_kernel();
     #[cfg(feature = "instrument")]
     let mut substitutions_applied: u64 = 0;
     let mut next_boundary = 0usize;
@@ -1285,7 +1285,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 grid_depth = grid.depth,
                 "head_debug: pre-dispatch buffer identity and dispatch shape"
             );
-            if target_index > 0 && std::env::var_os("PROXIMA_HEAD_SENTINEL_FILL").is_some() {
+            if target_index > 0 && env_flags::head_sentinel_fill() {
                 chunk_audit_record_write(
                     Retained::as_ptr(buffer) as usize,
                     offset,
@@ -1303,7 +1303,7 @@ pub(super) fn execute_plan_with_placements_inner(
         // compare lives in `arena_encode_dispatch_finish::finish`.
         #[cfg(feature = "instrument")]
         if let Some((buffer, offset)) = placement
-            && std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some()
+            && env_flags::repeat_verify()
             && plan
                 .prepared
                 .repeat_verify_pairs
@@ -2127,7 +2127,7 @@ pub fn execute_plan_named_with_placements_and_expert_sources(
     let expert_stage_started = std::time::Instant::now();
     let expert_buffers = stage_expert_sources(plan, &blocks, expert_sources)?;
     #[cfg(feature = "instrument")]
-    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+    if env_flags::debug_metal_stages() {
         eprintln!(
             "expert_source_stage_ms={} source_nodes={} staged_nodes={}",
             expert_stage_started.elapsed().as_secs_f64() * 1e3,
@@ -2512,10 +2512,7 @@ pub(super) fn validate_selected_expert_routes(
     bound: &BoundOp,
     expert_buffers: Option<&ExpertSourceBuffers>,
 ) -> Result<(), MetalError> {
-    let Some(selected) = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .map(NodeId)
+    let Some(selected) = env_flags::compare_bound_node()
     else {
         return Ok(());
     };
@@ -2628,10 +2625,7 @@ pub(super) fn evaluate_selected_bound_cpu(
     program: &[Op],
     bound: &BoundOp,
 ) -> Result<Option<alloc::vec::Vec<f32>>, MetalError> {
-    let selected = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .map(NodeId);
+    let selected = env_flags::compare_bound_node();
     if selected != Some(bound.node) {
         return Ok(None);
     }

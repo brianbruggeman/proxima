@@ -391,8 +391,7 @@ pub(super) fn pipeline_for(
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
     let kernel = emit(bound, packed_operands, numeric_policy)?;
-    if std::env::var_os("PROXIMA_DEBUG_METAL_SOURCE").is_some()
-        && std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE").ok() == Some(bound.node.0.to_string())
+    if env_flags::debug_metal_source() && env_flags::compare_bound_node() == Some(bound.node)
     {
         eprintln!(
             "metal_bound_source node={:?}\n{}",
