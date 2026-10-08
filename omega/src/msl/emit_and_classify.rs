@@ -2431,24 +2431,18 @@ pub enum PackedRowBlockRejection {
     /// default build keeps the generic cooperative gather-aware path until
     /// `metal-gathered-packed-row` has been enabled and measured.
     GatheredOperand,
-    /// The packed operand's codec is [`Codec::Q5_1`]/[`Codec::Q5_0`] or one
-    /// of the other non-admitted codecs — this path's lane amortization
-    /// ([`Q4K_BLOCK_ELEMENTS`], 8 lanes per 32-element sub-block) is
-    /// hard-coded to the K-quant family's shared 256-element super-block.
-    /// [`Codec::Q8_0`] and [`Codec::Q4_0`] are also flat 32-element codecs
-    /// with no super-block of their own, but both admit anyway: eight
-    /// contiguous real blocks span exactly one 256-element super-block, so
-    /// [`Q8_0_SUPER_ELEMENT_MSL`]/[`Q4_0_SUPER_ELEMENT_MSL`] emulate the
-    /// super-block relative read this path needs (see those items' own
-    /// docs). Every other non-admitted codec has no such eight-block
-    /// coincidence and always takes the fully generic per-element path
-    /// instead. Checked by WHITELISTING the admitted variants rather than
-    /// blacklisting one codec by `==` -- an equality check against one
-    /// non-K-quant codec silently admits any OTHER non-K-quant codec whose
-    /// extent happens to be a multiple of 256 (`docs/discipline.md`'s own
-    /// landmine: `Q8_0`'s addition was caught only because this was
-    /// rewritten as a match, not because a single `==` check would have
-    /// caught `Q4_0`, `Q5_1`, or `Q5_0` too).
+    /// The packed operand's codec is not in the codec table of the path that
+    /// asked: [`row_block_extent_multiple`] for the row-blocked kernel (the
+    /// K-quant family plus [`Codec::Q8_0`]/[`Codec::Q4_0`], whose eight
+    /// contiguous 32-element blocks span exactly one 256-element super-block, see
+    /// [`Q8_0_SUPER_ELEMENT_MSL`]/[`Q4_0_SUPER_ELEMENT_MSL`]), or the
+    /// [`tiled_decode`] descriptions for the tiled and expert-grouped GEMM. Every
+    /// other codec always takes the fully generic per-element path. Checked by
+    /// WHITELISTING the admitted variants rather than blacklisting one codec by
+    /// `==` -- an equality check against one codec silently admits any OTHER
+    /// codec whose extent happens to be a multiple of the block
+    /// (`docs/discipline.md`'s own landmine: `Q8_0`'s addition was caught only
+    /// because this was rewritten as a match).
     NotKQuantCodec,
     /// The reduce folds ZERO axes into its output — degenerate, never
     /// observed on a real matmul (kept so the match stays exhaustive over
@@ -2462,7 +2456,9 @@ pub enum PackedRowBlockRejection {
     /// The packed operand's stride at the innermost reduce dim is not 1.
     NonUnitWeightStride { stride: i64 },
     /// The flattened extent across every reduce dim is not a whole
-    /// multiple of [`Q4K_BLOCK_ELEMENTS`].
+    /// multiple of the codec table's block: [`Q4K_BLOCK_ELEMENTS`] for the
+    /// row-blocked kernel, the codec's [`tiled_decode`] block for the tiled
+    /// and expert-grouped GEMM.
     ExtentNotBlockMultiple { extent: u64 },
 }
 
@@ -2497,18 +2493,68 @@ pub(super) fn classify_packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
 ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
-    classify_packed_row_block_with(resolved, quantized, false)
+    classify_packed_row_block_with(resolved, quantized, false, row_block_extent_multiple)
+}
+
+/// The codec table of the row-blocked packed kernel: `Some(n)` when its lane
+/// math serves the codec, `n` being the reduce-extent multiple that math needs.
+/// Every admitted codec reads through the 256-element super-block addressing
+/// span (`Q8_0` and `Q4_0` as eight real blocks), so `n` is
+/// [`Q4K_BLOCK_ELEMENTS`] for all of them. Exhaustive over [`Codec`], so a new
+/// codec forces a decision here instead of slipping through.
+const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
+    match codec {
+        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K | Codec::Q8_0 | Codec::Q4_0 => {
+            Some(Q4K_BLOCK_ELEMENTS)
+        }
+        Codec::Q2K
+        | Codec::Q5_1
+        | Codec::Q5_0
+        | Codec::Float16
+        | Codec::BFloat16
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2Xs
+        | Codec::Iq2S
+        | Codec::Iq3Xxs
+        | Codec::Iq3S
+        | Codec::Iq4Nl
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => None,
+    }
+}
+
+/// The codec table of the tiled and expert-grouped GEMM: the [`tiled_decode`]
+/// description's block, which is the reduce-extent multiple its K loop needs (no
+/// ragged-K mask), `None` for a codec without a description.
+#[cfg(feature = "metal-tiled-gemm")]
+fn tiled_gemm_extent_multiple(codec: Codec) -> Option<usize> {
+    tiled_decode(codec).map(|decode| decode.block_elements as usize)
 }
 
 /// [`classify_packed_row_block`] with the multi-row gathered rejection
-/// optionally lifted: `admit_gathered_rows` is only ever `true` from
-/// [`classify_tiled_gemm`], whose expert-grouped path selects the tokens that
-/// share one expert itself and so never reuses a weight row across tokens
-/// that route elsewhere.
+/// optionally lifted and the codec table swapped: `admit_gathered_rows` is only
+/// ever `true` from [`classify_tiled_gemm`], whose expert-grouped path selects
+/// the tokens that share one expert itself and so never reuses a weight row
+/// across tokens that route elsewhere, and `extent_multiple` is the calling
+/// path's own codec table ([`row_block_extent_multiple`] here,
+/// `tiled_gemm_extent_multiple` there): the structure checks below (one packed
+/// operand, contiguous reduce, unit weight stride, token and feature split)
+/// are the same for both, only which codecs and which extent multiple differ.
 pub(super) fn classify_packed_row_block_with(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     admit_gathered_rows: bool,
+    extent_multiple: fn(Codec) -> Option<usize>,
 ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
     if !reduce_is_cooperative(resolved) {
         return Err(PackedRowBlockRejection::NotCooperativeReduce);
@@ -2533,46 +2579,9 @@ pub(super) fn classify_packed_row_block_with(
     let [(weight, codec)] = packed[..] else {
         return Err(PackedRowBlockRejection::NotExactlyOnePackedOperand);
     };
-    // Whitelist the K-quant family (plus `Q8_0`/`Q4_0`) explicitly rather
-    // than blacklisting one codec by `==` -- an equality check against a
-    // single non-K-quant codec would have silently admitted any future
-    // flat-block codec the moment its extent happened to be a multiple of
-    // 256. This match is exhaustive over `Codec`, so a new codec added
-    // later forces a decision here instead of slipping through. `Q8_0`/
-    // `Q4_0` are not K-quant codecs (no super-block of their own), but
-    // `push_packed_row_blocked_body`'s single-row `else` arm addresses both
-    // correctly via `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL`/
-    // `Q4_0_SUPER_ELEMENT_MSL` (eight contiguous 32-element blocks span
-    // exactly one K-quant super-block's 256 elements) -- see those items'
-    // own docs.
-    match codec {
-        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K | Codec::Q8_0 | Codec::Q4_0 => {}
-        Codec::Q2K
-        | Codec::Q5_1
-        | Codec::Q5_0
-        | Codec::Float16
-        | Codec::BFloat16
-        | Codec::Q4_1
-        | Codec::Q8_1
-        | Codec::Q8K
-        | Codec::Iq1S
-        | Codec::Iq1M
-        | Codec::Iq2Xxs
-        | Codec::Iq2Xs
-        | Codec::Iq2S
-        | Codec::Iq3Xxs
-        | Codec::Iq3S
-        | Codec::Iq4Nl
-        | Codec::Iq4Xs
-        | Codec::Tq10
-        | Codec::Tq20
-        | Codec::Mxfp4
-        | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0 => {
-            return Err(PackedRowBlockRejection::NotKQuantCodec);
-        }
-    }
+    let Some(block_multiple) = extent_multiple(codec) else {
+        return Err(PackedRowBlockRejection::NotKQuantCodec);
+    };
     let other = 1 - weight;
     let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
@@ -2611,7 +2620,7 @@ pub(super) fn classify_packed_row_block_with(
         .iter()
         .map(|&dim| resolved.extents[dim as usize])
         .product();
-    if !(extent as usize).is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+    if !(extent as usize).is_multiple_of(block_multiple) {
         return Err(PackedRowBlockRejection::ExtentNotBlockMultiple { extent });
     }
     let weight_layout = &resolved.operands()[weight].1;
@@ -2680,10 +2689,12 @@ pub enum TiledGemmRejection {
     /// `classify_packed_row_block` itself rejected first; the tiled path
     /// can only narrow that gate's `Ok`, never rescue its `Err`.
     NotPackedRowBlock(PackedRowBlockRejection),
-    /// The packed operand's codec is not [`Codec::Q4K`] -- Q5_K/Q6_K
-    /// have no batched-unpack helper for this path yet (see
-    /// `classify_tiled_gemm`'s own comment).
-    NotQ4K,
+    /// The codec's tiled admission is switched off at runtime:
+    /// `PROXIMA_TILED_GEMM_Q4_0=0` keeps `Q4_0` on the row-blocked kernel, the
+    /// same-binary A/B control `tiled_gemm_q4_0_override` documents. A codec with
+    /// no [`tiled_decode`] description is rejected earlier, as
+    /// `NotPackedRowBlock(NotKQuantCodec)`.
+    CodecSwitchedOff { codec: Codec },
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
     /// `simdgroup_matrix` accumulation requires.
     NotAddZeroReduce,
@@ -2745,8 +2756,6 @@ pub enum TiledGemmRejection {
     /// The route index has a nonzero stride on an axis other than the token
     /// axis, so one token would name several experts.
     GatheredIndexNotTokenOnly,
-    /// The expert weight's codec has no measured expert-grouped path.
-    GatheredCodecNotAdmitted { codec: Codec },
     /// The activation is not unit-stride along the reduction axis, which the
     /// grouped kernel's vector loads of an activation row assume.
     GatheredActivationNotUnitStride,
@@ -2792,12 +2801,12 @@ pub(super) struct TiledGemmBlock {
     /// `attn_output`'s reduce already folds three axes. The tile loop's M
     /// side walks the flattened product of these.
     pub(super) feature_axes: Vec<u16>,
-    /// the weight operand's codec -- `Q4K` unconditionally, or `Q4_0` when
-    /// [`tiled_gemm_q4_0_override`] admitted it. [`push_tiled_gemm_body`]
-    /// reads this to pick its weight-tile decode arm; every other line of
-    /// that function (tiling, `simdgroup_matrix` staging, write-back) is
-    /// codec-generic, matching the owner's standing rule that only the
-    /// decoder may be codec-specific.
+    /// the weight operand's codec, one with a [`tiled_decode`] description
+    /// (`Q4_0` only while [`tiled_gemm_q4_0_override`] admits it).
+    /// [`push_tiled_gemm_body`] and [`push_expert_grouped_gemm_body`] read the
+    /// description off it; every other line of those functions (tiling,
+    /// `simdgroup_matrix` staging, write-back) is codec-generic, matching the
+    /// owner's standing rule that only the decoder may be codec-specific.
     #[cfg(feature = "metal-tiled-gemm")]
     pub(super) codec: Codec,
     /// `Some` when the weight is a gathered expert slab and the op takes the
@@ -2842,22 +2851,17 @@ pub(super) fn classify_tiled_gemm(
             resolved,
             quantized,
             cfg!(feature = "metal-grouped-gemm"),
+            tiled_gemm_extent_multiple,
         )
         .map_err(TiledGemmRejection::NotPackedRowBlock)?;
-        let gathered = classify_expert_gather(resolved, weight, codec)?;
-        // Q4_K unconditionally, plus Q4_0 behind `PROXIMA_TILED_GEMM_Q4_0`
-        // (default ON: unset admits, only explicit `"0"` falls back).
-        // Q5_K/Q6_K have no batched-unpack helper
-        // yet (`push_packed_row_blocked_body`'s own comment on their arms)
-        // and, more to the point, have never been measured on this path.
-        // Shipping them unmeasured on a correctness-critical GPU kernel
-        // would violate the same discipline this landing's own gate
-        // demands (principle 18).
-        if gathered.is_none()
-            && codec != Codec::Q4K
-            && !(codec == Codec::Q4_0 && tiled_gemm_q4_0_override())
-        {
-            return Err(TiledGemmRejection::NotQ4K);
+        let gathered = classify_expert_gather(resolved, weight)?;
+        // Every codec with a `tiled_decode` description is admitted by the
+        // gate above (that table is the whitelist); the one runtime switch is
+        // `Q4_0`'s, `PROXIMA_TILED_GEMM_Q4_0` (default ON: unset admits, only
+        // explicit `"0"` falls back), kept as the same-binary A/B control the
+        // row-blocked `Q4_0` tests rely on.
+        if codec == Codec::Q4_0 && !tiled_gemm_q4_0_override() {
+            return Err(TiledGemmRejection::CodecSwitchedOff { codec });
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
         // no hardware knob for `Maximum`/`Subtract`/etc, so this only ever
@@ -2980,13 +2984,13 @@ pub(super) fn classify_tiled_gemm(
 
 /// Whether the weight is a gathered expert slab the grouped tiled path can
 /// serve, and which gather slot names its route. `None` for a dense weight.
-/// A gathered op is only ever admitted under `metal-grouped-gemm`, and only
-/// for the codec the expert-grouped body has a measured decode for.
+/// A gathered op is only ever admitted under `metal-grouped-gemm`; its codec
+/// was already admitted by the `tiled_decode` table, the same one the dense
+/// tiled path reads.
 #[cfg(feature = "metal-tiled-gemm")]
 fn classify_expert_gather(
     resolved: &BoundOp,
     weight: usize,
-    codec: Codec,
 ) -> Result<Option<ExpertGather>, TiledGemmRejection> {
     let gathered = gather_count(resolved);
     if gathered == 0 {
@@ -3002,9 +3006,6 @@ fn classify_expert_gather(
     };
     if gathered != 1 {
         return Err(TiledGemmRejection::GatheredOperandCount { gathered });
-    }
-    if codec != Codec::Q8_0 {
-        return Err(TiledGemmRejection::GatheredCodecNotAdmitted { codec });
     }
     Ok(Some(ExpertGather { slot }))
 }
@@ -3547,36 +3548,31 @@ fn pinned_width_is_shape_neutral(
         )
 }
 
-/// `true` only when [`wide_weight_stage_active`] admits AND that admitted
-/// path's codec is `Q4_0` -- the ONE combination
-/// [`crate::msl::tiled_gemm_cooperative_scan::push_wide_weight_stage_body`]'s
-/// `q4_0_run8_wide` call site actually reaches (its `Q4_K` arm calls the
-/// existing `q4k_run8`, never a wide decoder). [`preamble`]'s own call site
-/// in [`render_reduce`] is this function's only caller: it decides whether
-/// `Q4_0_RUN8_WIDE_MSL` -- new text a default-off switch introduced, unlike
-/// the always-cheap codec decoders around it -- gets spliced into THIS
-/// kernel's source at all.
+/// The codec whose [`tiled_decode`] description `resolved`'s kernel stages, when
+/// it takes the tiled or the expert-grouped GEMM path. [`preamble`]'s call site in
+/// [`render_reduce`] is the only caller: it decides whether that description's
+/// `msl` is spliced into THIS kernel's source at all (see [`preamble`]'s doc for why
+/// it is not spliced everywhere).
 #[cfg(feature = "metal-tiled-gemm")]
-pub(super) fn wide_weight_stage_wants_q4_0_wide_decode(
+pub(super) fn tiled_decode_codec_of(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
-) -> bool {
-    wide_weight_stage_active(resolved, quantized, reduce_op, init, output_axes)
-        && tiled_gemm_q4_0_active(resolved, quantized, reduce_op, init, output_axes)
+) -> Option<Codec> {
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).map(|block| block.codec)
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
-pub(super) fn wide_weight_stage_wants_q4_0_wide_decode(
+pub(super) fn tiled_decode_codec_of(
     _resolved: &BoundOp,
     _quantized: &[Option<Codec>],
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
-) -> bool {
-    false
+) -> Option<Codec> {
+    None
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]

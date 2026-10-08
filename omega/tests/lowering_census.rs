@@ -171,25 +171,23 @@ const MULTI_ROW_MARKER: &str = "feature_first";
 /// identifies `classify_tiled_gemm`'s admission unambiguously.
 const TILED_GEMM_MARKER: &str = "simdgroup_multiply_accumulate";
 
-/// Whether `classify_tiled_gemm` admits a `Codec::Q4K` weight matmul at
+/// Whether `classify_tiled_gemm` admits a `WEIGHT_FAMILIES` weight matmul at
 /// token count `m`: compiled in (`metal-tiled-gemm`) and `m` clears
 /// `omega::sized::TILED_GEMM_MIN_TOKENS` are the only two gates a plain
 /// (non-multi-head, non-broadcast, non-gathered) matmul like every
-/// `WEIGHT_FAMILIES` entry here can fail on -- `classify_tiled_gemm`
-/// unconditionally admits `Codec::Q4K` (no env override needed, unlike
-/// `Codec::Q4_0`'s `PROXIMA_TILED_GEMM_Q4_0` gate). Verified empirically
-/// (`S/nb/bmm2/diag_census.log`): at `m` in `{8, 31, 256}` every Q4_K
-/// family's emitted source carries `weight_tile`/`simdgroup_multiply_
-/// accumulate` and NOT `feature_first`, while `m == 1` and the non-Q4_K
-/// families (`Q5_K`/`Q6_K`, which `classify_tiled_gemm` declines outright)
-/// still carry their original markers.
+/// `WEIGHT_FAMILIES` entry here can fail on -- `Q4_K`, `Q5_K` and `Q6_K` all
+/// have a `tiled_decode` description, so `classify_tiled_gemm` admits each
+/// (no env override needed, unlike `Codec::Q4_0`'s `PROXIMA_TILED_GEMM_Q4_0`
+/// gate). At `m` in `{256}` every family's emitted source carries
+/// `weight_tile`/`simdgroup_multiply_accumulate` and NOT `feature_first`,
+/// while `m == 1` still carries each codec's original marker.
 #[cfg(feature = "metal-tiled-gemm")]
-fn q4k_takes_tiled_gemm(m: u32) -> bool {
+fn takes_tiled_gemm(m: u32) -> bool {
     u64::from(m) >= omega::sized::TILED_GEMM_MIN_TOKENS
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
-fn q4k_takes_tiled_gemm(_m: u32) -> bool {
+fn takes_tiled_gemm(_m: u32) -> bool {
     false
 }
 
@@ -278,7 +276,7 @@ fn assert_census_cell(m: u32) {
             .unwrap_or_else(|error| panic!("{}: emit failed: {error:?}", family.name));
         let expected_marker = if m == 1 {
             codec_marker(family.codec)
-        } else if family.codec == Codec::Q4K && q4k_takes_tiled_gemm(m) {
+        } else if takes_tiled_gemm(m) {
             TILED_GEMM_MARKER
         } else {
             MULTI_ROW_MARKER

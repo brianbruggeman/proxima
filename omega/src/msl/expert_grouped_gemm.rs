@@ -6,12 +6,15 @@ pub(super) const GROUPED_TILE_ROWS: u64 = 64;
 /// Tokens of the activation tile one expert-grouped threadgroup computes.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) const GROUPED_TILE_TOKENS: u64 = 32;
-/// Reduction elements one K step stages: one `Q8_0` block per weight row.
+/// Reduction elements one K step stages per weight row: two threads, one
+/// [`DECODE_RUN_ELEMENTS`] run each. Every [`tiled_decode`] block either
+/// divides or is divided by this, so a step never straddles a block.
 #[cfg(feature = "metal-grouped-gemm")]
-pub(super) const GROUPED_TILE_DEPTH: u64 = 32;
+pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 
 /// The expert-grouped counterpart of [`push_tiled_gemm_body`]: a gathered
-/// `Q8_0` expert slab `[expert, feature, reduce]` multiplied against a dense
+/// expert slab `[expert, feature, reduce]` in any codec with a
+/// [`tiled_decode`] description, multiplied against a dense
 /// activation `[token, reduce]`, where a route index names one expert per
 /// token. The tokens that name one expert are the only ones that may share a
 /// weight tile, so this kernel groups them instead of tiling the token axis
@@ -38,8 +41,11 @@ pub(super) const GROUPED_TILE_DEPTH: u64 = 32;
 /// Tile layout and thread mapping are `ggml-metal`'s `kernel_mul_mm_id`
 /// (`kernels/mul_mm.metal`): both staged tiles are `half`, stored as 8x8
 /// blocks of 64 contiguous elements so each `simdgroup_load` reads one
-/// contiguous 128 bytes; two threads per weight row decode 16 `Q8_0` levels
-/// each; four threads per token row convert eight activations each; each
+/// contiguous 128 bytes; two threads per weight row each decode one
+/// [`DECODE_RUN_ELEMENTS`] run of the codec through the stager the dense tiled
+/// GEMM shares ([`push_weight_cursor`], [`push_weight_decode`],
+/// [`push_block_cursor_advance`]); four threads per token row convert eight
+/// activations each; each
 /// simdgroup accumulates a 4 by 2 grid of 8x8 blocks in float. A tile of at
 /// most half [`GROUPED_TILE_TOKENS`] tokens leaves the two simdgroups that own
 /// the upper token half idle. The accumulators leave through a token-major
@@ -63,16 +69,18 @@ pub(super) fn push_expert_grouped_gemm_body(
             found: "dense-weight tiled gemm",
         });
     };
-    if block.codec != Codec::Q8_0 {
-        return Err(EmitError::RenderKindMismatch {
-            node,
-            expected: "q8_0 expert weight",
-            found: "other packed codec",
-        });
-    }
+    let decode = tiled_decode(block.codec).ok_or(EmitError::RenderKindMismatch {
+        node,
+        expected: "expert weight codec with a tiled decode description",
+        found: "other packed codec",
+    })?;
     let geometry = GroupedGeometry::new(block, output_axes, resolved)?;
     push_grouped_entry(source, node, &geometry)?;
     push_grouped_threadgroup_memory(source);
+    source.push_str(&format!(
+        "    device const uchar *weight_bytes = (device const uchar *)in{};\n",
+        block.weight
+    ));
     source.push_str(&format!(
         "    long grouped_expert_base = grouped_expert * u.gather_element_stride[{}];\n",
         expert.slot
@@ -98,6 +106,7 @@ pub(super) fn push_expert_grouped_gemm_body(
         source,
         block,
         &geometry,
+        &decode,
         element_type,
         epilogue_body,
         epilogue_operands,
@@ -339,8 +348,9 @@ fn push_grouped_consume(source: &mut String) {
 /// before the barrier that waits for the previous step's multiply-accumulate,
 /// so the memory latency overlaps that wait; the registers are stored to the
 /// tiles after the barrier. Per-thread row and token pointers are formed once
-/// per tile and advance by one `Q8_0` block (34 bytes) and one K step of
-/// activations (32 floats) per step. Measured on a granite-shaped gathered
+/// per tile and advance by one K step of the weight cursor
+/// ([`push_block_cursor_advance`]) and one K step of activations (32 floats)
+/// per step. Measured on a granite-shaped `Q8_0` gathered
 /// gate projection, uniform routing, 1000 tokens, `col_parts` 4
 /// (`expert_grouped_gemm_speed_probe`): 700 us with the staging inside the
 /// barrier pair and the pointers rebuilt every step, 402 us in this order.
@@ -349,6 +359,7 @@ fn push_grouped_tile(
     source: &mut String,
     block: &TiledGemmBlock,
     geometry: &GroupedGeometry,
+    decode: &TiledDecode,
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
@@ -357,20 +368,25 @@ fn push_grouped_tile(
     source.push_str(
         "            for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }\n",
     );
-    push_grouped_stage_pointers(source, block, geometry);
+    push_grouped_stage_pointers(source, block, geometry, decode);
     source.push_str(&format!(
         "            for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH}) {{\n"
     ));
-    source.push_str("                half4 w_regs[4];\n");
     source.push_str("                half4 a_regs[2];\n");
-    push_grouped_load(source, "                ");
+    push_grouped_load(source, decode, "                ");
     source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     push_grouped_store(source);
     source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     push_grouped_multiply_accumulate(source);
-    source.push_str(&format!(
-        "                w_blk += {Q8_0_BLOCK_BYTES};\n                a_ptr += {GROUPED_TILE_DEPTH};\n"
-    ));
+    push_block_cursor_advance(
+        source,
+        "                ",
+        "w_blk",
+        "w_pos",
+        GROUPED_TILE_DEPTH,
+        decode,
+    );
+    source.push_str(&format!("                a_ptr += {GROUPED_TILE_DEPTH};\n"));
     source.push_str("            }\n");
     source.push_str("            threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     push_grouped_writeback(source, geometry, element_type, epilogue_body, epilogue_operands);
@@ -378,9 +394,10 @@ fn push_grouped_tile(
 }
 
 /// What each thread stages, fixed for the whole tile. Weights: two threads
-/// per tile row, `w_blk` the row's `Q8_0` block for this K step (valid only
-/// while `w_valid`, a row past `feature_extent` stages zeros so its
-/// accumulators stay zero), `w_slot` its slot in the 8x8-block layout (block
+/// per tile row, `w_blk` and `w_pos` the row's weight cursor for this K step
+/// (valid only while `w_valid`, a row past `feature_extent` stages zeros so its
+/// accumulators stay zero; `w_half` offsets the second thread by one decode run),
+/// `w_slot` its slot in the 8x8-block layout (block
 /// `8 * k_block + row_block`, element `8 * (k % 8) + (row % 8)`).
 /// Activations: four threads per pending token, `a_ptr` the token's row at
 /// this thread's eight-element K block, `a_slot` its 16-byte row of the 8x8
@@ -394,13 +411,12 @@ fn push_grouped_stage_pointers(
     source: &mut String,
     block: &TiledGemmBlock,
     geometry: &GroupedGeometry,
+    decode: &TiledDecode,
 ) {
     let weight = block.weight;
     let other = block.other;
     let feature_axis = geometry.feature_axis;
     let token_axis = geometry.token_axis;
-    let block_bytes = Q8_0_BLOCK_BYTES;
-    let block_elements = Q8_0_BLOCK_ELEMENTS;
     source.push_str("            long w_row = tiitg / 2;\n");
     source.push_str("            long w_half = tiitg % 2;\n");
     source.push_str(&format!(
@@ -411,8 +427,9 @@ fn push_grouped_stage_pointers(
         "            threadgroup half *w_slot = weight_tile + 1024 * w_half + 64 * (w_row / 8) + (w_row % 8);\n",
     );
     source.push_str(&format!(
-        "            device const uchar *w_blk = in{weight} + ((u.operand_base[{weight}] + grouped_expert_base + (w_valid ? w_feat : 0) * u.operand_strides[{weight}][{feature_axis}]) / {block_elements}) * {block_bytes};\n"
+        "            long w_elem = u.operand_base[{weight}] + grouped_expert_base + (w_valid ? w_feat : 0) * u.operand_strides[{weight}][{feature_axis}] + w_half * {DECODE_RUN_ELEMENTS};\n"
     ));
+    push_weight_cursor(source, "            ", decode, "w_blk", "w_pos", "w_elem");
     source.push_str("            long a_row = tiitg / 4;\n");
     source.push_str("            long a_k_block = tiitg % 4;\n");
     source.push_str(&format!(
@@ -434,20 +451,25 @@ fn push_grouped_stage_pointers(
 }
 
 /// Issues one step's global loads and decodes into `w_regs`/`a_regs`: the row's
-/// `Q8_0` scale is two byte loads, its 16 levels four `packed_char4` loads (a
-/// block is 34 bytes, so the levels start at an even byte, never a 4-aligned
-/// one), scaled to `half`; the activation row's eight floats are two `float4`
-/// loads converted to `half`.
+/// [`DECODE_RUN_ELEMENTS`] weights decode through the codec's [`tiled_decode`]
+/// function (a row past `feature_extent` stages zeros), the activation row's
+/// eight floats are two `float4` loads converted to `half`.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_load(source: &mut String, indent: &str) {
+fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
+    let weight_load = [
+        format!("half w_regs[{DECODE_RUN_ELEMENTS}];"),
+        "if (w_valid) {".to_string(),
+        format!("    {};", decode.call("w_blk", "w_pos", "w_regs")),
+        "} else {".to_string(),
+        format!("    for (int element = 0; element < {DECODE_RUN_ELEMENTS}; ++element) {{ w_regs[element] = 0.0h; }}"),
+        "}".to_string(),
+    ];
+    for line in weight_load {
+        source.push_str(indent);
+        source.push_str(&line);
+        source.push('\n');
+    }
     let lines = [
-        "if (w_valid) {",
-        "    float scale = (float)as_type<half>((ushort)((uint)w_blk[0] | ((uint)w_blk[1] << 8)));",
-        "    device const packed_char4 *levels = (device const packed_char4 *)(w_blk + 2 + w_half * 16);",
-        "    for (int quad = 0; quad < 4; ++quad) { w_regs[quad] = half4(float4(levels[quad]) * scale); }",
-        "} else {",
-        "    for (int quad = 0; quad < 4; ++quad) { w_regs[quad] = half4(0.0h); }",
-        "}",
         "if (a_staged) {",
         "    if (a_tok < 0) {",
         "        a_regs[0] = half4(0.0h); a_regs[1] = half4(0.0h);",
@@ -473,12 +495,10 @@ fn push_grouped_load(source: &mut String, indent: &str) {
 /// 8 * (i % 8)` from `w_slot`), the activation row as two 16-byte stores.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_store(source: &mut String) {
-    for element in 0..16u64 {
+    for element in 0..DECODE_RUN_ELEMENTS {
         let slot = 512 * (element / 8) + 8 * (element % 8);
         source.push_str(&format!(
-            "                w_slot[{slot}] = w_regs[{}][{}];\n",
-            element / 4,
-            element % 4
+            "                w_slot[{slot}] = w_regs[{element}];\n"
         ));
     }
     source.push_str("                if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }\n");

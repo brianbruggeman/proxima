@@ -1173,11 +1173,10 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 /// byte, not a nibble), not a widening or narrowing of one. It slots into
 /// the same PACKED-OPERAND mechanism ([`Codec`], `operand_read`,
 /// this preamble) as a fourth codec precisely because that mechanism is
-/// generic over block byte width and element count; it does NOT take the
-/// tiled-GEMM (`classify_tiled_gemm`) fast path, which hard-codes the
-/// K-quants' `simdgroup_matrix` batched-unpack shape this codec has no
-/// analogue for -- `Q8_0` always renders through the fully generic
-/// per-element accessor below on that path.
+/// generic over block byte width and element count; the tiled-GEMM
+/// (`classify_tiled_gemm`) fast path reads it through its [`tiled_decode`]
+/// description ([`Q8_0_DEQUANT_HALF16_MSL`]), and every other path renders it
+/// through the per-element accessor below.
 ///
 /// It DOES take the row-blocked (`classify_packed_row_block`) fast path:
 /// eight real `Q8_0` blocks (32 elements, 34 bytes each) sit contiguously in
@@ -1262,11 +1261,10 @@ pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 /// format -- a flat 32-element block, one `f16` scale, no sub-block
 /// scale/min pair (unlike `Q4_K`) and no second `min` field (unlike
 /// `Q4_1`). Same KIND-difference from the K-quant family that `Q8_0`'s
-/// own doc draws: no super-block, so this codec does not take the
-/// tiled-GEMM (`classify_tiled_gemm`) fast path, which hard-codes the
-/// K-quants' `simdgroup_matrix` batched-unpack shape this codec has no
-/// analogue for -- `Q4_0` always renders through the fully generic
-/// per-element accessor below on that path.
+/// own doc draws: no super-block. The tiled-GEMM (`classify_tiled_gemm`) fast
+/// path reads it through its [`tiled_decode`] description
+/// ([`Q4_0_DEQUANT_HALF16_MSL`]); every other path renders it through the
+/// per-element accessor below.
 ///
 /// It DOES take the row-blocked (`classify_packed_row_block`) fast path,
 /// the same way `Q8_0` does: eight real `Q4_0` blocks (32 elements, 18 bytes
@@ -1378,22 +1376,17 @@ static inline void q4_0_run8(device const uchar *block, uint index, thread float
 }
 "#;
 
-/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s own drop-in for [`Q4_0_RUN8_MSL`]'s
-/// `q4_0_run8` -- byte-identical output for every `(block, index)` pair, but
-/// four `ushort` (2-byte) loads instead of eight `uchar` (1-byte) loads:
-/// `qs`'s 16 packed-nibble bytes are 2-byte aligned (`block` itself always
-/// starts at a `(slot / 32) * 18`-byte offset from a device buffer, `18` is
-/// even, so every block origin is even; `+2` for the header stays even), so
-/// pairing consecutive bytes into one `ushort` read is sound the same way
-/// `q4k_run8`'s wider `uint` read is sound for `Q4_K`'s 16-byte-aligned
-/// blocks -- just one width narrower, since `Q4_0`'s 18-byte block has no
-/// 4-byte alignment guarantee. `push_tiled_gemm_body`'s own module doc names
-/// this as the fix for "the same 16 `qs` bytes read twice" (once per nibble
-/// half, at `uchar` granularity) -- the wide-weight-stage schedule instead
-/// assigns each nibble half to its OWN thread, so this function only ever
-/// reads its half's 16 bytes once.
-pub const Q4_0_RUN8_WIDE_MSL: &str = r#"
-static inline void q4_0_dequant_half16(device const uchar *block, uint il, thread half *out) {
+/// `Q4_0`'s entry in the tiled decode description ([`tiled_decode`]): llama.cpp's
+/// `dequantize_q4_0` (`kernels/dequantize.h`) for one 16-element chunk of a
+/// block, fused to one multiply-add per element. The 16 packed-nibble bytes are
+/// read as eight `ushort` words (a block is 18 bytes, so every block origin and
+/// the `qs` plane at +2 are 2-byte aligned, never 4), and the chunk's nibble
+/// half is picked by `il` (`slot >> 4`): the low nibbles for the first chunk, the
+/// high nibbles for the second. Rounds to the same `half` as `(level - 8) * d`,
+/// because that product is exact in `float`.
+pub const Q4_0_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q4_0_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    uint il = slot >> 4u;
     device const ushort *qs = (device const ushort *)(block + 2);
     float d = (float)as_type<half>(((device const ushort *)block)[0]);
     float d1 = il != 0u ? d * 0.0625f : d;
@@ -1405,17 +1398,6 @@ static inline void q4_0_dequant_half16(device const uchar *block, uint il, threa
         ushort word = qs[i];
         out[2u * i] = (half)fma(d1, (float)(word & mask0), md);
         out[2u * i + 1u] = (half)fma(d2, (float)(word & mask1), md);
-    }
-}
-
-static inline void q4_0_run8_wide(device const uchar *block, uint index, thread float *out) {
-    device const ushort *qs = (device const ushort *)(block + 2);
-    uint shift = (index < 16u) ? 0u : 4u;
-    uint word_base = (index % 16u) / 2u;
-    for (uint w = 0u; w < 4u; ++w) {
-        ushort word = qs[word_base + w];
-        out[2u * w] = (float)((word >> shift) & 0x0Fu);
-        out[2u * w + 1u] = (float)((word >> (shift + 8u)) & 0x0Fu);
     }
 }
 "#;
@@ -1434,9 +1416,10 @@ pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 /// (unlike `Q4_0`'s single scale) plus a 5th bit per element split out into
 /// a separate `qh` plane -- same KIND-difference from the K-quant family
 /// [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no super-block, so this
-/// codec does not take the row-blocked (`classify_packed_row_block`) or
-/// tiled-GEMM (`classify_tiled_gemm`) fast paths either -- it always
-/// renders through the fully generic per-element accessor below.
+/// codec does not take the row-blocked (`classify_packed_row_block`) fast
+/// path; the tiled-GEMM (`classify_tiled_gemm`) fast path reads it through its
+/// [`tiled_decode`] description ([`Q5_1_DEQUANT_HALF16_MSL`]), and every other
+/// path renders it through the per-element accessor below.
 ///
 /// Ports `proxima_gguf::quant::q5_1::dequantize_block` exactly (see that
 /// function's own doc for the exact `ggml-quants.c` bit-shift derivation):
@@ -1483,15 +1466,15 @@ pub const Q5_1_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_1::QK5_1;
 
 /// `Q5_0`: [`Q5_1_UNPACK_MSL`] with the `m` (min) term dropped -- a flat
 /// 32-element block, one `f16` scale and a 5th bit per element split out
-/// into a separate `qh` plane, same as `Q5_1`, but no per-block min: `x = d
-/// * (level - 16)`, a fixed midpoint recenter exactly like [`Q4_0_UNPACK_MSL`]
+/// into a separate `qh` plane, same as `Q5_1`, but no per-block min:
+/// `x = d * (level - 16)`, a fixed midpoint recenter exactly like [`Q4_0_UNPACK_MSL`]
 /// except `level` is 5 bits wide instead of 4. Same KIND-difference from the
 /// K-quant family [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no
 /// super-block, so this codec does not take the row-blocked
-/// (`classify_packed_row_block`) or tiled-GEMM (`classify_tiled_gemm`) fast
-///
-/// paths either -- it always renders through the fully generic per-element
-/// accessor below.
+/// (`classify_packed_row_block`) fast path; the tiled-GEMM
+/// (`classify_tiled_gemm`) fast path reads it through its [`tiled_decode`]
+/// description ([`Q5_0_DEQUANT_HALF16_MSL`]), and every other path renders it
+/// through the per-element accessor below.
 ///
 /// Ports `proxima_gguf::quant::q5_0::dequantize_block` exactly (see that
 /// function's own doc for the exact `ggml-quants.c` bit-shift derivation):
@@ -1544,8 +1527,10 @@ pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
 /// weight (`Float16`) multiplied against an `f32` activation is exactly the
 /// mixed-dtype case `type_token` never had to handle before this codec.
 /// Same non-K-quant, flat, one-element-per-block shape `Q8_0`/`Q4_0`
-/// take: never the row-blocked (`classify_packed_row_block`) or tiled-GEMM
-/// path, always the generic per-element accessor.
+/// take: never the row-blocked (`classify_packed_row_block`) path; the
+/// tiled-GEMM path reads it through its [`tiled_decode`] description
+/// ([`F16_DEQUANT_HALF16_MSL`], staged as 32-element blocks), and every other
+/// path uses the generic per-element accessor.
 pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
 
 /// One `Float16` block is one element -- there is no super-block or
@@ -1775,20 +1760,371 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
     }
 }
 
+/// Elements one decode call of the tiled and expert-grouped GEMM stagers writes:
+/// llama.cpp's `dequantize_*` fills a `type4x4`, sixteen values, and
+/// `kernel_mul_mm` hands one such run to each of two threads per weight row.
+pub const DECODE_RUN_ELEMENTS: u64 = 16;
+
+/// Elements of one weight row a K step stages: two threads per row, one
+/// [`DECODE_RUN_ELEMENTS`] run each. The tiled GEMM's `TILED_GEMM_BLOCK_K` and the
+/// expert-grouped GEMM's tile depth are both this value.
+pub const STAGED_K_STEP_ELEMENTS: u64 = 2 * DECODE_RUN_ELEMENTS;
+
+/// `Q8_0`'s entry in the tiled decode description ([`tiled_decode`]): llama.cpp's
+/// `dequantize_q8_0` (`kernels/dequantize.h`), sixteen signed levels scaled by the
+/// block's `d`. The levels start at byte 2 of a 34-byte block, so they are read as
+/// `packed_char4` (alignment 1), never as `char4`.
+pub const Q8_0_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q8_0_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    float d = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
+    device const packed_char4 *qs = (device const packed_char4 *)(block + 2u + slot);
+    for (uint i = 0u; i < 4u; ++i) {
+        float4 levels = float4(qs[i]) * d;
+        out[4u * i + 0u] = (half)levels.x;
+        out[4u * i + 1u] = (half)levels.y;
+        out[4u * i + 2u] = (half)levels.z;
+        out[4u * i + 3u] = (half)levels.w;
+    }
+}
+"#;
+
+/// `Float16`'s entry in the tiled decode description: llama.cpp's
+/// `dequantize_f16` ("not dequantizing -- we are simply fitting the template").
+/// The weight is a flat `half` array, so `slot` is a plain element offset from
+/// `block` and any 2-byte aligned origin is valid; the description stages it in
+/// 32-element, 64-byte blocks only so the stager's block cursor has a unit to
+/// advance by.
+pub const F16_DEQUANT_HALF16_MSL: &str = r#"
+static inline void f16_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    device const half *src = (device const half *)(block + 2u * slot);
+    for (uint i = 0u; i < 16u; ++i) { out[i] = src[i]; }
+}
+"#;
+
+/// `Q4_K`'s entry in the tiled decode description: the sub-block header decoded
+/// once ([`Q4K_UNPACK_MSL`]'s `q4k_header_for`) and the nibbles extracted eight at
+/// a time by its `q4k_run8` word loads, so a 16-element chunk costs one header and
+/// four 4-byte loads, the amortization llama.cpp's `dequantize_q4_K` gets from
+/// computing `dl`/`ml` once per chunk. A chunk never straddles a sub-block:
+/// `slot` is a multiple of 16 and a sub-block is 32 elements.
+pub const Q4K_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q4k_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    q4k_header header = q4k_header_for(block, slot);
+    for (uint run = 0u; run < 2u; ++run) {
+        float levels[8];
+        q4k_run8(block, slot + 8u * run, levels);
+        for (uint j = 0u; j < 8u; ++j) {
+            out[8u * run + j] = (half)(header.scale * levels[j] - header.minimum);
+        }
+    }
+}
+"#;
+
+/// `Q5_0`'s entry in the tiled decode description: llama.cpp's `dequantize_q5_0`.
+/// The 5th bit of element `j` is bit `j` of the block's 32-bit `qh` for the low
+/// chunk and bit `j + 16` for the high one (`gh_mv`/`gh_bk` move it to bit 4);
+/// `qh` is assembled from two `ushort` loads because a 22-byte block only
+/// guarantees 2-byte alignment. `d * x + md` is `(x - 16) * d`.
+pub const Q5_0_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q5_0_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    uint il = slot >> 4u;
+    float d = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
+    float md = -16.0f * d;
+    device const ushort *qh_words = (device const ushort *)(block + 2u);
+    uint qh = (uint)qh_words[0] | ((uint)qh_words[1] << 16);
+    device const ushort *qs = (device const ushort *)(block + 6u);
+    uint mask = il != 0u ? 0x00F0u : 0x000Fu;
+    uint x_mv = il != 0u ? 4u : 0u;
+    uint gh_mv = il != 0u ? 12u : 0u;
+    uint gh_bk = il != 0u ? 0u : 4u;
+    for (uint i = 0u; i < 8u; ++i) {
+        uint xh_0 = ((qh >> (gh_mv + 2u * i)) << gh_bk) & 0x10u;
+        uint xh_1 = ((qh >> (gh_mv + 2u * i + 1u)) << gh_bk) & 0x10u;
+        uint x0 = (((uint)qs[i] & mask) >> x_mv) | xh_0;
+        uint x1 = ((((uint)qs[i] >> 8u) & mask) >> x_mv) | xh_1;
+        out[2u * i + 0u] = (half)(d * (float)x0 + md);
+        out[2u * i + 1u] = (half)(d * (float)x1 + md);
+    }
+}
+"#;
+
+/// `Q5_1`'s entry in the tiled decode description: llama.cpp's `dequantize_q5_1`,
+/// [`Q5_0_DEQUANT_HALF16_MSL`] with the block's own min `m` in place of the fixed
+/// `-16 * d` recenter. Layout, 24 bytes: `d` at 0, `m` at 2, `qh` at 4, `qs` at 8.
+pub const Q5_1_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q5_1_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    uint il = slot >> 4u;
+    float d = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
+    float m = (float)as_type<half>((ushort)((uint)block[2] | ((uint)block[3] << 8)));
+    device const ushort *qh_words = (device const ushort *)(block + 4u);
+    uint qh = (uint)qh_words[0] | ((uint)qh_words[1] << 16);
+    device const ushort *qs = (device const ushort *)(block + 8u);
+    uint mask = il != 0u ? 0x00F0u : 0x000Fu;
+    uint x_mv = il != 0u ? 4u : 0u;
+    uint gh_mv = il != 0u ? 12u : 0u;
+    uint gh_bk = il != 0u ? 0u : 4u;
+    for (uint i = 0u; i < 8u; ++i) {
+        uint xh_0 = ((qh >> (gh_mv + 2u * i)) << gh_bk) & 0x10u;
+        uint xh_1 = ((qh >> (gh_mv + 2u * i + 1u)) << gh_bk) & 0x10u;
+        uint x0 = (((uint)qs[i] & mask) >> x_mv) | xh_0;
+        uint x1 = ((((uint)qs[i] >> 8u) & mask) >> x_mv) | xh_1;
+        out[2u * i + 0u] = (half)(d * (float)x0 + m);
+        out[2u * i + 1u] = (half)(d * (float)x1 + m);
+    }
+}
+"#;
+
+/// `Q3_K`'s entry in the tiled decode description: llama.cpp's `dequantize_q3_K`,
+/// `il` (`slot >> 4`) naming the 16-element sub-block, which is also its scale
+/// index. `dl_int` carries the 6-bit scale code in place (shifted up by four when
+/// `il >= 8`, hence the `/ 16`), `coef` and `mask` pick the 2-bit lane out of each
+/// `qs` byte without a shift, and a clear `hmask` bit subtracts `4 * dl`. `d`
+/// trails the 110-byte block at offset 108.
+pub const Q3K_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q3k_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    uint il = slot >> 4u;
+    float d_all = (float)as_type<half>((ushort)((uint)block[108] | ((uint)block[109] << 8)));
+    device const uchar *q = block + 32u + 32u * (il / 8u) + 16u * (il & 1u);
+    device const uchar *h = block + 16u * (il & 1u);
+    device const uchar *scales = block + 96u;
+    uint m = 1u << (il / 2u);
+    uint kmask1 = (il / 4u) > 1u ? ((il / 4u) > 2u ? 192u : 48u) : ((il / 4u) > 0u ? 12u : 3u);
+    uint kmask2 = (il / 8u) != 0u ? 0xF0u : 0x0Fu;
+    uint scale_2 = (uint)scales[il % 8u];
+    uint scale_1 = (uint)scales[8u + il % 4u];
+    uint dl_bits = (((il / 4u) & 1u) != 0u)
+        ? ((scale_2 & kmask2) | ((scale_1 & kmask1) << 2u))
+        : ((scale_2 & kmask2) | ((scale_1 & kmask1) << 4u));
+    float dl = il < 8u ? d_all * ((float)dl_bits - 32.0f) : d_all * ((float)dl_bits / 16.0f - 32.0f);
+    float ml = 4.0f * dl;
+    uint lane = (il / 2u) & 3u;
+    float coef = lane > 1u ? (lane > 2u ? 0.015625f : 0.0625f) : (lane > 0u ? 0.25f : 1.0f);
+    uint mask = lane > 1u ? (lane > 2u ? 192u : 48u) : (lane > 0u ? 12u : 3u);
+    dl *= coef;
+    for (uint i = 0u; i < 16u; ++i) {
+        float correction = ((uint)h[i] & m) != 0u ? 0.0f : ml;
+        out[i] = (half)(dl * (float)((uint)q[i] & mask) - correction);
+    }
+}
+"#;
+
+/// `Q5_K`'s entry in the tiled decode description: llama.cpp's `dequantize_q5_K`.
+/// `il / 4` names the 64-element group, `il & 3` the chunk inside it: chunks 0 and
+/// 1 are the low nibbles of one 32-element sub-block, chunks 2 and 3 the high
+/// nibbles of the next, whose scale is `d / 16` and whose 5th bit is worth 256
+/// rather than 16 because the high nibble is read unshifted (`mask = 0xF0`). The
+/// `(scale, min)` pair comes from [`Q5K_UNPACK_MSL`]'s `q5k_scale_min`, the same
+/// bit-interleaved unpack llama.cpp's `get_scale_min_k4_just2` spells out.
+pub const Q5K_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q5k_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    uint il = slot >> 4u;
+    float d_super = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
+    float dmin = (float)as_type<half>((ushort)((uint)block[2] | ((uint)block[3] << 8)));
+    device const uchar *scales = block + 4u;
+    device const uchar *qh = block + 16u + 16u * (il & 1u);
+    device const uchar *q = block + 48u + 32u * (il / 4u) + 16u * (il & 1u);
+    uint ul = 1u << (il / 2u);
+    uint chunk = il & 3u;
+    uchar2 sc = q5k_scale_min(scales, (il / 4u) * 2u + chunk / 2u);
+    float d = chunk < 2u ? d_super : d_super / 16.0f;
+    float dl = d * (float)sc.x;
+    float ml = dmin * (float)sc.y;
+    uint mask = chunk < 2u ? 0x0Fu : 0xF0u;
+    float qh_val = chunk < 2u ? 16.0f : 256.0f;
+    for (uint i = 0u; i < 16u; ++i) {
+        float high = ((uint)qh[i] & ul) != 0u ? qh_val : 0.0f;
+        out[i] = (half)(dl * ((float)((uint)q[i] & mask) + high) - ml);
+    }
+}
+"#;
+
+/// `Q6_K`'s entry in the tiled decode description: llama.cpp's `dequantize_q6_K`.
+/// Four bytes of `ql` and `qh` are read as two `ushort` pairs and the 6-bit levels
+/// of four elements are rebuilt together by mask and shift; the byte lane is then
+/// scaled by `dl0 / 256^lane` so no shift moves it down. The scale is a signed
+/// byte (`scales[(il % 2) + 2 * (il / 2)]`), `ml = 32 * d * scale` recenters, and
+/// `d` trails the 210-byte block at offset 208, so every wide load here is a
+/// `ushort`.
+pub const Q6K_DEQUANT_HALF16_MSL: &str = r#"
+static inline void q6k_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    uint il = slot >> 4u;
+    float d_all = (float)as_type<half>((ushort)((uint)block[208] | ((uint)block[209] << 8)));
+    device const ushort *ql = (device const ushort *)block + 32u * (il / 8u) + 16u * ((il / 2u) & 1u) + 8u * (il & 1u);
+    device const ushort *qh = (device const ushort *)(block + 128u) + 16u * (il / 8u) + 8u * (il & 1u);
+    float sc = (float)(char)block[192u + (il % 2u) + 2u * (il / 2u)];
+    uint lane = (il / 2u) & 3u;
+    uint kmask1 = lane > 1u ? (lane > 2u ? 0xC0C0C0C0u : 0x30303030u) : (lane > 0u ? 0x0C0C0C0Cu : 0x03030303u);
+    uint kmask2 = lane > 1u ? 0xF0F0F0F0u : 0x0F0F0F0Fu;
+    float ml = d_all * sc * 32.0f;
+    float dl0 = d_all * sc;
+    float dl1 = dl0 / 256.0f;
+    float dl2 = dl0 / (256.0f * 256.0f);
+    float dl3 = dl0 / (256.0f * 256.0f * 256.0f);
+    uint shr_h = lane > 2u ? 2u : 0u;
+    uint shl_h = lane > 1u ? 0u : (lane > 0u ? 2u : 4u);
+    uint shr_l = lane > 1u ? 4u : 0u;
+    for (uint i = 0u; i < 4u; ++i) {
+        uint low = ((uint)ql[2u * i] | ((uint)ql[2u * i + 1u] << 16)) & kmask2;
+        uint high = ((uint)qh[2u * i] | ((uint)qh[2u * i + 1u] << 16)) & kmask1;
+        uint levels = ((high << shl_h) >> shr_h) | (low >> shr_l);
+        out[4u * i + 0u] = (half)(dl0 * (float)(levels & 0xFFu) - ml);
+        out[4u * i + 1u] = (half)(dl1 * (float)(levels & 0xFF00u) - ml);
+        out[4u * i + 2u] = (half)(dl2 * (float)(levels & 0xFF0000u) - ml);
+        out[4u * i + 3u] = (half)(dl3 * (float)(levels & 0xFF000000u) - ml);
+    }
+}
+"#;
+
+/// How the tiled and expert-grouped GEMM stagers read one codec: the one
+/// description [`tiled_decode`] selects, consumed by
+/// [`crate::msl::push_tiled_gemm_body`]'s three weight-staging schedules and by
+/// [`crate::msl::push_expert_grouped_gemm_body`] alike, so a codec is added by
+/// describing it here and nowhere else (llama.cpp's `kernel_mul_mm` and
+/// `kernel_mul_mm_id` take the same shape: one template, one `dequantize_*` per
+/// codec).
+///
+/// The decode contract is `function(block, slot, out)`: write the
+/// [`DECODE_RUN_ELEMENTS`] elements starting at element `slot` of the block that
+/// begins at `block` into `out` as `half`. `slot` is a multiple of
+/// [`DECODE_RUN_ELEMENTS`] for every blocked codec; the flat `Float16` accepts any
+/// offset. The stagers keep a `(block pointer, slot)` cursor per weight row and
+/// advance it by [`STAGED_K_STEP_ELEMENTS`] per K step, so a decode run never
+/// straddles a block: both block sizes divide or are divided by the K step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TiledDecode {
+    /// Elements one staged block spans: the codec's own block (32 for the legacy
+    /// codecs, 256 for the K-quants), or 32 for `Float16`, which has none.
+    /// Example: `256` for `Q6_K`.
+    pub(crate) block_elements: u64,
+    /// Bytes of that staged block. Example: `210` for `Q6_K`, `64` for `Float16`.
+    pub(crate) block_bytes: u64,
+    /// Name of the MSL decode function in [`Self::msl`]. Example: `"q6k_dequant_half16"`.
+    pub(crate) function: &'static str,
+    /// MSL source defining [`Self::function`], spliced into the preamble of a
+    /// kernel that stages this codec and nowhere else.
+    pub(crate) msl: &'static str,
+}
+
+impl TiledDecode {
+    const fn new(
+        block_elements: usize,
+        block_bytes: usize,
+        function: &'static str,
+        msl: &'static str,
+    ) -> Self {
+        Self {
+            block_elements: block_elements as u64,
+            block_bytes: block_bytes as u64,
+            function,
+            msl,
+        }
+    }
+
+    /// The MSL expression that decodes the run at `(block, slot)` into `out`.
+    #[cfg(feature = "metal-tiled-gemm")]
+    pub(crate) fn call(&self, block: &str, slot: &str, out: &str) -> String {
+        format!("{}({block}, {slot}, {out})", self.function)
+    }
+}
+
+/// The decode description of every codec the tiled and expert-grouped GEMM stages,
+/// `None` for a codec that has none and so keeps the row-blocked or generic
+/// per-element path. Exhaustive on purpose: a new [`Codec`] must be given a
+/// description or an explicit `None` here.
+pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
+    match codec {
+        Codec::Q4_0 => Some(TiledDecode::new(
+            Q4_0_BLOCK_ELEMENTS,
+            Q4_0_BLOCK_BYTES,
+            "q4_0_dequant_half16",
+            Q4_0_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q5_0 => Some(TiledDecode::new(
+            Q5_0_BLOCK_ELEMENTS,
+            Q5_0_BLOCK_BYTES,
+            "q5_0_dequant_half16",
+            Q5_0_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q5_1 => Some(TiledDecode::new(
+            Q5_1_BLOCK_ELEMENTS,
+            Q5_1_BLOCK_BYTES,
+            "q5_1_dequant_half16",
+            Q5_1_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q8_0 => Some(TiledDecode::new(
+            Q8_0_BLOCK_ELEMENTS,
+            Q8_0_BLOCK_BYTES,
+            "q8_0_dequant_half16",
+            Q8_0_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q3K => Some(TiledDecode::new(
+            Q4K_BLOCK_ELEMENTS,
+            Q3K_BLOCK_BYTES,
+            "q3k_dequant_half16",
+            Q3K_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q4K => Some(TiledDecode::new(
+            Q4K_BLOCK_ELEMENTS,
+            Q4K_BLOCK_BYTES,
+            "q4k_dequant_half16",
+            Q4K_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q5K => Some(TiledDecode::new(
+            Q4K_BLOCK_ELEMENTS,
+            Q5K_BLOCK_BYTES,
+            "q5k_dequant_half16",
+            Q5K_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q6K => Some(TiledDecode::new(
+            Q4K_BLOCK_ELEMENTS,
+            Q6K_BLOCK_BYTES,
+            "q6k_dequant_half16",
+            Q6K_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Float16 => Some(TiledDecode::new(
+            STAGED_K_STEP_ELEMENTS as usize,
+            STAGED_K_STEP_ELEMENTS as usize * FLOAT16_BLOCK_BYTES,
+            "f16_dequant_half16",
+            F16_DEQUANT_HALF16_MSL,
+        )),
+        Codec::Q2K
+        | Codec::BFloat16
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2Xs
+        | Codec::Iq2S
+        | Codec::Iq3Xxs
+        | Codec::Iq3S
+        | Codec::Iq4Nl
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => None,
+    }
+}
+
 /// The K-tile chunk width [`crate::msl::push_tiled_gemm_body`]'s weight-
-/// staging loop reads per iteration -- Q4_0's own 32-element block, or
-/// Q4_K's 32-element sub-block (`Q4K_BLOCK_ELEMENTS`/8, the header-
-/// amortization unit `q4k_header_for` reads once per, NOT `codec_block_
-/// elements(Q4K)`'s own 256-element super-block). `classify_tiled_gemm`'s
-/// admission gate and `push_tiled_gemm_body`'s emitter must agree on this
-/// value byte-for-byte -- this is the one definition both read, so they
-/// cannot silently drift apart.
+/// staging loop reads per iteration: one staged block, capped at the K step
+/// ([`STAGED_K_STEP_ELEMENTS`]) -- a legacy codec's 32-element block, or a
+/// K-quant's first 32 elements of its 256-element super-block. `0` for a
+/// codec with no [`tiled_decode`] description, which
+/// [`tiled_gemm_block_k_chunk_aligned`] rejects.
+/// `classify_tiled_gemm`'s admission gate and `push_tiled_gemm_body`'s emitter
+/// must agree on this value byte-for-byte -- this is the one definition both
+/// read, so they cannot silently drift apart.
 #[cfg(feature = "metal-tiled-gemm")]
 pub(crate) const fn tiled_gemm_codec_chunk_width(codec: Codec) -> u64 {
-    match codec {
-        Codec::Q4_0 => Q4_0_BLOCK_ELEMENTS as u64,
-        Codec::Q8_0 => Q8_0_BLOCK_ELEMENTS as u64,
-        _ => (Q4K_BLOCK_ELEMENTS / 8) as u64,
+    match tiled_decode(codec) {
+        Some(decode) if decode.block_elements < STAGED_K_STEP_ELEMENTS => decode.block_elements,
+        Some(_) => STAGED_K_STEP_ELEMENTS,
+        None => 0,
     }
 }
 
@@ -1804,10 +2140,16 @@ pub(crate) const fn tiled_gemm_codec_chunk_width(codec: Codec) -> u64 {
 /// covers, none ragged) -- `classify_tiled_gemm` calls this with the SAME
 /// `chunk_width` `push_tiled_gemm_body` computes
 /// ([`tiled_gemm_codec_chunk_width`]) so an admitted op can never reach the
-/// emitter with a ragged combination.
+/// emitter with a ragged combination. The chunk the stager writes is also a
+/// whole number of [`DECODE_RUN_ELEMENTS`] runs, because a decode call always
+/// writes a full run: a `block_k` that is not a multiple of the run is refused
+/// here rather than overrun in the tile.
 #[cfg(feature = "metal-tiled-gemm")]
 pub(crate) const fn tiled_gemm_block_k_chunk_aligned(block_k: u64, chunk_width: u64) -> bool {
-    chunk_width != 0 && (block_k <= chunk_width || block_k.is_multiple_of(chunk_width))
+    let staged_width = if block_k < chunk_width { block_k } else { chunk_width };
+    chunk_width != 0
+        && staged_width.is_multiple_of(DECODE_RUN_ELEMENTS)
+        && (block_k <= chunk_width || block_k.is_multiple_of(chunk_width))
 }
 
 /// Whether this codec's block layout has a paired-nibble/paired-lane decode
@@ -1982,15 +2324,18 @@ pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
 
 /// `PROXIMA_TILED_GEMM_Q4_0` A/B switch: admits `Codec::Q4_0` into
 /// [`crate::msl::classify_tiled_gemm`], the same `simdgroup_matrix`-tiled
-/// GEMM ([`crate::msl::push_tiled_gemm_body`]) today's `Codec::Q4_K`-only
-/// admission renders (`docs/discipline.md` ROW 109) -- scheduling, packing
-/// and tiling stay CODEC-GENERIC (only the weight-tile decode differs per
-/// codec), matching the owner's standing rule that only the decoder may be
-/// codec-specific. Default ON as of `docs/model-interop/discipline.md` ROW
+/// GEMM ([`crate::msl::push_tiled_gemm_body`]) every codec with a
+/// [`tiled_decode`] description renders (`docs/discipline.md` ROW 109) --
+/// scheduling, packing and tiling stay CODEC-GENERIC (only the description's
+/// decode differs per codec), matching the owner's standing rule that only
+/// the decoder may be codec-specific. Default ON as of
+/// `docs/model-interop/discipline.md` ROW
 /// C4.6 (isolated 44.8-45.8x per projection, byte-exact vs the f32 CPU
 /// oracle at every admitted shape) -- unset keeps the tiled Q4_0 admission;
-/// only explicit `"0"` falls back to today's Q4_K-only admission. The A/B
-/// control stays reachable in the same binary via that explicit override.
+/// only explicit `"0"` keeps `Q4_0` on the row-blocked kernel
+/// (`TiledGemmRejection::CodecSwitchedOff`). The A/B control stays reachable
+/// in the same binary via that explicit override; it is the one codec with a
+/// switch.
 // gated on `metal-tiled-gemm`, not just `std`: this switch has no meaning
 // outside the tiled-GEMM admission path, and every caller (`emit_and_
 // classify.rs`'s `classify_tiled_gemm`/`tiled_gemm_q4_0_active`) already

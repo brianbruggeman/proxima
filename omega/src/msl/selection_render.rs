@@ -23,7 +23,7 @@ pub(super) fn render_top_fraction_select(
     let chunk = rows.div_ceil(SELECTION_THREADGROUP_WIDTH);
 
     let mut source = String::new();
-    preamble(&mut source, false);
+    preamble(&mut source, None);
     source.push_str("struct Uniforms { long unused; };\n\n");
     source.push_str("static inline uint order_key(float value) {\n");
     source.push_str("    value = (value == 0.0f) ? 0.0f : value;\n");
