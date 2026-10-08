@@ -86,11 +86,13 @@ block_k = 32
 # prompt, whole-prefill wall time at parts 1/2/4/8 (3 runs each, interleaved,
 # CoV 0.7-1.4%): 864 / 828 / 848 / 870 ms.
 col_parts = 2
-# Route chunks (`block_threads` tokens each) whose entries one scan step
-# loads back to back before voting on the first. The loads are independent, so
-# one memory round trip serves the whole batch; a larger batch hides more
-# latency and keeps more registers live, and entries loaded past the point a
-# tile fills are fetched again by the next scan step.
+# Adjacent route entries each thread of a threadgroup owns in one scan step.
+# A step covers `block_threads * scan_ahead` entries for one barrier pair: the
+# loads are independent, so one memory round trip serves them all, and the
+# step appends every match it finds (no entry is fetched twice). A larger
+# value pays fewer barriers per route scan and keeps more registers live; it
+# also grows the pending-token list by `block_threads * 4` bytes per unit
+# (threadgroup memory, so occupancy).
 scan_ahead = 4
 
 [wide_cooperative_reduce]
