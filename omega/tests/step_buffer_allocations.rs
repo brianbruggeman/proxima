@@ -141,6 +141,7 @@ mod routed_moe {
         Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter,
         append_moe_ffn, input_leaf, scalar_constant,
     };
+    use omega::DispatchType;
     use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
 
     const EXPERT_COUNT: u32 = 32;
@@ -252,5 +253,52 @@ mod routed_moe {
             cold_values, warm_values,
             "recycling buffers across steps must not change the step's result"
         );
+    }
+
+    #[test]
+    fn a_warm_serial_routed_moe_step_allocates_no_device_buffers_and_matches_the_concurrent_step() {
+        let step = routed_decode_step();
+        let blocks = blocks(&step);
+        let mut serial = omega::plan(
+            &step.program,
+            &[],
+            &blocks,
+            &[step.output],
+            NumericPolicy::default(),
+        )
+        .expect("plans the full routed moe step");
+        serial.set_dispatch_type(DispatchType::Serial);
+        let concurrent = omega::plan(
+            &step.program,
+            &[],
+            &blocks,
+            &[step.output],
+            NumericPolicy::default(),
+        )
+        .expect("plans the same step for the whole-slot layout");
+
+        let _ = metal_stage_totals();
+        let cold = omega::execute_plan_with_placements(&serial, &blocks, &[], &[], &mut Vec::new())
+            .expect("cold serial step builds the packed arena and runs");
+        let cold_totals = metal_stage_totals();
+        let warm = omega::execute_plan_with_placements(&serial, &blocks, &[], &[], &mut Vec::new())
+            .expect("warm serial step runs against the packed arena");
+        let warm_totals = metal_stage_totals();
+        let reference =
+            omega::execute_plan_with_placements(&concurrent, &blocks, &[], &[], &mut Vec::new())
+                .expect("the concurrent whole-slot plan runs the same step");
+
+        assert!(
+            cold_totals.output_buffer_allocations > 0,
+            "the cold serial step must build the packed arena, or the warm count proves nothing"
+        );
+        assert_eq!(
+            warm_totals.output_buffer_allocations, 0,
+            "a warm serial step over {} dispatches allocated {} device buffers",
+            warm_totals.physical_dispatch_calls, warm_totals.output_buffer_allocations
+        );
+        let reference_values = reference.get(step.output).expect("reference output present").0;
+        assert_eq!(cold.get(step.output).expect("cold output present").0, reference_values);
+        assert_eq!(warm.get(step.output).expect("warm output present").0, reference_values);
     }
 }
