@@ -7869,17 +7869,19 @@ mod expert_grouped_gemm {
     }
 
     #[test]
-    fn expert_grouped_dispatch_is_one_z_slice_per_expert_and_row_tiles_times_parts_groups() {
+    fn expert_grouped_dispatch_launches_the_grid_its_route_mode_names() {
         let (bound, packed) = gathered_q8_0(TOKENS);
 
         let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits");
 
         let row_tiles = u64::from(ROWS).div_ceil(GROUPED_TILE_ROWS);
-        assert_eq!(kernel.grid.depth, u64::from(EXPERTS));
-        assert_eq!(
-            kernel.grid.threads,
-            row_tiles * crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS * 128
-        );
+        let (depth, token_tiles) = if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+            (1, u64::from(TOKENS).div_ceil(GROUPED_TILE_TOKENS) + u64::from(EXPERTS))
+        } else {
+            (u64::from(EXPERTS), crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS)
+        };
+        assert_eq!(kernel.grid.depth, depth);
+        assert_eq!(kernel.grid.threads, row_tiles * token_tiles * 128);
         assert_eq!(kernel.grid.threadgroup_width, Some(128));
         assert!(kernel.grid.grid2d.is_none());
     }
@@ -7893,10 +7895,15 @@ mod expert_grouped_gemm {
             .source;
 
         assert!(source.contains("uint3 grouped_gid [[thread_position_in_grid]]"), "{source}");
-        assert!(source.contains("simd_prefix_exclusive_sum(own_count)"), "{source}");
-        assert!(source.contains("tile_token[write_at] = (int)(own_base + entry)"), "{source}");
         assert!(source.contains("atomic_fetch_max_explicit(&fault[0]"), "{source}");
         assert!(source.contains("grouped_expert * u.gather_element_stride[0]"), "{source}");
+        if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+            assert!(source.contains("simd_prefix_exclusive_sum(hit)"), "{source}");
+            assert!(source.contains("= (uint)entry_token; }"), "{source}");
+        } else {
+            assert!(source.contains("simd_prefix_exclusive_sum(own_count)"), "{source}");
+            assert!(source.contains("tile_token[write_at] = (int)(own_base + entry)"), "{source}");
+        }
     }
 
     #[test]
@@ -7910,8 +7917,10 @@ mod expert_grouped_gemm {
 
         let capacity = format!("threadgroup int tile_token[{}];", 32 + step_entries);
         assert!(source.contains(&capacity), "{capacity} missing from {source}");
-        assert!(
-            source.contains(&format!("scan_base += 128l * {}l;", crate::sized::GROUPED_GEMM_SCAN_AHEAD)),
+        let step = format!("scan_base += 128l * {}l;", crate::sized::GROUPED_GEMM_SCAN_AHEAD);
+        assert_eq!(
+            source.contains(&step),
+            !crate::sized::GROUPED_GEMM_ROUTE_COMPACTED,
             "{source}"
         );
     }
@@ -7924,13 +7933,16 @@ mod expert_grouped_gemm {
             .expect("grouped kernel emits")
             .source;
 
+        if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+            assert!(!source.contains("long own_base"), "the gemm no longer scans the route\n{source}");
+            return;
+        }
         let scan_start = source.find("long own_base").expect("the scan step is emitted");
         let scan_end = source.find("uint tile_count").expect("the tile follows the scan");
         let scan = &source[scan_start..scan_end];
         assert_eq!(scan.matches("threadgroup_barrier").count(), 2, "{scan}");
         assert_eq!(scan.matches("gather_idx0[").count(), 1, "{scan}");
     }
-
     #[test]
     fn the_pipeline_identity_names_the_expert_grouped_body() {
         let (bound, packed) = gathered_q8_0(TOKENS);
@@ -8043,10 +8055,11 @@ mod expert_grouped_gemm {
 
         let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("stacked kernel emits");
 
-        assert_eq!(kernel.grid.depth, u64::from(EXPERTS));
+        let depth = if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED { 1 } else { u64::from(EXPERTS) };
+        assert_eq!(kernel.grid.depth, depth);
         assert!(kernel.source.contains("a_c1 = (long)(a_c_rest % (uint)u.output_extents[1])"), "{}", kernel.source);
         assert!(kernel.source.contains("o_c1 = (long)(o_c_rest % (uint)u.output_extents[1])"), "{}", kernel.source);
-        assert!(!kernel.source.contains("route_c"), "{}", kernel.source);
+        assert!(!kernel.source.contains("route_c_rest"), "{}", kernel.source);
     }
 
     #[test]
@@ -9197,6 +9210,10 @@ mod expert_grouped_route_segments {
 
         let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
 
+        if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+            assert!(!source.contains("segment_length"), "{source}");
+            return;
+        }
         let length = format!("long segment_length = (token_extent + {segments}l - 1l) / {segments}l;");
         assert!(source.contains(&length), "{length} missing from {source}");
         assert!(source.contains("long segment_begin = route_segment * segment_length;"), "{source}");
@@ -9218,5 +9235,163 @@ mod expert_grouped_route_segments {
         assert_eq!(source.matches(&k_loop).count(), 1, "{source}");
         let accumulate = "simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i])";
         assert_eq!(source.matches(accumulate).count(), 1, "{source}");
+    }
+
+    fn expert_counts(route: &[usize]) -> Vec<u32> {
+        let mut counts = vec![0u32; EXPERTS];
+        route.iter().for_each(|&expert| counts[expert] += 1);
+        counts
+    }
+
+    fn exclusive_offsets(counts: &[u32]) -> Vec<u32> {
+        counts
+            .iter()
+            .scan(0u32, |running, &count| {
+                let offset = *running;
+                *running += count;
+                Some(offset)
+            })
+            .collect()
+    }
+
+    fn expert_major_list(route: &[usize], offsets: &[u32]) -> Vec<u32> {
+        let mut list = vec![u32::MAX; route.len()];
+        let mut placed = [0u32; EXPERTS];
+        for (token, &expert) in route.iter().enumerate() {
+            list[(offsets[expert] + placed[expert]) as usize] = token as u32;
+            placed[expert] += 1;
+        }
+        list
+    }
+
+    fn tile_location(counts: &[u32], tile_index: usize) -> Option<(usize, usize)> {
+        let mut tile_base = 0usize;
+        for (expert, &count) in counts.iter().enumerate() {
+            let tiles = (count as usize).div_ceil(TILE_TOKENS);
+            if tile_index < tile_base + tiles {
+                return Some((expert, tile_index - tile_base));
+            }
+            tile_base += tiles;
+        }
+        None
+    }
+
+    fn tile_upper_bound(route_length: usize) -> usize {
+        route_length.div_ceil(TILE_TOKENS) + EXPERTS
+    }
+
+    #[test]
+    fn the_compacted_route_holds_every_assignment_once_expert_major_and_ascending() {
+        let route = top_k_route();
+
+        let counts = expert_counts(&route);
+        let offsets = exclusive_offsets(&counts);
+        let list = expert_major_list(&route, &offsets);
+
+        assert_eq!(counts.iter().sum::<u32>() as usize, route.len());
+        let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(route.len());
+        for expert in 0..EXPERTS {
+            let span = offsets[expert] as usize..(offsets[expert] + counts[expert]) as usize;
+            assert!(list[span.clone()].windows(2).all(|pair| pair[0] < pair[1]), "expert {expert} not ascending");
+            pairs.extend(list[span].iter().map(|&token| (expert, token as usize)));
+        }
+        assert_eq!(pairs, assignments(&route));
+    }
+
+    #[test]
+    fn every_realized_tile_is_located_once_and_the_tiles_cover_each_token_once() {
+        let route = top_k_route();
+        let counts = expert_counts(&route);
+        let offsets = exclusive_offsets(&counts);
+        let list = expert_major_list(&route, &offsets);
+        let realized: usize = counts.iter().map(|&count| (count as usize).div_ceil(TILE_TOKENS)).sum();
+
+        let mut located = Vec::new();
+        let mut covered = Vec::new();
+        for tile_index in 0..realized {
+            let (expert, local) = tile_location(&counts, tile_index).expect("a realized tile has an expert");
+            let start = offsets[expert] as usize + local * TILE_TOKENS;
+            let tokens = (counts[expert] as usize - local * TILE_TOKENS).min(TILE_TOKENS);
+            located.push((expert, local));
+            covered.extend(list[start..start + tokens].iter().map(|&token| (expert, token as usize)));
+        }
+
+        let mut distinct = located.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), realized);
+        covered.sort_unstable();
+        assert_eq!(covered, assignments(&route));
+    }
+
+    #[test]
+    fn tiles_past_the_realized_total_find_no_expert_and_the_launch_covers_the_realized_ones() {
+        let route = top_k_route();
+        let counts = expert_counts(&route);
+        let realized: usize = counts.iter().map(|&count| (count as usize).div_ceil(TILE_TOKENS)).sum();
+        let launched = tile_upper_bound(route.len());
+
+        assert!(realized <= launched, "{realized} realized tiles against {launched} launched");
+        assert!((realized..launched).all(|tile_index| tile_location(&counts, tile_index).is_none()));
+        assert!((0..realized).all(|tile_index| tile_location(&counts, tile_index).is_some()));
+    }
+
+    #[test]
+    fn a_heavy_expert_gets_proportionally_more_tiles_than_a_light_one() {
+        let route = top_k_route();
+        let counts = expert_counts(&route);
+        let heaviest = counts.iter().enumerate().max_by_key(|(_, count)| **count).map(|(expert, _)| expert).unwrap_or(0);
+        let lightest = counts.iter().enumerate().min_by_key(|(_, count)| **count).map(|(expert, _)| expert).unwrap_or(0);
+
+        let tiles_of = |expert: usize| (counts[expert] as usize).div_ceil(TILE_TOKENS);
+
+        assert_eq!(counts[heaviest], 885);
+        assert_eq!(tiles_of(heaviest), 28);
+        assert!(tiles_of(lightest) <= 4, "{} tiles for {} tokens", tiles_of(lightest), counts[lightest]);
+    }
+
+    #[test]
+    fn the_route_prepass_and_the_locating_gemm_render_for_the_compacted_mode_only() {
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+
+        let prepass = route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits");
+        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+
+        let Some((kernel, words)) = prepass else {
+            assert!(!source.contains("route_compaction"), "{source}");
+            return;
+        };
+        assert_eq!(words, 1 + 2 * 8 + 300);
+        assert!(kernel.entry.ends_with("_route_prepass"), "{}", kernel.entry);
+        assert_eq!(kernel.grid.depth, 1);
+        assert_eq!(kernel.grid.threadgroup_width, Some(1024));
+        let main_slots = bindings(&bound).len();
+        let compaction_slot = format!("device uint* route_compaction [[buffer({main_slots})]]");
+        let reader_slot = format!("device const uint *route_compaction [[buffer({main_slots})]]");
+        assert!(source.contains(&compaction_slot), "{source}");
+        assert!(source.contains(&reader_slot), "{source}");
+        assert!(source.contains("route_compaction[0] = running;"), "{source}");
+        assert!(source.contains("simd_prefix_exclusive_sum(hit)"), "{source}");
+    }
+
+    #[test]
+    fn the_locating_gemm_faults_when_the_prepass_total_does_not_match_the_route() {
+        if !crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+            return;
+        }
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+
+        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+
+        assert!(source.contains("if (route_compaction[0] != (uint)token_extent) {"), "{source}");
+        assert!(
+            source.contains("atomic_fetch_max_explicit(&fault[0], (uint)u.gather_extent[0] + 1u, memory_order_relaxed);"),
+            "{source}"
+        );
+        assert!(source.contains("if (grouped_expert < 0) { return; }"), "{source}");
+        let k_loop = format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
+        assert_eq!(source.matches(&k_loop).count(), 1, "{source}");
     }
 }
