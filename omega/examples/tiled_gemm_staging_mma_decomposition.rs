@@ -430,11 +430,11 @@ fn run() -> anyhow::Result<()> {
                 .source)
         });
     let source_a_wide = source_a_wide?;
-    let source_a_wide_has_q4_0_run8_wide = source_a_wide.contains("q4_0_run8_wide");
+    let source_a_wide_has_wide_decode = source_a_wide.contains("q4_0_dequant_half16(wws_blk0");
     let source_a_wide_has_wws_blk0 = source_a_wide.contains("wws_blk0");
     anyhow::ensure!(
-        source_a_wide_has_q4_0_run8_wide && source_a_wide_has_wws_blk0,
-        "arm A' must decode through q4_0_run8_wide and carry the wws_ per-thread block pointer, has_q4_0_run8_wide={source_a_wide_has_q4_0_run8_wide} has_wws_blk0={source_a_wide_has_wws_blk0}"
+        source_a_wide_has_wide_decode && source_a_wide_has_wws_blk0,
+        "arm A' must decode through the Q4_0 description at the per-thread cursor and carry the wws_ per-thread block pointer, has_wide_decode={source_a_wide_has_wide_decode} has_wws_blk0={source_a_wide_has_wws_blk0}"
     );
     let source_a_wide_dstore: anyhow::Result<String> = temp_env::with_vars(
         [
@@ -448,7 +448,7 @@ fn run() -> anyhow::Result<()> {
         },
     );
     let source_a_wide_dstore = source_a_wide_dstore?;
-    let source_a_wide_dstore_has_wide_stage = source_a_wide_dstore.contains("q4_0_run8_wide");
+    let source_a_wide_dstore_has_wide_stage = source_a_wide_dstore.contains("q4_0_dequant_half16(wws_blk0");
     let source_a_wide_dstore_has_direct_store = source_a_wide_dstore.contains("direct_store_interior");
     anyhow::ensure!(
         source_a_wide_dstore_has_wide_stage && source_a_wide_dstore_has_direct_store,

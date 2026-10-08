@@ -1,8 +1,9 @@
 //! Byte-identity gate for `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`
 //! (see `docs/model-interop/discipline.md` ROW C4.12): the wide schedule changes WHO decodes which weight
-//! element, how its bytes are loaded (`q4_0_run8_wide`'s `ushort` reads
-//! instead of `q4_0_run8`'s `uchar` reads for `Q4_0`; `Q4_K` keeps
-//! `q4k_header_for`/`q4k_run8` unchanged) and how the result is stored into
+//! element, how its bytes are loaded (every codec decodes through its
+//! `tiled_decode` description: `q4_0_dequant_half16`'s `ushort` reads for
+//! `Q4_0`, `q4k_dequant_half16`'s header and `q4k_run8` for `Q4_K`) and how the
+//! result is stored into
 //! `weight_tile` (`half4` vector stores instead of scalar `half` stores) --
 //! never the decoded VALUE (same `(level - 8) * d` / `scale * level -
 //! minimum` expression per element, per

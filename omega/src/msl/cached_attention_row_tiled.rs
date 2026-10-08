@@ -83,7 +83,7 @@ pub(super) fn render_cached_attention_row_tiled(
         ),
     ];
     let mut source = String::new();
-    preamble(&mut source, false);
+    preamble(&mut source, None);
     let mut body = ROW_TILED_KERNEL.to_string();
     for (token, value) in &substitutions {
         body = body.replace(token, value);

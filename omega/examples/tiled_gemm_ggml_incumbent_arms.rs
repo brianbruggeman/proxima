@@ -587,7 +587,7 @@ fn run() -> anyhow::Result<()> {
         },
     );
     let source_a2 = source_a2?;
-    let source_a2_has_wide_stage = source_a2.contains("q4_0_run8_wide");
+    let source_a2_has_wide_stage = source_a2.contains("q4_0_dequant_half16(wws_blk0");
     let source_a2_has_direct_store = source_a2.contains("direct_store_interior");
     anyhow::ensure!(
         source_a2_has_wide_stage && source_a2_has_direct_store,
@@ -648,7 +648,7 @@ fn run() -> anyhow::Result<()> {
         !source_a2_mma_removed_has_mma,
         "arm A2_mma_removed must not carry any MMA call, contains_mma={source_a2_mma_removed_has_mma}"
     );
-    let source_a2_mma_removed_has_wide_stage = source_a2_mma_removed.contains("q4_0_run8_wide");
+    let source_a2_mma_removed_has_wide_stage = source_a2_mma_removed.contains("q4_0_dequant_half16(wws_blk0");
     let source_a2_mma_removed_has_direct_store = source_a2_mma_removed.contains("direct_store_interior");
     anyhow::ensure!(
         source_a2_mma_removed_has_wide_stage && source_a2_mma_removed_has_direct_store,

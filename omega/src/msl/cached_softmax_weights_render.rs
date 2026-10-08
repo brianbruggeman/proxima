@@ -96,7 +96,7 @@ pub(super) fn render_cached_softmax_weights(
     };
 
     let mut source = String::new();
-    preamble(&mut source, false);
+    preamble(&mut source, None);
     source.push_str(uniforms_struct);
     let _ = write!(
         source,
@@ -328,7 +328,7 @@ fn render_cached_softmax_weights_rows(
     );
 
     let mut source = String::new();
-    preamble(&mut source, false);
+    preamble(&mut source, None);
     source.push_str(uniforms_struct);
     let _ = write!(
         source,
