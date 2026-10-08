@@ -49,10 +49,23 @@ pub struct NumericPolicy {
     /// multi-head norms do not, and under [`Self::llama_relaxed`] 71 to 1333
     /// elements per norm differ by at most 2.4e-7. The E2B checkpoint logits then
     /// differ in about 85% of their bits with row-norm-relative error of at
-    /// most 6.7e-8 and the same argmax at every step. Decode ms per token did
-    /// not improve with it on (15.72 off, 15.93 on, median of 14 runs), which
-    /// is why `ServingConfig::default` leaves it off. It is part of the plan
-    /// identity, so a plan cache keys on it.
+    /// most 6.7e-8 and the same argmax at every step.
+    ///
+    /// Why the first-operand rule declines those 170 norms: an RMSNorm apply
+    /// lists the projection output `x` ahead of its sum-of-squares reduce, the
+    /// first-operand rule picks `x`, and `x` is read by the reduce and by the
+    /// apply, so the single-reader gate rejects the pair and the reduce behind
+    /// it is never considered. Granting this field lets the pass fold the
+    /// apply into the reduce, one dispatch per norm row, the shape of
+    /// llama.cpp's `kernel_rms_norm_fuse_impl`.
+    ///
+    /// An earlier decode measurement (15.72 ms/token off, 15.93 on, median of
+    /// 14 runs) predates the broadcast epilogue's operand preload
+    /// (`push_broadcast_epilogue_preload`, 8.6 us to 4.6 us on a `[1, 1536]`
+    /// row); `ServingConfig::default` grants it from slice r6 on, and the
+    /// effect is read against the `PROXIMA_EPILOGUE_SOURCES=0` arm of
+    /// `decode_gbps_baseline`. It is
+    /// part of the plan identity, so a plan cache keys on it.
     #[cfg_attr(feature = "config", serde(default))]
     pub epilogue_sources: bool,
 }
