@@ -1424,6 +1424,9 @@ pub(super) fn record_hazard_op(
     run_before: u64,
 ) {
     let (true_edges, alias_edges) = edges;
+    if class != HazardClass::None {
+        note_barrier_pending();
+    }
     let reason = match class {
         HazardClass::None => "none",
         HazardClass::Raw if true_edges > 0 => "true_node_dependency",
@@ -1449,7 +1452,25 @@ pub(super) fn record_hazard_op(
 /// same op just wrote, so the reason is always an internal true dependency.
 #[cfg(feature = "instrument")]
 pub(super) fn record_internal_barrier(site: &'static str) {
+    note_barrier_pending();
     debug!(site, reason = "internal_true_dependency", "hazard_internal_barrier");
+}
+
+#[cfg(feature = "instrument")]
+thread_local! {
+    static BARRIER_PENDING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Marks that a barrier fired since the last captured dispatch; the next
+/// [`take_barrier_pending`] hands it to that dispatch's record.
+#[cfg(feature = "instrument")]
+fn note_barrier_pending() {
+    BARRIER_PENDING.with(|pending| pending.set(true));
+}
+
+#[cfg(feature = "instrument")]
+pub(super) fn take_barrier_pending() -> bool {
+    BARRIER_PENDING.with(|pending| pending.replace(false))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
