@@ -3689,3 +3689,188 @@ norm:                [AB_SEQUENCE=1 | AB_STEP_SEQUENCE=1] AB_SPAN_FULL=1 AB_STEP
 summaries:           ab_summary <group|sequence|step> <single_us|marginal_us|per_dispatch_us|step_ms> <stdout.log>...   # tools/ab_summary.rs; key_stats, sample_diff, queueing_summary alongside
 ```
 Missing for CI: no job runs the Metal tests, the censuses, the AB tool or the examples; every row re-proves on this box only. The binaries and raw logs are under `.long_ctx_backups/attr4/` (`bin/`, `bin_head/`); the `d3f3931d` build of `norm_variant_ab` re-run on the attention variants (1 process, `headcheck_attention/`) reads base 1145.6, ctrl 1145.4, f16kv 1098.0, nocausal 1937.9, nopv 889.6 us against the 3-process medians 1153.9, 1143.5, 1097.8, 1932.9, 889.4.
+
+## round four result (measured 2026-10-08, main b6463985 to the commit that adds this section)
+
+Slices applied: attention (4 patches), route prepass (2), shared route compaction (2), small (4: norm lanes by shape class, env flags read once, warm-up of resident buffers in omega, the interop call that declares them). Test models: gemma4 E2B and granite moe 1b; no 26B, no Ollama. The llama rows are `evidence/slice0/ac1/decode_arms.out` (recorded 2026-10-07, 1000-token prompt only, different box state; not re-run). Every number names its source under `evidence/round4/` (`conflicts.md`, `gates/`, `bench/`, `census/`, `rank/`, `ab/`, `sample/`, `timeline/`) or the logs under `.long_ctx_backups/combine4/logs/`. Rows are measurements with the mechanism where one was traced; unexplained and not-closed rows are last.
+
+### commits (17 on top of b6463985 before this section; the 18th is this section; linear, no trailer)
+
+Applied with `git am --3way` (`conflicts.md` 1-4): attention `8694ec12 3b2ece28 f7e91d71 47e20195`; prepass `724c86cc 4d1c36e8`; shared route `4fd344ad` (one conflict, resolved; `conflicts.md` 2) `2ff64346`; small `64ebc677 a9bd1f37 61890638 b3c284a6`. None skipped. Before the push `origin/main` had advanced from b6463985 to 1f9db2f4 (one docs-only commit, the python frontend cards: 17 files under `proxima-tensor/specs/python-frontend/` and one line in each of two `ai_docs` jsonl files, none read by omega, tensor or interop); the commits were rebased onto it without conflict, the hashes in this section are the rebased ones, and every gate and bench ran on the pre-rebase tip `66e2201b`, whose tree differs from the rebased code tip `8017c747` only by those 19 files (`git diff 66e2201b 8017c747 --stat`; hash map in `.long_ctx_backups/combine4/logs/hash_map.txt`).
+Integration commits, one change each: `8a04ec27` the std-tier lib tests compile again (fixture and imports gated to `metal-grouped-gemm`); `2c4c17bc` the warm-up has a caller (`decode_gbps_baseline`, before the first prefill); `6f766b18` the cpu-engine warm test sets `gpu_layers: 0`; `1ef6bf97` reverts the unrolled softmax loop of `3b2ece28`; `8017c747` reverts `64ebc677`. The two reverts are the only patches taken back out; both are in the failures below with the measurements that caused them. Bisect points: `2ff64346` through `2c4c17bc` do not compile the omega std-tier lib tests and `b3c284a6` through `8a04ec27` carry the failing cpu-engine warm test (fixed by `8a04ec27`, `6f766b18`); every other commit was not individually gated, the tips were.
+
+### gates at the final code tip `8017c747` (N is the count the run printed; `--cargo-profile gate`; `gates/summary.txt`)
+
+| gate | command | N | source |
+|---|---|---|---|
+| tensor | `nextest run -p proxima-tensor` | 803 run, 803 passed, 8 skipped | `z1_tensor.log` |
+| omega | `-p omega --features metal` | 875 run, 875 passed, 16 skipped (850 at b6463985) | `z2_omega_metal.log` |
+| omega instrument | `... metal,instrument` | 929 run, 929 passed, 22 skipped (903) | `z3_omega_instr.log` |
+| omega feature-gated | `... metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count` | 896 run, 896 passed, 16 skipped (871) | `z4_omega_gated.log` |
+| omega split-k | `... metal,metal-q4k-split-k` | 867 run, 867 passed, 16 skipped (842) | `z5_omega_splitk.log` |
+| omega std tier | `-p omega --no-default-features --features std --lib` | 151 run, 151 passed, 1 skipped (151) | `z6_omega_std.log` |
+| attention goldens | inside the omega metal run: `msl::attn_split_tests::golden_identity::attention_sources_match_the_recorded_main_goldens` plus 40 other `attn_split_tests` / `attn_rows_tests` | passed (41 of 41 in the filtered run, `m1_attn_tests_after_revert.log`) | `z2_omega_metal.log` |
+| interop slice gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --profile slice-gate -E 'not test(/gemma4_26b/)'` | 746 run, 746 passed, 128 skipped (741; +5 `warm_buffers` tests) | `z7_interop_slice.log` |
+| interop descriptor tests, E2B and granite | `... std,metal,conflaguration`, 10 `test(=name)` filters | 10 run, 10 passed, 864 skipped | `z8_interop_descriptor.log` |
+| clippy `-D warnings --all-targets` | tensor+interop (std,metal); omega metal; omega metal+instrument; omega gated set; interop std,metal,instrument; omega `std,metal-core`, `std,metal-tiled-gemm`, `std,metal-grouped-gemm` | exit 0 each (the last was re-run after `touch omega/src/lib.rs`: `Checking omega`, exit 0) | `z9`-`z16` |
+| tiers | `check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p omega --no-default-features --features alloc`; `--workspace --all-targets` | exit 0 each | `z17`-`z20` |
+| model-name grep (`combine3/ac4_pattern.txt`) | `git diff b6463985..HEAD -- . ':!proxima-tensor/specs'`, added lines only | 0 of 1623 added lines | `logs/added_lines_final.txt` |
+| census invariant (captured dispatches plus the route prepasses replayed inside their records = the step's physical dispatches), granite 1000-token prefill, final tip | `gemma4_decode_kernel_census` (instrument build) | 383 captured + 48 prepass dispatches = 431 physical (24 owner records x 2 dispatches); at b6463985 383 + 72 = 455; replay failures 0; unreplayable groups 0 (at round three the 72 compacted gemms were unreplayable) | `census/census_granite_prefill/stdout.log`, `census/base_granite_prefill/stdout.log` |
+| census invariant, granite and E2B decode step 23, E2B prefill | same | 398 = 398, 653 = 653, 842 = 842; failures 0 | `census/census_{granite_decode,e2b_decode,e2b_prefill}/stdout.log` |
+
+AC mapping inside the 746 and the 10: `arch_data_digest_` 7 passed (gemma4 E2B, granite moe, openchat, qwen2, qwen3, qwen35, qwen35moe), none moved: `git diff --name-only b6463985..HEAD` lists no fixture file and no `bind.ops` source; `generic_verify_llama_parity_` E2B and granite 2 passed; `llama_parity_` E2B and granite 2 passed (`gates/z7_parity_and_digest_tests.txt`, 18 lines). Not run: the 16 large-checkpoint tests of the round-two list and every 26B test.
+Earlier passes at intermediate tips with the same commands (`gates/summary.txt`, second block): `g1` omega metal after the three series 870 passed; `f1`-`f7`, `f15` at `1ef6bf97` (tensor 803, metal 881, instrument 935, gated 902, split-k 873, std 151, interop 746, descriptor 10), all passed. The six tests the norm revert removes are the difference between 881 and 875.
+
+### failures found, mechanism, fix
+
+1. Omega std-tier lib tests did not compile after the shared-route tests landed (`stacked_moe_layers` and nine imports used only under `metal-grouped-gemm`; dead-code and unused-import errors under `-D warnings`). `8a04ec27` gates them; 151 passed after.
+2. `warm_up_is_skipped_on_the_cpu_engine` failed: under `metal` `ServingConfig::default().gpu_layers` is `GPU_LAYERS_ALL`, so the config the test called the cpu engine was the gpu engine. `6f766b18` sets `gpu_layers: 0`; 746 passed after.
+3. The unrolled softmax vector loop (attention 0002, `3b2ece28`) made the granite attention kernel slower. First census at the integrated tip: `cached attention partial` 24 ops, 1285.8 us/op (`census/census_granite_prefill_unrolled/`, `rank/granite_prefill_unrolled.md`: 30.88 ms for the attention class against 27.43 at b6463985). Isolation, one process, 30 rounds, captured step 0, the production kernel against the same kernel text with one change (`ab/attn/r2`, then 3 processes `ab/attn/r3_p{1,2,3}`; medians of the 3 processes, marginal us/op): production 1282.0; the original text from b6463985 1134.3; the production text rebuilt by hand 1276.8 (control, equal to production within 0.4%); the production text without the unroll pragma 1160.2; without unroll and without the rescale skip 1161.7; without unroll and without the staged q tile 1196.7; with all three off 1195.1. Static threadgroup bytes 9600 (production) against 4480 (original). Outputs identical over 1,024,000 elements in every arm. So at this shape the unroll costs +122 us/op, the q-tile staging gains 36 us/op, the skip moves 1.5 us/op (inside the spread). `1ef6bf97` restores the original loop (and the pin test that asserted the unrolled text now asserts the original loop). After it: 1099.0 us/op (census, 24 ops, 26.38 ms) and 1099.0 us/op (median of 3 processes: 1096.9, 1099.5, 1099.0) against 1140.0 for the b6463985 text in the same processes (`ab/attn/r4_p{1,2,3}`), `differing=0` over 1,024,000 elements for both the b6463985 text and the unrolled text. Why the unrolled loop is slower was not traced (register or code-size effects are untested).
+4. The 512-lane hidden-width norm class (small 0001, `64ebc677`) changed output bits against the 256-lane kernel and moved no bench cell. The commit's own comment says 512 lanes against 256 changed no output bit and shortened the E2B step by 0.611 ms (step basis; 0.16 ms on the sequence basis). Measured at the integrated tip (E2B captured step 5, `ab/norm/`, 3 processes each, the three hidden-width groups of 71, 70 and 35 dispatches, production 512 lanes against the b6463985 kernel text at 256 lanes, `AB_SPAN_FULL=1`): step basis (`AB_STEP_SEQUENCE`) 512 lanes is faster by 0.024, -0.016 and 0.023 ms for the groups of 71, 70 and 35, 0.031 ms in total; sequence basis (`AB_SEQUENCE`, per dispatch) 512 lanes is slower by 0.65, 1.22 and 1.83 us per dispatch, 0.195 ms in total (DERIVED: us x count). Output bits: the 35-dispatch group differs from the 256-lane kernel in 541 of 1536 elements (max 6156 ulp) in every run of both bases; the other two groups differ in 1198 elements (max 3 ulp) and 88 elements (max 11 ulp) on the sequence basis and not on the step basis. Bench (final runs, decode ms/token, 512-lane binary against the final tip): E2B 1000-token +0.0375, E2B 25-token +0.010, granite 1000-token +0.0395, granite 25-token +0.046; in the first bench pass (`bench/pre_norm_revert/`, 256-lane arm built with `OMEGA_WIDE_COOPERATIVE_REDUCE_HIDDEN_NORM_WIDTH=256` against the 512-lane tip) E2B -0.004 and +0.013, granite +0.0215 and +0.0125 (512 lanes faster by 0.004 only on E2B 1000-token). Text hashes were equal across the two widths in both passes. Granite's one-row 1024-wide norms (49 dispatches) ran at 512 lanes in the integrated tip: census own-cb 0.56 ms, in situ 0.31 ms for the 49 against 0.53 and 0.22 at the final tip (`rank/granite_decode.md`, `rank/pre_norm_revert_*`). `8017c747` reverts the commit (the sizing key, the selector change and their six tests). Why the 512-lane kernel the commit emits differs from the 512-lane variant of the attribution round (which read `differing=0` for the three groups) was not traced.
+5. Not closed (details in the per-slice section): E2B 1000-token prefill attention rose by 5.84 ms own-cb (38 ops, 44.19 to 50.03) and the bench prefill by 4.0 ms (limit 11.7); isolated to the two kept attention patches (below), mechanism inside the kernel untraced. The warm-up of resident buffers moved no TTFT (below).
+6. The dry run on an export had stopped at the shared-route patch (`logs/conflict_sharedroute.log` of the writer); resolved at integration, `conflicts.md` 2.
+
+### bench (release `decode_gbps_baseline`, `decode_arms`; 3 processes x (1 warm-up + 5 timed) = 15 timed runs per arm per cell, 128 new tokens in every run; arms interleaved per process; the owner trimmed 7 timed runs to 5 for this round)
+
+Binaries (`bin/binaries.sha256`): `base` = b6463985 exported to `.long_ctx_backups/combine4/base_export` and built in `/private/tmp/cargo_target_combine4_base` (sha256 `39f26209...`); `tip` = final tip `8017c747` (`6674feee...`); `control` = byte copy of `tip`; `tipconc` = byte copy of `tip` with `PROXIMA_DISPATCH=concurrent` (`--arm-env`); `norm512` = the tip before `8017c747` (`39bee811...`, the binary with the 512-lane norm class). `decode_arms` is the round three binary (`5b4d68e0...`). Prompts `prompt1k.txt` (971 tokens E2B, 1000 granite) and `prompt_short_hippo.txt` (25 tokens). Text hash equal on all 90 generations per model and prompt, across all five arms: E2B `8fec363180a250e0` (1000) and `16f789b7871d97d1` (25), granite `c4625c1fb93f28b7` and `fd64fab40cc5300b`, equal to round three's hashes; the token id list is the same for every generation. Box (`bench/runA_long/box_load_before.txt`, `runB_short/`): `ioreg` Device Utilization samples 89, 0, 0 before the 1000-token run (first discarded as the settling artifact) and 95, 5, 0 before the 25-token run (first discarded; the 5 is a settling reading, the last is 0); load average 3.29 to 3.54 at launch; `pgrep` showed only the idle `sccache` server; no compile ran during any timed run. The per-launch ioreg line in `decode_arms.out` is taken right after the previous child exits and is not a busy fraction. GPU busy fraction needs the instrument build, which these binaries are not: the instrument census gives it for granite prefill step 0 (timeline section) and it is DERIVED from that census process, not the bench. Medians are kept-run medians (outlier rule 3 x 1.4826 x MAD); each cell shows `median (CoV all / CoV kept; n kept of 15)`. CPU is user+sys over one generation (`getrusage`), cpu% = cpu/wall. TTFT is the prefill time rounded to ms by the tool (`ttft_ms`), so the prefill column is the TTFT column. RSS and footprint are `/usr/bin/time -l` peaks, medians of 3 processes; GPU bytes is the Metal allocated-size maximum sampled at every token. A 1000-token cell, wall for 128 tokens:
+
+| arm | decode ms/token | prefill = TTFT ms | wall ms (128 tokens) | cpu ms | cpu % | RSS MB | footprint MB | peak GPU MB |
+|---|---|---|---|---|---|---|---|---|
+| E2B base | 11.182 (0.46/0.46; 15) | 586.96 (0.21/0.21; 15) | 2006.70 (0.32/0.32; 15) | 230.19 (2.04/2.04; 15) | 11.50 | 3748.9 | 426.5 | 3621.7 |
+| E2B tip | 11.179 (1.07/1.07; 15) | 591.01 (0.17/0.01; 9) | 2010.71 (0.72/0.72; 15) | 181.01 (8.06/3.34; 11) | 9.00 | 3749.2 | 418.6 | 3621.7 |
+| E2B control | 11.180 (1.05/0.73; 13) | 591.03 (0.14/0.01; 12) | 2012.06 (0.73/0.37; 12) | 181.90 (5.30/2.48; 12) | 9.05 | 3761.7 | 421.1 | 3620.7 |
+| E2B tip, concurrent dispatch | 11.184 (0.31/0.31; 15) | 591.00 (0.06/0.01; 13) | 2011.42 (0.22/0.22; 15) | 180.42 (1.67/1.38; 14) | 8.97 | 3758.8 | 421.6 | 3622.3 |
+| E2B tip with the 512-lane norm class | 11.217 (0.70/0.31; 12) | 591.00 (0.08/0.01; 11) | 2015.31 (0.51/0.28; 13) | 180.67 (15.99/1.77; 12) | 8.97 | 3763.5 | 428.2 | 3621.7 |
+| E2B llama (recorded) | 9.017 (5.98/0.39; 20) | 573.23 (2.98/0.69) | 1718.4 (derived: prefill + 127 x ms/token) | not recorded | not recorded | 3735.3 | 206.6 | not recorded |
+| granite base | 6.652 (2.07/2.07; 15) | 245.06 (0.29/0.29; 15) | 1090.02 (1.62/1.62; 15) | 192.48 (4.65/2.10; 13) | 17.92 | 2024.0 | 365.3 | 1730.4 |
+| granite tip | 6.636 (1.72/1.72; 15) | 214.97 (0.43/0.02; 10) | 1057.73 (1.40/1.40; 15) | 167.78 (3.74/3.74; 15) | 15.67 | 1989.8 | 366.5 | 1729.2 |
+| granite control | 6.668 (1.51/0.31; 13) | 215.01 (0.31/0.01; 11) | 1063.04 (1.20/0.27; 13) | 165.34 (2.51/2.51; 15) | 15.44 | 1876.8 | 364.9 | 1729.2 |
+| granite tip, concurrent dispatch | 6.685 (0.91/0.67; 14) | 215.04 (0.33/0.02; 10) | 1064.34 (0.72/0.52; 14) | 167.01 (5.68/4.52; 14) | 15.52 | 1990.0 | 365.1 | 1729.2 |
+| granite tip with the 512-lane norm class | 6.676 (1.07/0.73; 14) | 214.99 (0.32/0.01; 11) | 1063.04 (0.85/0.58; 14) | 164.08 (5.96/2.88; 11) | 15.43 | 1996.9 | 365.4 | 1729.2 |
+| granite llama (recorded) | 5.215 (1.10/0.66; 19) | 151.45 (0.32/0.32) | 813.8 (derived) | not recorded | not recorded | 1761.9 | 284.7 | not recorded |
+
+The 25-token cell (`bench/runB_short/`; llama was not recorded at 25 tokens):
+
+| arm | decode ms/token | prefill = TTFT ms | wall ms (128 tokens) | cpu ms | cpu % | RSS MB | footprint MB | peak GPU MB |
+|---|---|---|---|---|---|---|---|---|
+| E2B base | 10.816 (1.13/0.35; 12) | 88.01 (2.10/0.04; 11) | 1461.67 (1.10/0.37; 12) | 218.81 (6.53/2.93; 12) | 14.87 | 3618.4 | 199.4 | 3389.9 |
+| E2B tip | 10.832 (0.33/0.33; 15) | 88.04 (0.65/0.04; 10) | 1463.68 (0.33/0.33; 15) | 169.34 (1.32/1.06; 14) | 11.61 | 3616.8 | 204.3 | 3389.9 |
+| E2B control | 10.858 (0.32/0.32; 15) | 88.00 (0.50/0.04; 12) | 1467.47 (0.31/0.31; 15) | 170.67 (1.05/1.05; 15) | 11.64 | 3623.6 | 201.4 | 3389.9 |
+| E2B tip, concurrent dispatch | 10.832 (0.34/0.21; 13) | 88.02 (0.67/0.04; 10) | 1463.68 (0.31/0.19; 13) | 170.66 (1.92/1.92; 15) | 11.65 | 3614.5 | 201.7 | 3389.9 |
+| E2B tip with the 512-lane norm class | 10.842 (0.44/0.44; 15) | 88.00 (0.30/0.04; 14) | 1464.88 (0.41/0.41; 15) | 171.04 (2.22/1.31; 14) | 11.68 | 3614.3 | 201.9 | 3389.9 |
+| granite base | 5.555 (0.64/0.64; 15) | 40.01 (0.09/0.09; 15) | 745.46 (0.60/0.60; 15) | 164.21 (5.43/3.41; 12) | 21.92 | 1602.3 | 124.5 | 1483.2 |
+| granite tip | 5.551 (0.54/0.54; 15) | 39.04 (1.33/0.08; 11) | 744.03 (0.52/0.52; 15) | 138.55 (5.91/1.84; 10) | 18.60 | 1603.1 | 127.6 | 1483.1 |
+| granite control | 5.565 (0.50/0.27; 14) | 38.99 (0.67/0.09; 14) | 745.44 (0.47/0.26; 14) | 138.50 (4.06/1.79; 14) | 18.53 | 1595.6 | 126.3 | 1483.1 |
+| granite tip, concurrent dispatch | 5.571 (0.39/0.13; 12) | 39.01 (0.62/0.08; 14) | 747.00 (0.37/0.19; 13) | 137.06 (1.79/1.41; 14) | 18.38 | 1595.1 | 123.2 | 1483.1 |
+| granite tip with the 512-lane norm class | 5.597 (0.35/0.35; 15) | 39.01 (0.65/0.08; 14) | 749.20 (0.32/0.32; 15) | 136.42 (1.61/1.61; 15) | 18.18 | 1589.8 | 124.6 | 1483.1 |
+
+Bound lines (`bound` lines of `decode_arms.out`; time limit max(MAD, 2% of the reference), memory limit 2% of the reference by the tool; the owner's memory rule max(2% of base, |control - tip|) is applied in the notes). `d` is arm minus reference, a negative CPU or time `d` beyond the limit is an improvement the tool prints as `within=true`:
+
+| cell | metric | tip vs base: d (limit) | control vs tip: d (limit) | concurrent vs tip: d (limit) | 512-lane norm vs tip: d (limit) |
+|---|---|---|---|---|---|
+| E2B 1000 | decode ms/token | -0.003 (0.224) | +0.001 (0.224) | +0.005 (0.224) | +0.0375 (0.224) |
+| E2B 1000 | prefill ms | **+4.043 (11.74)** | +0.025 (11.82) | -0.009 (11.82) | -0.007 (11.82) |
+| E2B 1000 | wall ms | +4.01 (40.1) | +1.35 (40.2) | +0.71 (40.2) | +4.60 (40.2) |
+| E2B 1000 | cpu ms | **-49.19 (4.60)** | +0.89 (3.62) | -0.58 (3.62) | -0.34 (3.62) |
+| E2B 1000 | RSS / footprint / GPU bytes | +0.33 MB (75.0) / -7.98 MB (8.53) / 0 (72.4) | +12.4 MB (75.0) / +2.56 MB (8.37) / -1.0 MB (72.4) | +9.55 MB / +3.03 MB / +0.51 MB | +14.2 MB / **+9.62 MB (8.37)** / 0 |
+| granite 1000 | decode ms/token | -0.016 (0.133) | +0.032 (0.133) | +0.049 (0.133) | +0.0395 (0.133) |
+| granite 1000 | prefill ms | **-30.09 (4.90)** | +0.036 (4.30) | +0.063 (4.30) | +0.020 (4.30) |
+| granite 1000 | wall ms | **-32.29 (21.8)** | +5.31 (21.2) | +6.61 (21.2) | +5.31 (21.2) |
+| granite 1000 | cpu ms | **-24.70 (3.85)** | -2.44 (3.60) | -0.77 (3.60) | -3.70 (3.60) |
+| granite 1000 | RSS / footprint / GPU bytes | -34.3 MB (40.5) / +1.20 MB (7.31) / **-1,179,648 B** (34.6 MB) | **-113.0 MB (39.8)** / -1.54 MB (7.33) / 0 | +0.26 MB / -1.36 MB / 0 | +7.1 MB / -1.06 MB / 0 |
+| E2B 25 | decode ms/token | +0.016 (0.216) | +0.026 (0.217) | 0.000 (0.217) | +0.010 (0.217) |
+| E2B 25 | prefill ms | +0.027 (1.76) | -0.037 (1.76) | -0.017 (1.76) | -0.045 (1.76) |
+| E2B 25 | cpu ms | **-49.47 (4.38)** | +1.33 (3.39) | +1.31 (3.39) | +1.70 (3.39) |
+| E2B 25 | RSS / footprint / GPU bytes | -1.6 MB (72.4) / **+4.85 MB (3.99)** / -32,768 B | +6.8 MB / -2.92 MB (4.09) / +32,768 B | -2.2 MB / -2.56 MB / +32,768 B | -2.4 MB / -2.38 MB / -32,768 B |
+| granite 25 | decode ms/token | -0.004 (0.111) | +0.0135 (0.111) | +0.020 (0.111) | +0.046 (0.111) |
+| granite 25 | prefill ms | **-0.976 (0.80)** | -0.047 (0.78) | -0.030 (0.78) | -0.024 (0.78) |
+| granite 25 | cpu ms | **-25.66 (3.28)** | -0.05 (2.77) | -1.49 (2.77) | -2.13 (2.77) |
+| granite 25 | RSS / footprint / GPU bytes | +0.8 MB (32.0) / **+3.18 MB (2.49)** / -131,072 B | -7.5 MB / -1.34 MB (2.55) / 0 | -7.9 MB / -4.46 MB / 0 | -13.2 MB / -3.06 MB / 0 |
+
+Notes on the table. Memory under the owner's rule: granite 1000 RSS control minus tip is -113.0 MB (per-process RSS over the 15 launches of this cell: 1.88 to 2.22 GB, 1.88 to 2.10 GB in the base, tip and control arms), so its limit is 113 MB and tip minus base (-34.3 MB) is inside it; footprint E2B 25 tip minus base +4.85 MB against max(3.99, |control - tip| 2.92) = 3.99 is outside; granite 25 +3.18 MB against max(2.49, 1.34) = 2.49 is outside; the first bench pass (`bench/pre_norm_revert/`, same binaries except `tip`, which then had the 512-lane norm class) read those two cells at -2.79 and -1.90 MB (inside), so the footprint of these two small cells moves by about 3 to 5 MB between passes of the same code. The 512-lane arm's E2B 1000 footprint +9.62 MB (limit 8.37) is the same kind of spread (its first-pass value against base was +2.1 MB). CPU: the tip is 45 to 52 ms per generation below base on E2B (both prompts) and 25 to 28 ms below on granite (both prompts), against limits of 3.3 to 4.6 ms; control against tip is inside the limit in all four cells. Prefill: granite 1000-token -30.09 ms (the shared route compaction; per-slice section), granite 25-token -0.976 ms (limit 0.80); E2B 1000-token **+4.04 ms** (limit 11.74; the kept attention patches, per-slice section 4). The first bench pass is `bench/pre_norm_revert/` (summaries and bound lines; with the 512-lane arm replaced by a 256-lane arm of the same tree): tip minus base E2B 1000 prefill +4.00, granite 1000 prefill -30.08, E2B cpu -45.4 and -51.9, granite cpu -28.3 and -25.4, hashes equal.
+Concurrent dispatch (`tipconc`, same binary as `tip` with `PROXIMA_DISPATCH=concurrent`): decode ms/token minus serial +0.005 (E2B 1000), +0.049 (granite 1000), 0.000 (E2B 25), +0.020 (granite 25), all inside their limits (0.22 to 0.13 ms); prefill within 0.06 ms of serial; wall +0.71, +6.61, +0.00, +2.97 ms; hashes equal to the serial arms in all 90 generations of each cell. Concurrent dispatch moved no cell by more than its limit; whether it is faster in the sense of GPU overlap was not measured separately.
+
+### fresh-process TTFT (3 fresh launches per arm per cell, interleaved base / tip / tip with `PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD=false`; `bench/fresh_ttft/`; `env -i`, `PROXIMA_RUNS=1`, 8 new tokens, `/usr/bin/time -l`; the first generation of each process, so the pipeline compiles are in it)
+
+`ttft` is `decode_gbps_baseline`'s `ttft_ms` of the first generation (it starts after the warm-up call); `warm` is the printed duration of `LoadedModel::warm_resident_buffers` (the tip prints `warmed_buffers=1`: the one checkpoint-mapping buffer).
+
+| cell | base ttft ms (3 launches) | tip, warm-up on: ttft ms; warm ms | tip, warm-up off: ttft ms |
+|---|---|---|---|
+| E2B 1000-token | 747, 744, 753 | 752, 752, 745; 0.507, 0.512, 0.506 | 748, 746, 744 |
+| E2B 25-token | 232, 242, 233 | 243, 238, 238; 0.514, 0.497, 0.524 | 240, 238, 239 |
+| granite 1000-token | 362, 367, 362 | 337, 333, 332; 0.466, 0.457, 0.463 | 338, 333, 330 |
+| granite 25-token | 162, 168, 155 | 161, 155, 153; 0.503, 0.448, 0.451 | 153, 157, 156 |
+
+Process peaks over the 36 launches (RSS / footprint, `time -l`): E2B 1000 3.64 to 3.67 GB / 371 to 386 MB; E2B 25 3.59 to 3.61 GB / 174 to 196 MB; granite 1000 1.71 to 1.72 GB / 321 to 330 MB; granite 25 1.52 to 1.53 GB / 77 to 91 MB; the warm-up on or off does not separate the ranges. CPU and GPU bytes are in each launch's `run=done` line. The fresh-process TTFT is 1.26 to 4.30 times the warm TTFT of the bench in the same cells (E2B 25-token 232 to 243 ms against 88; granite 25-token 153 to 168 against 39; E2B 1000-token 744 to 753 against 591; granite 1000-token 330 to 367 against 215).
+Result: the warm-up declares one buffer in 0.45 to 0.52 ms and moves no fresh-process TTFT: on minus off medians are +6, -1, 0 and -1 ms (E2B 1000, E2B 25, granite 1000, granite 25) inside launch-to-launch spreads of 2 to 8 ms. The cold first-command-buffer cost the attribution round measured (44 to 52 ms) is not reduced by `useResource` on the mapping with no dispatch. This is a negative; its mechanism is open (what the driver does at first dispatch was not traced), and the first pass (`bench/pre_norm_revert/fresh_ttft/`) reads the same way (E2B 1000 on 766, 759, 749 against off 763, 763, 752; granite 25 on 150, 155, 153 against off 149, 156, 157).
+
+### parity (all three)
+
+Tests: gate table above (746 interop tests including `llama_parity_`, `generic_verify_llama_parity_`, 7 `arch_data_digest_`; 875/929/896/867 omega tests; 803 tensor). Model responses: text hash and token id list equal across base, tip, control, concurrent and the 512-lane binary on 90 generations per model and prompt (bench section); equal to round three's hashes. Wall clock and memory: the bench tables and bound lines above.
+
+### per-slice target and measured (granite 1000-token prefill step 0, own-cb census, `rank/`; before = b6463985 on this box and session, `rank/base_granite_prefill.md`, `census/base_granite_prefill/`; memory beside each row)
+
+| slice | before | target | measured at `8017c747` | memory / bytes |
+|---|---|---|---|---|
+| route prepass runs per step | 72 (physical dispatches 455 = 383 + 72) | 24 | 24 prepass runs, each two dispatches (count, place): physical 431 = 383 + 48 (`census_granite_prefill/stdout.log`) | peak GPU bytes granite 1000-token tip minus base -1,179,648 B (limit 34.6 MB); the attribution round's expectation -1.55 MB (48 x 32,260 B) is DERIVED and 0.37 MB larger than this measurement; dispatches per step 455 to 431 |
+| us per prepass | 426.1 / 426.3 (one pass, one threadgroup; round four attribution `ab/gemm/prepassonly_r*`) | 210 | 59.6 marginal, 62.6 single (the two-pass prepass alone, captured down-projection record, 24 members, 30 rounds, one process, `ab/prepass/AB_PREPASS_ONLY_r1`, CoV not available from one process); the compaction buffer is 36,356 B and identical to the other pipeline's | compaction buffer 36,356 B per run |
+| stacked expert GEMM class `Q8_0 4194304`, 72 ops | 164.84 ms (165.0 in the attribution round); per op gate 2177.1, up+silu 2258.9, down 2432.3 us (warm) | none stated | 135.33 ms; per op gate 1791.2, up+silu 1838.4, down 2009.3 us; -29.5 ms on the class; the first tip census read 134.07 | Metal bytes as above; the census can now time the compacted gemms (round three: unreplayable) |
+| attention per layer (`cached attention partial`, 24 ops) | 1142.3 us/op, 27.42 ms (1154 in the attribution round); the 3 processes of the in-process A/B read 1140.0 for the b6463985 text | at most 800 | **1099.0 us/op, 26.38 ms (census); 1099.0 (median of 3 processes of the A/B)**; the target is not reached; 26.4 ms of the attention class against 27.43 | bound buffers 138,235,140 B unchanged; static threadgroup bytes 4480 -> 9600 |
+| E2B hidden-width norms, 242 ops | 2.90 ms own-cb, 1.46 in situ marginal (round four attribution census); omission cost 1.976 ms | -0.61 ms (step basis) / -0.16 (sequence basis) | the 512-lane class is reverted (failures, item 4); at the final tip 2.96 / 2.95 ms own-cb, 1.46 / 1.43 marginal (two E2B decode censuses, `rank/e2b_decode.md`, `rank/e2b_decode_r2.md`); with the class in place 2.91 / 2.86 and 1.44 / 1.48 (`rank/pre_norm_revert_*`) | tg bytes 32 -> 64 (512 lanes) for the three groups (`ab/norm/*/stdout.log`, `ab res`) |
+| host `__findenv_locked` frame | 49 of 548 non-parked top-of-stack samples, 8.9% (E2B 1000-token decode, all threads); 61 of 432, 14.1% (granite 25-token) | 0 | 0 of 167 (E2B) and 0 of 339 (granite); the `std::sys::env::unix::getenv` frame 7 -> 0 and 11 -> 0 (`sample/*_diff.md`, `sample <pid> 3 1` (3 s at 1 ms), 8 generations per process, one process per arm, the sample started 5 s (E2B) and 3 s (granite) after launch) | CPU per generation (bench): E2B 1000 230.19 -> 181.01 ms, E2B 25 218.81 -> 169.34, granite 1000 192.48 -> 167.78, granite 25 164.21 -> 138.55 (limits 3.3 to 4.6); wall unchanged (see the bound table) |
+| cold first command buffer (fresh process) | granite TTFT 51.56 vs 5.45 ms and E2B 96.61 vs 6.83 (attribution `pq/`) | -46 and -90 ms | no change: fresh-process TTFT tip on vs off +6, -1, 0, -1 ms (previous section) | no added device bytes; warm-up call 0.45 to 0.52 ms |
+
+Attention decomposition (kept patches), by in-process A/B on the captured dispatch (marginal us/op, medians): granite 1000-token prefill step 0, group sha `7ecfbc94`, 24 ops, tg 64: production 1099.0; the b6463985 text 1140.0; the unrolled text 1275.2 (`ab/attn/r4_p{1,2,3}`, bit comparison `differing=0` over 1,024,000 elements for all three). E2B 1000-token prefill step 0, the sliding-window row-tiled group (`omega_cached_attention_h1_g8_d256_..._ln511_..._rt`, 28 ops, tg 128), whole-process censuses of three binaries (two rounds each, `census/e2b_prefill_bisect_*`, warm us/op): b6463985 928.9 and 923.8; `8694ec12` alone (skip rescale) 945.4 and 944.4; the final attention state (`8694ec12` + `f7e91d71`, the unroll reverted) 1126.2 and 1125.3; the global d512 group (not row-tiled, 7 ops) 2606.3, 2614.2, 2611.4 unchanged. Class totals: E2B attention core 44.19 ms (b6463985) -> 50.07 ms (final tip) own-cb; the bench E2B 1000-token prefill +4.04 ms. DERIVED from the per-op figures: 28 x 18.5 us = 0.52 ms for the skip and 28 x 181 us = 5.07 ms for the q-tile staging at E2B, against 24 x -36 us = -0.9 ms for the staging at granite. The threadgroup bytes of the E2B kernel with and without the staging were not read, and no per-patch A/B was run at the E2B shape, so the mechanism inside the kernel is untraced.
+
+### timeline (owner trim: decode timelines dropped; granite prefill is the one model whose per-slice target missed, so its step 0 was timelined; `timeline/granite_prefill.md`, instrument census process; before = `evidence/round3/timeline/granite_prefill.md`)
+
+| granite prefill step 0 (1000 tokens, 1 chunk of 383 ops) | round three tip | final tip |
+|---|---|---|
+| chunk busy sum, ms | 241.839 | 205.793 |
+| last GPU end, ms | 298.348 | 267.579 |
+| lead idle before the chunk, ms | 56.509 | 61.786 |
+| commit end to scheduled callback, ms | 49.890 | 55.576 |
+| scheduled callback to GPU start, ms | 0.242 | 0.401 |
+| encode, ms | 3.242 | 2.646 (5.771 by the chunk window) |
+| pipeline compile (misses), ms | 32.573 (33) | 25.568 (33); the first census run of this round read 218.116 ms for the same 33 misses |
+| step wall, ms | 389.990 | 353.933 |
+| chunk busy / step wall (DERIVED, census process, not the bench) | 62.0% | 58.1% |
+
+The GPU work in the chunk shrank by 36.0 ms and the last GPU end by 30.8 ms; the queueing between commit and the scheduled callback grew by 5.7 ms and the lead idle by 5.3 ms. The bench prefill difference tip minus base is -30.09 ms.
+
+### unexplained, not closed, unmeasured, assumed
+
+- E2B 1000-token prefill attention +5.8 ms own-cb and +4.04 ms bench prefill: isolated to `f7e91d71` (about +181 us/op on the 28 sliding d256 ops) and `8694ec12` (about +18.5 us/op); both are in the tree. The staging helps at the granite shape (-36 us/op) and hurts at the E2B d256 shape; the kernel-internal cause and a shape rule that separates the two were not found. Whether to keep either patch is not decided here.
+- The attention target (at most 800 us/op) is not reached: 1099.0 us/op after the unroll revert; the unrolled loop is slower (+122 us/op) for a reason that was not traced.
+- The 512-lane kernel the small patch emits differs in output bits from the 256-lane kernel; the attribution round's 512-lane variant did not. The difference between the two 512-lane texts was not examined.
+- Warm-up of resident buffers: no TTFT effect; what the driver does at the first dispatch (the 44 to 52 ms) is not traced; the interop front end is the example only (no serving front end in the tree constructs a `ServingConfig` after `LoadedModel::load`).
+- Queueing between commit and the scheduled callback at granite prefill (49.9 ms at round three, 55.6 ms now) and the lead idle: no cause traced.
+- The prepass-only time (59.6 us) is one process of 30 rounds in a replay, not an in-situ figure with the barrier between the two passes; the expert-class gain (-29.5 ms) is measured by the census, and 72 x 426 us - 24 x 60 us = 29.3 ms (DERIVED) matches it to 0.3 ms.
+- Footprint cells E2B 25-token (+4.85 MB, limit 3.99) and granite 25-token (+3.18 MB, limit 2.49) are outside the memory rule in the final pass and inside it in the first pass (-2.79, -1.90 MB); per-process RSS of granite 1000-token spans 1.88 to 2.22 GB across launches of one binary.
+- E2B `sample` windows: non-parked samples 548 (base) and 167 (tip), with `iokit_user_client_trap` 383 against 70; the windows were not aligned to a generation phase, so only the `__findenv_locked` and `getenv` frame counts are used.
+- GPU busy fraction of the bench binaries (not instrument builds); the census figure above is DERIVED from one process.
+- The owner's trim removed the E2B and granite decode timelines and 2 timed runs per process; the 7-run table of round three is not comparable cell by cell.
+- Not run: the 16 large-checkpoint tests, every 26B test; CUDA and WGSL do not read the route keys, the staged q tile or the warm-up.
+- Decisions that belong to the owner and are not taken here: whether `f7e91d71` and `8694ec12` stay, whether the warm-up call stays, the attention target.
+
+### re-prove
+
+```
+cargo nextest run -p proxima-tensor --cargo-profile gate                                                        # 803
+cargo nextest run -p omega --features metal --cargo-profile gate                                                 # 875
+cargo nextest run -p omega --features metal,instrument --cargo-profile gate                                      # 929
+cargo nextest run -p omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 896
+cargo nextest run -p omega --features metal,metal-q4k-split-k --cargo-profile gate                               # 867
+cargo nextest run -p omega --no-default-features --features std --lib --cargo-profile gate                       # 151
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 746
+decode_arms --prompt-file prompt1k.txt --log launches.log --processes 3 --runs 5 --new-tokens 128 --arm base=<b6463985 export, own target dir> --arm tip=<tip> --arm control=<copy of tip> --arm tipconc=<copy of tip> --arm-env tipconc:PROXIMA_DISPATCH=concurrent --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
+fresh TTFT: env -i PATH=/usr/bin:/bin HOME=$HOME PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_DECODE_MODEL_GGUF=<blob> PROXIMA_SPECULATIVE_TYPES=none PROXIMA_PROMPT="$(cat prompt)" PROXIMA_MAX_TOKENS=8 PROXIMA_RUNS=1 [PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD=false] /usr/bin/time -l decode_gbps_baseline
+M0_OUT_DIR=<dir> M0_MODEL_GGUF=<granite blob> M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=0 PROXIMA_PROMPT_FILE=prompt1k.txt gemma4_decode_kernel_census     # built --features std,metal,instrument; decode: M0_MAX_TOKENS=24 M0_CAPTURE_STEPS=23
+attribution_rank rank --census <dir> --llama evidence/slice0/llama_ops/granite_ops.tsv --ntok 512,488 --requests 3 --floor-us 4.0
+step_timeline <dir>/decode_telemetry.log <dir>/census_dispatches.csv 0
+attention A/B: AB_VARIANT_DIR=<dir with <sha16>.<tag>.metal> AB_SPAN_FULL=1 AB_SHA=<prefix> AB_STEP=0 AB_ROUNDS=30 AB_FLUSH_MIB=0 PROXIMA_GEMMA4_E2B_GGUF=<granite blob> PROXIMA_PROMPT_FILE=prompt1k.txt norm_variant_ab     # variants in ab/attn/var*
+prepass: AB_PREPASS_ONLY=1 (or AB_GEMM_ONLY=1) AB_PACKED=1 AB_VARIANT_DIR=ab/prepass/var AB_SHA=732f8c6a AB_STEP=0 AB_ROUNDS=30 AB_FLUSH_MIB=0 ... norm_variant_ab
+norm bases: AB_STEP_SEQUENCE=1 (or AB_SEQUENCE=1) AB_SPAN_FULL=1 AB_STEP=5 AB_ROUNDS=30 AB_FLUSH_MIB=0 AB_VARIANT_DIR=ab/norm/var PROXIMA_GEMMA4_E2B_GGUF=<E2B blob> ... norm_variant_ab
+frames: sample <pid> 3 1 -file sample.txt during a PROXIMA_RUNS=8 decode_gbps_baseline run; sample_diff <base sample.txt> <tip sample.txt>
+```
+Missing for CI: no job runs the Metal tests, the arms bench, the censuses, the A/B tool or the fresh-process runs; every row re-proves on this box only. Binaries and raw logs are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine4/` (`bin/`, `logs/`).

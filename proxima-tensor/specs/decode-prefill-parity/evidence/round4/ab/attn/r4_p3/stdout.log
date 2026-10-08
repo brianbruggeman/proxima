@@ -1,0 +1,12 @@
+ab capture excludes 0 unreplayable dispatches of 369
+ab capture: step=0 dispatches=369 groups=21
+ab res sha=7ecfbc9417b8be2c arm=base tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=7ecfbc9417b8be2c:base wall_ms=65.258 cpu_ms=3.335 cpu_pct=5.1 rss_peak_mb=1621.0 footprint_mb=185.5 gpu_alloc_mb=1515.3 load_before=5.73 load_after=5.73
+ab res sha=7ecfbc9417b8be2c arm=7ecfbc9417b8be2c.oldtext tg_static_bytes=4480 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=7ecfbc9417b8be2c:7ecfbc9417b8be2c.oldtext wall_ms=67.400 cpu_ms=2.894 cpu_pct=4.3 rss_peak_mb=1621.0 footprint_mb=185.5 gpu_alloc_mb=1515.3 load_before=5.73 load_after=5.73
+ab res sha=7ecfbc9417b8be2c arm=7ecfbc9417b8be2c.unrolled tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=7ecfbc9417b8be2c:7ecfbc9417b8be2c.unrolled wall_ms=74.208 cpu_ms=3.142 cpu_pct=4.2 rss_peak_mb=1621.0 footprint_mb=185.5 gpu_alloc_mb=1515.3 load_before=5.73 load_after=5.73
+ab bits sha=7ecfbc9417b8be2c threads=64000 extents=[1000, 8, 2, 64] arm=base elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7ecfbc9417b8be2c threads=64000 extents=[1000, 8, 2, 64] arm=7ecfbc9417b8be2c.oldtext elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=7ecfbc9417b8be2c threads=64000 extents=[1000, 8, 2, 64] arm=7ecfbc9417b8be2c.unrolled elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab group sha=7ecfbc9417b8be2c threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=base marginal_us=1098.992 single_us=1099.000
+ab group sha=7ecfbc9417b8be2c threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=7ecfbc9417b8be2c.oldtext marginal_us=1140.892 single_us=1149.917
+ab group sha=7ecfbc9417b8be2c threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=7ecfbc9417b8be2c.unrolled marginal_us=1273.433 single_us=1299.375
+ab cell label=process wall_ms=2773.802 cpu_ms=815.976 cpu_pct=29.4 rss_peak_mb=1621.0 footprint_mb=181.5 gpu_alloc_mb=1515.3 load_before=5.73 load_after=5.59

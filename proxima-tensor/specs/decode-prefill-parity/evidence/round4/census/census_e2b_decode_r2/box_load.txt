@@ -1,0 +1,4 @@
+"Device Utilization %"=92
+"Device Utilization %"=0
+"Device Utilization %"=0
+13:55  up 7 days, 23:59, 3 users, load averages: 4.35 3.95 5.14

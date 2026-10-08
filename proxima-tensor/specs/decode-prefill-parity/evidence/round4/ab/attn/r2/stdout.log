@@ -1,0 +1,21 @@
+ab capture excludes 0 unreplayable dispatches of 369
+ab capture: step=0 dispatches=369 groups=21
+ab res sha=57675ce2456e37cd arm=base tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=57675ce2456e37cd:base wall_ms=79.192 cpu_ms=3.300 cpu_pct=4.2 rss_peak_mb=1615.9 footprint_mb=189.3 gpu_alloc_mb=1515.3 load_before=5.59 load_after=5.59
+ab res sha=57675ce2456e37cd arm=57675ce2456e37cd.noskip tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=57675ce2456e37cd:57675ce2456e37cd.noskip wall_ms=74.410 cpu_ms=3.130 cpu_pct=4.2 rss_peak_mb=1615.9 footprint_mb=189.3 gpu_alloc_mb=1515.3 load_before=5.59 load_after=5.59
+ab res sha=57675ce2456e37cd arm=57675ce2456e37cd.nostage tg_static_bytes=4480 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=57675ce2456e37cd:57675ce2456e37cd.nostage wall_ms=77.906 cpu_ms=3.118 cpu_pct=4.0 rss_peak_mb=1615.9 footprint_mb=189.3 gpu_alloc_mb=1515.3 load_before=5.59 load_after=5.59
+ab res sha=57675ce2456e37cd arm=57675ce2456e37cd.nounroll tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=57675ce2456e37cd:57675ce2456e37cd.nounroll wall_ms=70.125 cpu_ms=3.123 cpu_pct=4.5 rss_peak_mb=1615.9 footprint_mb=189.3 gpu_alloc_mb=1515.3 load_before=5.59 load_after=5.59
+ab res sha=57675ce2456e37cd arm=57675ce2456e37cd.oldtext tg_static_bytes=4480 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=57675ce2456e37cd:57675ce2456e37cd.oldtext wall_ms=68.230 cpu_ms=3.110 cpu_pct=4.6 rss_peak_mb=1615.9 footprint_mb=189.3 gpu_alloc_mb=1515.3 load_before=5.59 load_after=5.59
+ab res sha=57675ce2456e37cd arm=57675ce2456e37cd.tiptext tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=57675ce2456e37cd:57675ce2456e37cd.tiptext wall_ms=75.983 cpu_ms=3.051 cpu_pct=4.0 rss_peak_mb=1615.9 footprint_mb=189.3 gpu_alloc_mb=1515.3 load_before=5.59 load_after=5.59
+ab bits sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] arm=base elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] arm=57675ce2456e37cd.noskip elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] arm=57675ce2456e37cd.nostage elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] arm=57675ce2456e37cd.nounroll elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] arm=57675ce2456e37cd.oldtext elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] arm=57675ce2456e37cd.tiptext elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab group sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=base marginal_us=1276.017 single_us=1313.042
+ab group sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=57675ce2456e37cd.noskip marginal_us=1257.119 single_us=1276.125
+ab group sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=57675ce2456e37cd.nostage marginal_us=1339.569 single_us=1347.792
+ab group sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=57675ce2456e37cd.nounroll marginal_us=1161.317 single_us=1180.708
+ab group sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=57675ce2456e37cd.oldtext marginal_us=1130.675 single_us=1136.458
+ab group sha=57675ce2456e37cd threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=57675ce2456e37cd.tiptext marginal_us=1279.308 single_us=1296.625
+ab cell label=process wall_ms=5652.052 cpu_ms=839.022 cpu_pct=14.8 rss_peak_mb=1615.9 footprint_mb=185.4 gpu_alloc_mb=1515.3 load_before=5.12 load_after=5.59
