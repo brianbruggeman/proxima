@@ -256,7 +256,14 @@ fn main() {
         Ok(other) => panic!("PROXIMA_DECODE_SPECULATIVE={other}: expected `none` or unset"),
         Err(_) => SpeculativeConfig::default(),
     };
+    let warm_model_buffers_at_load = match std::env::var("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD").as_deref() {
+        Ok("true") => true,
+        Ok("false") => false,
+        Ok(other) => panic!("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD={other}: expected `true` or `false`"),
+        Err(_) => ServingConfig::default().warm_model_buffers_at_load,
+    };
     let serving_config = ServingConfig {
+        warm_model_buffers_at_load,
         speculative,
         gpu_layers: GPU_LAYERS_ALL,
         numeric_policy,
@@ -273,6 +280,18 @@ fn main() {
         dispatch_type,
         ..ServingConfig::default()
     };
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    {
+        let warm_started = Instant::now();
+        let warmed_buffers = model
+            .warm_resident_buffers(&serving_config)
+            .expect("declare the model buffers to the driver");
+        eprintln!(
+            "decode_gbps_baseline warm_model_buffers={warm_model_buffers_at_load} warmed_buffers={warmed_buffers} warm_ms={:.3}",
+            warm_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     // Chat-template prompt (same convention as `gemma4_correctness_gate.rs`)
     // chosen because its locked greedy completion runs the full 46-token
