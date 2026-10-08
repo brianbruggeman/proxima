@@ -261,7 +261,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             block_maximum = simd_max(block_maximum);
             float previous_maximum = row_maximum[vector];
             float next_maximum = max(previous_maximum, block_maximum);
-            float rescale = (previous_maximum == -INFINITY) ? 0.0f : exp(previous_maximum - next_maximum);
+            float rescale = (previous_maximum == -INFINITY) ? 0.0f : (previous_maximum == next_maximum ? 1.0f : exp(previous_maximum - next_maximum));
             float block_sum = 0.0f;
             FOR_UNROLL for (long item = 0L; item < block / 32L; item++) {
                 if (item * 32L < columns) {
