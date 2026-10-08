@@ -80,9 +80,9 @@
 //!   `ATTENTION_ROWS_HEAD_DIMS_PER_SIMDGROUP`/`ATTENTION_ROWS_MIN_SIMDGROUPS`/
 //!   `ATTENTION_ROWS_MMA_MIN_QUERY_ROWS`/`ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE`/
 //!   `ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS`/`ATTENTION_ROWS_TARGET_SIMDGROUPS`/
-//!   `ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES` (always compiled) -- the row-tiled cached attention form's block width, split
+//!   `ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES`/`ATTENTION_ROWS_MMA_HALF` (always compiled) -- the row-tiled cached attention form's block width, split
 //!   granule, simdgroup rule, smallest K, tile height, per-simdgroup register
-//!   budget, split target and staged query-tile byte cap (`crate::msl::rows_per_threadgroup`, `query_tile_staged`, `row_tiled_simdgroups`,
+//!   budget, split target, staged query-tile byte cap and matrix-multiply operand precision (`crate::msl::rows_per_threadgroup`, `query_tile_staged`, `row_tiled_simdgroups`,
 //!   `row_tiled_splits`), read only under `metal-attn-split-rows`; see
 //!   `omega-runtime.toml`'s `[attention_rows]`.
 //! - `SELECTION_TOP_FRACTION_MIN_ROWS` (always compiled) -- the row count at which the rank-count top-fraction expression lowers to one selection kernel; see `omega-runtime.toml`'s `[selection]`.

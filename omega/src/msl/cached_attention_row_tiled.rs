@@ -33,11 +33,33 @@ use super::*;
 /// split's scalar pass for the tail, and the shared merge. The row count, the
 /// live cached rows and the split count are read at run time, so one compiled
 /// kernel serves every K and every bucket.
+///
+/// The operand precision of the two matrix multiplies is `[attention_rows].mma_precision`:
+/// `float` multiplies `simdgroup_float8x8` fragments; `half` narrows each fragment to
+/// `simdgroup_half8x8` as it is loaded (the `simdgroup_load` overloads in
+/// [`HALF_OPERAND_HELPERS`]) and still accumulates into `simdgroup_float8x8`, the way
+/// llama.cpp's half flash attention does over a half K/V. The softmax is float in both.
 pub(super) fn render_cached_attention_row_tiled(
     resolved: &BoundOp,
     entry: &str,
     rows_per_threadgroup: u64,
     simdgroups: u64,
+) -> Result<String, EmitError> {
+    render_cached_attention_row_tiled_with(
+        resolved,
+        entry,
+        rows_per_threadgroup,
+        simdgroups,
+        crate::sized::ATTENTION_ROWS_MMA_HALF,
+    )
+}
+
+pub(super) fn render_cached_attention_row_tiled_with(
+    resolved: &BoundOp,
+    entry: &str,
+    rows_per_threadgroup: u64,
+    simdgroups: u64,
+    half_operands: bool,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -76,6 +98,8 @@ pub(super) fn render_cached_attention_row_tiled(
         crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
     );
     let substitutions = [
+        ("@MMA_HELPERS@", if half_operands { HALF_OPERAND_HELPERS } else { "" }.to_string()),
+        ("@OPERAND@", if half_operands { "simdgroup_half8x8" } else { "simdgroup_float8x8" }.to_string()),
         ("@ENTRY@", entry.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
         ("@QUERY_GROUPS@", query_groups.to_string()),
@@ -103,7 +127,14 @@ pub(super) fn render_cached_attention_row_tiled(
     Ok(source)
 }
 
-const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long splits; };
+pub(super) const HALF_OPERAND_HELPERS: &str = r#"
+inline simdgroup_half8x8 narrow_fragment(simdgroup_float8x8 wide) { simdgroup_half8x8 narrowed; narrowed.thread_elements()[0] = half(wide.thread_elements()[0]); narrowed.thread_elements()[1] = half(wide.thread_elements()[1]); return narrowed; }
+inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride, ulong2 origin, bool transposed) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride, origin, transposed); destination = narrow_fragment(loaded); }
+inline void simdgroup_load(thread simdgroup_half8x8& destination, device const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
+inline void simdgroup_load(thread simdgroup_half8x8& destination, threadgroup const float* source, ulong stride) { simdgroup_float8x8 loaded; simdgroup_load(loaded, source, stride); destination = narrow_fragment(loaded); }
+"#;
+
+const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long splits; };@MMA_HELPERS@
 
 #define FOR_UNROLL _Pragma("clang loop unroll(full)")
 
@@ -196,7 +227,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             simdgroup_float8x8 scores[key_tiles_per_group][tile_blocks];
             FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) { FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { scores[group][vector_block] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
             for (int depth = 0; depth < (int)half_dim; depth += 8 * (int)depth_unroll) {
-                simdgroup_float8x8 key_even_tile[key_tiles_per_group][depth_unroll]; simdgroup_float8x8 key_odd_tile[key_tiles_per_group][depth_unroll];
+                @OPERAND@ key_even_tile[key_tiles_per_group][depth_unroll]; @OPERAND@ key_odd_tile[key_tiles_per_group][depth_unroll];
                 FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
                     int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
                     if (key_tile < fragments) {
@@ -210,7 +241,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                 }
                 FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) {
                     long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
-                    simdgroup_float8x8 query_even[depth_unroll]; simdgroup_float8x8 query_odd[depth_unroll];
+                    @OPERAND@ query_even[depth_unroll]; @OPERAND@ query_odd[depth_unroll];
                     FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
                         if (stage_query) {
                             threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
@@ -315,11 +346,11 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             device const float* value_ptr = (mode == 0L ? in6 : in7) + key0 * (kv_heads * head_dim) + kv_head * head_dim;
             int fragments = (int)((columns + 7L) / 8L);
             for (int key_tile = 0; key_tile < fragments; key_tile++) {
-                simdgroup_float8x8 weights[tile_blocks];
+                @OPERAND@ weights[tile_blocks];
                 FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_load(weights[vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
                 FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
                     int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
-                    simdgroup_float8x8 value;
+                    @OPERAND@ value;
                     simdgroup_load(value, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
                     FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value, accumulated[slot][vector_block]); }
                 }
