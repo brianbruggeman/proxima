@@ -1676,13 +1676,14 @@ pub(super) fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
             output_axes,
             ..
         } => {
-            is_cooperative_reduce_op(*reduce_op)
-                && gather_is_reduction_invariant(resolved, output_axes)
-                && meets_cooperative_min_len(reduction_len(resolved, output_axes))
-                && !short_fold_prefers_serial(
-                    reduction_len(resolved, output_axes),
-                    output_count(resolved, output_axes),
-                )
+            if !is_cooperative_reduce_op(*reduce_op)
+                || !gather_is_reduction_invariant(resolved, output_axes)
+            {
+                return false;
+            }
+            let length = reduction_len(resolved, output_axes);
+            meets_cooperative_min_len(length)
+                && !short_fold_prefers_serial(length, output_count(resolved, output_axes))
         }
         _ => false,
     }
@@ -1976,12 +1977,13 @@ pub(crate) fn debug_tiled_gemm_classification(
 /// nonzero stride would select different experts during the reduction and is
 /// therefore kept on the serial path.
 pub(super) fn gather_is_reduction_invariant(resolved: &BoundOp, output_axes: &[u16]) -> bool {
-    let reduce_dims = reduction_dims(resolved, output_axes);
-    resolved.operands().iter().all(|(_, _, lookup)| {
-        lookup.as_ref().is_none_or(|lookup| {
-            reduce_dims
-                .iter()
-                .all(|&dim| lookup.index_layout.stride(dim) == 0)
+    with_reduction_dims(resolved, output_axes, |reduce_dims| {
+        resolved.operands().iter().all(|(_, _, lookup)| {
+            lookup.as_ref().is_none_or(|lookup| {
+                reduce_dims
+                    .iter()
+                    .all(|&dim| lookup.index_layout.stride(dim) == 0)
+            })
         })
     })
 }
@@ -2030,10 +2032,11 @@ pub(super) fn output_count(resolved: &BoundOp, output_axes: &[u16]) -> u64 {
 /// over nothing) has no `reduce_dims`, so `product()` over the empty
 /// iterator correctly yields `1` — one element, itself.
 pub(super) fn reduction_len(resolved: &BoundOp, output_axes: &[u16]) -> u64 {
-    reduction_dims(resolved, output_axes)
-        .iter()
-        .map(|&dim| resolved.extents[dim as usize])
-        .product()
+    with_reduction_dims(resolved, output_axes, |dims| {
+        dims.iter()
+            .map(|&dim| resolved.extents[dim as usize])
+            .product()
+    })
 }
 
 pub(super) fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
