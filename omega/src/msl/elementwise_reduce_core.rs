@@ -651,6 +651,28 @@ pub(super) fn push_epilogue_body_steps(
     )
 }
 
+/// One divmod step of the serial body's flat-index unflatten: `target`
+/// receives `remaining % extent`, `remaining` becomes `remaining / extent`.
+/// `narrow` runs the pair in `uint` -- Apple GPUs emulate integer divide, and
+/// the 64-bit sequence is the longer one -- which is exact only when
+/// [`serial_reduce_index32_fits`] bounded the iteration space.
+fn serial_decode_step(
+    indent: &str,
+    remaining: &str,
+    target: &str,
+    extent: &str,
+    narrow: bool,
+) -> String {
+    if narrow {
+        format!(
+            "{indent}{target} = (long)((uint){remaining} % (uint){extent}); \
+             {remaining} = (long)((uint){remaining} / (uint){extent});\n"
+        )
+    } else {
+        format!("{indent}{target} = {remaining} % {extent}; {remaining} /= {extent};\n")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_serial_reduce_body(
     source: &mut String,
@@ -672,6 +694,7 @@ pub(super) fn push_serial_reduce_body(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
+    let narrow = serial_reduce_index32_fits(resolved, output_axes) && coord_index32_override();
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
@@ -683,9 +706,12 @@ pub(super) fn push_serial_reduce_body(
         source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
         source.push_str("    long remaining = (long)gid;\n");
         for index in (0..output_rank).rev() {
-            source.push_str(&format!(
-                "    output_coord[{index}] = remaining % u.output_extents[{index}]; \
-                 remaining /= u.output_extents[{index}];\n"
+            source.push_str(&serial_decode_step(
+                "    ",
+                "remaining",
+                &format!("output_coord[{index}]"),
+                &format!("u.output_extents[{index}]"),
+                narrow,
             ));
         }
         for (index, dim) in output_axes.iter().enumerate() {
@@ -702,13 +728,20 @@ pub(super) fn push_serial_reduce_body(
         source.push_str(&format!(
             "        long reduction_coord[{reduce_rank_len}];\n"
         ));
-        source.push_str("        long remaining_r = r;\n");
-        for index in (0..reduce_rank).rev() {
-            source.push_str(&format!(
-                "        reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
-                 remaining_r /= u.reduction_extents[{index}];\n"
+        if reduce_rank > 1 {
+            source.push_str("        long remaining_r = r;\n");
+        }
+        for index in (1..reduce_rank).rev() {
+            source.push_str(&serial_decode_step(
+                "        ",
+                "remaining_r",
+                &format!("reduction_coord[{index}]"),
+                &format!("u.reduction_extents[{index}]"),
+                narrow,
             ));
         }
+        let outermost = if reduce_rank > 1 { "remaining_r" } else { "r" };
+        source.push_str(&format!("        reduction_coord[0] = {outermost};\n"));
         for (index, dim) in reduce_dims.iter().enumerate() {
             source.push_str(&format!(
                 "        full_coord[{dim}] = reduction_coord[{index}];\n"

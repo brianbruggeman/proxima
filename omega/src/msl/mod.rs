@@ -195,6 +195,9 @@ mod attn_split_tests;
 mod cooperative_fold_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod serial_fold_index32_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
