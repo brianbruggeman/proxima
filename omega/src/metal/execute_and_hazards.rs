@@ -1407,6 +1407,51 @@ pub(super) fn record_hazard_class(class: HazardClass, arena_recycled: bool) {
     }
 }
 
+/// One structured event per op-level hazard step: `reason` is `none` when no
+/// barrier fired, else `true_node_dependency` when an input names the node that wrote its
+/// buffer, `pointer_alias_without_node_dependency` when a RAW fired on a
+/// shared buffer identity alone, `arena_slot_reuse` when a recycled slot was
+/// handed to an unrelated node, `persistent_buffer_rewrite` otherwise.
+/// `run_before` is the dispatching positions encoded since the previous
+/// barrier. Reads: [`HazardState::raw_edges`], [`record_hazard_class`].
+#[cfg(feature = "instrument")]
+pub(super) fn record_hazard_op(
+    position: usize,
+    node: NodeId,
+    class: HazardClass,
+    arena_recycled: bool,
+    edges: (u64, u64),
+    run_before: u64,
+) {
+    let (true_edges, alias_edges) = edges;
+    let reason = match class {
+        HazardClass::None => "none",
+        HazardClass::Raw if true_edges > 0 => "true_node_dependency",
+        HazardClass::Raw => "pointer_alias_without_node_dependency",
+        HazardClass::Waw | HazardClass::War if arena_recycled => "arena_slot_reuse",
+        HazardClass::Waw | HazardClass::War => "persistent_buffer_rewrite",
+    };
+    debug!(
+        site = "op",
+        position = position as u64,
+        node = ?node,
+        class = ?class,
+        reason,
+        true_edges,
+        alias_edges,
+        run_before,
+        "hazard_op"
+    );
+}
+
+/// The barriers an op fires against buffers it wrote itself (attention
+/// split to merge, route prepass to place to consumer): each reads what the
+/// same op just wrote, so the reason is always an internal true dependency.
+#[cfg(feature = "instrument")]
+pub(super) fn record_internal_barrier(site: &'static str) {
+    debug!(site, reason = "internal_true_dependency", "hazard_internal_barrier");
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ExpertSourceCacheState {
     Hit,
@@ -1425,6 +1470,14 @@ pub(super) enum ExpertSourceCacheState {
 pub(super) struct HazardState {
     pub(super) tracker: HazardTracker<*const ProtocolObject<dyn MTLBuffer>>,
     pub(super) inputs: Vec<*const ProtocolObject<dyn MTLBuffer>>,
+    /// The node whose output last wrote each buffer identity, so a RAW barrier
+    /// can tell an input that reads the writer's own node from a buffer
+    /// identity two unrelated nodes happen to share.
+    #[cfg(feature = "instrument")]
+    pub(super) writer_nodes: std::collections::HashMap<*const ProtocolObject<dyn MTLBuffer>, NodeId>,
+    /// Dispatching positions encoded since the last barrier this state saw.
+    #[cfg(feature = "instrument")]
+    pub(super) dispatches_since_barrier: u64,
 }
 
 impl HazardState {
@@ -1432,12 +1485,56 @@ impl HazardState {
         Self {
             tracker: HazardTracker::new(),
             inputs: Vec::new(),
+            #[cfg(feature = "instrument")]
+            writer_nodes: std::collections::HashMap::new(),
+            #[cfg(feature = "instrument")]
+            dispatches_since_barrier: 0,
         }
     }
 
     pub(super) fn reset(&mut self) {
         self.tracker.reset();
         self.inputs.clear();
+        #[cfg(feature = "instrument")]
+        {
+            self.writer_nodes.clear();
+            self.dispatches_since_barrier = 0;
+        }
+    }
+
+    /// For the op about to be encoded: how many of its read operands name the
+    /// node that wrote their buffer since the last barrier (a true dataflow
+    /// edge) and how many only share a written buffer identity with a
+    /// different node. `read_nodes` pairs with `self.inputs` in order.
+    #[cfg(feature = "instrument")]
+    pub(super) fn raw_edges(&self, read_nodes: &[NodeId]) -> (u64, u64) {
+        read_nodes
+            .iter()
+            .zip(&self.inputs)
+            .filter(|(_, pointer)| self.tracker.written.contains(*pointer))
+            .fold((0, 0), |(true_edges, alias_edges), (node, pointer)| {
+                if self.writer_nodes.get(pointer) == Some(node) {
+                    (true_edges + 1, alias_edges)
+                } else {
+                    (true_edges, alias_edges + 1)
+                }
+            })
+    }
+
+    /// Records one encoded op after its hazard step: the node that now owns
+    /// the output buffer identity, and the run length since the last barrier.
+    #[cfg(feature = "instrument")]
+    pub(super) fn note_dispatch(
+        &mut self,
+        output: *const ProtocolObject<dyn MTLBuffer>,
+        node: NodeId,
+        barrier_fired: bool,
+    ) {
+        if barrier_fired {
+            self.dispatches_since_barrier = 0;
+        }
+        self.dispatches_since_barrier += 1;
+        self.writer_nodes.insert(output, node);
     }
 }
 
