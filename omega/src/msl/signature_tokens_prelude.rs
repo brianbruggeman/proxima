@@ -113,7 +113,7 @@ pub(super) fn grid_threads(
                         .iter()
                         .map(|&axis| resolved.extents[axis as usize])
                         .product(),
-                    expert_grouped_launch_tokens(&block).unwrap_or_else(|| {
+                    expert_grouped_launch_tokens(resolved, &block).unwrap_or_else(|| {
                         block
                             .token_axes
                             .iter()
