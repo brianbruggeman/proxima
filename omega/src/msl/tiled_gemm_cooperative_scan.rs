@@ -1457,9 +1457,6 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str(&format!(
         "                long row_base = u.operand_base[{weight}] + dense_weight_batch_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + k0 * u.operand_strides[{weight}][{reduce_dim}];\n"
     ));
-    source.push_str(&format!(
-        "                for (long w_k = 0; w_k < {block_k}; ++w_k) {{\n"
-    ));
     // Dense reduce extents carry no super-block-multiple guarantee the way
     // `PackedRowBlock`'s own `Q4K_BLOCK_ELEMENTS` gate gives the packed path
     // (`push_tiled_gemm_body`'s own doc names that guarantee explicitly) --
@@ -1467,21 +1464,29 @@ pub(super) fn push_dense_batched_gemm_body(
     // otherwise read `w_k` elements past the operand's real reduce extent on
     // the last `k0` step. Zero-fill out-of-range k, matching the boundary-
     // tile mask this same function already applies on `feature_extent`/
-    // `token_extent`.
-    source.push_str("                    if (k0 + w_k < u.reduction_total) {\n");
+    // `token_extent`. Every guarded global load is issued into `w_regs`
+    // before the first threadgroup store, so the loads are independent of one
+    // another instead of each waiting behind the previous store.
+    source.push_str(&format!("                {dense_element_type} w_regs[{block_k}];\n"));
     source.push_str(&format!(
-        "                        long w_off = row_base + w_k * u.operand_strides[{weight}][{reduce_dim}];\n"
+        "                long w_stride = u.operand_strides[{weight}][{reduce_dim}];\n"
     ));
-    let dense_weight_index = format!("w_row * {block_k} + w_k");
+    source.push_str("                #pragma unroll\n");
     source.push_str(&format!(
-        "                        weight_tile[{dense_weight_index}] = {dense_value_cast}{};\n",
-        operand_read(weight, "w_off", None)
+        "                for (int w_k = 0; w_k < {block_k}; ++w_k) {{\n"
     ));
-    source.push_str("                    } else {\n");
     source.push_str(&format!(
-        "                        weight_tile[{dense_weight_index}] = {dense_zero_literal};\n"
+        "                    w_regs[w_k] = (k0 + w_k < u.reduction_total) ? {dense_value_cast}{} : {dense_zero_literal};\n",
+        operand_read(weight, "row_base + (long)w_k * w_stride", None)
     ));
-    source.push_str("                    }\n");
+    source.push_str("                }\n");
+    source.push_str("                #pragma unroll\n");
+    source.push_str(&format!(
+        "                for (int w_k = 0; w_k < {block_k}; ++w_k) {{\n"
+    ));
+    source.push_str(&format!(
+        "                    weight_tile[w_row * {block_k} + w_k] = w_regs[w_k];\n"
+    ));
     source.push_str("                }\n");
     source.push_str("            } else {\n");
     let dense_weight_fill_index = format!("w_row * {block_k} + fill_k");
