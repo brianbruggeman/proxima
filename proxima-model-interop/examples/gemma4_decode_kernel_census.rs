@@ -1118,10 +1118,11 @@ mod harness {
             launched.len(),
             "invariant 1: distinct kernels x counts must equal captured dispatches"
         );
+        let prepass_dispatches: u64 = launched.iter().map(|dispatch| dispatch.route_prepass_dispatches).sum();
         assert_eq!(
-            Some(launched.len() as u64),
+            Some(launched.len() as u64 + prepass_dispatches),
             capture_stats.physical_dispatch_calls,
-            "invariant 1: captured dispatches must equal the step's physical_dispatch_calls"
+            "invariant 1: captured dispatches plus the route prepasses the capture does not record must equal the step's physical_dispatch_calls"
         );
         let unexplained: Vec<&&Group> = failed
             .iter()
