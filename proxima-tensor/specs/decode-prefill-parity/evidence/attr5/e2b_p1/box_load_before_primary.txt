@@ -1,0 +1,12 @@
+Thu Oct  8 16:54:35 CDT 2026
+16:54  up 8 days,  2:58, 3 users, load averages: 3.68 4.49 6.43
+"Device Utilization %"=83
+"Device Utilization %"=0
+"Device Utilization %"=0
+42600 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+17029  68.4 <local daemon, name withheld>
+  476  42.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533   9.6 /Applications/iTerm.app/Contents/MacOS/iTerm2
+  888   9.5 /usr/libexec/sysmond
+54647   5.4 claude

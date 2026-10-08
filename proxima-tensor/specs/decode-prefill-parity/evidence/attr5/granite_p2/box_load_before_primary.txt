@@ -1,0 +1,12 @@
+Thu Oct  8 16:56:40 CDT 2026
+16:56  up 8 days, 3 hrs, 3 users, load averages: 3.97 4.44 6.16
+"Device Utilization %"=79
+"Device Utilization %"=0
+"Device Utilization %"=0
+42600 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+17029  66.2 <local daemon, name withheld>
+  476  39.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  888  10.9 /usr/libexec/sysmond
+54533   6.2 /Applications/iTerm.app/Contents/MacOS/iTerm2
+78004   4.9 /Users/brianbruggeman/.codex/packages/app-server-daemon/releases/0.162.0-aarch64-apple-darwin/bin/codex

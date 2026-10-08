@@ -1,0 +1,7 @@
+run=done run_index=0 wall_ms=1217.677 cpu_user_ms=190.243 cpu_sys_ms=118.997 cpu_ms=309.240 cpu_pct=25.40 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=1 wall_ms=1063.806 cpu_user_ms=95.174 cpu_sys_ms=71.258 cpu_ms=166.432 cpu_pct=15.64 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=2 wall_ms=1064.199 cpu_user_ms=97.729 cpu_sys_ms=72.528 cpu_ms=170.257 cpu_pct=16.00 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=3 wall_ms=1062.758 cpu_user_ms=95.796 cpu_sys_ms=71.446 cpu_ms=167.242 cpu_pct=15.74 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=4 wall_ms=1057.631 cpu_user_ms=95.576 cpu_sys_ms=69.625 cpu_ms=165.201 cpu_pct=15.62 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=5 wall_ms=1058.415 cpu_user_ms=96.425 cpu_sys_ms=70.712 cpu_ms=167.137 cpu_pct=15.79 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+   6 speculative_types=SpeculativeTypeSet(64)

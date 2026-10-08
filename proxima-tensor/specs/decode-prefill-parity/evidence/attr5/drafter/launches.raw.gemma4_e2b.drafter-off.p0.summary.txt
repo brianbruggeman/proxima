@@ -1,0 +1,7 @@
+run=done run_index=0 wall_ms=2210.083 cpu_user_ms=206.433 cpu_sys_ms=161.222 cpu_ms=367.655 cpu_pct=16.64 tokens_generated=128 prompt_token_count=970 text_hash=8fec363180a250e0
+run=done run_index=1 wall_ms=2012.472 cpu_user_ms=126.862 cpu_sys_ms=55.403 cpu_ms=182.265 cpu_pct=9.06 tokens_generated=128 prompt_token_count=970 text_hash=8fec363180a250e0
+run=done run_index=2 wall_ms=2009.940 cpu_user_ms=128.365 cpu_sys_ms=57.045 cpu_ms=185.410 cpu_pct=9.22 tokens_generated=128 prompt_token_count=970 text_hash=8fec363180a250e0
+run=done run_index=3 wall_ms=2002.707 cpu_user_ms=126.963 cpu_sys_ms=56.487 cpu_ms=183.450 cpu_pct=9.16 tokens_generated=128 prompt_token_count=970 text_hash=8fec363180a250e0
+run=done run_index=4 wall_ms=2002.470 cpu_user_ms=128.983 cpu_sys_ms=57.579 cpu_ms=186.562 cpu_pct=9.32 tokens_generated=128 prompt_token_count=970 text_hash=8fec363180a250e0
+run=done run_index=5 wall_ms=2010.725 cpu_user_ms=125.137 cpu_sys_ms=54.877 cpu_ms=180.014 cpu_pct=8.95 tokens_generated=128 prompt_token_count=970 text_hash=8fec363180a250e0
+   6 speculative_types=SpeculativeTypeSet(0)
