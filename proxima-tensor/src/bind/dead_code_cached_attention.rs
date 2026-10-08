@@ -147,22 +147,27 @@ pub(super) fn read_nodes(computed: &BoundOp) -> BTreeSet<NodeId> {
 pub fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BTreeSet<NodeId> {
     let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
     let reads: Vec<BTreeSet<NodeId>> = resolved.iter().map(read_nodes).collect();
+    let produced: Vec<Vec<NodeId>> = resolved.iter().map(output_nodes).collect();
     let mut readers: BTreeMap<NodeId, usize> = BTreeMap::new();
     for node in reads.iter().flatten() {
         *readers.entry(*node).or_insert(0) += 1;
     }
-    let mut positions: BTreeMap<NodeId, Vec<usize>> = BTreeMap::new();
-    for (position, computed) in resolved.iter().enumerate() {
-        positions.entry(computed.node).or_default().push(position);
+    let mut owners: BTreeMap<NodeId, Vec<usize>> = BTreeMap::new();
+    for (position, nodes) in produced.iter().enumerate() {
+        for node in nodes {
+            owners.entry(*node).or_default().push(position);
+        }
     }
-    let is_unread = |node: &NodeId, readers: &BTreeMap<NodeId, usize>| {
-        !outputs.contains(node) && readers.get(node).copied().unwrap_or(0) == 0
+    let is_dead = |position: usize, readers: &BTreeMap<NodeId, usize>| {
+        produced[position]
+            .iter()
+            .all(|node| !outputs.contains(node) && readers.get(node).copied().unwrap_or(0) == 0)
     };
-    let mut pending: Vec<usize> = resolved
-        .iter()
-        .enumerate()
-        .filter(|(_, computed)| is_unread(&computed.node, &readers))
-        .map(|(position, _)| position)
+    let mut queued: Vec<bool> = (0..resolved.len())
+        .map(|position| is_dead(position, &readers))
+        .collect();
+    let mut pending: Vec<usize> = (0..resolved.len())
+        .filter(|position| queued[*position])
         .collect();
     let mut dead = BTreeSet::new();
     while let Some(position) = pending.pop() {
@@ -171,8 +176,11 @@ pub fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -
             if let Some(count) = readers.get_mut(read) {
                 *count -= 1;
             }
-            if is_unread(read, &readers) {
-                pending.extend(positions.get(read).into_iter().flatten().copied());
+            for owner in owners.get(read).into_iter().flatten().copied() {
+                if !queued[owner] && is_dead(owner, &readers) {
+                    queued[owner] = true;
+                    pending.push(owner);
+                }
             }
         }
     }
@@ -186,6 +194,33 @@ pub fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -
         );
     }
     dead
+}
+
+/// Every node `computed` writes: its own, plus the extra outputs of the kinds
+/// that write more than one. An op is live while any of them is read or
+/// requested, so a consumer that reads only an extra output (the stacked
+/// route and weight pair of a fused top-k, whose primary route nothing reads)
+/// keeps the op that writes it.
+fn output_nodes(computed: &BoundOp) -> Vec<NodeId> {
+    let mut nodes = vec![computed.node];
+    match &computed.kind {
+        BoundOpKind::MoeTopK { .. } => {
+            nodes.extend(computed.kind.moe_topk_extra_outputs_iter(0).map(|(node, _)| node));
+        }
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_weight_sum,
+            new_weight_sum,
+            new_attended,
+            ..
+        } => nodes.extend([*cached_weight_sum, *new_weight_sum, *new_attended]),
+        BoundOpKind::GatedDeltaNet { state_out, .. } => nodes.push(*state_out),
+        BoundOpKind::RoundBatchedReduce { round_outputs, .. } => {
+            nodes.extend(round_outputs.iter().skip(1).copied());
+        }
+        BoundOpKind::ElementwiseTwin { twin_node, .. } => nodes.push(*twin_node),
+        _ => {}
+    }
+    nodes
 }
 
 /// Drops every [`dead_resolved_nodes`] entry from `resolved` — the one
@@ -1120,7 +1155,7 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         }
-        let mut source_nodes = alloc::vec![
+        let mut source_nodes = vec![
             query_even,
             query_odd,
             cached_key_even,
@@ -1561,7 +1596,7 @@ pub(super) fn cached_attention_candidates(
                 dtype: DType::Float32,
                 extents: softmax_node.extents.clone(),
                 kind: BoundOpKind::CachedSoftmaxWeights {
-                    operands: alloc::vec![
+                    operands: vec![
                         (cached_score_parts[0], cached_scores_layout, None),
                         (new_masked, new_scores_layout, None),
                         (new_value, new_value_layout, None),
@@ -1585,28 +1620,28 @@ pub(super) fn cached_attention_candidates(
             // Multiply(step1, step2). `epilogue_operands` carries [157, 158,
             // 164] — 162's own result is the implicit slot at index 3
             // (`BoundOpKind::Reduce::epilogue_body`'s own doc).
-            let epilogue_operands: BoundOperands = alloc::vec![
+            let epilogue_operands: BoundOperands = vec![
                 (sum_parts[0], sum_a_layout, None),
                 (sum_parts[1], sum_b_layout, None),
                 (attended_parts[1], attended_layout, None),
             ];
             let epilogue_body = ComposedBody {
-                steps: alloc::vec![
+                steps: vec![
                     BodyStep {
                         op: ScalarOp::Add,
-                        args: alloc::vec![StepArg::Operand(0), StepArg::Operand(1)],
+                        args: vec![StepArg::Operand(0), StepArg::Operand(1)],
                     },
                     BodyStep {
                         op: ScalarOp::Reciprocal,
-                        args: alloc::vec![StepArg::Step(0)],
+                        args: vec![StepArg::Step(0)],
                     },
                     BodyStep {
                         op: ScalarOp::Add,
-                        args: alloc::vec![StepArg::Operand(3), StepArg::Operand(2)],
+                        args: vec![StepArg::Operand(3), StepArg::Operand(2)],
                     },
                     BodyStep {
                         op: ScalarOp::Multiply,
-                        args: alloc::vec![StepArg::Step(1), StepArg::Step(2)],
+                        args: vec![StepArg::Step(1), StepArg::Step(2)],
                     },
                 ],
             };
@@ -2246,7 +2281,7 @@ pub(super) fn removable_attention_dependencies(
                 Some(Op::Elementwise { operands, .. }) => {
                     operands.iter().map(|(source, _)| *source).collect()
                 }
-                Some(Op::Reduce(reduce)) => alloc::vec![reduce.operand],
+                Some(Op::Reduce(reduce)) => vec![reduce.operand],
                 Some(Op::Input { .. })
                 | Some(Op::Iota { .. })
                 | Some(Op::Constant { .. })
