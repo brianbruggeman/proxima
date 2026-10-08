@@ -24,6 +24,18 @@
 //! - `no_barriers`: concurrent dispatch with none; the output is not valid.
 //! - `serial_encoder`: the serial replay the other arms' output is compared with.
 //!
+//! `DF_MODE=stamped` (serial capture; one structured `dispatch_stamp` event per
+//! stamped dispatch to `DF_STAMP_EVENTS_FILE`):
+//! - `recorded`: the captured step on one serial encoder (the reference).
+//! - `split_unstamped`: one serial encoder per dispatch in one command buffer, nothing sampled.
+//! - `split_stamped`: the same split, each encoder sampling start and end GPU timestamps.
+//! - `empty_split_stamped`: the split and stamped replay with every kernel empty, the
+//!   instrument's reading of a dispatch with no work in it.
+//! - `empty_same_bindings`: the one-encoder empty stream of `floor` mode.
+//!
+//! `dispatch_instream.csv` and `dispatch_instream_groups.csv` carry the per-dispatch and
+//! per-kernel medians over the rounds beside the isolated marginal.
+//!
 //! The per-dispatch table (`DF_OUT_DIR/dispatch_table.csv`) carries, per
 //! dispatch, its kernel, grid, threadgroups, bindings, bytes bound, threadgroup
 //! memory, pipeline switch, barrier flags, the isolated marginal GPU time of its
@@ -46,12 +58,18 @@ mod harness {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fmt::Write as _;
     use std::fs::File;
+    use std::sync::Arc;
 
     use memmap2::{Mmap, MmapOptions};
     use omega::CapturedDispatch;
     use proxima_gguf::parse_complete;
     use proxima_gguf::types::GgmlType;
-    use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig, TokenEvent};
+    use proxima_telemetry::export::Exporter;
+    use proxima_telemetry::recorder::Recorder;
+    use conflaguration::Settings as _;
+    use proxima_model_interop::{
+        GPU_LAYERS_ALL, LoadedModel, ServingConfig, SpeculativeConfig, SpeculativeSettings, TokenEvent,
+    };
 
     use super::cell::Cell;
 
@@ -85,8 +103,9 @@ mod harness {
         })
     }
 
-    fn serving_config(dispatch_type: omega::DispatchType) -> ServingConfig<'static> {
+    fn serving_config(dispatch_type: omega::DispatchType, speculative: SpeculativeConfig<'_>) -> ServingConfig<'_> {
         ServingConfig {
+            speculative,
             gpu_layers: GPU_LAYERS_ALL,
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -121,8 +140,15 @@ mod harness {
             omega::DispatchType::Serial
         };
         let mut on_token = |_event: TokenEvent<'_>| ControlFlow::Continue(());
+        let speculative_settings = SpeculativeSettings::from_env().expect("PROXIMA_SPECULATIVE_* env parses");
+        println!("df speculative_types={}", speculative_settings.speculative_types);
         model
-            .generate_streaming(prompt, step + 1, serving_config(dispatch_type), &mut on_token)
+            .generate_streaming(
+                prompt,
+                step + 1,
+                serving_config(dispatch_type, speculative_settings.as_speculative_config()),
+                &mut on_token,
+            )
             .expect("greedy decode");
         let dispatches: Vec<CapturedDispatch> = omega::take_captured_dispatches()
             .into_iter()
@@ -161,6 +187,24 @@ mod harness {
         (span(ISOLATED_BATCH) - span(1)) / (ISOLATED_BATCH - 1) as f64
     }
 
+    /// Median over `ISOLATED_REPEATS` of one dispatch alone in a command buffer after a cache flush, less the same
+    /// without the flush: the command buffer floor cancels, what remains is the weights coming from DRAM.
+    fn cold_penalty_ns(dispatch: &CapturedDispatch) -> f64 {
+        let flush_bytes = env_usize("DF_FLUSH_MIB", 256) * 1024 * 1024;
+        let sample = |flush: bool| -> f64 {
+            let spans: Vec<f64> = (0..ISOLATED_REPEATS)
+                .map(|_| {
+                    if flush {
+                        omega::flush_gpu_caches(flush_bytes).expect("flush gpu caches");
+                    }
+                    dispatch.time_gpu_ns(1).expect("isolated replay")
+                })
+                .collect();
+            median(&spans)
+        };
+        sample(true) - sample(false)
+    }
+
     fn longest_run(flags: &[bool]) -> usize {
         let mut longest = 0;
         let mut run = 0;
@@ -179,11 +223,12 @@ mod harness {
         Serial,
         Noop { minimal_bindings: bool, one_threadgroup: bool },
         Barriered { flags: Vec<bool>, prepass_barrier: bool },
+        Split { sample: bool, empty_kernels: bool },
     }
 
     impl Replay {
-        fn run(&self, dispatches: &[CapturedDispatch]) -> f64 {
-            match self {
+        fn run(&self, dispatches: &[CapturedDispatch]) -> (f64, Vec<[u64; 2]>) {
+            let span = match self {
                 Self::Serial => CapturedDispatch::time_gpu_sequence_ns(dispatches),
                 Self::Noop { minimal_bindings, one_threadgroup } => {
                     CapturedDispatch::time_gpu_noop_sequence_ns(dispatches, *minimal_bindings, *one_threadgroup)
@@ -191,8 +236,12 @@ mod harness {
                 Self::Barriered { flags, prepass_barrier } => {
                     CapturedDispatch::time_gpu_sequence_barriered_ns(dispatches, flags, *prepass_barrier)
                 }
-            }
-            .expect("whole-step replay")
+                Self::Split { sample, empty_kernels } => {
+                    return CapturedDispatch::time_gpu_sequence_split_ns(dispatches, *sample, *empty_kernels)
+                        .expect("split whole-step replay");
+                }
+            };
+            (span.expect("whole-step replay"), Vec::new())
         }
     }
 
@@ -221,6 +270,276 @@ mod harness {
                 replay: Replay::Barriered { flags: vec![false; records], prepass_barrier: false },
             },
         ]
+    }
+
+    fn stamped_arms() -> Vec<Arm> {
+        vec![
+            Arm { label: "recorded", replay: Replay::Serial },
+            Arm {
+                label: "split_unstamped",
+                replay: Replay::Split { sample: false, empty_kernels: false },
+            },
+            Arm {
+                label: "split_stamped",
+                replay: Replay::Split { sample: true, empty_kernels: false },
+            },
+            Arm {
+                label: "empty_split_stamped",
+                replay: Replay::Split { sample: true, empty_kernels: true },
+            },
+            Arm {
+                label: "empty_same_bindings",
+                replay: Replay::Noop { minimal_bindings: false, one_threadgroup: false },
+            },
+        ]
+    }
+
+    /// One dispatch of the stamped replay, medians over the rounds.
+    struct InstreamRow {
+        index: usize,
+        node: u32,
+        kernel: String,
+        grid_threads: u64,
+        threadgroups: u64,
+        bindings: usize,
+        bytes_bound_full: u64,
+        static_threadgroup_bytes: usize,
+        dynamic_threadgroup_bytes: usize,
+        pipeline_switch: bool,
+        isolated_ns: f64,
+        round4_isolated_ns: f64,
+        cold_penalty_ns: f64,
+        instream_ns: f64,
+        instream_min_ns: f64,
+        instream_max_ns: f64,
+        instream_cov_pct: f64,
+        gap_ns: f64,
+        empty_instream_ns: f64,
+        empty_gap_ns: f64,
+    }
+
+    impl InstreamRow {
+        fn excess_ns(&self) -> f64 {
+            self.instream_ns - self.isolated_ns
+        }
+
+        fn ratio(&self) -> f64 {
+            self.instream_ns / self.isolated_ns.max(1.0)
+        }
+
+        /// In-stream time less what the same instrument reads for an empty kernel with the same launch.
+        fn work_ns(&self) -> f64 {
+            self.instream_ns - self.empty_instream_ns
+        }
+
+        fn work_excess_ns(&self) -> f64 {
+            self.work_ns() - self.isolated_ns
+        }
+    }
+
+    /// Per dispatch, over the rounds: `(duration ns, gap ns)`. The gap of dispatch 0 is 0:
+    /// nothing precedes it in the stamped span.
+    fn duration_and_gap(rounds: &[Vec<[u64; 2]>], count: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let durations = (0..count)
+            .map(|index| rounds.iter().map(|round| (round[index][1] - round[index][0]) as f64).collect())
+            .collect();
+        let gaps = (0..count)
+            .map(|index| {
+                rounds
+                    .iter()
+                    .map(|round| match index {
+                        0 => 0.0,
+                        _ => round[index][0].saturating_sub(round[index - 1][1]) as f64,
+                    })
+                    .collect()
+            })
+            .collect();
+        (durations, gaps)
+    }
+
+    fn instream_rows(
+        dispatches: &[CapturedDispatch],
+        marginals: &BTreeMap<(String, u64, u64), f64>,
+        stamped: &[Vec<[u64; 2]>],
+        empty: &[Vec<[u64; 2]>],
+        round4: &BTreeMap<usize, (u32, String, f64)>,
+        cold_penalties: &[f64],
+    ) -> Vec<InstreamRow> {
+        let (durations, gaps) = duration_and_gap(stamped, dispatches.len());
+        let (empty_durations, empty_gaps) = duration_and_gap(empty, dispatches.len());
+        let mut previous_pipeline = usize::MAX;
+        dispatches
+            .iter()
+            .enumerate()
+            .map(|(index, dispatch)| {
+                let switch = dispatch.pipeline_identity() != previous_pipeline;
+                previous_pipeline = dispatch.pipeline_identity();
+                InstreamRow {
+                    index,
+                    node: dispatch.node,
+                    kernel: dispatch.entry.clone(),
+                    grid_threads: dispatch.grid.threads,
+                    threadgroups: dispatch.threadgroup_count(),
+                    bindings: dispatch.buffer_binding_count(),
+                    bytes_bound_full: dispatch.bound_buffer_bytes_full(),
+                    static_threadgroup_bytes: dispatch.pipeline_resources().0,
+                    dynamic_threadgroup_bytes: dispatch.dynamic_threadgroup_bytes(),
+                    pipeline_switch: switch,
+                    isolated_ns: marginals[&group_key(dispatch)],
+                    cold_penalty_ns: cold_penalties[index],
+                    round4_isolated_ns: round4
+                        .get(&index)
+                        .filter(|(node, kernel, _)| *node == dispatch.node && *kernel == dispatch.entry)
+                        .map_or(f64::NAN, |(_, _, isolated)| *isolated),
+                    instream_ns: median(&durations[index]),
+                    instream_min_ns: durations[index].iter().copied().fold(f64::INFINITY, f64::min),
+                    instream_max_ns: durations[index].iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    instream_cov_pct: cov_percent(&durations[index]),
+                    gap_ns: median(&gaps[index]),
+                    empty_instream_ns: median(&empty_durations[index]),
+                    empty_gap_ns: median(&empty_gaps[index]),
+                }
+            })
+            .collect()
+    }
+
+    fn write_instream_csv(directory: &str, rows: &[InstreamRow]) {
+        let mut table = String::from(
+            "index,node,kernel,grid_threads,threadgroups,buffer_bindings,bytes_bound_full,static_threadgroup_bytes,dynamic_threadgroup_bytes,pipeline_switch,isolated_marginal_ns,round4_isolated_marginal_ns,cold_penalty_ns,instream_ns_median,instream_ns_min,instream_ns_max,instream_cov_pct,gap_ns_median,empty_instream_ns_median,empty_gap_ns_median,instream_minus_isolated_ns,instream_over_isolated,work_ns,work_minus_isolated_ns\n",
+        );
+        for row in rows {
+            writeln!(
+                table,
+                "{},{},{},{},{},{},{},{},{},{},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{:.2},{:.0},{:.0},{:.0},{:.0},{:.3},{:.0},{:.0}",
+                row.index,
+                row.node,
+                row.kernel,
+                row.grid_threads,
+                row.threadgroups,
+                row.bindings,
+                row.bytes_bound_full,
+                row.static_threadgroup_bytes,
+                row.dynamic_threadgroup_bytes,
+                u8::from(row.pipeline_switch),
+                row.isolated_ns,
+                row.round4_isolated_ns,
+                row.cold_penalty_ns,
+                row.instream_ns,
+                row.instream_min_ns,
+                row.instream_max_ns,
+                row.instream_cov_pct,
+                row.gap_ns,
+                row.empty_instream_ns,
+                row.empty_gap_ns,
+                row.excess_ns(),
+                row.ratio(),
+                row.work_ns(),
+                row.work_excess_ns()
+            )
+            .unwrap();
+        }
+        std::fs::write(format!("{directory}/dispatch_instream.csv"), table).expect("write dispatch_instream");
+    }
+
+    fn write_instream_groups(directory: &str, rows: &[InstreamRow]) {
+        let mut groups: BTreeMap<&str, Vec<&InstreamRow>> = BTreeMap::new();
+        for row in rows {
+            groups.entry(row.kernel.as_str()).or_default().push(row);
+        }
+        let mut table = String::from(
+            "kernel,dispatches,threadgroups_mean,single_threadgroup_dispatches,isolated_ms,instream_ms,gap_ms,empty_instream_ms,empty_gap_ms,instream_minus_isolated_ms,instream_over_isolated,work_ms,work_minus_isolated_ms,cold_penalty_ms\n",
+        );
+        for (kernel, members) in &groups {
+            let sum = |field: fn(&InstreamRow) -> f64| members.iter().map(|row| field(row)).sum::<f64>() / 1e6;
+            let (isolated, instream) = (sum(|row| row.isolated_ns), sum(|row| row.instream_ns));
+            writeln!(
+                table,
+                "{kernel},{},{:.1},{},{isolated:.4},{instream:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.4},{:.4},{:.4}",
+                members.len(),
+                members.iter().map(|row| row.threadgroups as f64).sum::<f64>() / members.len() as f64,
+                members.iter().filter(|row| row.threadgroups <= 1).count(),
+                sum(|row| row.gap_ns),
+                sum(|row| row.empty_instream_ns),
+                sum(|row| row.empty_gap_ns),
+                instream - isolated,
+                instream / isolated.max(f64::MIN_POSITIVE),
+                sum(InstreamRow::work_ns),
+                sum(InstreamRow::work_excess_ns),
+                sum(|row| row.cold_penalty_ns)
+            )
+            .unwrap();
+        }
+        std::fs::write(format!("{directory}/dispatch_instream_groups.csv"), table).expect("write instream groups");
+    }
+
+    fn print_top(label: &str, rows: &[InstreamRow], min_isolated_ns: f64, key: fn(&InstreamRow) -> f64, count: usize) {
+        let mut ranked: Vec<&InstreamRow> = rows.iter().filter(|row| row.isolated_ns >= min_isolated_ns).collect();
+        ranked.sort_by(|left, right| key(right).partial_cmp(&key(left)).expect("finite"));
+        for row in ranked.into_iter().take(count) {
+            println!(
+                "df top {label} index={} node={} kernel={} threadgroups={} bindings={} bytes_bound_full={} isolated_ns={:.0} instream_ns={:.0} excess_ns={:.0} ratio={:.2} gap_ns={:.0} empty_instream_ns={:.0} work_ns={:.0} work_excess_ns={:.0}",
+                row.index,
+                row.node,
+                row.kernel,
+                row.threadgroups,
+                row.bindings,
+                row.bytes_bound_full,
+                row.isolated_ns,
+                row.instream_ns,
+                row.excess_ns(),
+                row.ratio(),
+                row.gap_ns,
+                row.empty_instream_ns,
+                row.work_ns(),
+                row.work_excess_ns()
+            );
+        }
+    }
+
+    fn span_ms(rounds: &[Vec<[u64; 2]>]) -> Vec<f64> {
+        rounds
+            .iter()
+            .map(|round| (round[round.len() - 1][1] - round[0][0]) as f64 / 1e6)
+            .collect()
+    }
+
+    fn print_group_sums(label: &str, members: &[&InstreamRow]) {
+        let sum_ms = |field: fn(&InstreamRow) -> f64| members.iter().map(|row| field(row)).sum::<f64>() / 1e6;
+        println!(
+            "df instream {label} dispatches={} isolated_ms={:.4} round4_isolated_ms={:.4} instream_ms={:.4} gap_ms={:.4} empty_instream_ms={:.4} empty_gap_ms={:.4} excess_ms={:.4} work_ms={:.4} work_excess_ms={:.4} cold_penalty_ms={:.4}",
+            members.len(),
+            sum_ms(|row| row.isolated_ns),
+            sum_ms(|row| row.round4_isolated_ns),
+            sum_ms(|row| row.instream_ns),
+            sum_ms(|row| row.gap_ns),
+            sum_ms(|row| row.empty_instream_ns),
+            sum_ms(|row| row.empty_gap_ns),
+            sum_ms(InstreamRow::excess_ns),
+            sum_ms(InstreamRow::work_ns),
+            sum_ms(InstreamRow::work_excess_ns),
+            sum_ms(|row| row.cold_penalty_ns),
+        );
+    }
+
+    fn print_instream_summary(rows: &[InstreamRow], stamped: &[Vec<[u64; 2]>], empty: &[Vec<[u64; 2]>]) {
+        let (span, empty_span) = (span_ms(stamped), span_ms(empty));
+        println!(
+            "df instream spans stamped_p50_ms={:.4} stamped_cov_pct={:.2} empty_stamped_p50_ms={:.4} empty_stamped_cov_pct={:.2} round4_matched={}",
+            median(&span),
+            cov_percent(&span),
+            median(&empty_span),
+            cov_percent(&empty_span),
+            rows.iter().filter(|row| !row.round4_isolated_ns.is_nan()).count()
+        );
+        let all: Vec<&InstreamRow> = rows.iter().collect();
+        let singles: Vec<&InstreamRow> = rows.iter().filter(|row| row.threadgroups <= 1).collect();
+        let others: Vec<&InstreamRow> = rows.iter().filter(|row| row.threadgroups > 1).collect();
+        print_group_sums("all", &all);
+        print_group_sums("single_threadgroup", &singles);
+        print_group_sums("multi_threadgroup", &others);
+        print_top("excess_absolute", rows, 0.0, InstreamRow::excess_ns, 40);
+        print_top("excess_ratio_isolated_at_least_2us", rows, 2000.0, InstreamRow::ratio, 40);
+        print_top("work_excess_absolute", rows, 0.0, InstreamRow::work_excess_ns, 40);
     }
 
     fn barrier_arms(live: Vec<bool>, node: Vec<bool>, slot: Vec<bool>) -> Vec<Arm> {
@@ -323,11 +642,89 @@ mod harness {
         std::fs::write(format!("{directory}/group_rollup.csv"), groups).expect("write group rollup");
     }
 
+    type StampRecorder = Arc<Recorder<proxima_telemetry::clock::GlobalClock>>;
+
+    /// `DF_STAMP_EVENTS_FILE=<path>` points a file-sink exporter at the process recorder so the
+    /// per-dispatch `dispatch_stamp` events of the stamped arms land in a file. The ring is
+    /// drained from this thread between replays, never during one.
+    fn install_stamp_recorder() -> Option<StampRecorder> {
+        let path = std::env::var("DF_STAMP_EVENTS_FILE").ok()?;
+        proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(
+            "dispatch_floor=info,omega::metal::arena_encode_dispatch_finish=debug",
+        ));
+        let exporter = Exporter::file(path);
+        Some(
+            Recorder::builder()
+                .ring_capacity(2048)
+                .export(exporter)
+                .expect("file exporter installs")
+                .install()
+                .expect("telemetry recorder installs"),
+        )
+    }
+
+    fn drain(recorder: Option<&StampRecorder>) {
+        if let Some(recorder) = recorder {
+            let mut drained = 0;
+            loop {
+                let batch = recorder.drain();
+                drained += batch;
+                if batch == 0 {
+                    break;
+                }
+            }
+            println!("df events_drained={drained}");
+        }
+    }
+
+    /// `DF_ISOLATED_TABLE=<dispatch_table.csv>` is an earlier run's table: `index -> (node, kernel, isolated_marginal_ns)`.
+    fn round4_table() -> BTreeMap<usize, (u32, String, f64)> {
+        let Ok(path) = std::env::var("DF_ISOLATED_TABLE") else {
+            return BTreeMap::new();
+        };
+        let text = std::fs::read_to_string(&path).expect("read DF_ISOLATED_TABLE");
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().expect("table header").split(',').collect();
+        let column = |name: &str| header.iter().position(|candidate| *candidate == name).expect("column present");
+        let (index, node, kernel, isolated) =
+            (column("index"), column("node"), column("kernel"), column("isolated_marginal_ns"));
+        lines
+            .map(|line| {
+                let fields: Vec<&str> = line.split(',').collect();
+                (
+                    fields[index].parse().expect("index"),
+                    (fields[node].parse().expect("node"), fields[kernel].to_string(), fields[isolated].parse().expect("isolated")),
+                )
+            })
+            .collect()
+    }
+
+    fn report_instream(
+        directory: &str,
+        dispatches: &[CapturedDispatch],
+        marginals: &BTreeMap<(String, u64, u64), f64>,
+        labels: &[&str],
+        stamps: &[Vec<Vec<[u64; 2]>>],
+    ) {
+        let rounds_of = |label: &str| {
+            let arm = labels.iter().position(|candidate| *candidate == label).expect("arm exists");
+            assert!(!stamps[arm].is_empty(), "N==0: arm {label} produced no stamps");
+            &stamps[arm]
+        };
+        let (stamped, empty) = (rounds_of("split_stamped"), rounds_of("empty_split_stamped"));
+        let cold_penalties: Vec<f64> = dispatches.iter().map(cold_penalty_ns).collect();
+        let rows = instream_rows(dispatches, marginals, stamped, empty, &round4_table(), &cold_penalties);
+        write_instream_csv(directory, &rows);
+        write_instream_groups(directory, &rows);
+        print_instream_summary(&rows, stamped, empty);
+    }
+
     pub fn run() {
         let step = env_usize("DF_STEP", 23);
         let rounds = env_usize("DF_ROUNDS", 21);
         let mode = std::env::var("DF_MODE").unwrap_or_else(|_| "floor".to_string());
         let barriers_mode = mode == "barriers";
+        let stamped_mode = mode == "stamped";
         let directory = std::env::var("DF_OUT_DIR").unwrap_or_else(|_| "df_out".to_string());
         let path = std::env::var("PROXIMA_DECODE_MODEL_GGUF").expect("PROXIMA_DECODE_MODEL_GGUF");
         let file = File::open(path).expect("open checkpoint");
@@ -400,6 +797,8 @@ mod harness {
         );
         let arms = if barriers_mode {
             barrier_arms(live_flags.clone(), node_flags.clone(), slot_flags.clone())
+        } else if stamped_mode {
+            stamped_arms()
         } else {
             floor_arms(dispatches.len())
         };
@@ -421,15 +820,40 @@ mod harness {
             marginals.len(),
             dispatches.iter().map(|dispatch| marginals[&group_key(dispatch)]).sum::<f64>() / 1e6
         );
+        let recorder = stamped_mode.then(install_stamp_recorder).flatten();
+        if stamped_mode {
+            for arm in &arms {
+                arm.replay.run(&dispatches);
+            }
+            drain(recorder.as_ref());
+        }
         let mut spans: Vec<Vec<f64>> = vec![Vec::new(); arms.len()];
+        let mut stamps: Vec<Vec<Vec<[u64; 2]>>> = vec![Vec::new(); arms.len()];
         for round in 0..rounds {
             for offset in 0..arms.len() {
                 let arm = (round + offset) % arms.len();
+                proxima_telemetry::info!(arm = arms[arm].label, round = round as u64, "dispatch_stamp_replay");
                 let cell = Cell::begin();
-                let span = arms[arm].replay.run(&dispatches);
-                println!("df replay arm={} round={round} gpu_span_ms={:.4}", arms[arm].label, span / 1e6);
+                let (span, round_stamps) = arms[arm].replay.run(&dispatches);
+                let stamped_span_ms = round_stamps.last().zip(round_stamps.first()).map(|(last, first)| (last[1] - first[0]) as f64 / 1e6);
+                if let Some(stamped_ms) = stamped_span_ms {
+                    assert!(
+                        (stamped_ms - span / 1e6).abs() <= 0.02 * span / 1e6,
+                        "stamp unit check: first start to last end {stamped_ms} ms against command buffer span {} ms",
+                        span / 1e6
+                    );
+                }
+                println!(
+                    "df replay arm={} round={round} gpu_span_ms={:.4} stamped_first_start_to_last_end_ms={stamped_span_ms:?}",
+                    arms[arm].label,
+                    span / 1e6
+                );
                 println!("{}", cell.end(arms[arm].label));
+                drain(recorder.as_ref());
                 spans[arm].push(span / 1e6);
+                if !round_stamps.is_empty() {
+                    stamps[arm].push(round_stamps);
+                }
             }
         }
         let mut means_us = Vec::new();
@@ -456,6 +880,9 @@ mod harness {
             .map(|(label, value)| format!("{label}={value:.4}"))
             .collect();
         println!("df p50_ms {}", line.join(" "));
+        if stamped_mode {
+            report_instream(&directory, &dispatches, &marginals, &labels, &stamps);
+        }
     }
 }
 
