@@ -3,6 +3,7 @@ use super::*;
 /// Token axes the expert-grouped kernel decomposes a flat token index into:
 /// `[sequence]` for one top-k slot per dispatch, `[sequence, selected]` for the
 /// stacked form that runs every selected expert of a projection at once.
+#[cfg(feature = "metal-tiled-gemm")]
 pub(super) const GROUPED_MAX_TOKEN_AXES: usize = 3;
 
 /// Rows of the weight tile one expert-grouped threadgroup computes.
