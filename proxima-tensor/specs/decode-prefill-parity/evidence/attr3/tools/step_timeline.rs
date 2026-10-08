@@ -13,6 +13,14 @@ struct Chunk {
     gpu_idle_before_ms: f64,
 }
 
+#[derive(Default, Clone)]
+struct Phase {
+    chunk: u64,
+    name: String,
+    start_s: f64,
+    end_s: f64,
+}
+
 #[derive(Default)]
 struct StepRecord {
     step: u64,
@@ -26,6 +34,7 @@ struct StepRecord {
     encode_dispatch_ms: f64,
     gpu_exec_ms: f64,
     chunks: Vec<Chunk>,
+    phases: Vec<Phase>,
 }
 
 struct DispatchRow {
@@ -44,12 +53,27 @@ fn value(line: &str, name: &str) -> f64 {
     rest[..end].parse().unwrap_or(0.0)
 }
 
+fn word(line: &str, name: &str) -> String {
+    let marker = format!(" {name}=");
+    let Some(at) = line.find(&marker) else { return String::new() };
+    let rest = &line[at + marker.len()..];
+    rest[..rest.find(' ').unwrap_or(rest.len())].to_string()
+}
+
 fn parse_log(path: &str) -> Vec<StepRecord> {
     let text = fs::read_to_string(path).expect("read telemetry log");
     let mut records: Vec<StepRecord> = Vec::new();
     let mut pending: Vec<Chunk> = Vec::new();
+    let mut pending_phases: Vec<Phase> = Vec::new();
     for line in text.lines() {
-        if line.contains("chunk_record step=") {
+        if line.contains("step_phase step=") || line.contains("chunk_phase step=") {
+            pending_phases.push(Phase {
+                chunk: value(line, "chunk") as u64,
+                name: word(line, "phase"),
+                start_s: value(line, "start_raw_s"),
+                end_s: value(line, "end_raw_s"),
+            });
+        } else if line.contains("chunk_record step=") {
             pending.push(Chunk {
                 chunk: value(line, "chunk") as u64,
                 op_first: value(line, "op_first") as u64,
@@ -76,6 +100,7 @@ fn parse_log(path: &str) -> Vec<StepRecord> {
                 wall_ms: value(line, "step_wall_ms"),
                 evaluate_ms: value(line, "evaluate_ms"),
                 chunks: std::mem::take(&mut pending),
+                phases: std::mem::take(&mut pending_phases),
                 ..StepRecord::default()
             });
         }
@@ -191,6 +216,39 @@ fn print_detail(record: &StepRecord, seq: usize, dispatches: &[DispatchRow]) {
     }
 }
 
+fn phase_edge(record: &StepRecord, chunk: u64, name: &str, end: bool) -> Option<f64> {
+    record
+        .phases
+        .iter()
+        .find(|phase| phase.chunk == chunk && phase.name == name)
+        .map(|phase| if end { phase.end_s } else { phase.start_s })
+}
+
+fn print_phases(record: &StepRecord) {
+    if record.phases.is_empty() {
+        println!("\nno step_phase or chunk_phase events in this step (N=0); capture with a file-sink exporter on the instrument build");
+        return;
+    }
+    let origin = record.phases.iter().map(|phase| phase.start_s).fold(f64::INFINITY, f64::min);
+    let mut ordered = record.phases.clone();
+    ordered.sort_by(|left, right| left.start_s.partial_cmp(&right.start_s).expect("finite"));
+    println!("\nhost phases, ms from the earliest phase start (step_phase has chunk 0):\n");
+    println!("| chunk | phase | start ms | end ms | duration ms |");
+    println!("|---|---|---|---|---|");
+    for phase in &ordered {
+        println!("| {} | {} | {:.3} | {:.3} | {:.3} |", phase.chunk, phase.name, (phase.start_s - origin) * 1e3, (phase.end_s - origin) * 1e3, (phase.end_s - phase.start_s) * 1e3);
+    }
+    println!("\ncommit-to-GPU-start split per chunk (commit end to scheduled callback, scheduled callback to GPU start):\n");
+    println!("| chunk | commit end to scheduled ms | scheduled to gpu start ms |");
+    println!("|---|---|---|");
+    let chunks: Vec<u64> = record.phases.iter().filter(|phase| phase.name == "commit").map(|phase| phase.chunk).collect();
+    for chunk in chunks {
+        let queued = phase_edge(record, chunk, "scheduled", false).zip(phase_edge(record, chunk, "commit", true)).map(|(scheduled, committed)| (scheduled - committed) * 1e3);
+        let started = phase_edge(record, chunk, "gpu", false).zip(phase_edge(record, chunk, "scheduled", false)).map(|(gpu, scheduled)| (gpu - scheduled) * 1e3);
+        println!("| {chunk} | {} | {} |", queued.map_or("missing".to_string(), |ms| format!("{ms:.3}")), started.map_or("missing".to_string(), |ms| format!("{ms:.3}")));
+    }
+}
+
 fn main() {
     let arguments: Vec<String> = env::args().collect();
     assert!(arguments.len() >= 4, "usage: step_timeline <telemetry.log> <census_dispatches.csv> <detail seq>");
@@ -202,4 +260,5 @@ fn main() {
     print_steps(&records);
     print_decode_median(&records);
     print_detail(&records[detail_seq], detail_seq, &dispatches);
+    print_phases(&records[detail_seq]);
 }
