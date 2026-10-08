@@ -2,13 +2,16 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[cfg(feature = "metal-grouped-gemm")]
+use proxima_tensor::correct_packed_matmul_layouts;
+#[cfg(feature = "metal-grouped-gemm")]
 use proxima_tensor::spec::{
     Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
     input_leaf, scalar_constant,
 };
 use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind,
-    correct_packed_matmul_layouts, infer, map,
+    AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer,
+    map,
 };
 
 use super::*;
@@ -820,6 +823,7 @@ fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
         .expect("one fused bound emitted")
 }
 
+#[cfg(feature = "metal-grouped-gemm")]
 pub(crate) fn stacked_moe_layers(
     layers: u32,
     sequence: u32,
