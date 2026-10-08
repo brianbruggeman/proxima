@@ -1,0 +1,2 @@
+Physical footprint:         96.2M
+Physical footprint (peak):  119.3M

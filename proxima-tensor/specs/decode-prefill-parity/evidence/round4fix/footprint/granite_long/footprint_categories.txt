@@ -1,0 +1,29 @@
+  Dirty      Clean  Reclaimable    Regions    Category
+    ---        ---          ---        ---    ---
+ 173 MB        0 B          0 B        186    IOAccelerator (graphics)
+  21 MB        0 B      5072 KB          1    MALLOC_NANO
+  16 MB        0 B       236 MB          9    MALLOC_MEDIUM
+  13 MB        0 B       304 KB         20    MALLOC_TINY
+4384 KB        0 B          0 B          7    MALLOC_SMALL
+1446 KB        0 B          0 B          1    page table
+ 596 KB        0 B          0 B        276    __DATA
+ 352 KB        0 B          0 B          8    IOAccelerator
+ 352 KB        0 B          0 B         28    stack
+ 234 KB        0 B          0 B         89    __DATA_DIRTY
+ 208 KB        0 B          0 B         36    untagged (VM_ALLOCATE)
+ 177 KB        0 B          0 B        163    __AUTH
+ 176 KB        0 B          0 B         14    MALLOC metadata
+ 161 KB        0 B          0 B        634    unused dyld shared cache area
+  96 KB        0 B          0 B        297    __AUTH_CONST
+  96 KB        0 B          0 B        298    __DATA_CONST
+  64 KB        0 B          0 B          4    IOKit
+  48 KB        0 B          0 B          2    __TPRO_CONST
+  32 KB        0 B          0 B          1    Activity Tracing
+  16 KB        0 B          0 B          1    Owned physical footprint (unmapped)
+  16 KB        0 B          0 B          1    os_alloc_once
+    0 B    1359 MB          0 B         66    mapped file
+    0 B    3872 KB          0 B        307    __TEXT
+    0 B      48 KB          0 B          4    __LINKEDIT
+    0 B        0 B          0 B          1    __FONT_DATA
+    ---        ---          ---        ---    ---
+ 232 MB    1363 MB       241 MB       2456    TOTAL

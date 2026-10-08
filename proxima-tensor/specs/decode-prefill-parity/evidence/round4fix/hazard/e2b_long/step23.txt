@@ -1,0 +1,6 @@
+cell e2b_long steps_recorded=24
+step | hazard_ops | op_barriers | internal_barriers | counter barriers | counter raw/waw/war | physical_dispatch_calls | encode_dispatch_calls | longest_run_ops | runs>=8
+23 | 618 | 584 | 35 | 619 | 567/0/17 | 653 | 618 | 2 | 0
+  op_barrier reason=arena_slot_reuse count=17
+  op_barrier reason=true_node_dependency count=567
+  internal_barrier site=attention_split_to_merge count=35

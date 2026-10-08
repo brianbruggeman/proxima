@@ -1,0 +1,5 @@
+Thu Oct  8 15:21:21 CDT 2026
+15:21  up 8 days,  1:25, 3 users, load averages: 5.75 4.61 4.76
+"Device Utilization %"=97
+"Device Utilization %"=0
+"Device Utilization %"=0

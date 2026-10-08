@@ -1,0 +1,5 @@
+INFO decode_gbps_baseline: telemetry_recorder_footprint footprint_before_bytes=2261888 footprint_after_bytes=1457409664
+DEBUG omega::metal::arena_encode_dispatch_finish: buffer arena laid out packed=true slots=228 allocations=790 allocated_bytes=54158028 peak_bytes=54153808
+DEBUG omega::metal::arena_encode_dispatch_finish: buffer arena laid out packed=true slots=228 allocations=790 allocated_bytes=202124 peak_bytes=200160
+DEBUG proxima_model_interop::generate::device_kv: kv_host_mirror host_mirror_bytes=110690304 cached_len=1126
+DEBUG proxima_model_interop::generate::resident_plans: resident_plans_held decode_plans=1 wide_plans=1 decode_bytes=202124 wide_bytes=54158028

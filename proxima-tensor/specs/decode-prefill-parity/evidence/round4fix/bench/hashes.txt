@@ -1,0 +1,3 @@
+base hashes:   18 text_hash=8fec363180a250e0  tokens:   18 tokens_generated=128  prompt:   21 prompt_token_count=970  steady_samples:   18 steady_samples=119 
+tip hashes:   18 text_hash=8fec363180a250e0  tokens:   18 tokens_generated=128  prompt:   21 prompt_token_count=970  steady_samples:   18 steady_samples=119 
+control hashes:   18 text_hash=8fec363180a250e0  tokens:   18 tokens_generated=128  prompt:   21 prompt_token_count=970  steady_samples:   18 steady_samples=119 

@@ -1,0 +1,6 @@
+decode_gbps_baseline run=start prompt="<|turn>user\n# proxima\n\n> ## WORK IN PROGRESS — EXPERIMENTAL\n>\n> **proxima is under heavy active development: not stable, not production-ready.**\n> APIs, behavior, semantics, and internals change without notice or a migration\n> path, and whole subsystems may be reworked or removed. Do not depend on it in\n> production. Use at your own risk.\n\n**A sans-IO core where everyt
+decode_gbps_baseline run=done run_index=0 wall_ms=1222.598 cpu_user_ms=191.849 cpu_sys_ms=120.216 cpu_ms=312.065 cpu_pct=25.52 tokens_generated=128 prompt_token_count=999 text_hash=007c4f22f573f794 stopped_by_eos=false decode_ms_per_token=6.942 ttft_ms=341 gpu_peak_bytes=1608253440 steady_rss_bytes=1631830016 steady_footprint_bytes=241341440 steady_gpu_bytes=1608253440 steady_samples=119 text=">\n\n## WORK IN PROGRES
+decode_gbps_baseline held_bytes run_index=0 prompt_cache_bytes=0 resident_prefill_plan_budget_bytes=536870912 speculative_types=SpeculativeTypeSet(64)
+        1.63 real         0.32 user         0.65 sys
+          1743650816  maximum resident set size
+           353031424  peak memory footprint

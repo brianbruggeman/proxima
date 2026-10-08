@@ -1,0 +1,2 @@
+DEBUG omega::metal::arena_encode_dispatch_finish: buffer arena laid out packed=false slots=251 allocations=846 allocated_bytes=327850888 peak_bytes=142039904
+DEBUG omega::metal::arena_encode_dispatch_finish: buffer arena laid out packed=false slots=248 allocations=846 allocated_bytes=1388424 peak_bytes=1055612

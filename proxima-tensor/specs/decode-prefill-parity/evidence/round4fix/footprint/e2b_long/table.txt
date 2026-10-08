@@ -1,0 +1,20 @@
+cell e2b_long
+telemetry_ring_install_footprint before=2704256 after=1457835584 delta=1455131328 (excluded from every footprint figure below as footprint_minus_ring)
+steps_recorded=126 steady_window=10..=127 steady_steps=116
+phys_footprint_bytes step0=1788146432 peak=1808429888 steady_median=1807692608 peak_minus_steady=737280
+phys_footprint_minus_ring_bytes step0=333015104 peak=353298560 steady_median=352561280 peak_minus_steady=737280
+device_allocated_bytes step0=3556130816 peak=3569041408 steady_median=3569041408 peak_minus_steady=0
+unattributed_device_bytes step=0 device_allocated=3556130816 live_event_bytes=3558312800 unattributed=-2181984
+unattributed_device_bytes step=10 device_allocated=3569041408 live_event_bytes=3570608344 unattributed=-1566936
+steady_rss_bytes(median of per-token samples after token 10)=Some(5095178240) steady_footprint_bytes(same samples, run line)=Some(1807692608)
+owner | events | bytes created | of which aliased | released
+arena_slot | 676 | 148476544 | 0 | 0
+attention_scratch | 37 | 27562624 | 0 | 0
+block_copy | 1142 | 3380280 | 0 | 0
+fault_buffer | 3 | 12 | 0 | 0
+placed_buffer | 46 | 44695552 | 0 | 0
+plan_uniform | 2539 | 376200 | 0 | 0
+uniform_cache | 4 | 64 | 0 | 0
+weight_nocopy[checkpoint_mapping] | 1 | 3349528576 | 3349528576 | 0
+arena plans=3 allocated_bytes_sum=148476544 live_peak_bytes_sum=145205836 fragmentation_bytes=3270708
+device_memory_by_class load-time device allocation broken out by class step=0 weights_nocopy_bytes=0 weights_copied_bytes=2987612 weights_offset_bytes=0 kv_cache_device_bytes=0 kv_cache_device_bytes_known=false device_allocated_bytes=3556130816 phys_footprint_bytes=1788146432
