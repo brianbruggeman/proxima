@@ -24,6 +24,18 @@
 # per-threadgroup ceiling every Apple GPU family this crate targets enforces.
 simdgroups = 1
 
+# output rows one simdgroup folds against a single load of the activation
+# when the weight is `Q6_K` (`msl::codec_rows_per_simdgroup_default`). The
+# other codecs take 4. llama.cpp's `N_R0_Q6_K` is 2 at the revision this was
+# compared against (`ggml-metal-impl.h`, `N_SG_Q6_K` 2): the activation
+# gather `yl[16]` is shared by two rows, and a 262144-row head launches half
+# the simdgroups. Raising it costs one `sumf` accumulator and one block
+# pointer per row per lane; `Q6_K` decodes `ql`, `qh` and the scales per
+# row, so register pressure grows faster than `Q4_K`'s. 1 reproduces the
+# shape before this key. Overridable per-build via
+# `OMEGA_PACKED_ROW_BLOCK_Q6K_ROWS`.
+q6k_rows = 2
+
 # `metal-q4k-split-k`-only ceiling on the row-blocked packed matmul's OUTPUT
 # row count (`output_total` in `msl.rs`'s `packed_row_dispatch`) above which
 # split-K never engages, regardless of what `[packed_row_split_k]`'s

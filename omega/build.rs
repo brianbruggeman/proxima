@@ -234,6 +234,14 @@ fn emit_sizing_consts() {
         "pub const PACKED_ROW_BLOCK_SIMDGROUPS: u64 = {packed_row_block_simdgroups};\n"
     ));
 
+    let packed_row_block_q6k_rows = require_nonzero(
+        "packed_row_block.q6k_rows",
+        resolve_int(&root, "packed_row_block", "q6k_rows"),
+    );
+    out.push_str(&format!(
+        "pub const PACKED_ROWS_PER_GROUP_Q6K: usize = {packed_row_block_q6k_rows};\n"
+    ));
+
     let cooperative_reduce_min_len = require_nonneg(
         "cooperative_reduce.min_len",
         resolve_int(&root, "cooperative_reduce", "min_len"),

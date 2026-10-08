@@ -2177,20 +2177,22 @@ pub(crate) const fn codec_supports_pair_dot(codec: Codec) -> bool {
 /// their own `lane % 8u` arithmetic regardless of this value —
 /// [`PACKED_ROWS_PER_GROUP`]'s doc). `Q6_K` decodes three raw-byte fields
 /// per element (`ql`, `qh`, `scale`) versus `Q4_K`'s effectively two, so
-/// batching 4 rows' worth of `sumf[q]` accumulators plus per-row
+/// batching rows' worth of `sumf[q]` accumulators plus per-row
 /// `weight_base[q]`/`other_base[q]` state costs more live registers per lane
-/// for `Q6_K` than the same batching costs `Q4_K` — matches ggml's own
-/// choice (`N_R0_Q6_K = 1`, `N_R0_Q4_K = 4`, `ggml-metal-impl.h:32-39`). The
-/// lane assignment itself (`ix`/`it`/`slot` spreading all 32 lanes across
-/// the reduction axis) does not depend on this value — it only controls how
-/// many output rows share one activation load.
+/// for `Q6_K` than the same batching costs `Q4_K`; its count is its own
+/// build-time axis, [`crate::sized::PACKED_ROWS_PER_GROUP_Q6K`]
+/// (`omega-runtime.toml`'s `[packed_row_block]`), which is `N_R0_Q6_K` (2) in
+/// llama.cpp's `ggml-metal-impl.h` against `N_R0_Q4_K` (2) and `N_R0_Q4_0`
+/// (4). The lane assignment itself (`ix`/`it`/`slot` spreading all 32 lanes
+/// across the reduction axis) does not depend on this value — it only
+/// controls how many output rows share one activation load.
 /// [`codec_rows_per_simdgroup`] with any runtime override stripped back
 /// out -- the structural default per codec, so a caller can tell whether an
 /// override actually changed anything for THIS codec (`Q6_K` never does;
 /// `PROXIMA_PACKED_ROWS` only feeds the `_ => PACKED_ROWS_PER_GROUP` arm).
 pub(super) const fn codec_rows_per_simdgroup_default(codec: Codec) -> usize {
     match codec {
-        Codec::Q6K => 1,
+        Codec::Q6K => crate::sized::PACKED_ROWS_PER_GROUP_Q6K,
         _ => PACKED_ROWS_PER_GROUP,
     }
 }

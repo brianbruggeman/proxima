@@ -8762,3 +8762,24 @@ mod expert_grouped_decode_description {
         );
     }
 }
+
+/// One decode token against a `Q6_K` weight takes the single-activation
+/// row-blocked body, whose row count is the codec's own build-time axis
+/// (`[packed_row_block] q6k_rows`): the accumulator array, the group base and
+/// the launch geometry must all follow that one value.
+#[test]
+fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
+    let rows = crate::sized::PACKED_ROWS_PER_GROUP_Q6K;
+    let bound = matmul_op(1, 512, 8);
+    let weight_node = bound.operands()[0].0;
+    let q6k = BTreeMap::from([(weight_node, Codec::Q6K)]);
+    let codecs = operand_codecs(&bound, &q6k);
+
+    assert_eq!(codec_rows_per_simdgroup(Codec::Q6K), rows);
+    assert!(packed_row_block(&bound, &codecs).is_some(), "fixture must take the row-blocked path");
+    let source = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
+    assert!(source.contains(&format!("float sumf[{rows}];")), "{source}");
+    assert!(source.contains(&format!("long group_first = output_index * {rows};")), "{source}");
+    let (groups, split) = packed_row_dispatch(8, 1, Codec::Q6K);
+    assert_eq!((groups, split), (8u64.div_ceil(rows as u64), 1));
+}
