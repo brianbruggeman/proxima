@@ -4,8 +4,81 @@ use super::*;
 use objc2_metal::MTLBlitCommandEncoder;
 
 #[cfg(feature = "instrument")]
+use block2::RcBlock;
+
+#[cfg(feature = "instrument")]
 fn raw_ticks_to_seconds(raw_ticks: u64) -> f64 {
     ticks_to_nanos(raw_ticks) as f64 / 1e9
+}
+
+#[cfg(feature = "instrument")]
+fn raw_now_seconds() -> f64 {
+    raw_ticks_to_seconds(read_ticks().as_raw())
+}
+
+/// One `step_phase` event per host phase that runs once per placed execution
+/// (`prepare`, `pre_encode`). `start_raw_s`/`end_raw_s` are on the
+/// `mach_absolute_time` base `GPUStartTime`/`GPUEndTime` use, so a phase lines
+/// up against `chunk_phase` and `chunk_record` without conversion. Never emitted
+/// per dispatch; compiled out without `instrument`.
+#[cfg(feature = "instrument")]
+pub(super) fn emit_step_phase(phase: &'static str, start_raw_ticks: u64, end_raw_ticks: u64) {
+    debug!(
+        step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed),
+        phase,
+        start_raw_s = raw_ticks_to_seconds(start_raw_ticks),
+        end_raw_s = raw_ticks_to_seconds(end_raw_ticks),
+        "step_phase"
+    );
+}
+
+/// One `chunk_phase` event per host phase of one command buffer (`encode`,
+/// `commit`), same clock as [`emit_step_phase`]. `chunk` counts from 1, matching
+/// `chunk_record`.
+#[cfg(feature = "instrument")]
+fn emit_chunk_phase(chunk: usize, phase: &'static str, start_raw_ticks: u64, end_raw_ticks: u64) {
+    debug!(
+        step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed),
+        chunk = chunk as u64,
+        phase,
+        start_raw_s = raw_ticks_to_seconds(start_raw_ticks),
+        end_raw_s = raw_ticks_to_seconds(end_raw_ticks),
+        "chunk_phase"
+    );
+}
+
+/// Registers the two Metal callbacks that close a chunk's timeline: the
+/// scheduled handler stamps the host clock when Metal reports the buffer
+/// scheduled (`phase = "scheduled"`, start and end are that instant), and the
+/// completed handler reports the buffer's own `GPUStartTime`/`GPUEndTime`
+/// (`phase = "gpu"`). Between `commit`'s end and `scheduled` is the driver's
+/// queueing; between `scheduled` and the gpu start is the GPU's. Call before
+/// `commit`; Metal copies each block, so the local `RcBlock`s may drop.
+#[cfg(feature = "instrument")]
+fn watch_command_buffer(buffer: &ProtocolObject<dyn MTLCommandBuffer>, chunk: usize) {
+    let step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed);
+    let chunk = chunk as u64;
+    let scheduled = RcBlock::new(move |_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        let now = raw_now_seconds();
+        debug!(step, chunk, phase = "scheduled", start_raw_s = now, end_raw_s = now, "chunk_phase");
+    });
+    let completed = RcBlock::new(move |finished: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        // SAFETY: Metal passes the live command buffer to its own completion handler.
+        let finished = unsafe { finished.as_ref() };
+        debug!(
+            step,
+            chunk,
+            phase = "gpu",
+            start_raw_s = finished.GPUStartTime(),
+            end_raw_s = finished.GPUEndTime(),
+            "chunk_phase"
+        );
+    });
+    // SAFETY: both pointers are valid blocks for the duration of the call; Metal copies them.
+    unsafe {
+        buffer.addScheduledHandler(RcBlock::as_ptr(&scheduled));
+        buffer.addCompletedHandler(RcBlock::as_ptr(&completed));
+    }
 }
 
 /// One `step_host_timeline` event per placed execution, on the same
@@ -838,6 +911,10 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let step_encode_start_ticks = read_ticks();
     #[cfg(feature = "instrument")]
+    emit_step_phase("pre_encode", pre_encode_started.as_raw(), step_encode_start_ticks.as_raw());
+    #[cfg(feature = "instrument")]
+    let mut current_chunk_encode_start_ticks = step_encode_start_ticks.as_raw();
+    #[cfg(feature = "instrument")]
     counter!(PRE_ENCODE_CALLS, 1);
     #[cfg(feature = "instrument")]
     counter!(PRE_ENCODE_TICKS, elapsed_ticks(pre_encode_started));
@@ -925,6 +1002,10 @@ pub(super) fn execute_plan_with_placements_inner(
             #[cfg(feature = "instrument")]
             let closing_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
             #[cfg(feature = "instrument")]
+            let closing_encode_end_ticks = read_ticks().as_raw();
+            #[cfg(feature = "instrument")]
+            watch_command_buffer(&closing_command_buffer, capture_chunk_index);
+            #[cfg(feature = "instrument")]
             chunk_command_buffers.push(closing_command_buffer.clone());
             // Same clock-correlation argument as the single-buffer
             // `gpu_exec_started`/`commit_call_start_s` pair below: a tick
@@ -936,6 +1017,8 @@ pub(super) fn execute_plan_with_placements_inner(
             #[cfg(feature = "instrument")]
             let commit_call_started = std::time::Instant::now();
             closing_command_buffer.commit();
+            #[cfg(feature = "instrument")]
+            let closing_commit_end_ticks = read_ticks().as_raw();
             #[cfg(feature = "instrument")]
             let closing_commit_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
             #[cfg(feature = "instrument")]
@@ -963,8 +1046,21 @@ pub(super) fn execute_plan_with_placements_inner(
                     commit_at_ms: closing_commit_at_ms,
                     commit_ms: closing_commit_ms,
                 });
+                emit_chunk_phase(
+                    capture_chunk_index,
+                    "encode",
+                    current_chunk_encode_start_ticks,
+                    closing_encode_end_ticks,
+                );
+                emit_chunk_phase(
+                    capture_chunk_index,
+                    "commit",
+                    this_commit_ticks.as_raw(),
+                    closing_commit_end_ticks,
+                );
                 current_chunk_first_op = position;
                 current_chunk_encode_start_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
+                current_chunk_encode_start_ticks = read_ticks().as_raw();
             }
             #[cfg(feature = "instrument")]
             chunk_audit_on_commit();
@@ -1620,6 +1716,8 @@ pub(super) fn execute_plan_with_placements_inner(
     // push already established.
     #[cfg(feature = "instrument")]
     let last_chunk_encode_end_ms = step_encode_start.elapsed().as_secs_f64() * 1e3;
+    #[cfg(feature = "instrument")]
+    let last_chunk_encode_end_ticks = read_ticks().as_raw();
     chunk_status_buffers.push(command_buffer.clone());
     chunk_status_diagnostics.push(BufferDiagnostics {
         chunk_index: chunk_status_diagnostics.len(),
@@ -1643,12 +1741,31 @@ pub(super) fn execute_plan_with_placements_inner(
         .unwrap_or(0.0);
 
     #[cfg(feature = "instrument")]
+    watch_command_buffer(&command_buffer, capture_chunk_index);
+    #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
     #[cfg(feature = "instrument")]
     let commit_call_started = std::time::Instant::now();
     command_buffer.commit();
     #[cfg(feature = "instrument")]
+    let commit_end_ticks = read_ticks();
+    #[cfg(feature = "instrument")]
     let commit_call_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
+    #[cfg(feature = "instrument")]
+    {
+        emit_chunk_phase(
+            capture_chunk_index,
+            "encode",
+            current_chunk_encode_start_ticks,
+            last_chunk_encode_end_ticks,
+        );
+        emit_chunk_phase(
+            capture_chunk_index,
+            "commit",
+            gpu_exec_started.as_raw(),
+            commit_end_ticks.as_raw(),
+        );
+    }
     #[cfg(feature = "instrument")]
     let commit_at_ms = commit_call_started.duration_since(step_encode_start).as_secs_f64() * 1e3;
     #[cfg(feature = "instrument")]
