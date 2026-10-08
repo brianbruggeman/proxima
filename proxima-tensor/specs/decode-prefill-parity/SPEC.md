@@ -2148,3 +2148,89 @@ cargo nextest run -p proxima-tensor -E 'test(ple_) or test(tiled_split) or test(
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(gemma4_decode_holds_one_per_layer_input_norm_reduce)'
 # then recapture the gemma4_e2b digest with the arch_data_baseline capture path and diff it against the list above
 ```
+
+## r6 written changes (written 2026-10-07, nothing below was run)
+
+Slice r6 of the re-plan, item 6: norm-apply and rope dispatches. The owner's order for this pass was to write all of r2 to
+r6 first and bench and test afterwards, so this section holds what was read and what was written. Every number is a
+reading of an artifact named next to it; no cell here is a measurement taken for this slice. Verification so far is
+`cargo check` and `cargo clippy` only.
+
+### the declining condition (read)
+
+- The 170 unfused applies are the `norm apply` rows of `evidence/r8/census_head_long/census_groups.csv`: 12 + 12 + 28 + 70
+  + 35 + 3 + 3 + 7 = 170. The class histogram of `census_dispatches.csv` (column 5) reads 170 `RMSNorm sumsq`, 170
+  `norm apply`, 106 `RMSNorm sumsq + fused epilogue`, 100 `RoPE`, 36 `identity copy`: 170 + 170 + 106 = 446, the norm
+  family of the r8 table. In the dispatch order each plain `RMSNorm sumsq` is followed by its `norm apply` (rows 89-90,
+  94 and 96, 114-115, 120-121 of the same file).
+- The pass: `find_epilogue_source` returns the first reduce-fold operand of the consumer
+  (`proxima-tensor/src/bind/cached_attention_epilogue_liveness.rs:317`). An apply lists the projection output `x` before the
+  sum-of-squares reduce. `x` is read by the reduce and by the apply, and the candidate gate drops any source with other
+  readers (`:414`, `reference_counts != 1`), so the pair is never formed and the reduce behind `x` is not considered.
+  `find_epilogue_sources` (`:362`) considers every flagged operand; `bind_with_fusion` selects it only when the policy
+  grants `WidenedReduceEpilogueFusion`, that is `epilogue_sources` (`bind/gdn_moe_fusion_apply.rs:159-161`).
+- The serving default had `epilogue_sources: false` (`serving_settings.rs` `default_str`, `ServingConfig::default`). The
+  bind test `projection_output_rmsnorm_tail_fuses_only_with_the_epilogue_sources_switch`
+  (`bind/tests.rs`, written before this slice) asserts zero real epilogues with the switch off and at least one with it on
+  for a projection-fed RMSNorm. The ignored census test `gemma4_epilogue_sources_census` names the E2B total: 35 x (3
+  hidden norms + Q norm + attention combine) + 15 x (K norm, V norm) = 205 ops absorbed.
+- The kernel the fold reaches is one dispatch per row: a cooperative fold, the scalar published through shared memory,
+  every lane writing its share of the row, with the operand loads issued before the fold
+  (`omega/src/msl/tiled_gemm_cooperative_scan.rs:2576` `push_cooperative_reduce_tail`, `:2729`
+  `push_broadcast_epilogue_write`, `:3048` `push_broadcast_epilogue_preload`). The gamma multiply and the residual add of
+  the hidden-width post-norms are part of the epilogue body (`omega/tests/rmsnorm_epilogue_bit_identity.rs`, shape
+  `hidden_residual`).
+
+### what was written
+
+| commit | change |
+|---|---|
+| `feat(interop): grant epilogue_sources in the serving default` | `ServingConfig::default`, the `ServingSettings` builder default and its `default_str` now grant `epilogue_sources`; tests: `default_numeric_policy_is_llama_relaxed_with_epilogue_sources`, `default_numeric_policy_admits_the_widened_reduce_epilogue_fusion`, the three `*_agrees_across_literal_and_default_override` literals, and the settings default assertion |
+| `test(tensor): pin the gamma and residual tail fold under epilogue_sources` | `projection_output_rmsnorm_gamma_residual_tail_folds_into_one_broadcast_reduce_with_the_switch`: switch off leaves no broadcast reduce; switch on leaves exactly one whose epilogue reads `gamma` and `residual`, drops ops, and matches the unfused CPU result within 1e-6 relative |
+
+The switch stays a field of `NumericPolicy`, so `PROXIMA_EPILOGUE_SOURCES=0` in `decode_gbps_baseline` and
+`gemma4_decode_kernel_census` is the off arm of the A/B (`examples/decode_gbps_baseline.rs:218-222`).
+
+### what the arithmetic says about the target (derived, not measured)
+
+Removing 170 applies from the 446-dispatch norm family leaves 276, not llama's 242 (`rank_vs_llama.md`). The 34 beyond
+242 are not traced. The earlier decode measurement recorded in `NumericPolicy::epilogue_sources` (15.72 ms off, 15.93 ms
+on) was taken before the operand preload (`c3d924e3`, 2026-10-04 08:55 -0500, against the doc commit `810bc46b` at 01:50
+-0500), whose own doc reports 8.6 us to 4.6 us on a `[1, 1536]` row; whether the fold now pays is what the bench step
+decides. The same doc records logits differing in about 85% of their bits with row-norm-relative error at most 6.7e-8 and
+the same argmax at every step on E2B; no other model was measured.
+
+### rope: not written, and why
+
+Rope stays two elementwise nodes per tensor (100 dispatches). Three things were read that stop a single-op form:
+
+1. K's two halves are placed outputs. They are the layer cache roots (`LayerCacheRoots`, `spec/attention_forward.rs:3006`;
+   `rope_leaves_of` reads `rotated_even` from them, `generate/chunk_shift.rs:357`) and are written into the KV buffers by
+   output placement. One node cannot hand two placed buffers, so 30 of the 100 dispatches need a kernel with two outputs.
+2. As one `Op::Elementwise` over a parity axis `p` the form needs `p` sized by an operand. `unify_iteration_space`
+   (`shape.rs:236`) sizes an axis from a pure `coeff == 1` projection or a declared `@len` on the one unit-coefficient term
+   (`map.rs:107`). Interleaved `2*i+p@2` qualifies. Split-half, which E2B uses, addresses `i+pairs*p`, whose unit term is
+   `i`, so `p` stays unconstrained. The sign of the `sin` term also needs a +-1 operand that depends on `p`; an `Op::Iota`
+   is its own dispatch (two `iota` rows in the census) and a derived node read through a broadcast map is materialized
+   (`is_identity_projection`, `bind/builder_compose_window.rs:946`), so each variant of the sign adds shared dispatches
+   that eat into the 35 saved on Q.
+3. Reading the two halves back out of one node as zero-copy windows is what `apply_identity_copy_alias` does for base-0
+   copies; it is default-off in interop (`proxima-model-interop/Cargo.toml:240-249`), does not fold a window with a
+   non-zero base, and folds copies of `Op::Input` leaves, which can be caller-placed buffers a later op overwrites
+   (`omega/src/metal/execute_and_hazards.rs` placement notes). Turning it on is an unmeasured switch of its own.
+
+The form that removes all 100 -> 50 without those constraints is a twin-output elementwise: one kernel reads the pair once
+and writes both halves, as llama's `kernel_rope_*` does, with each output keeping its own node, placement and hazard
+entry. That is a BoundOp and arena change (a second output per op), not an edit to `fused_rope_pair`, and it was not
+written in this pass.
+
+### bench and test to run after r2 to r6 are written
+
+```
+cargo nextest run -p proxima-tensor --features reduce-epilogue-fusion,cached-attention-streaming -E 'test(projection_output_rmsnorm)'   # 2
+cargo nextest run -p proxima-model-interop --features std,metal -E 'test(default_numeric_policy)'                                      # 2, both new
+cargo nextest run -p omega --features metal -E 'binary(rmsnorm_epilogue_bit_identity)'                                                  # 2
+cargo nextest run -p proxima-model-interop --features std,metal -E 'test(llama_parity_) or test(generic_verify_llama_parity_)'          # 12
+cargo nextest run -p proxima-model-interop --features std,metal -E 'test(epilogue_sources_drift)' --run-ignored all                      # needs the E2B gguf
+PROXIMA_EPILOGUE_SOURCES=0|1 decode_gbps_baseline / gemma4_decode_kernel_census   # off and on arms; the census reads the norm family 446 -> ?
+```
