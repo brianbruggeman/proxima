@@ -3,47 +3,50 @@ use super::*;
 use objc2_metal::MTLBlitCommandEncoder;
 #[cfg(feature = "instrument")]
 use std::borrow::Borrow;
-
-/// CARD 6.5: whole-`MetalBuffer` device output arena, hung off the cached
-/// [`Plan`] and built exactly once, in [`plan`], from
+/// CARD 6.5: device output arena, hung off the cached [`Plan`] and built
+/// exactly once, on the plan's first placed call, from
 /// [`proxima_tensor::node_retirement`]'s own liveness ranges over
-/// `prepared.resolved` -- never lazily, never per `execute_plan_with_placements`
-/// call. `slots` holds one physical buffer per size class actually needed;
-/// `position_slot` says which slot backs each plan POSITION's output.
+/// `prepared.resolved`. `slots` holds the physical device buffers;
+/// `position_slot` and `position_offset` say which slot and byte offset back
+/// each plan POSITION's output.
 ///
-/// # Whole-buffer sharing only (crit RS-3)
+/// # Two layouts, one retirement order
 ///
-/// A slot is reused across two positions only when [`build_buffer_arena`]'s
-/// single retirement-ordered pass has seen the first position's node retired
-/// before assigning the slot to a later position needing the SAME byte
-/// length -- never a sub-range of a larger slot. Sub-allocating would make
-/// `encode_op`'s `device_buffers.insert(bound.node, (output, 0))` a lie, and
-/// [`finish`]'s readback invariant ("an output node's buffer is always
-/// freshly allocated ... at offset 0") would then read a co-resident node's
-/// bytes instead of its own.
+/// A plan dispatched [`DispatchType::Serial`] is laid out by
+/// [`lay_out_packed`]: every output that some later op retires shares one
+/// buffer, each at its own aligned byte offset, so a retired range serves a
+/// later output of any size that fits and the buffer is as long as the plan's
+/// live peak. Every other plan is laid out by [`lay_out_whole_slots`]: one
+/// buffer per output, handed to a later output of the SAME byte length. The
+/// concurrent hazard tracker names a buffer by pointer alone, so a packed
+/// buffer would read as one resource and barrier every dispatch.
 ///
 /// # Outputs are pinned by construction
 ///
 /// `node_retirement` already excludes every `effective_outputs` node from
-/// every position's retire list, so an output's slot is never handed back to
-/// `free_by_size` by this struct's own build loop -- no separate output
-/// check is needed here, only the `debug_assert!` in [`build_buffer_arena`]
-/// that keeps that upstream invariant honest if it ever changes.
+/// every position's retire list, so an output keeps a buffer of its own at
+/// offset 0 in both layouts -- [`finish`]'s readback ("an output node's
+/// buffer is always freshly allocated ... at offset 0") never sees a
+/// co-resident node's bytes. The `debug_assert!` in [`build_buffer_arena`]
+/// keeps that upstream invariant honest if it ever changes.
 #[cfg(feature = "metal-plan-stable-buffers")]
 pub(super) struct BufferArena {
     pub(super) slots: Vec<MetalBuffer>,
     pub(super) slot_bytes: Vec<usize>,
     /// Parallel to `prepared.resolved`.
     pub(super) position_slot: Vec<usize>,
+    /// Parallel to `position_slot`: the byte offset of that position's output
+    /// inside its slot.
+    pub(super) position_offset: Vec<usize>,
     /// Every extra output node an op writes beyond its own (`extra_output_nodes`),
-    /// with the slot backing it, grouped by position.
-    pub(super) extra_slots: Vec<(NodeId, usize)>,
+    /// with the slot and byte offset backing it, grouped by position.
+    pub(super) extra_slots: Vec<(NodeId, usize, usize)>,
     /// Parallel to `prepared.resolved`: the range of `extra_slots` one position owns.
     pub(super) position_extras: Vec<core::ops::Range<usize>>,
     /// Live-bytes high-water mark reached while building -- MG-3's own
     /// witness against [`ARENA_TRANSIENT_CAP`].
     pub(super) peak_bytes: usize,
-    /// Per-slot count of positions ever assigned that slot -- `instrument`-
+    /// Per-slot count of outputs ever assigned that slot -- `instrument`-
     /// only, ROW 539's witness for whether a WAW/WAR barrier's colliding
     /// identity is a genuinely recycled slot (`> 1`) rather than a slot this
     /// plan only ever assigned once. Parallel to `slots`/`slot_bytes`.
@@ -55,24 +58,28 @@ pub(super) struct BufferArena {
 impl BufferArena {
     /// The `(buffer, offset)` pair [`encode_op`] binds a position's output
     /// to when the caller has not output-placed that position's node.
-    /// Offset is always 0: see this struct's own "whole-buffer sharing
-    /// only" doc.
     fn placement_for(&self, position: usize) -> (&MetalBuffer, usize) {
-        (&self.slots[self.position_slot[position]], 0)
+        (
+            &self.slots[self.position_slot[position]],
+            self.position_offset[position],
+        )
     }
 
-    /// The `(node, buffer)` pairs a position's extra outputs bind to, so a
-    /// multi-output op writes into plan-owned storage instead of a fresh
-    /// allocation per call.
-    fn extra_placements(&self, position: usize) -> impl Iterator<Item = (NodeId, &MetalBuffer)> {
+    /// The `(node, buffer, offset)` triples a position's extra outputs bind
+    /// to, so a multi-output op writes into plan-owned storage instead of a
+    /// fresh allocation per call.
+    fn extra_placements(
+        &self,
+        position: usize,
+    ) -> impl Iterator<Item = (NodeId, &MetalBuffer, usize)> {
         self.extra_slots[self.position_extras[position].clone()]
             .iter()
-            .map(|(node, slot)| (*node, &self.slots[*slot]))
+            .map(|(node, slot, offset)| (*node, &self.slots[*slot], *offset))
     }
 
-    /// Physical slot count -- the direct witness of how much reuse
-    /// [`build_buffer_arena`]'s free list actually achieved: `slots.len() <
-    /// position_slot.len()` whenever two or more positions shared a slot.
+    /// Physical slot count -- the direct witness of how much reuse the
+    /// layout actually achieved: `slots.len() < position_slot.len()` whenever
+    /// two or more positions shared a slot.
     pub(super) fn slot_count(&self) -> usize {
         self.slots.len()
     }
@@ -85,7 +92,7 @@ impl BufferArena {
     }
 
     /// True when `position`'s own slot was assigned to more than one
-    /// position over this plan's whole program -- a recycled slot, ROW 539's
+    /// output over this plan's whole program -- a recycled slot, ROW 539's
     /// arena-reuse witness for [`record_hazard_class`].
     #[cfg(feature = "instrument")]
     pub(super) fn slot_is_recycled(&self, position: usize) -> bool {
@@ -126,14 +133,6 @@ fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeId, usize)> 
         .chain(twin)
 }
 
-/// Builds [`BufferArena`] in one pass over `resolved`, in program order,
-/// mirroring the retirement ordering [`execute_plan_with_placements`]'s own
-/// dispatch loop already uses: assign THIS position's slot first (against
-/// the free list as of every EARLIER position's retirements only), then
-/// free whatever `retires[position]` names. `effective_outputs` is passed
-/// through only for the `debug_assert!` below -- `node_retirement` itself is
-/// what actually keeps an output out of `retires`.
-///
 /// This plan's own row count, straight from the caller's bind-time
 /// `symbols[0]` (`new_count` in `residency_caches.rs`'s own vocabulary,
 /// stored once on [`Plan::bind_row_count`] at [`plan`]/[`plan_named`] time)
@@ -164,29 +163,106 @@ pub(super) fn plan_bind_row_count(symbols: &[u64]) -> u64 {
     symbols.first().copied().unwrap_or(1).max(1)
 }
 
+/// The outputs a plan writes, in program order, with the releases the arena
+/// layout needs: `primary[position]` is the allocation holding that position's
+/// own node, `extras` the allocations holding the extra outputs
+/// ([`extra_output_nodes`]) with `position_extras[position]` their range.
+#[cfg(feature = "metal-plan-stable-buffers")]
+struct ArenaAllocations {
+    allocations: Vec<Allocation>,
+    releases: Vec<Vec<usize>>,
+    primary: Vec<usize>,
+    extras: Vec<(NodeId, usize)>,
+    position_extras: Vec<core::ops::Range<usize>>,
+}
+
+/// Walks `resolved` in program order, mirroring the retirement ordering
+/// [`execute_plan_with_placements`]'s own dispatch loop already uses: a
+/// position's outputs come into being first, then whatever `retires[position]`
+/// names is released for positions after this one. `outputs` is passed through
+/// only for the `debug_assert!` -- `node_retirement` itself is what actually
+/// keeps an output out of `retires`.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn arena_allocations(
+    resolved: &[BoundOp],
+    retires: &[Vec<NodeId>],
+    outputs: &BTreeSet<NodeId>,
+    resident_nodes: &BTreeSet<NodeId>,
+) -> ArenaAllocations {
+    let mut found = ArenaAllocations {
+        allocations: Vec::with_capacity(resolved.len()),
+        releases: Vec::with_capacity(resolved.len()),
+        primary: Vec::with_capacity(resolved.len()),
+        extras: Vec::new(),
+        position_extras: Vec::with_capacity(resolved.len()),
+    };
+    let mut live_index: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for (position, bound) in resolved.iter().enumerate() {
+        let resident = resident_nodes.contains(&bound.node);
+        let element_bytes = bound.dtype.size_bytes();
+        let own = Allocation {
+            bytes: bound_output_len(bound).max(1) * element_bytes,
+            first: position,
+            resident,
+        };
+        live_index.insert(bound.node, found.allocations.len());
+        found.primary.push(found.allocations.len());
+        found.allocations.push(own);
+        let extras_start = found.extras.len();
+        for (extra_node, element_count) in extra_output_nodes(bound) {
+            live_index.insert(extra_node, found.allocations.len());
+            found.extras.push((extra_node, found.allocations.len()));
+            found.allocations.push(Allocation {
+                bytes: element_count.max(1) * element_bytes,
+                first: position,
+                resident,
+            });
+        }
+        found.position_extras.push(extras_start..found.extras.len());
+        let mut released = Vec::new();
+        for retired in &retires[position] {
+            debug_assert!(
+                !outputs.contains(retired),
+                "node_retirement must never retire an effective output"
+            );
+            released.extend(live_index.remove(retired));
+        }
+        found.releases.push(released);
+    }
+    found
+}
+
+/// Builds [`BufferArena`]: collects the plan's outputs ([`arena_allocations`]),
+/// lays them out ([`lay_out_packed`] for a serially dispatched plan,
+/// [`lay_out_whole_slots`] otherwise, and for a packed buffer longer than the
+/// device allows in one allocation), then allocates one device buffer per slot.
+///
+/// This plan's own row count, straight from the caller's bind-time
+/// `symbols[0]` (`new_count` in `residency_caches.rs`'s own vocabulary,
+/// stored once on [`Plan::bind_row_count`] at [`plan`]/[`plan_named`] time)
+/// -- never inferred from any bound op's `extents`. `max(1)` covers a
+/// symbols-less caller (bare `Op` unit tests) the same way decode's own
+/// `new_count == 1` already does. [`plan_bind_row_count`]'s own doc has why.
+///
 /// Prints the naive (no-reuse) transient sum against this plan's own
 /// `query_rows`-scaled cap before allocating anything, per this card's
-/// memory gate. `query_rows` is the caller's own [`Plan::bind_row_count`] --
-/// see [`plan_bind_row_count`]'s own doc for why that, rather than a scan
-/// over `resolved`, is the cap's source of truth.
+/// memory gate, and refuses to allocate when the live peak exceeds the cap.
 #[cfg(feature = "metal-plan-stable-buffers")]
 pub(super) fn build_buffer_arena(
     device: &ProtocolObject<dyn MTLDevice>,
-    resolved: &[BoundOp],
+    plan: &Plan,
     retires: &[Vec<NodeId>],
-    effective_outputs: &[NodeId],
-    resident_nodes: &BTreeSet<NodeId>,
-    query_rows: u64,
-    numeric_policy: NumericPolicy,
 ) -> Result<BufferArena, MetalError> {
-    let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
+    let resolved = plan.prepared.resolved.as_slice();
+    let query_rows = plan.bind_row_count;
+    let outputs: BTreeSet<NodeId> = plan.prepared.effective_outputs.iter().copied().collect();
     let naive_transient_bytes: usize = resolved
         .iter()
         .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
         .sum();
     let uniform_bytes: usize = resolved
         .iter()
-        .map(|bound| pack_uniforms_byte_len(bound, numeric_policy))
+        .map(|bound| pack_uniforms_byte_len(bound, plan.numeric_policy))
         .sum();
     let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows.max(1) as usize);
     let device_limit = device.recommendedMaxWorkingSetSize();
@@ -201,103 +277,8 @@ pub(super) fn build_buffer_arena(
         "buffer arena sized against the naive (no-reuse) transient sum"
     );
 
-    let mut free_by_size: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    let mut slots: Vec<MetalBuffer> = Vec::new();
-    let mut slot_bytes: Vec<usize> = Vec::new();
-    let mut position_slot: Vec<usize> = Vec::with_capacity(resolved.len());
-    let mut extra_slots: Vec<(NodeId, usize)> = Vec::new();
-    let mut position_extras: Vec<core::ops::Range<usize>> = Vec::with_capacity(resolved.len());
-    let mut node_slot: BTreeMap<NodeId, usize> = BTreeMap::new();
-    let mut live_bytes: usize = 0;
-    let mut peak_bytes: usize = 0;
-    #[cfg(feature = "instrument")]
-    let mut slot_occupancy: Vec<usize> = Vec::new();
-
-    for (position, bound) in resolved.iter().enumerate() {
-        let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
-        // A resident position's slot is written once, on the plan's cold
-        // call, and never rewritten again (`resident_skip`) -- so it can
-        // never share a slot with an ordinary position that keeps writing
-        // every call. `resident_pinned_retires` already stops this position's
-        // OWN slot from being handed FORWARD once resident; this stops the
-        // opposite direction, a resident position being handed a slot an
-        // ordinary, every-call position still owns, by refusing the shared
-        // free list on its own allocation.
-        let is_resident = resident_nodes.contains(&bound.node);
-        let slot = match (!is_resident)
-            .then(|| free_by_size.get_mut(&byte_length).and_then(Vec::pop))
-            .flatten()
-        {
-            Some(reused) => reused,
-            None => {
-                let index = slots.len();
-                slots.push(allocate_buffer(
-                    device,
-                    bound_output_len(bound),
-                    bound.dtype,
-                )?);
-                slot_bytes.push(byte_length);
-                #[cfg(feature = "instrument")]
-                slot_occupancy.push(0);
-                index
-            }
-        };
-        #[cfg(feature = "instrument")]
-        {
-            slot_occupancy[slot] += 1;
-        }
-        // every slot assignment re-occupies `byte_length` bytes, whether the
-        // slot is freshly allocated or pulled back from the free list -- a
-        // reused slot was subtracted out of `live_bytes` when its PREVIOUS
-        // occupant retired, so skipping this on the reuse arm would double-
-        // count that subtraction the next time this new occupant retires.
-        live_bytes += byte_length;
-        peak_bytes = peak_bytes.max(live_bytes);
-        position_slot.push(slot);
-        node_slot.insert(bound.node, slot);
-
-        let extras_start = extra_slots.len();
-        for (extra_node, element_count) in extra_output_nodes(bound) {
-            let extra_bytes = element_count.max(1) * bound.dtype.size_bytes();
-            let index = match (!is_resident)
-                .then(|| free_by_size.get_mut(&extra_bytes).and_then(Vec::pop))
-                .flatten()
-            {
-                Some(reused) => reused,
-                None => {
-                    slots.push(allocate_buffer(device, element_count, bound.dtype)?);
-                    slot_bytes.push(extra_bytes);
-                    #[cfg(feature = "instrument")]
-                    slot_occupancy.push(0);
-                    slots.len() - 1
-                }
-            };
-            #[cfg(feature = "instrument")]
-            {
-                slot_occupancy[index] += 1;
-            }
-            live_bytes += extra_bytes;
-            peak_bytes = peak_bytes.max(live_bytes);
-            node_slot.insert(extra_node, index);
-            extra_slots.push((extra_node, index));
-        }
-        position_extras.push(extras_start..extra_slots.len());
-
-        for retired in &retires[position] {
-            debug_assert!(
-                !outputs.contains(retired),
-                "node_retirement must never retire an effective output"
-            );
-            if let Some(retired_slot) = node_slot.remove(retired) {
-                live_bytes -= slot_bytes[retired_slot];
-                free_by_size
-                    .entry(slot_bytes[retired_slot])
-                    .or_default()
-                    .push(retired_slot);
-            }
-        }
-    }
-
+    let found = arena_allocations(resolved, retires, &outputs, &plan.resident_nodes);
+    let peak_bytes = peak_live_bytes(&found.allocations, &found.releases);
     let reuse_factor = naive_transient_bytes as f64 / peak_bytes.max(1) as f64;
     debug!(
         peak_bytes = peak_bytes as u64,
@@ -319,15 +300,45 @@ pub(super) fn build_buffer_arena(
         });
     }
 
+    let packed = (plan.dispatch_type == DispatchType::Serial)
+        .then(|| lay_out_packed(&found.allocations, &found.releases))
+        .filter(|layout| layout.slot_bytes.iter().all(|bytes| *bytes <= device.maxBufferLength()));
+    let was_packed = packed.is_some();
+    let layout = packed
+        .unwrap_or_else(|| lay_out_whole_slots(&found.allocations, &found.releases));
+    let mut slots: Vec<MetalBuffer> = Vec::with_capacity(layout.slot_bytes.len());
+    for bytes in &layout.slot_bytes {
+        slots.push(allocate_buffer(device, bytes.div_ceil(4), DType::Float32)?);
+    }
+    debug!(
+        packed = was_packed,
+        slots = layout.slot_bytes.len() as u64,
+        allocations = found.allocations.len() as u64,
+        allocated_bytes = layout.slot_bytes.iter().sum::<usize>() as u64,
+        peak_bytes = peak_bytes as u64,
+        "buffer arena laid out"
+    );
+
     Ok(BufferArena {
         slots,
-        slot_bytes,
-        position_slot,
-        extra_slots,
-        position_extras,
+        position_slot: found.primary.iter().map(|index| layout.places[*index].0).collect(),
+        position_offset: found.primary.iter().map(|index| layout.places[*index].1).collect(),
+        extra_slots: found
+            .extras
+            .iter()
+            .map(|(node, index)| (*node, layout.places[*index].0, layout.places[*index].1))
+            .collect(),
+        position_extras: found.position_extras,
         peak_bytes,
         #[cfg(feature = "instrument")]
-        slot_occupancy,
+        slot_occupancy: {
+            let mut occupancy = vec![0usize; layout.slot_bytes.len()];
+            for (slot, _) in &layout.places {
+                occupancy[*slot] += 1;
+            }
+            occupancy
+        },
+        slot_bytes: layout.slot_bytes,
     })
 }
 
@@ -422,16 +433,7 @@ pub(super) fn arena_placement(
     if plan.arena.get().is_none() {
         let (device, _queue) = device_and_queue()?;
         let pinned_retires = resident_pinned_retires(plan);
-        let arena = build_buffer_arena(
-            &device,
-            &plan.prepared.resolved,
-            &pinned_retires,
-            &plan.prepared.effective_outputs,
-            &plan.resident_nodes,
-            plan.bind_row_count,
-            plan.numeric_policy,
-        )?;
-        // a fresh, still-empty `OnceCell` can only fail to accept this set
+        let arena = build_buffer_arena(&device, plan, &pinned_retires)?;        // a fresh, still-empty `OnceCell` can only fail to accept this set
         // if another call already raced it in -- impossible here since
         // `plan` is `&Plan`, never shared across a concurrent write.
         let _ = plan.arena.set(arena);
@@ -451,10 +453,10 @@ pub(super) fn bind_arena_extras(
     let Some(arena) = plan.arena.get() else {
         return;
     };
-    for (node, buffer) in arena.extra_placements(position) {
+    for (node, buffer, offset) in arena.extra_placements(position) {
         device_buffers
             .entry(node)
-            .or_insert_with(|| (buffer.clone(), 0));
+            .or_insert_with(|| (buffer.clone(), offset));
     }
 }
 #[cfg(not(feature = "metal-plan-stable-buffers"))]
@@ -3227,7 +3229,7 @@ pub(super) mod arena_tests {
     };
 
     use super::{
-        arena_placement, device_and_queue, execute_plan, execute_plan_with_placements, plan,
+        DispatchType, arena_placement, device_and_queue, execute_plan, execute_plan_with_placements, plan,
         plan_uniform_buffer,
     };
 
@@ -3366,6 +3368,91 @@ pub(super) mod arena_tests {
             },
         );
         (shared, consumer_a, consumer_b)
+    }
+
+    /// Four diamonds of four different lengths, every consumer a program
+    /// output: the four `shared` nodes retire one after another, so a packed
+    /// layout lets all four use the start of one buffer while a whole-slot
+    /// layout needs four buffers (no two lengths match).
+    #[test]
+    fn a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer() {
+        let extents = [64u32, 16, 32, 8];
+        let mut program = Vec::new();
+        let mut shared_nodes = Vec::new();
+        let mut outputs = Vec::new();
+        for extent in extents {
+            let (shared, consumer_a, consumer_b) = append_diamond(&mut program, extent);
+            shared_nodes.push(shared);
+            outputs.extend([consumer_a, consumer_b]);
+        }
+        let inputs: Vec<Vec<f32>> = extents
+            .iter()
+            .map(|extent| (0..*extent).map(|index| index as f32 * 0.5 - 3.0).collect())
+            .collect();
+        let host_inputs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
+        let blocks: Vec<QuantizedBlock> = inputs
+            .iter()
+            .map(|each| QuantizedBlock::Float32(each))
+            .collect();
+        let cpu_oracle = cpu::evaluate(&program, &[], &host_inputs, &outputs)
+            .expect("the CPU oracle evaluates the same diamonds");
+        let mut resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
+            .expect("plans the diamonds");
+        resolved_plan.set_dispatch_type(DispatchType::Serial);
+
+        let packed = execute_plan_with_placements(&resolved_plan, &blocks, &[], &[], &mut Vec::new())
+            .expect("runs the diamonds against the packed arena");
+
+        for node in outputs.iter().copied() {
+            let (expected, _shape) = cpu_oracle.get(node).expect("oracle has this output");
+            let (actual, _shape) = packed.get(node).expect("packed run has this output");
+            assert_eq!(actual, expected, "packed arena output for {node:?} must equal the CPU oracle's");
+        }
+        let arena = resolved_plan.arena.get().expect("the placed run built the arena");
+        assert_eq!(
+            arena.slot_count(),
+            1 + outputs.len(),
+            "one shared buffer for the four released `shared` nodes plus one per program output"
+        );
+        for shared in shared_nodes {
+            let position = resolved_plan
+                .prepared
+                .resolved
+                .iter()
+                .position(|bound| bound.node == shared)
+                .expect("`shared` is dispatched");
+            assert_eq!(arena.position_slot[position], 0, "{shared:?} lives in the shared buffer");
+            assert_eq!(arena.position_offset[position], 0, "no two `shared` nodes are live together");
+        }
+    }
+
+    /// The same program run under each dispatch type: packing is a layout
+    /// choice, so both must return the same bits.
+    #[test]
+    fn serial_packed_and_concurrent_whole_slot_runs_return_the_same_bits() {
+        let mut program = Vec::new();
+        let (shared, consumer_a, consumer_b) = append_diamond(&mut program, 24);
+        let outputs = [consumer_a, consumer_b];
+        let input: Vec<f32> = (0..24).map(|index| (index as f32).sin()).collect();
+        let blocks = [QuantizedBlock::Float32(&input)];
+        let run = |dispatch_type: DispatchType| {
+            let mut resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
+                .expect("plans the diamond");
+            resolved_plan.set_dispatch_type(dispatch_type);
+            execute_plan_with_placements(&resolved_plan, &blocks, &[], &[], &mut Vec::new())
+                .expect("runs the diamond")
+        };
+
+        let serial = run(DispatchType::Serial);
+        let concurrent = run(DispatchType::Concurrent);
+
+        for node in outputs {
+            assert_eq!(
+                serial.get(node).expect("serial run has this output"),
+                concurrent.get(node).expect("concurrent run has this output"),
+                "{node:?} (fed by {shared:?}) differs between layouts"
+            );
+        }
     }
 
     #[test]
