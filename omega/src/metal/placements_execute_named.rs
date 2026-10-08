@@ -3,6 +3,57 @@ use super::*;
 #[cfg(feature = "instrument")]
 use objc2_metal::MTLBlitCommandEncoder;
 
+#[cfg(feature = "instrument")]
+fn raw_ticks_to_seconds(raw_ticks: u64) -> f64 {
+    ticks_to_nanos(raw_ticks) as f64 / 1e9
+}
+
+/// One `step_host_timeline` event per placed execution, on the same
+/// `mach_absolute_time` base as `GPUStartTime`/`GPUEndTime`, so the host
+/// time `evaluate` spends outside the GPU span splits into named parts:
+/// `pre_encode_ms` (entry to the encode epoch), `leading_idle_ms` (entry to
+/// the first GPU start: encode of the first command buffer plus its commit
+/// latency), `trailing_idle_ms` (last GPU end to `waitUntilCompleted`
+/// returning), and `finish_ms` (status check and readback). Every `_ms` is
+/// relative to `entry_raw_s`; the `chunk_record` events carry the per-chunk
+/// breakdown on the epoch base (`epoch_raw_s`).
+#[cfg(feature = "instrument")]
+fn emit_step_host_timeline(
+    decode_shaped: bool,
+    entry_raw_ticks: u64,
+    epoch_raw_ticks: u64,
+    wait_returned_raw_ticks: u64,
+    finish_ticks: u64,
+    gpu_span_raw_s: (f64, f64),
+    chunk_count: u64,
+) {
+    let exit_raw_s = raw_ticks_to_seconds(read_ticks().as_raw());
+    let entry_raw_s = raw_ticks_to_seconds(entry_raw_ticks);
+    let epoch_raw_s = raw_ticks_to_seconds(epoch_raw_ticks);
+    let wait_returned_raw_s = raw_ticks_to_seconds(wait_returned_raw_ticks);
+    let (gpu_start_raw_s, gpu_end_raw_s) = gpu_span_raw_s;
+    let to_ms = |raw_s: f64| (raw_s - entry_raw_s) * 1e3;
+    let gpu_span_ms = (gpu_end_raw_s - gpu_start_raw_s) * 1e3;
+    let exit_ms = to_ms(exit_raw_s);
+    debug!(
+        step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed),
+        plan_shape = if decode_shaped { "decode" } else { "prefill" },
+        chunks = chunk_count,
+        entry_raw_s,
+        epoch_raw_s,
+        pre_encode_ms = to_ms(epoch_raw_s),
+        leading_idle_ms = to_ms(gpu_start_raw_s),
+        gpu_span_ms,
+        last_gpu_end_ms = to_ms(gpu_end_raw_s),
+        trailing_idle_ms = (wait_returned_raw_s - gpu_end_raw_s) * 1e3,
+        wait_returned_ms = to_ms(wait_returned_raw_s),
+        finish_ms = ticks_to_nanos(finish_ticks) as f64 / 1e6,
+        exit_ms,
+        host_unhidden_ms = exit_ms - gpu_span_ms,
+        "step_host_timeline"
+    );
+}
+
 /// reads `PROXIMA_SUBSTITUTE_DUMP_DIR`'s `manifest.txt` back, pairing each
 /// node id with its one captured `.bin` file.
 #[cfg(feature = "instrument")]
@@ -821,6 +872,7 @@ pub(super) fn execute_plan_with_placements_inner(
         last_op: usize,
         encode_start_ms: f64,
         encode_end_ms: f64,
+        commit_at_ms: f64,
         commit_ms: f64,
     }
     #[cfg(feature = "instrument")]
@@ -909,6 +961,9 @@ pub(super) fn execute_plan_with_placements_inner(
             closing_command_buffer.commit();
             #[cfg(feature = "instrument")]
             let closing_commit_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
+            #[cfg(feature = "instrument")]
+            let closing_commit_at_ms =
+                commit_call_started.duration_since(step_encode_start).as_secs_f64() * 1e3;
             // `PROXIMA_CAPTURE_DUMP_DIR` (see `capture_dispatch`'s own doc):
             // an extra `waitUntilCompleted` a normal run never pays -- this
             // closing buffer is exactly the one whose LAST op was the
@@ -928,6 +983,7 @@ pub(super) fn execute_plan_with_placements_inner(
                     last_op: position.saturating_sub(1),
                     encode_start_ms: current_chunk_encode_start_ms,
                     encode_end_ms: closing_encode_end_ms,
+                    commit_at_ms: closing_commit_at_ms,
                     commit_ms: closing_commit_ms,
                 });
                 current_chunk_first_op = position;
@@ -1617,17 +1673,24 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let commit_call_ms = commit_call_started.elapsed().as_secs_f64() * 1e3;
     #[cfg(feature = "instrument")]
+    let commit_at_ms = commit_call_started.duration_since(step_encode_start).as_secs_f64() * 1e3;
+    #[cfg(feature = "instrument")]
     chunk_host_timings.push(ChunkHostTiming {
         first_op: current_chunk_first_op,
         last_op: total_ops.saturating_sub(1),
         encode_start_ms: current_chunk_encode_start_ms,
         encode_end_ms: last_chunk_encode_end_ms,
+        commit_at_ms,
         commit_ms: commit_call_ms,
     });
     while_gpu_runs();
     #[cfg(feature = "instrument")]
     let wait_started = std::time::Instant::now();
     command_buffer.waitUntilCompleted();
+    #[cfg(feature = "instrument")]
+    let wait_returned_ticks = read_ticks();
+    #[cfg(feature = "instrument")]
+    let gpu_span_raw_s: (f64, f64);
     // checks EVERY command buffer this call committed, not only the last --
     // see `Plan::chunk_status_buffers`'s own doc for why one wait already
     // proves every earlier entry has a terminal status too.
@@ -1721,6 +1784,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 step_encode_start_ticks.as_raw(),
             ) as f64
                 / 1e9;
+            gpu_span_raw_s = (gpu_start_s, gpu_end_s);
             let mut sum_gpu_exec_ms = 0.0f64;
             let mut gpu_starts_ends: Vec<(f64, f64)> = Vec::with_capacity(chunk_command_buffers.len());
             for (index, buffer) in chunk_command_buffers.iter().enumerate() {
@@ -1728,6 +1792,8 @@ pub(super) fn execute_plan_with_placements_inner(
                 let gpu_start_ms = ((buffer.GPUStartTime() - step_epoch_s) * 1e3).max(0.0);
                 let gpu_end_ms = ((buffer.GPUEndTime() - step_epoch_s) * 1e3).max(0.0);
                 sum_gpu_exec_ms += (gpu_end_ms - gpu_start_ms).max(0.0);
+                let gpu_idle_before_ms = gpu_start_ms
+                    - gpu_starts_ends.last().map_or(0.0, |&(_, previous_end_ms)| previous_end_ms);
                 gpu_starts_ends.push((gpu_start_ms, gpu_end_ms));
                 debug!(
                     step,
@@ -1738,9 +1804,12 @@ pub(super) fn execute_plan_with_placements_inner(
                     op_last = timing.last_op as u64,
                     encode_start_ms = timing.encode_start_ms,
                     encode_end_ms = timing.encode_end_ms,
+                    commit_at_ms = timing.commit_at_ms,
                     commit_ms = timing.commit_ms,
                     gpu_start_ms,
                     gpu_end_ms,
+                    commit_to_gpu_start_ms = gpu_start_ms - timing.commit_at_ms,
+                    gpu_idle_before_ms,
                     "chunk_record"
                 );
             }
@@ -1789,7 +1858,19 @@ pub(super) fn execute_plan_with_placements_inner(
     check_pending_faults(pending_faults)?;
 
     let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
+    #[cfg(feature = "instrument")]
+    let finish_started = read_ticks();
     let evaluated = finish(plan, &device_buffers, &placed_output_nodes, recycle.pop())?;
+    #[cfg(feature = "instrument")]
+    emit_step_host_timeline(
+        plan.command_buffer_chunks_decode_shaped,
+        pre_encode_started.as_raw(),
+        step_encode_start_ticks.as_raw(),
+        wait_returned_ticks.as_raw(),
+        elapsed_ticks(finish_started),
+        gpu_span_raw_s,
+        chunk_count as u64,
+    );
 
     // Expert buffers are a per-step source snapshot, not plan-resident
     // weights. `finish` has already read every requested output, so retaining
