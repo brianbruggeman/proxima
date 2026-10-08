@@ -1,0 +1,122 @@
+# e2b_p1 proc2
+Thu Oct  8 16:54:52 CDT 2026
+16:54  up 8 days,  2:59, 3 users, load averages: 3.54 4.41 6.37
+df speculative_types=ngram-simple
+df capture mode=stamped step=23 records=653 physical_dispatches=653 prepass_records=0 rounds=21
+cell label=recorded wall_ms=13.230 cpu_ms=2.558 cpu_pct=19.3 rss_peak_mb=3454.4 footprint_mb=419.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.277 cpu_ms=2.586 cpu_pct=19.5 rss_peak_mb=3454.4 footprint_mb=419.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=25.858 cpu_ms=7.403 cpu_pct=28.6 rss_peak_mb=3454.5 footprint_mb=419.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.133 cpu_ms=9.888 cpu_pct=42.7 rss_peak_mb=3454.6 footprint_mb=419.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.624 cpu_ms=1.116 cpu_pct=42.5 rss_peak_mb=3454.6 footprint_mb=419.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.300 cpu_ms=2.621 cpu_pct=19.7 rss_peak_mb=3454.6 footprint_mb=419.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.339 cpu_ms=7.387 cpu_pct=28.0 rss_peak_mb=3454.7 footprint_mb=419.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=22.799 cpu_ms=9.883 cpu_pct=43.3 rss_peak_mb=3454.8 footprint_mb=419.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.426 cpu_ms=1.189 cpu_pct=49.0 rss_peak_mb=3454.8 footprint_mb=419.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.225 cpu_ms=2.556 cpu_pct=19.3 rss_peak_mb=3454.8 footprint_mb=419.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.109 cpu_ms=7.645 cpu_pct=29.3 rss_peak_mb=3454.9 footprint_mb=419.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=24.448 cpu_ms=11.443 cpu_pct=46.8 rss_peak_mb=3455.0 footprint_mb=419.9 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=3.223 cpu_ms=1.455 cpu_pct=45.1 rss_peak_mb=3455.0 footprint_mb=419.9 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=15.060 cpu_ms=3.284 cpu_pct=21.8 rss_peak_mb=3455.0 footprint_mb=420.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=15.746 cpu_ms=3.639 cpu_pct=23.1 rss_peak_mb=3455.0 footprint_mb=420.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=24.649 cpu_ms=11.777 cpu_pct=47.8 rss_peak_mb=3455.1 footprint_mb=420.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.765 cpu_ms=1.231 cpu_pct=44.5 rss_peak_mb=3455.1 footprint_mb=420.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.187 cpu_ms=2.484 cpu_pct=18.8 rss_peak_mb=3455.1 footprint_mb=420.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.577 cpu_ms=2.649 cpu_pct=19.5 rss_peak_mb=3455.1 footprint_mb=420.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=25.931 cpu_ms=7.458 cpu_pct=28.8 rss_peak_mb=3455.2 footprint_mb=420.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.559 cpu_ms=1.131 cpu_pct=44.2 rss_peak_mb=3455.2 footprint_mb=420.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=12.598 cpu_ms=2.598 cpu_pct=20.6 rss_peak_mb=3455.2 footprint_mb=420.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.645 cpu_ms=2.951 cpu_pct=21.6 rss_peak_mb=3455.2 footprint_mb=420.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.434 cpu_ms=7.855 cpu_pct=29.7 rss_peak_mb=3455.3 footprint_mb=420.3 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=22.951 cpu_ms=9.907 cpu_pct=43.2 rss_peak_mb=3455.4 footprint_mb=420.3 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.410 cpu_ms=2.493 cpu_pct=18.6 rss_peak_mb=3455.4 footprint_mb=420.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=12.994 cpu_ms=2.898 cpu_pct=22.3 rss_peak_mb=3455.5 footprint_mb=420.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=24.979 cpu_ms=8.161 cpu_pct=32.7 rss_peak_mb=3455.6 footprint_mb=420.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=22.045 cpu_ms=10.973 cpu_pct=49.8 rss_peak_mb=3455.8 footprint_mb=420.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=3.143 cpu_ms=1.244 cpu_pct=39.6 rss_peak_mb=3455.8 footprint_mb=420.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.943 cpu_ms=3.033 cpu_pct=21.8 rss_peak_mb=3455.9 footprint_mb=420.9 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=25.823 cpu_ms=8.300 cpu_pct=32.1 rss_peak_mb=3456.0 footprint_mb=420.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.680 cpu_ms=10.339 cpu_pct=43.7 rss_peak_mb=3456.0 footprint_mb=420.9 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.466 cpu_ms=1.244 cpu_pct=50.4 rss_peak_mb=3456.0 footprint_mb=420.9 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=14.900 cpu_ms=3.040 cpu_pct=20.4 rss_peak_mb=3456.0 footprint_mb=421.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=27.987 cpu_ms=10.112 cpu_pct=36.1 rss_peak_mb=3456.1 footprint_mb=421.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=25.036 cpu_ms=13.566 cpu_pct=54.2 rss_peak_mb=3456.3 footprint_mb=421.3 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=3.642 cpu_ms=1.760 cpu_pct=48.3 rss_peak_mb=3456.3 footprint_mb=421.3 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=17.026 cpu_ms=4.191 cpu_pct=24.6 rss_peak_mb=3456.4 footprint_mb=421.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=15.676 cpu_ms=4.420 cpu_pct=28.2 rss_peak_mb=3456.4 footprint_mb=421.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=25.859 cpu_ms=15.432 cpu_pct=59.7 rss_peak_mb=3456.5 footprint_mb=421.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.610 cpu_ms=1.137 cpu_pct=43.6 rss_peak_mb=3456.5 footprint_mb=421.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.728 cpu_ms=2.872 cpu_pct=20.9 rss_peak_mb=3456.5 footprint_mb=421.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=16.027 cpu_ms=5.247 cpu_pct=32.7 rss_peak_mb=3456.5 footprint_mb=421.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=30.449 cpu_ms=14.941 cpu_pct=49.1 rss_peak_mb=3456.6 footprint_mb=421.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=5.046 cpu_ms=3.686 cpu_pct=73.0 rss_peak_mb=3456.6 footprint_mb=421.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=26.662 cpu_ms=13.492 cpu_pct=50.6 rss_peak_mb=3457.0 footprint_mb=421.9 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=23.123 cpu_ms=9.627 cpu_pct=41.6 rss_peak_mb=3457.0 footprint_mb=422.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=32.409 cpu_ms=13.778 cpu_pct=42.5 rss_peak_mb=3457.1 footprint_mb=422.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=27.700 cpu_ms=15.522 cpu_pct=56.0 rss_peak_mb=3457.2 footprint_mb=422.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=17.861 cpu_ms=4.523 cpu_pct=25.3 rss_peak_mb=3457.2 footprint_mb=422.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=18.481 cpu_ms=5.003 cpu_pct=27.1 rss_peak_mb=3457.2 footprint_mb=422.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=31.786 cpu_ms=10.899 cpu_pct=34.3 rss_peak_mb=3457.3 footprint_mb=422.3 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=24.521 cpu_ms=11.255 cpu_pct=45.9 rss_peak_mb=3457.6 footprint_mb=422.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.907 cpu_ms=1.187 cpu_pct=40.8 rss_peak_mb=3457.6 footprint_mb=422.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.518 cpu_ms=2.745 cpu_pct=20.3 rss_peak_mb=3457.6 footprint_mb=422.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.001 cpu_ms=7.385 cpu_pct=28.4 rss_peak_mb=3457.7 footprint_mb=422.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=22.879 cpu_ms=9.849 cpu_pct=43.0 rss_peak_mb=3457.8 footprint_mb=422.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.595 cpu_ms=1.114 cpu_pct=42.9 rss_peak_mb=3457.8 footprint_mb=422.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.254 cpu_ms=2.502 cpu_pct=18.9 rss_peak_mb=3457.8 footprint_mb=422.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.290 cpu_ms=7.447 cpu_pct=28.3 rss_peak_mb=3457.9 footprint_mb=422.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.201 cpu_ms=9.995 cpu_pct=43.1 rss_peak_mb=3458.0 footprint_mb=422.9 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.610 cpu_ms=1.112 cpu_pct=42.6 rss_peak_mb=3458.0 footprint_mb=422.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.145 cpu_ms=2.543 cpu_pct=19.3 rss_peak_mb=3458.0 footprint_mb=423.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.610 cpu_ms=2.668 cpu_pct=19.6 rss_peak_mb=3458.0 footprint_mb=423.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.463 cpu_ms=10.059 cpu_pct=42.9 rss_peak_mb=3458.1 footprint_mb=423.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.634 cpu_ms=1.112 cpu_pct=42.2 rss_peak_mb=3458.1 footprint_mb=423.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.161 cpu_ms=2.531 cpu_pct=19.2 rss_peak_mb=3458.1 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.390 cpu_ms=2.817 cpu_pct=21.0 rss_peak_mb=3458.1 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.883 cpu_ms=7.831 cpu_pct=29.1 rss_peak_mb=3458.2 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=3.236 cpu_ms=1.340 cpu_pct=41.4 rss_peak_mb=3458.2 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=14.558 cpu_ms=2.949 cpu_pct=20.3 rss_peak_mb=3458.2 footprint_mb=423.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=15.378 cpu_ms=3.314 cpu_pct=21.6 rss_peak_mb=3458.2 footprint_mb=423.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.852 cpu_ms=7.846 cpu_pct=29.2 rss_peak_mb=3458.3 footprint_mb=423.3 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.126 cpu_ms=9.967 cpu_pct=43.1 rss_peak_mb=3458.4 footprint_mb=423.3 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.399 cpu_ms=2.510 cpu_pct=18.7 rss_peak_mb=3458.5 footprint_mb=423.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.239 cpu_ms=2.626 cpu_pct=19.8 rss_peak_mb=3458.5 footprint_mb=423.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.210 cpu_ms=7.443 cpu_pct=28.4 rss_peak_mb=3458.6 footprint_mb=423.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.147 cpu_ms=9.965 cpu_pct=43.1 rss_peak_mb=3458.7 footprint_mb=422.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.558 cpu_ms=1.123 cpu_pct=43.9 rss_peak_mb=3458.7 footprint_mb=422.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.357 cpu_ms=2.643 cpu_pct=19.8 rss_peak_mb=3458.7 footprint_mb=422.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.519 cpu_ms=7.475 cpu_pct=28.2 rss_peak_mb=3458.8 footprint_mb=422.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.051 cpu_ms=9.889 cpu_pct=42.9 rss_peak_mb=3458.9 footprint_mb=422.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.663 cpu_ms=1.112 cpu_pct=41.8 rss_peak_mb=3458.9 footprint_mb=422.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.293 cpu_ms=2.517 cpu_pct=18.9 rss_peak_mb=3459.0 footprint_mb=422.8 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.388 cpu_ms=7.272 cpu_pct=27.6 rss_peak_mb=3459.1 footprint_mb=423.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.362 cpu_ms=9.808 cpu_pct=42.0 rss_peak_mb=3459.2 footprint_mb=423.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.559 cpu_ms=1.105 cpu_pct=43.2 rss_peak_mb=3459.2 footprint_mb=423.0 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.219 cpu_ms=2.521 cpu_pct=19.1 rss_peak_mb=3459.2 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.786 cpu_ms=2.683 cpu_pct=19.5 rss_peak_mb=3459.2 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.482 cpu_ms=9.910 cpu_pct=42.2 rss_peak_mb=3459.3 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.604 cpu_ms=1.115 cpu_pct=42.8 rss_peak_mb=3459.3 footprint_mb=423.1 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.085 cpu_ms=2.443 cpu_pct=18.7 rss_peak_mb=3459.3 footprint_mb=423.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.658 cpu_ms=2.637 cpu_pct=19.3 rss_peak_mb=3459.3 footprint_mb=423.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.098 cpu_ms=8.283 cpu_pct=31.7 rss_peak_mb=3459.4 footprint_mb=423.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.578 cpu_ms=1.116 cpu_pct=43.3 rss_peak_mb=3459.4 footprint_mb=423.2 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.213 cpu_ms=2.588 cpu_pct=19.6 rss_peak_mb=3459.5 footprint_mb=423.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.694 cpu_ms=2.672 cpu_pct=19.5 rss_peak_mb=3459.5 footprint_mb=423.4 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.052 cpu_ms=7.305 cpu_pct=28.0 rss_peak_mb=3459.6 footprint_mb=423.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=22.966 cpu_ms=10.053 cpu_pct=43.8 rss_peak_mb=3459.7 footprint_mb=423.5 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=recorded wall_ms=13.536 cpu_ms=2.497 cpu_pct=18.4 rss_peak_mb=3459.7 footprint_mb=423.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_unstamped wall_ms=13.600 cpu_ms=2.624 cpu_pct=19.3 rss_peak_mb=3459.7 footprint_mb=423.6 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=split_stamped wall_ms=26.487 cpu_ms=7.330 cpu_pct=27.7 rss_peak_mb=3459.8 footprint_mb=423.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_split_stamped wall_ms=23.360 cpu_ms=9.815 cpu_pct=42.0 rss_peak_mb=3459.9 footprint_mb=423.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+cell label=empty_same_bindings wall_ms=2.596 cpu_ms=1.108 cpu_pct=42.7 rss_peak_mb=3459.9 footprint_mb=423.7 gpu_alloc_mb=3400.5 load_before=4.38 load_after=4.38
+df summary arm=recorded n=21 p50_ms=10.4849 min=9.8093 max=12.9075 cov_pct=6.83 us_per_record=16.056 us_per_physical_dispatch=16.056
+df summary arm=split_unstamped n=21 p50_ms=10.4972 min=9.6350 max=13.2724 cov_pct=7.19 us_per_record=16.075 us_per_physical_dispatch=16.075
+df summary arm=split_stamped n=21 p50_ms=21.6777 min=20.0438 max=24.8396 cov_pct=4.15 us_per_record=33.197 us_per_physical_dispatch=33.197
+df summary arm=empty_split_stamped n=21 p50_ms=18.1035 min=16.5887 max=19.2933 cov_pct=2.69 us_per_record=27.724 us_per_physical_dispatch=27.724
+df summary arm=empty_same_bindings n=21 p50_ms=1.2962 min=1.0603 max=1.4803 cov_pct=7.83 us_per_record=1.985 us_per_physical_dispatch=1.985
+df instream spans stamped_p50_ms=21.6777 stamped_cov_pct=4.15 empty_stamped_p50_ms=18.1035 empty_stamped_cov_pct=2.69 round4_matched=653
+df instream all dispatches=653 isolated_ms=8.2822 round4_isolated_ms=8.3511 instream_ms=11.2591 gap_ms=10.1048 empty_instream_ms=2.6260 empty_gap_ms=15.0218 excess_ms=2.9769 work_ms=8.6331 work_excess_ms=0.3509 cold_penalty_ms=0.5653 stamped_isolated_ms=10.6479 stamped_excess_ms=0.6112
+df instream single_threadgroup dispatches=255 isolated_ms=1.4162 round4_isolated_ms=1.4627 instream_ms=2.6489 gap_ms=6.1009 empty_instream_ms=0.9671 empty_gap_ms=7.8714 excess_ms=1.2327 work_ms=1.6818 work_excess_ms=0.2656 cold_penalty_ms=0.1725 stamped_isolated_ms=2.7185 stamped_excess_ms=-0.0696
+df instream multi_threadgroup dispatches=398 isolated_ms=6.8660 round4_isolated_ms=6.8884 instream_ms=8.6102 gap_ms=4.0039 empty_instream_ms=1.6589 empty_gap_ms=7.1504 excess_ms=1.7442 work_ms=6.9513 work_excess_ms=0.0853 cold_penalty_ms=0.3928 stamped_isolated_ms=7.9295 stamped_excess_ms=0.6808
+       13.11 real         1.70 user         2.79 sys
+          3637411840  maximum resident set size
+           713238592  peak memory footprint

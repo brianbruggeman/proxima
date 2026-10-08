@@ -1,0 +1,7 @@
+run=done run_index=0 wall_ms=1215.480 cpu_user_ms=191.364 cpu_sys_ms=118.043 cpu_ms=309.407 cpu_pct=25.46 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=1 wall_ms=1066.969 cpu_user_ms=93.412 cpu_sys_ms=68.042 cpu_ms=161.454 cpu_pct=15.13 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=2 wall_ms=1066.679 cpu_user_ms=93.429 cpu_sys_ms=68.959 cpu_ms=162.388 cpu_pct=15.22 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=3 wall_ms=1081.448 cpu_user_ms=93.579 cpu_sys_ms=66.712 cpu_ms=160.291 cpu_pct=14.82 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=4 wall_ms=1071.861 cpu_user_ms=94.789 cpu_sys_ms=78.983 cpu_ms=173.772 cpu_pct=16.21 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+run=done run_index=5 wall_ms=1060.796 cpu_user_ms=95.229 cpu_sys_ms=75.630 cpu_ms=170.859 cpu_pct=16.11 tokens_generated=128 prompt_token_count=1000 text_hash=c4625c1fb93f28b7
+   6 speculative_types=SpeculativeTypeSet(0)

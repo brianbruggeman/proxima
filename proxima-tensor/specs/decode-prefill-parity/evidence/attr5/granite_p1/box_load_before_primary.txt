@@ -1,0 +1,12 @@
+Thu Oct  8 16:56:19 CDT 2026
+16:56  up 8 days, 3 hrs, 3 users, load averages: 4.08 4.50 6.23
+"Device Utilization %"=74
+"Device Utilization %"=0
+"Device Utilization %"=0
+42600 /Users/brianbruggeman/.cargo/bin/sccache
+  PID  %CPU COMM
+17029  68.7 <local daemon, name withheld>
+  476  42.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+54533  27.2 /Applications/iTerm.app/Contents/MacOS/iTerm2
+  740   4.1 /Applications/ExpressVPN.app/Contents/MacOS/expressvpnd
+  936   1.8 /Applications/Little Snitch.app/Contents/Components/Little Snitch Agent.app/Contents/MacOS/Little Snitch Agent

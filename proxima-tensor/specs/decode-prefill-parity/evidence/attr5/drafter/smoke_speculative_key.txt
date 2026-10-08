@@ -1,0 +1,3 @@
+PROXIMA_SPECULATIVE_TYPES=none: speculative_types=SpeculativeTypeSet(0)
+PROXIMA_SPECULATIVE_TYPES=ngram-simple: speculative_types=SpeculativeTypeSet(64)
+PROXIMA_SPECULATIVE_TYPES=unset: speculative_types=SpeculativeTypeSet(64)
