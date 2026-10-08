@@ -3298,6 +3298,112 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
     }
 }
 
+#[test]
+fn stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count() {
+    use proxima_gguf::quant::q4_k::QK_K;
+
+    const EMBEDDING: usize = QK_K;
+    const FEED_FORWARD: usize = QK_K;
+    const EXPERT_COUNT: u32 = 4;
+    const EXPERT_USED_COUNT: u32 = 3;
+
+    let pack_stack = |seed: u64, rows: usize, k: usize| -> alloc::vec::Vec<u8> {
+        (0..EXPERT_COUNT as u64)
+            .flat_map(|expert| {
+                quantize_rows(&synth_row(seed + expert, rows * k, 1.0 + expert as f32), rows, k)
+            })
+            .collect()
+    };
+    let gate = pack_stack(1_001, FEED_FORWARD, EMBEDDING);
+    let up = pack_stack(2_002, FEED_FORWARD, EMBEDDING);
+    let down = pack_stack(3_003, EMBEDDING, FEED_FORWARD);
+    let gate_inp = synth_row(4_004, EMBEDDING * EXPERT_COUNT as usize, 1.0);
+
+    let build = |tokens: usize, strategy: MoeProjectionStrategy| {
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(tokens as u32), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
+        let gate_inp = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            "gate_inp",
+        );
+        let stack = |program: &mut Vec<Op>, rows: usize, columns: usize, name: &str| {
+            input_leaf(
+                program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(rows as u32),
+                    Extent::Static(columns as u32),
+                ],
+                name,
+            )
+        };
+        let expert_w_gate = stack(&mut program, EMBEDDING, FEED_FORWARD, "expert_w_gate");
+        let expert_w_up = stack(&mut program, EMBEDDING, FEED_FORWARD, "expert_w_up");
+        let expert_w_down = stack(&mut program, FEED_FORWARD, EMBEDDING, "expert_w_down");
+        let ones = scalar_constant(&mut program, 1.0);
+        let moe_spec = MoeFfnSpec {
+            router: MoeRouter::GateInput(gate_inp),
+            expert_w_gate,
+            expert_w_up,
+            expert_w_down,
+            expert_count: EXPERT_COUNT,
+            expert_used_count: EXPERT_USED_COUNT,
+            ones,
+            gating: ExpertGatingFunc::Softmax,
+            expert_bias: None,
+            expert_scale: None,
+            activation: Activation::Silu,
+            strategy,
+        };
+        let (root, _) =
+            append_moe_ffn(&mut program, 0, x, &moe_spec).expect("the MoE graph builds");
+        (program, root)
+    };
+
+    for tokens in [1usize, 3, 8] {
+        let x = synth_row(5_005 + tokens as u64, tokens * EMBEDDING, 1.0);
+        let blocks = [
+            crate::cpu::QuantizedBlock::Float32(&x),
+            crate::cpu::QuantizedBlock::Float32(&gate_inp),
+            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &gate },
+            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &up },
+            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &down },
+        ];
+        let (per_route_program, per_route_root) = build(tokens, MoeProjectionStrategy::PerRoute);
+        let per_route =
+            crate::cpu::evaluate_quantized(&per_route_program, &[], &blocks, &[per_route_root])
+                .expect("the per-route graph evaluates over packed Q4_K experts");
+        let (stacked_program, stacked_root) = build(tokens, MoeProjectionStrategy::Stacked);
+        let stacked =
+            crate::cpu::evaluate_quantized(&stacked_program, &[], &blocks, &[stacked_root])
+                .expect("the stacked graph evaluates over packed Q4_K experts");
+
+        assert_eq!(stacked.root().len(), tokens * EMBEDDING, "{tokens} tokens");
+        assert_eq!(per_route.root().len(), tokens * EMBEDDING, "{tokens} tokens");
+        let worst_relative_difference = stacked
+            .root()
+            .iter()
+            .zip(per_route.root())
+            .map(|(stacked_value, per_route_value)| {
+                (stacked_value - per_route_value).abs() / per_route_value.abs().max(1.0e-3)
+            })
+            .fold(0.0_f32, f32::max);
+        assert!(
+            worst_relative_difference <= 1.0e-6,
+            "{tokens} tokens: the stacked graph drifted {worst_relative_difference:e} from the \
+             per-route outputs over packed Q4_K experts"
+        );
+    }
+}
+
 /// Independent reference for grouped-query attention: a plain
 /// `q @ k^T` -> causal softmax -> `@ v` over raw f32 slices, with no
 /// dependency on `Op`, `IndexMap`, or anything else the graph under test
