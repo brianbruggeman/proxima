@@ -243,7 +243,7 @@ fn the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape() {
 }
 
 #[test]
-fn simdgroups_follow_llamas_head_dim_rule_and_never_fall_below_two() {
+fn simdgroups_follow_the_reference_head_dim_rule_and_never_fall_below_two() {
     for (head_dim, simdgroups, block) in [
         (64_u64, 2_u64, 64_u64),
         (128, 2, 64),
@@ -324,17 +324,17 @@ fn row_tiled_splits_matches_the_grid_table() {
     assert_eq!(cells, 24, "2 layers x 4 row counts x 3 capacities");
 }
 
-/// `(query rows, rows per threadgroup, splits)` of granite's eight kv heads at
+/// `(query rows, rows per threadgroup, splits)` of eight kv heads at
 /// a thousand cached keys: two simdgroups per threadgroup, so the target is 128
 /// threadgroups and every chunk width lands on it exactly.
-const GRANITE_CHUNKS: [(u64, u64, u64); 5] = [(8, 8, 16), (16, 8, 8), (32, 8, 4), (64, 8, 2), (128, 8, 1)];
+const EIGHT_KV_HEAD_CHUNKS: [(u64, u64, u64); 5] = [(8, 8, 16), (16, 8, 8), (32, 8, 4), (64, 8, 2), (128, 8, 1)];
 
 #[test]
-fn granite_chunks_split_the_keys_until_the_target_threadgroups_are_filled() {
+fn eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled() {
     assert_default_sizing();
     let simdgroups = row_tiled_simdgroups(64);
     assert_eq!(row_tiled_target_threadgroups(simdgroups), 128);
-    for (rows, rows_tile, splits) in GRANITE_CHUNKS {
+    for (rows, rows_tile, splits) in EIGHT_KV_HEAD_CHUNKS {
         let capacity = 1024 + rows;
         let tile = rows_per_threadgroup(rows, 8, 2, 64, capacity);
         let tiles = rows.div_ceil(tile);
@@ -702,7 +702,7 @@ fn the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once() {
     assert!(cases > 20_000, "the property must have run over the whole domain: {cases}");
 }
 
-/// The K-row `CachedSoftmaxWeights` the recognizer binds for gemma4-E2B at
+/// The K-row `CachedSoftmaxWeights` the recognizer binds for a sliding and global layer schedule at
 /// `rows` verify rows: eight groups on one kv head, head_dim 256, with the
 /// layouts `bind::softmax_weights_axes` collapses to (dense `stug`/`swug`
 /// strides, and a value row broadcast across the groups).

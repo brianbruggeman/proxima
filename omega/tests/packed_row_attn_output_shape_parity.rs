@@ -1,6 +1,6 @@
-//! The decode attention-output projection of a gemma4-class checkpoint is a
+//! The decode attention-output projection of a decoder with per-layer inputs is a
 //! Q4_0 matvec whose reduction folds two contiguous axes (kv heads x head
-//! dim, `[1, 1, 8, 256, 1536]` in the E2B census) and whose output carries
+//! dim, `[1, 1, 8, 256, 1536]` in a decode census) and whose output carries
 //! two unit axes. It takes the single-token packed-row body and, with no
 //! fused epilogue, the lane-parallel plain write-back: lane `q` of a
 //! simdgroup stores output row `q`. This gate holds every output of that

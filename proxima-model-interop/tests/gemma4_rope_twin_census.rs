@@ -8,7 +8,7 @@
 //! too, so 35 + 15 = 50 rotated tensors, each two plain elementwise ops before the pass (the 100
 //! `RoPE` rows of the r8 census) and one `ElementwiseTwin` after it.
 //!
-//! `#[ignore]`d: needs the host-local gemma4-E2B checkpoint, and fails loudly naming the env var and
+//! Needs the host-local gemma4-E2B checkpoint and fails loudly, naming the env var and
 //! path when it is absent ([`require_fixture`]) so an explicit run never passes having executed
 //! nothing.
 
@@ -75,7 +75,6 @@ fn kind_histogram(bound_ops: &[BoundOp]) -> BTreeMap<&'static str, usize> {
 }
 
 #[test]
-#[ignore = "needs host-local gemma4-E2B gguf"]
 fn gemma4_rope_twin_census() {
     let path = gemma4_e2b_gguf_path();
     require_fixture(&path, "PROXIMA_GEMMA4_E2B_GGUF");

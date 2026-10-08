@@ -482,7 +482,7 @@ async fn flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refu
 }
 
 #[test]
-fn dense_granite_projection_shape_matches_for_q8_0() {
+fn dense_1024_by_512_projection_shape_matches_for_q8_0() {
     assert_dense_codec_matches(Codec::Q8_0, DenseShape { tokens: 510, rows: 1024, k: 1024 });
 }
 
