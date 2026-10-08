@@ -375,6 +375,13 @@ fn emit_sizing_consts() {
             "grouped_gemm.scan_ahead",
             resolve_int(&root, "grouped_gemm", "scan_ahead"),
         );
+        let prepass_entries = require_multiple_of_thirty_two(
+            "grouped_gemm.prepass_entries",
+            require_nonzero(
+                "grouped_gemm.prepass_entries",
+                resolve_int(&root, "grouped_gemm", "prepass_entries"),
+            ),
+        );
         let route_mode = resolve_str(&root, "grouped_gemm", "route_mode");
         let route_compacted = match route_mode.as_str() {
             "segments" => false,
@@ -384,6 +391,7 @@ fn emit_sizing_consts() {
         out.push_str(&format!("pub const GROUPED_GEMM_ROUTE_COMPACTED: bool = {route_compacted};\n"));
         out.push_str(&format!("pub const GROUPED_GEMM_ROUTE_SEGMENTS: u64 = {route_segments};\n"));
         out.push_str(&format!("pub const GROUPED_GEMM_SCAN_AHEAD: u64 = {scan_ahead};\n"));
+        out.push_str(&format!("pub const GROUPED_GEMM_PREPASS_ENTRIES: u64 = {prepass_entries};\n"));
     }
 
     if env::var_os("CARGO_FEATURE_METAL_WIDE_COOPERATIVE_REDUCE").is_some() {
