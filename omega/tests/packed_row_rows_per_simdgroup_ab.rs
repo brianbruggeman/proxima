@@ -213,15 +213,34 @@ fn default_env_emits_node_94_shape_for_diffing_against_the_capture() {
     });
     let _ = &packed;
 
-    if cfg!(feature = "metal-q4_0-native") {
+    let native_body_selected =
+        cfg!(feature = "metal-q4_0-native") && !cfg!(feature = "metal-q4k-split-k");
+    if native_body_selected {
         assert!(
             source.contains("sumy * -8.0f") && !source.contains("q4_0_pair_dot(blk"),
             "node 94's shape must take ggml's inline Q4_0 dot under metal-q4_0-native:\n{source}"
         );
     } else {
         assert!(
-            source.contains("q4_0_pair_dot(blk"),
+            source.contains("q4_0_pair_dot(blk") && !source.contains("sumy * -8.0f"),
             "node 94's shape must take the batched Q4_0 pair-dot arm:\n{source}"
+        );
+    }
+    if cfg!(feature = "metal-q4k-split-k") {
+        for fragment in [
+            "int ib_first = (int)(ix + sgitg * ",
+            "threadgroup float partial_sums[",
+            "if (sgitg == 0u && lane == 0u) {",
+        ] {
+            assert!(
+                source.contains(fragment),
+                "node 94's shape is 2048 rows, under split-k's ceiling, so it takes the split route (`{fragment}`):\n{source}"
+            );
+        }
+    } else {
+        assert!(
+            !source.contains("sgitg") && !source.contains("partial_sums["),
+            "without split-k node 94's shape is one simdgroup per row group:\n{source}"
         );
     }
     let scratch = tempfile::tempdir().expect("scratch dir creates");
