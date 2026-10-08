@@ -672,6 +672,11 @@ mod gated {
                 let body = body_token(resolved.element_body());
                 format!("{prefix}_elementwise_r{rank}_n{operand_count}_{body}")
             }
+            BoundOpKind::ElementwiseTwin { twin_body, .. } => {
+                let body = body_token(resolved.element_body());
+                let twin = body_token(twin_body);
+                format!("{prefix}_elementwise_twin_r{rank}_n{operand_count}_{body}_{twin}")
+            }
             BoundOpKind::Reduce {
                 reduce_op,
                 init,

@@ -184,6 +184,10 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
         }
         BoundOpKind::MoeTopK { .. } => run_moe_topk(resolved, buffers, output, moe_topk_extra_sink),
         BoundOpKind::TopFractionSelect { .. } => run_top_fraction_select(resolved, buffers, output),
+        BoundOpKind::ElementwiseTwin { .. } => Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "elementwise twin binding has no CPU interpreter; BoundOp::twin_halves runs it as two plain ops",
+        }),
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);

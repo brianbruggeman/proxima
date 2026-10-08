@@ -1396,6 +1396,13 @@ pub(super) fn execute_plan_with_placements_inner(
             #[cfg(feature = "instrument")]
             let placement_resolve_started = read_ticks();
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
+            // a twin's second node is as placeable as its first (a K rotation half is a cache root),
+            // and `bound.node` above is only the first: seed the caller's buffer ahead of the arena's.
+            if let Some(twin_node) = bound.twin_node()
+                && let Some((buffer, offset)) = output_placed.get(&twin_node).copied()
+            {
+                device_buffers.insert(twin_node, (buffer.clone(), offset));
+            }
             bind_arena_extras(plan, position, &mut device_buffers);
             // Redesign §4c: the ONE call site that resolves a scratch
             // buffer for `encode_op`'s two-dispatch `CachedAttention` form

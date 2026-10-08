@@ -314,6 +314,7 @@ fn refresh_one(
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
+        | BoundOpKind::ElementwiseTwin { .. }
         | BoundOpKind::RoundBatchedReduce { .. } => Err(RefreshRefusal::MatcherFusedKind {
             position,
             node: bound_op.node,

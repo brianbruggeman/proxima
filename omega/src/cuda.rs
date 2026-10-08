@@ -242,6 +242,12 @@ pub fn emit_cuda_with_policy(
                 kind: "cached_softmax_weights",
             });
         }
+        BoundOpKind::ElementwiseTwin { .. } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: "elementwise_twin",
+            });
+        }
     };
     let cooperative = reduce_is_cooperative(resolved, &quantized, numeric_policy);
     let grid = CudaGridSpec {
@@ -470,7 +476,8 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
-        | BoundOpKind::CachedSoftmaxWeights { .. } => {
+        | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::ElementwiseTwin { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
                 kind: resolved.kind.name(),
@@ -691,7 +698,8 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError>
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
-        | BoundOpKind::CachedAttention { .. } => extents_product(),
+        | BoundOpKind::CachedAttention { .. }
+        | BoundOpKind::ElementwiseTwin { .. } => extents_product(),
     }
 }
 

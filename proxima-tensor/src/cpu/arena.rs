@@ -1042,6 +1042,7 @@ pub(super) fn bind_named_inputs_into_arena(
 pub(super) fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
     match kind {
         BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::ElementwiseTwin { .. } => "elementwise_twin",
         BoundOpKind::Reduce { .. } => "reduce",
         BoundOpKind::RoundBatchedReduce { .. } => "round_batched_reduce",
         BoundOpKind::Iota => "iota",

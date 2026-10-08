@@ -84,7 +84,7 @@ pub(super) fn grid_threads(
                     .unwrap_or(0);
             checked_product(resolved.node, [attention_vectors, chunks, splits, SIMD_WIDTH])?
         }
-        BoundOpKind::Elementwise { .. } => {
+        BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
             checked_product(resolved.node, resolved.extents.iter().copied())?
         }
         BoundOpKind::Reduce {
@@ -401,6 +401,11 @@ pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> S
             let body = body_token(resolved.element_body());
             format!("omega_elementwise_r{rank}_n{operand_count}_{body}")
         }
+        BoundOpKind::ElementwiseTwin { twin_body, .. } => {
+            let body = body_token(resolved.element_body());
+            let twin = body_token(twin_body);
+            format!("omega_elementwise_twin_r{rank}_n{operand_count}_{body}_{twin}")
+        }
         BoundOpKind::Reduce {
             reduce_op,
             init,
@@ -614,6 +619,33 @@ pub(super) fn kernel_signature(
     element_type: &str,
     include_threadgroup_width: bool,
 ) {
+    kernel_signature_with_extra_outputs(
+        source,
+        quantized,
+        epilogue_operand_count,
+        gather_count,
+        entry,
+        element_type,
+        include_threadgroup_width,
+        0,
+    );
+}
+
+// `extra_outputs` second-and-later output buffers, named `extra_out{index}`, bound after the
+// uniforms (and fault) slot at the indices `encode_op` hands an op's extra outputs: right past
+// `Kernel::bindings`, which is where `BoundOp::twin_node` lands.
+// clippy::too_many_arguments: the seven parameters of `kernel_signature` plus the one it forwards
+#[allow(clippy::too_many_arguments)]
+pub(super) fn kernel_signature_with_extra_outputs(
+    source: &mut String,
+    quantized: &[Option<Codec>],
+    epilogue_operand_count: usize,
+    gather_count: usize,
+    entry: &str,
+    element_type: &str,
+    include_threadgroup_width: bool,
+    extra_outputs: usize,
+) {
     let operand_count = quantized.len();
     source.push_str(&format!("kernel void {entry}(\n"));
     for (index, &codec) in quantized.iter().enumerate() {
@@ -668,6 +700,13 @@ pub(super) fn kernel_signature(
         source.push_str(&format!(
             "    device atomic_uint* fault [[buffer({})]],\n",
             base + gather_count + 2
+        ));
+    }
+    let extra_base = base + gather_count + 2 + usize::from(gather_count > 0);
+    for index in 0..extra_outputs {
+        source.push_str(&format!(
+            "    device {element_type}* extra_out{index} [[buffer({})]],\n",
+            extra_base + index
         ));
     }
     source.push_str("    uint gid [[thread_position_in_grid]]");

@@ -29,6 +29,7 @@ fn max_node_id(built: &[BoundOp]) -> u32 {
         highest = highest.max(bound.node.0);
         match &bound.kind {
             BoundOpKind::GatedDeltaNet { state_out, .. } => highest = highest.max(state_out.0),
+            BoundOpKind::ElementwiseTwin { twin_node, .. } => highest = highest.max(twin_node.0),
             BoundOpKind::CachedSoftmaxWeights {
                 cached_weight_sum,
                 new_weight_sum,
@@ -134,6 +135,7 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
+        | BoundOpKind::ElementwiseTwin { .. }
         | BoundOpKind::RoundBatchedReduce { .. } => return None,
     };
     Some(BoundOp {

@@ -128,7 +128,8 @@ pub(super) fn apply_identity_copy_alias(built: Vec<BoundOp>, outputs: &[NodeId])
             | BoundOpKind::GatedDeltaNet { operands, .. }
             | BoundOpKind::MoeTopK { operands, .. }
             | BoundOpKind::TopFractionSelect { operands, .. }
-            | BoundOpKind::Elementwise { operands, .. } => {
+            | BoundOpKind::Elementwise { operands, .. }
+            | BoundOpKind::ElementwiseTwin { operands, .. } => {
                 rewrite_read_sources(operands, &alias_of);
             }
             BoundOpKind::Reduce {
