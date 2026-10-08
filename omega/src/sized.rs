@@ -147,6 +147,15 @@ pub const SIMD_WIDTH: u64 = 32;
 // `COOPERATIVE_REDUCE_PREFETCH_REGISTERS` is the per-lane register budget a
 // broadcast epilogue's operand prefetch shares across its operands.
 
+// `BROADCAST_REDUCE_MAX_WIDTH` (only with `metal-wide-cooperative-reduce`) and
+// `COOPERATIVE_REDUCE_BROADCAST_SIMD_FOLD` come in through the `include!`
+// above -- the width cap and the partial-combine structure of a reduce that
+// carries a broadcast epilogue (a row normalization); see
+// `omega-runtime.toml`'s `[wide_cooperative_reduce]` and `[cooperative_reduce]`.
+// `OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=256` and
+// `OMEGA_COOPERATIVE_REDUCE_BROADCAST_SIMD_FOLD=0` rebuild the shape before
+// these keys, which is the A/B control.
+
 // `GRID_LINEAR_THREAD_LIMIT`/`GRID_MAX_THREADGROUPS_X` come in through the
 // `include!` above -- `msl::grid2d_for`'s two grid-shape facts: the widest 1D
 // grid a `uint gid [[thread_position_in_grid]]` kernel can address (a wider
