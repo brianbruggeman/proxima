@@ -1774,6 +1774,47 @@ impl CapturedDispatch {
         })
     }
 
+    /// The bytes of the buffer bound at `binding`, from its offset to its end,
+    /// as they stand after the last replay; `None` for an unbound index or a
+    /// resident checkpoint mapping. Compares what a kernel variant left in a
+    /// buffer other than the op's output (a route compaction).
+    #[must_use]
+    pub fn bound_buffer_bytes_at(&self, binding: usize) -> Option<Vec<u8>> {
+        let (_, buffer, offset) = self.buffers.iter().find(|(index, _, _)| *index == binding)?;
+        if buffer.length() > RESIDENT_WEIGHT_BUFFER_BYTES {
+            return None;
+        }
+        // SAFETY: shared-storage buffer idle between replays; `offset <= length()` by construction.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                buffer.contents().as_ptr().cast::<u8>().add(*offset),
+                buffer.length().saturating_sub(*offset),
+            )
+        };
+        Some(bytes.to_vec())
+    }
+
+    /// Overwrites the buffer bound at `binding` with the replay poison byte, so
+    /// a variant that fails to write it cannot pass for one that did. Returns
+    /// whether a buffer was bound there.
+    pub fn poison_bound_buffer(&self, binding: usize) -> bool {
+        let Some((_, buffer, offset)) = self.buffers.iter().find(|(index, _, _)| *index == binding) else {
+            return false;
+        };
+        if buffer.length() > RESIDENT_WEIGHT_BUFFER_BYTES {
+            return false;
+        }
+        // SAFETY: shared-storage buffer idle between replays; `offset <= length()` by construction.
+        unsafe {
+            core::ptr::write_bytes(
+                buffer.contents().as_ptr().cast::<u8>().add(*offset),
+                REPLAY_POISON_BYTE,
+                buffer.length().saturating_sub(*offset),
+            );
+        }
+        true
+    }
+
     /// The route prepass of this record as a dispatch of its own (its pipeline,
     /// launch shape and the shared buffers), `None` for a record with no
     /// prepass, so the prepass is timed apart from the gemm that follows it.
