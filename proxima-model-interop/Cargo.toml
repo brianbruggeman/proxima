@@ -625,6 +625,18 @@ required-features = ["std", "metal", "instrument"]
 name = "norm_variant_ab"
 required-features = ["std", "metal", "instrument"]
 
+# The live decode step against the same captured step replayed with no host
+# encode on the critical path (the ceiling a pre-encoded step could win).
+[[example]]
+name = "step_encode_bound"
+required-features = ["std", "metal", "instrument"]
+
+# Where the commit-to-scheduled milliseconds of a first prefill command buffer
+# go: cold, warm, pre-touched and small-prefill-first stages in one process.
+[[example]]
+name = "prefill_queueing"
+required-features = ["std", "metal", "instrument"]
+
 # SLICE 1 forward decomposition harness (`bench/forward-decomposition`):
 # root-causes the multi-position gpu_exec floor by splitting the gemma4-E2B
 # Metal forward into named components, each on the compile axis
