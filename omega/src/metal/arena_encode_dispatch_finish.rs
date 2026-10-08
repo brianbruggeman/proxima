@@ -1837,6 +1837,116 @@ fn shared_buffer_from(
     Ok(buffer)
 }
 
+/// A timestamp sample buffer with two slots per dispatch (start, end).
+#[cfg(feature = "instrument")]
+fn stamp_sample_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    dispatch_count: usize,
+) -> Result<Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>, MetalError> {
+    let refuse = |log: String| MetalError::CompileFailed { log };
+    debug!(
+        at_stage_boundary = device.supportsCounterSampling(objc2_metal::MTLCounterSamplingPoint::AtStageBoundary),
+        at_dispatch_boundary = device.supportsCounterSampling(objc2_metal::MTLCounterSamplingPoint::AtDispatchBoundary),
+        counter_sets = ?device.counterSets().map(|sets| sets.iter().map(|set| set.name().to_string()).collect::<Vec<_>>()),
+        "counter_sampling_support"
+    );
+    if !device.supportsCounterSampling(objc2_metal::MTLCounterSamplingPoint::AtStageBoundary) {
+        return Err(refuse("device does not sample counters at the stage boundary".to_string()));
+    }
+    let counter_set =
+        timestamp_counter_set(device).ok_or_else(|| refuse("device exposes no timestamp counter set".to_string()))?;
+    if 2 * dispatch_count > MAX_TIMESTAMP_SAMPLES {
+        return Err(refuse(format!(
+            "{dispatch_count} dispatches need {} samples, one timestamp buffer holds {MAX_TIMESTAMP_SAMPLES}",
+            2 * dispatch_count
+        )));
+    }
+    let descriptor = objc2_metal::MTLCounterSampleBufferDescriptor::new();
+    descriptor.setCounterSet(Some(&counter_set));
+    // SAFETY: the count is the checked arithmetic above, within the device's sample buffer limit.
+    unsafe { descriptor.setSampleCount((2 * dispatch_count) as NSUInteger) };
+    device
+        .newCounterSampleBufferWithDescriptor_error(&descriptor)
+        .map_err(|error| refuse(format!("failed to allocate a counter sample buffer: {error}")))
+}
+
+/// One serial compute encoder for dispatch `position`, sampling its start and
+/// end into slots `2 * position` and `2 * position + 1` when a sample buffer is given.
+#[cfg(feature = "instrument")]
+fn split_encoder(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    sample_buffer: Option<&ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    position: usize,
+) -> Result<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>, MetalError> {
+    let refused = || MetalError::CompileFailed { log: "command buffer refused a split replay encoder".to_string() };
+    let Some(sample_buffer) = sample_buffer else {
+        return command_buffer.computeCommandEncoder().ok_or_else(refused);
+    };
+    let descriptor = objc2_metal::MTLComputePassDescriptor::computePassDescriptor();
+    // SAFETY: attachment 0 is the one stage-boundary slot a compute pass descriptor always has.
+    let attachment = unsafe { descriptor.sampleBufferAttachments().objectAtIndexedSubscript(0) };
+    attachment.setSampleBuffer(Some(sample_buffer));
+    // SAFETY: both indices are inside the `2 * dispatch_count` slots `stamp_sample_buffer` allocated.
+    unsafe {
+        attachment.setStartOfEncoderSampleIndex((2 * position) as NSUInteger);
+        attachment.setEndOfEncoderSampleIndex((2 * position + 1) as NSUInteger);
+    }
+    command_buffer.computeCommandEncoderWithDescriptor(&descriptor).ok_or_else(refused)
+}
+
+/// `[start, end]` per dispatch in ns since the first dispatch's start. A slot the
+/// device left unwritten (`u64::MAX`) or an end before its start is an error,
+/// never a zero.
+#[cfg(feature = "instrument")]
+fn resolve_stamps(
+    sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer>,
+    dispatches: &[&CapturedDispatch],
+    nanos_per_tick: f64,
+) -> Result<Vec<[u64; 2]>, MetalError> {
+    let fail = |log: String| MetalError::CompileFailed { log };
+    let range = objc2_foundation::NSRange { location: 0, length: 2 * dispatches.len() };
+    // SAFETY: the range is exactly the slots the replay wrote.
+    let resolved = unsafe { sample_buffer.resolveCounterRange(range) }
+        .ok_or_else(|| fail("counter sample buffer resolved no data".to_string()))?;
+    let raw = resolved.to_vec();
+    let ticks: Vec<u64> = (0..2 * dispatches.len()).map(|slot| read_timestamp(&raw, slot)).collect();
+    if let Some(slot) = ticks.iter().position(|tick| *tick == u64::MAX) {
+        return Err(fail(format!("timestamp slot {slot} was not written")));
+    }
+    let origin = ticks[0];
+    let nanos = |tick: u64| (tick.saturating_sub(origin) as f64 * nanos_per_tick) as u64;
+    ticks
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .enumerate()
+        .map(|(position, pair)| {
+            (pair[1] >= pair[0])
+                .then(|| [nanos(pair[0]), nanos(pair[1])])
+                .ok_or_else(|| fail(format!("dispatch {position} ends before it starts")))
+        })
+        .collect()
+}
+
+/// One `dispatch_stamp` event per dispatch: index, node, kernel, start and end in
+/// ns since the first start, and the gap from the previous dispatch's end.
+#[cfg(feature = "instrument")]
+fn emit_dispatch_stamps(dispatches: &[&CapturedDispatch], stamps: &[[u64; 2]]) {
+    let mut previous_end = 0u64;
+    for (index, (record, stamp)) in dispatches.iter().zip(stamps).enumerate() {
+        debug!(
+            index = index as u64,
+            node = u64::from(record.node),
+            kernel = ?record.entry,
+            start_ns = stamp[0],
+            end_ns = stamp[1],
+            gap_ns = stamp[0].saturating_sub(previous_end),
+            "dispatch_stamp"
+        );
+        previous_end = stamp[1];
+    }
+}
+
 #[cfg(feature = "instrument")]
 const REPLAY_POISON_BYTE: u8 = 0x55;
 
@@ -2248,6 +2358,101 @@ impl CapturedDispatch {
     /// buffer allocation or command execution fails.
     pub fn time_gpu_sequence_ns<Item: Borrow<Self>>(items: &[Item]) -> Result<f64, MetalError> {
         Self::replay_sequence(items, None)
+    }
+
+    /// The captured step replayed as ONE command buffer holding one serial
+    /// compute encoder per dispatch, so each dispatch carries its own start
+    /// and end GPU timestamp. With `sample` every encoder attaches a timestamp
+    /// sample buffer at its stage boundary (the sampling point an Apple GPU
+    /// honors, see [`counter_sampling_mode`]); without it the encoders are
+    /// split and nothing is sampled, the control that separates the cost of
+    /// splitting from the cost of sampling. Returns the command buffer's GPU
+    /// span in ns and, when sampled, `[start, end]` per dispatch in ns since the
+    /// first dispatch's start. With `empty_kernels` every kernel is replaced by
+    /// the empty kernel of [`Self::time_gpu_noop_sequence_ns`] (same bindings,
+    /// same grids), the control that names what the instrument reports for a
+    /// dispatch with no work in it. One `dispatch_stamp` event per dispatch is
+    /// emitted after the command buffer completed, never inside the timed span.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::time_gpu_sequence_ns`], plus [`MetalError::CompileFailed`]
+    /// when the device does not sample at the stage boundary, the dispatches
+    /// exceed one timestamp sample buffer, or a sample comes back unwritten
+    /// (never filled in).
+    pub fn time_gpu_sequence_split_ns<Item: Borrow<Self>>(
+        items: &[Item],
+        sample: bool,
+        empty_kernels: bool,
+    ) -> Result<(f64, Vec<[u64; 2]>), MetalError> {
+        let dispatches: Vec<&Self> = items.iter().map(Borrow::borrow).collect();
+        if dispatches.is_empty() {
+            return Ok((0.0, Vec::new()));
+        }
+        if let Some(reason) = dispatches.iter().find_map(|dispatch| dispatch.unreplayable.as_ref()) {
+            return Err(MetalError::CompileFailed { log: reason.clone() });
+        }
+        let (device, queue) = device_and_queue()?;
+        let sample_buffer = if sample { Some(stamp_sample_buffer(&device, dispatches.len())?) } else { None };
+        let uniforms: Vec<MetalBuffer> = dispatches
+            .iter()
+            .map(|dispatch| shared_buffer_from(&device, &dispatch.uniform_bytes))
+            .collect::<Result<_, _>>()?;
+        let fault = shared_buffer_from(&device, &[0u8; FAULT_REPLAY_BYTES])?;
+        let empties: Vec<FloorPipeline> = if empty_kernels {
+            dispatches
+                .iter()
+                .map(|record| floor_pipeline_for(&device, record, false))
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
+        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+            log: "queue refused a split replay command buffer".to_string(),
+        })?;
+        for (position, (record, uniforms_buffer)) in dispatches.iter().zip(&uniforms).enumerate() {
+            let encoder = split_encoder(&command_buffer, sample_buffer.as_deref(), position)?;
+            let pipeline = empties.get(position).map_or(&record.pipeline, |empty| &empty.pipeline);
+            encoder.setComputePipelineState(pipeline);
+            for (index, buffer, offset) in &record.buffers {
+                // SAFETY: each captured buffer and offset is the pair `encode_op` bound.
+                unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), *offset, *index) };
+            }
+            let uniforms_bound = if empty_kernels { &fault } else { uniforms_buffer };
+            if let Some(index) = record.uniforms_index {
+                unsafe { encoder.setBuffer_offset_atIndex(Some(uniforms_bound), 0, index) };
+            }
+            if let Some(index) = record.fault_index {
+                unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
+            }
+            if empty_kernels {
+                dispatch_floor(&encoder, &record.pipeline, record.grid, true, false);
+            } else {
+                if let Some(prepass) = &record.prepass {
+                    prepass.dispatch_passes(&encoder);
+                    encoder.setComputePipelineState(&record.pipeline);
+                }
+                dispatch(&encoder, &record.pipeline, record.grid);
+            }
+            encoder.endEncoding();
+        }
+        let clock_before = sample_timestamps(&device);
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        let clock_after = sample_timestamps(&device);
+        let span_ns = gpu_span_ns(&command_buffer)?;
+        let Some(sample_buffer) = sample_buffer else {
+            return Ok((span_ns, Vec::new()));
+        };
+        // the cpu half of sampleTimestamps is already ns here: its delta equals the gpu tick delta,
+        // and the mach timebase would scale every stamp by 41.67 against the command buffer span
+        let cpu_delta = clock_after.0.wrapping_sub(clock_before.0);
+        let gpu_delta = clock_after.1.saturating_sub(clock_before.1).max(1);
+        let nanos_per_tick = cpu_delta as f64 / gpu_delta as f64;
+        let stamps = resolve_stamps(&sample_buffer, &dispatches, nanos_per_tick)?;
+        debug!(cpu_delta, gpu_delta, nanos_per_tick, dispatches = dispatches.len() as u64, "dispatch_stamp_calibration");
+        emit_dispatch_stamps(&dispatches, &stamps);
+        Ok((span_ns, stamps))
     }
 
     /// [`Self::time_gpu_sequence_ns`] on a concurrent encoder with a buffer
