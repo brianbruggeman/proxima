@@ -20,7 +20,7 @@ use proxima_telemetry::tag::{ScalarValue, Tag};
 
 use super::{
     BackendRuntime, LayerCacheState, LoadedModel, LogitsSink, NodeValuesSink, PrefixState,
-    ServingConfig, ubatch_prefill_chunks,
+    ServingConfig, ubatch_forgoes_row_kernel, ubatch_prefill_chunks,
 };
 
 const EMBEDDING: u64 = 16;
@@ -411,4 +411,16 @@ fn chunked_prefill_chunk_count_edges() {
     assert_eq!(ubatch_prefill_chunks(32, 64), 2);
     assert_eq!(ubatch_prefill_chunks(32, 65), 3);
     assert_eq!(ubatch_prefill_chunks(32, 7895), 247);
+}
+
+/// The debug event's predicate: only a nonzero `ubatch` under the kernel's
+/// row threshold, on a prompt that alone would have cleared it, is the
+/// configuration's doing. 160 is `omega-runtime.toml`'s `[tiled_gemm].min_tokens`.
+#[test]
+fn ubatch_below_the_row_threshold_forgoes_the_kernel_only_for_a_long_enough_prompt() {
+    assert!(ubatch_forgoes_row_kernel(32, 971, 160), "-ub 32 on a 971-row prompt");
+    assert!(!ubatch_forgoes_row_kernel(512, 971, 160), "-ub 512 clears the threshold");
+    assert!(!ubatch_forgoes_row_kernel(160, 971, 160), "-ub equal to the threshold clears it");
+    assert!(!ubatch_forgoes_row_kernel(0, 971, 160), "-ub 0 is the single pass");
+    assert!(!ubatch_forgoes_row_kernel(32, 100, 160), "a short prompt misses the kernel on its own");
 }
