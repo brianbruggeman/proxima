@@ -212,41 +212,18 @@ fn config_or_default_chunks(plan_chunks: u32) -> (usize, &'static str) {
 /// Chunk boundary positions (program-order op indices) splitting
 /// `total_ops` resolved ops into `chunk_count` contiguous groups: a short head
 /// of `COMMAND_BUFFER_FIRST_CHUNK_OPS` ops so the GPU starts early, then the
-/// rest as evenly as an integer split allows (`omega-runtime.toml`'s
-/// `[command_buffer]` doc has the measurements). With no head configured, or
-/// fewer than three chunks, it is the even split: boundary `i` sits at
-/// `floor(i * total_ops / chunk_count)`. Returns the empty vector for
-/// `chunk_count <= 1` or `total_ops == 0` -- a `1..1` range has a
-/// `(0, Some(0))` size hint, so `.collect()` never allocates, which is what
-/// makes the default `PROXIMA_COMMAND_BUFFER_CHUNKS` unset path provably
-/// free of the extra command-buffer machinery below rather than merely
-/// untested. Duplicate boundary values (K exceeding `total_ops`) collapse
-/// to fewer than `chunk_count - 1` entries instead of producing an empty
-/// chunk.
+/// rest in chunks growing by `COMMAND_BUFFER_GROWTH_PERMILLE` each so a chunk
+/// runs on the GPU at least as long as the next one takes to encode
+/// (`omega-runtime.toml`'s `[command_buffer]` doc has the measurements; the
+/// arithmetic is [`crate::command_buffer_plan::chunk_boundaries`]). Called once
+/// per plan execution, not per dispatch.
 fn command_buffer_chunk_boundaries(total_ops: usize, chunk_count: usize) -> Vec<usize> {
-    if chunk_count <= 1 || total_ops == 0 {
-        return Vec::new();
-    }
-    let head_ops = crate::sized::COMMAND_BUFFER_FIRST_CHUNK_OPS as usize;
-    let headed = head_ops > 0 && head_ops < total_ops && chunk_count > 2;
-    let (first_boundary, tail_ops, tail_chunks) = if headed {
-        (head_ops, total_ops - head_ops, chunk_count - 1)
-    } else {
-        (0, total_ops, chunk_count)
-    };
-    let mut boundaries = Vec::with_capacity(chunk_count - 1);
-    if headed {
-        boundaries.push(first_boundary);
-    }
-    let mut previous = first_boundary;
-    for index in 1..tail_chunks {
-        let boundary = first_boundary + (index * tail_ops) / tail_chunks;
-        if boundary > previous && boundary < total_ops {
-            boundaries.push(boundary);
-            previous = boundary;
-        }
-    }
-    boundaries
+    crate::command_buffer_plan::chunk_boundaries(
+        total_ops,
+        chunk_count,
+        crate::sized::COMMAND_BUFFER_FIRST_CHUNK_OPS as usize,
+        crate::sized::COMMAND_BUFFER_GROWTH_PERMILLE as u32,
+    )
 }
 
 /// The one place `BufferDiagnostics::first_op_label`/`last_op_label` are
@@ -2839,22 +2816,21 @@ mod chunk_boundary_tests {
     use super::command_buffer_chunk_boundaries;
 
     #[test]
-    fn gemma4_decode_step_gets_a_short_head_and_an_even_tail() {
+    fn decode_step_gets_the_sized_head_then_chunks_that_do_not_shrink() {
         let boundaries = command_buffer_chunk_boundaries(1150, 8);
         assert_eq!(boundaries.len(), 7, "8 chunks need 7 boundaries");
         assert_eq!(
-            boundaries[0], 24,
+            boundaries[0] as u64,
+            crate::sized::COMMAND_BUFFER_FIRST_CHUNK_OPS,
             "head chunk is the sized first-chunk op count"
         );
         let widths: Vec<usize> = boundaries
             .windows(2)
             .map(|pair| pair[1] - pair[0])
             .collect();
-        let widest = widths.iter().copied().max().unwrap_or(0);
-        let narrowest = widths.iter().copied().min().unwrap_or(0);
         assert!(
-            widest - narrowest <= 1,
-            "tail chunks stay within one op of even: {widths:?}"
+            widths.windows(2).all(|pair| pair[1] + 1 >= pair[0]),
+            "each chunk after the head is at least as wide as the one before: {widths:?}"
         );
         assert!(boundaries.iter().all(|boundary| *boundary < 1150));
     }

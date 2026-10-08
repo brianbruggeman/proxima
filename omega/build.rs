@@ -306,6 +306,14 @@ fn emit_sizing_consts() {
         "pub const COMMAND_BUFFER_FIRST_CHUNK_OPS: u64 = {first_chunk_ops};\n"
     ));
 
+    let growth_permille = require_nonneg(
+        "command_buffer.growth_permille",
+        resolve_int(&root, "command_buffer", "growth_permille"),
+    );
+    out.push_str(&format!(
+        "pub const COMMAND_BUFFER_GROWTH_PERMILLE: u64 = {growth_permille};\n"
+    ));
+
     let uniform_cache_entries = require_nonzero(
         "spans.uniform_cache_entries",
         resolve_int(&root, "spans", "uniform_cache_entries"),

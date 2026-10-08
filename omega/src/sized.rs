@@ -171,6 +171,10 @@ pub const SIMD_WIDTH: u64 = 32;
 // `COMMAND_BUFFER_FIRST_CHUNK_OPS` comes in through the `include!` above --
 // the op count of a chunked decode step's first command buffer; see
 // `omega-runtime.toml`'s `[command_buffer]` doc for the measured rationale.
+//
+// `COMMAND_BUFFER_GROWTH_PERMILLE` comes in the same way -- the ratio, in
+// permille, between consecutive chunk sizes after that head; see
+// `crate::command_buffer_plan::chunk_boundaries`.
 
 // `UNIFORM_CACHE_ENTRIES` comes in through the `include!` above -- LRU
 // capacity of `crate::metal::UNIFORM_BUFFERS`. See
