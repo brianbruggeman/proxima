@@ -1572,38 +1572,66 @@ where
     Ok(attention_resources)
 }
 
-/// The two whole-checkpoint tensors every layer's own per-layer-embedding
-/// (PLE) input slices out of -- the reference Go source's `computePLEInputs` preamble
-/// (the reference Go source, lines 1276-1301), built ONCE regardless of `block_count` since
-/// neither `proj_flat` nor `emb_flat` depends on `layer`. Kept as raw
-/// `[s, ple_total]` tensors (`ple_total = block_count * ple_dim`) rather
-/// than a materialized `[s, block_count, ple_dim]` reshape --
-/// [`ple_layer_input`] slices each layer's own `ple_dim`-wide window
-/// directly off these two, via [`map::AxisIndex`]'s slice-by-nonzero-offset
-/// case ([`crate::map`]'s own doc table), the same way [`gather_last_row`]'s
-/// sibling ops already address a tensor's axis by more than a bare
-/// projection.
+/// The whole-checkpoint per-layer-embedding (PLE) tensor every layer's own
+/// input is read from -- the reference Go source's `computePLEInputs` preamble
+/// (the reference Go source, lines 1276-1301), built ONCE regardless of
+/// `block_count` since nothing in it depends on `layer`.
+///
+/// The flat `[s, ple_total]` projection and embedding gather
+/// (`ple_total = block_count * ple_dim`) are viewed as `[s, block_count,
+/// ple_dim]` through the tiled-split address `ple_dim*l+d@ple_dim`
+/// ([`map::AxisIndex::split_outer_axis`]), so the per-layer RMSNorm is ONE
+/// reduce over the layer axis instead of `block_count` windowed ones, and
+/// the bound `per_layer_model_proj.weight` leaf stays 2D.
+/// [`ple_layer_input`] reads one layer's `[s, ple_dim]` slice off the result.
 pub(crate) struct PleSharedProjections {
-    /// `per_layer_model_proj(h0) * (1/sqrt(embedding))`, unnormalized --
-    /// [`ple_layer_input`] applies [`Self::proj_norm_weight`]'s RMSNorm
-    /// AFTER slicing, per the reference Go source, line 1297.
+    /// `(rmsnorm(per_layer_model_proj(h0) * (1/sqrt(embedding)))
+    /// + per_layer_token_embd(ids) * sqrt(ple_dim)) * (1/sqrt(2))`, shaped
+    /// `[s, block_count, ple_dim]`; the RMSNorm carries no `+1` offset since
+    /// `per_layer_proj_norm.weight` already holds the full effective gamma.
+    pub(crate) combined: NodeId,
+}
+
+/// The two flat `[s, ple_total]` tensors and the shared norm constants the
+/// layer-axis view is built from -- split out of
+/// [`append_ple_shared_projections`] so a test can build the per-layer
+/// windowed norm over the very same flat nodes.
+pub(crate) struct PleFlatProjections {
     pub(crate) proj_flat: NodeId,
-    /// `per_layer_token_embd(ids) * sqrt(ple_dim)`.
     pub(crate) emb_flat: NodeId,
-    /// `per_layer_proj_norm.weight`, shared across every layer.
     pub(crate) proj_norm_weight: NodeId,
     pub(crate) inv_ple_dim: NodeId,
 }
 
-/// Stage A preamble (the reference Go source, lines 1276-1297): the per-token matmul
-/// (`per_layer_model_proj`) and gather (`per_layer_token_embd`) every
-/// layer's own [`ple_layer_input`] call slices from, computed once before
+/// Stage A preamble (the reference Go source, lines 1276-1301): the per-token matmul
+/// (`per_layer_model_proj`) and gather (`per_layer_token_embd`), their
+/// layer-axis view, the shared RMSNorm and the combine, computed once before
 /// the layer loop starts. `h0` is the caller's own post-embedding-scale
 /// hidden state (`x` at the top of [`scheduled_forward_program_with_experts`],
 /// BEFORE the layer loop reassigns it) -- Gemma 4's `per_layer_model_proj`
 /// input is always the model's initial embedding, never a later layer's
 /// hidden state (the reference Go source, line 1291, `h` there is the preamble's own `h0`).
+///
+/// Composes [`append_ple_flat_projections`] (matmul and gather) and
+/// [`append_ple_combined`] (split view, [`rmsnorm_per_head`] with the layer
+/// axis as its head axis, combine).
+// each argument is a distinct graph node or checkpoint dimension the two halves consume; grouping them would mint a type for one call shape
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_ple_shared_projections(
+    program: &mut Vec<Op>,
+    ids: NodeId,
+    h0: NodeId,
+    eps: NodeId,
+    vocab: u32,
+    embedding: u32,
+    ple_dim: u32,
+    ple_total: u32,
+) -> Result<PleSharedProjections, TensorError> {
+    let flat = append_ple_flat_projections(program, ids, h0, vocab, embedding, ple_dim, ple_total)?;
+    append_ple_combined(program, &flat, eps, ple_dim)
+}
+
+pub(crate) fn append_ple_flat_projections(
     program: &mut Vec<Op>,
     ids: NodeId,
     h0: NodeId,
@@ -1611,7 +1639,7 @@ pub(crate) fn append_ple_shared_projections(
     embedding: u32,
     ple_dim: u32,
     ple_total: u32,
-) -> Result<PleSharedProjections, TensorError> {
+) -> Result<PleFlatProjections, TensorError> {
     let emb_table = input_leaf(
         program,
         DType::Float32,
@@ -1664,7 +1692,7 @@ pub(crate) fn append_ple_shared_projections(
     );
     let inv_ple_dim = scalar_constant(program, 1.0 / ple_dim as f32);
 
-    Ok(PleSharedProjections {
+    Ok(PleFlatProjections {
         proj_flat,
         emb_flat,
         proj_norm_weight,
@@ -1672,57 +1700,67 @@ pub(crate) fn append_ple_shared_projections(
     })
 }
 
-/// Stage A per-layer slice + norm + combine (the reference Go source, lines 1297-1301): this
-/// `layer`'s own `ple_dim`-wide window of [`PleSharedProjections::proj_flat`]
-/// (RMSNorm'd, no `+1` offset -- plain [`rmsnorm`], Gemma 4's
-/// `per_layer_proj_norm` carries the full effective gamma already) added to
-/// this layer's own window of [`PleSharedProjections::emb_flat`], scaled by
-/// `1/sqrt(2)`. The window offset is `layer * ple_dim`, spelled as
-/// [`elementwise`]'s own `"s,d+{offset}@{ple_dim}->sd"` notation -- a
-/// slice-by-nonzero-offset read ([`crate::map`]'s doc table), with
-/// `@{ple_dim}` stating the window's true width directly
-/// (`parse_axis_expr`'s own doc) since a nonzero offset no longer defines
-/// the iteration extent from the operand's own on-disk width.
-pub(crate) fn ple_layer_input(
+/// The layer-axis half of Stage A: views both flat tensors as
+/// `[s, layers, ple_dim]`, norms the projection with ONE reduce, combines.
+pub(crate) fn append_ple_combined(
     program: &mut Vec<Op>,
-    shared: &PleSharedProjections,
+    flat: &PleFlatProjections,
     eps: NodeId,
-    layer: u32,
     ple_dim: u32,
-) -> Result<NodeId, TensorError> {
-    let offset = layer * ple_dim;
-    let window = alloc::format!("s,d+{offset}@{ple_dim}->sd");
-    let proj_slice = elementwise(
+) -> Result<PleSharedProjections, TensorError> {
+    let split_view = alloc::format!("s,{ple_dim}*l+d@{ple_dim}->sld");
+    let proj_view = elementwise(
         program,
         DType::Float32,
         ScalarOp::Identity,
-        &[(shared.proj_flat, window.as_str())],
+        &[(flat.proj_flat, split_view.as_str())],
     )?;
-    let emb_slice = elementwise(
+    let emb_view = elementwise(
         program,
         DType::Float32,
         ScalarOp::Identity,
-        &[(shared.emb_flat, window.as_str())],
+        &[(flat.emb_flat, split_view.as_str())],
     )?;
-    let proj_normed = rmsnorm(
+    let proj_normed = rmsnorm_per_head(
         program,
-        proj_slice,
-        shared.proj_norm_weight,
-        shared.inv_ple_dim,
+        proj_view,
+        flat.proj_norm_weight,
+        flat.inv_ple_dim,
         eps,
+        "l",
     )?;
     let summed = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(proj_normed, "sd->sd"), (emb_slice, "sd->sd")],
+        &[(proj_normed, "sld->sld"), (emb_view, "sld->sld")],
     )?;
     let combine_scale = scalar_constant(program, core::f32::consts::FRAC_1_SQRT_2);
-    elementwise(
+    let combined = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(summed, "sd->sd"), (combine_scale, "->sd")],
+        &[(summed, "sld->sld"), (combine_scale, "->sld")],
+    )?;
+
+    Ok(PleSharedProjections { combined })
+}
+
+/// Stage A per-layer read: this `layer`'s own `[s, ple_dim]` slice of
+/// [`PleSharedProjections::combined`], addressed by the constant layer index
+/// (`"s,{layer},d->sd"`, [`elementwise`]'s constant-axis case) so no work
+/// beyond a view is done per layer.
+pub(crate) fn ple_layer_input(
+    program: &mut Vec<Op>,
+    shared: &PleSharedProjections,
+    layer: u32,
+) -> Result<NodeId, TensorError> {
+    let slice = alloc::format!("s,{layer},d->sd");
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Identity,
+        &[(shared.combined, slice.as_str())],
     )
 }
 
@@ -1873,6 +1911,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
             &mut program,
             ids,
             x,
+            eps,
             vocab,
             embedding,
             ple_dim,
@@ -1922,9 +1961,9 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
             None
         };
 
-        if let (Some(shared), Some(ple_dim)) = (&ple_shared, ple_dim) {
+        if let Some(shared) = &ple_shared {
             ple_layer_inputs[layer as usize] =
-                Some(ple_layer_input(&mut program, shared, eps, layer, ple_dim)?);
+                Some(ple_layer_input(&mut program, shared, layer)?);
         }
 
         let post_mixer = match kind {
@@ -3315,29 +3354,29 @@ mod ple_stage_a_tests {
             alloc::vec![Extent::Symbolic(0), Extent::Static(H0.len() as u32)],
             "h0",
         );
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
         let shared = append_ple_shared_projections(
             &mut program,
             ids,
             h0,
+            eps,
             1,
             H0.len() as u32,
             PROJ_NORM_WEIGHT.len() as u32,
             PROJ_NORM_WEIGHT.len() as u32,
         )
         .expect("append_ple_shared_projections lowers");
-        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
-        let root = ple_layer_input(&mut program, &shared, eps, 0, PROJ_NORM_WEIGHT.len() as u32)
-            .expect("ple_layer_input lowers");
+        let root = ple_layer_input(&mut program, &shared, 0).expect("ple_layer_input lowers");
 
         let proj_table = proj_table_in_major();
         let symbols: [u64; 1] = [1];
         let blocks: [&[f32]; 6] = [
             &[0.0],
             &H0,
+            &[EPS],
             &E_RAW,
             proj_table.as_slice(),
             &PROJ_NORM_WEIGHT,
-            &[EPS],
         ];
         let evaluated = crate::cpu::evaluate(&program, &symbols, &blocks, &[root])
             .expect("ple stage A evaluates");
@@ -3446,12 +3485,20 @@ mod ple_stage_b_tests {
             alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
             "h0",
         );
-        let shared =
-            append_ple_shared_projections(&mut program, ids, h0, 1, embedding, ple_dim, ple_dim)
-                .expect("append_ple_shared_projections lowers");
         let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
-        let ple_input = ple_layer_input(&mut program, &shared, eps, 0, ple_dim)
-            .expect("ple_layer_input lowers");
+        let shared = append_ple_shared_projections(
+            &mut program,
+            ids,
+            h0,
+            eps,
+            1,
+            embedding,
+            ple_dim,
+            ple_dim,
+        )
+        .expect("append_ple_shared_projections lowers");
+        let ple_input =
+            ple_layer_input(&mut program, &shared, 0).expect("ple_layer_input lowers");
 
         let ffn_norm_weight = input_leaf(
             &mut program,
@@ -3504,17 +3551,17 @@ mod ple_stage_b_tests {
         let scale_block: [f32; 1] = [LAYER_OUTPUT_SCALE];
         let symbols: [u64; 1] = [1];
         // Bound positionally, in the exact order each `Input` leaf was
-        // declared above: `ids`, `h0`, then `append_ple_shared_projections`'s
-        // own three leaves, `eps`, then this function's own `ffn_norm.weight`/
+        // declared above: `ids`, `h0`, `eps`, then `append_ple_shared_projections`'s
+        // own three leaves, then this function's own `ffn_norm.weight`/
         // `post_mixer`, then `append_layer_ffn`'s own dense-FFN triple
         // (zeroed) and Stage B triple, and finally `output_scale`'s leaf.
         let blocks: [&[f32]; 15] = [
             &[0.0],
             &H0,
+            &eps_block,
             &E_RAW,
             proj_table.as_slice(),
             &PROJ_NORM_WEIGHT,
-            &eps_block,
             &ffn_norm_ones,
             &H1,
             &zero_gate,
@@ -3545,6 +3592,182 @@ mod ple_stage_b_tests {
                 "h_final = {h_final:?}, expected {expected:?}"
             );
         }
+    }
+}
+
+/// The per-layer-input norm as ONE reduce over the `[s, layers, ple_dim]`
+/// view ([`append_ple_combined`] + [`ple_layer_input`]) against the form it
+/// replaced: one `d + layer*ple_dim` window and one RMSNorm per layer. Both
+/// are built over the same flat projection nodes in one program and
+/// evaluated on the CPU, so the only difference is the norm's shape.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod ple_single_reduce_parity_tests {
+    use super::*;
+
+    const LAYERS: u32 = 5;
+    const PLE_DIM: u32 = 8;
+    const EMBEDDING: u32 = 12;
+    const VOCAB: u32 = 7;
+    const IDS: [f32; 3] = [1.0, 4.0, 6.0];
+    const EPS: f32 = 1e-6;
+
+    fn fill(count: usize, seed: f32) -> Vec<f32> {
+        (0..count)
+            .map(|index| ((index as f32 + seed) * 0.37).sin() * 0.8)
+            .collect()
+    }
+
+    fn windowed_layer_input(
+        program: &mut Vec<Op>,
+        flat: &PleFlatProjections,
+        eps: NodeId,
+        layer: u32,
+    ) -> NodeId {
+        let window = alloc::format!("s,d+{}@{PLE_DIM}->sd", layer * PLE_DIM);
+        let proj_slice = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Identity,
+            &[(flat.proj_flat, window.as_str())],
+        )
+        .expect("window slice of the projection lowers");
+        let emb_slice = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Identity,
+            &[(flat.emb_flat, window.as_str())],
+        )
+        .expect("window slice of the embedding lowers");
+        let normed = rmsnorm(program, proj_slice, flat.proj_norm_weight, flat.inv_ple_dim, eps)
+            .expect("per-layer rmsnorm lowers");
+        let summed = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(normed, "sd->sd"), (emb_slice, "sd->sd")],
+        )
+        .expect("combine add lowers");
+        let combine_scale = scalar_constant(program, core::f32::consts::FRAC_1_SQRT_2);
+        elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(summed, "sd->sd"), (combine_scale, "->sd")],
+        )
+        .expect("combine scale lowers")
+    }
+
+    fn evaluate_both_forms() -> (Vec<Vec<f32>>, Vec<Vec<f32>>, usize) {
+        let ple_total = LAYERS * PLE_DIM;
+        let mut program = Vec::new();
+        let ids = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Symbolic(0)],
+            "ids",
+        );
+        let h0 = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
+            "h0",
+        );
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let flat = append_ple_flat_projections(
+            &mut program,
+            ids,
+            h0,
+            VOCAB,
+            EMBEDDING,
+            PLE_DIM,
+            ple_total,
+        )
+        .expect("flat projections lower");
+        let shared =
+            append_ple_combined(&mut program, &flat, eps, PLE_DIM).expect("layer-axis view lowers");
+
+        let one_reduce: Vec<NodeId> = (0..LAYERS)
+            .map(|layer| ple_layer_input(&mut program, &shared, layer).expect("layer slice lowers"))
+            .collect();
+        let windowed: Vec<NodeId> = (0..LAYERS)
+            .map(|layer| windowed_layer_input(&mut program, &flat, eps, layer))
+            .collect();
+
+        let tokens = IDS.len();
+        let h0_block = fill(tokens * EMBEDDING as usize, 0.5);
+        let emb_block = fill((VOCAB * ple_total) as usize, 3.0);
+        let proj_block = fill((EMBEDDING * ple_total) as usize, 7.0);
+        let norm_block: Vec<f32> = fill(PLE_DIM as usize, 11.0).iter().map(|value| 1.0 + value).collect();
+        let eps_block = alloc::vec![EPS; tokens];
+        let blocks: [&[f32]; 6] = [
+            &IDS,
+            &h0_block,
+            &eps_block,
+            &emb_block,
+            &proj_block,
+            &norm_block,
+        ];
+        let outputs: Vec<NodeId> = one_reduce.iter().chain(windowed.iter()).copied().collect();
+        let evaluated = crate::cpu::evaluate(&program, &[tokens as u64], &blocks, &outputs)
+            .expect("both per-layer-input forms evaluate");
+
+        let collect = |nodes: &[NodeId]| -> Vec<Vec<f32>> {
+            nodes
+                .iter()
+                .map(|node| evaluated.get(*node).expect("requested output present").0.to_vec())
+                .collect()
+        };
+        let reduces = program
+            .iter()
+            .filter(|op| matches!(op, Op::Reduce(reduce) if reduce.keep == Keep::Reduce))
+            .count();
+        (collect(&one_reduce), collect(&windowed), reduces)
+    }
+
+    #[test]
+    fn one_reduce_per_layer_input_matches_the_per_layer_windowed_norm_at_1e_minus_6() {
+        let (single, windowed, _) = evaluate_both_forms();
+
+        assert_eq!(single.len(), LAYERS as usize);
+        for (layer, (new_form, old_form)) in single.iter().zip(&windowed).enumerate() {
+            assert_eq!(new_form.len(), IDS.len() * PLE_DIM as usize, "layer {layer} shape");
+            for (index, (new_value, old_value)) in new_form.iter().zip(old_form).enumerate() {
+                assert!(
+                    (new_value - old_value).abs() < 1e-6,
+                    "layer {layer} element {index}: one-reduce {new_value} vs windowed {old_value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_reduce_form_of_a_layer_differs_from_the_windowed_form_of_another() {
+        let (single, windowed, _) = evaluate_both_forms();
+
+        let largest_gap = single[0]
+            .iter()
+            .zip(&windowed[1])
+            .map(|(new_value, old_value)| (new_value - old_value).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            largest_gap > 1e-3,
+            "layers 0 and 1 must read different windows, largest gap {largest_gap}"
+        );
+    }
+
+    #[test]
+    fn the_layer_axis_form_adds_one_norm_reduce_where_the_windowed_form_adds_one_per_layer() {
+        let (_, _, reduces) = evaluate_both_forms();
+
+        let matmul_reduces = 1;
+        let one_norm_reduce = 1;
+        let windowed_norm_reduces = LAYERS as usize;
+        assert_eq!(
+            reduces,
+            matmul_reduces + one_norm_reduce + windowed_norm_reduces,
+            "projection matmul + shared norm + one windowed norm per layer"
+        );
     }
 }
 
