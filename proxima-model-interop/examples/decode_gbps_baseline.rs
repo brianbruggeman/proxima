@@ -150,12 +150,18 @@ fn install_console_telemetry() -> (
             .expect("console+file fan composes"),
         Err(_) => Exporter::std(),
     };
+    let footprint_before_bytes = process_memory_bytes().1;
     let recorder = Recorder::builder()
         .ring_capacity(65536)
         .export(exporter)
         .expect("console exporter installs")
         .install()
         .expect("telemetry recorder installs");
+    proxima_telemetry::info!(
+        footprint_before_bytes,
+        footprint_after_bytes = process_memory_bytes().1,
+        "telemetry_recorder_footprint"
+    );
     let drained_total = Arc::new(AtomicUsize::new(0));
     let pump_recorder = Arc::clone(&recorder);
     let pump_total = Arc::clone(&drained_total);
