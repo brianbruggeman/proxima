@@ -13,6 +13,9 @@
 //! multiplier on the thread count, for a variant that changes how many rows one
 //! simdgroup folds.
 //!
+//! A `<sha16>.<tag>.f16` file lists comma-separated binding indices whose buffers the variant reads as `half` (the replay narrows them from f32). `AB_GEMM_ONLY` times a compacted gemm without its route prepass, `AB_PREPASS_ONLY` the prepass alone.
+//! Every kernel arm also prints an `ab res` line with its resources (static threadgroup bytes, bound buffer bytes, CPU, RSS, footprint, Metal bytes, load; `AB_RESOURCE_ITERS` replays).
+//!
 //! Knobs: `AB_VARIANT_DIR`, `AB_STEP` (5), `AB_ROUNDS` (60), `AB_BATCH` (16), `AB_SKIP_GROUPS`
 //! (`;`-separated prefixes of `<sha16>:<extents>`; a group whose omission stalls the GPU is named here and skipped),
 //! `PROXIMA_PROMPT`.
@@ -39,6 +42,10 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
+#[path = "cell_resources/cell.rs"]
+mod cell;
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
 mod harness {
     use core::ops::ControlFlow;
     use std::collections::BTreeMap;
@@ -51,6 +58,8 @@ mod harness {
     use proxima_gguf::types::GgmlType;
     use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig, TokenEvent};
     use proxima_tensor::NumericPolicy;
+
+    use super::cell::Cell;
 
     const MODEL_ENV: &str = "PROXIMA_GEMMA4_E2B_GGUF";
     const SHA_PREFIX_CHARS: usize = 16;
@@ -158,9 +167,26 @@ mod harness {
             let template = base
                 .with_kernel_variant(&source, &base.entry, threads, width, numeric_policy())
                 .unwrap_or_else(|error| panic!("variant {name} does not compile: {error}"));
+            let narrowed: Vec<usize> = std::fs::read_to_string(dir.join(name.replace(".metal", ".f16")))
+                .map(|text| {
+                    text.trim()
+                        .split(',')
+                        .map(|index| index.trim().parse().expect("f16 binding index integer"))
+                        .collect()
+                })
+                .unwrap_or_default();
             let dispatches = members
                 .iter()
-                .map(|member| member.with_pipeline_of(&template))
+                .map(|member| {
+                    let replaced = member.with_pipeline_of(&template);
+                    if narrowed.is_empty() {
+                        replaced
+                    } else {
+                        replaced
+                            .with_f16_buffers(&narrowed)
+                            .unwrap_or_else(|error| panic!("variant {name} f16 buffers: {error}"))
+                    }
+                })
                 .collect();
             arms.push(Arm {
                 label: name.trim_end_matches(".metal").to_string(),
@@ -283,7 +309,40 @@ mod harness {
             .collect()
     }
 
+    fn print_arm_resources(sha: &str, arm: &(String, Vec<&CapturedDispatch>), iterations: usize) {
+        let lead = arm.1[0];
+        let (threadgroup_bytes, max_threads, execution_width) = lead.pipeline_resources();
+        let cell = Cell::begin();
+        for _ in 0..iterations {
+            lead.time_gpu_ns(1).expect("resource replay");
+        }
+        let line = cell.end(&format!("{sha}:{}", arm.0));
+        println!(
+            "ab res sha={sha} arm={} tg_static_bytes={threadgroup_bytes} max_threads={max_threads} exec_width={execution_width} bound_buffer_bytes={} iters={iterations} {line}",
+            arm.0,
+            lead.bound_buffer_bytes()
+        );
+    }
+
+    fn gemm_only(dispatches: Vec<CapturedDispatch>) -> Vec<CapturedDispatch> {
+        dispatches
+            .into_iter()
+            .map(|dispatch| {
+                if dispatch.route_prepass_dispatches == 0 {
+                    return dispatch;
+                }
+                dispatch.time_gpu_ns(1).expect("fill the compaction buffer");
+                if std::env::var_os("AB_PREPASS_ONLY").is_some() {
+                    return dispatch.prepass_only().expect("a record with a route prepass");
+                }
+                dispatch.without_prepass()
+            })
+            .collect()
+    }
+
     pub fn run() {
+        let process_cell = Cell::begin();
+        let resource_iterations = env_usize("AB_RESOURCE_ITERS", 50);
         let step = env_usize("AB_STEP", 5);
         let rounds = env_usize("AB_ROUNDS", 60);
         let batch = env_usize("AB_BATCH", 16);
@@ -316,10 +375,17 @@ mod harness {
             .filter(|dispatch| dispatch.grid.threads > 0)
             .collect();
         let launched_total = launched.len();
-        let dispatches: Vec<CapturedDispatch> = launched
+        let replayable: Vec<CapturedDispatch> = launched
             .into_iter()
             .filter(|dispatch| dispatch.unreplayable.is_none())
             .collect();
+        let dispatches = if std::env::var_os("AB_GEMM_ONLY").is_some()
+            || std::env::var_os("AB_PREPASS_ONLY").is_some()
+        {
+            gemm_only(replayable)
+        } else {
+            replayable
+        };
         println!(
             "ab capture excludes {} unreplayable dispatches of {launched_total}",
             launched_total - dispatches.len()
@@ -430,6 +496,9 @@ mod harness {
                 .replay_output_elements(span)
                 .expect("reference output");
             for arm in &arms {
+                print_arm_resources(&sha[..SHA_PREFIX_CHARS], arm, resource_iterations);
+            }
+            for arm in &arms {
                 let output = arm.1[0].replay_output_elements(span).expect("arm output");
                 println!(
                     "ab bits sha={} threads={threads} extents={extents:?} arm={} {}",
@@ -527,6 +596,7 @@ mod harness {
                 }
             }
         }
+        println!("ab {}", process_cell.end("process"));
         assert!(
             timed_groups > 0,
             "N==0: no captured kernel matched a variant file"
