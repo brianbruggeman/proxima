@@ -1651,6 +1651,10 @@ pub(super) struct ResolvedStep {
     /// back out of the scratch buffer `bindings`' own trailing
     /// `Binding::Scratch` slot wrote.
     pub(super) merge: Option<ResolvedMergeStep>,
+    /// `Some` exactly for a compacted expert-grouped GEMM position: the
+    /// prepass dispatch [`encode_op`] runs before the GEMM, see
+    /// [`crate::msl::route_prepass`].
+    pub(super) prepass: Option<ResolvedPrepass>,
     /// `Some` exactly for a `RoundBatchedReduce` position: its contiguous
     /// output buffer and `RoundBase` table, allocated once when the step is
     /// resolved so a warm step binds them instead of allocating two device
@@ -1661,6 +1665,15 @@ pub(super) struct ResolvedStep {
     /// places none, allocated on first use and reused after, so an unplaced
     /// recurrent state costs one device buffer per plan, not one per step.
     pub(super) state_out_fallback: core::cell::OnceCell<MetalBuffer>,
+}
+
+/// [`ResolvedStep::prepass`]'s payload: the prepass pipeline, its launch
+/// shape and the words of the compaction buffer it fills, which the GEMM
+/// kernel binds at `bindings.len()` (see [`crate::msl::route_prepass`]).
+pub(super) struct ResolvedPrepass {
+    pub(super) pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub(super) grid: GridSpec,
+    pub(super) words: usize,
 }
 
 /// [`ResolvedStep::merge`]'s payload -- the SAME triple `ResolvedStep`

@@ -509,6 +509,9 @@ pub(super) fn render_reduce(
         );
     }
     source.push_str("}\n");
+    if !expert_source_mode {
+        push_grouped_route_prepass_if_compacted(&mut source, resolved, quantized, *reduce_op, *init, output_axes, entry)?;
+    }
     Ok(source)
 }
 

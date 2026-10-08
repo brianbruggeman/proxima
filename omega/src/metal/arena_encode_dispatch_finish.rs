@@ -731,6 +731,29 @@ pub(super) fn attention_scratch_buffer(
     Ok(None)
 }
 
+/// The prepass pipeline of a compacted expert-grouped position, keyed on the
+/// GEMM's own cache key plus `_prepass` so the two entries of one source never
+/// collide; `None` for every other position.
+fn resolve_route_prepass(
+    device: &ProtocolObject<dyn MTLDevice>,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    cache_key: &str,
+    math_mode: MathMode,
+) -> Result<Option<ResolvedPrepass>, MetalError> {
+    let Some((kernel, words)) = crate::msl::route_prepass(bound, packed_operands, numeric_policy)? else {
+        return Ok(None);
+    };
+    let prepass_key = format!("{cache_key}_prepass");
+    let pipeline = pipeline_for_kernel(device, &kernel, &prepass_key, math_mode)?;
+    Ok(Some(ResolvedPrepass {
+        pipeline,
+        grid: kernel.grid,
+        words,
+    }))
+}
+
 /// One position's `(pipeline, bindings, grid, merge)`: the per-`bound` body
 /// of [`resolve_steps`], extracted so [`Plan::refit_symbols`] re-resolves
 /// only the positions it patched. A pure function of `bound` and the plan's
@@ -797,6 +820,7 @@ pub(super) fn resolve_step(
         }
         None => None,
     };
+    let prepass = resolve_route_prepass(device, bound, packed_operands, numeric_policy, &cache_key, math_mode)?;
     #[cfg(feature = "metal-moe-mul-mat-id")]
     let round_group = match &bound.kind {
         BoundOpKind::RoundBatchedReduce { .. } => Some(ensure_round_group_resolved(device, bound)?),
@@ -807,6 +831,7 @@ pub(super) fn resolve_step(
         bindings,
         grid,
         merge,
+        prepass,
         #[cfg(feature = "metal-moe-mul-mat-id")]
         round_group,
         state_out_fallback: core::cell::OnceCell::new(),
@@ -970,7 +995,8 @@ pub(super) fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan)
             .iter()
             .map(|bound| bound.operands().iter().map(|(node, ..)| *node).collect())
             .collect();
-        let groups = group_mergeable_positions(&identities, &reads, &writes);
+        let mut groups = group_mergeable_positions(&identities, &reads, &writes);
+        groups.retain(|group| group.iter().all(|position| steps[*position].prepass.is_none()));
         debug!(
             plan_positions = steps.len(),
             merge_groups = groups.len(),
@@ -1240,7 +1266,12 @@ fn capture_dispatch(
                 None => unreplayable = Some(format!("binding {index} ({binding:?}) not resolvable")),
             }
         }
-        let extras_reason = live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers);
+        let extras_reason = live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers)
+            .or_else(|| {
+                crate::msl::route_prepass_active(bound, packed_operands).then(|| {
+                    "a compacted grouped gemm needs its route prepass, which the capture does not record".to_string()
+                })
+            });
         // SAFETY: `uniforms` is a live shared buffer of `length()` bytes.
         let uniform_bytes = unsafe {
             core::slice::from_raw_parts(uniforms.contents().as_ptr().cast::<u8>(), uniforms.length())
@@ -2133,7 +2164,8 @@ pub(super) fn encode_op(
     let emit_started = read_ticks();
     let owned_bindings: Vec<Binding>;
     let owned_merge: Option<ResolvedMergeStep>;
-    let (pipeline, bindings, grid, merge) = if let Some(step) =
+    let owned_prepass: Option<ResolvedPrepass>;
+    let (pipeline, bindings, grid, merge, prepass) = if let Some(step) =
         resolved.filter(|_| expert_buffers.is_none())
     {
         (
@@ -2141,6 +2173,7 @@ pub(super) fn encode_op(
             step.bindings.as_slice(),
             step.grid,
             step.merge.as_ref(),
+            step.prepass.as_ref(),
         )
     } else if let Some(source_node) = expert_source_node {
         let (binding_identity, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
@@ -2198,7 +2231,14 @@ pub(super) fn encode_op(
         };
         let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, math_mode)?;
         owned_bindings = kernel.bindings;
-        (pipeline, owned_bindings.as_slice(), kernel.grid, None)
+        if crate::msl::route_prepass_active(bound, packed_operands) {
+            return Err(MetalError::ExpertSourceUnsupported {
+                node: source_node,
+                reason: "a compacted grouped gemm has no expert-source lowering",
+            });
+        }
+        owned_prepass = None;
+        (pipeline, owned_bindings.as_slice(), kernel.grid, None, owned_prepass.as_ref())
     } else {
         // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
         // `emit`'s work -- structural fingerprint, bindings, grid -- with no
@@ -2250,12 +2290,15 @@ pub(super) fn encode_op(
             }
             None => None,
         };
+        owned_prepass =
+            resolve_route_prepass(device, bound, packed_operands, numeric_policy, &cache_key, math_mode)?;
         owned_bindings = bindings;
         (
             pipeline,
             owned_bindings.as_slice(),
             grid,
             owned_merge.as_ref(),
+            owned_prepass.as_ref(),
         )
     };
     #[cfg(feature = "instrument")]
@@ -2507,6 +2550,17 @@ pub(super) fn encode_op(
         capture_chunk_index,
         &uniforms,
     );
+    if let Some(prepass) = prepass {
+        encode_route_prepass(
+            device,
+            encoder,
+            prepass,
+            bindings.len(),
+            Retained::as_ptr(&output),
+            hazard.as_deref_mut(),
+        )?;
+        encoder.setComputePipelineState(&pipeline);
+    }
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
     // (its own `Binding::Scratch` slot, never `output`); this second
@@ -2589,6 +2643,40 @@ pub(super) fn encode_op(
 
     device_buffers.insert(bound.node, (output, output_offset));
     Ok(fault.map(|fault_buffer| (fault_buffer, gathers)))
+}
+
+/// Runs a compacted expert-grouped op's prepass between the GEMM's binds and
+/// its dispatch. The compaction buffer is bound at `slot` for both kernels (the
+/// prepass declares the GEMM's own binding slots, so nothing is rebound), its
+/// header word is zeroed so a prepass that did not run reads as a total of
+/// zero, which the GEMM turns into a route fault. Under concurrent dispatch
+/// the buffer goes through the hazard tracker like the attention merge's
+/// scratch does; under serial dispatch program order is the dependency.
+fn encode_route_prepass(
+    device: &ProtocolObject<dyn MTLDevice>,
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    prepass: &ResolvedPrepass,
+    slot: usize,
+    output_pointer: *const ProtocolObject<dyn MTLBuffer>,
+    hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
+) -> Result<(), MetalError> {
+    let compaction = allocate_buffer(device, prepass.words, DType::Float32)?;
+    // SAFETY: shared-storage buffer of at least one 4-byte word, idle until the encoded work runs.
+    unsafe { compaction.contents().as_ptr().cast::<u32>().write(0) };
+    unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, slot) };
+    encoder.setComputePipelineState(&prepass.pipeline);
+    dispatch(encoder, &prepass.pipeline, prepass.grid);
+    if let Some(tracker) = hazard {
+        let compaction_pointer = Retained::as_ptr(&compaction);
+        tracker.record(&[], Some(compaction_pointer));
+        if tracker.needs_barrier(&[compaction_pointer], None) {
+            encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+            counter!(BARRIERS_EMITTED, 1);
+            tracker.reset();
+            tracker.record(&[], Some(output_pointer));
+        }
+    }
+    Ok(())
 }
 
 /// Reads back a dispatch's fault buffer and, if any slot recorded a fault,
