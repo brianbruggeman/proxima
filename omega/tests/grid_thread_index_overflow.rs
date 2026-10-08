@@ -22,7 +22,8 @@
 //! rows the 1872-row linear-form dispatch also computes are byte-identical to it
 //! (the wide form must not change a single bit of what the linear form
 //! produced); and the tail rows past the threshold agree with
-//! `proxima_tensor::evaluate` on the same rows.
+//! `proxima_tensor::evaluate` on the same rows (the tiled arm is held to the f32 accumulation bound against the f64 dot
+//! product instead, see `assert_tail_within_accumulation_bound`).
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 // test fixtures: expect() and unwrap() carry the failure message
@@ -193,8 +194,22 @@ fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u
 
     let tail_rows = TAIL_ORACLE_ROWS.min(rows);
     let tail_first = (rows - tail_rows) as usize;
-    let oracle = run_on_cpu(tail_rows, &activations[tail_first * row_len..], &dequantized);
+    let tail_activations = &activations[tail_first * row_len..];
     let tail = &metal[tail_first * features..];
+    match disabled_tiled {
+        Some(_) => assert_tail_matches_cpu_oracle(rows, tail_rows, tail_activations, &dequantized, tail),
+        None => assert_tail_within_accumulation_bound(rows, tail_activations, &dequantized, tail),
+    }
+}
+
+fn assert_tail_matches_cpu_oracle(
+    rows: u32,
+    tail_rows: u32,
+    tail_activations: &[f32],
+    dequantized: &[f32],
+    tail: &[f32],
+) {
+    let oracle = run_on_cpu(tail_rows, tail_activations, dequantized);
     assert_eq!(oracle.len(), tail.len(), "rows={rows}: tail oracle element count");
     let worst = tail
         .iter()
@@ -204,6 +219,33 @@ fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u
     assert!(
         worst <= 1e-3,
         "rows={rows}: the last {tail_rows} rows differ from the cpu oracle by up to {worst} over {} elements",
+        tail.len()
+    );
+}
+
+/// The tiled GEMM accumulates blocks in a different order from the cooperative
+/// kernel's lane tree, and the outputs here reach ~1800, where one f32 ulp is
+/// 1.2e-4. A fixed 1e-3 therefore compares two accumulation orders, not the
+/// kernel against the truth. The bound used instead is the classical f32 sum
+/// bound `n * 2^-24 * sum(|a * w|)` against the f64 dot product, per element.
+fn assert_tail_within_accumulation_bound(rows: u32, tail_activations: &[f32], dequantized: &[f32], tail: &[f32]) {
+    let features = FEATURES as usize;
+    let row_len = REDUCTION_LEN as usize;
+    let unit_roundoff = f64::from(f32::EPSILON) / 2.0;
+    let mut worst_ratio = 0.0f64;
+    for (position, gpu_value) in tail.iter().enumerate() {
+        let (row, feature) = (position / features, position % features);
+        let (dot, magnitude) = (0..row_len).fold((0.0f64, 0.0f64), |(dot, magnitude), reduction| {
+            let product = f64::from(tail_activations[row * row_len + reduction])
+                * f64::from(dequantized[feature * row_len + reduction]);
+            (dot + product, magnitude + product.abs())
+        });
+        let bound = row_len as f64 * unit_roundoff * magnitude;
+        worst_ratio = worst_ratio.max((f64::from(*gpu_value) - dot).abs() / bound);
+    }
+    assert!(
+        worst_ratio <= 1.0,
+        "rows={rows}: the last rows reach {worst_ratio} times the f32 accumulation bound over {} elements",
         tail.len()
     );
 }
@@ -228,12 +270,12 @@ fn per_layer_projection_at_the_last_linear_row_count_is_fully_populated() {
 }
 
 #[test]
-fn tiled_per_layer_projection_at_1873_rows_is_fully_populated_and_matches_the_cpu_oracle() {
+fn tiled_per_layer_projection_at_1873_rows_is_fully_populated_and_inside_the_f32_accumulation_bound() {
     assert_projection_is_fully_populated_and_correct(1873, &synthetic_f16_weight_bytes(), TILED_KERNEL);
 }
 
 #[test]
-fn tiled_per_layer_projection_at_1880_rows_is_fully_populated_and_matches_the_cpu_oracle() {
+fn tiled_per_layer_projection_at_1880_rows_is_fully_populated_and_inside_the_f32_accumulation_bound() {
     assert_projection_is_fully_populated_and_correct(1880, &synthetic_f16_weight_bytes(), TILED_KERNEL);
 }
 
@@ -323,4 +365,29 @@ fn real_per_layer_model_proj_weight_is_fully_populated_at_the_overflow_row_count
         assert_projection_is_fully_populated_and_correct(1873, &weight_bytes, disabled_tiled);
         assert_projection_is_fully_populated_and_correct(1880, &weight_bytes, disabled_tiled);
     }
+}
+
+fn cpu_tail_and_inputs() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let weight_bytes = synthetic_f16_weight_bytes();
+    let mut dequantized = vec![0.0f32; REDUCTION_LEN as usize * FEATURES as usize];
+    f16::dequantize(&weight_bytes, &mut dequantized).expect("weights decode from f16");
+    let activations = random_vec(0x51A7_0001, TAIL_ORACLE_ROWS as usize * REDUCTION_LEN as usize);
+    let tail = run_on_cpu(TAIL_ORACLE_ROWS, &activations, &dequantized);
+    (activations, dequantized, tail)
+}
+
+#[test]
+fn the_accumulation_bound_admits_the_cpu_f32_evaluation_of_the_same_rows() {
+    let (activations, dequantized, tail) = cpu_tail_and_inputs();
+
+    assert_tail_within_accumulation_bound(0, &activations, &dequantized, &tail);
+}
+
+#[test]
+#[should_panic(expected = "times the f32 accumulation bound")]
+fn the_accumulation_bound_rejects_a_corrupted_output_element() {
+    let (activations, dequantized, mut tail) = cpu_tail_and_inputs();
+    tail[0] += 10.0;
+
+    assert_tail_within_accumulation_bound(0, &activations, &dequantized, &tail);
 }
