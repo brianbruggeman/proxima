@@ -1911,10 +1911,33 @@ pub(super) fn q4k_super_block_tiled(
 /// resolving its own `reduction_total` from `reduce_dims`.
 #[cfg(feature = "metal-wide-cooperative-reduce")]
 pub(crate) fn wide_cooperative_reduce_width(reduction_total: u64) -> u64 {
-    let quarter = reduction_total.div_ceil(4).max(1);
-    quarter
+    quarter_width(reduction_total, crate::sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH)
+}
+
+/// One lane per four reduced elements, rounded up to whole simdgroups and
+/// held to `cap` -- the rule both [`wide_cooperative_reduce_width`] and
+/// [`broadcast_cooperative_reduce_width`] apply; they differ only in the cap.
+#[cfg(feature = "metal-wide-cooperative-reduce")]
+fn quarter_width(reduction_total: u64, cap: u64) -> u64 {
+    reduction_total
+        .div_ceil(4)
+        .max(1)
         .next_multiple_of(SIMD_WIDTH)
-        .clamp(SIMD_WIDTH, crate::sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH)
+        .clamp(SIMD_WIDTH, cap)
+}
+
+/// The width of a reduce that carries a broadcast epilogue (the shape a
+/// normalization over one row takes: fold the row, then every lane rewrites
+/// its share of it). One threadgroup covers the row with one lane per four
+/// elements, the same sizing llama.cpp's `ggml_metal_op_norm` applies
+/// (`nth` doubles from 32 until it spans `ne00 / 4`, then is cut to
+/// `(ne00 / 4 + 31) / 32 * 32`), held to
+/// [`crate::sized::BROADCAST_REDUCE_MAX_WIDTH`] instead of the general
+/// cooperative cap: a row has no tile reuse to trade against occupancy, so
+/// the cap that protects the general fold has nothing to protect here.
+#[cfg(feature = "metal-wide-cooperative-reduce")]
+pub(crate) fn broadcast_cooperative_reduce_width(reduction_total: u64) -> u64 {
+    quarter_width(reduction_total, crate::sized::BROADCAST_REDUCE_MAX_WIDTH)
 }
 
 /// Feature off: always `SIMD_WIDTH`, matching [`cooperative_reduce_width`]'s
@@ -1937,6 +1960,9 @@ pub(super) fn cooperative_reduce_width(
         .iter()
         .map(|&dim| resolved.extents[dim as usize])
         .product();
+    if reduce_has_broadcast_epilogue(resolved) {
+        return broadcast_cooperative_reduce_width(reduction_total);
+    }
     wide_cooperative_reduce_width(reduction_total)
 }
 
@@ -2489,6 +2515,13 @@ pub(super) fn push_cooperative_reduce_body(
     Ok(())
 }
 
+/// Whether a multi-simdgroup broadcast fold combines its partials with one
+/// more simd combine ([`crate::sized::COOPERATIVE_REDUCE_BROADCAST_SIMD_FOLD`]
+/// nonzero) rather than serially on lane 0 behind a second barrier.
+fn broadcast_folds_partials_with_simd() -> bool {
+    crate::sized::COOPERATIVE_REDUCE_BROADCAST_SIMD_FOLD != 0
+}
+
 /// The per-lane `simd_sum` fold and the final store both cooperative loop
 /// shapes end with — shared so the strength-reduced single-reduction-dim
 /// path, the general path, and the Q4_K super-block-tiled path (which
@@ -2591,6 +2624,30 @@ pub(super) fn push_cooperative_reduce_tail(
         "    if (lane % {SIMD_WIDTH}u == 0u) {{ partials[lane / {SIMD_WIDTH}u] = partial; }}\n"
     ));
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    if is_broadcast_epilogue && broadcast_folds_partials_with_simd() {
+        // llama.cpp's `kernel_rms_norm_fuse_impl`: lane `i` of every
+        // simdgroup reads simdgroup `i`'s partial and one more simd combine
+        // leaves the scalar in every lane, so there is no serial fold on lane
+        // 0 and no second barrier. A lane past the last simdgroup reads the
+        // reduction identity, which keeps llama's separate zero-fill pass (and
+        // the barrier that would order it) out of the kernel.
+        let identity = cooperative_identity_token(node, reduce_op)?;
+        source.push_str(&format!(
+            "    {element_type} reduced = {combine_fn}((lane % {SIMD_WIDTH}u) < {simdgroups}u \
+             ? partials[lane % {SIMD_WIDTH}u] : ({element_type}){identity});\n"
+        ));
+        push_broadcast_epilogue_write(
+            source,
+            rank,
+            reduce_dims,
+            width,
+            epilogue_body,
+            epilogue_operands,
+            element_type,
+            "reduced",
+        );
+        return Ok(());
+    }
     if is_broadcast_epilogue {
         // Every lane needs `reduced`, not just lane 0 -- fold on lane 0 same
         // as below, publish it back through `partials[0]`, and a second

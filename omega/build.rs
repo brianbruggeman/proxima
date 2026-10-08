@@ -282,6 +282,14 @@ fn emit_sizing_consts() {
         "pub const ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS: u64 = {reciprocal_min_elements};\n"
     ));
 
+    let broadcast_simd_fold = require_nonneg(
+        "cooperative_reduce.broadcast_simd_fold",
+        resolve_int(&root, "cooperative_reduce", "broadcast_simd_fold"),
+    );
+    out.push_str(&format!(
+        "pub const COOPERATIVE_REDUCE_BROADCAST_SIMD_FOLD: u64 = {broadcast_simd_fold};\n"
+    ));
+
     let first_chunk_ops = require_nonneg(
         "command_buffer.first_chunk_ops",
         resolve_int(&root, "command_buffer", "first_chunk_ops"),
@@ -359,6 +367,16 @@ fn emit_sizing_consts() {
         );
         out.push_str(&format!(
             "pub const WIDE_COOPERATIVE_REDUCE_MAX_WIDTH: u64 = {max_width};\n"
+        ));
+        let broadcast_max_width = require_multiple_of_thirty_two(
+            "wide_cooperative_reduce.broadcast_max_width",
+            require_nonzero(
+                "wide_cooperative_reduce.broadcast_max_width",
+                resolve_int(&root, "wide_cooperative_reduce", "broadcast_max_width"),
+            ),
+        );
+        out.push_str(&format!(
+            "pub const BROADCAST_REDUCE_MAX_WIDTH: u64 = {broadcast_max_width};\n"
         ));
     }
 
