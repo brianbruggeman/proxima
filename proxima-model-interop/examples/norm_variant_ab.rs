@@ -13,7 +13,8 @@
 //! multiplier on the thread count, for a variant that changes how many rows one
 //! simdgroup folds.
 //!
-//! Knobs: `AB_VARIANT_DIR`, `AB_STEP` (5), `AB_ROUNDS` (60), `AB_BATCH` (16),
+//! Knobs: `AB_VARIANT_DIR`, `AB_STEP` (5), `AB_ROUNDS` (60), `AB_BATCH` (16), `AB_SKIP_GROUPS`
+//! (`;`-separated prefixes of `<sha16>:<extents>`; a group whose omission stalls the GPU is named here and skipped),
 //! `PROXIMA_PROMPT`.
 //!
 //! Packed-weight kernels (a `Q4_0` matvec) are skipped unless `AB_PACKED` is set.
@@ -291,6 +292,9 @@ mod harness {
         let describe = std::env::var_os("AB_DESCRIBE").is_some();
         let span_full = std::env::var_os("AB_SPAN_FULL").is_some();
         let omit_all = std::env::var_os("AB_OMIT_ALL").is_some();
+        let skip_groups: Vec<String> = std::env::var("AB_SKIP_GROUPS")
+            .map(|list| list.split(';').map(str::to_string).collect())
+            .unwrap_or_default();
         let window_radius = std::env::var("AB_WINDOW")
             .ok()
             .and_then(|value| value.parse::<usize>().ok());
@@ -353,6 +357,11 @@ mod harness {
             }
             let sha_filter = std::env::var("AB_SHA").ok();
             if sha_filter.as_ref().is_some_and(|prefix| !sha.starts_with(prefix.as_str())) {
+                continue;
+            }
+            let group_name = format!("{}:{extents:?}", &sha[..SHA_PREFIX_CHARS]);
+            if skip_groups.iter().any(|skipped| group_name.starts_with(skipped.as_str())) {
+                println!("ab skip group={group_name} count={}", members.len());
                 continue;
             }
             if describe {
