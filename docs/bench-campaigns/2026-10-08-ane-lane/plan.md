@@ -93,6 +93,22 @@ run on a warm path, off the per-layer critical path; nothing in this set
 pursues it. The predictor line is the campaign. Card 1.1's floor is still
 measured first because every predictor cost is a multiple of it.
 
+Two expert tiers, warm and cold (owner, 2026-10-08: "we should have cold
+and warm"). Warm = resident on the GPU and bound, ready to dispatch. Cold =
+on disk (mmap, not resident) or resident but unbound. There is no third
+tier in this design; HOBBIT's precision tiers and NPUMoE's capacity tiers
+are not adopted here. The predictor's job is promotion: it names the experts
+expected at layer L for the next token early enough that the page-in and
+bind finish before the GPU reaches L. Demotion is the warm set's eviction
+rule, decided by data (a least-recently-used or frequency score over the
+captured routes; 5.4 measures which). The warm set's size is a config value
+in bytes, never a count of experts, because expert size differs by model.
+Every card that touches experts reports the warm and cold hit counts per
+token, and every ANE cell reports a cold column (compile, load, first
+prediction) beside the warm column (steady p50), because the ANE's cold cost
+is two orders above its warm cost (0.1: load 54.6 ms, first prediction
+0.53 ms, warm p50 0.27 ms).
+
 Primary line, in order: 0.1 -> 1.1 -> 5.1 (hit rate, CPU) -> 5.3 (predictor
 on the ANE, one dispatch per token) -> 5.4 (prefetch gain on paged experts).
 Secondary, only if the primary line pays: 1.2, 1.3, 2.x, 3.1, 4.x (the
@@ -433,11 +449,11 @@ lock: gpu.lock
 opens: an arm in the existing external expert paging path (`proxima-model-interop/tests/external_expert_paging.rs` names the mechanism) that accepts a predicted expert set per token and issues the page-ins ahead of the layer; no library change beyond a hook the harness drives, behind the `coreml` feature
 commands:
 1. quiet check as 1.1
-2. `cd <tree> && /usr/bin/time -l cargo run --release -p proxima-model-interop --features std,metal,coreml --example ane_lanes -- prefetch --model <granite blob> --resident-experts <fraction> --prompt <prompt1k.txt> --new 128 --arms none,oracle,ane-predicted --iters 3 > runs/5.4.log 2>&1; echo EXIT=$?` (granite with only a fraction of experts resident, the rest paged from disk, to stand in for a model larger than memory; `none` pages on demand, `oracle` prefetches the exact route one layer ahead, `ane-predicted` prefetches 5.3's set; interleaved; text hash must match across arms)
+2. `cd <tree> && /usr/bin/time -l cargo run --release -p proxima-model-interop --features std,metal,coreml --example ane_lanes -- prefetch --model <granite blob> --warm-bytes <B> --evict lru,lfu --prompt <prompt1k.txt> --new 128 --arms none,oracle,ane-predicted --iters 3 > runs/5.4.log 2>&1; echo EXIT=$?` (granite with a warm set of `--warm-bytes` resident experts and every other expert cold on disk, to stand in for a model larger than memory; `none` promotes on demand at the miss, `oracle` promotes the exact route one layer ahead, `ane-predicted` promotes 5.3's set; two eviction rules; interleaved; text hash must match across arms)
 expect:
-- N1 = 3 arms x 3 runs x 128 tokens; text hash equal across arms
-- N2 = per arm: ms/token p50 and CoV, page-in count and bytes per token, miss count per token, GPU busy fraction, peak RSS
-- N3 = `ane-predicted` miss count against `oracle` miss count: the gap is the predictor's cost in misses
+- N1 = 3 arms x 2 eviction rules x 3 runs x 128 tokens; text hash equal across arms
+- N2 = per arm and rule: ms/token p50 and CoV, warm hits and cold misses per token, promotions and demotions per token with bytes, GPU busy fraction, peak RSS and footprint (the warm set must stay at or under `--warm-bytes`, asserted per step)
+- N3 = `ane-predicted` cold misses against `oracle` cold misses: the gap is the predictor's cost in misses; and lru against lfu at the same warm size
 predict: `oracle` recovers most of the on-demand penalty; `ane-predicted` lands between, closer to oracle when 5.1's hit rate is above 85%
 kill: `ane-predicted` is no faster than `none` within the bound (the prediction does not pay at this hit rate and miss cost; the row records it as a negative)
 memory gate: MG-3, clauses 1 to 3, with the resident-expert fraction stated
@@ -589,8 +605,8 @@ not to this repo; each consumer carries its own campaign that depends on cards
 
 | card | status | predict | observed | miss category + work item |
 | --- | --- | --- | --- | --- |
-| 0.1 | | all 4 units; ANE for innerProduct; 27,072 routes | | |
-| 1.1 | | ANE p50 0.3 to 3 ms | | |
+| 0.1 | DONE 2026-10-08 (`.long_ctx_backups/ane/0.1/runs/`) | all 4 units; ANE for innerProduct; 27,072 routes | M1 Max; 4/4 units compile+predict; `cpuAndNeuralEngine` and `all` place ip0 on the Neural Engine, `cpuAndGPU` places it on CPU; 27,048 routes at `--new 128` (27,072 at `--new 129`); top-k of every route equals a CPU top-8 of the GPU's logits, max abs logit diff 1.43e-5 | route count is positions evaluated (prompt + 127 steps), not tokens produced; CoreML puts a 1024x512 inner product on CPU under cpuAndGPU; harness needed an instrument-gated omega capture change (3 patches, unit tests for the dump behaviours still open) |
+| 1.1 | DONE 2026-10-08, 3 runs | ANE p50 0.3 to 3 ms | ANE p50 0.2695 to 0.2753 ms (CoV 5.0 to 6.6%), p99 0.32 to 0.33; cpuOnly 0.208 ms; "cpuAndGPU" 0.234 ms but placed on CPU; 24.7 to 25.3x the Metal per-op floor; process peak RSS 32 MB; box load 3.7 to 4.0, GPU util 0 on settled samples | ANE under the predicted bracket (public path beats the private-API IOSurface figure); CoreML CPU path carries ~0.2 ms overhead; 24 per-layer round trips would be 6.5 ms, equal to the granite step, so the exact-router ruling holds; one call per token is 4% of the step |
 | 1.2 | | copy < 20 us; iosurface zero-copy | | |
 | 1.3 | | ceiling 1024 to 1536 MB; 2-graph swap < 2x | | |
 | 5.3 | | ANE predictor within 1.5x of the floor; hit rate = 5.1 | | |
@@ -603,5 +619,5 @@ not to this repo; each consumer carries its own campaign that depends on cards
 | 3.1 | | < 15% mutual slowdown | | |
 | 4.1 | | hybrid within 1.5x | | |
 | 4.2 | | decode within 10%, lower CPU% | | |
-| 5.1 | | prev2 80 to 90% | | |
+| 5.1 | DONE 2026-10-08 (`ane/0.1/runs/5.1.log`), 5,424 held-out routes (226 positions x 24 layers, 200 prompt / 26 decode) | prev2 80 to 90% | top-8 overall / decode: prev0 control 48.9 / 50.2; prev1 68.1 / 73.3; prev2 58.4 / 64.1; embedding probe (layer-0 router input, linear) 81.5 / 86.9; layer-input-mlp 86.8 / 90.0; oracle-linear 100 / 100. CPU per position over 24 layers, p50: prev1 10.5 us, embedding 81.5 us, mlp 337.7 us. Break-even vs the ANE floor 56.5% | prev2 missed: sparse keys (1,677 of 5,424 held-out keys seen in 902 training positions; unseen keys fall back to the 48.9% global top-8). layer-input-mlp reads the layer's OWN input, which does not exist before the layer runs, so it is not a prefetch signal as built (ProMoE's previous-layer input was not built). The prefetchable signal is the embedding probe: 81.5% at 81.5 us on the CPU, which is 3.3x cheaper than the ANE's 0.27 ms floor, so the predictor belongs on the CPU on this box; the ANE cannot beat 0.27 ms for any predictor, and 5.3 is a confirmation cell only |
 | 5.2 | | pal4 fails, others pass | | |
