@@ -194,70 +194,17 @@ mod normalization_rows {
             .expect("a cooperative reduce reports its threadgroup width")
     }
 
-    const CAPTURED_HIDDEN_WIDTH: u64 = 1536;
-    const CAPTURED_NARROW_ROW: u64 = 512;
-
     #[test]
-    fn hidden_width_norm_class_takes_its_own_width_key() {
-        let expected = crate::sized::HIDDEN_NORM_REDUCE_WIDTH;
+    fn hidden_width_row_gets_one_lane_per_four_elements() {
+        let expected = 384.min(crate::sized::BROADCAST_REDUCE_MAX_WIDTH);
         assert_eq!(dispatch_width(1536), expected);
         assert!(emitted(1536).contains(&format!("lane = gid % {expected}u;")));
     }
 
     #[test]
-    fn selector_returns_512_for_the_captured_one_row_shapes() {
-        assert_eq!(broadcast_width_for(CAPTURED_HIDDEN_WIDTH, 1, 256, 512), 512);
-        assert_eq!(broadcast_width_for(CAPTURED_NARROW_ROW, 1, 256, 512), 512);
-    }
-
-    #[test]
-    fn selector_keeps_256_for_a_wide_reduce_and_for_many_rows() {
-        assert_eq!(broadcast_width_for(4096, 8, 256, 512), 256);
-        assert_eq!(broadcast_width_for(CAPTURED_HIDDEN_WIDTH, 35, 256, 512), 256);
-        assert_eq!(broadcast_width_for(1024, 1, 256, 256), 256);
-    }
-
-    #[test]
-    fn selector_with_the_key_at_256_reproduces_the_one_lane_per_four_widths() {
-        for reduction_total in [128, 256, 512, 1024, 1536, 4096] {
-            for rows in [1, 8] {
-                assert_eq!(
-                    broadcast_width_for(reduction_total, rows, 256, 256),
-                    quarter_width(reduction_total, 256),
-                    "reduction {reduction_total}, rows {rows}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn selector_leaves_a_one_row_reduce_shorter_than_the_key_on_the_quarter_rule() {
-        assert_eq!(broadcast_width_for(100, 1, 256, 512), 32);
-        assert_eq!(broadcast_width_for(256, 1, 256, 512), 64);
-        assert_eq!(broadcast_width_for(4096, 1, 256, 512), 512);
-    }
-
-    #[test]
-    fn hidden_norm_default_in_the_sizing_toml_is_512() {
-        let toml = include_str!("../../omega-runtime.toml");
-        assert!(toml.lines().any(|line| line == "hidden_norm_width = 512"));
-    }
-
-    #[test]
-    fn hidden_width_kernel_renders_the_512_lane_body() {
-        if crate::sized::HIDDEN_NORM_REDUCE_WIDTH != 512 {
-            return;
-        }
-        let source = emitted(1536);
-        assert!(source.contains("lane = gid % 512u;"), "{source}");
-        assert!(source.contains("partials[16]"), "{source}");
-        assert!(source.contains("(lane % 32u) < 16u"), "{source}");
-    }
-
-    #[test]
     fn row_wider_than_the_cap_is_held_to_the_cap() {
-        let widest = crate::sized::BROADCAST_REDUCE_MAX_WIDTH.max(crate::sized::HIDDEN_NORM_REDUCE_WIDTH);
-        assert_eq!(dispatch_width(4096), widest);
+        let expected = 1024.min(crate::sized::BROADCAST_REDUCE_MAX_WIDTH);
+        assert_eq!(dispatch_width(4096), expected);
     }
 
     #[test]
