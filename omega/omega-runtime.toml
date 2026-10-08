@@ -123,6 +123,19 @@ max_width = 256
 # short-reduce thresholds remain excluded because the existing attention
 # evidence shows that routing 64-element score folds serial is slower.
 min_len = 2
+# a fold shorter than this many elements and producing at least
+# `serial_min_outputs` outputs takes the one-thread-per-output serial body
+# even though it clears `min_len`. The 32-lane group of the cooperative body
+# is 24 lanes idle for an 8-long fold, and with a million outputs that idle
+# width is the whole cost. MEASURED (granite 1000-token prefill, MoE combine
+# fold [1000, 8, 1024], 1,024,000 outputs): cooperative 4134 us/op, serial
+# 567.7 us/op; the same serial body on the 1,024-output decode fold slows the
+# step by 0.7-0.9 ms, which is why this is a shape rule and `min_len` is not
+# raised. 0 disables the rule.
+serial_below_len = 32
+# outputs at or above which `serial_below_len` applies. Prefill combine has
+# 1,024,000; the decode folds measured have under 10,000.
+serial_min_outputs = 65536
 # elements each lane loads back to back before folding any of them, in the
 # cooperative fold's accumulate loop and in a broadcast epilogue's write
 # loop (`msl::push_cooperative_reduce_body`). The loop ran one load, one

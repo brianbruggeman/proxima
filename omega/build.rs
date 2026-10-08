@@ -242,6 +242,22 @@ fn emit_sizing_consts() {
         "pub const COOPERATIVE_REDUCE_MIN_LEN: u64 = {cooperative_reduce_min_len};\n"
     ));
 
+    let cooperative_serial_below_len = require_nonneg(
+        "cooperative_reduce.serial_below_len",
+        resolve_int(&root, "cooperative_reduce", "serial_below_len"),
+    );
+    out.push_str(&format!(
+        "pub const COOPERATIVE_SERIAL_BELOW_LEN: u64 = {cooperative_serial_below_len};\n"
+    ));
+
+    let cooperative_serial_min_outputs = require_nonneg(
+        "cooperative_reduce.serial_min_outputs",
+        resolve_int(&root, "cooperative_reduce", "serial_min_outputs"),
+    );
+    out.push_str(&format!(
+        "pub const COOPERATIVE_SERIAL_MIN_OUTPUTS: u64 = {cooperative_serial_min_outputs};\n"
+    ));
+
     let cooperative_reduce_unroll = require_nonzero(
         "cooperative_reduce.unroll",
         resolve_int(&root, "cooperative_reduce", "unroll"),
