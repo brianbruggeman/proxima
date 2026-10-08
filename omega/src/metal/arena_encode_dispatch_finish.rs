@@ -5663,3 +5663,144 @@ mod merge_pipeline_key_tests {
         assert_eq!(flat_key, "split_key_merge_wg");
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod extra_output_slot_tests {
+    //! The extra-output slot plan against the kernels that declare those slots:
+    //! `extra_output_slots` is what both the live encoder and the replay capture
+    //! bind from, and the Metal source `emit` renders names the buffer index
+    //! each extra output must land at. Both ops come from the shapes production
+    //! binds: a rope pair fused to a twin, and an eight-of-thirty-two router.
+
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use proxima_tensor::spec::{RopePairing, fused_rope_pair, input_leaf};
+    use proxima_tensor::{
+        BoundOpKind, DType, Extent, Layout, NodeId, NumericPolicy, bind, fuse_twin_elementwise, infer,
+    };
+
+    use super::{BoundOp, extra_output_slots};
+    use crate::{PackedOperands, emit};
+
+    const TOP_K: u64 = 8;
+    const EXPERT_COUNT: u64 = 32;
+
+    fn rope_twin() -> BoundOp {
+        let mut program = Vec::new();
+        let source = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Static(3), Extent::Static(2), Extent::Static(8)],
+            "x",
+        );
+        let trig = || vec![Extent::Static(3), Extent::Static(4)];
+        let cosine = input_leaf(&mut program, DType::Float32, trig(), "cos");
+        let sine = input_leaf(&mut program, DType::Float32, trig(), "sin");
+        let (first, second) = fused_rope_pair(
+            &mut program,
+            source,
+            'h',
+            cosine,
+            sine,
+            RopePairing::SplitHalf { pairs: 4 },
+        )
+        .expect("rope pair builds");
+        let shapes = infer(&program, &[]).expect("rope program infers");
+        let bound = bind(&program, &shapes, &[first, second], NumericPolicy::default())
+            .expect("rope program binds");
+        let mut fused = fuse_twin_elementwise(bound, &program);
+        assert_eq!(fused.len(), 1, "the rope pair fuses to one op");
+        fused.remove(0)
+    }
+
+    fn router_top_k(stacked: bool) -> BoundOp {
+        let nodes = |start: u32, count: u64| (0..count as u32).map(|index| NodeId(start + index)).collect();
+        BoundOp {
+            node: NodeId(100),
+            dtype: DType::Float32,
+            extents: vec![1],
+            kind: BoundOpKind::MoeTopK {
+                operands: vec![(NodeId(1), Layout { base: 0, strides: vec![1].into() }, None)],
+                expert_count: EXPERT_COUNT,
+                top_k: TOP_K,
+                routes: nodes(100, TOP_K),
+                weights: nodes(200, TOP_K),
+                weight_total: NodeId(300),
+                stacked: stacked.then_some((NodeId(400), NodeId(401))),
+            },
+        }
+    }
+
+    fn declared_buffer_index(source: &str, name: &str) -> usize {
+        let marker = format!("{name} [[buffer(");
+        source
+            .split(&marker)
+            .nth(1)
+            .unwrap_or_else(|| panic!("the kernel declares {name}:\n{source}"))
+            .split(")]]")
+            .next()
+            .expect("the buffer attribute closes")
+            .parse()
+            .expect("the buffer index is a number")
+    }
+
+    #[test]
+    fn extra_output_slot_of_a_twin_is_the_buffer_its_kernel_declares() {
+        let twin = rope_twin();
+        let kernel = emit(&twin, &PackedOperands::new(), NumericPolicy::default()).expect("a twin renders");
+
+        let slots: Vec<(usize, NodeId, usize)> = extra_output_slots(&twin, kernel.bindings.len()).collect();
+
+        assert_eq!(slots.len(), 1, "a twin binds exactly its second output");
+        assert_eq!(slots[0].0, declared_buffer_index(&kernel.source, "extra_out0"));
+        assert_eq!(Some(slots[0].1), twin.twin_node());
+        assert_eq!(slots[0].2, 3 * 2 * 4, "the twin holds one value per element of the op extents: sequence, heads, pairs");
+    }
+
+    #[test]
+    fn extra_output_slot_of_a_top_k_is_the_buffer_its_kernel_declares_for_every_extra() {
+        let router = router_top_k(false);
+        let kernel = emit(&router, &PackedOperands::new(), NumericPolicy::default()).expect("a router renders");
+
+        let slots: Vec<(usize, NodeId, usize)> = extra_output_slots(&router, kernel.bindings.len()).collect();
+
+        assert_eq!(slots.len() as u64, 2 * TOP_K, "top_k - 1 routes, top_k weights, one total");
+        for (index, (slot, _, _)) in slots.iter().enumerate() {
+            assert_eq!(*slot, declared_buffer_index(&kernel.source, &format!("extra{index}")));
+        }
+        let BoundOpKind::MoeTopK { routes, weights, weight_total, .. } = &router.kind else {
+            unreachable!("router_top_k builds a MoeTopK")
+        };
+        let expected: Vec<NodeId> = routes[1..]
+            .iter()
+            .chain(weights)
+            .chain(core::iter::once(weight_total))
+            .copied()
+            .collect();
+        let planned: Vec<NodeId> = slots.iter().map(|(_, node, _)| *node).collect();
+        assert_eq!(planned, expected, "routes[1..], then weights, then the total");
+    }
+
+    #[test]
+    fn extra_output_slot_of_a_stacked_top_k_ends_on_the_stack_pair_the_kernel_declares() {
+        let router = router_top_k(true);
+        let kernel = emit(&router, &PackedOperands::new(), NumericPolicy::default()).expect("a router renders");
+
+        let slots: Vec<(usize, NodeId, usize)> = extra_output_slots(&router, kernel.bindings.len()).collect();
+
+        let stacked: Vec<&(usize, NodeId, usize)> = slots.iter().rev().take(2).rev().collect();
+        assert_eq!(stacked[0].0, declared_buffer_index(&kernel.source, "stacked_routes"));
+        assert_eq!(stacked[1].0, declared_buffer_index(&kernel.source, "stacked_weights"));
+        assert_eq!((stacked[0].1, stacked[1].1), (NodeId(400), NodeId(401)));
+    }
+
+    #[test]
+    fn extra_output_slot_of_a_plain_op_is_empty() {
+        let mut fused = rope_twin();
+        fused.kind = BoundOpKind::Iota;
+
+        assert_eq!(extra_output_slots(&fused, 4).count(), 0);
+    }
+}
