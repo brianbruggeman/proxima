@@ -19,7 +19,8 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
+use half::f16;
+use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::spec::qk_norm_cached_forward_program;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{BoundOpKind, NodeId, Op, bind, infer};
@@ -98,9 +99,49 @@ fn gqa_decode_fixture(cached_len: u64, head_dim: u32) -> Fixture {
     }
 }
 
-fn parity_cell(cached_len: u64, head_dim: u32) -> f32 {
+fn is_kv_cache(name: &str) -> bool {
+    name.starts_with("kv_cache.")
+}
+
+fn round_to_half(values: &[f32]) -> Vec<f32> {
+    values
+        .iter()
+        .map(|value| f16::from_f32(*value).to_f32())
+        .collect()
+}
+
+/// The cache leaves as the device holds them: binary16, little-endian.
+fn half_bytes(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| f16::from_f32(*value).to_le_bytes())
+        .collect()
+}
+
+/// `half_kv` runs the cache leaves as `Codec::Float16` blocks on Metal and as
+/// their binary16-rounded f32 values on the CPU, so both executors attend over
+/// exactly the same numbers and the comparison isolates the kernel's half read.
+fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
     let policy = production_numeric_policy();
-    let fixture = gqa_decode_fixture(cached_len, head_dim);
+    let mut fixture = gqa_decode_fixture(cached_len, head_dim);
+    let half_blocks: Vec<(String, Vec<u8>)> = if half_kv {
+        fixture
+            .named
+            .iter_mut()
+            .filter(|(name, _)| is_kv_cache(name))
+            .map(|(name, data)| {
+                *data = round_to_half(data);
+                (name.clone(), half_bytes(data))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        half_blocks.len(),
+        if half_kv { 3 * LAYERS as usize } else { 0 },
+        "every layer contributes a K even, K odd and V cache leaf"
+    );
     let output_roots = [fixture.roots[0]];
     let named = as_named_blocks(&fixture.named);
 
@@ -116,8 +157,18 @@ fn parity_cell(cached_len: u64, head_dim: u32) -> f32 {
         "head_dim {head_dim} cached_len {cached_len}: zero CachedAttention ops would compare nothing"
     );
     for bound in &attention {
-        let kernel = omega::emit(bound, &omega::PackedOperands::new(), policy)
-            .expect("the bound attention op emits");
+        let mut packed = omega::PackedOperands::new();
+        if half_kv {
+            for index in [2, 3, 6] {
+                packed.insert(bound.operands()[index].0, omega::Codec::Float16);
+            }
+        }
+        let kernel = omega::emit(bound, &packed, policy).expect("the bound attention op emits");
+        assert_eq!(
+            kernel.source.contains("device const half* in2"),
+            half_kv,
+            "head_dim {head_dim} cached_len {cached_len}: the cached K plane binds as half exactly when the cache is half"
+        );
         assert!(
             kernel.entry.ends_with("_ds"),
             "head_dim {head_dim} cached_len {cached_len}: the op must take the decode split form, got {}",
@@ -136,15 +187,31 @@ fn parity_cell(cached_len: u64, head_dim: u32) -> f32 {
         &mut validated,
     )
     .expect("cpu runs the decode program");
+    let metal_named: Vec<(&str, QuantizedBlock<'_>)> = named
+        .iter()
+        .map(|(name, block)| {
+            match half_blocks.iter().find(|(half_name, _)| half_name == name) {
+                Some((_, bytes)) => (
+                    *name,
+                    QuantizedBlock::Packed {
+                        codec: omega::Codec::Float16,
+                        bytes: bytes.as_slice(),
+                    },
+                ),
+                None => (*name, *block),
+            }
+        })
+        .collect();
     let plan = omega::plan_named(
         &fixture.program,
         &fixture.symbols,
-        &named,
+        &metal_named,
         &output_roots,
         policy,
     )
     .expect("metal plans the decode program");
-    let metal = omega::execute_plan_named(&plan, &named).expect("metal runs the decode program");
+    let metal =
+        omega::execute_plan_named(&plan, &metal_named).expect("metal runs the decode program");
 
     let expected = cpu.root();
     let actual = metal.root();
@@ -164,7 +231,7 @@ fn parity_cell(cached_len: u64, head_dim: u32) -> f32 {
         .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
     eprintln!(
-        "decode_split parity: head_dim={head_dim} cached_len={cached_len} attention_ops={} max_diff={max_diff} relative={relative}",
+        "decode_split parity: head_dim={head_dim} cached_len={cached_len} half_kv={half_kv} attention_ops={} max_diff={max_diff} relative={relative}",
         attention.len()
     );
     relative
@@ -175,10 +242,26 @@ fn the_decode_split_kernels_hold_parity_with_the_cpu_evaluator_across_split_coun
     let mut cells = 0_usize;
     for head_dim in HEAD_DIMS {
         for cached_len in CACHED_LENGTHS {
-            let relative = parity_cell(cached_len, head_dim);
+            let relative = parity_cell(cached_len, head_dim, false);
             assert!(
                 relative < 1e-4,
                 "head_dim {head_dim} cached_len {cached_len}: metal disagrees with cpu on the decode split root: relative={relative}"
+            );
+            cells += 1;
+        }
+    }
+    assert_eq!(cells, 12, "3 head dims x 4 cached lengths");
+}
+
+#[test]
+fn the_decode_split_reads_a_float16_cache_as_the_cpu_reads_the_same_rounded_values() {
+    let mut cells = 0_usize;
+    for head_dim in HEAD_DIMS {
+        for cached_len in CACHED_LENGTHS {
+            let relative = parity_cell(cached_len, head_dim, true);
+            assert!(
+                relative < 1e-4,
+                "head_dim {head_dim} cached_len {cached_len}: the half-read kernel disagrees with cpu on identical binary16 values: relative={relative}"
             );
             cells += 1;
         }
