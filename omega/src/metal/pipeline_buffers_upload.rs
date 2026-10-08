@@ -51,7 +51,7 @@ pub enum MathMode {
 }
 
 impl MathMode {
-    const fn as_mtl(self) -> MTLMathMode {
+    pub(super) const fn as_mtl(self) -> MTLMathMode {
         match self {
             MathMode::Safe => MTLMathMode::Safe,
             MathMode::Relaxed => MTLMathMode::Relaxed,
@@ -322,11 +322,7 @@ pub(super) fn compile_pipeline(
                 ),
             })?;
 
-    device
-        .newComputePipelineStateWithFunction_error(&function)
-        .map_err(|error| MetalError::CompileFailed {
-            log: nserror_description(&error),
-        })
+    pipeline_for_function(device, &function, kernel, math_mode)
 }
 
 /// Resolves `bound`'s compiled pipeline against `cache_key`
