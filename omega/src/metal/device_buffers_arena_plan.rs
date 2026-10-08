@@ -1669,11 +1669,13 @@ pub(super) struct ResolvedStep {
     pub(super) state_out_fallback: core::cell::OnceCell<MetalBuffer>,
 }
 
-/// [`ResolvedStep::prepass`]'s payload: the prepass pipeline, its launch
-/// shape and the words of the compaction buffer it fills, which the GEMM
-/// kernel binds at `bindings.len()` (see [`crate::msl::route_prepass`]).
+/// [`ResolvedStep::prepass`]'s payload: the count pass and place pass
+/// pipelines (dispatched in that order with the one launch shape) and the words
+/// of the compaction buffer they fill, which the GEMM kernel binds at
+/// `bindings.len()` (see [`crate::msl::route_prepass`]).
 pub(super) struct ResolvedPrepass {
     pub(super) pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub(super) place: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(super) grid: GridSpec,
     pub(super) words: usize,
 }

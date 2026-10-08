@@ -9358,14 +9358,19 @@ mod expert_grouped_route_segments {
         let prepass = route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits");
         let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
 
-        let Some((kernel, words)) = prepass else {
+        let Some(([count, place], words)) = prepass else {
             assert!(!source.contains("route_compaction"), "{source}");
             return;
         };
-        assert_eq!(words, 1 + 2 * 8 + 300);
-        assert!(kernel.entry.ends_with("_route_prepass"), "{}", kernel.entry);
-        assert_eq!(kernel.grid.depth, 1);
-        assert_eq!(kernel.grid.threadgroup_width, Some(1024));
+        let threadgroups = grouped_prepass_threadgroups(300);
+        assert_eq!(words as u64, 1 + 2 * 8 + 300 + threadgroups * 8);
+        assert!(count.entry.ends_with("_route_prepass"), "{}", count.entry);
+        assert!(place.entry.ends_with("_route_prepass_place"), "{}", place.entry);
+        for pass in [&count, &place] {
+            assert_eq!(pass.grid.depth, 1);
+            assert_eq!(pass.grid.threadgroup_width, Some(1024));
+            assert_eq!(pass.grid.threads, 1024 * threadgroups);
+        }
         let main_slots = bindings(&bound).len();
         let compaction_slot = format!("device uint* route_compaction [[buffer({main_slots})]]");
         let reader_slot = format!("device const uint *route_compaction [[buffer({main_slots})]]");

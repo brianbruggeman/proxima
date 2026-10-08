@@ -742,14 +742,15 @@ fn resolve_route_prepass(
     cache_key: &str,
     math_mode: MathMode,
 ) -> Result<Option<ResolvedPrepass>, MetalError> {
-    let Some((kernel, words)) = crate::msl::route_prepass(bound, packed_operands, numeric_policy)? else {
+    let Some(([count, place], words)) = crate::msl::route_prepass(bound, packed_operands, numeric_policy)? else {
         return Ok(None);
     };
-    let prepass_key = format!("{cache_key}_prepass");
-    let pipeline = pipeline_for_kernel(device, &kernel, &prepass_key, math_mode)?;
+    let pipeline = pipeline_for_kernel(device, &count, &format!("{cache_key}_prepass"), math_mode)?;
+    let place_pipeline = pipeline_for_kernel(device, &place, &format!("{cache_key}_prepass_place"), math_mode)?;
     Ok(Some(ResolvedPrepass {
         pipeline,
-        grid: kernel.grid,
+        place: place_pipeline,
+        grid: count.grid,
         words,
     }))
 }
@@ -1267,11 +1268,12 @@ fn capture_dispatch(
                 None => unreplayable = Some(format!("binding {index} ({binding:?}) not resolvable")),
             }
         }
-        let route_prepass_dispatches = u64::from(crate::msl::route_prepass_active(bound, packed_operands));
+        let route_prepass_dispatches = ROUTE_PREPASS_DISPATCHES * u64::from(crate::msl::route_prepass_active(bound, packed_operands));
         let captured_prepass = prepass.map(|(resolved_prepass, compaction)| {
             live_buffers.push((bindings.len(), compaction.clone(), 0));
             CapturedPrepass {
                 pipeline: resolved_prepass.pipeline.clone(),
+                place: Some(resolved_prepass.place.clone()),
                 grid: resolved_prepass.grid,
             }
         });
@@ -1546,14 +1548,35 @@ pub struct CapturedDispatch {
     prepass: Option<CapturedPrepass>,
 }
 
-/// The route prepass of a compacted expert-grouped gemm: its pipeline and
-/// launch shape. The compaction buffer it fills is one of the record's own
-/// `buffers`, bound at `bindings.len()` for the prepass and the gemm alike.
+/// The route prepass of a compacted expert-grouped gemm: its count pipeline, its
+/// place pipeline (absent when the record's own pipeline is the place pass) and
+/// the launch shape both share. The compaction buffer they fill is one of the
+/// record's own `buffers`, bound at `bindings.len()` for the prepass and the gemm
+/// alike. The replay encoders dispatch serially, so program order separates the
+/// two passes.
+/// Dispatches one compacted expert-grouped op issues for its prepass: the count
+/// pass and the place pass.
+#[cfg(feature = "instrument")]
+const ROUTE_PREPASS_DISPATCHES: u64 = 2;
+
 #[cfg(feature = "instrument")]
 #[derive(Clone)]
 struct CapturedPrepass {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    place: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     grid: GridSpec,
+}
+
+#[cfg(feature = "instrument")]
+impl CapturedPrepass {
+    fn dispatch_passes(&self, encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>) {
+        encoder.setComputePipelineState(&self.pipeline);
+        dispatch(encoder, &self.pipeline, self.grid);
+        if let Some(place) = &self.place {
+            encoder.setComputePipelineState(place);
+            dispatch(encoder, place, self.grid);
+        }
+    }
 }
 
 #[cfg(feature = "instrument")]
@@ -1815,18 +1838,32 @@ impl CapturedDispatch {
         true
     }
 
-    /// The route prepass of this record as a dispatch of its own (its pipeline,
-    /// launch shape and the shared buffers), `None` for a record with no
+    /// The route prepass of this record as a dispatch of its own (its two passes,
+    /// launch shape and the shared buffers: the count pass rides as the record's
+    /// prepass, the place pass is its pipeline), `None` for a record with no
     /// prepass, so the prepass is timed apart from the gemm that follows it.
     #[must_use]
     pub fn prepass_only(&self) -> Option<Self> {
         let prepass = self.prepass.as_ref()?;
         let mut alone = self.with_pipeline_of(self);
         alone.msl_sha256.clone_from(&self.msl_sha256);
-        alone.entry = format!("{}_route_prepass", self.entry);
-        alone.pipeline = prepass.pipeline.clone();
         alone.grid = prepass.grid;
-        alone.prepass = None;
+        match &prepass.place {
+            Some(place) => {
+                alone.entry = format!("{}_route_prepass_place", self.entry);
+                alone.pipeline = place.clone();
+                alone.prepass = Some(CapturedPrepass {
+                    pipeline: prepass.pipeline.clone(),
+                    place: None,
+                    grid: prepass.grid,
+                });
+            }
+            None => {
+                alone.entry = format!("{}_route_prepass", self.entry);
+                alone.pipeline = prepass.pipeline.clone();
+                alone.prepass = None;
+            }
+        }
         Some(alone)
     }
 
@@ -2002,8 +2039,7 @@ impl CapturedDispatch {
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
             }
             if let Some(prepass) = &self.prepass {
-                encoder.setComputePipelineState(&prepass.pipeline);
-                dispatch(&encoder, &prepass.pipeline, prepass.grid);
+                prepass.dispatch_passes(&encoder);
                 encoder.setComputePipelineState(&self.pipeline);
             }
             dispatch(&encoder, &self.pipeline, self.grid);
@@ -2060,8 +2096,7 @@ impl CapturedDispatch {
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
             }
             if let Some(prepass) = &dispatch_record.prepass {
-                encoder.setComputePipelineState(&prepass.pipeline);
-                dispatch(&encoder, &prepass.pipeline, prepass.grid);
+                prepass.dispatch_passes(&encoder);
                 encoder.setComputePipelineState(&dispatch_record.pipeline);
             }
             dispatch(&encoder, &dispatch_record.pipeline, dispatch_record.grid);
@@ -2842,7 +2877,9 @@ pub(super) fn encode_op(
 /// its dispatch. The compaction buffer is bound at `slot` for both kernels (the
 /// prepass declares the GEMM's own binding slots, so nothing is rebound), its
 /// header word is zeroed so a prepass that did not run reads as a total of
-/// zero, which the GEMM turns into a route fault. Under concurrent dispatch
+/// zero, which the GEMM turns into a route fault. The count pass writes the partial
+/// counts the place pass reads, so concurrent dispatch puts a buffer barrier
+/// between the two. Under concurrent dispatch
 /// the buffer goes through the hazard tracker like the attention merge's
 /// scratch does; under serial dispatch program order is the dependency.
 fn encode_route_prepass(
@@ -2859,6 +2896,12 @@ fn encode_route_prepass(
     unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, slot) };
     encoder.setComputePipelineState(&prepass.pipeline);
     dispatch(encoder, &prepass.pipeline, prepass.grid);
+    if hazard.is_some() {
+        encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+        counter!(BARRIERS_EMITTED, 1);
+    }
+    encoder.setComputePipelineState(&prepass.place);
+    dispatch(encoder, &prepass.place, prepass.grid);
     if let Some(tracker) = hazard {
         let compaction_pointer = Retained::as_ptr(&compaction);
         tracker.record(&[], Some(compaction_pointer));

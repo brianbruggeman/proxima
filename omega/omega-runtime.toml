@@ -126,6 +126,18 @@ route_mode = "compacted"
 # also grows the pending-token list by `block_threads * 4` bytes per unit
 # (threadgroup memory, so occupancy).
 scan_ahead = 4
+# Route entries one threadgroup of the route prepass owns. The prepass is two
+# dispatches (a count pass and a place pass) of `ceil(tokens / this)`
+# threadgroups each, so a larger value is fewer threadgroups with a longer
+# serial scan each, and a value covering the whole route reproduces the one
+# threadgroup prepass. The compaction buffer grows by `threadgroups * experts`
+# words of per threadgroup partial counts. Output bytes do not depend on it.
+# 256 cuts the 8000 entry route of a 1000 token prompt on a top-8 model into 32
+# threadgroups of 8 scan steps, the 32 threadgroup shape the one threadgroup
+# per expert timing used (201.8 us against 426.3 us for the one threadgroup
+# prepass, `evidence/attr4/summaries/prepass_variants_single_us.md`); it has not
+# been swept. Must be a multiple of 32 (SIMD_WIDTH).
+prepass_entries = 256
 
 [wide_cooperative_reduce]
 # upper bound on the threadgroup width `msl::cooperative_reduce_width` picks
