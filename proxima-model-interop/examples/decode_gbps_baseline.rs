@@ -221,6 +221,12 @@ fn main() {
         Ok(other) => panic!("PROXIMA_EPILOGUE_SOURCES={other}: expected `0` or `1`"),
         Err(_) => ServingConfig::default().numeric_policy,
     };
+    let resident_prefill_plan_bytes: usize = match std::env::var("PROXIMA_RESIDENT_PREFILL_PLAN_BYTES") {
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            panic!("PROXIMA_RESIDENT_PREFILL_PLAN_BYTES={value}: expected a byte count")
+        }),
+        Err(_) => ServingConfig::default().resident_prefill_plan_bytes,
+    };
     let serving_config = ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
         numeric_policy,
@@ -231,6 +237,7 @@ fn main() {
         ubatch_size: 0,
         reasoning_budget: 0,
         kv_bucket_tokens,
+        resident_prefill_plan_bytes,
         prompt_cache: PromptCacheConfig::off(),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         dispatch_type,
@@ -394,6 +401,13 @@ fn main() {
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} ttft_ms={prefill_elapsed_ms} \
                  gpu_peak_bytes={gpu_peak_bytes} text={text:?}"
+            );
+        }
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        {
+            let (archive_hits, archive_stores) = omega::metal::pipeline_disk_cache_counts();
+            eprintln!(
+                "decode_gbps_baseline pipeline_disk_cache run_index={run_index} hits={archive_hits} stores={archive_stores}"
             );
         }
         // synchronous flush point: the background pump thread above only
