@@ -2698,6 +2698,9 @@ pub(super) fn check_gather_fault(
     else {
         return Ok(());
     };
+    if recorded == crate::msl::ROUTE_COMPACTION_MISMATCH_FAULT {
+        return Err(MetalError::RouteCompactionMismatch { node: bound.node });
+    }
     if recorded & 0x8000_0000 != 0 {
         let encoded_expert = recorded & 0x7fff_ffff;
         return Err(MetalError::ExpertSourceMiss {
@@ -5890,5 +5893,59 @@ mod extra_output_slot_tests {
         fused.kind = BoundOpKind::Iota;
 
         assert_eq!(extra_output_slots(&fused, 4).count(), 0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod route_fault_decode_tests {
+    //! The host's reading of the gather fault word: a stale route compaction,
+    //! an expert-source miss and an out-of-range route index are three
+    //! different causes and each must be reported as itself. Skips, like the
+    //! other Metal tests in this file, on a host with no GPU.
+
+    use alloc::vec;
+
+    use objc2_metal::MTLBuffer;
+    use proxima_tensor::{BoundOpKind, DType, NodeId};
+
+    use super::{
+        BoundOp, MetalError, allocate_fault_buffer, check_gather_fault, device_and_queue,
+        fault_slots,
+    };
+    use crate::msl::ROUTE_COMPACTION_MISMATCH_FAULT;
+
+    fn recorded_fault(word: u32) -> Option<MetalError> {
+        let (device, _queue) = device_and_queue().ok()?;
+        let buffer = allocate_fault_buffer(&device, 1).expect("fault buffer allocates");
+        // SAFETY: a one-word shared buffer allocated just above, written
+        // before any command buffer could touch it.
+        unsafe { buffer.contents().as_ptr().cast::<u32>().write(word) };
+        assert_eq!(fault_slots(&buffer, 1), &[word]);
+        let bound = BoundOp {
+            node: NodeId(7),
+            dtype: DType::Float32,
+            extents: vec![1],
+            kind: BoundOpKind::Iota,
+        };
+        check_gather_fault(&bound, &buffer, 1).err()
+    }
+
+    #[test]
+    fn a_stale_route_compaction_is_reported_as_a_compaction_mismatch() {
+        let Some(error) = recorded_fault(ROUTE_COMPACTION_MISMATCH_FAULT) else {
+            return;
+        };
+
+        assert!(matches!(error, MetalError::RouteCompactionMismatch { node } if node == NodeId(7)), "{error:?}");
+    }
+
+    #[test]
+    fn an_expert_source_miss_keeps_its_own_report() {
+        let Some(error) = recorded_fault(0x8000_0003) else {
+            return;
+        };
+
+        assert!(matches!(error, MetalError::ExpertSourceMiss { expert: 2, .. }), "{error:?}");
     }
 }
