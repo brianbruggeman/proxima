@@ -4636,6 +4636,70 @@ fn single_axis_sum_op(reduce_len: u32) -> BoundOp {
         .expect("one bound emitted")
 }
 
+fn rowwise_sum_op(outputs: u32, reduce_len: u32) -> BoundOp {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(outputs), Extent::Static(reduce_len)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: source,
+            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("row-wise sum infers");
+    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("row-wise sum lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted")
+}
+
+/// Proves the short-fold rule reads output count and length together, at the
+/// `omega-runtime.toml` defaults (`serial_below_len` 32, `serial_min_outputs`
+/// 65536, `min_len` 2): the 8-long combine fold is serial with a million
+/// outputs (prefill) and cooperative with a thousand (decode); a 64-long fold
+/// stays cooperative at any output count.
+#[proxima::test]
+#[case::prefill_combine_1m_outputs_len_8(1_024_000, 8, false)]
+#[case::decode_combine_1k_outputs_len_8(1024, 8, true)]
+#[case::one_below_output_threshold(65_535, 8, true)]
+#[case::at_output_threshold(65_536, 8, false)]
+#[case::long_fold_stays_cooperative_at_1m_outputs(1_024_000, 64, true)]
+#[case::at_length_threshold_stays_cooperative(1_024_000, 32, true)]
+async fn short_folds_route_on_output_count_and_length_together(
+    #[case] outputs: u32,
+    #[case] reduce_len: u32,
+    #[case] expected_cooperative: bool,
+) {
+    let bound = rowwise_sum_op(outputs, reduce_len);
+
+    assert_eq!(
+        reduce_is_cooperative(&bound),
+        expected_cooperative,
+        "outputs={outputs} reduce_len={reduce_len}"
+    );
+
+    let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed()).expect("row-wise sum emits");
+    assert_eq!(
+        kernel.source.contains("simd_sum(accumulator)"),
+        expected_cooperative,
+        "emitted kernel source must agree with the route"
+    );
+}
+
 /// Proven against the COMPILED `COOPERATIVE_REDUCE_MIN_LEN` constant,
 /// not a hardcoded 128 — this same test body is the re-prove artifact for
 /// BOTH claims the short-reduce initiative makes: at the
