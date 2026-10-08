@@ -1,0 +1,22 @@
+--- scratch/capture_granite/pipeline_e3603c6942491f2f.metal	2026-10-08 17:24:29
++++ scratch/var_granite/e3603c6942491f2f.t16n4u.metal	2026-10-08 17:25:23
+@@ -854,7 +854,7 @@
+ 
+ kernel void omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], device const float* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const float* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+     constexpr long kv_heads = 8; constexpr long query_groups = 2; constexpr long head_dim = 64; constexpr long half_dim = head_dim / 2; constexpr float scale = 0.015625; constexpr long cached_lower = -9223372036854775807L; constexpr long new_upper = 0L;
+-    constexpr long tile_rows = 8; constexpr long simdgroups = 2; constexpr long block = 64; constexpr long split_keys = 64;
++    constexpr long tile_rows = 16; constexpr long simdgroups = 4; constexpr long block = 64; constexpr long split_keys = 64;
+     constexpr bool rows_in_fragment = (query_groups % 8) != 0;
+     constexpr long groups_per_row = rows_in_fragment ? 1 : query_groups / 8;
+     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
+@@ -876,7 +876,7 @@
+     short quad = (short)(lane / 4); short fragment_row = (short)((quad & 4) + ((lane / 2) % 4)); short fragment_column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+     threadgroup float score_tile[tile_vectors * block]; threadgroup float row_maximum[tile_vectors]; threadgroup float row_sum[tile_vectors]; threadgroup float rescale_tile[tile_vectors];
+     threadgroup int vector_row[tile_vectors]; threadgroup int vector_head[tile_vectors]; threadgroup int vector_live[tile_vectors];
+-    constexpr bool stage_query = true; constexpr long query_stage_stride = half_dim + 8L;
++    constexpr bool stage_query = false; constexpr long query_stage_stride = half_dim + 8L;
+     threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
+     for (long index = thread_id; index < tile_vectors; index += threads) {
+         long block_index = index / 8L; long within = index % 8L;
+scale=504/1000
+width=128

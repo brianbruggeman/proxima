@@ -1,0 +1,10 @@
+"Device Utilization %"=0
+"Device Utilization %"=0
+"Device Utilization %"=0
+17:46  up 8 days,  3:50, 3 users, load averages: 3.11 3.74 4.37
+PID    COMMAND          %CPU
+17029  user-daemon             37.8
+54533  iTerm2           14.7
+64389  top              10.6
+78004  codex            5.5 
+0      kernel_task      4.9 

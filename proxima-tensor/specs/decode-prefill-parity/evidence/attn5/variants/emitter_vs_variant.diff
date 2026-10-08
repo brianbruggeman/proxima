@@ -1,0 +1,15 @@
+### emitter output at vector_blocks_per_tile=4 accumulator_fragments=32 (capture_keys_granite/pipeline_b258004033a36f56.metal) against variant (var_granite/e3603c6942491f2f.t16u.metal)
+855c855
+< kernel void omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r16_n2_b64_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [
+---
+> kernel void omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[
+### emitter output at vector_blocks_per_tile=4 accumulator_fragments=32 (capture_keys_e2b/pipeline_35f887f78f3c217e.metal) against variant (var_e2b/28e538282271e635.r4u.metal)
+855c855
+< kernel void omega_cached_attention_h1_g8_d256_s3f800000_ln511_up0_r4_n4_b128_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], d
+---
+> kernel void omega_cached_attention_h1_g8_d256_s3f800000_ln511_up0_r2_n4_b128_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], d
+### emitter output at vector_blocks_per_tile=4 accumulator_fragments=32 (capture_keys_e2b/pipeline_5369865d6519b2ac.metal) against variant (var_e2b/96585e0bac7c1105.r4u.metal)
+855c855
+< kernel void omega_cached_attention_h1_g8_d512_s3f800000_ln9223372036854775808_up0_r4_n8_b128_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 
+---
+> kernel void omega_cached_attention_h1_g8_d512_s3f800000_ln9223372036854775808_up0_r2_n8_b128_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 
