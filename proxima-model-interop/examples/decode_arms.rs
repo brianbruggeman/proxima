@@ -171,6 +171,12 @@ fn parse_arguments() -> Arguments {
         "--prompt-file required"
     );
     assert!(!arguments.log.as_os_str().is_empty(), "--log required");
+    for (label, key, _) in &arguments.arm_envs {
+        assert!(
+            arguments.arms.iter().any(|(arm, _)| arm == label),
+            "--arm-env {label}:{key}: no --arm carries that label"
+        );
+    }
     if arguments.cases.is_empty() {
         arguments.cases.push(Case {
             name: String::new(),
@@ -576,7 +582,7 @@ fn run_proxima_process(
             arguments
                 .arm_envs
                 .iter()
-                .filter(|(label, _, _)| *label == arm.label)
+                .filter(|(label, _, _)| *label == arm.engine)
                 .map(|(_, key, setting)| (key, setting)),
         )
         .output()
