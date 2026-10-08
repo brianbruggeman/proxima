@@ -115,10 +115,15 @@ fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeId, usize)> 
         ]),
         _ => None,
     };
+    let twin = match &bound.kind {
+        BoundOpKind::ElementwiseTwin { twin_node, .. } => Some((*twin_node, bound_output_len(bound))),
+        _ => None,
+    };
     bound
         .kind
         .moe_topk_extra_outputs_iter(token_count)
         .chain(softmax.into_iter().flatten())
+        .chain(twin)
 }
 
 /// Builds [`BufferArena`] in one pass over `resolved`, in program order,

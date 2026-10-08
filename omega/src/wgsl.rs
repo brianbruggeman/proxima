@@ -264,6 +264,12 @@ pub fn emit_wgsl_with_policy(
                 kind: "cached_softmax_weights",
             });
         }
+        BoundOpKind::ElementwiseTwin { .. } => {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "elementwise_twin",
+            });
+        }
     };
     let (threads, workgroup_size) = match cooperative_width {
         Some(width) => (
@@ -574,7 +580,8 @@ fn grid_threads(resolved: &BoundOp) -> Result<u64, EmitError> {
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
-        | BoundOpKind::CachedSoftmaxWeights { .. } => extents_product(),
+        | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::ElementwiseTwin { .. } => extents_product(),
     }
 }
 

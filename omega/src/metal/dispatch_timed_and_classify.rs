@@ -1373,6 +1373,7 @@ pub(super) fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -
         BoundOpKind::CachedAttention { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
         | BoundOpKind::Elementwise { .. }
+        | BoundOpKind::ElementwiseTwin { .. }
         | BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }

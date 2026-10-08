@@ -200,6 +200,7 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
             reader.node,
             match &reader.kind {
                 proxima_tensor::bind::BoundOpKind::Elementwise { .. } => "Elementwise",
+                proxima_tensor::bind::BoundOpKind::ElementwiseTwin { .. } => "ElementwiseTwin",
                 proxima_tensor::bind::BoundOpKind::Reduce { .. } => "Reduce",
                 proxima_tensor::bind::BoundOpKind::RoundBatchedReduce { .. } => {
                     "RoundBatchedReduce"

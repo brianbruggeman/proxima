@@ -104,6 +104,7 @@ mod identity_copy_alias;
 mod repeat_nodes;
 mod refit_cached_attention;
 mod refresh;
+mod twin_elementwise;
 #[cfg(feature = "top-fraction-fusion")]
 mod top_fraction_fusion;
 pub use builder_compose_window::*;
@@ -112,6 +113,7 @@ pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
 pub use refit_cached_attention::refit_cached_attention_rows;
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
+pub use twin_elementwise::fuse_twin_elementwise;
 #[cfg(feature = "top-fraction-fusion")]
 pub use top_fraction_fusion::{bind_with_top_fraction, top_fraction_candidates};
 pub use types_layout_boundop::*;

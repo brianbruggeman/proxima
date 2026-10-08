@@ -753,7 +753,8 @@ fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
-        | BoundOpKind::CachedSoftmaxWeights { .. } => Ok(pack_leaf_uniforms(bound)),
+        | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::ElementwiseTwin { .. } => Ok(pack_leaf_uniforms(bound)),
     }
 }
 
