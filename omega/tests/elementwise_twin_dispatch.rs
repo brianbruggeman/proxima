@@ -29,22 +29,29 @@ struct RopeCase {
     first: NodeId,
     second: NodeId,
     inputs: [Vec<f32>; 3],
+    sequence: u32,
+    heads: u32,
+    pairs: u32,
 }
 
 impl RopeCase {
     fn new(head_dim: u32, pairing: RopePairing) -> Self {
+        Self::sized(SEQUENCE, HEADS, PAIRS, head_dim, pairing)
+    }
+
+    fn sized(sequence: u32, heads: u32, pairs: u32, head_dim: u32, pairing: RopePairing) -> Self {
         let mut program = Vec::new();
         let source = input_leaf(
             &mut program,
             DType::Float32,
             vec![
-                Extent::Static(SEQUENCE),
-                Extent::Static(HEADS),
+                Extent::Static(sequence),
+                Extent::Static(heads),
                 Extent::Static(head_dim),
             ],
             "x",
         );
-        let trig = || vec![Extent::Static(SEQUENCE), Extent::Static(PAIRS)];
+        let trig = || vec![Extent::Static(sequence), Extent::Static(pairs)];
         let cosine = input_leaf(&mut program, DType::Float32, trig(), "cos");
         let sine = input_leaf(&mut program, DType::Float32, trig(), "sin");
         let (first, second) = fused_rope_pair(&mut program, source, 'h', cosine, sine, pairing)
@@ -54,10 +61,13 @@ impl RopeCase {
             first,
             second,
             inputs: [
-                random_values(0x0e1e_0001, (SEQUENCE * HEADS * head_dim) as usize),
-                random_values(0x0e1e_0002, (SEQUENCE * PAIRS) as usize),
-                random_values(0x0e1e_0003, (SEQUENCE * PAIRS) as usize),
+                random_values(0x0e1e_0001, (sequence * heads * head_dim) as usize),
+                random_values(0x0e1e_0002, (sequence * pairs) as usize),
+                random_values(0x0e1e_0003, (sequence * pairs) as usize),
             ],
+            sequence,
+            heads,
+            pairs,
         }
     }
 
@@ -70,7 +80,7 @@ impl RopeCase {
     }
 
     fn half_len(&self) -> usize {
-        (SEQUENCE * HEADS * PAIRS) as usize
+        (self.sequence * self.heads * self.pairs) as usize
     }
 
     fn plan(&self) -> omega::Plan {
@@ -169,6 +179,26 @@ async fn the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit(
         bits(&twin_second),
         "degenerate gate: the two halves must differ or a swapped output would pass"
     );
+}
+
+#[proxima::test]
+#[case::split_half_at_prefill_width(1000, 16, 32, 64, RopePairing::SplitHalf { pairs: 32 })]
+#[case::split_half_kv_heads_at_prefill_width(1000, 8, 32, 64, RopePairing::SplitHalf { pairs: 32 })]
+#[case::adjacent_pairs_at_prefill_width(1000, 16, 32, 64, RopePairing::Interleaved)]
+async fn a_prefill_wide_rope_pair_decodes_its_coordinates_exactly(
+    #[case] sequence: u32,
+    #[case] heads: u32,
+    #[case] pairs: u32,
+    #[case] head_dim: u32,
+    #[case] pairing: RopePairing,
+) {
+    let case = RopeCase::sized(sequence, heads, pairs, head_dim, pairing);
+    let (first, second) = case.run_unplaced();
+
+    let (cpu_first, cpu_second) = case.cpu_reference();
+    assert_eq!(first.len(), (sequence * heads * pairs) as usize, "first half element count");
+    assert!(max_abs_difference(&first, &cpu_first) <= 1e-6, "first half vs CPU");
+    assert!(max_abs_difference(&second, &cpu_second) <= 1e-6, "second half vs CPU");
 }
 
 #[proxima::test]
