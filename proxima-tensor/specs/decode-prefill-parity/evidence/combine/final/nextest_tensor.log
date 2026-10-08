@@ -1,0 +1,804 @@
+    Finished `gate` profile [optimized] target(s) in 0.31s
+────────────
+ Nextest run ID e6eeb699-b521-4598-b5b5-29dda8a06414 with nextest profile: default
+    Starting 798 tests across 8 binaries (8 tests skipped)
+        PASS [   0.010s] (  1/798) proxima-tensor align::tests::rounds_up_to_a_page_multiple
+        PASS [   0.010s] (  2/798) proxima-tensor align::tests::element_count_overflow_is_a_typed_error_not_a_panic
+        PASS [   0.010s] (  3/798) proxima-tensor bind::dead_resolved_tests::a_requested_output_is_never_dead_even_when_unread
+        PASS [   0.010s] (  4/798) proxima-tensor bind::dead_resolved_tests::a_fold_read_only_by_an_unread_fold_is_dead_with_it
+        PASS [   0.010s] (  5/798) proxima-tensor align::tests::pointer_is_page_aligned
+        PASS [   0.011s] (  6/798) proxima-tensor bind::dead_resolved_tests::an_op_stays_live_while_only_its_second_output_is_requested
+        PASS [   0.011s] (  7/798) proxima-tensor align::tests::exact_page_multiple_request_is_unchanged
+        PASS [   0.011s] (  8/798) proxima-tensor align::tests::non_power_of_two_page_size_is_a_typed_error_not_a_panic
+        PASS [   0.012s] (  9/798) proxima-tensor align::tests::contents_start_zeroed_and_are_writable
+        PASS [   0.012s] ( 10/798) proxima-tensor align::tests::zero_elements_still_allocates_one_page
+        PASS [   0.010s] ( 11/798) proxima-tensor bind::dead_resolved_tests::pruning_leaves_a_requested_output_bit_identical
+        PASS [   0.010s] ( 12/798) proxima-tensor bind::tests::a_conv_window_operand_folds_two_terms_into_one_stride_slot
+        PASS [   0.010s] ( 13/798) proxima-tensor bind::tests::a_computed_index_reached_only_through_a_sibling_map_is_materialized_before_the_gather_reads_it
+        PASS [   0.010s] ( 14/798) proxima-tensor bind::tests::a_broadcast_operand_has_stride_zero_in_the_broadcast_axis
+        PASS [   0.010s] ( 15/798) proxima-tensor bind::tests::a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three
+        PASS [   0.011s] ( 16/798) proxima-tensor bind::dead_resolved_tests::prune_dead_removes_the_whole_orphaned_chain_in_one_call
+        PASS [   0.011s] ( 17/798) proxima-tensor bind::refresh::tests::refresh_recomposes_a_reduce_that_absorbed_a_fused_prologue_locally
+        PASS [   0.011s] ( 18/798) proxima-tensor bind::refresh::tests::refresh_carries_forward_a_position_whose_mask_does_not_name_the_changed_symbol
+        PASS [   0.011s] ( 19/798) proxima-tensor bind::tests::a_masked_window_reduce_folds_to_a_single_operand_identity_read_of_source
+        PASS [   0.012s] ( 20/798) proxima-tensor bind::tests::a_masked_window_reduce_that_fails_the_in_bounds_proof_declines_and_binds_as_a_reduce
+        PASS [   0.009s] ( 21/798) proxima-tensor bind::tests::an_elementwise_intermediate_requested_as_an_output_prevents_fusion
+        PASS [   0.009s] ( 22/798) proxima-tensor bind::tests::an_iota_binds_to_its_own_ready_bound_op_with_no_operands
+        PASS [   0.009s] ( 23/798) proxima-tensor bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_output_group
+        PASS [   0.010s] ( 24/798) proxima-tensor bind::tests::add_zero_to_negative_zero_differs_by_numeric_policy
+        PASS [   0.010s] ( 25/798) proxima-tensor bind::tests::an_elementwise_intermediate_consumed_by_two_different_ops_is_not_fused
+        PASS [   0.010s] ( 26/798) proxima-tensor bind::tests::a_masked_window_reduce_with_a_non_windowed_axis_matches_a_direct_window_read
+        PASS [   0.010s] ( 27/798) proxima-tensor bind::tests::a_non_equal_mask_chain_declines_and_binds_as_a_reduce
+        PASS [   0.011s] ( 28/798) proxima-tensor bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group
+        PASS [   0.011s] ( 29/798) proxima-tensor bind::tests::elementwise_into_elementwise_into_reduce_fuses_into_one_bound_op
+        PASS [   0.011s] ( 30/798) proxima-tensor bind::tests::infer_and_then_build_ops_matches_the_free_function_pipeline
+        PASS [   0.009s] ( 31/798) proxima-tensor bind::tests::matmul_resolves_to_one_fused_op_not_two
+        PASS [   0.010s] ( 32/798) proxima-tensor bind::tests::maximum_of_nan_and_negative_infinity_differs_by_numeric_policy
+        PASS [   0.009s] ( 33/798) proxima-tensor bind::tests::name_reports_the_variant_backends_render_error_messages_with
+        PASS [   0.009s] ( 34/798) proxima-tensor bind::tests::requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion
+        PASS [   0.011s] ( 35/798) proxima-tensor bind::tests::moe_routing_census::qwen35moe_routing_census_at_real_expert_shape
+        PASS [   0.011s] ( 36/798) proxima-tensor bind::tests::nan_assumption_alone_does_not_eliminate_add_zero
+        PASS [   0.012s] ( 37/798) proxima-tensor bind::tests::select_push_emits_three_when_all_three_operands_are_held_and_non_fusing
+        PASS [   0.010s] ( 38/798) proxima-tensor bind::tests::split_aligned_below_the_alignment_falls_back_to_unaligned
+        PASS [   0.010s] ( 39/798) proxima-tensor bind::tests::split_aligned_rounds_non_final_chunks_down_to_the_alignment
+        PASS [   0.010s] ( 40/798) proxima-tensor bind::tests::split_aligned_with_alignment_one_matches_split_exactly
+        PASS [   0.009s] ( 41/798) proxima-tensor bind::tests::split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout
+        PASS [   0.010s] ( 42/798) proxima-tensor bind::tests::split_of_an_elementwise_op_yields_contiguous_chunks_with_a_ragged_last
+        PASS [   0.010s] ( 43/798) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::too_few_parts
+        PASS [   0.010s] ( 44/798) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::scalar_reduction
+        PASS [   0.012s] ( 45/798) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::extent_smaller_than_parts
+        PASS [   0.012s] ( 46/798) proxima-tensor bind::tests::split_returns_none_when_unsound_or_unhelpful::keep_scan_scan
+        PASS [   0.009s] ( 47/798) proxima-tensor bind::tests::transpose_layout_has_permuted_strides
+        PASS [   0.010s] ( 48/798) proxima-tensor bind::tests::top_fraction_select_reports_its_name_and_reads_every_operand
+        PASS [   0.011s] ( 49/798) proxima-tensor config::tests::default_config_validates
+        PASS [   0.010s] ( 50/798) proxima-tensor config::tests::defaults_track_the_sized_floor
+        PASS [   0.009s] ( 51/798) proxima-tensor config::tests::zero_fields_rejected
+        PASS [   0.011s] ( 52/798) proxima-tensor config::tests::env_override_takes_effect_and_does_not_leak
+        PASS [   0.009s] ( 53/798) proxima-tensor convert::decimal::tests::from_fixed_is_to_fixed_inverse
+        PASS [   0.009s] ( 54/798) proxima-tensor convert::decimal::tests::multiply_i128_stays_exact_below_the_measured_overflow_boundary
+        PASS [   0.010s] ( 55/798) proxima-tensor convert::decimal::tests::multiply_i128_reports_overflow_past_its_own_measured_boundary
+        PASS [   0.010s] ( 56/798) proxima-tensor convert::decimal::tests::multiply_i64_matches_plain_arithmetic_within_headroom
+        PASS [   0.010s] ( 57/798) proxima-tensor convert::decimal::tests::scale_out_of_range_is_rejected_at_construction_not_at_call_time
+        PASS [   0.011s] ( 58/798) proxima-tensor convert::decimal::tests::multiply_i64_reports_overflow_instead_of_wrapping
+        PASS [   0.011s] ( 59/798) proxima-tensor convert::decimal::tests::to_fixed_scales_by_ten_to_the_scale::negative
+        PASS [   0.010s] ( 60/798) proxima-tensor convert::decimal::tests::to_fixed_scales_by_ten_to_the_scale::two_decimal_places
+        PASS [   0.009s] ( 61/798) proxima-tensor convert::decimal::tests::to_fixed_scales_by_ten_to_the_scale::whole_number
+        PASS [   0.011s] ( 62/798) proxima-tensor convert::tests::bf16_preserves_nan_and_infinity
+        PASS [   0.011s] ( 63/798) proxima-tensor convert::tests::bf16_round_trips_representable_values::negative_fraction
+        PASS [   0.009s] ( 64/798) proxima-tensor convert::tests::compose_through_and_then_reaches_a_pair_with_no_direct_pipe
+        PASS [   0.010s] ( 65/798) proxima-tensor convert::tests::bf16_round_trips_representable_values::small
+        PASS [   0.009s] ( 66/798) proxima-tensor convert::tests::bool_pipes_round_trip
+        PASS [   0.011s] ( 67/798) proxima-tensor convert::tests::bf16_round_trips_representable_values::zero
+        PASS [   0.012s] ( 68/798) proxima-tensor convert::tests::bf16_round_trips_representable_values::one
+        PASS [   0.009s] ( 69/798) proxima-tensor convert::tests::convert_slice_matches_scalar_call_including_remainder
+        PASS [   0.009s] ( 70/798) proxima-tensor convert::tests::f16_flushes_values_below_subnormal_range_to_zero
+        PASS [   0.010s] ( 71/798) proxima-tensor convert::tests::f16_normal_path_ties_round_to_nearest_even::rounds_down_kept_lsb_even
+        PASS [   0.010s] ( 72/798) proxima-tensor convert::tests::f16_preserves_nan_and_infinity
+        PASS [   0.010s] ( 73/798) proxima-tensor convert::tests::f16_round_trips_representable_values::max_normal
+        PASS [   0.011s] ( 74/798) proxima-tensor convert::tests::f16_normal_path_ties_round_to_nearest_even::rounds_up_kept_lsb_odd
+        PASS [   0.010s] ( 75/798) proxima-tensor convert::tests::f16_round_trips_representable_values::one
+        PASS [   0.010s] ( 76/798) proxima-tensor convert::tests::f16_round_trips_representable_values::negative
+        PASS [   0.010s] ( 77/798) proxima-tensor convert::tests::f16_round_trips_representable_values::zero
+        PASS [   0.011s] ( 78/798) proxima-tensor convert::tests::f16_round_trips_representable_values::small_subnormal
+        PASS [   0.011s] ( 79/798) proxima-tensor convert::tests::f16_saturates_past_max_magnitude_to_infinity
+        PASS [   0.012s] ( 80/798) proxima-tensor convert::tests::float_to_int_saturates_never_panics::negative
+        PASS [   0.010s] ( 81/798) proxima-tensor convert::tests::float_to_int_saturates_never_panics::one
+        PASS [   0.009s] ( 82/798) proxima-tensor convert::tests::float_to_int_saturates_never_panics::saturates_low
+        PASS [   0.010s] ( 83/798) proxima-tensor convert::tests::float_to_int_saturates_never_panics::saturates_high
+        PASS [   0.009s] ( 84/798) proxima-tensor convert::tests::float_to_int_saturates_never_panics::zero
+        PASS [   0.010s] ( 85/798) proxima-tensor convert::tests::simd_ladder_pairs_agree_with_scalar::exact_multiple
+        PASS [   0.010s] ( 86/798) proxima-tensor convert::tests::narrowing_truncates_like_a_bare_as_cast
+        PASS [   0.010s] ( 87/798) proxima-tensor convert::tests::simd_ladder_pairs_agree_with_scalar::i8_i16
+        PASS [   0.011s] ( 88/798) proxima-tensor convert::tests::simd_ladder_pairs_agree_with_scalar::single_remainder
+        PASS [   0.009s] ( 89/798) proxima-tensor cpu::run_node::rank_select_tests::rank_select_reference_twelve_scores
+        PASS [   0.012s] ( 90/798) proxima-tensor convert::tests::widening_ladder_round_trips_a_small_value
+        PASS [   0.010s] ( 91/798) proxima-tensor cpu::run_node::rank_select_tests::rank_select_runner_reads_scores_then_keep_count
+        PASS [   0.009s] ( 92/798) proxima-tensor cpu::tests::a_chain_of_8_unary_ops_binds_to_one_bound_op_and_the_result_is_unchanged
+        PASS [   0.010s] ( 93/798) proxima-tensor cpu::tests::a_chain_of_elementwise_ops_binds_to_one_bound_op_and_matches_a_hand_reference
+        PASS [   0.010s] ( 94/798) proxima-tensor cpu::tests::a_chain_of_unary_zips_keeps_peak_live_buffers_small
+        PASS [   0.009s] ( 95/798) proxima-tensor cpu::tests::a_constant_carries_negative_infinity_verbatim
+        PASS [   0.010s] ( 96/798) proxima-tensor cpu::tests::a_composed_two_axis_reduction_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row
+        PASS [   0.010s] ( 97/798) proxima-tensor cpu::tests::a_constant_evaluates_to_its_literal_at_every_position
+        PASS [   0.010s] ( 98/798) proxima-tensor cpu::tests::a_dead_constant_is_marked_dead_not_static
+        PASS [   0.009s] ( 99/798) proxima-tensor cpu::tests::a_fetched_index_past_the_extent_is_a_real_error_not_ub
+        PASS [   0.010s] (100/798) proxima-tensor cpu::tests::a_gather_fused_into_a_fold_matches_a_hand_written_embedding_matmul_reference
+        PASS [   0.009s] (101/798) proxima-tensor cpu::tests::a_matmul_past_the_parallel_threshold_actually_splits_and_still_matches_sequential
+        PASS [   0.009s] (102/798) proxima-tensor cpu::tests::a_narrow_width_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row
+        PASS [   0.011s] (103/798) proxima-tensor cpu::tests::a_non_float32_program_is_rejected
+        PASS [   0.011s] (104/798) proxima-tensor cpu::tests::a_rank_zero_constant_broadcasts_into_a_higher_rank_consumer
+        PASS [   0.015s] (105/798) proxima-tensor cpu::tests::a_gather_program_past_the_parallel_threshold_actually_splits_and_still_matches_sequential
+        PASS [   0.012s] (106/798) proxima-tensor cpu::tests::a_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row
+        PASS [   0.010s] (107/798) proxima-tensor cpu::tests::a_requested_elementwise_intermediate_stays_readable_and_correct
+        PASS [   0.011s] (108/798) proxima-tensor cpu::tests::a_requested_intermediate_survives_alongside_the_root
+        PASS [   0.014s] (109/798) proxima-tensor cpu::tests::a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejected
+        PASS [   0.010s] (110/798) proxima-tensor cpu::tests::a_static_block_sparse_matmul_catches_a_transposed_block_weight
+        PASS [   0.009s] (111/798) proxima-tensor cpu::tests::a_static_block_sparse_matmul_needs_no_data_dependent_map
+        PASS [   0.009s] (112/798) proxima-tensor cpu::tests::all_expert_arena_rejects_a_missing_expert_span
+        PASS [   0.010s] (113/798) proxima-tensor cpu::tests::all_expert_arena_requires_one_exact_span_per_packed_entry
+        PASS [   0.009s] (114/798) proxima-tensor cpu::tests::an_elementwise_intermediate_consumed_by_two_ops_still_evaluates_correctly
+        PASS [   0.009s] (115/798) proxima-tensor cpu::tests::an_iota_evaluates_to_its_own_position
+        PASS [   0.010s] (116/798) proxima-tensor cpu::tests::an_i8_operand_i32_accumulator_reduce_evaluates
+        PASS [   0.010s] (117/798) proxima-tensor cpu::tests::an_unshipped_widened_pair_is_rejected_not_silently_wrong
+        PASS [   0.010s] (118/798) proxima-tensor cpu::tests::bf16_reduce_widens_into_an_f32_accumulator_exactly
+        PASS [   0.010s] (119/798) proxima-tensor cpu::tests::bias_add_via_broadcast
+        PASS [   0.008s] (120/798) proxima-tensor cpu::tests::build_static_arena_elides_a_node_with_zero_consumers
+        PASS [   0.011s] (121/798) proxima-tensor cpu::tests::build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output
+        PASS [   0.010s] (122/798) proxima-tensor cpu::tests::build_static_arena_runs_a_live_constant_once_and_never_again
+        PASS [   0.009s] (123/798) proxima-tensor cpu::tests::cached_attention_bound_step_scores_the_partial_rotary_pass_plane
+        PASS [   0.010s] (124/798) proxima-tensor cpu::tests::cached_attention_bound_step_runs_online_softmax
+        PASS [   0.010s] (125/798) proxima-tensor cpu::tests::cached_softmax_weights_bound_step_matches_hand_computed_softmax
+        PASS [   0.010s] (126/798) proxima-tensor cpu::tests::cached_attention_window_bounds_the_new_range_too
+        PASS [   0.010s] (127/798) proxima-tensor cpu::tests::cached_softmax_weights_extras_rejects_a_sink_of_the_wrong_length
+        PASS [   0.010s] (128/798) proxima-tensor cpu::tests::cached_softmax_weights_group_max_folds_in_new_scores_when_larger
+        PASS [   0.009s] (129/798) proxima-tensor cpu::tests::commutative_operand_order_is_canonical_regardless_of_authored_order
+        PASS [   0.009s] (130/798) proxima-tensor cpu::tests::commutative_operand_order_preserves_bit_exact_output
+        PASS [   0.010s] (131/798) proxima-tensor cpu::tests::dot_half_precision_matches_a_hand_computed_dot_product::bf16
+        PASS [   0.011s] (132/798) proxima-tensor cpu::tests::cumsum_matches_a_running_sum_reference
+        PASS [   0.011s] (133/798) proxima-tensor cpu::tests::dot_half_precision_rejects_a_malformed_shape::bf16
+        PASS [   0.011s] (134/798) proxima-tensor cpu::tests::dot_half_precision_matches_a_hand_computed_dot_product::f16
+        PASS [   0.010s] (135/798) proxima-tensor cpu::tests::dot_q4k_q8k_portable_rejects_a_weight_row_length_not_a_block_multiple
+        PASS [   0.010s] (136/798) proxima-tensor cpu::tests::dot_half_precision_rejects_a_malformed_shape::f16
+        PASS [   0.010s] (137/798) proxima-tensor cpu::tests::dot_q4k_q8k_rejects_a_q8k_activation_length_mismatch
+        PASS [   0.009s] (138/798) proxima-tensor cpu::tests::elementwise_width_generic_matches_scalar_apply_body::rope_add
+        PASS [   0.009s] (139/798) proxima-tensor cpu::tests::elementwise_width_generic_matches_scalar_apply_body::rope_subtract
+        PASS [   0.012s] (140/798) proxima-tensor cpu::tests::elementwise_width_generic_matches_scalar_apply_body::rmsnorm
+        PASS [   0.009s] (141/798) proxima-tensor cpu::tests::elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_two_operand
+        PASS [   0.012s] (142/798) proxima-tensor cpu::tests::elementwise_width_generic_matches_scalar_apply_body::swiglu
+        PASS [   0.009s] (143/798) proxima-tensor cpu::tests::erf_evaluates_through_a_real_elementwise_program
+        PASS [   0.010s] (144/798) proxima-tensor cpu::tests::embedding_lookup_matches_a_hand_written_reference
+        PASS [   0.009s] (145/798) proxima-tensor cpu::tests::erf_f64_matches_reference_values
+        PASS [   0.010s] (146/798) proxima-tensor cpu::tests::erf_f32_matches_reference_values_within_f32_epsilon
+        PASS [   0.009s] (147/798) proxima-tensor cpu::tests::evaluate_bound_f32_into_rejects_packed_and_gathered_operands
+        PASS [   0.009s] (148/798) proxima-tensor cpu::tests::evaluate_bound_f32_into_runs_only_the_supplied_dense_bound_op
+        PASS [   0.010s] (149/798) proxima-tensor cpu::tests::evaluate_named_packs_a_named_weight_with_zero_caller_opt_in
+        PASS [   0.010s] (150/798) proxima-tensor cpu::tests::evaluate_named_rebinding_a_packed_weight_never_serves_a_stale_panel
+        PASS [   0.010s] (151/798) proxima-tensor cpu::tests::evaluate_named_with_arena_answers_a_constant_bound_input_without_a_repass_and_still_honors_a_repass
+        PASS [   0.010s] (152/798) proxima-tensor cpu::tests::evaluate_named_with_arena_matches_evaluate_named_over_two_calls
+        PASS [   0.009s] (153/798) proxima-tensor cpu::tests::evaluate_named_with_arena_reports_a_shape_mismatched_rebind_by_name
+        PASS [   0.009s] (154/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_gather_program::three_workers
+        PASS [   0.010s] (155/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_gather_program::one_worker
+        PASS [   0.009s] (156/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_matmul::eight_workers
+        PASS [   0.010s] (157/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_gather_program::two_workers
+        PASS [   0.011s] (158/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_matmul::one_worker
+        PASS [   0.009s] (159/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_matmul::three_workers
+        PASS [   0.010s] (160/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_matmul::two_workers
+        PASS [   0.010s] (161/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_tanh_chain::eight_workers
+        PASS [   0.010s] (162/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_tanh_chain::three_workers
+        PASS [   0.009s] (163/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_tanh_chain::two_workers
+        PASS [   0.011s] (164/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_a_tanh_chain::one_worker
+        PASS [   0.010s] (165/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_cumsum::eight_workers
+        PASS [   0.010s] (166/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_cumsum::three_workers
+        PASS [   0.011s] (167/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_cumsum::one_worker
+        PASS [   0.011s] (168/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_cumsum::two_workers
+        PASS [   0.011s] (169/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_multiple_requested_outputs::eight_workers
+        PASS [   0.010s] (170/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_multiple_requested_outputs::one_worker
+        PASS [   0.012s] (171/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_multiple_requested_outputs::three_workers
+        PASS [   0.010s] (172/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_multiple_requested_outputs::two_workers
+        PASS [   0.010s] (173/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_softmax::eight_workers
+        PASS [   0.009s] (174/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_softmax::one_worker
+        PASS [   0.011s] (175/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_softmax::three_workers
+        PASS [   0.009s] (176/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_on_the_hand_worked_scatter_example
+        PASS [   0.009s] (177/798) proxima-tensor cpu::tests::evaluate_parallel_raises_the_same_errors_as_evaluate_on_every_existing_sad_path
+        PASS [   0.012s] (178/798) proxima-tensor cpu::tests::evaluate_parallel_matches_evaluate_for_softmax::two_workers
+        PASS [   0.012s] (179/798) proxima-tensor cpu::tests::evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contraction
+        PASS [   0.011s] (180/798) proxima-tensor cpu::tests::evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf
+        PASS [   0.010s] (181/798) proxima-tensor cpu::tests::evaluate_quantized_executes_a_half_precision_weight_end_to_end::bf16
+        PASS [   0.010s] (182/798) proxima-tensor cpu::tests::evaluate_quantized_exact_matches_dequantize_then_f32_evaluate_near_exactly
+        PASS [   0.010s] (183/798) proxima-tensor cpu::tests::evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul
+        PASS [   0.011s] (184/798) proxima-tensor cpu::tests::evaluate_quantized_executes_a_half_precision_weight_end_to_end::f16
+        PASS [   0.011s] (185/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate
+        PASS [   0.012s] (186/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec::float32
+        PASS [   0.016s] (187/798) proxima-tensor cpu::tests::evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain::two_workers
+        PASS [   0.012s] (188/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec::q3_k
+        PASS [   0.018s] (189/798) proxima-tensor cpu::tests::evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain::three_workers
+        PASS [   0.011s] (190/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec::q4_0
+        PASS [   0.018s] (191/798) proxima-tensor cpu::tests::evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain::eight_workers
+        PASS [   0.011s] (192/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec::q4_k
+        PASS [   0.011s] (193/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec::q5_k
+        PASS [   0.013s] (194/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec::q6_k
+        PASS [   0.012s] (195/798) proxima-tensor cpu::tests::evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec::q8_0
+        PASS [   0.012s] (196/798) proxima-tensor cpu::tests::evaluate_quantized_routes_q5k_block_and_matches_dequantize_then_evaluate
+        PASS [   0.010s] (197/798) proxima-tensor cpu::tests::evaluate_quantized_two_layers_does_not_underflow_live_now
+        PASS [   0.009s] (198/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::int32
+        PASS [   0.010s] (199/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::float64
+        PASS [   0.010s] (200/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::int128
+        PASS [   0.011s] (201/798) proxima-tensor cpu::tests::evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multiply
+        PASS [   0.011s] (202/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::int16
+        PASS [   0.012s] (203/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::int64
+        PASS [   0.010s] (204/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::int8
+        PASS [   0.009s] (205/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::uint8
+        PASS [   0.009s] (206/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::uint64
+        PASS [   0.010s] (207/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::uint16
+        PASS [   0.011s] (208/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::uint128
+        PASS [   0.010s] (209/798) proxima-tensor cpu::tests::evaluate_typed_adds_across_every_extended_width::uint32
+        PASS [   0.011s] (210/798) proxima-tensor cpu::tests::evaluate_typed_computes_float64_transcendentals
+        PASS [   0.011s] (211/798) proxima-tensor cpu::tests::evaluate_typed_float32_matmul_rhs_transposed_matches_evaluate_bit_for_bit
+        PASS [   0.010s] (212/798) proxima-tensor cpu::tests::evaluate_typed_float32_matmul_shaped_reduce_matches_evaluate_bit_for_bit
+        PASS [   0.009s] (213/798) proxima-tensor cpu::tests::evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_float64
+        PASS [   0.010s] (214/798) proxima-tensor cpu::tests::evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_int32
+        PASS [   0.010s] (215/798) proxima-tensor cpu::tests::evaluate_typed_reduces_a_vector_to_a_scalar_across_widths::float64
+        PASS [   0.010s] (216/798) proxima-tensor cpu::tests::evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported
+        PASS [   0.010s] (217/798) proxima-tensor cpu::tests::evaluate_typed_reduces_a_vector_to_a_scalar_across_widths::uint64
+        PASS [   0.011s] (218/798) proxima-tensor cpu::tests::evaluate_typed_reduces_a_vector_to_a_scalar_across_widths::int32
+        PASS [   0.009s] (219/798) proxima-tensor cpu::tests::evaluate_typed_rejects_a_program_mixing_dtypes
+        PASS [   0.011s] (220/798) proxima-tensor cpu::tests::evaluate_typed_rejects_a_block_whose_dtype_does_not_match_the_program
+        PASS [   0.010s] (221/798) proxima-tensor cpu::tests::evaluate_typed_rejects_a_float_gather_index_dtype_at_execution
+        PASS [   0.010s] (222/798) proxima-tensor cpu::tests::evaluate_typed_rejects_a_transcendental_on_an_integer_dtype
+        PASS [   0.010s] (223/798) proxima-tensor cpu::tests::evaluate_typed_rejects_negate_on_an_unsigned_dtype
+        PASS [   0.009s] (224/798) proxima-tensor cpu::tests::evaluate_typed_reports_integer_divide_by_zero_instead_of_panicking
+        PASS [   0.010s] (225/798) proxima-tensor cpu::tests::execute_composes_through_pipe_ext_matching_the_free_function
+        PASS [   0.010s] (226/798) proxima-tensor cpu::tests::evaluate_typed_wraps_signed_narrow_overflow_instead_of_panicking
+        PASS [   0.010s] (227/798) proxima-tensor cpu::tests::expert_entries_from_stack_never_panics
+        PASS [   0.010s] (228/798) proxima-tensor cpu::tests::expert_entries_from_stack_rejects_empty_payload_instead_of_panicking
+        PASS [   0.009s] (229/798) proxima-tensor cpu::tests::expert_selection_counts_match_hand_computed_four_expert_two_used_routing
+        PASS [   0.011s] (230/798) proxima-tensor cpu::tests::evaluate_typed_scans_an_integer_vector_producing_a_running_sum
+        PASS [   0.010s] (231/798) proxima-tensor cpu::tests::expert_selection_snapshot_drains_the_table
+        PASS [   0.010s] (232/798) proxima-tensor cpu::tests::expert_source_rejects_an_entry_whose_shape_disagrees_with_the_program
+        PASS [   0.011s] (233/798) proxima-tensor cpu::tests::expert_source_matches_stack_gather
+        PASS [   0.011s] (234/798) proxima-tensor cpu::tests::expert_source_resolves_each_entry_through_its_own_codec
+        PASS [   0.009s] (235/798) proxima-tensor cpu::tests::f32_typed_path_is_unchanged
+        PASS [   0.010s] (236/798) proxima-tensor cpu::tests::f16_reduce_widens_into_an_f32_accumulator_where_f16_alone_overflows
+        PASS [   0.010s] (237/798) proxima-tensor cpu::tests::expert_source_swap_between_evaluations_reads_the_new_entry_cleanly
+        PASS [   0.009s] (238/798) proxima-tensor cpu::tests::fused_matmul_with_transposed_rhs_matches_a_naive_triple_loop
+        PASS [   0.010s] (239/798) proxima-tensor cpu::tests::fused_matmul_with_transposed_rhs_k1024_within_tolerance_of_a_naive_triple_loop
+        PASS [   0.011s] (240/798) proxima-tensor cpu::tests::fused_contraction_skips_the_product_tensor
+        PASS [   0.009s] (241/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_accepts_a_non_negative_constant_stride::rmsnorm
+        PASS [   0.011s] (242/798) proxima-tensor cpu::tests::fused_matmul_matches_a_naive_triple_loop
+        PASS [   0.010s] (243/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_accepts_a_non_negative_constant_stride::swiglu
+        PASS [   0.011s] (244/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_accepts_gather_free_affine_operands::rmsnorm
+        PASS [   0.010s] (245/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_accepts_gather_free_affine_operands::swiglu
+        PASS [   0.010s] (246/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_rejects_a_gathered_operand::rmsnorm
+        PASS [   0.011s] (247/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_accepts_gather_free_affine_operands::rope_add
+        PASS [   0.010s] (248/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_rejects_a_gathered_operand::swiglu
+        PASS [   0.010s] (249/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_rejects_a_negative_stride::swiglu
+        PASS [   0.010s] (250/798) proxima-tensor cpu::tests::half_precision_uniform_elementwise_matches_f32_reference::bf16_add
+        PASS [   0.011s] (251/798) proxima-tensor cpu::tests::generic_body_is_affine_fast_path_rejects_a_negative_stride::rmsnorm
+        PASS [   0.010s] (252/798) proxima-tensor cpu::tests::half_precision_uniform_elementwise_matches_f32_reference::f16_add
+        PASS [   0.010s] (253/798) proxima-tensor cpu::tests::half_precision_uniform_reduce_matches_f32_reference::bf16_sum
+        PASS [   0.010s] (254/798) proxima-tensor cpu::tests::half_precision_uniform_reduce_matches_f32_reference::f16_sum
+        PASS [   0.010s] (255/798) proxima-tensor cpu::tests::i16_operand_i64_accumulator_reduce_survives_i16_overflow
+        PASS [   0.010s] (256/798) proxima-tensor cpu::tests::interpreter_places_cached_softmax_weights_extra_outputs_in_the_buffer_table
+        PASS [   0.010s] (257/798) proxima-tensor cpu::tests::match_epilogue_recognizes_clip_authored
+        PASS [   0.011s] (258/798) proxima-tensor cpu::tests::match_epilogue_recognizes_clip_norm_authored
+        PASS [   0.010s] (259/798) proxima-tensor cpu::tests::match_epilogue_recognizes_clip_when_reduce_is_not_operand_zero
+        PASS [   0.009s] (260/798) proxima-tensor cpu::tests::match_epilogue_recognizes_layer_norm_authored
+        PASS [   0.010s] (261/798) proxima-tensor cpu::tests::match_epilogue_recognizes_layer_norm_after_hidden_one_confluence
+        PASS [   0.010s] (262/798) proxima-tensor cpu::tests::match_epilogue_rejects_clip_after_bias_identity_elimination
+        PASS [   0.011s] (263/798) proxima-tensor cpu::tests::match_epilogue_recognizes_norm_authored
+        PASS [   0.009s] (264/798) proxima-tensor cpu::tests::match_epilogue_rejects_norm_after_bias_identity_elimination
+        PASS [   0.010s] (265/798) proxima-tensor cpu::tests::match_epilogue_rejects_unrelated_shape
+        PASS [   0.009s] (266/798) proxima-tensor cpu::tests::matmul_half_precision_hand_computed_assertion_can_actually_fail::f16
+        PASS [   0.010s] (267/798) proxima-tensor cpu::tests::matmul_binds_a_symbolic_sequence_length_at_eval_time
+        PASS [   0.010s] (268/798) proxima-tensor cpu::tests::matmul_half_precision_hand_computed_assertion_can_actually_fail::bf16
+        PASS [   0.010s] (269/798) proxima-tensor cpu::tests::matmul_half_precision_matches_a_hand_computed_two_row_matmul::bf16
+        PASS [   0.010s] (270/798) proxima-tensor cpu::tests::matmul_half_precision_matches_a_hand_computed_two_row_matmul::f16
+        PASS [   0.011s] (271/798) proxima-tensor cpu::tests::matmul_q2k_f32_matches_naive_dequantize_then_dot_matvec
+        PASS [   0.011s] (272/798) proxima-tensor cpu::tests::matmul_q4k_f32_matches_dequantize_then_f32_matmul::seed_1
+        PASS [   0.012s] (273/798) proxima-tensor cpu::tests::matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance
+        PASS [   0.010s] (274/798) proxima-tensor cpu::tests::matmul_q4k_f32_matches_dequantize_then_f32_matmul::seed_1000
+        PASS [   0.010s] (275/798) proxima-tensor cpu::tests::matmul_q4k_f32_rejects_an_activation_length_mismatch
+        PASS [   0.018s] (276/798) proxima-tensor cpu::tests::matmul_q4k_f32_matches_an_f64_dequant_reference_tighter_than_the_int8_path_on_a_real_row
+        PASS [   0.011s] (277/798) proxima-tensor cpu::tests::matmul_q4k_f32_matches_dequantize_then_f32_matmul::seed_7
+        PASS [   0.010s] (278/798) proxima-tensor cpu::tests::matmul_q4k_f32_rejects_an_activation_length_that_does_not_match_the_weight_rows_element_count
+        PASS [   0.012s] (279/798) proxima-tensor cpu::tests::matmul_q4k_f32_rejects_a_row_length_not_a_block_multiple
+        PASS [   0.011s] (280/798) proxima-tensor cpu::tests::matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm
+        PASS [   0.013s] (281/798) proxima-tensor cpu::tests::matmul_q4k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel
+        PASS [   0.010s] (282/798) proxima-tensor cpu::tests::matmul_q4k_q8k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance
+        PASS [   0.010s] (283/798) proxima-tensor cpu::tests::matmul_q5k_q8k_f32_agrees_bit_exact_with_the_portable_arm
+        PASS [   0.017s] (284/798) proxima-tensor cpu::tests::matmul_q5k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel
+        PASS [   0.021s] (285/798) proxima-tensor cpu::tests::matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes
+        PASS [   0.016s] (286/798) proxima-tensor cpu::tests::matmul_q6k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel
+        PASS [   0.018s] (287/798) proxima-tensor cpu::tests::matmul_q5k_q8k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel
+        PASS [   0.021s] (288/798) proxima-tensor cpu::tests::matmul_q5k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes
+        PASS [   0.022s] (289/798) proxima-tensor cpu::tests::matmul_q6k_q8k_f32_agrees_bit_exact_with_the_portable_arm
+        PASS [   0.018s] (290/798) proxima-tensor cpu::tests::matmul_worker_count_is_between_one_and_available_parallelism
+        PASS [   0.035s] (291/798) proxima-tensor cpu::tests::matmul_q5k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes
+        PASS [   0.023s] (292/798) proxima-tensor cpu::tests::matmul_q6k_q8k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel
+        PASS [   0.015s] (293/798) proxima-tensor cpu::tests::native_scatter_matches_the_mask_composition_oracle_on_the_same_fixture
+        PASS [   0.012s] (294/798) proxima-tensor cpu::tests::operand_access_footprint_is_exact_for_a_dense_operand
+        PASS [   0.013s] (295/798) proxima-tensor cpu::tests::one_dimensional_convolution_via_a_two_term_window_map
+        PASS [   0.012s] (296/798) proxima-tensor cpu::tests::operand_access_footprint_is_one_for_a_scalar_reduction
+        PASS [   0.056s] (297/798) proxima-tensor cpu::tests::matmul_q4k_q8k_f32_wide_matches_narrow_calls_at_prefill_widths_on_real_gguf_bytes
+        PASS [   0.016s] (298/798) proxima-tensor cpu::tests::packed_reduce_planner_materializes_the_gated_activation_not_the_product_at_decode
+        PASS [   0.047s] (299/798) proxima-tensor cpu::tests::mins_correction_neon_agrees_with_get_scale_min_k4_scalar_route_on_real_gguf_bytes
+        PASS [   0.021s] (300/798) proxima-tensor cpu::tests::operand_access_footprint_undercounts_distinct_under_broadcast
+        PASS [   0.073s] (301/798) proxima-tensor cpu::tests::matmul_q5k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes_ffn_down
+        PASS [   0.020s] (302/798) proxima-tensor cpu::tests::parse_cpu_list_count_matches_sysfs_shapes::malformed_range
+        PASS [   0.025s] (303/798) proxima-tensor cpu::tests::parse_cpu_list_count_matches_sysfs_shapes::bare_id
+        PASS [   0.022s] (304/798) proxima-tensor cpu::tests::parse_cpu_list_count_matches_sysfs_shapes::empty_file
+        PASS [   0.060s] (305/798) proxima-tensor cpu::tests::matmul_q6k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes
+        PASS [   0.013s] (306/798) proxima-tensor cpu::tests::parse_cpu_list_count_matches_sysfs_shapes::single_cpu_range
+        PASS [   0.015s] (307/798) proxima-tensor cpu::tests::parse_cpu_list_count_matches_sysfs_shapes::single_range
+        PASS [   0.016s] (308/798) proxima-tensor cpu::tests::parse_cpu_list_count_matches_sysfs_shapes::trailing_newline
+        PASS [   0.011s] (309/798) proxima-tensor cpu::tests::parse_cpu_list_count_matches_sysfs_shapes::whitespace_only
+        PASS [   0.011s] (310/798) proxima-tensor cpu::tests::peak_live_buffers_on_a_tanh_chain_stays_small_under_evaluate_parallel
+        PASS [   0.010s] (311/798) proxima-tensor cpu::tests::placed_output_reports_placed_not_missing
+        PASS [   0.011s] (312/798) proxima-tensor cpu::tests::plan_trace_named_reports_fusion_flip_when_an_intermediate_becomes_an_output
+        PASS [   0.010s] (313/798) proxima-tensor cpu::tests::quant_dot_fused_and_unfused_agree_for_q4k_within_int8_quantization_tolerance
+        PASS [   0.010s] (314/798) proxima-tensor cpu::tests::quant_dot_fused_and_unfused_agree_for_q5k_within_int8_quantization_tolerance
+        PASS [   0.009s] (315/798) proxima-tensor cpu::tests::quant_dot_fused_and_unfused_agree_for_q6k_within_int8_quantization_tolerance
+        PASS [   0.015s] (316/798) proxima-tensor cpu::tests::q5k_mins_correction_neon_agrees_with_get_scale_min_k4_scalar_route_on_real_gguf_bytes
+        PASS [   0.011s] (317/798) proxima-tensor cpu::tests::quant_dot_rejects_a_codec_with_no_int8_dot_kernel
+        PASS [   0.010s] (318/798) proxima-tensor cpu::tests::quant_dot_rejects_a_malformed_weight_row_on_both_fused_and_unfused
+        PASS [   0.011s] (319/798) proxima-tensor cpu::tests::quantize_row_q8k_dispatch_is_bit_identical_to_the_serial_reference
+        PASS [   0.010s] (320/798) proxima-tensor cpu::tests::quantize_row_q8k_zero_vector_is_bit_exact_zero
+        PASS [   0.010s] (321/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::bfloat16_two_elements
+        PASS [   0.009s] (322/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::iq2_xs_two_super_blocks
+        PASS [   0.010s] (323/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::float16_seven_elements
+        PASS [   0.012s] (324/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::iq3_xxs_three_super_blocks
+        PASS [   0.011s] (325/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::iq4_nl_five_blocks
+        PASS [   0.010s] (326/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::q4_0_five_blocks
+        PASS [   0.010s] (327/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::q4_k_two_super_blocks
+        PASS [   0.010s] (328/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::q5_1_three_blocks
+        PASS [   0.011s] (329/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::q5_k_three_super_blocks
+        PASS [   0.011s] (330/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::q6_k_one_super_block
+        PASS [   0.012s] (331/798) proxima-tensor cpu::tests::quantized_block_element_count_multiplies_block_count_by_elements_per_block::q8_0_four_blocks
+        PASS [   0.009s] (332/798) proxima-tensor cpu::tests::quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple::bfloat16
+        PASS [   0.009s] (333/798) proxima-tensor cpu::tests::quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple::float16
+        PASS [   0.009s] (334/798) proxima-tensor cpu::tests::quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple::q4_0
+        PASS [   0.011s] (335/798) proxima-tensor cpu::tests::quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple::q4_k
+        PASS [   0.011s] (336/798) proxima-tensor cpu::tests::quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple::q5_k
+        PASS [   0.009s] (337/798) proxima-tensor cpu::tests::quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple::q6_k
+        PASS [   0.009s] (338/798) proxima-tensor cpu::tests::qwen35_batched_packed_ssm_projection_matches_repeated_rows
+        PASS [   0.010s] (339/798) proxima-tensor cpu::tests::quantized_block_element_count_reports_float32_slice_length_directly
+        PASS [   0.010s] (340/798) proxima-tensor cpu::tests::quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple::q8_0
+        PASS [   0.010s] (341/798) proxima-tensor cpu::tests::reduce_dot_binary_stride_two_matches_a_scalar_reference
+        PASS [   0.110s] (342/798) proxima-tensor cpu::tests::matmul_q6k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes
+        PASS [   0.010s] (343/798) proxima-tensor cpu::tests::reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation
+        PASS [   0.010s] (344/798) proxima-tensor cpu::tests::reject_non_float32_exempts_a_quantized_weight_in_matmul_position
+        PASS [   0.011s] (345/798) proxima-tensor cpu::tests::reject_non_float32_exempts_an_unreferenced_non_float32_input
+        PASS [   0.011s] (346/798) proxima-tensor cpu::tests::reject_non_float32_exempts_many_independent_quantized_weights
+        PASS [   0.009s] (347/798) proxima-tensor cpu::tests::reject_non_float32_rejects_a_quantized_weight_selected_by_a_synthetic_iota_mask
+        PASS [   0.009s] (348/798) proxima-tensor cpu::tests::reject_non_float32_still_rejects_a_referenced_non_float32_input
+        PASS [   0.010s] (349/798) proxima-tensor cpu::tests::reject_non_float32_still_rejects_a_quantized_node_outside_matmul_shape
+        PASS [   0.009s] (350/798) proxima-tensor cpu::tests::round_batched_reduce_matches_k_sequential_reduces
+        PASS [   0.009s] (351/798) proxima-tensor cpu::tests::row_chunk_count_scales_down_for_a_small_shape_and_stays_capped_for_a_large_one
+        PASS [   0.010s] (352/798) proxima-tensor cpu::tests::run_reduce_quantized_rejects_a_composed_body_wider_than_a_bare_weight_activation_product
+        PASS [   0.009s] (353/798) proxima-tensor cpu::tests::scan_width_unary_stride_two_matches_a_running_sum_reference
+        PASS [   0.010s] (354/798) proxima-tensor cpu::tests::scatter_add_into_a_known_destination_via_mask_composition
+        PASS [   0.010s] (355/798) proxima-tensor cpu::tests::scatter_add_matches_the_hand_worked_example
+        PASS [   0.010s] (356/798) proxima-tensor cpu::tests::scatter_add_with_an_out_of_range_destination_index_is_rejected
+        PASS [   0.011s] (357/798) proxima-tensor cpu::tests::scatter_add_with_no_collisions_places_each_source_element_once
+        PASS [   0.009s] (358/798) proxima-tensor cpu::tests::splitting_an_elementwise_node_and_running_its_chunks_matches_the_unsplit_result
+        PASS [   0.011s] (359/798) proxima-tensor cpu::tests::softmax_end_to_end_matches_a_reference_within_epsilon
+        PASS [   0.011s] (360/798) proxima-tensor cpu::tests::splitting_a_fused_matmul_reduction_and_running_its_chunks_matches_the_unsplit_result
+        PASS [   0.011s] (361/798) proxima-tensor cpu::tests::staged_round_completes_with_a_single_member
+        PASS [   0.010s] (362/798) proxima-tensor cpu::tests::staged_round_never_runs_a_stage_before_its_predecessor_completes
+        PASS [   0.010s] (363/798) proxima-tensor cpu::tests::staged_round_publishes_a_failed_chunk_so_later_stages_do_not_hang
+        PASS [   0.010s] (364/798) proxima-tensor cpu::tests::staged_round_supports_variable_width_stages_in_one_round
+        PASS [   0.009s] (365/798) proxima-tensor cpu::tests::transpose_wide_to_output_dispatch_is_bit_identical_to_the_serial_reference
+        PASS [   0.010s] (366/798) proxima-tensor cpu::tests::transpose_via_permuted_map
+        PASS [   0.010s] (367/798) proxima-tensor cpu::tests::typed_gather_dim1_matches_f32_oracle
+        PASS [   0.011s] (368/798) proxima-tensor cpu::tests::typed_gather_matches_f32_oracle_element_for_element::i32_index
+        PASS [   0.012s] (369/798) proxima-tensor cpu::tests::typed_gather_f16_compute_matches_f32_oracle_within_half_precision
+        PASS [   0.011s] (370/798) proxima-tensor cpu::tests::typed_gather_out_of_range_index_matches_f32_oracle_error_shape::index_past_the_extent
+        PASS [   0.011s] (371/798) proxima-tensor cpu::tests::typed_gather_matches_f32_oracle_element_for_element::u32_index
+        PASS [   0.009s] (372/798) proxima-tensor cpu::tests::typed_gather_out_of_range_index_matches_f32_oracle_error_shape::negative_index
+        PASS [   0.010s] (373/798) proxima-tensor cpu::tests::typed_program_plan_no_longer_rejects_float16_or_bfloat16_but_still_rejects_bool
+        PASS [   0.009s] (374/798) proxima-tensor cpu::tests::typed_program_plan_permits_an_integer_gather_index_distinct_from_compute_dtype::i32_index_over_f16_compute
+        PASS [   0.010s] (375/798) proxima-tensor cpu::tests::typed_program_plan_permits_an_integer_gather_index_distinct_from_compute_dtype::i32_index_over_f32_compute
+        PASS [   0.012s] (376/798) proxima-tensor cpu::tests::typed_program_plan_permits_an_integer_gather_index_distinct_from_compute_dtype::u32_index_over_f16_compute
+        PASS [   0.010s] (377/798) proxima-tensor cpu::tests::typed_program_plan_permits_an_integer_gather_index_distinct_from_compute_dtype::u32_index_over_f32_compute
+        PASS [   0.010s] (378/798) proxima-tensor cpu::tests::typed_program_plan_rejects_a_float_gather_index_dtype
+        PASS [   0.009s] (379/798) proxima-tensor cpu::tests::wrong_block_count_is_rejected
+        PASS [   0.010s] (380/798) proxima-tensor cpu::tests::widened_reduce_over_a_gathered_f16_operand_matches_a_hand_written_reference
+        PASS [   0.011s] (381/798) proxima-tensor cpu::tests::u8_operand_u32_accumulator_reduce_survives_u8_overflow
+        PASS [   0.009s] (382/798) proxima-tensor cpu::tests::wrong_block_size_is_rejected
+        PASS [   0.010s] (383/798) proxima-tensor cpu::twin_elementwise_tests::a_lone_elementwise_op_passes_through_unchanged
+        PASS [   0.009s] (384/798) proxima-tensor cpu::twin_elementwise_tests::a_twin_with_its_bodies_swapped_does_not_match_the_reference
+        PASS [   0.009s] (385/798) proxima-tensor cpu::twin_elementwise_tests::one_twin_dispatch_matches_the_two_dispatch_rope_path_bit_for_bit::adjacent_pairs
+        PASS [   0.010s] (386/798) proxima-tensor cpu::twin_elementwise_tests::elementwise_ops_with_different_reads_are_not_merged
+        PASS [   0.010s] (387/798) proxima-tensor cpu::twin_elementwise_tests::twin_halves_are_the_two_plain_ops_the_pass_merged::adjacent_pairs
+        PASS [   0.012s] (388/798) proxima-tensor cpu::twin_elementwise_tests::one_twin_dispatch_matches_the_two_dispatch_rope_path_bit_for_bit::split_half_full_rotary
+        PASS [   0.012s] (389/798) proxima-tensor cpu::twin_elementwise_tests::one_twin_dispatch_matches_the_two_dispatch_rope_path_bit_for_bit::split_half_partial_rotary
+        PASS [   0.009s] (390/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::bool_widens
+        PASS [   0.011s] (391/798) proxima-tensor cpu::twin_elementwise_tests::twin_halves_are_the_two_plain_ops_the_pass_merged::split_half
+        PASS [   0.009s] (392/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::float64_in_place
+        PASS [   0.010s] (393/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::float32_in_place
+        PASS [   0.009s] (394/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::int128_in_place
+        PASS [   0.009s] (395/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::int16_widens
+        PASS [   0.010s] (396/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::int32_in_place
+        PASS [   0.010s] (397/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::int64_in_place
+        PASS [   0.010s] (398/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::narrow_int_widens
+        PASS [   0.011s] (399/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::narrow_uint_widens
+        PASS [   0.011s] (400/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::uint16_widens
+        PASS [   0.010s] (401/798) proxima-tensor dtype::tests::narrow_integers_require_a_wider_accumulator::uint64_in_place
+        PASS [   0.010s] (402/798) proxima-tensor dtype::tests::only_floating_types_report_float
+        PASS [   0.010s] (403/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::bool_is_not_integer
+        PASS [   0.010s] (404/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::float32_is_not_integer
+        PASS [   0.009s] (405/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::int16
+        PASS [   0.010s] (406/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::int128
+        PASS [   0.011s] (407/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::int32
+        PASS [   0.010s] (408/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::int8
+        PASS [   0.010s] (409/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::uint16
+        PASS [   0.012s] (410/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::int64
+        PASS [   0.011s] (411/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::uint128
+        PASS [   0.009s] (412/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::uint32
+        PASS [   0.011s] (413/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::uint64
+        PASS [   0.010s] (414/798) proxima-tensor dtype::tests::only_whole_number_types_report_integer::uint8
+        PASS [   0.009s] (415/798) proxima-tensor dtype::tests::signedness_matches_the_variant_name::int64_signed
+        PASS [   0.011s] (416/798) proxima-tensor dtype::tests::signedness_matches_the_variant_name::int128_signed
+        PASS [   0.010s] (417/798) proxima-tensor dtype::tests::signedness_matches_the_variant_name::int8_signed
+        PASS [   0.010s] (418/798) proxima-tensor dtype::tests::signedness_matches_the_variant_name::uint64_unsigned
+        PASS [   0.010s] (419/798) proxima-tensor dtype::tests::signedness_matches_the_variant_name::uint8_unsigned
+        PASS [   0.011s] (420/798) proxima-tensor dtype::tests::signedness_matches_the_variant_name::uint128_unsigned
+        PASS [   0.010s] (421/798) proxima-tensor dtype::tests::size_bytes_matches_width::boolean
+        PASS [   0.010s] (422/798) proxima-tensor dtype::tests::size_bytes_matches_width::double
+        PASS [   0.010s] (423/798) proxima-tensor dtype::tests::size_bytes_matches_width::brain_half
+        PASS [   0.009s] (424/798) proxima-tensor dtype::tests::size_bytes_matches_width::half
+        PASS [   0.010s] (425/798) proxima-tensor dtype::tests::size_bytes_matches_width::int16
+        PASS [   0.011s] (426/798) proxima-tensor dtype::tests::size_bytes_matches_width::int128
+        PASS [   0.010s] (427/798) proxima-tensor dtype::tests::size_bytes_matches_width::int32
+        PASS [   0.010s] (428/798) proxima-tensor dtype::tests::size_bytes_matches_width::int64
+        PASS [   0.010s] (429/798) proxima-tensor dtype::tests::size_bytes_matches_width::narrow_int
+        PASS [   0.010s] (430/798) proxima-tensor dtype::tests::size_bytes_matches_width::narrow_uint
+        PASS [   0.010s] (431/798) proxima-tensor dtype::tests::size_bytes_matches_width::single
+        PASS [   0.010s] (432/798) proxima-tensor dtype::tests::size_bytes_matches_width::uint128
+        PASS [   0.010s] (433/798) proxima-tensor dtype::tests::size_bytes_matches_width::uint16
+        PASS [   0.010s] (434/798) proxima-tensor dtype::tests::size_bytes_matches_width::uint64
+        PASS [   0.011s] (435/798) proxima-tensor dtype::tests::size_bytes_matches_width::uint32
+        PASS [   0.010s] (436/798) proxima-tensor live::tests::a_multiply_used_operand_retires_at_its_last_use_not_its_first
+        PASS [   0.011s] (437/798) proxima-tensor live::tests::a_reduce_operand_retires_at_the_reduce
+        PASS [   0.011s] (438/798) proxima-tensor live::tests::a_single_use_operand_retires_at_its_consumer
+        PASS [   0.012s] (439/798) proxima-tensor live::tests::a_requested_output_never_retires
+        PASS [   0.009s] (440/798) proxima-tensor map::tests::a_convolution_axis_is_two_terms
+        PASS [   0.009s] (441/798) proxima-tensor map::tests::computed_and_affine_both_expose_a_base_pattern
+        PASS [   0.010s] (442/798) proxima-tensor live::tests::dead_code_retires_at_its_own_position
+        PASS [   0.010s] (443/798) proxima-tensor map::tests::projection_has_unit_coefficient_and_scaled_does_not
+        PASS [   0.011s] (444/798) proxima-tensor map::tests::projection_reads_transpose_broadcast_and_identity
+        PASS [   0.009s] (445/798) proxima-tensor numeric::tests::context_split_merge_admitted_once_the_policy_opts_up
+        PASS [   0.011s] (446/798) proxima-tensor numeric::tests::bit_exact_rewrites_admitted_at_the_default_policy
+        PASS [   0.008s] (447/798) proxima-tensor numeric::tests::context_split_merge_rejected_under_bit_exact_policy
+        PASS [   0.010s] (448/798) proxima-tensor numeric::tests::nan_assumption_alone_does_not_grant_signed_zero_elimination
+        PASS [   0.008s] (449/798) proxima-tensor numeric::tests::policy_toml_without_epilogue_sources_deserializes_it_as_false
+        PASS [   0.009s] (450/798) proxima-tensor numeric::tests::policy_with_epilogue_sources_round_trips_through_toml
+        PASS [   0.010s] (451/798) proxima-tensor numeric::tests::presets_grant_exactly_their_documented_permissions
+        PASS [   0.010s] (452/798) proxima-tensor numeric::tests::reassociating_rewrite_admitted_once_the_policy_opts_up
+        PASS [   0.010s] (453/798) proxima-tensor numeric::tests::reassociating_rewrite_rejected_under_bit_exact_policy
+        PASS [   0.010s] (454/798) proxima-tensor numeric::tests::signed_zero_alone_does_not_grant_nan_assumption_elimination
+        PASS [   0.011s] (455/798) proxima-tensor numeric::tests::signed_zero_elimination_admitted_once_the_policy_opts_up
+        PASS [   0.010s] (456/798) proxima-tensor numeric::tests::widened_reduce_epilogue_fusion_needs_the_epilogue_sources_permission
+        PASS [   0.008s] (457/798) proxima-tensor op::tests::append_returns_increasing_ids
+        PASS [   0.010s] (458/798) proxima-tensor op::tests::arity_matches_the_body::binary
+        PASS [   0.010s] (459/798) proxima-tensor op::tests::arity_matches_the_body::compare
+        PASS [   0.010s] (460/798) proxima-tensor op::tests::arity_matches_the_body::negate
+        PASS [   0.009s] (461/798) proxima-tensor op::tests::arity_matches_the_body::ternary
+        PASS [   0.009s] (462/798) proxima-tensor op::tests::dtype_and_name_read_through_every_variant
+        PASS [   0.010s] (463/798) proxima-tensor op::tests::arity_matches_the_body::unary
+        PASS [   0.009s] (464/798) proxima-tensor op::tests::only_associative_bodies_may_be_reassociated::add
+        PASS [   0.010s] (465/798) proxima-tensor op::tests::node_id_displays_in_ssa_form
+        PASS [   0.009s] (466/798) proxima-tensor op::tests::only_associative_bodies_may_be_reassociated::maximum
+        PASS [   0.011s] (467/798) proxima-tensor op::tests::only_associative_bodies_may_be_reassociated::divide
+        PASS [   0.011s] (468/798) proxima-tensor op::tests::only_associative_bodies_may_be_reassociated::multiply
+        PASS [   0.009s] (469/798) proxima-tensor partition::tests::ancestor_closed_partition_excludes_dead_interval_nodes
+        PASS [   0.011s] (470/798) proxima-tensor op::tests::only_associative_bodies_may_be_reassociated::subtract
+        PASS [   0.010s] (471/798) proxima-tensor partition::tests::partition_between_materializes_external_cut_inputs
+        PASS [   0.010s] (472/798) proxima-tensor partition::tests::round_trip_matches_whole_program_evaluation
+        PASS [   0.009s] (473/798) proxima-tensor physical::tests::gqa_stream_reuses_each_kv_head_for_query_groups
+        PASS [   0.010s] (474/798) proxima-tensor physical::tests::merged_kv_zero_cached_range_matches_the_old_duplicated_capacity_with_a_dead_band
+        PASS [   0.010s] (475/798) proxima-tensor physical::tests::pass_plane_scores_cross_product_of_kv_heads_and_query_groups
+        PASS [   0.010s] (476/798) proxima-tensor physical::tests::pass_plane_scores_each_kv_head_independently
+        PASS [   0.009s] (477/798) proxima-tensor physical::tests::rejects_inconsistent_attention_buffers
+        PASS [   0.010s] (478/798) proxima-tensor physical::tests::pass_plane_scores_each_query_group_independently
+        PASS [   0.010s] (479/798) proxima-tensor physical::tests::split_rope_stream_matches_full_vector_attention
+        PASS [   0.010s] (480/798) proxima-tensor physical::tests::streams_cached_and_new_ranges_without_materialized_weights
+        PASS [   0.009s] (481/798) proxima-tensor shape::tests::a_bad_expr_is_rejected_at_push_time_not_at_finish
+        PASS [   0.009s] (482/798) proxima-tensor shape::tests::a_broadcast_bias_add_resolves_the_wider_shape
+        PASS [   0.010s] (483/798) proxima-tensor shape::tests::a_compound_axis_infers_from_two_real_anchors_without_an_anchor_trick
+        PASS [   0.010s] (484/798) proxima-tensor shape::tests::a_conv_window_that_exceeds_bounds_is_rejected
+        PASS [   0.011s] (485/798) proxima-tensor shape::tests::a_conv_window_within_bounds_infers
+        PASS [   0.011s] (486/798) proxima-tensor shape::tests::a_gathered_dim_out_of_range_for_the_operand_is_rejected
+        PASS [   0.011s] (487/798) proxima-tensor shape::tests::a_gathered_extent_at_exactly_two_to_the_24_is_accepted
+        PASS [   0.009s] (488/798) proxima-tensor shape::tests::a_gathered_extent_past_two_to_the_24_is_rejected
+        PASS [   0.010s] (489/798) proxima-tensor shape::tests::a_keep_reduce_fold_that_contracts_a_symbolic_axis_drops_it_from_the_output_mask
+        PASS [   0.011s] (490/798) proxima-tensor shape::tests::a_leaf_mask_carries_exactly_its_own_symbolic_extents
+        PASS [   0.011s] (491/798) proxima-tensor shape::tests::a_len_on_two_unit_coefficient_terms_is_ambiguous
+        PASS [   0.010s] (492/798) proxima-tensor shape::tests::a_len_that_exceeds_the_operands_own_width_is_still_rejected
+        PASS [   0.013s] (493/798) proxima-tensor shape::tests::a_len_marked_axis_narrows_below_the_operands_own_width
+        PASS [   0.010s] (494/798) proxima-tensor shape::tests::a_multi_term_axis_resolves_len_onto_its_unit_coefficient_term
+        PASS [   0.009s] (495/798) proxima-tensor shape::tests::a_node_with_no_symbolic_ancestor_has_an_empty_mask
+        PASS [   0.010s] (496/798) proxima-tensor shape::tests::a_non_backward_reference_is_rejected::forward_reference
+        PASS [   0.011s] (497/798) proxima-tensor shape::tests::a_non_backward_reference_is_rejected::self_reference
+        PASS [   0.009s] (498/798) proxima-tensor shape::tests::a_non_pure_projection_cannot_index_past_a_lower_rank_operand
+        PASS [   0.010s] (499/798) proxima-tensor shape::tests::a_nonzero_offset_slice_evaluates_the_correct_chunk_values::third_chunk_offset_4096
+        PASS [   0.012s] (500/798) proxima-tensor shape::tests::a_nonzero_offset_slice_evaluates_the_correct_chunk_values::second_chunk_offset_2048
+        PASS [   0.010s] (501/798) proxima-tensor shape::tests::a_reduce_output_mask_carries_a_symbol_iff_it_lives_on_a_surviving_axis
+        PASS [   0.010s] (502/798) proxima-tensor shape::tests::a_nonzero_offset_slice_out_of_the_donors_bounds_is_still_rejected
+        PASS [   0.012s] (503/798) proxima-tensor shape::tests::a_nonzero_offset_slice_of_a_wider_operand_narrows_via_a_companion_donor
+        PASS [   0.010s] (504/798) proxima-tensor shape::tests::a_scatter_as_a_keep_scan_is_rejected
+        PASS [   0.010s] (505/798) proxima-tensor shape::tests::a_scatter_destination_extent_past_two_to_the_24_is_rejected
+        PASS [   0.010s] (506/798) proxima-tensor shape::tests::a_scatter_out_map_infers_the_hand_worked_destination_shape
+        PASS [   0.038s] (507/798) proxima-tensor shape::tests::a_fused_qkv_split_evaluates_all_three_chunks_by_a_real_chunk_axis
+        PASS [   0.012s] (508/798) proxima-tensor shape::tests::a_scatter_with_first_element_init_is_rejected
+        PASS [   0.010s] (509/798) proxima-tensor shape::tests::a_shifted_len_declaration_with_no_conflicting_anchor_resolves
+        PASS [   0.011s] (510/798) proxima-tensor shape::tests::a_shifted_len_declaration_disagrees_with_an_unshifted_anchor
+        PASS [   0.010s] (511/798) proxima-tensor shape::tests::a_tiled_split_sizes_its_outer_axis_from_the_operand_extent
+        PASS [   0.012s] (512/798) proxima-tensor shape::tests::a_split_over_a_partial_tile_is_unconstrained_not_rounded
+        PASS [   0.009s] (513/798) proxima-tensor shape::tests::an_all_static_leaf_has_an_empty_mask
+        PASS [   0.011s] (514/798) proxima-tensor shape::tests::a_split_whose_declared_tile_is_not_its_stride_is_unconstrained
+        PASS [   0.009s] (515/798) proxima-tensor shape::tests::an_embedding_lookup_infers_without_the_vocab_extent_leaking_into_iteration
+        PASS [   0.009s] (516/798) proxima-tensor shape::tests::an_iota_broadcasts_into_a_higher_rank_consumer
+        PASS [   0.009s] (517/798) proxima-tensor shape::tests::an_iota_resolves_its_own_shape_from_its_extent::static_extent
+        PASS [   0.009s] (518/798) proxima-tensor shape::tests::an_iota_over_an_unbound_symbol_is_rejected
+        PASS [   0.008s] (519/798) proxima-tensor shape::tests::an_iota_resolves_its_own_shape_from_its_extent::symbolic_extent
+        PASS [   0.011s] (520/798) proxima-tensor shape::tests::an_iota_mask_carries_its_own_symbolic_extent
+        PASS [   0.011s] (521/798) proxima-tensor shape::tests::an_offset_zero_slice_narrower_than_its_operand_is_still_ambiguous
+        PASS [   0.011s] (522/798) proxima-tensor shape::tests::an_unbound_symbol_is_rejected
+        PASS [   0.011s] (523/798) proxima-tensor shape::tests::disagreeing_operand_extents_are_rejected
+        PASS [   0.012s] (524/798) proxima-tensor shape::tests::an_unconstrained_iteration_dim_is_rejected
+        PASS [   0.011s] (525/798) proxima-tensor shape::tests::exact_float_gather_indices_are_accepted
+        PASS [   0.009s] (526/798) proxima-tensor shape::tests::infer_as_a_pipe_matches_the_free_function
+        PASS [   0.009s] (527/798) proxima-tensor shape::tests::fold_iteration_extents_rejects_a_len_marked_axis
+        PASS [   0.012s] (528/798) proxima-tensor shape::tests::masks_compose_as_the_union_of_operand_masks
+        PASS [   0.011s] (529/798) proxima-tensor shape::tests::matmul_program_propagates_the_symbolic_operands_mask_through_reduce
+        PASS [   0.010s] (530/798) proxima-tensor shape::tests::reduce_output_shape_drops_the_contracted_dim
+        PASS [   0.011s] (531/798) proxima-tensor shape::tests::matmul_shape_resolves_a_symbolic_sequence_length
+        PASS [   0.010s] (532/798) proxima-tensor shape::tests::scan_output_shape_equals_the_input_shape
+        PASS [   0.011s] (533/798) proxima-tensor shape::tests::streaming_and_batch_inference_agree
+        PASS [   0.010s] (534/798) proxima-tensor shape::tests::summing_narrow_integers_in_place_is_rejected
+        PASS [   0.009s] (535/798) proxima-tensor shape::tests::symbol_dependency_output_masks_are_indexed_per_axis_not_per_node
+        PASS [   0.010s] (536/798) proxima-tensor shape::tests::symbol_dependency_iteration_mask_keeps_the_axis_the_output_mask_drops
+        PASS [   0.009s] (537/798) proxima-tensor similarity::tests::cosine_top_k_ranks_a_synthetic_matrix_by_hand_computed_cosine
+        PASS [   0.011s] (538/798) proxima-tensor shape::tests::transpose_reads_the_permuted_shape
+        PASS [   0.010s] (539/798) proxima-tensor similarity::tests::cosine_top_k_rejects_a_matrix_length_not_a_multiple_of_dim
+        PASS [   0.009s] (540/798) proxima-tensor sized::tests::generated_consts_match_the_measurement_record
+        PASS [   0.010s] (541/798) proxima-tensor sized::tests::neon_column_panel_budget_matches_the_measurement_record
+        PASS [   0.010s] (542/798) proxima-tensor sized::tests::staged_batch_min_len_matches_the_measurement_record
+        PASS [   0.011s] (543/798) proxima-tensor spec::attention_forward::activation_tests::gelu_tanh_matches_closed_form_reference
+        PASS [   0.010s] (544/798) proxima-tensor spec::attention_forward::activation_tests::silu_matches_sigmoid_times_x
+        PASS [   0.014s] (545/798) proxima-tensor spec::attention_forward::exclusive_dense_post_norm_tests::true_applies_post_ffw_norm_to_the_dense_branch_before_the_residual_add
+        PASS [   0.010s] (546/798) proxima-tensor spec::attention_forward::ple_single_reduce_parity_tests::one_reduce_form_of_a_layer_differs_from_the_windowed_form_of_another
+        PASS [   0.010s] (547/798) proxima-tensor spec::attention_forward::ple_single_reduce_parity_tests::the_layer_axis_form_adds_one_norm_reduce_where_the_windowed_form_adds_one_per_layer
+        PASS [   0.010s] (548/798) proxima-tensor spec::attention_forward::ple_single_reduce_parity_tests::one_reduce_per_layer_input_matches_the_per_layer_windowed_norm_at_1e_minus_6
+        PASS [   0.010s] (549/798) proxima-tensor spec::attention_forward::ple_stage_a_tests::per_layer_input_matches_worked_example
+        PASS [   0.010s] (550/798) proxima-tensor spec::attention_forward::ple_stage_b_tests::h_final_matches_worked_example
+        PASS [   0.011s] (551/798) proxima-tensor spec::gated_attention::hyper_connection_tests::combine_matches_f64_reference
+        PASS [   0.011s] (552/798) proxima-tensor spec::gated_attention::hyper_connection_tests::mix_matches_f64_reference_at_hc_2
+        PASS [   0.010s] (553/798) proxima-tensor spec::gated_attention::hyper_connection_tests::mix_matches_f64_reference_at_hc_4
+        PASS [   0.010s] (554/798) proxima-tensor spec::gated_attention::hyper_connection_tests::mix_matches_f64_reference_for_the_final_mixer_form
+        PASS [   0.009s] (555/798) proxima-tensor spec::layer_runs::tests::a_repeat_that_would_exhaust_memory_is_refused_before_it_allocates
+        PASS [   0.011s] (556/798) proxima-tensor spec::layer_runs::tests::a_pattern_repeats_in_order_like_gemma4_sliding_then_full
+        PASS [   0.011s] (557/798) proxima-tensor spec::layer_runs::tests::a_repeated_layer_expands_to_that_many_identical_blocks
+        PASS [   0.011s] (558/798) proxima-tensor spec::layer_runs::tests::an_entry_with_neither_a_layer_nor_a_pattern_is_refused
+        PASS [   0.012s] (559/798) proxima-tensor spec::layer_runs::tests::an_entry_that_is_both_a_layer_and_a_pattern_is_refused
+        PASS [   0.009s] (560/798) proxima-tensor spec::layer_runs::tests::an_unknown_key_in_a_layer_entry_is_an_error_not_a_silent_default
+        PASS [   0.010s] (561/798) proxima-tensor spec::layer_runs::tests::the_expanded_form_a_dump_produces_still_loads_and_equals_the_runs
+        PASS [   0.011s] (562/798) proxima-tensor spec::tests::a_cached_decode_step_matches_the_uncached_forward_pass_exactly
+        PASS [   0.009s] (563/798) proxima-tensor spec::tests::a_causal_attention_block_written_as_toml_masks_future_positions
+        PASS [   0.011s] (564/798) proxima-tensor spec::tests::a_constant_axis_parses_as_a_fixed_index_with_no_terms
+        PASS [   0.010s] (565/798) proxima-tensor spec::tests::a_constant_node_reads_from_toml_with_its_literal_and_shape
+        PASS [   0.010s] (566/798) proxima-tensor spec::tests::a_conv2d_written_as_toml_reproduces_its_input_through_a_center_tap_kernel
+        PASS [   0.011s] (567/798) proxima-tensor spec::tests::a_constant_axis_with_a_declared_len_is_rejected_at_parse_time
+        PASS [   0.010s] (568/798) proxima-tensor spec::tests::a_duplicate_id_is_rejected
+        PASS [   0.010s] (569/798) proxima-tensor spec::tests::a_gqa_attention_block_groups_query_heads_onto_shared_kv_heads
+        PASS [   0.012s] (570/798) proxima-tensor spec::tests::a_forward_reference_in_config_is_rejected
+        PASS [   0.011s] (571/798) proxima-tensor spec::tests::a_gqa_attention_block_with_a_non_power_of_two_group_groups_query_heads_onto_shared_kv_heads
+        PASS [   0.011s] (572/798) proxima-tensor spec::tests::a_len_declaration_parses_regardless_of_address_shape::scaled
+        PASS [   0.013s] (573/798) proxima-tensor spec::tests::a_len_declaration_parses_regardless_of_address_shape::multi_term_unit_coefficient
+        PASS [   0.010s] (574/798) proxima-tensor spec::tests::a_len_on_two_unit_coefficient_terms_is_rejected_at_parse_time
+        PASS [   0.010s] (575/798) proxima-tensor spec::tests::a_malformed_extent_is_rejected
+        PASS [   0.010s] (576/798) proxima-tensor spec::tests::a_map_without_an_arrow_is_rejected
+        PASS [   0.012s] (577/798) proxima-tensor spec::tests::a_len_declaration_parses_regardless_of_address_shape::shifted
+        PASS [   0.010s] (578/798) proxima-tensor spec::tests::a_mistral_layer_written_as_toml_evaluates
+        PASS [   0.010s] (579/798) proxima-tensor spec::tests::a_mistral_layer_written_as_toml_infers_at_its_real_dimensions
+        PASS [   0.010s] (580/798) proxima-tensor spec::tests::a_moe_block_written_as_toml_routes_each_token_to_its_own_experts_weights
+        PASS [   0.009s] (581/798) proxima-tensor spec::tests::a_program_written_as_toml_equals_the_same_program_written_in_rust
+        PASS [   0.010s] (582/798) proxima-tensor spec::tests::a_rope_pairwise_rotation_written_as_toml_preserves_pair_norm
+        PASS [   0.010s] (583/798) proxima-tensor spec::tests::a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_reference
+        PASS [   0.011s] (584/798) proxima-tensor spec::tests::a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_independent_reference
+        PASS [   0.011s] (585/798) proxima-tensor spec::tests::a_symbolic_extent_survives_as_a_symbol
+        PASS [   0.011s] (586/798) proxima-tensor spec::tests::a_topk2_probe_unrolls_two_argmax_rounds_with_exclusion
+        PASS [   0.013s] (587/798) proxima-tensor spec::tests::a_single_range_decode_step_with_qk_norm_matches_the_two_range_decode_step
+        PASS [   0.016s] (588/798) proxima-tensor spec::tests::a_single_range_decode_step_matches_the_two_range_decode_step
+        PASS [   0.012s] (589/798) proxima-tensor spec::tests::a_transformer_block_written_as_toml_evaluates
+        PASS [   0.010s] (590/798) proxima-tensor spec::tests::an_embedding_lookup_written_as_toml_equals_the_same_program_written_in_rust
+        PASS [   0.011s] (591/798) proxima-tensor spec::tests::an_attention_block_written_as_toml_evaluates
+        PASS [   0.010s] (592/798) proxima-tensor spec::tests::an_input_name_survives_the_config_round_trip
+        PASS [   0.013s] (593/798) proxima-tensor spec::tests::append_qwen35_conv_branch_hand_computed_check_actually_detects_a_wrong_weight
+        PASS [   0.010s] (594/798) proxima-tensor spec::tests::append_qwen35_dense_attention_layer_hand_computed_check_actually_detects_a_dropped_gate
+        PASS [   0.011s] (595/798) proxima-tensor spec::tests::append_qwen35_conv_branch_matches_a_hand_computed_conv_silu_split_and_norm
+        PASS [   0.010s] (596/798) proxima-tensor spec::tests::append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat
+        PASS [   0.010s] (597/798) proxima-tensor spec::tests::cache_mask::a_config_without_a_cache_mask_lowers_the_bounded_mask
+        PASS [   0.012s] (598/798) proxima-tensor spec::tests::bound_ops_are_classified_variant_or_invariant_in_cached_len
+        PASS [   0.010s] (599/798) proxima-tensor spec::tests::cache_mask::the_mask_survives_a_toml_round_trip
+        PASS [   0.010s] (600/798) proxima-tensor spec::tests::causal_conv1d_hand_computed_check_actually_detects_a_wrong_weight
+        PASS [   0.011s] (601/798) proxima-tensor spec::tests::cache_mask::the_padded_mask_adds_one_cached_block_select_per_layer_over_the_bounded_mask
+        PASS [   0.010s] (602/798) proxima-tensor spec::tests::causal_conv1d_keeps_channels_independent_and_catches_a_transposed_weight
+        PASS [   0.010s] (603/798) proxima-tensor spec::tests::causal_conv1d_matches_a_hand_computed_causal_window
+        PASS [   0.010s] (604/798) proxima-tensor spec::tests::causal_conv1d_multi_row_batch_row_zero_matches_a_single_row_call
+        PASS [   0.011s] (605/798) proxima-tensor spec::tests::causal_conv1d_rejects_a_zero_width_window
+        PASS [   0.011s] (606/798) proxima-tensor spec::tests::causal_mask_merged_windowed_matches_the_hand_worked_three_by_five_table
+        PASS [   0.010s] (607/798) proxima-tensor spec::tests::causal_mask_merged_windowed_with_no_window_matches_causal_mask_merged_exactly
+        PASS [   0.012s] (608/798) proxima-tensor spec::tests::causal_mask_windowed_matches_the_hand_worked_six_by_six_window_three_table
+        PASS [   0.012s] (609/798) proxima-tensor spec::tests::causal_mask_windowed_with_no_window_matches_causal_mask_exactly
+        PASS [   0.012s] (610/798) proxima-tensor spec::tests::dense_attention_only_and_with_taps_produce_the_same_program
+        PASS [   0.010s] (611/798) proxima-tensor spec::tests::dense_windows::a_dense_window_without_a_ring_keeps_every_layer_on_the_full_cache
+        PASS [   0.011s] (612/798) proxima-tensor spec::tests::dense_windows::a_ring_binds_only_the_windowed_dense_layer_to_the_sliding_slot
+        PASS [   0.012s] (613/798) proxima-tensor spec::tests::dense_windows::a_dense_schedule_with_no_window_lowers_the_program_it_always_did
+        PASS [   0.012s] (614/798) proxima-tensor spec::tests::dense_windows::a_ring_refuses_dense_windows_of_different_widths
+        PASS [   0.015s] (615/798) proxima-tensor spec::tests::dense_windows::a_windowed_dense_decode_step_reads_exactly_the_last_window_rows
+        PASS [   0.016s] (616/798) proxima-tensor spec::tests::dense_windows::a_window_wider_than_the_context_changes_nothing
+        PASS [   0.011s] (617/798) proxima-tensor spec::tests::descriptor_config::a_descriptor_round_trips_through_toml_and_lowers_the_same_program
+        PASS [   0.015s] (618/798) proxima-tensor spec::tests::dense_windows::a_windowed_dense_prefill_masks_each_new_row_to_its_own_window
+        PASS [   0.014s] (619/798) proxima-tensor spec::tests::dense_windows::the_windowed_dense_helper_run_is_not_vacuous
+        PASS [   0.013s] (620/798) proxima-tensor spec::tests::descriptor_config::an_unknown_field_is_an_error_not_a_silent_default
+        PASS [   0.014s] (621/798) proxima-tensor spec::tests::descriptor_config::every_descriptor_the_lowering_tests_build_validates
+        PASS [   0.015s] (622/798) proxima-tensor spec::tests::descriptor_config::env_then_an_explicit_toml_layer_override_a_seeded_descriptor_in_that_order
+        PASS [   0.015s] (623/798) proxima-tensor spec::tests::descriptor_config::flipping_last_row_only_in_the_toml_changes_the_lowered_program
+        PASS [   0.010s] (624/798) proxima-tensor spec::tests::descriptor_config::rope_table_names_are_data_in_the_toml
+        PASS [   0.010s] (625/798) proxima-tensor spec::tests::descriptor_config::the_fluent_builder_and_the_toml_config_build_the_same_descriptor
+        PASS [   0.010s] (626/798) proxima-tensor spec::tests::forward_roots_hidden_is_an_operand_of_the_lm_head_product
+        PASS [   0.011s] (627/798) proxima-tensor spec::tests::forward_scales::attention_factor_replaces_the_inverse_square_root_constant
+        PASS [   0.012s] (628/798) proxima-tensor spec::tests::descriptor_config::validation_names_the_field_whose_count_disagrees
+        PASS [   0.011s] (629/798) proxima-tensor spec::tests::forward_scales::dense_default_graph_equals_the_pre_change_graph
+        PASS [   0.014s] (630/798) proxima-tensor spec::tests::forward_scales::dense_single_range_refuses_a_residual_scale
+        PASS [   0.014s] (631/798) proxima-tensor spec::tests::forward_scales::embedding_factor_adds_one_constant_and_one_multiply
+        PASS [   0.011s] (632/798) proxima-tensor spec::tests::forward_scales::logit_scale_divides_single_range_logits_by_the_scale
+        PASS [   0.012s] (633/798) proxima-tensor spec::tests::forward_scales::embedding_sqrt_multiplies_by_the_square_root_of_the_width
+        PASS [   0.011s] (634/798) proxima-tensor spec::tests::forward_scales::new_descriptors_default_to_no_logit_scale
+        PASS [   0.015s] (635/798) proxima-tensor spec::tests::forward_scales::moe_default_graph_equals_the_pre_change_graph
+        PASS [   0.012s] (636/798) proxima-tensor spec::tests::forward_scales::moe_residual_scale_adds_one_constant_and_two_multiplies_per_layer
+        PASS [   0.012s] (637/798) proxima-tensor spec::tests::forward_scales::new_descriptors_default_to_no_residual_scale
+        PASS [   0.014s] (638/798) proxima-tensor spec::tests::forward_scales::profile_toml_can_carry_a_literal_embedding_factor
+        PASS [   0.009s] (639/798) proxima-tensor spec::tests::forward_scales::single_range_moe_refuses_a_pairing_its_layer_cannot_express
+        PASS [   0.011s] (640/798) proxima-tensor spec::tests::forward_scales::two_range_and_cacheless_refuse_a_residual_scale
+        PASS [   0.012s] (641/798) proxima-tensor spec::tests::forward_scales::two_range_and_cacheless_refuse_a_logit_scale
+        PASS [   0.013s] (642/798) proxima-tensor spec::tests::forward_scales::unscaled_attention_uses_a_constant_of_one
+        PASS [   0.009s] (643/798) proxima-tensor spec::tests::gather_head_permutation_selects_head_rows_without_reordering_tokens_or_features
+        PASS [   0.010s] (644/798) proxima-tensor spec::tests::gathered_expert_product_over_a_packed_q4k_stack_reads_the_routed_experts_own_bytes
+        PASS [   0.011s] (645/798) proxima-tensor spec::tests::gdn_layer_kind::a_gdn_layer_survives_a_toml_round_trip_and_cannot_rewind
+        PASS [   0.010s] (646/798) proxima-tensor spec::tests::gdn_layer_kind::a_gdn_schedule_reaches_the_recurrent_engine_whatever_cache_fields_the_descriptor_names
+        PASS [   0.012s] (647/798) proxima-tensor spec::tests::gemma4_synthetic_parity::build_forward_matches_direct_builder_call_at_real_qwen2_dims
+        PASS [   0.011s] (648/798) proxima-tensor spec::tests::gemma4_synthetic_parity::build_forward_two_range_matches_direct_builder_call
+        PASS [   0.012s] (649/798) proxima-tensor spec::tests::gemma4_synthetic_parity::gemma4_shaped_two_range_recognizer_accept_decline_counts
+        PASS [   0.021s] (650/798) proxima-tensor spec::tests::fused_qkv_reduce_adds_one_dispatch_per_layer_relative_to_the_baseline
+        PASS [   0.011s] (651/798) proxima-tensor spec::tests::gemma4_synthetic_parity::output_projection_alone_isolates_the_wo_einsum
+        PASS [   0.012s] (652/798) proxima-tensor spec::tests::gemma4_synthetic_parity::gemma4_synthetic_parity_localizes_first_divergence
+        PASS [   0.011s] (653/798) proxima-tensor spec::tests::gemma4_synthetic_parity::score_softmax_attend_chain_alone_isolates_the_group_broadcast
+        PASS [   0.013s] (654/798) proxima-tensor spec::tests::gemma4_synthetic_parity::raw_query_projection_alone_isolates_the_wq_einsum
+        PASS [   0.011s] (655/798) proxima-tensor spec::tests::gemma4_synthetic_parity::shared_kv_worked_example::shared_from_layer_reuses_source_kv_exactly
+        PASS [   0.009s] (656/798) proxima-tensor spec::tests::gemma4_synthetic_parity::single_token_attention_intermediate_taps_localize_the_exact_node
+        PASS [   0.011s] (657/798) proxima-tensor spec::tests::gemma4_synthetic_parity::single_range_cached_gemma4_diverges_on_zero_cache_matches_when_self_range_is_folded
+        PASS [   0.009s] (658/798) proxima-tensor spec::tests::gemma4_synthetic_parity::single_token_attention_isolates_projection_norm_rope_from_masking
+        PASS [   0.011s] (659/798) proxima-tensor spec::tests::gemma4_synthetic_parity::single_token_attention_variant_sweep_finds_what_the_engine_actually_computed
+        PASS [   0.011s] (660/798) proxima-tensor spec::tests::gemma4_synthetic_parity::sliding_ring_program_bounds_only_windowed_cache_leaves_by_the_sliding_slot
+        PASS [   0.012s] (661/798) proxima-tensor spec::tests::gemma4_synthetic_parity::two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding
+        PASS [   0.017s] (662/798) proxima-tensor spec::tests::gemma4_synthetic_parity::two_range_cached_gemma4_all_positions_one_shot_matches_incremental_single_position_decode
+        PASS [   0.017s] (663/798) proxima-tensor spec::tests::gemma4_synthetic_parity::two_range_cached_gemma4_shared_kv_layer_matches_cacheless_oracle
+        PASS [   0.012s] (664/798) proxima-tensor spec::tests::gqa_cached_forward_program_with_experts_qk_norm_changes_the_moe_program
+        PASS [   0.010s] (665/798) proxima-tensor spec::tests::greedy_argmax_breaks_a_tie_toward_the_lowest_index
+        PASS [   0.015s] (666/798) proxima-tensor spec::tests::gemma4_synthetic_parity::two_range_cached_gemma4_two_step_decode_matches_one_shot_prefill_oracle
+        PASS [   0.011s] (667/798) proxima-tensor spec::tests::greedy_argmax_flags_a_row_holding_nan_or_an_infinity
+        PASS [   0.012s] (668/798) proxima-tensor spec::tests::greedy_argmax_over_a_blocked_vocabulary_keeps_the_lowest_tied_index
+        PASS [   0.010s] (669/798) proxima-tensor spec::tests::greedy_argmax_picks_the_peak_of_each_row
+        PASS [   0.013s] (670/798) proxima-tensor spec::tests::greedy_argmax_treats_negative_and_positive_zero_as_one_tie
+        PASS [   0.011s] (671/798) proxima-tensor spec::tests::head_repeats::cacheless_default_graph_equals_the_pre_change_graph
+        PASS [   0.012s] (672/798) proxima-tensor spec::tests::grouped_gathered_expert_product_infers_selected_axis
+        PASS [   0.013s] (673/798) proxima-tensor spec::tests::grouped_gate_up_matches_the_per_route_moe_graph_on_cpu
+        PASS [   0.012s] (674/798) proxima-tensor spec::tests::head_repeats::extra_repeats_append_duplicate_heads_after_the_unchanged_prefix
+        PASS [   0.012s] (675/798) proxima-tensor spec::tests::head_repeats::repeat_counts_outside_one_to_three_clamp
+        PASS [   0.011s] (676/798) proxima-tensor spec::tests::head_repeats::two_range_default_graph_equals_the_pre_change_graph
+        PASS [   0.010s] (677/798) proxima-tensor spec::tests::hybrid_dense_descriptor::an_all_attention_stack_that_sets_gated_attention_lowers_the_gated_variant
+        PASS [   0.012s] (678/798) proxima-tensor spec::tests::hybrid_dense_descriptor::a_hybrid_descriptor_survives_a_toml_round_trip_and_lowers_the_same_program
+        PASS [   0.012s] (679/798) proxima-tensor spec::tests::hybrid_dense_descriptor::the_descriptor_and_the_positional_interval_builder_lower_one_program
+        PASS [   0.014s] (680/798) proxima-tensor spec::tests::hybrid_dense_descriptor::a_schedule_of_only_recurrent_layers_lowers_the_leading_stack_of_a_hybrid
+        PASS [   0.012s] (681/798) proxima-tensor spec::tests::hybrid_dense_descriptor::the_engine_refuses_what_it_cannot_lower_instead_of_lowering_something_else
+        PASS [   0.012s] (682/798) proxima-tensor spec::tests::hybrid_dense_descriptor::the_schedule_not_an_interval_decides_which_layers_attend_and_which_recur
+        PASS [   0.011s] (683/798) proxima-tensor spec::tests::hybrid_dense_descriptor::the_verify_row_shape_is_data_on_the_hybrid_descriptor
+        PASS [   0.010s] (684/798) proxima-tensor spec::tests::hybrid_routed_descriptor::a_dense_ffn_next_to_a_shared_expert_schedule_is_refused
+        PASS [   0.011s] (685/798) proxima-tensor spec::tests::hybrid_routed_descriptor::a_shared_expert_ffn_is_refused_by_the_attention_engines
+        PASS [   0.011s] (686/798) proxima-tensor spec::tests::hybrid_routed_descriptor::a_pinned_prefill_width_makes_the_position_axis_static
+        PASS [   0.053s] (687/798) proxima-tensor spec::tests::gemma4_synthetic_parity::two_range_cached_gemma4_sliding_ring_matches_full_cache_logits_across_prefill_and_decode
+        PASS [   0.010s] (688/798) proxima-tensor spec::tests::hybrid_routed_descriptor::routed_experts_depend_on_the_diagnostic_router_logits
+        PASS [   0.011s] (689/798) proxima-tensor spec::tests::hybrid_routed_descriptor::one_gdn_layer_and_one_attention_layer_lower_with_a_diagnostic_boundary_each
+        PASS [   0.054s] (690/798) proxima-tensor spec::tests::gemma4_synthetic_parity::two_range_cached_gemma4_sliding_ring_window_one_row_stale_breaks_logit_parity
+        PASS [   0.010s] (691/798) proxima-tensor spec::tests::l2norm_matches_a_hand_computed_unit_vector
+        PASS [   0.011s] (692/798) proxima-tensor spec::tests::inputs_and_maps_must_agree_in_count
+        PASS [   0.010s] (693/798) proxima-tensor spec::tests::l2norm_multi_row_batch_matches_thirteen_single_row_calls
+        PASS [   0.010s] (694/798) proxima-tensor spec::tests::layer_kind_derives_from_the_real_checkpoints_own_tensor_marker::attention_block
+        PASS [   0.011s] (695/798) proxima-tensor spec::tests::layer_kind_derives_from_the_real_checkpoints_own_tensor_marker::conv_block
+        PASS [   0.010s] (696/798) proxima-tensor spec::tests::layer_roots::a_cacheless_descriptor_has_no_layer_roots_and_a_cached_one_has_one_per_layer
+        PASS [   0.012s] (697/798) proxima-tensor spec::tests::layer_roots::fewer_cache_roots_than_owning_layers_reports_both_counts
+        PASS [   0.012s] (698/798) proxima-tensor spec::tests::layer_kind_names_the_block_when_neither_marker_is_present
+        PASS [   0.010s] (699/798) proxima-tensor spec::tests::layer_roots::shared_layers_sit_between_owning_layers_in_schedule_order
+        PASS [   0.011s] (700/798) proxima-tensor spec::tests::layer_roots::more_cache_roots_than_owning_layers_reports_both_counts
+        PASS [   0.009s] (701/798) proxima-tensor spec::tests::lfm2_forward_program_rejects_a_layer_schedule_length_mismatch
+        PASS [   0.012s] (702/798) proxima-tensor spec::tests::layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer
+        PASS [   0.010s] (703/798) proxima-tensor spec::tests::projecting_a_letter_the_iteration_space_lacks_is_rejected
+        PASS [   0.013s] (704/798) proxima-tensor spec::tests::no_repeated_scalar_crosses_the_binding_surface
+        PASS [   0.009s] (705/798) proxima-tensor spec::tests::projection_notation_reads_like_einsum::broadcast
+        PASS [   0.010s] (706/798) proxima-tensor spec::tests::projection_notation_reads_like_einsum::contraction_lhs
+        PASS [   0.010s] (707/798) proxima-tensor spec::tests::projection_notation_reads_like_einsum::identity
+        PASS [   0.011s] (708/798) proxima-tensor spec::tests::projection_notation_reads_like_einsum::full_reduction
+        PASS [   0.010s] (709/798) proxima-tensor spec::tests::projection_notation_reads_like_einsum::transpose
+        PASS [   0.010s] (710/798) proxima-tensor spec::tests::public_builders_compose_a_one_layer_forward_program
+        PASS [   0.022s] (711/798) proxima-tensor spec::tests::paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline
+        PASS [   0.012s] (712/798) proxima-tensor spec::tests::query_prefill_split_then_l2norm_multi_row_matches_single_row
+        PASS [   0.009s] (713/798) proxima-tensor spec::tests::qwen35_delta_net_step_matches_a_hand_computed_recurrence
+        PASS [   0.010s] (714/798) proxima-tensor spec::tests::qwen35_delta_net_step_hand_computed_check_actually_detects_a_wrong_beta
+        PASS [   0.014s] (715/798) proxima-tensor spec::tests::qwen2_cached_program_uses_split_half_rope_without_qk_norm
+        PASS [   0.010s] (716/798) proxima-tensor spec::tests::qwen35_gdn_prefill_scan_matches_repeated_graph_steps
+        PASS [   0.010s] (717/798) proxima-tensor spec::tests::qwen35_gdn_prefill_scan_rejects_a_truncated_projection
+        PASS [   0.010s] (718/798) proxima-tensor spec::tests::qwen35_gdn_sequence_tail_matches_repeated_one_position_graphs
+        PASS [   0.011s] (719/798) proxima-tensor spec::tests::qwen35_last_row_projection_has_one_output_row
+        PASS [   0.012s] (720/798) proxima-tensor spec::tests::qwen35_prefill_sequence_taps_match_repeated_cached_conv_steps
+        PASS [   0.013s] (721/798) proxima-tensor spec::tests::qwen35_prefill_scan_and_tail_match_repeated_mixer_steps
+        PASS [   0.012s] (722/798) proxima-tensor spec::tests::qwen35_prefill_sequence_taps_preserve_causal_rows
+        PASS [   0.012s] (723/798) proxima-tensor spec::tests::qwen35_ssm_mixer_hand_computed_check_actually_detects_a_wrong_history_value
+        PASS [   0.013s] (724/798) proxima-tensor spec::tests::qwen35_ssm_mixer_matches_a_hand_computed_decode_step
+        PASS [   0.010s] (725/798) proxima-tensor spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps
+        PASS [   0.042s] (726/798) proxima-tensor spec::tests::quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_own_swiglu
+        PASS [   0.935s] (727/798) proxima-tensor cpu::tests::matmul_q4k_q8k_f32_stays_within_tolerance_at_real_forward_out_dim_above_the_reported_threshold
+        PASS [   0.689s] (728/798) proxima-tensor spec::tests::qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one_row_eval
+        PASS [   0.224s] (729/798) proxima-tensor spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::baseline
+        PASS [   0.223s] (730/798) proxima-tensor spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::no_attn_norm_m4
+        PASS [   0.705s] (731/798) proxima-tensor spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::production_args_m13
+        PASS [   0.223s] (732/798) proxima-tensor spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::sigmoid_gate_m4
+        PASS [   0.708s] (733/798) proxima-tensor spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::v_head_reordered_m13
+        PASS [   0.224s] (734/798) proxima-tensor spec::tests::qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::v_head_reordered_m4
+        PASS [   0.011s] (735/798) proxima-tensor spec::tests::repeat_kv_heads_hand_computed_check_actually_detects_a_swapped_head
+        PASS [   0.011s] (736/798) proxima-tensor spec::tests::repeat_kv_heads_maps_each_kv_head_to_its_own_three_query_heads
+        PASS [   0.011s] (737/798) proxima-tensor spec::tests::rank_select_cpu_keep_rows_union
+        PASS [   0.011s] (738/798) proxima-tensor spec::tests::qwen35_ssm_taps_expose_the_existing_delta_net_step_inputs
+        PASS [   0.011s] (739/798) proxima-tensor spec::tests::qwen35_ssm_mixer_sigmoid_gate_moves_the_output_away_from_silu
+        PASS [   0.011s] (740/798) proxima-tensor spec::tests::recurrence_fields::the_recurrence_fields_survive_a_toml_round_trip
+        PASS [   0.011s] (741/798) proxima-tensor spec::tests::qwen35_ssm_mixer_rejects_a_static_zero_width_step
+        PASS [   0.012s] (742/798) proxima-tensor spec::tests::repeat_kv_heads_multi_row_batch_matches_thirteen_single_row_calls
+        PASS [   0.012s] (743/798) proxima-tensor spec::tests::recurrence_fields::a_config_from_before_the_recurrence_fields_still_loads_with_them_zeroed
+        PASS [   0.014s] (744/798) proxima-tensor spec::tests::repeat_kv_heads_then_permute_reduce_multi_row_matches_single_row
+        PASS [   0.009s] (745/798) proxima-tensor spec::tests::scaling_attention_scores_by_inverse_sqrt_head_dim_prevents_softmax_saturation
+        PASS [   0.010s] (746/798) proxima-tensor spec::tests::rmsnorm_per_head_hand_computed_check_actually_detects_a_wrong_gamma
+        PASS [   0.009s] (747/798) proxima-tensor spec::tests::sigmoid_topk_reference_lets_bias_change_selection_but_never_the_weight
+        PASS [   0.010s] (748/798) proxima-tensor spec::tests::rmsnorm_per_head_matches_a_hand_computed_rms_norm
+        PASS [   0.011s] (749/798) proxima-tensor spec::tests::silu_multi_row_batch_at_production_width_matches_single_row
+        PASS [   0.011s] (750/798) proxima-tensor spec::tests::single_range_layer_binds_qk_norm_with_two_extra_per_head_norm_reduces
+        PASS [   0.012s] (751/798) proxima-tensor spec::tests::selected_scalar_routes_stack_in_token_then_selected_order
+        PASS [   0.011s] (752/798) proxima-tensor spec::tests::softplus_matches_log_one_plus_exp
+        PASS [   0.013s] (753/798) proxima-tensor spec::tests::ssm_out_projection_reduce_isolated_packed_matches_dequantized_and_hand_computed
+        PASS [   0.011s] (754/798) proxima-tensor spec::tests::stacked_projection_matches_the_per_route_moe_graph_and_issues_one_gather_per_projection
+        PASS [   0.010s] (755/798) proxima-tensor spec::tests::swapping_gate_and_up_order_keeps_dataflow_identical
+        PASS [   0.010s] (756/798) proxima-tensor spec::tests::the_name_survives_the_config_round_trip
+        PASS [   0.011s] (757/798) proxima-tensor spec::tests::the_whole_mistral_forward_pass_infers_at_real_dimensions
+        PASS [   0.011s] (758/798) proxima-tensor spec::tests::the_whole_qwen35_forward_pass_infers_at_real_dimensions
+        PASS [   0.009s] (759/798) proxima-tensor spec::tests::top_fraction_cpu_worked_at
+        PASS [   0.013s] (760/798) proxima-tensor spec::tests::the_whole_lfm2_forward_pass_infers_at_real_dimensions
+        PASS [   0.014s] (761/798) proxima-tensor spec::tests::the_whole_qwen35_forward_pass_infers_at_the_2b_checkpoints_real_dimensions
+        PASS [   0.018s] (762/798) proxima-tensor spec::tests::the_chunked_cache_fold_node_budget_is_measured_before_it_is_built
+        PASS [   0.009s] (763/798) proxima-tensor spec::tests::top_fraction_cpu_worked_below
+        PASS [   0.011s] (764/798) proxima-tensor spec::tests::verify_descriptor::a_descriptor_that_is_not_armed_has_no_verify_program
+        PASS [   0.009s] (765/798) proxima-tensor spec::tests::verify_descriptor::a_descriptor_with_a_short_conv_layer_has_no_verify_program
+        PASS [   0.011s] (766/798) proxima-tensor spec::tests::verify_descriptor::a_pooled_embedding_descriptor_has_no_verify_program
+        PASS [   0.010s] (767/798) proxima-tensor spec::tests::verify_descriptor::an_armed_attention_descriptor_lowers_a_verify_that_keeps_every_row
+        PASS [   0.024s] (768/798) proxima-tensor spec::tests::the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_baseline
+        PASS [   0.011s] (769/798) proxima-tensor spec::tests::verify_descriptor::validation_refuses_to_arm_verify_over_a_layer_that_cannot_rewind
+        PASS [   0.010s] (770/798) proxima-tensor::leading_unit_axis_tile_engagement leading_unit_axis_matches_unbatched_bit_identical
+        PASS [   0.014s] (771/798) proxima-tensor::external_program_composition external_crate_composes_a_one_layer_forward_program
+        PASS [   0.044s] (772/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_257_remainder_path
+        PASS [   0.042s] (773/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_260
+        PASS [   0.023s] (774/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_64
+        PASS [   0.265s] (775/798) proxima-tensor spec::tests::the_interpreter_per_node_dispatch_floor_is_measured
+        PASS [   0.025s] (776/798) proxima-tensor::neon_tile_full_output width_tile_small_m_1_fires_the_one_row_neon_remainder
+        PASS [   0.032s] (777/798) proxima-tensor::neon_tile_full_output width_tile_small_m_2_pure_two_row_remainder
+        PASS [   0.032s] (778/798) proxima-tensor::neon_tile_full_output width_tile_small_m_3_two_then_one_row_remainder
+        PASS [   0.025s] (779/798) proxima-tensor::neon_tile_full_output width_tile_small_m_5_main_tile_plus_one_row_remainder
+        PASS [   0.022s] (780/798) proxima-tensor::neon_tile_full_output width_tile_small_m_6_main_tile_plus_two_row_remainder
+        PASS [   0.025s] (781/798) proxima-tensor::neon_tile_full_output width_tile_small_m_7_bge_real_sentence_two_then_one_remainder
+        PASS [   0.028s] (782/798) proxima-tensor::neon_tile_full_output width_tile_small_m_9_bge_real_sentence_one_row_remainder
+        PASS [   0.017s] (783/798) proxima-tensor::quantized_embedding_gather_validation quantized_embedding_gather_matches_dequantized_reference_q4_k
+        PASS [   0.012s] (784/798) proxima-tensor::quantized_embedding_gather_validation quantized_embedding_gather_matches_dequantized_reference_q8_0
+        PASS [   0.019s] (785/798) proxima-tensor::rewrite_law_equivalence law1_clip_epilogue_fused_matches_unfused_bit_identical
+        PASS [   0.026s] (786/798) proxima-tensor::rewrite_law_equivalence law2_layer_norm_cluster_fused_matches_unfused_within_rtol
+        PASS [   0.027s] (787/798) proxima-tensor::rewrite_law_equivalence law3_prologue_absorption_fuses_and_matches_hand_reference
+        PASS [   0.021s] (788/798) proxima-tensor::rewrite_law_equivalence law5_leading_unit_axis_elision_matches_unbatched_bit_identical
+        PASS [   0.019s] (789/798) proxima-tensor::rewrite_law_equivalence law6_constant_staging_hoisted_matches_per_step_evaluation_bit_identical
+        PASS [   0.599s] (790/798) proxima-tensor::convert_zero_cost cast_through_the_pipe_costs_nothing_over_the_bare_loop
+        PASS [   2.019s] (791/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_1022_row_remainder_boundary
+        PASS [   2.024s] (792/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_1023_row_remainder_boundary
+        PASS [   2.024s] (793/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_1024
+        PASS [   2.027s] (794/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_1021_row_remainder_boundary
+        PASS [   2.029s] (795/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_1026_row_remainder_boundary
+        PASS [   2.031s] (796/798) proxima-tensor::neon_tile_full_output neon_tile_full_output_1025_row_remainder_boundary
+        PASS [   2.261s] (797/798) proxima-tensor::neon_tile_full_output width_tile_full_output_1023_row_and_column_remainder
+        PASS [   2.510s] (798/798) proxima-tensor::neon_tile_full_output width_tile_full_output_1025_row_and_column_remainder
+────────────
+     Summary [   6.495s] 798 tests run: 798 passed, 8 skipped

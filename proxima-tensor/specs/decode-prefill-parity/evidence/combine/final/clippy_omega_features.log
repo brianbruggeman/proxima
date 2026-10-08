@@ -1,0 +1,6 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Checking proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-onnx)
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+    Checking proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-autograd)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.11s
