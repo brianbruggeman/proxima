@@ -2025,3 +2025,70 @@ cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile 
 M0_OUT_DIR=<dir> M0_MODEL_GGUF=<blob> M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=1 M0_ITERS=1 M0_BATCH=2 \
   PROXIMA_PROMPT_FILE=prompt_short_hippo.txt gemma4_decode_kernel_census                                         # reach; compare msl_sha256
 ```
+
+## r9 written changes (written 2026-10-07, nothing below was run)
+
+Slice r9: the E2B Q4_0 attention-output matvec and the 34 untraced norm-family dispatches. Owner's order: write, then bench
+and test. Verification so far is `cargo check` and `cargo clippy -D warnings` only. Every number is a reading of the
+artifact named beside it.
+
+### 1536x2048 Q4_0 matvec (read)
+
+- The class row `Q4_0 3145728 (1536x2048)`, 56 ops, 1.31 ms against llama 0.71 ms (`rank_vs_llama.md`) holds two
+  different matvecs of the same 3145728 elements: 28 Q projections (K=1536, rows 2048, entry `omega_reduce_r4_o3_...`,
+  census marginal 12.4 us) and 28 attention outputs (K=2048 as heads 8 x head_dim 256, rows 1536, entry
+  `omega_reduce_r5_o2_...`, census marginal 26.7 us); `census_groups.csv`. llama times the two at 12.34 and 12.94 us own-cb
+  (`slice0/llama_ops/e2b_ops.tsv`, ntok=1, `Qcur` and `node_32`...).
+- Geometry is already llama's: 4 rows per simdgroup (`PACKED_ROWS_PER_GROUP`, `emit_and_classify.rs:2288`), 2 simdgroups per
+  threadgroup (`packed_row_nsg_factor`, `tiled_gemm_cooperative_scan.rs:1876`), 64 threads, 192 threadgroups for 1536 rows;
+  llama `N_R0_Q4_0 4`, `N_SG_Q4_0 2` (`ggml-metal-impl.h:32-33`), dispatch `(ne01 + nr0*nsg - 1)/(nr0*nsg)`
+  (`ggml-metal-ops.cpp:2896`). llama's tuning table (`ggml-metal-tuning.cpp`) is flash-attention only; no matvec geometry is
+  shape-keyed there, so there is no shape entry to copy and a proxima geometry table would reproduce the constants.
+- The hot loop is the same text in both proxima kernels (`diff` of `variants/6ccd88ae...copy.metal` and
+  `variants/2c9c96c7...copy.metal`: coordinate prologue and the store tail only) and the same arithmetic as llama's
+  `mul_vec_q_n_f32_impl` (`mul_mv.metal:219`): `ix = lane/2`, `il = (lane%2)*8`, 16 blocks in flight, `sumy * -8`.
+- The difference is the write tail. Before: four serial lane-0 stores, each addressed by a sum over all 5 iteration axes
+  (`coord_q_cache[q][0..4] * u.out_strides[0..4]`, 64-bit multiplies); the Q kernel pays 4 terms, the attention output 5,
+  the census marginal reads 12.4 and 26.7 us; the fused-epilogue tail was made lane-parallel in 962d9351 and the plain tail
+  was left as it was. llama's tail is `dst[r0 + row] = tot`.
+- Written: the plain tail is lane-parallel too (lane `q` stores row `q`) and, when `packed_row_direct_output_axis`
+  finds one non-unit output axis, addresses the store as `out_base + flat * out_strides[axis]`
+  (`push_packed_row_lane_parallel_tail`, `elementwise_reduce_core.rs`). Values are the same `simd_sum` results; only the
+  lane that stores them and the address arithmetic change. What this does to the 26.7 us is unmeasured.
+- Not established: whether the tail is what separates 12.4 from 26.7 us. A single-dispatch census cb and a batch replay of the
+  same group read 26.7 and 9.3 us (SPEC r8 section), so the census figure also carries GPU clock state.
+
+### the 34 norm-family dispatches (read)
+
+- Norm family after r6's fold: 170 `RMSNorm sumsq` + 106 `RMSNorm sumsq + fused epilogue` = 276 against llama's 242.
+- llama (ntok=1, count/381 graphs): hidden-width 106 + 70 = 176, Q-norm 28 + 7 = 35, K-norm 12 + 3 = 15, V-norm 12 + 3 = 15,
+  per-layer-input 1 (`[256,35]`, `fuse=3`) = 242.
+- proxima (`census_groups.csv`): hidden-width 105 + 71 = 176, Q-norm 28 + 7 = 35, K and V 24 + 6 = 30, per-layer-input 35
+  (`RMSNorm sumsq + fused epilogue`, `epi15`, 1 each, grid 64) = 276. Every class matches except the last: 35 against 1 = 34.
+- Cause: `ple_layer_input` (`proxima-tensor/src/spec/attention_forward.rs:1695`) takes a `d + layer*256` window of the flat
+  `[s, 35*256]` projection and builds `rmsnorm` on it once per layer. The norm is not left unfused by a rule; the program
+  contains 35 of them.
+- Fusion route, not written: one RMSNorm over `[s, 35, 256]` (`rmsnorm_per_head` with a layer axis) needs the layer axis to be
+  sized by an operand. `per_layer_model_proj.weight` is declared `[embedding, ple_total]` (`attention_forward.rs:1634`), so
+  the grammar cannot size a split axis (`map.rs:107`, `len_target_axis`); declaring the weight `[embedding, 35, 256]`
+  changes the leaf shape that `declared_leaves_match_bound_leaves_tests` and the GGUF binder compare. The per-layer gate
+  chain (norm, add, scale, gelu gate, `epi15`) would then be an elementwise consumer of the shared norm: norm reduces 35 ->
+  1, elementwise +35, so total dispatches stay level and the saving is the reduce launches only.
+
+### tests written (not run)
+
+- `omega/tests/packed_row_attn_output_shape_parity.rs`: Q4_0, K = 8 x 256 folded, rows 1536 / 6 / 4, f64 dequantize-and-dot
+  oracle, tolerance 1e-5 relative.
+- `proxima-model-interop/tests/gemma4_norm_family_census.rs` (`#[ignore]`, needs the E2B gguf): 35 reduces over `[1, 256]`
+  in the bound decode program, 34 beyond llama's 1.
+- `omega/src/msl/tests.rs`: `a_plain_matvec_finishes_each_row_of_the_simdgroup_on_its_own_lane` replaces the single-lane pin;
+  `omega/tests/fixtures/packed_row_blocked_s1_q4k.msl` carries the new tail (written by hand, to be compared by
+  `packed_row_blocked_s1_byte_identity`).
+
+### run after
+
+```
+cargo nextest run -p omega --features metal -E 'binary(packed_row_attn_output_shape_parity) or binary(packed_row_blocked_s1_byte_identity) or binary(packed_row_single_token_epilogue)'
+cargo nextest run -p omega --features metal -E 'test(a_plain_matvec_finishes_each_row) or test(a_fused_epilogue_finishes_each_row)'
+cargo nextest run -p proxima-model-interop --features std,metal --run-ignored all -E 'test(gemma4_decode_holds_one_per_layer_input_norm)'
+```
