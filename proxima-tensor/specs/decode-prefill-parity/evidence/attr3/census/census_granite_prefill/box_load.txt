@@ -1,0 +1,8 @@
+  PID  %CPU COMM
+  587  78.7 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+17029  72.0 <background daemon>
+ 1418  38.5 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  716  19.4 /Applications/iTerm.app/Contents/MacOS/iTerm2
+29286   2.9 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access.xpc/Contents/MacOS/mediaanalysisd-access
+ 5:42  up 7 days, 15:46, 7 users, load averages: 4.42 7.28 7.90
+"Device Utilization %"=0

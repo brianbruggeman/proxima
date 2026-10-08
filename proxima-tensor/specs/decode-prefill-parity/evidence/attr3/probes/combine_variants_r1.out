@@ -1,0 +1,10 @@
+ab capture excludes 24 unreplayable dispatches of 369
+ab capture: step=0 dispatches=345 groups=20
+ab bits sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] arm=base elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] arm=2c18a81c64b2e363.c0_control elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] arm=2c18a81c64b2e363.c1_no_loop_divmod elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] arm=2c18a81c64b2e363.c2_no_loop_divmod_uint_output elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab group sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] tg=None count=24 pass=0 arm=base marginal_us=566.530 single_us=567.208
+ab group sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] tg=None count=24 pass=0 arm=2c18a81c64b2e363.c0_control marginal_us=566.667 single_us=567.458
+ab group sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] tg=None count=24 pass=0 arm=2c18a81c64b2e363.c1_no_loop_divmod marginal_us=453.827 single_us=455.500
+ab group sha=2c18a81c64b2e363 threads=1024000 extents=[1000, 8, 1024] tg=None count=24 pass=0 arm=2c18a81c64b2e363.c2_no_loop_divmod_uint_output marginal_us=220.762 single_us=221.667

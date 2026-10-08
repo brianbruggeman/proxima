@@ -1,0 +1,22 @@
+ab capture excludes 24 unreplayable dispatches of 369
+ab capture: step=0 dispatches=345 groups=20
+ab omit entry=omega_cached_attention_h8_g2_d64_s3c800000_ln9223372036854775808_up0_r8_n2_b64_rt sha=1388fb736f661844 threads=64000 tg=Some(64) extents=[1000, 8, 2, 64] count=24 base_ms=252.7006 cost_ms=27.2216 per_dispatch_us=1134.23
+ab omit entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1 sha=17b21f30b4c6bf95 threads=512000 tg=None extents=[1000, 16, 32] count=24 base_ms=253.7238 cost_ms=1.0856 per_dispatch_us=45.23
+ab omit entry=omega_constant_r0_v41400000 sha=2277fa6e8ff1353b threads=1 tg=None extents=[] count=1 base_ms=253.0136 cost_ms=-0.7594 per_dispatch_us=-759.42
+ab omit entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0 sha=23d555d56f27caa0 threads=256000 tg=Some(256) extents=[1000, 1024] count=49 base_ms=253.3130 cost_ms=-8.2414 per_dispatch_us=-168.19
+ab omit entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi10_fused_identity_o10__add_o8_o9__add_s1_o7__add_s2_o6__add_s3_o5__add_s4_o4__add_s5_o3__add_s6_o2__reciprocal_s7__multiply_s0_s8__multiply_s9_o1__add_s10_o0 sha=2c18a81c64b2e363 threads=1024000 tg=None extents=[1000, 8, 1024] count=24 base_ms=253.2576 cost_ms=13.3127 per_dispatch_us=554.70
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero sha=549f5659c2440e67 threads=32768 tg=Some(128) extents=[1000, 8, 64, 1024] count=48 base_ms=253.9575 cost_ms=8.5987 per_dispatch_us=179.14
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero sha=549f5659c2440e67 threads=65536 tg=Some(128) extents=[1000, 16, 64, 1024] count=24 base_ms=253.0024 cost_ms=6.7893 per_dispatch_us=282.89
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero_g10 sha=6cd35d1301ccafbb threads=2048 tg=Some(128) extents=[1000, 8, 1024, 512] count=24 base_ms=253.1214 cost_ms=54.1300 per_dispatch_us=2255.42
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero_g10 sha=6cd35d1301ccafbb threads=4096 tg=Some(128) extents=[1000, 8, 512, 1024] count=24 base_ms=253.2247 cost_ms=58.2518 per_dispatch_us=2427.16
+ab omit entry=omega_elementwise_r2_n1_identity_g1 sha=6ea595c3ebd844f9 threads=1024 tg=None extents=[1, 1024] count=1 base_ms=253.3609 cost_ms=0.5186 per_dispatch_us=518.58
+ab omit entry=omega_constant_r0_v3a800000 sha=6ff3207155ac557a threads=1 tg=None extents=[] count=1 base_ms=253.2677 cost_ms=-0.0359 per_dispatch_us=-35.88
+ab omit entry=omega_constant_r0_v3e2aaaab sha=6ff5fb48d1e629ae threads=1 tg=None extents=[] count=1 base_ms=253.6151 cost_ms=0.4552 per_dispatch_us=455.17
+ab omit entry=omega_reduce_r3_o2_n2_multiply_add_zero sha=7cc38fcbaefaa4ee threads=4096 tg=Some(128) extents=[1000, 1024, 32] count=24 base_ms=253.3521 cost_ms=12.3251 per_dispatch_us=513.55
+ab omit entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1 sha=817c00aae7e568be threads=256000 tg=None extents=[1000, 8, 32] count=24 base_ms=253.7807 cost_ms=0.6283 per_dispatch_us=26.18
+ab omit entry=omega_reduce_r5_o2_n2_multiply_add_zero_epi2_fused_identity_o2__multiply_s0_o1__add_s1_o0 sha=944aea166f673647 threads=65536 tg=Some(128) extents=[1000, 8, 2, 64, 1024] count=24 base_ms=253.2674 cost_ms=8.5864 per_dispatch_us=357.77
+ab omit entry=omega_reduce_r4_o3_n2_multiply_add_zero_epi3_fused_identity_o3__negate_o2__exponential_s1__add_s2_o1__reciprocal_s3__multiply_s4_o0__multiply_s0_s5_g10 sha=b4b756175d248d5e threads=2048 tg=Some(128) extents=[1000, 8, 1024, 512] count=24 base_ms=253.4391 cost_ms=58.9659 per_dispatch_us=2456.91
+ab omit entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi1_fused_identity_o1__multiply_s0_o0 sha=c9fdfb3e7b9c2f5b threads=393248 tg=Some(64) extents=[1, 1024, 49155] count=1 base_ms=253.2185 cost_ms=-0.0504 per_dispatch_us=-50.42
+ab omit entry=omega_constant_r0_v3e6147ae sha=d552d3d4eda67cc5 threads=1 tg=None extents=[] count=1 base_ms=253.6597 cost_ms=0.6528 per_dispatch_us=652.83
+ab omit entry=omega_elementwise_r2_n2_fused_identity_o0__multiply_s0_o1_g10 sha=f27d6389d63d50f8 threads=1024000 tg=None extents=[1000, 1024] count=1 base_ms=252.8160 cost_ms=0.1188 per_dispatch_us=118.79
+ab omit entry=omega_constant_r0_v3f800000 sha=ff543d11d58b05fc threads=1 tg=None extents=[] count=1 base_ms=253.4675 cost_ms=0.1690 per_dispatch_us=168.96

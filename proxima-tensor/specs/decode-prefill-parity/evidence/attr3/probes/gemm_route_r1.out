@@ -1,0 +1,14 @@
+ab capture excludes 24 unreplayable dispatches of 369
+ab capture: step=0 dispatches=345 groups=20
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=base elements=4096000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=6cd35d1301ccafbb.b0_control elements=4096000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] arm=6cd35d1301ccafbb.b1_synthetic_route elements=4096000 differing=3986432 max_ulp=2209155131 max_abs=5.7036236e1 max_abs_over_largest=1.0203294e0
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=base marginal_us=2296.792 single_us=2222.292
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.b0_control marginal_us=2283.833 single_us=2216.375
+ab group sha=6cd35d1301ccafbb threads=2048 extents=[1000, 8, 1024, 512] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.b1_synthetic_route marginal_us=1734.708 single_us=1736.750
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=base elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=6cd35d1301ccafbb.b0_control elements=8192000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] arm=6cd35d1301ccafbb.b1_synthetic_route elements=8192000 differing=7972863 max_ulp=2225379333 max_abs=1.0721008e2 max_abs_over_largest=1.5737662e0
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=base marginal_us=2408.611 single_us=2403.292
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.b0_control marginal_us=2383.653 single_us=2419.458
+ab group sha=6cd35d1301ccafbb threads=4096 extents=[1000, 8, 512, 1024] tg=Some(128) count=24 pass=0 arm=6cd35d1301ccafbb.b1_synthetic_route marginal_us=1874.958 single_us=1875.250
