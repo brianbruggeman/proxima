@@ -920,15 +920,14 @@ fn the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_
         "the weights are written once, in f32, against the final block maximum"
     );
     for required in [
-        "constexpr long vectors_per_simdgroup = (tile_vectors + simdgroups - 1L) / simdgroups;",
-        "FOR_UNROLL for (long turn = 0L; turn < vectors_per_simdgroup; turn++) {",
+        "for (long vector = (long)simdgroup_slot; vector < tile_vectors; vector += simdgroups) {",
         "(previous_maximum == next_maximum ? 1.0f : exp(previous_maximum - next_maximum))",
     ] {
         assert!(source.contains(required), "missing `{required}`");
     }
     assert!(
-        !source.contains("vector += simdgroups"),
-        "the vector loop has a compile-time trip count"
+        !source.contains("vectors_per_simdgroup"),
+        "the vector loop is not unrolled by turn: the unrolled form measured 122 us slower per op at the prompt shape"
     );
 }
 
