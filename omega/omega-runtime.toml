@@ -546,6 +546,15 @@ target_simdgroups = 256
 # not the second; the full `threadgroup_memory_bytes` value stages every shape
 # that fits. override via OMEGA_ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES.
 max_staged_query_bytes = 8192
+# operand precision of the row-tiled attention's two matrix multiplies (Q.K^T and P.V): "float"
+# multiplies float8x8 fragments; "half" narrows each fragment to half8x8 as it is loaded and
+# still accumulates into float8x8 (the softmax stays float in both). MEASURED on one layer of
+# the captured prefill (4 interleaved arms, 3 processes x 21 rounds, same-process float arm as
+# the base): head dim 64 (1000 rows) -2.1 %, head dim 256 (971 rows, sliding) -2.1 %, head dim
+# 512 (971 rows, global) +5.8 %, with the output moved by 5.3e-4 relative L2 (head dim 64, against
+# an f64 reference); no single value wins every shape, so the default is the exact one.
+# override via OMEGA_ATTENTION_ROWS_MMA_PRECISION.
+mma_precision = "float"
 
 [selection]
 # smallest row count at which the rank-count top-fraction expression lowers to one selection

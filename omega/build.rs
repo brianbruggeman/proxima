@@ -658,6 +658,14 @@ fn emit_sizing_consts() {
     out.push_str(&format!(
         "pub const ATTENTION_ROWS_MIN_SIMDGROUPS: u64 = {attention_rows_min_simdgroups};\n"
     ));
+    let attention_rows_mma_half = match resolve_str(&root, "attention_rows", "mma_precision").as_str() {
+        "float" => false,
+        "half" => true,
+        other => panic!("attention_rows.mma_precision must be \"float\" or \"half\", got {other:?}"),
+    };
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_MMA_HALF: bool = {attention_rows_mma_half};\n"
+    ));
     let attention_rows_vector_blocks_per_tile = require_nonzero(
         "attention_rows.vector_blocks_per_tile",
         resolve_int(&root, "attention_rows", "vector_blocks_per_tile"),
