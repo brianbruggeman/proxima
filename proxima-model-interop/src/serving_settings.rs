@@ -10,8 +10,9 @@ use crate::RopeScaling;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::speculative_settings::SpeculativeSettings;
 use crate::serving::{
-    ContextLength, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
-    GdnPrefillBackend, NamePattern, ServingConfig, WeightPrecisionRule,
+    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
+    DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE, GdnPrefillBackend, NamePattern,
+    ServingConfig, WeightPrecisionRule,
 };
 
 mod levels;
@@ -165,12 +166,12 @@ pub struct ServingSettings {
     #[builder(default = false)]
     pub flash_attention: bool,
     /// `ServingConfig::batch_size`: `-b`.
-    #[setting(default = 32)]
-    #[builder(default = 32)]
+    #[setting(default = 2048)]
+    #[builder(default = DEFAULT_BATCH_SIZE)]
     pub batch_size: u32,
     /// `ServingConfig::ubatch_size`: `-ub`.
-    #[setting(default = 32)]
-    #[builder(default = 32)]
+    #[setting(default = 512)]
+    #[builder(default = DEFAULT_UBATCH_SIZE)]
     pub ubatch_size: u32,
     /// `ServingConfig::gpu_layers`: `-ngl`; `-1` offloads every layer.
     #[cfg_attr(feature = "metal", setting(default = -1))]
@@ -474,6 +475,20 @@ mod round_trip {
 mod tests {
     use super::*;
     use crate::speculative_settings::{SpeculativeTypeName, SpeculativeTypeNameSet};
+
+    #[test]
+    fn unset_batch_sizes_lower_to_the_serving_config_defaults_from_every_surface() {
+        let from_builder = ServingSettings::builder().build();
+        let from_empty_toml: ServingSettings =
+            conflaguration::from_toml_str("").expect("an empty toml takes every default");
+
+        for settings in [&from_builder, &from_empty_toml] {
+            let lowered = settings.as_serving_config(&[]);
+            assert_eq!(lowered.batch_size, ServingConfig::default().batch_size);
+            assert_eq!(lowered.ubatch_size, ServingConfig::default().ubatch_size);
+            assert_eq!(lowered.ubatch_size, 512, "llama.cpp's own -ub default");
+        }
+    }
 
     #[test]
     fn serving_section_cache_type_round_trips_json() {
