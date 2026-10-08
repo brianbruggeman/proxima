@@ -1,0 +1,6 @@
+ 5:09  up 7 days, 15:13, 7 users, load averages: 4.69 4.64 5.02
+  587  83.3 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_store
+  716  74.5 /Applications/iTerm.app/Contents/MacOS/iTerm2
+17029  55.1 a background daemon in ~/.local/bin
+ 1418  35.7 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+29286   5.9 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access

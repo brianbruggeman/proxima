@@ -1,0 +1,73 @@
+<|turn>user
+# proxima
+
+> ## WORK IN PROGRESS — EXPERIMENTAL
+>
+> **proxima is under heavy active development: not stable, not production-ready.**
+> APIs, behavior, semantics, and internals change without notice or a migration
+> path, and whole subsystems may be reworked or removed. Do not depend on it in
+> production. Use at your own risk.
+
+**A sans-IO core where everything is a `Pipe`, and big things are small
+things composed.** One trait — async `In -> Result<Out, Err>` — and four roles
+(source, sink, transform, observe) express every part. A proxy, a gateway, a cache,
+a load balancer, a rate limiter, a codec, a telemetry pipeline: each is a handful
+of pipes stacked. A production gateway is roughly `Auth -> Route -> RateLimit -> Forward`.
+
+Because protocol logic and composition are separated from I/O, the same pipe runs
+behind the from-scratch **Prime** per-core runtime (the default), a hosted **Tokio**
+backend, config-driven services, and sans-IO protocol crates. `no_std`, wasm, and
+the kernel-bypass floor (DPDK/pmem, plus a custom userspace NVMe queue-pair
+engine — no SPDK dependency) are frontier surfaces, not the start-here
+path. Config-driven throughout — one spec drives the library, the CLI, and an MCP
+(Model Context Protocol) control plane; dependencies can be faked, recorded, or replayed.
+
+## learn proxima
+
+Start with the **example curriculum** — a scope-and-sequence where each rung
+teaches one piece, and the whole algebra bottoms out at eight of them: **one
+form** worn four ways (transform `In -> Out`, source `() -> Out`, sink
+`In -> ()`, observe `In -> In`), **one chain** that joins them (`and_then`), and
+**three primitives** built on the pipe (filter, fan-out, fan-in). Everything
+else — retries, gates, proxies, a gateway — is those eight composed. Read it top
+to bottom.
+
+- **[`examples/`](examples/README.md)** — one runnable `examples/<name>/` per
+  rung (README + `main.rs`). Start at `hello`, follow the **Builds on** links.
+- **[`docs/tutorials/00-foundations.md`](docs/tutorials/00-foundations.md)** —
+  the same path in prose, from zero: what a pipe is, its four shapes, why
+  there are four related `Pipe` traits, and how to serve one.
+- **the book's algebra** — [`book/src/algebra/index.md`](book/src/algebra/index.md)
+  is the map (form, chain, primitive, pattern — four layers, each built on the
+  one before); [`patterns.md`](book/src/algebra/patterns.md) is the pattern
+  gallery. `mdbook serve book` renders the curriculum from the verified
+  example source (chapters embed the real files, so prose and code never
+  drift).
+
+### hello, running
+
+The smallest proxima service is one pipe mounted behind a listener. This is
+`examples/hello/main.rs` verbatim, trimmed to the two functions that matter
+(the file also has the doc comments explaining each line and a client
+round-trip proving the response crossed a real socket — see
+[`examples/hello/`](examples/hello/main.rs) for all of it):
+
+```rust
+#[proxima::instrument]
+async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    Ok(Response::ok("hello, proxima\n"))
+}
+
+#[proxima::main]
+async fn main() -> Result<(), ProximaError> {
+    let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, 8080));
+
+    let app = App::new()?;
+    app.mount("/", hello)?;
+
+    // `serve` spawns the listener and returns once it is actually accepting —
+    // no polling, no sleeping, no discovering ECONNREFUSED the hard way.
+    let server = app.serve(RunConfig::http(bin
+
+Write a long, detailed, section-by-section walkthrough of the project described above, at least 600 words.<turn|>
+<|turn>model

@@ -1,0 +1,22 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 5.40s
+────────────
+ Nextest run ID 0d327bd0-ad1b-4d5d-a785-c3bbe901b348 with nextest profile: default
+    Starting 15 tests across 106 binaries (802 tests skipped)
+        PASS [   0.010s] ( 1/15) omega msl::tests::epilogue_operand_reuse::aliases_map_every_mention_of_one_tensor_to_its_first
+        PASS [   0.011s] ( 2/15) omega msl::tests::epilogue_operand_reuse::the_same_source_at_a_different_layout_is_not_an_alias
+        PASS [   0.011s] ( 3/15) omega msl::tests::epilogue_operand_reuse::a_repeated_epilogue_operand_is_loaded_from_device_memory_once
+        PASS [   0.011s] ( 4/15) omega msl::tests::epilogue_operand_reuse::distinct_epilogue_operands_each_keep_their_own_load
+        PASS [   0.011s] ( 5/15) omega msl::tests::epilogue_operand_reuse::a_fused_epilogue_finishes_each_row_of_the_simdgroup_on_its_own_lane
+        PASS [   0.012s] ( 6/15) omega msl::tests::epilogue_operand_reuse::a_cooperative_fold_keeps_its_duplicate_operand_load
+        PASS [   0.011s] ( 7/15) omega msl::tests::epilogue_operand_reuse::a_round_batched_reduce_carries_its_epilogue_repeats_in_its_identity
+        PASS [   0.011s] ( 8/15) omega msl::tests::multi_row_kernel_folds_only_the_activation_rows_the_op_has
+        PASS [   0.013s] ( 9/15) omega msl::tests::epilogue_operand_reuse::a_plain_matvec_finishes_each_row_of_the_simdgroup_on_its_own_lane
+        PASS [   0.014s] (10/15) omega msl::tests::epilogue_operand_reuse::the_repeat_pattern_is_part_of_the_pipeline_identity
+        PASS [   0.009s] (11/15) omega msl::tests::ported_matvec_bodies_unroll_their_row_and_lane_loops_fully
+        PASS [   0.008s] (12/15) omega msl::tests::push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel
+        PASS [   0.008s] (13/15) omega msl::tests::q4_0_codec_takes_the_row_blocked_path_at_a_256_extent
+        PASS [   0.008s] (14/15) omega msl::tests::q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup
+        PASS [   0.023s] (15/15) omega::packed_row_rows_per_simdgroup_ab default_env_emits_node_94_shape_for_diffing_against_the_capture
+────────────
+     Summary [   0.038s] 15 tests run: 15 passed, 802 skipped
