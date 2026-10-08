@@ -1,0 +1,832 @@
+    Finished `gate` profile [optimized] target(s) in 0.21s
+────────────
+ Nextest run ID f7d6c411-07ee-40de-9737-6fb6c24af74c with nextest profile: default
+    Starting 826 tests across 105 binaries (22 tests skipped)
+        PASS [   0.010s] (  1/826) omega backend::tests::gpu_expert_source_gate_rejects_a_nonempty_substitution_table
+        PASS [   0.010s] (  2/826) omega config::tests::the_pipeline_cache_knobs_come_from_omega_variables
+        PASS [   0.010s] (  3/826) omega backend::tests::every_engine_name_round_trips_through_from_str
+        PASS [   0.010s] (  4/826) omega backend::tests::from_env_unset_falls_back_to_the_compiled_default
+        PASS [   0.010s] (  5/826) omega backend::tests::an_unknown_engine_name_lists_the_known_ones
+        PASS [   0.011s] (  6/826) omega backend::tests::from_env_with_a_known_name_resolves_to_its_variant
+        PASS [   0.011s] (  7/826) omega backend::tests::from_env_with_an_unknown_name_errors_without_falling_back
+        PASS [   0.011s] (  8/826) omega grid::tests::a_product_that_fits_is_returned_exactly
+        PASS [   0.012s] (  9/826) omega backend::tests::metal_plan_rejects_malformed_expert_sources_at_the_public_execution_boundary
+        PASS [   0.013s] ( 10/826) omega config::tests::an_environment_with_no_omega_variables_loads_the_default_policy
+        PASS [   0.010s] ( 11/826) omega grid::tests::a_product_that_wraps_u64_is_a_named_error_not_a_truncated_count
+        PASS [   0.010s] ( 12/826) omega identity::numeric_policy_cache_token_tests::a_single_permission_differs_from_bit_exact
+        PASS [   0.010s] ( 13/826) omega identity::numeric_policy_cache_token_tests::the_three_presets_produce_distinct_tokens
+        PASS [   0.011s] ( 14/826) omega grid::tests::an_empty_product_is_one_thread
+        PASS [   0.262s] ( 15/826) omega metal::arena_encode_dispatch_finish::arena_tests::uniform_contents_change_per_step_while_the_buffer_identity_does_not
+        PASS [   0.264s] ( 16/826) omega metal::arena_encode_dispatch_finish::arena_tests::two_ops_with_identical_uniform_bytes_get_distinct_plan_owned_buffers
+        PASS [   0.274s] ( 17/826) omega metal::arena_encode_dispatch_finish::arena_tests::a_programs_output_buffer_is_never_in_the_free_list
+        PASS [   0.274s] ( 18/826) omega metal::arena_encode_dispatch_finish::arena_tests::a_pooled_slot_is_never_rebound_before_its_last_consumers_position
+        PASS [   0.272s] ( 19/826) omega metal::arena_encode_dispatch_finish::arena_tests::live_buffer_count_bounded_in_steady_state
+        PASS [   0.274s] ( 20/826) omega metal::arena_encode_dispatch_finish::arena_tests::an_extent_change_forces_a_documented_realloc
+        PASS [   0.276s] ( 21/826) omega metal::arena_encode_dispatch_finish::arena_tests::pooled_output_equals_the_cpu_oracle_on_a_real_forward
+        PASS [   0.012s] ( 22/826) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::the_row_tiled_positions_of_a_plan_share_one_scratch_sized_at_the_widest
+        PASS [   0.013s] ( 23/826) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::decode_split_positions_keep_their_own_scratch
+        PASS [   0.012s] ( 24/826) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::prefill_dispatch_sizes_scratch_by_the_real_split_count_not_the_compiled_max
+        PASS [   0.012s] ( 25/826) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::row_tiled_scratch_is_sized_by_the_forms_own_split_count
+        PASS [   0.013s] ( 26/826) omega metal::arena_encode_dispatch_finish::attention_scratch_len_tests::decode_dispatch_still_reserves_the_compiled_split_maximum
+        PASS [   0.012s] ( 27/826) omega metal::arena_encode_dispatch_finish::block_node_attribution_tests::declaration_ordered_blocks_plan_cleanly
+        PASS [   0.278s] ( 28/826) omega metal::arena_encode_dispatch_finish::arena_tests::serial_packed_and_concurrent_whole_slot_runs_return_the_same_bits
+        PASS [   0.286s] ( 29/826) omega metal::arena_encode_dispatch_finish::arena_tests::execute_plan_never_builds_the_arena_or_uniforms_for_the_unplaced_path
+        PASS [   0.291s] ( 30/826) omega metal::arena_encode_dispatch_finish::arena_tests::a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer
+        PASS [   0.010s] ( 31/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::all_expert_arena_descriptors_keep_mmap_relative_offsets
+        PASS [   0.011s] ( 32/826) omega metal::arena_encode_dispatch_finish::block_node_attribution_tests::weight_first_blocks_against_activation_first_program_names_the_true_node
+        PASS [   0.010s] ( 33/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::selected_hobbit_entries_compact_payload_but_keep_original_ids
+        PASS [   0.011s] ( 34/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::mixed_hobbit_entries_keep_codec_and_byte_spans_separate
+        PASS [   0.011s] ( 35/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::live_input_mask_filters_dead_expert_blocks_and_keeps_requested_roots
+        PASS [   0.011s] ( 36/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::selected_hobbit_descriptor_offsets_follow_compact_payload_order
+        PASS [   0.010s] ( 37/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::selected_hobbit_q6k_entry_keeps_codec_and_descriptor_tag
+        PASS [   0.012s] ( 38/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::mixed_hobbit_entries_accept_q3k_runtime_decoder
+        PASS [   0.012s] ( 39/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::selected_hobbit_preserves_sparse_original_expert_indices
+        PASS [   0.011s] ( 40/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::substituted_expert_stack_is_absent_from_ordinary_uploads
+        PASS [   0.010s] ( 41/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::transient_staging_accepts_a_smaller_mixed_codec_table
+        PASS [   0.009s] ( 42/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::arena_slot_reuse_after_a_read_emits_a_war_barrier
+        PASS [   0.010s] ( 43/826) omega metal::arena_encode_dispatch_finish::expert_payload_descriptor_tests::transient_staging_rejects_a_full_size_expert_stack_before_upload
+        PASS [   0.010s] ( 44/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::a_binding_list_gaining_a_read_is_barriered_with_no_second_call_site_to_update
+        PASS [   0.010s] ( 45/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::a_sibling_op_between_the_split_write_and_the_merge_read_does_not_hide_the_scratch_raw_hazard
+        PASS [   0.010s] ( 46/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::hazard_class_counters_attribute_one_raw_and_one_arena_reuse_war
+        PASS [   0.011s] ( 47/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::a_missing_operand_buffer_is_an_error_not_a_dropped_hazard
+        PASS [   0.011s] ( 48/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::hazard_walk_over_bindings_matches_the_decode_shaped_fixtures_expected_trace
+        PASS [   0.010s] ( 49/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::independent_producers_share_no_barrier_but_their_joint_consumer_does
+        PASS [   0.011s] ( 50/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::last_reader_table_protects_a_fused_epilogues_sibling_read
+        PASS [   0.009s] ( 51/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::merged_dispatch_records_all_eight_outputs_against_one_shared_input_set
+        PASS [   0.011s] ( 52/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::logical_retirement_preserves_arena_identity_hazards
+        PASS [   0.010s] ( 53/826) omega metal::arena_encode_dispatch_finish::operand_tensor_bytes_tests::gathered_q4k_operand_reports_selected_rows_not_the_whole_stack
+        PASS [   0.010s] ( 54/826) omega metal::arena_encode_dispatch_finish::operand_tensor_bytes_tests::f32_operand_reports_element_count_times_4
+        PASS [   0.012s] ( 55/826) omega metal::arena_encode_dispatch_finish::hazard_tracker_tests::production_sequence_barriers_before_the_raw_and_war_ops_only
+        PASS [   0.011s] ( 56/826) omega metal::arena_encode_dispatch_finish::operand_tensor_bytes_tests::q4k_operand_reports_rows_times_k_times_144_over_256
+        PASS [   0.014s] ( 57/826) omega metal::arena_encode_dispatch_finish::merge_pipeline_key_tests::a_merge_kernel_that_took_the_flat_form_never_shares_a_key_with_its_linear_sibling
+        PASS [   0.012s] ( 58/826) omega metal::arena_encode_dispatch_finish::operand_tensor_bytes_tests::q5k_operand_reports_rows_times_k_times_176_over_256
+        PASS [   0.012s] ( 59/826) omega metal::arena_encode_dispatch_finish::plan_query_rows_tests::cap_scales_linearly_with_the_callers_own_new_count
+        PASS [   0.009s] ( 60/826) omega metal::arena_encode_dispatch_finish::plan_query_rows_tests::decode_step_bind_row_count_is_one
+        PASS [   0.010s] ( 61/826) omega metal::arena_encode_dispatch_finish::plan_query_rows_tests::expert_count_leading_op_never_inflates_the_decode_cap
+        PASS [   0.010s] ( 62/826) omega metal::arena_encode_dispatch_finish::plan_query_rows_tests::gemma4_e2b_prefill_admits_its_true_peak_at_the_bind_time_row_count
+        PASS [   0.010s] ( 63/826) omega metal::arena_encode_dispatch_finish::plan_query_rows_tests::symbols_less_caller_defaults_to_one_row
+        PASS [   0.011s] ( 64/826) omega metal::arena_encode_dispatch_finish::plan_query_rows_tests::oversized_peak_at_the_same_row_count_is_still_rejected
+        PASS [   0.012s] ( 65/826) omega metal::arena_encode_dispatch_finish::plan_query_rows_tests::thousand_row_prefill_shape_fits_the_scaled_cap
+        PASS [   0.011s] ( 66/826) omega metal::arena_layout::tests::packed_buffer_is_never_smaller_than_the_live_peak
+        PASS [   0.009s] ( 67/826) omega metal::arena_layout::tests::packed_range_serves_a_later_output_of_a_different_length
+        PASS [   0.011s] ( 68/826) omega metal::arena_layout::tests::packed_outputs_live_together_never_share_bytes
+        PASS [   0.009s] ( 69/826) omega metal::arena_layout::tests::packed_stacked_block_needs_the_hidden_and_down_buffers_not_the_sum_of_size_classes
+        PASS [   0.012s] ( 70/826) omega metal::arena_layout::tests::packed_placement_is_disjoint_for_pseudo_random_programs
+        PASS [   0.010s] ( 71/826) omega metal::arena_layout::tests::packing_an_empty_plan_allocates_only_the_empty_shared_buffer
+        PASS [   0.009s] ( 72/826) omega metal::arena_layout::tests::whole_slots_keep_a_resident_output_out_of_the_free_list
+        PASS [   0.009s] ( 73/826) omega metal::command_buffer_failed_label_tests::nil_label_becomes_unlabeled_marker
+        PASS [   0.010s] ( 74/826) omega metal::arena_layout::tests::whole_slots_hand_a_released_buffer_to_a_later_output_of_the_same_length
+        PASS [   0.010s] ( 75/826) omega metal::command_buffer_failed_label_tests::empty_label_is_kept_not_replaced
+        PASS [   0.009s] ( 76/826) omega metal::command_buffer_failed_label_tests::present_label_is_kept_verbatim
+        PASS [   0.008s] ( 77/826) omega metal::device_buffers_arena_plan::block_buffer_reusable_tests::a_first_call_with_no_recorded_identity_is_never_reused
+        PASS [   0.009s] ( 78/826) omega metal::device_buffers_arena_plan::block_buffer_reusable_tests::a_non_resident_block_is_never_reused_even_at_the_same_address
+        PASS [   0.009s] ( 79/826) omega metal::device_buffers_arena_plan::block_buffer_reusable_tests::a_resident_block_at_the_same_address_and_length_is_reused
+        PASS [   0.009s] ( 80/826) omega metal::device_buffers_arena_plan::block_buffer_reusable_tests::a_resident_block_whose_address_moved_is_rebuilt
+        PASS [   0.009s] ( 81/826) omega metal::device_buffers_arena_plan::block_buffer_reusable_tests::a_resident_block_whose_length_changed_is_rebuilt
+        PASS [   0.010s] ( 82/826) omega metal::device_buffers_arena_plan::bounded_compare_tests::finite_difference_reports_first_element_and_maximum_relative_error
+        PASS [   0.011s] ( 83/826) omega metal::device_buffers_arena_plan::bounded_compare_tests::cpu_nonfinite_difference_is_reported
+        PASS [   0.010s] ( 84/826) omega metal::device_buffers_arena_plan::bounded_compare_tests::finite_equal_is_not_a_mismatch
+        PASS [   0.010s] ( 85/826) omega metal::device_buffers_arena_plan::bounded_compare_tests::nonfinite_difference_cannot_evade_tolerance
+        PASS [   0.010s] ( 86/826) omega metal::device_buffers_arena_plan::bounded_compare_tests::length_mismatch_is_typed
+        PASS [   0.010s] ( 87/826) omega metal::device_buffers_arena_plan::command_buffer_failed_context_tests::display_names_each_failing_encoder_and_its_error_state
+        PASS [   0.011s] ( 88/826) omega metal::device_buffers_arena_plan::command_buffer_failed_context_tests::display_names_the_failing_chunk_and_its_op_range
+        PASS [   0.011s] ( 89/826) omega metal::device_buffers_arena_plan::command_buffer_failed_context_tests::single_buffer_diagnostics_read_as_untracked_rather_than_a_fabricated_position
+        PASS [   0.010s] ( 90/826) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::every_k_quant_codec_classifies_as_packed_row_blocked_plain_product
+        PASS [   0.011s] ( 91/826) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::eight_of_thirty_two_experts_stacked_append_moe_ffn_lowers_each_projection_to_one_reduce
+        PASS [   0.010s] ( 92/826) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_and_q8_0_multi_row_dispatch_classifies_as_packed_row_blocked
+        PASS [   0.011s] ( 93/826) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::every_k_quant_codec_classifies_as_packed_row_blocked_scalar_fallback
+        PASS [   0.010s] ( 94/826) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked
+        PASS [   0.010s] ( 95/826) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_and_q8_0_single_row_dispatch_classifies_as_packed_row_blocked
+        PASS [   0.010s] ( 96/826) omega metal::pipeline_buffers_upload::host_bookkeeping_instrument_tests::new_host_bookkeeping_fields_print_in_stage_totals
+        PASS [   0.089s] ( 97/826) omega metal::arena_encode_dispatch_finish::operand_tensor_bytes_tests::operand_bound_at_a_nonzero_mapping_offset_reports_the_tensor_length_not_the_shared_buffer
+        PASS [   0.112s] ( 98/826) omega metal::arena_encode_dispatch_finish::uniform_cache_tests::uniform_buffer_reuses_still_counts_hits
+        PASS [   0.116s] ( 99/826) omega metal::arena_encode_dispatch_finish::uniform_cache_tests::a_cache_hit_refreshes_the_use_tick
+        PASS [   0.010s] (100/826) omega metal::pipeline_disk_cache::tests::digest_separates_fields_that_concatenate_alike
+        PASS [   0.010s] (101/826) omega metal::pipeline_disk_cache::tests::digest_is_stable_and_changes_with_every_field
+        PASS [   0.011s] (102/826) omega metal::pipeline_disk_cache::tests::eviction_keeps_everything_when_the_files_fit
+        PASS [   0.011s] (103/826) omega metal::pipeline_disk_cache::tests::eviction_counts_partial_writes_against_the_budget
+        PASS [   0.137s] (104/826) omega metal::arena_encode_dispatch_finish::uniform_cache_tests::filling_past_capacity_evicts_the_least_recently_used_entry
+        PASS [   0.009s] (105/826) omega metal::pipeline_disk_cache::tests::location_follows_the_config_switches
+        PASS [   0.010s] (106/826) omega metal::pipeline_disk_cache::tests::eviction_of_a_missing_directory_is_an_error_not_a_silent_zero
+        PASS [   0.011s] (107/826) omega metal::pipeline_disk_cache::tests::eviction_removes_the_oldest_cache_files_until_the_budget_holds
+        PASS [   0.008s] (108/826) omega metal::placements_execute_named::chunk_boundary_tests::a_plan_no_longer_than_the_head_falls_back_to_the_even_split
+        PASS [   0.008s] (109/826) omega metal::placements_execute_named::chunk_boundary_tests::gemma4_decode_step_gets_a_short_head_and_an_even_tail
+        PASS [   0.008s] (110/826) omega metal::placements_execute_named::chunk_boundary_tests::one_chunk_or_an_empty_plan_has_no_boundaries
+        PASS [   0.008s] (111/826) omega metal::placements_execute_named::chunk_boundary_tests::two_chunks_keep_the_even_split_because_a_head_would_leave_one_tail_chunk
+        PASS [   0.008s] (112/826) omega metal::prepare_uniforms_pack::numeric_policy_construction_tests::metal_math_mode_round_trips_through_numeric_policy
+        PASS [   0.008s] (113/826) omega metal::prepare_uniforms_pack::numeric_policy_construction_tests::numeric_policy_projection_never_grants_more_than_the_policy_allows
+        PASS [   0.008s] (114/826) omega metal::prepare_uniforms_pack::numeric_policy_construction_tests::plan_records_the_policy_it_bound_under_not_a_later_default
+        PASS [   0.008s] (115/826) omega metal::prepare_uniforms_pack::numeric_policy_construction_tests::plan_refuses_a_mismatched_policy_instead_of_silently_narrowing
+        PASS [   0.008s] (116/826) omega metal::prepare_uniforms_pack::numeric_policy_construction_tests::set_math_mode_narrows_within_the_bound_policy_but_never_widens_it
+        PASS [   0.008s] (117/826) omega metal::prepare_uniforms_pack::pack_uniforms_byte_len_tests::decode_split_uniforms_carry_the_bind_time_counts_and_match_the_byte_len
+        PASS [   0.008s] (118/826) omega metal::prepare_uniforms_pack::pack_uniforms_byte_len_tests::elementwise_byte_len_matches_the_real_packed_bytes
+        PASS [   0.008s] (119/826) omega metal::prepare_uniforms_pack::pack_uniforms_byte_len_tests::reduce_byte_len_matches_the_real_packed_bytes
+        PASS [   0.008s] (120/826) omega metal::prepare_uniforms_pack::pack_uniforms_byte_len_tests::row_tiled_uniforms_carry_the_row_head_count_and_the_split_count_and_match_the_byte_len
+        PASS [   0.193s] (121/826) omega metal::pipeline_buffers_upload::checkpoint_mapping_release_tests::unregister_only_clears_the_currently_registered_identity
+        PASS [   0.194s] (122/826) omega metal::pipeline_buffers_upload::checkpoint_mapping_release_tests::expert_mapping_resolves_a_misaligned_arena_slice_and_unregisters
+        PASS [   0.194s] (123/826) omega metal::pipeline_buffers_upload::checkpoint_mapping_release_tests::packed_upload_prefers_the_registered_expert_mapping
+        PASS [   0.093s] (124/826) omega metal::prepare_uniforms_pack::numeric_policy_construction_tests::narrowing_math_mode_forces_a_genuine_pipeline_cache_miss_not_a_stale_hit
+        PASS [   0.012s] (125/826) omega metal::resident_nocopy_cache::cross_plan_resident_reuse_tests::a_host_range_the_global_caches_have_never_seen_is_not_resolved
+        PASS [   0.252s] (126/826) omega metal::pipeline_disk_cache::tests::a_compiled_pipeline_is_published_then_loaded_and_computes_the_same_bytes
+        PASS [   0.242s] (127/826) omega metal::pipeline_disk_cache::tests::a_corrupt_archive_file_is_replaced_by_a_fresh_compile
+        PASS [   0.236s] (128/826) omega metal::pipeline_disk_cache::tests::an_archive_larger_than_the_budget_is_evicted_but_the_pipeline_still_runs
+        PASS [   0.183s] (129/826) omega metal::pipeline_disk_cache::tests::math_mode_and_source_each_name_a_separate_archive
+        PASS [   0.096s] (130/826) omega metal::resident_nocopy_cache::cross_plan_resident_reuse_tests::a_checkpoint_mapped_block_is_resolved_from_the_global_cache_without_an_offer
+        PASS [   0.191s] (131/826) omega metal::resident_nocopy_cache::nocopy_buffer_cache_tests::an_unnamed_upload_is_never_cached
+        PASS [   0.140s] (132/826) omega metal::resident_nocopy_cache::nocopy_buffer_cache_tests::release_resident_names_evicts_only_the_named_entry
+        PASS [   0.116s] (133/826) omega metal::resident_nocopy_cache::resident_buffer_cache_tests::a_resident_name_rebound_to_a_different_length_is_rejected
+        PASS [   0.203s] (134/826) omega metal::resident_nocopy_cache::cross_plan_resident_reuse_tests::a_resident_name_rebound_to_different_bytes_is_rejected_not_silently_reused
+        PASS [   0.195s] (135/826) omega metal::resident_nocopy_cache::nocopy_buffer_cache_tests::a_nocopy_name_rebound_to_a_different_length_is_rejected
+        PASS [   0.140s] (136/826) omega metal::resident_nocopy_cache::resident_buffer_cache_tests::a_resident_cache_hit_adds_no_bytes_to_the_copied_counter
+        PASS [   0.123s] (137/826) omega metal::resident_nocopy_cache::resident_buffer_cache_tests::a_resident_name_rebound_to_a_different_host_pointer_is_rejected
+        PASS [   0.203s] (138/826) omega metal::resident_nocopy_cache::nocopy_buffer_cache_tests::a_nocopy_name_rebound_to_a_different_host_pointer_is_rejected
+        PASS [   0.141s] (139/826) omega metal::resident_nocopy_cache::nocopy_buffer_cache_tests::the_same_nocopy_name_still_hits_the_cache
+        PASS [   0.010s] (140/826) omega msl::attn_rows_tests::a_launch_past_u32_threads_takes_the_flat_form_through_the_one_grid_decision
+        PASS [   0.010s] (141/826) omega msl::attn_rows_tests::row_tiled_splits_matches_the_grid_table
+        PASS [   0.011s] (142/826) omega msl::attn_rows_tests::eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled
+        PASS [   0.012s] (143/826) omega msl::attn_rows_tests::rows_per_threadgroup_follows_the_reuse_registers_memory_and_occupancy_budgets
+        PASS [   0.010s] (144/826) omega msl::attn_rows_tests::shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form
+        PASS [   0.010s] (145/826) omega msl::attn_rows_tests::simdgroups_follow_the_reference_head_dim_rule_and_never_fall_below_two
+        PASS [   0.010s] (146/826) omega msl::attn_rows_tests::the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape
+        PASS [   0.009s] (147/826) omega msl::attn_rows_tests::the_decode_split_baseline_bakes_the_new_key_count
+        PASS [   0.009s] (148/826) omega msl::attn_rows_tests::the_k_row_softmax_weights_kernel_rejects_a_layout_not_collapsed_to_the_row_axes
+        PASS [   0.010s] (149/826) omega msl::attn_rows_tests::the_k_row_softmax_weights_kernel_folds_the_new_range_in_key_order
+        PASS [   0.016s] (150/826) omega msl::attn_rows_tests::the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store
+        PASS [   0.009s] (151/826) omega msl::attn_rows_tests::the_partial_dispatches_one_threadgroup_per_kv_head_row_tile_and_split
+        PASS [   0.012s] (152/826) omega msl::attn_rows_tests::the_one_row_softmax_weights_kernel_is_unchanged_with_the_rows_feature_on
+        PASS [   0.011s] (153/826) omega msl::attn_rows_tests::the_row_count_the_policy_and_the_head_group_choose_the_form
+        PASS [   0.012s] (154/826) omega msl::attn_rows_tests::the_row_tiled_kernel_declines_a_half_precision_op
+        PASS [   0.011s] (155/826) omega msl::attn_rows_tests::the_split_binds_scratch_and_the_merge_runs_one_threadgroup_per_row_and_head
+        PASS [   0.009s] (156/826) omega msl::attn_split_tests::a_twelve_operand_single_range_op_is_named_as_the_dynamic_form
+        PASS [   0.011s] (157/826) omega msl::attn_split_tests::decode_split::shapes_and_policies_the_split_cannot_serve_stay_one_dispatch
+        PASS [   0.010s] (158/826) omega msl::attn_split_tests::decode_split::the_merge_is_llamas_reduce_eight_groups_of_a_full_simdgroup_per_split
+        PASS [   0.012s] (159/826) omega msl::attn_split_tests::decode_split::the_merge_rejects_a_head_dim_that_is_not_a_whole_float4_lane_set
+        PASS [   0.009s] (160/826) omega msl::attn_split_tests::decode_split::the_partial_dispatches_one_threadgroup_per_head_and_split
+        PASS [   0.013s] (161/826) omega msl::attn_split_tests::decode_split::the_partial_kernel_source_carries_the_split_grid_and_the_interleaved_store
+        PASS [   0.009s] (162/826) omega msl::attn_split_tests::decode_split::the_single_range_writer_stores_the_same_interleaved_layout
+        PASS [   0.013s] (163/826) omega msl::attn_split_tests::decode_split::the_simdgroup_walk_visits_every_key_of_a_split_exactly_once
+        PASS [   0.008s] (164/826) omega msl::attn_split_tests::decode_split::the_split_and_chunk_counts_follow_the_bucket_capacity
+        PASS [   0.008s] (165/826) omega msl::attn_split_tests::decode_split::the_split_binds_scratch_and_a_merge_follows_above_one_split
+        PASS [   0.008s] (166/826) omega msl::attn_split_tests::decode_split::the_split_merge_algebra_matches_single_pass_on_the_four_key_fixture
+        PASS [   0.009s] (167/826) omega msl::attn_split_tests::decode_split::the_split_partial_and_the_interleaved_merge_past_u32_threads_launch_flat_with_a_widened_source
+        PASS [   0.008s] (168/826) omega msl::attn_split_tests::split_limit_accepts_the_simd_width_and_rejects_more_with_a_typed_error
+        PASS [   0.013s] (169/826) omega msl::attn_split_tests::golden_identity::attention_sources_match_the_recorded_main_goldens
+        PASS [   0.015s] (170/826) omega msl::attn_split_tests::decode_split::the_split_slices_partition_the_live_band_exactly_once
+        PASS [   0.008s] (171/826) omega msl::attn_split_tests::the_form_classifier_reads_the_operand_count_and_the_row_discriminator
+        PASS [   0.008s] (172/826) omega msl::attn_split_tests::the_scalar_kernel_bounds_the_new_range_by_the_window_only_when_the_window_cuts_it
+        PASS [   0.008s] (173/826) omega msl::cooperative_fold_tests::bit_exact_policy_keeps_the_serial_fold_and_never_batches
+        PASS [   0.008s] (174/826) omega msl::cooperative_fold_tests::cooperative_fold_issues_every_slot_load_before_the_first_fold
+        PASS [   0.009s] (175/826) omega msl::cooperative_fold_tests::cooperative_fold_keeps_slot_order_so_the_sum_is_the_serial_sum
+        PASS [   0.009s] (176/826) omega msl::tests::a_gather_free_op_names_and_binds_exactly_as_before_gather_existed
+        PASS [   0.008s] (177/826) omega msl::tests::a_gather_kernel_binds_and_declares_the_fault_buffer
+        PASS [   0.127s] (178/826) omega metal::resident_nocopy_cache::resident_buffer_cache_tests::release_resident_names_evicts_only_the_named_resident_copy
+        PASS [   0.127s] (179/826) omega metal::resident_nocopy_cache::resident_buffer_cache_tests::name_keyed_cache_never_serves_a_different_names_content
+        PASS [   0.128s] (180/826) omega metal::resident_nocopy_cache::resident_buffer_cache_tests::the_same_resident_name_still_hits_the_cache
+        PASS [   0.128s] (181/826) omega metal::resident_nocopy_cache::resident_buffer_cache_tests::pre_fix_address_keyed_cache_served_stale_content_across_names
+        PASS [   0.009s] (182/826) omega msl::tests::a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms
+        PASS [   0.009s] (183/826) omega msl::tests::a_keep_scan_over_zero_axes_is_rejected
+        PASS [   0.009s] (184/826) omega msl::tests::a_select_reduction_body_is_rejected
+        PASS [   0.010s] (185/826) omega msl::tests::an_arity_mismatched_op_is_rejected
+        PASS [   0.010s] (186/826) omega msl::tests::block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight
+        PASS [   0.009s] (187/826) omega msl::tests::block_width_above_one_renders_the_block_staged_body_under_llama_relaxed
+        PASS [   0.010s] (188/826) omega msl::tests::block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned
+        PASS [   0.011s] (189/826) omega msl::tests::block_staged_v_accumulate_falls_back_to_scalar_when_head_dim_not_32_aligned
+        PASS [   0.010s] (190/826) omega msl::tests::block_width_one_renders_the_strictly_sequential_body_never_the_block_staged_one
+        PASS [   0.010s] (191/826) omega msl::tests::cached_attention_at_one_chunk_never_emits_context_chunk_machinery
+        PASS [   0.010s] (192/826) omega msl::tests::cached_attention_emits_one_online_softmax_dispatch
+        PASS [   0.010s] (193/826) omega msl::tests::cached_softmax_weights_render_is_deterministic_and_width_dependent
+        PASS [   0.010s] (194/826) omega msl::tests::codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path::bfloat16
+        PASS [   0.012s] (195/826) omega msl::tests::cached_attention_two_dispatch_form_is_inert_under_bit_exact
+        PASS [   0.012s] (196/826) omega msl::tests::classify_tiled_gemm_admits_todays_real_sized_block_k_for_both_codecs
+        PASS [   0.011s] (197/826) omega msl::tests::codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path::iq4_nl
+        PASS [   0.011s] (198/826) omega msl::tests::codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path::q2k
+        PASS [   0.010s] (199/826) omega msl::tests::codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path::q4_1
+        PASS [   0.136s] (200/826) omega msl::attn_rows_tests::the_new_range_visits_every_key_a_row_of_the_tile_can_see_exactly_once
+        PASS [   0.010s] (201/826) omega msl::tests::context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context
+        PASS [   0.010s] (202/826) omega msl::tests::cooperative_identity_token_rejects_a_non_cooperative_reduce_op
+        PASS [   0.010s] (203/826) omega msl::tests::coord_index32_generic_reduce_source_differs_only_in_coordinate_lines
+        PASS [   0.011s] (204/826) omega msl::tests::coord_index32_single_token_shape_is_admitted_with_same_narrowing
+        PASS [   0.012s] (205/826) omega msl::tests::cumsum_op_emits_a_scan_kernel_with_one_thread_per_line
+        PASS [   0.009s] (206/826) omega msl::tests::dense_batched_gemm_grid_spec_matches_tiled_shape
+        PASS [   0.011s] (207/826) omega msl::tests::dense_batched_gemm_admission_is_switch_gated
+        PASS [   0.011s] (208/826) omega msl::tests::decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in
+        PASS [   0.009s] (209/826) omega msl::tests::dense_layout_accepts_contiguous_and_rejects_broadcast
+        PASS [   0.010s] (210/826) omega msl::tests::dense_batched_restage_msl_dump_for_the_real_weather_score_shape
+        PASS [   0.011s] (211/826) omega msl::tests::distinct_dtype_on_the_same_shape_yields_distinct_cache_keys_and_source
+        PASS [   0.011s] (212/826) omega msl::tests::distinct_output_axis_set_at_the_same_output_rank_yields_distinct_cache_keys_and_source
+        PASS [   0.010s] (213/826) omega msl::tests::distinct_output_rank_at_same_total_rank_yields_distinct_cache_keys_and_source
+        PASS [   0.010s] (214/826) omega msl::tests::distinct_packed_codec_on_the_same_shape_yields_distinct_cache_keys_and_source
+        PASS [   0.010s] (215/826) omega msl::tests::dynamic_tgmem_kernel_argument_and_launch_length_always_agree
+        PASS [   0.011s] (216/826) omega msl::tests::dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets
+        PASS [   0.011s] (217/826) omega msl::tests::effective_context_chunk_cap_clamps_below_the_threadgroup_budget_for_qwen35_shape
+        PASS [   0.010s] (218/826) omega msl::tests::elementwise_broadcast_decodes_omitted_axes_before_selected_axes
+        PASS [   0.012s] (219/826) omega msl::tests::effective_context_chunk_cap_holds_the_compiled_cap_for_the_openchat_shape
+        PASS [   0.181s] (220/826) omega msl::attn_rows_tests::every_cached_and_new_key_is_scored_by_exactly_one_split
+        PASS [   0.010s] (221/826) omega msl::tests::elementwise_op_emits_one_input_one_output_and_a_matching_grid
+        PASS [   0.011s] (222/826) omega msl::tests::elementwise_outermost_modulo_elision_changes_the_kernel_cache_key
+        PASS [   0.010s] (223/826) omega msl::tests::elementwise_unit_leading_axis_is_never_decoded
+        PASS [   0.009s] (224/826) omega msl::tests::emit_is_deterministic_byte_equal
+        PASS [   0.010s] (225/826) omega msl::tests::epilogue_operand_reuse::a_cooperative_fold_keeps_its_duplicate_operand_load
+        PASS [   0.010s] (226/826) omega msl::tests::epilogue_operand_reuse::a_fused_epilogue_finishes_each_row_of_the_simdgroup_on_its_own_lane
+        PASS [   0.010s] (227/826) omega msl::tests::epilogue_operand_reuse::a_plain_matvec_finishes_each_row_of_the_simdgroup_on_its_own_lane
+        PASS [   0.010s] (228/826) omega msl::tests::epilogue_operand_reuse::a_repeated_epilogue_operand_is_loaded_from_device_memory_once
+        PASS [   0.011s] (229/826) omega msl::tests::epilogue_operand_reuse::a_round_batched_reduce_carries_its_epilogue_repeats_in_its_identity
+        PASS [   0.010s] (230/826) omega msl::tests::epilogue_operand_reuse::aliases_map_every_mention_of_one_tensor_to_its_first
+        PASS [   0.012s] (231/826) omega msl::tests::epilogue_operand_reuse::distinct_epilogue_operands_each_keep_their_own_load
+        PASS [   0.009s] (232/826) omega msl::tests::epilogue_operand_reuse::the_repeat_pattern_is_part_of_the_pipeline_identity
+        PASS [   0.010s] (233/826) omega msl::tests::epilogue_operand_reuse::the_same_source_at_a_different_layout_is_not_an_alias
+        PASS [   0.011s] (234/826) omega msl::tests::every_axis_that_changes_emitted_source_also_changes_kernel_cache_key
+        PASS [   0.011s] (235/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::float16
+        PASS [   0.010s] (236/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q3k
+        PASS [   0.011s] (237/826) omega msl::tests::expert_codec_declared_once_when_both_substitution_markers_fire
+        PASS [   0.009s] (238/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q4_0
+        PASS [   0.012s] (239/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q4k
+        PASS [   0.011s] (240/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q5_0
+        PASS [   0.013s] (241/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q5_1
+        PASS [   0.010s] (242/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q6k
+        PASS [   0.012s] (243/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q5k
+        PASS [   0.009s] (244/826) omega msl::tests::expert_grouped_decode_description::the_grouped_k_step_is_the_staged_k_step_every_description_divides_into_or_out_of
+        PASS [   0.009s] (245/826) omega msl::tests::expert_grouped_decode_description::the_grouped_kernel_no_longer_hard_codes_a_q8_0_block
+        PASS [   0.009s] (246/826) omega msl::tests::expert_grouped_decode_description::a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor::q8_0
+        PASS [   0.010s] (247/826) omega msl::tests::expert_grouped_gemm::a_codec_without_a_decode_description_is_rejected_by_name::bfloat16
+        PASS [   0.010s] (248/826) omega msl::tests::expert_grouped_gemm::a_codec_without_a_decode_description_is_rejected_by_name::iq4_nl
+        PASS [   0.009s] (249/826) omega msl::tests::expert_grouped_gemm::a_codec_without_a_decode_description_is_rejected_by_name::q2k
+        PASS [   0.009s] (250/826) omega msl::tests::expert_grouped_gemm::a_stacked_down_below_the_tiled_minimum_is_single_row_matvecs_at_every_width
+        PASS [   0.010s] (251/826) omega msl::tests::expert_grouped_gemm::a_q8_0_expert_gather_at_prefill_width_is_admitted_as_expert_grouped
+        PASS [   0.009s] (252/826) omega msl::tests::expert_grouped_gemm::a_stacked_gate_over_sequence_and_selected_axes_is_one_expert_grouped_op
+        PASS [   0.011s] (253/826) omega msl::tests::expert_grouped_gemm::a_stacked_down_whose_activation_differs_per_selected_expert_is_admitted_too
+        PASS [   0.011s] (254/826) omega msl::tests::expert_grouped_gemm::a_stacked_gate_and_down_whose_slots_fill_the_tiles_keep_the_tiled_classification
+        PASS [   0.013s] (255/826) omega msl::tests::expert_grouped_gemm::a_stacked_decode_step_stays_below_the_tiled_minimum_and_keeps_the_matvec
+        PASS [   0.012s] (256/826) omega msl::tests::expert_grouped_gemm::below_the_tiled_token_minimum_the_gather_stays_on_the_dense_kernel
+        PASS [   0.009s] (257/826) omega msl::tests::expert_grouped_gemm::expert_grouped_dispatch_is_one_z_slice_per_expert_and_row_tiles_times_parts_groups
+        PASS [   0.011s] (258/826) omega msl::tests::expert_grouped_gemm::routed_rows_at_the_tiled_minimum_still_refuse_the_shared_weight_row_body
+        PASS [   0.010s] (259/826) omega msl::tests::expert_grouped_gemm::the_rendered_kernel_ranks_tokens_by_prefix_sum_and_reports_a_bad_route
+        PASS [   0.011s] (260/826) omega msl::tests::expert_grouped_gemm::routed_rows_below_the_tiled_minimum_are_single_row_matvecs_each_on_its_own_expert
+        PASS [   0.010s] (261/826) omega msl::tests::expert_grouped_gemm::the_stacked_op_renders_one_kernel_that_decomposes_the_flat_token_into_both_axes
+        PASS [   0.012s] (262/826) omega msl::tests::expert_grouped_gemm::the_pipeline_identity_names_the_expert_grouped_body
+        PASS [   0.009s] (263/826) omega msl::tests::expert_grouped_gemm::the_stacked_pipeline_identity_differs_from_the_single_axis_one
+        PASS [   0.010s] (264/826) omega msl::tests::expert_source_emission_appends_payload_and_descriptor_bindings
+        PASS [   0.009s] (265/826) omega msl::tests::flat_grid_form::a_batched_launch_whose_slice_fits_but_whose_whole_grid_does_not_takes_the_flat_form
+        PASS [   0.012s] (266/826) omega msl::tests::expert_source_uses_descriptor_codec_instead_of_checkpoint_codec
+        PASS [   0.010s] (267/826) omega msl::tests::flat_grid_form::a_composite_threadgroup_count_above_u32_max_splits_across_both_axes
+        PASS [   0.010s] (268/826) omega msl::tests::flat_grid_form::a_flat_launch_is_re_cut_for_a_pipeline_that_cannot_run_the_pinned_width
+        PASS [   0.010s] (269/826) omega msl::tests::flat_grid_form::a_grid_that_fits_a_32_bit_thread_index_keeps_the_linear_form
+        PASS [   0.011s] (270/826) omega msl::tests::flat_grid_form::a_grid_with_more_threadgroups_than_two_axes_can_hold_is_rejected
+        PASS [   0.010s] (271/826) omega msl::tests::flat_grid_form::a_pinned_threadgroup_width_that_does_not_divide_the_grid_launches_one_simdgroup_wide
+        PASS [   0.010s] (272/826) omega msl::tests::flat_grid_form::a_thread_count_that_wraps_u64_is_rejected_instead_of_truncated
+        PASS [   0.011s] (273/826) omega msl::tests::flat_grid_form::a_pinned_width_that_does_not_divide_the_grid_is_refused_for_a_kernel_that_reads_it
+        PASS [   0.010s] (274/826) omega msl::tests::flat_grid_form::a_threadgroup_count_with_no_divisor_to_spill_into_y_is_rejected
+        PASS [   0.009s] (275/826) omega msl::tests::flat_grid_form::cached_attention_with_grouped_queries_is_refused_when_its_width_does_not_divide_the_grid
+        PASS [   0.009s] (276/826) omega msl::tests::flat_grid_form::expert_source_substitution_refuses_the_flat_form
+        PASS [   0.011s] (277/826) omega msl::tests::flat_grid_form::every_kernel_past_the_thread_index_renders_and_dispatches_the_flat_form_together
+        PASS [   0.010s] (278/826) omega msl::tests::flat_grid_form::the_dense_batched_gemm_one_d_form_past_the_thread_index_reads_its_batch_from_the_flat_group_z
+        PASS [   0.009s] (279/826) omega msl::tests::flat_grid_form::the_rectangle_never_launches_a_threadgroup_the_grid_does_not_need
+        PASS [   0.011s] (280/826) omega msl::tests::flat_grid_form::the_flat_form_gets_its_own_pipeline_identity_and_the_linear_sibling_keeps_its_own
+        PASS [   0.010s] (281/826) omega msl::tests::flat_grid_form::the_tile_coordinate_form_needs_no_widening_however_wide_the_grid
+        PASS [   0.010s] (282/826) omega msl::tests::flat_grid_form::the_tile_coordinate_launch_is_never_re_cut_for_a_pipeline_width
+        PASS [   0.010s] (283/826) omega msl::tests::flat_grid_form::the_tiled_gemm_one_d_form_past_the_thread_index_takes_the_flat_form
+        PASS [   0.009s] (284/826) omega msl::tests::forty_keys_stays_one_split_under_bit_exact_but_splits_under_llama_relaxed
+        PASS [   0.010s] (285/826) omega msl::tests::forty_key_plan_uses_the_per_query_head_grid_with_no_merge_under_either_policy
+        PASS [   0.009s] (286/826) omega msl::tests::fused_matmul_op_emits_two_inputs_a_reduction_loop_and_a_row_by_col_grid
+        PASS [   0.011s] (287/826) omega msl::tests::ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul
+        PASS [   0.012s] (288/826) omega msl::tests::grid2d_kernel_attribute_form_and_dispatched_grid_always_agree
+        PASS [   0.010s] (289/826) omega msl::tests::half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_extent::bfloat16
+        PASS [   0.009s] (290/826) omega msl::tests::long_contexts_split_across_more_than_one_threadgroup_under_llama_relaxed
+        PASS [   0.010s] (291/826) omega msl::tests::half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_extent::float16
+        PASS [   0.011s] (292/826) omega msl::tests::long_contexts_stay_one_split_under_bit_exact
+        PASS [   0.011s] (293/826) omega msl::tests::many_token_matmul_takes_the_tiled_gemm_path
+        PASS [   0.010s] (294/826) omega msl::tests::mm_layout_decodes_before_the_first_barrier_and_ends_the_loop_on_the_multiplies
+        PASS [   0.010s] (295/826) omega msl::tests::mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed
+        PASS [   0.013s] (296/826) omega msl::tests::mm_layout_default_on_renders_unless_explicitly_disabled_or_the_weight_stage_is_off
+        PASS [   0.010s] (297/826) omega msl::tests::mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_accessor
+        PASS [   0.011s] (298/826) omega msl::tests::multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_count
+        PASS [   0.009s] (299/826) omega msl::tests::multi_row_index32_27_token_shape_gets_i32_suffix_with_unchanged_geometry
+        PASS [   0.009s] (300/826) omega msl::tests::multi_row_index32_decode_shape_keeps_current_key_source_grid_and_width
+        PASS [   0.009s] (301/826) omega msl::tests::multi_row_index32_oversized_shape_not_admitted
+        PASS [   0.009s] (302/826) omega msl::tests::multi_row_kernel_folds_only_the_activation_rows_the_op_has
+        PASS [   0.009s] (303/826) omega msl::tests::multi_row_unroll_27_token_shape_gets_u_suffix_with_unchanged_geometry
+        PASS [   0.009s] (304/826) omega msl::tests::multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width
+        PASS [   0.009s] (305/826) omega msl::tests::packed_row_activation_cap_is_the_smallest_power_of_two_holding_the_tokens_up_to_the_group
+        PASS [   0.010s] (306/826) omega msl::tests::one_token_gathered_q4k_matmul_uses_row_blocked_gather_body
+        PASS [   0.010s] (307/826) omega msl::tests::output_axis_order_at_the_same_axis_set_yields_distinct_cache_keys_and_source
+        PASS [   0.009s] (308/826) omega msl::tests::packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul
+        PASS [   0.009s] (309/826) omega msl::tests::per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads
+        PASS [   0.009s] (310/826) omega msl::tests::preamble_contains_mixed_expert_codec_selector
+        PASS [   0.010s] (311/826) omega msl::tests::push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel
+        PASS [   0.009s] (312/826) omega msl::tests::push_tiled_gemm_body_rejects_an_axis_not_in_output_axes
+        PASS [   0.010s] (313/826) omega msl::tests::push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel
+        PASS [   0.010s] (314/826) omega msl::tests::push_packed_row_blocked_body_rejects_a_non_k_quant_codec
+        PASS [   0.009s] (315/826) omega msl::tests::push_tiled_gemm_body_rejects_an_empty_token_axis_group
+        PASS [   0.009s] (316/826) omega msl::tests::q4_0_broadcast_epilogue_declines_tiled_gemm_admission_without_erroring
+        PASS [   0.009s] (317/826) omega msl::tests::q4_0_codec_falls_back_to_per_element_for_a_non_plain_product_reduce
+        PASS [   0.010s] (318/826) omega msl::tests::q4_0_codec_takes_the_row_blocked_path_at_a_256_extent
+        PASS [   0.009s] (319/826) omega msl::tests::q4_0_never_takes_the_tiled_gemm_path_with_the_switch_explicitly_off
+        PASS [   0.009s] (320/826) omega msl::tests::q4_0_takes_the_tiled_gemm_path_when_unset
+        PASS [   0.010s] (321/826) omega msl::tests::q4_0_takes_the_tiled_gemm_path_with_the_switch_on
+        PASS [   0.009s] (322/826) omega msl::tests::q4k_row_blocked_matmul_uses_paired_nibble_decode
+        PASS [   0.009s] (323/826) omega msl::tests::q4k_row_blocked_non_add_reduce_keeps_the_per_element_path
+        PASS [   0.010s] (324/826) omega msl::tests::q5k_row_blocked_matmul_uses_paired_nibble_decode
+        PASS [   0.010s] (325/826) omega msl::tests::q6k_row_blocked_matmul_uses_paired_nibble_decode
+        PASS [   0.010s] (326/826) omega msl::tests::rank_select_entry_and_grid_follow_rows_and_keep_flag
+        PASS [   0.009s] (327/826) omega msl::tests::rank_select_render_emits_kernel_entry_bindings_and_grid
+        PASS [   0.013s] (328/826) omega msl::tests::q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group
+        PASS [   0.010s] (329/826) omega msl::tests::rank_select_render_declares_four_passes
+        PASS [   0.011s] (330/826) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::at_threshold_2
+        PASS [   0.011s] (331/826) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::attended_34
+        PASS [   0.088s] (332/826) omega msl::tests::flat_grid_form::the_cached_attention_merge_kernel_past_the_thread_index_takes_the_flat_form_and_compiles
+        PASS [   0.009s] (333/826) omega msl::tests::reduction_literal_default_is_none_and_key_carries_no_rl_token
+        PASS [   0.010s] (334/826) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::sum_squares_4096
+        PASS [   0.009s] (335/826) omega msl::tests::render_cached_attention_never_declares_past_the_threadgroup_budget
+        PASS [   0.010s] (336/826) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::unit_axis
+        PASS [   0.009s] (337/826) omega msl::tests::render_cached_attention_omits_the_merge_block_under_bit_exact_policy
+        PASS [   0.014s] (338/826) omega msl::tests::reduce_routes_on_reduced_axis_length_against_min_len::score_even_odd_64
+        PASS [   0.098s] (339/826) omega msl::tests::flat_grid_form::cached_attention_with_grouped_queries_past_the_thread_index_launches_its_pinned_width_and_compiles
+        PASS [   0.010s] (340/826) omega msl::tests::render_cached_attention_rejects_an_elementwise_bound_op
+        PASS [   0.010s] (341/826) omega msl::tests::render_reduce_rejects_a_broadcast_reduce_epilogue
+        PASS [   0.010s] (342/826) omega msl::tests::render_scan_rejects_an_elementwise_bound_op
+        PASS [   0.010s] (343/826) omega msl::tests::render_reduce_rejects_an_elementwise_bound_op
+        PASS [   0.011s] (344/826) omega msl::tests::same_structure_different_extents_share_one_cache_key
+        PASS [   0.012s] (345/826) omega msl::tests::routed_q4k_reduce_uses_cooperative_gather_fetch
+        PASS [   0.009s] (346/826) omega msl::tests::simd_combine_fn_rejects_a_non_cooperative_reduce_op
+        PASS [   0.010s] (347/826) omega msl::tests::same_structure_different_extents_yield_identical_source_but_different_grid
+        PASS [   0.010s] (348/826) omega msl::tests::softmax_runtime_rows_default_off_is_byte_identical_to_the_literal_bound_emit
+        PASS [   0.009s] (349/826) omega msl::tests::softmax_runtime_rows_on_changes_only_the_bound_and_the_name
+        PASS [   0.009s] (350/826) omega msl::tests::split_count_never_exceeds_the_compiled_maximum
+        PASS [   0.010s] (351/826) omega msl::tests::splits_for_has_a_knee_at_the_scaled_divisor_threshold
+        PASS [   0.011s] (352/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::float16
+        PASS [   0.012s] (353/826) omega msl::tests::staging_switches_default_on_render_unless_explicitly_disabled
+        PASS [   0.011s] (354/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q3k
+        PASS [   0.010s] (355/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q4_0
+        PASS [   0.011s] (356/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q4k
+        PASS [   0.010s] (357/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q5_0
+        PASS [   0.011s] (358/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q5_1
+        PASS [   0.011s] (359/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q5k
+        PASS [   0.010s] (360/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q6k
+        PASS [   0.009s] (361/826) omega msl::tests::tiled_decode_description::a_flat_codec_is_admitted_at_any_whole_block_extent_the_row_blocked_kernel_refuses::float16
+        PASS [   0.010s] (362/826) omega msl::tests::tiled_decode_description::a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description::q8_0
+        PASS [   0.010s] (363/826) omega msl::tests::tiled_decode_description::a_flat_codec_is_admitted_at_any_whole_block_extent_the_row_blocked_kernel_refuses::q5_0
+        PASS [   0.011s] (364/826) omega msl::tests::tiled_decode_description::a_flat_codec_is_admitted_at_any_whole_block_extent_the_row_blocked_kernel_refuses::q5_1
+        PASS [   0.011s] (365/826) omega msl::tests::tiled_decode_description::a_float16_weight_binds_as_half_and_is_viewed_as_bytes_for_the_cursor
+        PASS [   0.012s] (366/826) omega msl::tests::tiled_decode_description::a_flat_codec_is_admitted_at_any_whole_block_extent_the_row_blocked_kernel_refuses::q8_0
+        PASS [   0.009s] (367/826) omega msl::tests::tiled_decode_description::a_k_quant_extent_that_is_not_a_whole_super_block_is_refused_by_extent::q3k
+        PASS [   0.010s] (368/826) omega msl::tests::tiled_decode_description::a_k_quant_extent_that_is_not_a_whole_super_block_is_refused_by_extent::q5k
+        PASS [   0.009s] (369/826) omega msl::tests::tiled_decode_description::a_kernel_off_the_tiled_path_carries_no_description
+        PASS [   0.010s] (370/826) omega msl::tests::tiled_decode_description::a_k_quant_extent_that_is_not_a_whole_super_block_is_refused_by_extent::q6k
+        PASS [   0.011s] (371/826) omega msl::tests::tiled_decode_description::codecs_without_a_description_have_no_chunk_width::bfloat16
+        PASS [   0.011s] (372/826) omega msl::tests::tiled_decode_description::codecs_without_a_description_have_no_chunk_width::iq4_nl
+        PASS [   0.010s] (373/826) omega msl::tests::tiled_decode_description::codecs_without_a_description_have_no_chunk_width::mxfp4
+        PASS [   0.010s] (374/826) omega msl::tests::tiled_decode_description::codecs_without_a_description_have_no_chunk_width::q2k
+        PASS [   0.011s] (375/826) omega msl::tests::tiled_decode_description::codecs_without_a_description_have_no_chunk_width::q4_1
+        PASS [   0.010s] (376/826) omega msl::tests::tiled_decode_description::codecs_without_a_description_have_no_chunk_width::q8_k
+        PASS [   0.009s] (377/826) omega msl::tests::tiled_decode_description::every_described_codec_stages_one_k_step_per_chunk_and_block_k_must_be_whole_decode_runs
+        PASS [   0.009s] (378/826) omega msl::tests::tiled_decode_description::every_description_agrees_with_the_codec_geometry_and_defines_exactly_its_function
+        PASS [   0.010s] (379/826) omega msl::tests::tiled_decode_description::the_cursor_advances_a_whole_block_when_the_block_divides_the_k_step_and_wraps_the_slot_otherwise
+        PASS [   0.011s] (380/826) omega msl::tests::tiled_decode_description::the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel::float16
+        PASS [   0.010s] (381/826) omega msl::tests::tiled_decode_description::the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel::q3k
+        PASS [   0.009s] (382/826) omega msl::tests::tiled_decode_description::the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel::q5_1
+        PASS [   0.011s] (383/826) omega msl::tests::tiled_decode_description::the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel::q5_0
+        PASS [   0.010s] (384/826) omega msl::tests::tiled_decode_description::the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel::q5k
+        PASS [   0.010s] (385/826) omega msl::tests::tiled_decode_description::the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel::q6k
+        PASS [   0.010s] (386/826) omega msl::tests::tiled_decode_description::the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel::q8_0
+        PASS [   0.009s] (387/826) omega msl::tests::tiled_decode_description::the_q4_0_switch_is_q4_0s_alone_and_names_the_codec_it_turned_off
+        PASS [   0.011s] (388/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::float16
+        PASS [   0.010s] (389/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q3k
+        PASS [   0.010s] (390/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q4k
+        PASS [   0.010s] (391/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q4_0
+        PASS [   0.010s] (392/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q5_0
+        PASS [   0.011s] (393/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q5_1
+        PASS [   0.011s] (394/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q6k
+        PASS [   0.009s] (395/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q8_0
+        PASS [   0.014s] (396/826) omega msl::tests::tiled_decode_description::the_wide_and_per_row_schedules_decode_through_the_same_description::q5k
+        PASS [   0.011s] (397/826) omega msl::tests::tiled_gemm_block_k_chunk_aligned_rejects_a_ragged_combination
+        PASS [   0.010s] (398/826) omega msl::tests::wide_weight_stage_emits_the_described_q4_0_decode_when_switch_on
+        PASS [   0.010s] (399/826) omega msl::tests::uniform_expert_source_retains_packed_row_decoder
+        PASS [   0.010s] (400/826) omega msl::tests::wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on
+        PASS [   0.010s] (401/826) omega msl::tests::wide_weight_stage_msl_dump_for_the_real_q4_0_shape
+        PASS [   0.009s] (402/826) omega msl::tests::wide_weight_stage_never_applies_to_the_dense_batched_gemm_path
+        PASS [   0.009s] (403/826) omega msl::tests::wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_packed_row_q4_0_never_carries_it
+        PASS [   0.012s] (404/826) omega msl::twin_elementwise_tests::a_plain_elementwise_kernel_declares_no_extra_output
+        PASS [   0.012s] (405/826) omega msl::twin_elementwise_tests::one_kernel_reads_each_operand_once_and_stores_two_outputs::adjacent_pairs
+        PASS [   0.011s] (406/826) omega msl::twin_elementwise_tests::one_kernel_reads_each_operand_once_and_stores_two_outputs::split_half
+        PASS [   0.012s] (407/826) omega msl::twin_elementwise_tests::the_second_output_is_bound_right_past_the_kernels_own_bindings::adjacent_pairs
+        PASS [   0.011s] (408/826) omega msl::twin_elementwise_tests::the_twin_entry_name_differs_from_both_plain_halves_it_replaces
+        PASS [   0.012s] (409/826) omega msl::twin_elementwise_tests::the_second_output_is_bound_right_past_the_kernels_own_bindings::split_half
+        PASS [   0.010s] (410/826) omega sized::tests::selection_min_rows_is_the_toml_value
+        PASS [   0.011s] (411/826) omega::attn_multi_axis_tiled_gemm_parity metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path
+        PASS [   0.207s] (412/826) omega::bf16_real_checkpoint_parity metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.220s] (413/826) omega::attn_multi_axis_tiled_gemm_parity metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group
+        PASS [   0.228s] (414/826) omega::backend_parity the_wrapper_agrees_with_itself_across_cpu_and_metal
+        PASS [   0.230s] (415/826) omega::backend_parity the_same_process_runs_one_plan_on_cpu_and_the_next_on_metal
+        PASS [   0.240s] (416/826) omega::backend_parity metal_wrapper_reuses_resolved_dispatches_and_output_storage
+        PASS [   0.238s] (417/826) omega::cached_attention_coop_load_parity the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding
+        PASS [   0.248s] (418/826) omega::cached_attention_coop_load_parity m_greater_than_one_prefill_holds_parity_past_the_split_knee
+        PASS [   0.028s] (419/826) omega::cached_attention_row_tiled_cpu_gate rows_under_one_fragment_of_a_two_group_head_keep_the_one_dispatch_kernel_and_the_cpu_oracle_agrees
+        PASS [   0.193s] (420/826) omega::cached_attention_partial_rotary_parity forty_keys_with_three_padded_rows_holds_partial_rotary_parity
+        PASS [   0.202s] (421/826) omega::cached_attention_partial_rotary_parity forty_keys_holds_partial_rotary_parity_under_bit_exact
+        PASS [   0.218s] (422/826) omega::cached_attention_partial_rotary_parity five_hundred_twelve_keys_holds_partial_rotary_parity_past_the_split_knee
+        PASS [   0.194s] (423/826) omega::cached_attention_row_tiled_parity rows_under_one_fragment_of_a_two_group_head_hold_one_dispatch_parity_with_the_cpu_evaluator
+        PASS [   0.327s] (424/826) omega::cached_attention_rows_compile_gate the_k_row_softmax_weights_kernels_compile_with_the_metal_toolchain
+        PASS [   0.016s] (425/826) omega::cached_attention_two_pass_wiring_dump dump_qwen35_partial_rotary_op_text
+        PASS [   0.604s] (426/826) omega::cached_attention_decode_split_parity the_decode_split_kernels_hold_parity_with_the_cpu_evaluator_across_split_counts
+        PASS [   0.881s] (427/826) omega::cached_attention_decode_split_compile_gate the_decode_split_partial_compiles_with_the_metal_toolchain
+        PASS [   0.120s] (428/826) omega::captured_dispatch_replay a_captured_matvec_replays_the_values_the_plan_wrote
+        PASS [   0.109s] (429/826) omega::captured_dispatch_replay a_dispatch_rebound_to_a_siblings_pipeline_writes_the_same_values
+        PASS [   0.109s] (430/826) omega::captured_dispatch_replay every_bound_buffer_is_described_once
+        PASS [   0.597s] (431/826) omega::cached_attention_rows_compile_gate the_row_tiled_partial_compiles_with_the_metal_toolchain
+        PASS [   0.117s] (432/826) omega::chunked_command_buffer_status chunked_command_buffers_match_the_unsplit_run_bitwise_and_check_every_status
+        PASS [   0.172s] (433/826) omega::coord_index32_ab boundary_output_total_not_multiple_of_width_bit_exact
+        PASS [   0.183s] (434/826) omega::coord_index32_ab plain_generic_reduce_bit_exact
+        PASS [   0.134s] (435/826) omega::decode_step_telemetry_budget one_steady_state_decode_step_stays_under_the_debug_level_event_budget
+        PASS [   1.695s] (436/826) omega::cached_attention_decode_split_compile_gate every_lane_layout_and_load_batch_the_sweep_reaches_compiles
+        PASS [   0.160s] (437/826) omega::dense_batched_direct_store_parity dense_batch_innermost_matches_restage_path_at_the_real_hippo_prefill_shape
+        PASS [   0.130s] (438/826) omega::dense_batched_direct_store_parity dense_batch_innermost_matches_restage_path_at_the_real_weather_prefill_shape
+        PASS [   0.134s] (439/826) omega::dense_batched_direct_store_parity dense_direct_store_matches_restage_path_at_a_fully_interior_batched_shape
+        PASS [   0.102s] (440/826) omega::dense_batched_direct_store_parity dense_direct_store_matches_restage_path_with_a_partial_edge_tile
+        PASS [   0.104s] (441/826) omega::dispatch_timed_counter_sampling encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns
+        PASS [   0.164s] (442/826) omega::dense_batched_direct_store_parity dense_feature_fastest_matches_restage_path_at_the_real_weather_attended_shape
+        PASS [   0.133s] (443/826) omega::dispatch_timed_counter_sampling every_dispatch_gets_a_timing_and_a_named_sampling_mode
+        PASS [   0.149s] (444/826) omega::elementwise_twin_dispatch both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets::adjacent_pairs
+        PASS [   0.125s] (445/826) omega::elementwise_twin_dispatch both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets::split_half
+        PASS [   0.107s] (446/826) omega::elementwise_twin_dispatch only_the_second_half_placed_still_writes_the_first_into_the_arena
+        PASS [   0.103s] (447/826) omega::elementwise_twin_dispatch the_metal_rope_pair_matches_the_cpu_reference_for_each_pairing::split_half_full_rotary
+        PASS [   0.128s] (448/826) omega::elementwise_twin_dispatch the_metal_rope_pair_matches_the_cpu_reference_for_each_pairing::adjacent_pairs
+        PASS [   2.242s] (449/826) omega::cached_attention_row_tiled_cpu_gate the_verify_program_binds_row_tiled_attention_and_the_cpu_oracle_agrees_with_the_unfused_chain
+        PASS [   2.269s] (450/826) omega::cached_attention_row_tiled_cpu_gate the_kernel_transcription_reproduces_the_cpu_oracle_on_the_programs_own_activations
+        PASS [   0.126s] (451/826) omega::elementwise_twin_dispatch the_metal_rope_pair_matches_the_cpu_reference_for_each_pairing::split_half_partial_rotary
+        PASS [   0.133s] (452/826) omega::elementwise_twin_dispatch the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit::adjacent_pairs
+        PASS [   0.094s] (453/826) omega::elementwise_twin_dispatch the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit::split_half_partial_rotary
+        PASS [   0.113s] (454/826) omega::elementwise_twin_dispatch the_twin_dispatch_reproduces_the_two_dispatch_plan_bit_for_bit::split_half_full_rotary
+        PASS [   0.155s] (455/826) omega::encoder_guard_survives_mid_loop_error execute_plan_survives_an_error_encoded_after_the_first_op
+        PASS [   0.114s] (456/826) omega::expert_grouped_gemm_parity below_the_tiled_token_minimum_the_dense_gather_kernel_runs
+        PASS [   0.125s] (457/826) omega::expert_grouped_gemm_parity an_expert_index_past_the_slab_raises_the_same_error_as_cpu
+        PASS [   0.210s] (458/826) omega::expert_grouped_gemm_parity a_fused_epilogue_reads_its_operands_at_the_scattered_token
+        PASS [   0.084s] (459/826) omega::expert_grouped_gemm_parity ragged_rows_and_tokens_match_the_f32_oracle
+        PASS [   0.138s] (460/826) omega::expert_grouped_gemm_parity heavy_expert_and_empty_experts_match_the_f32_oracle
+        PASS [   0.161s] (461/826) omega::expert_grouped_gemm_parity control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor
+        PASS [   0.139s] (462/826) omega::expert_grouped_gemm_parity one_expert_receiving_every_token_spans_every_token_tile
+        PASS [   0.158s] (463/826) omega::expert_grouped_gemm_parity tokens_cycling_through_every_expert_match_the_f32_oracle
+        PASS [   0.266s] (464/826) omega::expert_grouped_gemm_stacked_parity a_fused_epilogue_reads_its_operands_at_the_sequence_and_selected_coordinates
+        PASS [   0.156s] (465/826) omega::expert_grouped_gemm_stacked_parity a_stacked_down_at_a_decode_step_takes_the_packed_matvec_not_the_dense_gather
+        PASS [   0.308s] (466/826) omega::expert_grouped_gemm_stacked_parity a_per_selected_activation_down_over_top_k_routing_matches_the_f32_oracle
+        PASS [   2.480s] (467/826) omega::cached_softmax_weights_rows_parity the_fused_k_row_softmax_weights_return_the_unfused_chains_bytes
+        PASS [   0.143s] (468/826) omega::expert_grouped_gemm_stacked_parity an_expert_index_past_the_slab_raises_the_same_error_as_cpu
+        PASS [   0.141s] (469/826) omega::expert_grouped_gemm_stacked_parity below_the_tiled_token_minimum_the_stacked_op_keeps_the_dense_gather_kernel
+        PASS [   0.161s] (470/826) omega::expert_grouped_gemm_stacked_parity ragged_rows_and_tokens_match_the_f32_oracle
+        PASS [   0.419s] (471/826) omega::expert_grouped_gemm_stacked_parity a_stacked_projection_at_decode_and_verify_widths_matches_the_f32_oracle
+        PASS [   0.728s] (472/826) omega::expert_grouped_gemm_stacked_parity a_shared_activation_gate_over_top_k_routing_matches_the_f32_oracle
+        PASS [   0.294s] (473/826) omega::expert_grouped_gemm_stacked_parity one_expert_named_by_most_tokens_spans_many_token_tiles
+        PASS [   0.128s] (474/826) omega::f16_real_checkpoint_parity metal_matmul_on_real_ffn_gate_inp_f16_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.023s] (475/826) omega::flat_grid_compile_gate the_packed_row_fixtures_take_the_launch_widths_their_labels_name
+        PASS [   0.511s] (476/826) omega::expert_grouped_gemm_stacked_parity control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor
+        PASS [   3.770s] (477/826) omega::cached_attention_row_tiled_parity the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_across_rows_and_cached_lengths
+        PASS [   0.614s] (478/826) omega::gdn_sequence_projection_parity qwen35_sequence_tail_projection_matches_cpu_on_packed_weight
+        PASS [   0.743s] (479/826) omega::flat_grid_compile_gate every_flat_form_kernel_compiles_with_the_metal_toolchain
+        PASS [   0.106s] (480/826) omega::grid_thread_index_overflow the_accumulation_bound_admits_the_cpu_f32_evaluation_of_the_same_rows
+        PASS [   0.105s] (481/826) omega::grid_thread_index_overflow the_accumulation_bound_rejects_a_corrupted_output_element
+        PASS [   0.310s] (482/826) omega::grid_thread_index_overflow tiled_per_layer_projection_at_1880_rows_is_fully_populated_and_inside_the_f32_accumulation_bound
+        PASS [   0.377s] (483/826) omega::grid_thread_index_overflow tiled_per_layer_projection_at_1873_rows_is_fully_populated_and_inside_the_f32_accumulation_bound
+        PASS [   0.102s] (484/826) omega::horizontal_merge_dispatch lazy_activation_and_output_exercise_the_fresh_allocation_path
+        PASS [   0.567s] (485/826) omega::horizontal_merge_dispatch dispatch_and_hazard_counts_match_the_design_note
+        PASS [   0.234s] (486/826) omega::horizontal_merge_dispatch raw_split_member_forces_its_own_dispatch
+        PASS [   0.565s] (487/826) omega::horizontal_merge_dispatch eight_independent_matvecs_run_unmerged_today
+        PASS [   0.107s] (488/826) omega::kind_filter_family_ablation family_exclusion_drops_exactly_the_named_family_layer_count
+        PASS [   0.080s] (489/826) omega::kind_filter_family_ablation family_typo_matching_zero_dispatches_is_a_typed_error
+        PASS [   0.010s] (490/826) omega::lowering_census decode_m1_every_weight_family_takes_the_packed_row_blocked_pair_dot_body
+        PASS [   0.009s] (491/826) omega::lowering_census long_prompt_m256_every_weight_family_takes_the_multi_row_body
+        PASS [   0.009s] (492/826) omega::lowering_census prefill_m31_every_weight_family_takes_the_multi_row_body
+        PASS [   0.009s] (493/826) omega::lowering_census prefill_m8_every_weight_family_takes_the_multi_row_body
+        PASS [   0.081s] (494/826) omega::kind_filter_family_ablation unknown_kind_term_is_a_typed_error_not_a_silent_full_drop
+        PASS [   0.570s] (495/826) omega::horizontal_merge_dispatch mixed_buffer_member_does_not_merge
+        PASS [   0.095s] (496/826) omega::metal_output_placement a_call_that_fails_before_its_commit_drops_the_closure_unrun
+        PASS [   0.098s] (497/826) omega::metal_output_placement a_placed_buffer_holds_both_runs_data_at_their_own_offsets
+        PASS [   0.178s] (498/826) omega::metal_output_placement a_four_dimensional_state_round_trips_through_placement
+        PASS [   0.094s] (499/826) omega::metal_output_placement a_program_reads_a_placed_write_from_a_later_op_in_the_same_call
+        PASS [   0.109s] (500/826) omega::metal_output_placement a_placed_input_can_be_planned_without_a_named_host_payload
+        PASS [   0.382s] (501/826) omega::metal_compile_gate emitted_source_compiles_with_the_metal_toolchain
+        PASS [   0.104s] (502/826) omega::metal_parity a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device
+        PASS [   0.108s] (503/826) omega::metal_output_placement the_overlapping_call_runs_its_closure_once_and_returns_the_plain_calls_output
+        PASS [   0.154s] (504/826) omega::metal_parity attention_block_spec_parity_matches_within_epsilon
+        PASS [   0.010s] (505/826) omega::metal_parity block_count_mismatch_produces_the_same_tensor_error_as_cpu
+        PASS [   0.129s] (506/826) omega::metal_parity axis_reduce_parity_holds_for_every_cooperative_reduce_body
+        PASS [   0.010s] (507/826) omega::metal_parity block_size_mismatch_produces_the_same_tensor_error_as_cpu
+        PASS [   0.154s] (508/826) omega::metal_parity axis_reduce_parity_holds_across_the_cooperative_serial_length_boundary
+        PASS [   0.146s] (509/826) omega::metal_parity cached_dense_kernel_does_not_override_reordered_head_split_layout
+        PASS [   0.125s] (510/826) omega::metal_parity cumsum_parity_matches_exactly
+        PASS [   0.151s] (511/826) omega::metal_parity conv_window_parity_matches_within_epsilon
+        PASS [   2.415s] (512/826) omega::grid_thread_index_overflow per_layer_projection_at_1880_rows_is_fully_populated_and_matches_the_cpu_oracle
+        PASS [   2.269s] (513/826) omega::grid_thread_index_overflow per_layer_projection_at_the_last_linear_row_count_is_fully_populated
+        PASS [   0.161s] (514/826) omega::metal_parity embedding_matmul_parity_matches_within_epsilon
+        PASS [   0.118s] (515/826) omega::metal_parity matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle
+        PASS [   0.163s] (516/826) omega::metal_parity matmul_parity_holds_over_a_contraction_spanning_multiple_simd_lanes
+        PASS [   0.171s] (517/826) omega::metal_parity embedding_lookup_parity_is_exact_for_integer_valued_inputs
+        PASS [   0.137s] (518/826) omega::metal_parity matmul_parity_is_exact_for_integer_valued_inputs
+        PASS [   0.144s] (519/826) omega::metal_parity metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path
+        PASS [   0.134s] (520/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::float32_at_float16
+        PASS [   0.144s] (521/826) omega::metal_parity metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path
+        PASS [   0.150s] (522/826) omega::metal_parity metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale
+        PASS [   0.163s] (523/826) omega::metal_parity metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path
+        PASS [   5.364s] (524/826) omega::coord_index32_ab attention_shape_608x8x128_bit_exact
+        PASS [   0.224s] (525/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q4k_at_float32
+        PASS [   0.136s] (526/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q5k_at_float16
+        PASS [   0.237s] (527/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q4_0_at_float16
+        PASS [   0.243s] (528/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::float32_at_float32
+        PASS [   0.241s] (529/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q4_0_at_float32
+        PASS [   0.297s] (530/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q4k_at_float16
+        PASS [   0.167s] (531/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q5k_at_float32
+        PASS [   0.162s] (532/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q8_0_at_float16
+        PASS [   0.168s] (533/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q8_0_at_float32
+        PASS [   0.174s] (534/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q6k_at_float32
+        PASS [   0.118s] (535/826) omega::metal_parity multi_output_parity_covers_both_an_intermediate_and_the_root
+        PASS [   0.222s] (536/826) omega::metal_parity metal_matmul_parity_across_codec_and_dtype::q6k_at_float16
+        PASS [   0.160s] (537/826) omega::metal_parity out_of_range_gather_index_produces_the_same_error_on_cpu_and_metal
+        PASS [   0.153s] (538/826) omega::metal_parity page_aligned_input_takes_the_no_copy_metal_upload_path
+        PASS [   0.110s] (539/826) omega::metal_parity square_root_parity_matches_within_epsilon
+        PASS [   0.155s] (540/826) omega::metal_parity softmax_parity_matches_within_epsilon
+        PASS [   0.171s] (541/826) omega::metal_parity multiply_sqrt_reciprocal_chain_matches_cpu_on_a_real_device
+        PASS [   0.171s] (542/826) omega::metal_parity reciprocal_parity_matches_within_epsilon
+        PASS [   0.160s] (543/826) omega::metal_parity tanh_parity_saturates_instead_of_nan_on_large_magnitude_inputs
+        PASS [   0.167s] (544/826) omega::metal_parity tanh_chain_parity_matches_within_epsilon
+        PASS [   0.160s] (545/826) omega::metal_real_forward metal_runs_the_real_forward_graph_and_agrees_with_the_cpu
+        PASS [   0.180s] (546/826) omega::metal_parity symbolic_extent_parity_holds_across_two_different_bindings
+        PASS [   0.176s] (547/826) omega::metal_real_forward fused_cached_attention_root_agrees_between_cpu_and_metal
+        PASS [   3.470s] (548/826) omega::grid_thread_index_overflow per_layer_projection_at_1873_rows_is_fully_populated_and_matches_the_cpu_oracle
+        PASS [   0.228s] (549/826) omega::metal_real_forward metal_agrees_with_cpu_on_a_nonempty_kv_cache
+        PASS [   0.063s] (550/826) omega::mixed_expert_metal_execution mixed_expert_source_rejects_unsupported_codec_before_device_execution
+        PASS [   0.155s] (551/826) omega::metal_real_forward running_the_same_plan_twice_reproduces_the_first_run_exactly
+        PASS [   0.128s] (552/826) omega::moe_gather_parity moe_gather_parity_f32_bit_exact_on_metal
+        PASS [   0.213s] (553/826) omega::mixed_expert_metal_execution mixed_expert_source_and_recurrent_state_placement_share_one_execution
+        PASS [   0.171s] (554/826) omega::moe_gather_parity moe_gather_parity_q4_k_within_tolerance_on_metal
+        PASS [   0.249s] (555/826) omega::mixed_expert_metal_execution mixed_q2k_q4k_expert_source_executes_on_metal
+        PASS [   0.254s] (556/826) omega::mixed_expert_metal_execution mixed_kernel_cache_keeps_each_route_index_binding
+        PASS [   0.241s] (557/826) omega::mixed_expert_metal_execution q3k_q4k_seven_rows_route_distinct_high_experts_matches_cpu
+        PASS [   0.121s] (558/826) omega::moe_gather_parity moe_gather_parity_q6_k_within_tolerance_on_metal
+        PASS [   0.083s] (559/826) omega::moe_gather_parity moe_gather_parity_q8_0_within_measured_tolerance_on_metal
+        PASS [   0.010s] (560/826) omega::packed_row_blocked_s1_byte_identity single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_body
+        PASS [   0.160s] (561/826) omega::moe_gather_parity one_token_moe_gather_q4_k_uses_the_routed_expert_on_metal
+        PASS [   0.154s] (562/826) omega::packed_row_attn_output_shape_parity q4_0_attention_output_k2048_rows4_fills_exactly_one_simdgroup
+        PASS [   0.154s] (563/826) omega::packed_row_attn_output_shape_parity q4_0_attention_output_k2048_rows6_masks_the_lanes_past_the_last_row
+        PASS [   0.163s] (564/826) omega::packed_row_attn_output_shape_parity q4_0_attention_output_k2048_rows1536_every_lane_writes_its_own_row
+        PASS [   0.179s] (565/826) omega::onnx_metal_parity an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper
+        PASS [   0.160s] (566/826) omega::packed_row_multi_activation_parity q4k_eight_activation_rows_is_byte_identical_across_twenty_runs
+        PASS [   0.097s] (567/826) omega::packed_row_multi_activation_parity q4k_eight_activation_rows_match_independent_reference
+        PASS [   0.318s] (568/826) omega::moe_topk_fused_fold_parity moe_topk_fused_fold_parity_sweep_on_metal
+        PASS [   0.147s] (569/826) omega::packed_row_multi_activation_parity q4k_two_activation_rows_match_independent_reference
+        PASS [   0.162s] (570/826) omega::packed_row_multi_activation_parity q4k_single_activation_row_matches_independent_reference
+        PASS [   0.143s] (571/826) omega::packed_row_multi_activation_parity q5k_eight_activation_rows_match_independent_reference
+        PASS [   0.124s] (572/826) omega::packed_row_multi_activation_parity q5k_four_activation_rows_match_independent_reference
+        PASS [   0.175s] (573/826) omega::packed_row_multi_activation_parity q4k_four_activation_rows_match_independent_reference
+        PASS [   0.175s] (574/826) omega::packed_row_multi_activation_parity q4k_nine_activation_rows_crosses_the_tile_boundary_and_matches_reference
+        PASS [   0.097s] (575/826) omega::packed_row_multi_activation_parity q5k_nine_activation_rows_crosses_the_tile_boundary_and_matches_reference
+        PASS [   7.342s] (576/826) omega::cached_attention_row_tiled_parity the_row_tiled_kernels_hold_parity_with_the_cpu_evaluator_at_prefill_widths
+        PASS [   0.191s] (577/826) omega::packed_row_multi_activation_parity q6k_eight_activation_rows_match_independent_reference
+        PASS [   0.123s] (578/826) omega::packed_row_multi_activation_parity q6k_two_activation_rows_match_independent_reference
+        PASS [   0.180s] (579/826) omega::packed_row_multi_activation_parity q6k_single_activation_row_matches_independent_reference
+        PASS [   0.181s] (580/826) omega::packed_row_multi_activation_parity q6k_nine_activation_rows_crosses_the_tile_boundary_and_matches_reference
+        PASS [   0.196s] (581/826) omega::packed_row_multi_activation_parity q5k_two_activation_rows_match_independent_reference
+        PASS [   0.194s] (582/826) omega::packed_row_multi_activation_parity q6k_four_activation_rows_match_independent_reference
+        PASS [   0.201s] (583/826) omega::packed_row_multi_activation_parity q5k_single_activation_row_matches_independent_reference
+        PASS [   0.110s] (584/826) omega::packed_row_multi_row_epilogue_pairs q4_0_tokens2_k1536_rows1536_two_pairs_per_row_group
+        PASS [   0.163s] (585/826) omega::packed_row_multi_row_epilogue_pairs q4_0_tokens3_k1536_rows6_masks_the_pairs_past_the_last_row
+        PASS [   0.162s] (586/826) omega::packed_row_multi_row_epilogue_pairs q6k_tokens8_k1536_rows64_pair_index_is_the_token_slot
+        PASS [   0.163s] (587/826) omega::packed_row_multi_row_epilogue_pairs q6k_tokens4_k1536_rows512_one_row_per_simdgroup
+        PASS [   0.167s] (588/826) omega::packed_row_multi_row_epilogue_pairs q4_0_tokens9_k1536_rows256_second_token_group_is_partial
+        PASS [   0.170s] (589/826) omega::packed_row_multi_row_epilogue_pairs q4_0_tokens8_k1536_rows512_thirty_two_pairs_fill_one_round_of_lanes
+        PASS [   0.180s] (590/826) omega::packed_row_multi_row_epilogue_pairs q4_0_tokens4_k1536_rows1536_sixteen_pairs
+        PASS [  10.310s] (591/826) omega::coord_index32_ab attention_shape_608x8x256_bit_exact
+        PASS [  14.315s] (592/826) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down
+        PASS [   0.242s] (593/826) omega::packed_row_multi_row_index32_ab q4_0_tokens1_k1536_rows6144_single_token
+        PASS [   0.418s] (594/826) omega::packed_row_multi_row_index32_ab q4_0_tokens27_k1536_rows12288
+        PASS [   0.602s] (595/826) omega::packed_row_multi_row_index32_ab q4_0_tokens600_k12288_rows1536
+        PASS [   0.572s] (596/826) omega::packed_row_multi_row_index32_ab q4_0_tokens600_k1536_rows12288
+        PASS [   0.245s] (597/826) omega::packed_row_multi_row_index32_ab q4_0_tokens9_k1536_rows6144_tail
+        PASS [   1.995s] (598/826) omega::packed_row_multi_row_index32_ab q4k_tokens1_k1536_rows6144_single_token
+        PASS [   7.794s] (599/826) omega::packed_row_multi_row_index32_ab q4k_tokens27_k1536_rows12288_not_admitted
+        PASS [   7.793s] (600/826) omega::packed_row_multi_row_index32_ab q4k_tokens600_k1536_rows12288_not_admitted
+        PASS [   3.926s] (601/826) omega::packed_row_multi_row_index32_ab q4k_tokens9_k1536_rows6144_tail_not_admitted
+        PASS [   0.899s] (602/826) omega::packed_row_multi_row_index32_ab q6k_tokens1_k1536_rows6144_single_token
+        PASS [   1.726s] (603/826) omega::packed_row_multi_row_index32_ab q6k_tokens27_k1536_rows12288
+        PASS [   1.935s] (604/826) omega::packed_row_multi_row_index32_ab q6k_tokens600_k12288_rows1536
+        PASS [   1.919s] (605/826) omega::packed_row_multi_row_index32_ab q6k_tokens600_k1536_rows12288
+        PASS [   0.909s] (606/826) omega::packed_row_multi_row_index32_ab q6k_tokens9_k1536_rows6144_tail
+        PASS [   0.311s] (607/826) omega::packed_row_multi_row_index32_ab q8_0_tokens1_k1536_rows6144_single_token
+        PASS [   0.562s] (608/826) omega::packed_row_multi_row_index32_ab q8_0_tokens27_k1536_rows12288
+        PASS [   0.760s] (609/826) omega::packed_row_multi_row_index32_ab q8_0_tokens600_k12288_rows1536
+        PASS [   0.721s] (610/826) omega::packed_row_multi_row_index32_ab q8_0_tokens600_k1536_rows12288
+        PASS [   0.320s] (611/826) omega::packed_row_multi_row_index32_ab q8_0_tokens9_k1536_rows6144_tail
+        PASS [   0.257s] (612/826) omega::packed_row_multi_row_unroll_ab q4_0_tokens1_k1536_rows6144_single_token
+        PASS [   0.261s] (613/826) omega::packed_row_multi_row_unroll_ab q4_0_tokens9_k1536_rows6144_tail
+        PASS [   0.306s] (614/826) omega::packed_row_multi_row_unroll_ab q4_0_tokens27_k1536_rows12288
+        PASS [   0.465s] (615/826) omega::packed_row_multi_row_unroll_ab q4_0_tokens600_k12288_rows1536
+        PASS [   0.470s] (616/826) omega::packed_row_multi_row_unroll_ab q4_0_tokens600_k1536_rows12288
+        PASS [   0.564s] (617/826) omega::packed_row_multi_row_unroll_ab q6k_tokens1_k1536_rows6144_single_token
+        PASS [   0.270s] (618/826) omega::packed_row_multi_row_unroll_ab q8_0_tokens1_k1536_rows6144_single_token
+        PASS [   0.465s] (619/826) omega::packed_row_multi_row_unroll_ab q8_0_tokens27_k1536_rows12288
+        PASS [   0.627s] (620/826) omega::packed_row_multi_row_unroll_ab q6k_tokens9_k1536_rows6144_tail
+        PASS [   0.476s] (621/826) omega::packed_row_multi_row_unroll_ab q8_0_tokens600_k12288_rows1536
+        PASS [   1.217s] (622/826) omega::packed_row_multi_row_unroll_ab q4k_tokens1_k1536_rows6144_single_token
+        PASS [   0.268s] (623/826) omega::packed_row_multi_row_unroll_ab q8_0_tokens9_k1536_rows6144_tail
+        PASS [   1.107s] (624/826) omega::packed_row_multi_row_unroll_ab q6k_tokens27_k1536_rows12288
+        PASS [   0.197s] (625/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens1_k1536_rows6144_routes_unaffected_by_hoist
+        PASS [   1.250s] (626/826) omega::packed_row_multi_row_unroll_ab q6k_tokens600_k12288_rows1536
+        PASS [   0.151s] (627/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens27_k1536_rows2048_bit_exact_across_hoist
+        PASS [   1.255s] (628/826) omega::packed_row_multi_row_unroll_ab q6k_tokens600_k1536_rows12288
+        PASS [   0.532s] (629/826) omega::packed_row_multi_row_unroll_ab q8_0_tokens600_k1536_rows12288
+        PASS [   0.395s] (630/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens27_k12288_rows1536_bit_exact_across_hoist
+        PASS [   0.210s] (631/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens27_k1536_rows6144_bit_exact_across_hoist
+        PASS [   0.327s] (632/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens27_k1536_rows12288_bit_exact_across_hoist
+        PASS [   0.168s] (633/826) omega::packed_row_q4_0_multi_row_pair_lane_ab distinct_activation_rows_produce_distinct_output_rows
+        PASS [   0.125s] (634/826) omega::packed_row_q4_0_multi_row_pair_lane_ab the_generic_arm_is_reachable_and_sums_in_a_different_order
+        PASS [   0.118s] (635/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens2_k1536_rows4096_match_the_oracle
+        PASS [   0.083s] (636/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens2_k256_rows64_match_the_oracle_with_two_groups
+        PASS [   0.266s] (637/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens8_k1536_rows6144_bit_exact_across_hoist
+        PASS [   0.226s] (638/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens9_k1536_rows6144_bit_exact_across_hoist_partial_group
+        PASS [   0.093s] (639/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens2_rows6_fewer_rows_than_two_groups_match_the_oracle
+        PASS [   0.120s] (640/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens3_k1536_rows2048_match_the_oracle_through_a_padded_cap
+        PASS [   0.133s] (641/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens3_k1536_rows512_strided_activation_stays_on_the_generic_arm_and_matches_the_oracle
+        PASS [   0.129s] (642/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens4_k1536_rows2048_match_the_oracle
+        PASS [   0.138s] (643/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens4_k1536_rows1536_fused_epilogue_matches_the_oracle
+        PASS [   0.198s] (644/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens2_k6144_rows1536_match_the_oracle_over_forty_eight_groups
+        PASS [   0.119s] (645/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens8_k1536_rows2048_match_the_oracle
+        PASS [   0.090s] (646/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens8_k1536_rows512_fused_epilogue_matches_the_oracle_with_thirty_two_pairs
+        PASS [   0.114s] (647/826) omega::packed_row_q6k_multi_row_pair_dot_ab distinct_activation_rows_produce_distinct_output_rows
+        PASS [   0.112s] (648/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens2_k256_rows64_match_single_row_with_one_super_block_per_row
+        PASS [   0.139s] (649/826) omega::packed_row_q4_0_multi_row_pair_lane_ab tokens9_k1536_rows1024_match_the_oracle_across_a_partial_second_group
+        PASS [   0.537s] (650/826) omega::packed_row_q4_0_multi_row_hoist_ab tokens510_k1536_rows6144_bit_exact_across_hoist_long_bucket
+        PASS [   0.133s] (651/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens3_k1536_rows512_strided_activation_match_single_row
+        PASS [   0.245s] (652/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens2_k1536_rows4096_match_single_row
+        PASS [   0.025s] (653/826) omega::packed_row_rows_per_simdgroup_ab default_env_emits_node_94_shape_for_diffing_against_the_capture
+        PASS [   0.154s] (654/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens9_k1536_rows1024_match_single_row_across_a_partial_second_group
+        PASS [   0.252s] (655/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens3_k1536_rows4096_match_single_row_through_a_padded_cap
+        PASS [   0.200s] (656/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens4_k1536_rows2048_match_single_row
+        PASS [   0.204s] (657/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens8_k1536_rows2048_match_single_row
+        PASS [   2.278s] (658/826) omega::packed_row_multi_row_unroll_ab q4k_tokens9_k1536_rows6144_tail_not_admitted
+        PASS [   0.333s] (659/826) omega::packed_row_q6k_multi_row_pair_dot_ab tokens2_k6144_rows1536_match_single_row_over_twenty_four_super_blocks
+        PASS [   0.124s] (660/826) omega::packed_row_rows_per_simdgroup_ab k1536_rows1540_tail_not_divisible_by_eight_bit_exact
+        PASS [   0.114s] (661/826) omega::packed_row_rows_per_simdgroup_ab k1536_rows256_bit_exact_across_row_group_widths
+        PASS [   0.136s] (662/826) omega::packed_row_rows_per_simdgroup_ab k1536_rows2048_bit_exact_across_row_group_widths
+        PASS [   0.129s] (663/826) omega::packed_row_rows_per_simdgroup_ab k2048_rows1536_bit_exact_across_row_group_widths
+        PASS [   0.189s] (664/826) omega::packed_row_rows_per_simdgroup_ab k1536_rows6144_bit_exact_across_row_group_widths
+        PASS [   0.092s] (665/826) omega::placed_buffer_over placed_buffer_over_mmap_range_round_trips
+        PASS [   0.187s] (666/826) omega::packed_row_single_token_epilogue q4_0_one_token_k1536_rows6_masks_the_lanes_past_the_last_row
+        PASS [   0.154s] (667/826) omega::packed_row_single_token_epilogue q4_0_one_token_k256_rows5_leaves_a_partial_group_of_one_row
+        PASS [   0.147s] (668/826) omega::packed_row_single_token_epilogue q6_k_one_token_k1024_rows7_folds_one_row_per_simdgroup
+        PASS [   0.195s] (669/826) omega::packed_row_single_token_epilogue q4_0_one_token_k1536_rows1536_every_lane_writes_its_own_row
+        PASS [   0.188s] (670/826) omega::packed_row_single_token_epilogue q4_0_one_token_k256_rows3_fills_fewer_rows_than_one_group
+        PASS [   0.009s] (671/826) omega::q2k_unpack q2k_block_geometry_matches_the_gguf_codec
+        PASS [   0.012s] (672/826) omega::q2k_unpack q2k_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly
+        PASS [   0.009s] (673/826) omega::q3k_unpack q3k_block_geometry_matches_the_gguf_codec
+        PASS [   0.010s] (674/826) omega::q3k_unpack q3k_scale_trails_the_block_not_leads_it
+        PASS [   0.011s] (675/826) omega::q3k_unpack q3k_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly
+        PASS [   0.044s] (676/826) omega::q2k_unpack q2k_unpack_msl_assembles_with_the_real_metal_toolchain
+        PASS [   0.281s] (677/826) omega::packed_row_rows_per_simdgroup_ab k6144_rows1536_bit_exact_across_row_group_widths
+        PASS [   0.047s] (678/826) omega::q3k_unpack q3k_unpack_msl_assembles_with_the_real_metal_toolchain
+        PASS [   0.144s] (679/826) omega::q2k_metal_parity q2k_metal_matmul_matches_dequantized_cpu
+        PASS [   0.166s] (680/826) omega::plan_refit_parity refit_declines_and_leaves_the_plan_executable_when_the_new_position_count_moves
+        PASS [   0.274s] (681/826) omega::plan_refit_parity multi_row_refit_matches_a_fresh_plan_across_bucket_crossings
+        PASS [   0.222s] (682/826) omega::plan_refit_parity single_range_refit_matches_a_fresh_plan_across_bucket_crossings
+        PASS [   0.201s] (683/826) omega::q4_0_real_checkpoint_parity metal_multi_token27_on_real_attn_k_q4_0_bytes_matches_f32_cpu
+        PASS [   0.259s] (684/826) omega::plan_refit_parity two_range_refit_matches_a_fresh_plan_across_bucket_crossings
+        PASS [   0.011s] (685/826) omega::q4_0_unpack q4_0_block_geometry_matches_the_gguf_codec
+        PASS [   0.012s] (686/826) omega::q4_0_unpack q4_0_has_no_sub_block_structure
+        PASS [   0.218s] (687/826) omega::q4_0_real_checkpoint_parity metal_matmul_on_real_attn_k_q4_0_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.011s] (688/826) omega::q4_0_unpack q4_0_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly
+        PASS [   0.208s] (689/826) omega::q4_0_real_checkpoint_parity metal_multi_token600_on_real_attn_k_q4_0_bytes_matches_f32_cpu
+        PASS [   0.048s] (690/826) omega::q4_0_unpack q4_0_unpack_msl_assembles_with_the_real_metal_toolchain
+        PASS [   0.120s] (691/826) omega::q4k_ggml_port_strided_activation ggml_port_matches_the_reference_against_an_interleaved_non_unit_stride_activation
+        PASS [   0.165s] (692/826) omega::q4k_ggml_port_parity ggml_port_matches_dequantized_f32_cpu_on_a_ragged_row_count_and_short_k
+        PASS [   0.164s] (693/826) omega::q4k_ggml_port_parity ggml_port_matches_dequantized_f32_cpu_on_real_attn_q_weight
+        PASS [   0.143s] (694/826) omega::q4k_ggml_port_parity ggml_port_matches_dequantized_f32_cpu_on_real_ffn_up_weight
+        PASS [   0.011s] (695/826) omega::q4k_unpack q4k_block_geometry_matches_the_gguf_codec
+        PASS [   0.012s] (696/826) omega::q4k_unpack q4k_low_and_high_nibbles_of_one_byte_land_32_elements_apart
+        PASS [   0.014s] (697/826) omega::q4k_unpack q4k_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly
+        PASS [   0.372s] (698/826) omega::q4_0_tiled_gemm_batched_run8_parity attn_q_projection_batched_run8_matches_row_blocked_and_f32_oracle
+        PASS [   0.367s] (699/826) omega::q4_0_tiled_gemm_batched_run8_parity attn_q_projection_batched_run8_matches_row_blocked_and_f32_oracle_with_a_fused_epilogue
+        PASS [   0.054s] (700/826) omega::q4k_unpack q4k_unpack_msl_assembles_with_the_real_metal_toolchain
+        PASS [   0.009s] (701/826) omega::q5k_unpack q5k_block_geometry_matches_the_gguf_codec
+        PASS [   0.009s] (702/826) omega::q5k_unpack q5k_qh_bit_is_selected_by_mask_not_by_a_second_qh_index
+        PASS [   0.014s] (703/826) omega::q5k_unpack q5k_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly
+        PASS [   0.132s] (704/826) omega::q4k_ggml_port_strided_activation ggml_port_matches_the_reference_with_a_unit_stride_contiguous_activation
+        PASS [   0.133s] (705/826) omega::q4k_matmul_layout metal_agrees_with_cpu_and_the_independent_reference_on_a_q4k_weight_declared_reduction_axis_first
+        PASS [   0.143s] (706/826) omega::q4k_real_checkpoint_parity metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.054s] (707/826) omega::q5k_unpack q5k_unpack_msl_assembles_with_the_real_metal_toolchain
+        PASS [   0.449s] (708/826) omega::q4_0_tiled_gemm_batched_run8_parity ffn_gate_projection_batched_run8_matches_row_blocked_and_f32_oracle
+        PASS [   0.431s] (709/826) omega::q4_0_tiled_gemm_batched_run8_parity ffn_gate_projection_batched_run8_matches_row_blocked_and_f32_oracle_with_a_fused_epilogue
+        PASS [   0.140s] (710/826) omega::q5k_real_checkpoint_parity metal_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.013s] (711/826) omega::q6k_unpack q6k_block_geometry_matches_the_gguf_codec
+        PASS [   0.009s] (712/826) omega::q6k_unpack q6k_scale_trails_the_block_not_leads_it
+        PASS [   0.138s] (713/826) omega::q5k_real_checkpoint_parity q5k_pair_dot_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.009s] (714/826) omega::q6k_unpack q6k_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly
+        PASS [   0.008s] (715/826) omega::q8_0_unpack q8_0_block_geometry_matches_the_gguf_codec
+        PASS [   0.009s] (716/826) omega::q8_0_unpack q8_0_has_no_sub_block_structure
+        PASS [   0.008s] (717/826) omega::q8_0_unpack q8_0_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly
+        PASS [   0.126s] (718/826) omega::q6k_ggml_port_strided_activation ggml_port_matches_the_reference_with_a_unit_stride_contiguous_activation
+        PASS [   0.110s] (719/826) omega::q6k_matmul_strided_activation metal_agrees_with_the_independent_reference_on_a_q6k_weight_against_an_interleaved_non_unit_stride_activation
+        PASS [   0.041s] (720/826) omega::q6k_unpack q6k_unpack_msl_assembles_with_the_real_metal_toolchain
+        PASS [   0.133s] (721/826) omega::q6k_ggml_port_strided_activation ggml_port_matches_the_reference_against_an_interleaved_non_unit_stride_activation
+        PASS [   0.042s] (722/826) omega::q8_0_unpack q8_0_unpack_msl_assembles_with_the_real_metal_toolchain
+        PASS [   0.130s] (723/826) omega::q6k_real_checkpoint_parity metal_matmul_on_real_output_weight_q6k_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.162s] (724/826) omega::q8_0_real_checkpoint_parity metal_matmul_on_real_attn_k_q8_0_bytes_matches_the_dequantized_f32_cpu_path
+        PASS [   0.109s] (725/826) omega::reduce_epilogue_fusion_parity the_fused_epilogue_holds_parity_at_every_kv_capacity_bucket_padding
+        PASS [   0.190s] (726/826) omega::qwen3_gqa_qk_norm_two_range_parity the_two_range_cached_attention_kernel_holds_parity_on_the_qwen3_gqa_qk_norm_shape
+        PASS [   0.103s] (727/826) omega::reduce_epilogue_fusion_parity the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width
+        PASS [   0.298s] (728/826) omega::qwen35_mixer_multi_position_metal_parity metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs::m4
+        PASS [   0.178s] (729/826) omega::reduce_epilogue_fusion_parity the_fused_epilogue_is_byte_identical_across_twenty_dispatches
+        PASS [   0.147s] (730/826) omega::rmsnorm_epilogue_bit_identity every_gemma4_norm_shape_stays_within_ten_ulp_of_the_unfused_pair
+        PASS [   0.106s] (731/826) omega::rmsnorm_epilogue_bit_identity hidden_and_single_head_norms_keep_every_bit_under_the_bit_exact_policy
+        PASS [   0.355s] (732/826) omega::qwen3_gqa_qk_norm_two_range_parity the_two_range_cached_attention_kernel_holds_parity_under_production_policy_past_the_split_knee
+        PASS [   0.125s] (733/826) omega::rmsnorm_fused_epilogue_cost rmsnorm_fused_epilogue_air_division_count_decode_shape
+        PASS [   0.128s] (734/826) omega::rmsnorm_fused_epilogue_cost rmsnorm_fused_epilogue_air_division_count_prefill_shape
+        PASS [   0.514s] (735/826) omega::qwen35_mixer_multi_position_metal_parity metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs::m8
+        PASS [   0.592s] (736/826) omega::qwen35_mixer_multi_position_metal_parity metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs::m13
+        PASS [   0.104s] (737/826) omega::sequence_position_slice_parity metal_sequence_position_slice_matches_cpu_and_source_row_at_position::position_0
+        PASS [   0.088s] (738/826) omega::sequence_position_slice_parity metal_sequence_position_slice_matches_cpu_and_source_row_at_position::position_12
+        PASS [   0.084s] (739/826) omega::sequence_position_slice_parity metal_sequence_position_slice_matches_cpu_and_source_row_at_position::position_5
+        PASS [   0.086s] (740/826) omega::step_buffer_allocations lookup::a_recycled_fault_buffer_still_reports_an_out_of_range_gather_and_is_not_poisoned_by_it
+        PASS [   0.784s] (741/826) omega::qwen35_mixer_multi_position_metal_parity metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs::m16
+        PASS [   0.156s] (742/826) omega::tiled_gemm_codec_parity control_dense_oracle_built_from_other_weights_disagrees_by_a_gross_factor
+        PASS [   0.233s] (743/826) omega::tiled_gemm_codec_parity dense_1024_by_512_projection_shape_matches_for_q8_0
+        PASS [   0.212s] (744/826) omega::tiled_gemm_codec_parity dense_per_layer_projection_shape_matches_for_float16
+        PASS [   0.814s] (745/826) omega::rmsnorm_fused_epilogue_cost rmsnorm_unfused_vs_fused_decode_shape
+        PASS [   0.106s] (746/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q3k
+        PASS [   0.160s] (747/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::float16
+        PASS [   0.485s] (748/826) omega::tiled_gemm_codec_parity control_grouped_oracle_built_from_other_experts_disagrees_by_a_gross_factor
+        PASS [   4.435s] (749/826) omega::packed_row_multi_row_unroll_ab q4k_tokens27_k1536_rows12288_not_admitted
+        PASS [   0.897s] (750/826) omega::rmsnorm_fused_epilogue_cost rmsnorm_unfused_vs_fused_prefill_shape
+        PASS [   4.444s] (751/826) omega::packed_row_multi_row_unroll_ab q4k_tokens600_k1536_rows12288_not_admitted
+        PASS [   0.148s] (752/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q5_0
+        PASS [   0.171s] (753/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q4_0
+        PASS [   0.097s] (754/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q5_1
+        PASS [   0.157s] (755/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q4k
+        PASS [   0.136s] (756/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q8_0
+        PASS [   0.144s] (757/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q6k
+        PASS [   0.151s] (758/826) omega::tiled_gemm_codec_parity dense_tiled_gemm_matches_the_cpu_dequant_oracle_with_partial_row_and_token_tiles::q5k
+        PASS [   0.151s] (759/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::float16
+        PASS [   0.197s] (760/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q4k
+        PASS [   0.126s] (761/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q5_1
+        PASS [   0.135s] (762/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q5_0
+        PASS [   0.240s] (763/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q4_0
+        PASS [   0.282s] (764/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q3k
+        PASS [   0.200s] (765/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q5k
+        PASS [   0.166s] (766/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q6k
+        PASS [   0.142s] (767/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_runs_flat_codecs_at_an_extent_the_row_blocked_kernel_refuses::q5_0
+        PASS [   0.146s] (768/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_runs_flat_codecs_at_an_extent_the_row_blocked_kernel_refuses::float16
+        PASS [   0.127s] (769/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_runs_flat_codecs_at_an_extent_the_row_blocked_kernel_refuses::q5_1
+        PASS [   0.173s] (770/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_matches_the_cpu_dequant_oracle_for_a_heavy_expert_and_empty_experts::q8_0
+        PASS [   0.009s] (771/826) omega::tiled_gemm_codec_parity the_q5_0_encoder_round_trips_through_the_cpu_dequantizer_within_one_step
+        PASS [   0.009s] (772/826) omega::tiled_gemm_codec_parity the_q5_1_encoder_round_trips_through_the_cpu_dequantizer_within_one_step
+        PASS [   0.120s] (773/826) omega::tiled_gemm_codec_parity flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refuses::float16
+        PASS [   0.102s] (774/826) omega::tiled_gemm_codec_parity flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refuses::q4_0
+        PASS [   0.134s] (775/826) omega::tiled_gemm_codec_parity expert_grouped_gemm_runs_flat_codecs_at_an_extent_the_row_blocked_kernel_refuses::q8_0
+        PASS [   0.141s] (776/826) omega::tiled_gemm_codec_parity flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refuses::q5_1
+        PASS [   0.134s] (777/826) omega::tiled_gemm_codec_parity flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refuses::q8_0
+        PASS [   0.144s] (778/826) omega::tiled_gemm_codec_parity flat_codecs_run_the_tiled_gemm_at_an_extent_the_row_blocked_kernel_refuses::q5_0
+        PASS [   0.100s] (779/826) omega::tiled_gemm_grid2d_parity dense_pv_grid2d_matches_flattened_gid_at_the_real_weather_attended_shape
+        PASS [   0.209s] (780/826) omega::tiled_gemm_direct_store_parity direct_store_matches_restage_path_at_a_fully_interior_shape
+        PASS [   0.161s] (781/826) omega::tiled_gemm_grid2d_parity dense_score_grid2d_matches_flattened_gid_with_a_partial_edge_tile
+        PASS [   0.293s] (782/826) omega::tiled_gemm_direct_store_parity direct_store_matches_restage_path_at_the_minimum_admitted_token_count
+        PASS [   0.197s] (783/826) omega::tiled_gemm_grid2d_parity dense_score_grid2d_matches_flattened_gid_at_the_real_weather_prefill_shape
+        PASS [   0.197s] (784/826) omega::tiled_gemm_grid2d_parity dense_score_grid2d_matches_flattened_gid_combined_with_direct_store
+        PASS [   0.284s] (785/826) omega::tiled_gemm_direct_store_parity direct_store_matches_restage_path_with_a_partial_edge_tile
+        PASS [   0.204s] (786/826) omega::tiled_gemm_grid2d_parity dense_pv_grid2d_matches_flattened_gid_combined_with_direct_store
+        PASS [   0.211s] (787/826) omega::tiled_gemm_grid2d_parity q4_0_grid2d_matches_flattened_gid_at_a_fully_interior_shape
+        PASS [   0.129s] (788/826) omega::tiled_gemm_grid2d_parity q4k_grid2d_matches_flattened_gid_combined_with_wws_and_direct_store
+        PASS [   0.133s] (789/826) omega::tiled_gemm_grid2d_parity q4k_grid2d_matches_flattened_gid_at_a_fully_interior_shape
+        PASS [   0.127s] (790/826) omega::tiled_gemm_grid2d_parity q4k_grid2d_matches_flattened_gid_with_a_partial_edge_tile
+        PASS [   0.257s] (791/826) omega::tiled_gemm_grid2d_parity q4_0_grid2d_matches_flattened_gid_with_a_partial_edge_tile
+        PASS [   0.257s] (792/826) omega::tiled_gemm_grid2d_parity q4_0_grid2d_matches_flattened_gid_combined_with_wws_and_direct_store
+        PASS [   0.260s] (793/826) omega::tiled_gemm_grid2d_parity q4_0_grid2d_matches_flattened_gid_combined_with_wide_weight_stage
+        PASS [   0.324s] (794/826) omega::tiled_gemm_grid2d_parity q4_0_grid2d_matches_flattened_gid_combined_with_direct_store
+        PASS [   0.232s] (795/826) omega::tiled_gemm_mm_layout_parity q4_0_dynamic_threadgroup_memory_matches_the_declared_array_at_the_gemma4_prefill_width
+        PASS [   0.232s] (796/826) omega::tiled_gemm_mm_layout_parity q4_0_dynamic_threadgroup_memory_matches_the_declared_array_on_the_row_major_layout
+        PASS [   0.270s] (797/826) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width
+        PASS [   0.272s] (798/826) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_at_the_gemma4_prefill_width_with_the_direct_store_default
+        PASS [   0.289s] (799/826) omega::tiled_gemm_mm_layout_parity q4_0_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles
+        PASS [   0.282s] (800/826) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_combined_with_direct_store
+        PASS [   0.210s] (801/826) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_with_a_full_tile_grid
+        PASS [   0.225s] (802/826) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_with_a_partial_feature_tile
+        PASS [   0.324s] (803/826) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_on_the_generic_activation_read
+        PASS [   0.160s] (804/826) omega::tiled_gemm_mm_layout_parity q4k_mm_layout_matches_row_major_with_a_full_tile_grid
+        PASS [   0.148s] (805/826) omega::tiled_gemm_mm_layout_parity q4k_mm_layout_matches_row_major_with_partial_tiles
+        PASS [   0.208s] (806/826) omega::tiled_gemm_mm_layout_parity q4_0_mm_layout_matches_row_major_with_a_partial_token_tile
+        PASS [   0.262s] (807/826) omega::tiled_gemm_mm_layout_parity q4k_dynamic_threadgroup_memory_matches_the_declared_array_with_partial_tiles
+        PASS [   0.226s] (808/826) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_a_boundary_token_count
+        PASS [   0.228s] (809/826) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_min_tokens
+        PASS [   0.222s] (810/826) omega::tiled_gemm_staging_switches_parity attn_q_all_staging_switches_match_the_f32_oracle_at_prefill_token_count
+        PASS [   0.284s] (811/826) omega::tiled_gemm_staging_switches_parity ffn_gate_all_staging_switches_match_the_f32_oracle_at_a_boundary_token_count
+        PASS [   0.157s] (812/826) omega::tiled_gemm_wide_weight_stage_parity q4k_wide_weight_stage_matches_default_path_with_a_partial_edge_tile
+        PASS [   0.176s] (813/826) omega::tiled_gemm_wide_weight_stage_parity q4k_wide_weight_stage_matches_default_path_at_a_fully_interior_shape
+        PASS [   0.193s] (814/826) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_with_a_partial_edge_tile
+        PASS [   0.251s] (815/826) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_combined_with_direct_store
+        PASS [   0.300s] (816/826) omega::tiled_gemm_wide_weight_stage_parity q4_0_wide_weight_stage_matches_default_path_at_a_fully_interior_shape
+        PASS [   0.170s] (817/826) omega::training_step_parity a_training_step_runs_on_metal_at_cpu_parity
+        PASS [   0.180s] (818/826) omega::wide_cooperative_reduce_key_collision cooperative_reduce_extents_never_share_a_pipeline_cache_entry
+        PASS [   0.181s] (819/826) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_add_holds_parity_on_ragged_extents
+        PASS [   0.180s] (820/826) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_maximum_holds_parity_on_ragged_extents
+        PASS [   0.180s] (821/826) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_minimum_holds_parity_on_ragged_extents
+        PASS [   0.178s] (822/826) omega::wide_cooperative_reduce_ragged wide_cooperative_reduce_multiply_holds_parity_on_ragged_extents
+        PASS [   0.224s] (823/826) omega::training_step_parity ten_training_steps_rebind_state_and_the_loss_drops_on_metal
+        PASS [   6.750s] (824/826) omega::row_376_cached_attention_batched block_staged_attention_holds_parity_at_context_512
+        PASS [   7.466s] (825/826) omega::row_376_cached_attention_batched block_staged_attention_holds_parity_at_context_40
+        PASS [   7.687s] (826/826) omega::row_376_cached_attention_batched block_staged_attention_holds_parity_at_context_4096
+────────────
+     Summary [  59.634s] 826 tests run: 826 passed, 22 skipped

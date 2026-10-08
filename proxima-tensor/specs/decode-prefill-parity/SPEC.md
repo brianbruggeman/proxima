@@ -2804,3 +2804,11 @@ OMEGA_COOPERATIVE_REDUCE_MIN_LEN=9 cargo build --release -p proxima-model-intero
 PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_VARIANT_DIR=<empty dir> AB_OMIT_ALL=1 AB_PACKED=1 AB_STEP=5 AB_ROUNDS=30 AB_FLUSH_MIB=0 AB_SKIP_GROUPS='49f4a86451846a3b:[1, 8, 256];cdf3715b4db55454:[1, 8, 512]' norm_variant_ab   # E2B; granite: same with its blob and no skip list
 cargo test -p proxima-model-interop --features std --example attribution_rank                                                              # the table generator's own tests
 ```
+
+### the three omega `instrument` failures (fixed, 2026-10-08)
+
+The three failures listed in the gates table of the memory section and in `evidence/combine/gates.md` were stale text expectations, not kernel defects. `classify_kind_packed_row_marker_tests::q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked`
+asserted the spelling `q4_0_element(wblk0`; the two-token Q4_0 kernel now reads its weight through `device const uchar *wblk0 = in0 + ...` and per-row `blk0..blk3` pointers (printed from the emitted source), and `classify_kind` still returns
+`reduce-packed-row-blocked` for it, so only the precondition string changed (`b1e102a0`). `rmsnorm_fused_epilogue_air_division_count_{decode,prefill}_shape` rewrote the emitted `%`/`/` coordinate pair into `full_coord[1] = r;` to count AIR division instructions; the emitter
+now writes `full_coord[1] = r;` itself (the emitted source has no `remaining_r`), so the test restores the pair, compiles both forms to AIR, and asserts the emitted form has strictly fewer division-class instructions (`3fdc667d`).
+After both: `cargo nextest run -p omega --features metal,instrument --cargo-profile gate --no-fail-fast` 826 run, 826 passed, 22 skipped (`evidence/attr2/omega_instrument_after_test_fixes.log`); clippy `-p omega --features metal,instrument --all-targets -D warnings` exit 0.
