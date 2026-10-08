@@ -1,0 +1,32 @@
+# Proxima Tensor Python frontend -- cards
+
+Execute these cards in order. Each card has one dedicated worktree, one behavior/evidence change, one coherent commit, counted acceptance criteria, and one final post-push evidence check. First land this entire spec/card package and its `ai_docs` route/index records as one docs-only commit on `main`; that source commit is a prerequisite for Card 00. Then start every card worktree from freshly fetched `origin/main`; do not use the dirty checkout that initiated this plan.
+
+`capture_validation.py` owns the external evidence root and sets `CARGO_TARGET_DIR`, `UV_CACHE_DIR`, `UV_PROJECT_ENVIRONMENT`, `PYTHONPYCACHEPREFIX`, `TMPDIR`, and `XDG_CACHE_HOME` beneath it. Wrap every executed command from exploration through editing, fixture generation, builds, tests, failures/retries, git commit/rebase/fast-forward/push, and validation in that tool; make source and fixture changes through recorded shell commands. Save complete Sol/spec-auditor request and response artifacts as chronological event records. Only the terminal finalizer appends its own invocation and output after the prepush log check. After push, `check_evidence.py --finalize` opens the full log, command manifest, payloads, cassette, review artifacts, hashes, and worktree artifact inventory. Keep the evidence outside the repository.
+
+| # | card | acceptance criteria | worktree | validation | expected | done | note |
+|---|---|---|---|---|---|---|---|
+| 00 | [Evidence capture tools](cards/00-evidence-tools.md) | AC00, AC01, AC02, AC10 | `/private/tmp/proxima-python-card-00` | `check_evidence.py --self-check <external card-00 root>` | 2 synthetic commands, 2 stdout/stderr pairs, 2 exit records, 1 corrupted artifact rejected, 0 repository artifacts | [ ] | Run spec-auditor ADMIT before adding the scripts. |
+| 01 | [Architecture report](cards/01-architecture.md) | AC03 | `/private/tmp/proxima-python-card-01` | `check_architecture.py ARCHITECTURE.md` | 17 populated findings, 17 cited findings, 0 stale citations, 0 unresolved findings | [ ] | Sol reviews the architecture boundary; verify ai_docs route/index. |
+| 02 | [External cassette root](cards/02-evidence-cassette.md) | AC09 | `/private/tmp/proxima-python-card-02` | `cargo test -p proxima-test cassette_external_root:: -- --nocapture` | 4 path/mode cases, 1 record/replay payload match, 1 corrupt-cassette rejection | [ ] | Use cassette only for the Handler I/O boundary. |
+| 03 | [Rust symbolic program seam](cards/03-rust-program-seam.md) | AC04 | `/private/tmp/proxima-python-card-03` | `cargo test -p proxima-tensor python_program:: -- --nocapture` | 5 exact Op graph cases, 2 typed errors, evaluator/device calls = 0 | [ ] | Reuse existing `Vec<Op>` and `NodeId`. |
+| 04 | [PyO3 import boundary](cards/04-python-boundary.md) | AC04 | `/private/tmp/proxima-python-card-04` | `uv run --project python -m pytest python/tests/test_import.py -q` | 4 passed, 0 failed; import resolves to built extension | [ ] | Apply package/build choice from Card 01. |
+| 05 | [Python operators and inspection](cards/05-python-syntax.md) | AC04 | `/private/tmp/proxima-python-card-05` | `uv run --project python -m pytest python/tests/test_symbolic_ops.py -q` | 5 expressions match Rust Op oracles, 1 shape error, bind/evaluate/device calls = 0 | [ ] | `@`, `+`, `*`, `silu`, `shape`, and `graph`. |
+| 06 | [CPU vertical slice](cards/06-cpu-vertical-slice.md) | AC04 | `/private/tmp/proxima-python-card-06` | `uv run --project python -m pytest python/tests/test_cpu_vertical_slice.py -q` | Op sequence, exact BoundOp record, and 1 complete result payload match literal and Rust incumbent oracles; invalid-input control fails | [ ] | One whole-program Rust boundary call. |
+| 07 | [TOML load and round trip](cards/07-toml-roundtrip.md) | AC06 | `/private/tmp/proxima-python-card-07` | `uv run --project python -m pytest python/tests/test_toml_roundtrip.py -q` | 3 graph round trips preserve Op equality; 2 unsupported forms return named errors | [ ] | No silent loss of unsupported maps. |
+| 08 | [Program bind and explain](cards/08-program-inspection.md) | AC06 | `/private/tmp/proxima-python-card-08` | `uv run --project python -m pytest python/tests/test_program_inspection.py -q` | 3 frontend/bound records match; 1 altered-output control changes the record | [ ] | Explain fields come from existing Proxima outputs. |
+| 09 | [Omega device execution](cards/09-omega-session.md) | AC08 | `/private/tmp/proxima-python-card-09` | `uv run --project python -m pytest python/tests/test_omega_session_metal.py -q` on Metal-capable host | 1 Metal plan, 2 full payloads match literal and CPU oracle, 0 skips | [ ] | This card cannot close without a real Omega device execution. |
+| 10 | [Model loading and bound session](cards/10-model-loading.md) | AC07 | `/private/tmp/proxima-python-card-10` | `uv run --project python -m pytest python/tests/test_model_session.py -q` | 2 valid loads, 1 typed malformed-descriptor error, 1 full forward payload | [ ] | Rust retains model/weight/session ownership. |
+| 11 | [NumPy ownership and DLPack](cards/11-interchange.md) | AC05 | `/private/tmp/proxima-python-card-11` | `uv run --project python -m pytest python/tests/test_interchange.py -q` | 5 ownership cases and 3 DLPack cases have complete payload/owner records; 0 unsupported zero-copy claims | [ ] | DLPack is evidence-gated. |
+| 12 | [Core Python tensor sugar](cards/12-core-sugar.md) | AC11 | `/private/tmp/proxima-python-card-12` | `uv run --project python -m pytest python/tests/test_core_sugar_graphs.py -q` | 8 named GELU, softmax, sum, and argmax graph/shape cases match literal and Rust constructor oracles | [ ] | Preserve single-program execution. |
+| 13 | [Extended Python tensor sugar](cards/13-extended-sugar.md) | AC12 | `/private/tmp/proxima-python-card-13` | `uv run --project python -m pytest python/tests/test_extended_sugar_graphs.py -q` | 6 transpose, indexing, scalar, augmented assignment, and alias cases match literal and Rust constructor oracles | [ ] | Unsupported indexing fails explicitly. |
+
+## resume
+
+Last landed slice: none
+Next action: finish Sol/spec-auditor review, land this plan package as the docs-only prerequisite commit, then create Card 00's worktree from fetched `origin/main`
+Open question, if any: none; cassette replay covers Proxima Handler I/O, while local tensor evaluation is checked with literal payload oracles
+
+## struck
+
+- None.
