@@ -2820,6 +2820,8 @@ pub(super) fn encode_op(
             {
                 encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
                 counter!(BARRIERS_EMITTED, 1);
+                #[cfg(feature = "instrument")]
+                record_internal_barrier("route_compaction_consumer");
             }
             Some((compaction, reused.then_some(owner)))
         }
@@ -2870,6 +2872,8 @@ pub(super) fn encode_op(
             if tracker.needs_barrier(&[scratch_pointer], None) {
                 encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
                 counter!(BARRIERS_EMITTED, 1);
+                #[cfg(feature = "instrument")]
+                record_internal_barrier("attention_split_to_merge");
                 // a barrier is a full flush, so `reset` is correct -- but
                 // the caller's OWN `hazard_step`, before this op was ever
                 // encoded, already recorded this op's real output as
@@ -2952,6 +2956,8 @@ fn encode_route_prepass(
     if hazard.is_some() {
         encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
         counter!(BARRIERS_EMITTED, 1);
+        #[cfg(feature = "instrument")]
+        record_internal_barrier("route_prepass_to_place");
     }
     encoder.setComputePipelineState(&prepass.place);
     dispatch(encoder, &prepass.place, prepass.grid);
@@ -2960,6 +2966,8 @@ fn encode_route_prepass(
     {
         encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
         counter!(BARRIERS_EMITTED, 1);
+        #[cfg(feature = "instrument")]
+        record_internal_barrier("route_place_to_consumer");
     }
     Ok(compaction)
 }

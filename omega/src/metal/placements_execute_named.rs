@@ -1489,11 +1489,34 @@ pub(super) fn execute_plan_with_placements_inner(
                 let hazard_class = hazard_state
                     .tracker
                     .classify(&hazard_state.inputs, Some(hazard_output));
-                if hazard_step(
+                #[cfg(feature = "instrument")]
+                let raw_edges = hazard_state.raw_edges(
+                    &crate::msl::hazard_read_nodes(bindings_for_hazard).collect::<Vec<_>>(),
+                );
+                let barrier_fired = hazard_step(
                     &mut hazard_state.tracker,
                     &hazard_state.inputs,
                     hazard_output,
-                ) {
+                );
+                #[cfg(feature = "instrument")]
+                {
+                    let run_before = hazard_state.dispatches_since_barrier;
+                    hazard_state.note_dispatch(hazard_output, bound.node, barrier_fired);
+                    let arena_recycled = placement_is_arena_sourced
+                        && plan
+                            .arena
+                            .get()
+                            .is_some_and(|arena| arena.slot_is_recycled(position));
+                    record_hazard_op(
+                        position,
+                        bound.node,
+                        hazard_class,
+                        arena_recycled,
+                        raw_edges,
+                        run_before,
+                    );
+                }
+                if barrier_fired {
                     encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
                     counter!(BARRIERS_EMITTED, 1);
                     #[cfg(feature = "instrument")]

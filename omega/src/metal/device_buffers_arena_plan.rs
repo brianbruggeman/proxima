@@ -1583,12 +1583,23 @@ pub(super) fn handle_merged_position(
     // above (or, from step 2 onward, on a prior call).
     if dispatch_type == DispatchType::Concurrent {
         let operand_nodes: Vec<NodeId> = bound.operands().iter().map(|(node, ..)| *node).collect();
-        resolve_hazard_inputs_into(operand_nodes.into_iter(), device_buffers, &mut hazard_state.inputs)?;
+        resolve_hazard_inputs_into(operand_nodes.iter().copied(), device_buffers, &mut hazard_state.inputs)?;
         let output_pointer = device_buffers
             .get(&bound.node)
             .map(|(buffer, _)| Retained::as_ptr(buffer))
             .ok_or(MetalError::UnresolvedHazardOperand { node: bound.node })?;
-        if hazard_step(&mut hazard_state.tracker, &hazard_state.inputs, output_pointer) {
+        #[cfg(feature = "instrument")]
+        let merged_class = hazard_state.tracker.classify(&hazard_state.inputs, Some(output_pointer));
+        #[cfg(feature = "instrument")]
+        let merged_edges = hazard_state.raw_edges(&operand_nodes);
+        let merged_fired = hazard_step(&mut hazard_state.tracker, &hazard_state.inputs, output_pointer);
+        #[cfg(feature = "instrument")]
+        {
+            let run_before = hazard_state.dispatches_since_barrier;
+            hazard_state.note_dispatch(output_pointer, bound.node, merged_fired);
+            record_hazard_op(position, bound.node, merged_class, false, merged_edges, run_before);
+        }
+        if merged_fired {
             encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
             counter!(BARRIERS_EMITTED, 1);
         }
