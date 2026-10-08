@@ -185,24 +185,12 @@ pub(super) fn prepare(
         alloc::vec::Vec::new();
     #[cfg(feature = "instrument")]
     {
-        let targets: alloc::vec::Vec<NodeId> = std::env::var("PROXIMA_REPEAT_NODES")
-            .ok()
-            .map(|value| {
-                value
-                    .split(',')
-                    .filter_map(|entry| entry.trim().parse::<u32>().ok())
-                    .map(NodeId)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let repeat_count: u32 = std::env::var("PROXIMA_REPEAT_COUNT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(1);
+        let targets = env_flags::repeat_nodes();
+        let repeat_count = env_flags::repeat_count();
         if !targets.is_empty() {
             let (repeated, refusals, pairs) = apply_repeat_nodes(
                 resolved,
-                &targets,
+                targets,
                 repeat_count,
                 &mut effective_outputs,
                 &mut shapes,
@@ -215,7 +203,7 @@ pub(super) fn prepare(
             // moment its real last reader executes -- promoting it to a
             // requested output keeps that buffer alive through readback the
             // same way `apply_repeat_nodes` already keeps every copy alive.
-            if std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some() {
+            if env_flags::repeat_verify() {
                 for (original, _) in &repeat_verify_pairs {
                     if !effective_outputs.contains(original) {
                         effective_outputs.push(*original);
@@ -229,7 +217,7 @@ pub(super) fn prepare(
                     "PROXIMA_REPEAT_NODES: target declined, not a byte-identical duplicate"
                 );
             }
-            if std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some() {
+            if env_flags::repeat_verify() {
                 std::eprintln!(
                     "repeat_nodes targets={:?} count={} refusals={:?} pairs={:?}",
                     targets.iter().map(|node| node.0).collect::<alloc::vec::Vec<_>>(),

@@ -2426,12 +2426,12 @@ pub(super) fn encode_op(
         if let Some(codec) = uniform_codec {
             cache_key.push_str("_uniform_expert_");
             cache_key.push_str(crate::msl::codec_cache_token(codec));
-            if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
+            if env_flags::debug_expert_emit() {
                 eprintln!("expert lowering mode=uniform codec={codec:?} node={source_node:?}");
             }
         } else {
             cache_key.push_str("_mixed_expert");
-            if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
+            if env_flags::debug_expert_emit() {
                 eprintln!("expert lowering mode=mixed node={source_node:?}");
             }
         }
@@ -3306,7 +3306,7 @@ pub(super) fn finish(
     // (`apply_repeat_nodes` pushes it), so `results` already has its bytes;
     // the original still needs its own direct `read_back`.
     #[cfg(feature = "instrument")]
-    if std::env::var_os("PROXIMA_REPEAT_VERIFY").is_some() {
+    if env_flags::repeat_verify() {
         static STEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let step = STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for (original, copies) in &plan.prepared.repeat_verify_pairs {

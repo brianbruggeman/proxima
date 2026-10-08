@@ -266,6 +266,7 @@ mod pipeline_buffers_upload;
 mod pipeline_disk_cache;
 #[macro_use]
 mod resident_nocopy_cache;
+mod env_flags;
 #[macro_use]
 mod arena_encode_dispatch_finish;
 #[cfg(feature = "metal-plan-stable-buffers")]
@@ -333,7 +334,7 @@ fn commit_and_wait(
 /// `MetalError::CommandBufferFailed`'s `encoder_infos` field, only on the
 /// fault branch and only when this switch was on.
 fn encoder_error_status_requested() -> bool {
-    std::env::var_os("PROXIMA_METAL_ENCODER_ERROR_STATUS").is_some_and(|value| value == "1")
+    env_flags::encoder_error_status()
 }
 
 /// Every command-buffer-creating call site in this driver goes through

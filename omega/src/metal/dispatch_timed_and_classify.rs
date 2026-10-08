@@ -132,7 +132,7 @@ pub(super) fn execute_op_timed(
     if let Some((fault_buffer, gathers)) = fault {
         check_gather_fault(bound, &fault_buffer, gathers)?;
     }
-    if std::env::var_os("PROXIMA_METAL_NAN_CHECK").is_some()
+    if env_flags::nan_check()
         && let Some((first_index, shape, metal_values)) =
             check_op_output_finite(device_buffers, prepared, program, bound.node, kind)?
     {
@@ -349,10 +349,7 @@ pub(super) fn execute_plan_op_timed_inner(
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
-    let selected_bound = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .map(NodeId);
+    let selected_bound = env_flags::compare_bound_node();
     if let Some(node) = selected_bound
         && !prepared.resolved.iter().any(|bound| bound.node == node)
     {
