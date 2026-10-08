@@ -1,0 +1,397 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling cfg-if v1.0.4
+   Compiling thiserror v2.0.19
+   Compiling libc v0.2.189
+   Compiling serde v1.0.229
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling memchr v2.8.3
+   Compiling num-traits v0.2.19
+   Compiling once_cell v1.21.4
+   Compiling tracing-core v0.1.36
+   Compiling indexmap v2.14.0
+   Compiling pin-project-lite v0.2.17
+   Compiling winnow v0.7.15
+   Compiling toml_write v0.1.2
+   Compiling falsehoods v1.0.0
+   Compiling crossbeam-utils v0.8.22
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling stable_deref_trait v1.2.1
+   Compiling ordered-float v2.10.1
+   Compiling version_check v0.9.5
+   Compiling foldhash v0.2.0
+   Compiling jobserver v0.1.35
+   Compiling allocator-api2 v0.2.21
+   Compiling futures-core v0.3.33
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.1
+   Compiling cc v1.3.0
+   Compiling itoa v1.0.18
+   Compiling bitflags v2.13.1
+   Compiling rustversion v1.0.23
+   Compiling futures-io v0.3.33
+   Compiling futures-sink v0.3.33
+   Compiling zmij v1.0.23
+   Compiling byteorder v1.5.0
+   Compiling parking_lot_core v0.9.12
+   Compiling futures-channel v0.3.33
+   Compiling litemap v0.8.2
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.19
+   Compiling slab v0.4.12
+   Compiling writeable v0.6.3
+   Compiling futures-task v0.3.33
+   Compiling bytes v1.12.1
+   Compiling utf8_iter v1.0.4
+   Compiling crypto-common v0.1.7
+   Compiling icu_normalizer_data v2.2.0
+   Compiling subtle v2.6.1
+   Compiling icu_properties_data v2.2.0
+   Compiling scopeguard v1.2.0
+   Compiling serde_json v1.0.151
+   Compiling lock_api v0.4.14
+   Compiling pkg-config v0.3.33
+   Compiling ucd-trie v0.1.7
+   Compiling arc-swap v1.9.2
+   Compiling crossbeam-queue v0.3.13
+   Compiling pest v2.8.8
+   Compiling concurrent-queue v2.5.0
+   Compiling aho-corasick v1.1.4
+   Compiling thread_local v1.1.10
+   Compiling parking v2.2.1
+   Compiling tracing-attributes v0.1.31
+   Compiling conflaguration-derive v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+   Compiling synstructure v0.13.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling futures-macro v0.3.33
+   Compiling zerofrom-derive v0.1.7
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling tracing v0.1.44
+   Compiling serde-value v0.7.0
+   Compiling smallvec v1.15.2
+   Compiling yoke-derive v0.8.2
+   Compiling toml_edit v0.22.27
+   Compiling time-core v0.1.9
+   Compiling num-conv v0.2.2
+   Compiling futures-timer v3.0.4
+   Compiling environs v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling strsim v0.11.1
+   Compiling futures-util v0.3.33
+   Compiling zerofrom v0.1.8
+   Compiling ryu v1.0.23
+   Compiling ident_case v1.0.1
+   Compiling regex-syntax v0.8.11
+   Compiling time-macros v0.2.32
+   Compiling pest_meta v2.8.8
+   Compiling parking_lot v0.12.5
+   Compiling darling_core v0.23.0
+   Compiling yoke v0.8.3
+   Compiling event-listener v5.4.1
+   Compiling deranged v0.5.8
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling toml v0.8.23
+   Compiling powerfmt v0.2.0
+   Compiling prettyplease v0.2.37
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling pest_generator v2.8.8
+   Compiling conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+   Compiling darling_macro v0.23.0
+   Compiling icu_locale_core v2.2.0
+   Compiling time v0.3.54
+   Compiling icu_collections v2.2.0
+   Compiling futures-executor v0.3.33
+   Compiling event-listener-strategy v0.5.4
+   Compiling proxima-build v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-build)
+   Compiling percent-encoding v2.3.2
+   Compiling regex-automata v0.4.16
+   Compiling futures v0.3.33
+   Compiling base64 v0.22.1
+   Compiling heapless v0.9.3
+   Compiling form_urlencoded v1.2.2
+   Compiling pest_derive v2.8.8
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-core)
+   Compiling darling v0.23.0
+   Compiling hash32 v0.3.1
+   Compiling unsafe-libyaml-norway v0.2.15
+   Compiling portable-atomic v1.14.0
+   Compiling fastrand v2.5.0
+   Compiling icu_provider v2.2.0
+   Compiling arrayvec v0.7.8
+   Compiling base64 v0.21.7
+   Compiling bon-macros v3.9.3
+   Compiling json5 v0.4.1
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling ron v0.8.1
+   Compiling serde_norway v0.9.42
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-primitives)
+   Compiling quick-xml v0.41.0
+   Compiling proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-runtime)
+   Compiling async-lock v3.4.2
+   Compiling idna_adapter v1.2.2
+   Compiling async-channel v2.5.0
+   Compiling async-broadcast v0.7.2
+   Compiling idna v1.1.0
+   Compiling cmake v0.1.58
+   Compiling dunce v1.0.5
+   Compiling rustc-hash v2.1.3
+   Compiling bon v3.9.3
+   Compiling fs_extra v1.3.0
+   Compiling regex v1.13.1
+   Compiling crc32fast v1.5.0
+   Compiling winnow v1.0.4
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling zerocopy v0.8.55
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling aws-lc-sys v0.43.0
+   Compiling zerocopy-derive v0.8.55
+   Compiling miniz_oxide v0.8.9
+   Compiling cobs v0.3.0
+   Compiling block-buffer v0.10.4
+   Compiling cpufeatures v0.2.17
+   Compiling aws-lc-rs v1.17.3
+   Compiling postcard v1.1.3
+   Compiling digest v0.10.7
+   Compiling proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-telemetry)
+   Compiling crossbeam-channel v0.5.16
+   Compiling nom v8.0.0
+   Compiling url v2.5.8
+   Compiling crossbeam-epoch v0.9.20
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling hashbrown v0.14.5
+   Compiling rustls-pki-types v1.15.0
+   Compiling crossbeam-deque v0.8.7
+   Compiling flate2 v1.1.9
+   Compiling toml_edit v0.25.13+spec-1.1.0
+   Compiling dashmap v6.2.1
+   Compiling inout v0.1.4
+   Compiling universal-hash v0.5.1
+   Compiling proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-config)
+   Compiling num_cpus v1.17.0
+   Compiling cipher v0.4.4
+   Compiling rustls v0.23.42
+   Compiling untrusted v0.9.0
+   Compiling proc-macro-crate v3.5.0
+   Compiling opaque-debug v0.3.1
+   Compiling prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/prime)
+   Compiling rand_core v0.10.1
+   Compiling core_affinity v0.8.3
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling socket2 v0.5.10
+   Compiling proxima-macros v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-macros)
+   Compiling atomic-waker v1.1.2
+   Compiling polyval v0.6.2
+   Compiling aead v0.5.2
+   Compiling httparse v1.10.1
+   Compiling ghash v0.5.1
+   Compiling poly1305 v0.8.0
+   Compiling aes v0.8.4
+   Compiling hdrhistogram v7.6.0
+   Compiling chacha20 v0.9.1
+   Compiling ctr v0.9.2
+   Compiling webpki-roots v1.0.9
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-protocols)
+   Compiling libm v0.2.16
+   Compiling chacha20poly1305 v0.10.1
+   Compiling aes-gcm v0.10.3
+   Compiling hkdf v0.12.4
+   Compiling sha1 v0.10.7
+   Compiling hashbrown v0.16.1
+   Compiling bumpalo v3.20.3
+   Compiling float-cmp v0.10.0
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.3
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling core-foundation-sys v0.8.7
+   Compiling simdutf8 v0.1.5
+   Compiling objc2 v0.6.4
+   Compiling halfbrown v0.4.0
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-net)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-tensor)
+   Compiling async-stream-impl v0.3.6
+   Compiling value-trait v0.12.2
+   Compiling objc2-encode v4.1.0
+   Compiling rand_core v0.9.5
+   Compiling async-stream v0.3.6
+   Compiling simd-json v0.17.3
+   Compiling security-framework-sys v2.17.0
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling core-foundation v0.10.1
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-listen)
+   Compiling memoffset v0.9.1
+   Compiling bit-vec v0.8.0
+   Compiling cfg_aliases v0.2.2
+   Compiling zstd-safe v7.2.4
+   Compiling proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-clock)
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-gguf)
+   Compiling nix v0.31.3
+   Compiling bit-set v0.8.0
+   Compiling security-framework v3.7.0
+   Compiling rand_chacha v0.9.0
+   Compiling chacha20 v0.10.1
+   Compiling yasna v0.6.0
+   Compiling pem v3.0.6
+   Compiling http v1.4.2
+   Compiling murmur3 v0.4.1
+   Compiling proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-codec)
+   Compiling typed-arena v2.0.2
+   Compiling rustix v1.1.4
+   Compiling log v0.4.33
+   Compiling thiserror v1.0.69
+   Compiling paste v1.0.15
+   Compiling lazy_static v1.5.0
+   Compiling uuid v1.24.0
+   Compiling either v1.16.0
+   Compiling proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-tls)
+   Compiling better_any v0.2.1
+   Compiling antlr4rust v0.3.0-rc2
+   Compiling rand v0.9.5
+   Compiling rand v0.10.2
+   Compiling md-5 v0.10.6
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-patterns)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-http)
+   Compiling tokio-macros v2.7.1
+   Compiling thiserror-impl v1.0.69
+   Compiling blake3 v1.8.5
+   Compiling alloca v0.4.0
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-process)
+   Compiling errno v0.3.14
+   Compiling ciborium-io v0.2.2
+   Compiling minimal-lexical v0.2.1
+   Compiling anstyle v1.0.14
+   Compiling rayon-core v1.13.0
+   Compiling hex v0.4.3
+   Compiling clap_lex v1.1.0
+   Compiling xxhash-rust v0.8.18
+   Compiling cel-parser v0.10.1
+   Compiling nom v7.1.3
+   Compiling clap_builder v4.6.2
+   Compiling proxima-auth v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-auth)
+   Compiling zstd v0.13.3
+   Compiling ciborium-ll v0.2.2
+   Compiling tokio v1.53.1
+   Compiling ulid v1.2.1
+   Compiling http-body v1.1.0
+   Compiling itertools v0.13.0
+   Compiling objc2-foundation v0.3.2
+   Compiling block2 v0.6.2
+   Compiling objc2-core-foundation v0.3.2
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/omega)
+   Compiling chrono v0.4.45
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling cast v0.3.0
+   Compiling anyhow v1.0.104
+   Compiling shell-words v1.1.1
+   Compiling same-file v1.0.6
+   Compiling objc2-metal v0.3.2
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-test)
+   Compiling criterion-plot v0.8.2
+   Compiling walkdir v2.5.0
+   Compiling clap v4.6.4
+   Compiling http-body-util v0.1.4
+   Compiling tempfile v3.27.0
+   Compiling ciborium v0.2.2
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-tokenizer)
+   Compiling tinytemplate v1.2.1
+   Compiling cel-interpreter v0.10.0
+   Compiling page_size v0.6.0
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling temp-env v0.3.6
+   Compiling criterion v0.8.2
+   Compiling rayon v1.12.0
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-safetensors)
+   Compiling proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-autograd)
+   Compiling rustls-webpki v0.103.13
+   Compiling rcgen v0.14.8
+   Compiling rustls-platform-verifier v0.7.1
+   Compiling futures-rustls v0.26.0
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-recording)
+   Compiling proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-onnx)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-quic)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base)
+    Finished `gate` profile [optimized] target(s) in 1m 39s
+────────────
+ Nextest run ID 50ba0029-7124-4bb1-98d5-541b928ef991 with nextest profile: default
+    Starting 5 tests across 99 binaries (681 tests skipped)
+        FAIL [   0.015s] (1/5) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked
+  stdout ───
+
+    running 1 test
+    test metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked ... FAILED
+
+    failures:
+
+    failures:
+        metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 312 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked' (72735645) panicked at omega/src/metal/dispatch_timed_and_classify.rs:1703:9:
+    precondition: default index32 must render the block-origin read
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.017s] (2/5) omega::rmsnorm_fused_epilogue_cost rmsnorm_fused_epilogue_air_division_count_prefill_shape
+  stdout ───
+
+    running 1 test
+    test rmsnorm_fused_epilogue_air_division_count_prefill_shape ... FAILED
+
+    failures:
+
+    failures:
+        rmsnorm_fused_epilogue_air_division_count_prefill_shape
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'rmsnorm_fused_epilogue_air_division_count_prefill_shape' (72735643) panicked at omega/tests/rmsnorm_fused_epilogue_cost.rs:413:5:
+    row368 write-loop pattern not found in emitted source -- emitted text changed shape
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.025s] (3/5) omega::rmsnorm_fused_epilogue_cost rmsnorm_fused_epilogue_air_division_count_decode_shape
+  stdout ───
+
+    running 1 test
+    test rmsnorm_fused_epilogue_air_division_count_decode_shape ... FAILED
+
+    failures:
+
+    failures:
+        rmsnorm_fused_epilogue_air_division_count_decode_shape
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'rmsnorm_fused_epilogue_air_division_count_decode_shape' (72735648) panicked at omega/tests/rmsnorm_fused_epilogue_cost.rs:413:5:
+    row368 write-loop pattern not found in emitted source -- emitted text changed shape
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   2.539s] (4/5) omega::rmsnorm_fused_epilogue_cost rmsnorm_unfused_vs_fused_decode_shape
+        PASS [   3.066s] (5/5) omega::rmsnorm_fused_epilogue_cost rmsnorm_unfused_vs_fused_prefill_shape
+────────────
+     Summary [   3.077s] 5 tests run: 2 passed, 3 failed, 681 skipped
+        FAIL [   0.015s] (1/5) omega metal::dispatch_timed_and_classify::classify_kind_packed_row_marker_tests::q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked
+        FAIL [   0.017s] (2/5) omega::rmsnorm_fused_epilogue_cost rmsnorm_fused_epilogue_air_division_count_prefill_shape
+        FAIL [   0.025s] (3/5) omega::rmsnorm_fused_epilogue_cost rmsnorm_fused_epilogue_air_division_count_decode_shape
+error: test run failed

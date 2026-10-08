@@ -2249,3 +2249,152 @@ cargo nextest run -p omega --features metal -E 'binary(elementwise_twin_dispatch
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(gemma4_rope_twin_census)' --run-ignored all                   # needs the E2B gguf: 50 twins, 100 -> 50
 PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION=1|unset decode_gbps_baseline / gemma4_decode_kernel_census   # off and on arms for the rope fold
 ```
+
+## combined r1-r9 result (measured 2026-10-07, origin/main ab69ec03 to HEAD of this section)
+
+Order executed: apply the r9, r3, r2, r4, r6, r5, r7 patch sets onto the r1-applied main (`7d693c1a`), remove model names from library
+source, run every gate once at the integrated tip, bench once, push. Evidence root: `evidence/combine/` (this directory); raw per-process
+logs, the base source export and the binaries are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/`. Every number below
+names its artifact; the status of a sentence is the status of its weakest cell. Test models were gemma4 E2B and granite moe 1b only (the order);
+no result here covers any other checkpoint.
+
+### what landed (`git log ab69ec03..HEAD`, 67 commits before the commit that adds this section)
+
+| slice | commits at the tip | note |
+|---|---|---|
+| r1 (on main, unpushed) | `2d7a8e1a e0423838 e80df86b 6c99b40b a035824d 7d693c1a 16f4851c` | row-tiled and windowed prefill attention |
+| r9 | `210afc05 b824a691 fc3d8e05 38dbf823 bfa949c4 a698dfa7 63f4bca6 f1bb9b08 dbd8b49c` | Q4_0 matvec tail on its own lanes; one per-layer-input norm over the layer axis |
+| r3 | `b06bdf10 966e0f70 0712bc78 559f6c38 84cfba10` | every described codec on the tiled GEMM; disable switch |
+| r2 | `f582a26b a0c75ba4 b05a0393 8645f749 ffc69cff 102343f8 fefbd8d8 e6cded5e bfb62f6f d8ede9d5 e365e191 60c5e0f6`; `9aa0833c` reverted by `b18a6537` | stacked routed experts as an opt-in strategy |
+| r4 | `3af7e47c fdca26ce c01209d5 ba01bb44 3026cd8a 2d04a25d eb83c913 401f2003` | gather fault buffer pool, arena extras, 8 command buffers for granite |
+| r6 | `96a64c5f 0b3aa7a0 76593bda d5b83512 db88f4e2 40c78ce8`; r6 0004 skipped (same hunks as r4 0004) | epilogue_sources grant; twin-output elementwise |
+| r5 | `55940cd2 3127bc55` | pipeline archive cache on disk; resident prefill plans |
+| r7 | `f2f273d8 fa405b6a f61d6fb1 a79513bd 5ae7d822` | arena allowance per prefill row; default ubatch 512 |
+| this pass | `96d24dc4` (model names out of library source), `0780fb6c 5cf74898 b8b036b1 df9e38a1 6868398c b18a6537 8eca5477 a2edd376 04c67331 85f1f23e 1989bdc1` | fixes, one revert, the e2b digest, an example hook; each is described in `evidence/combine/conflicts.md` |
+
+Patch application: 10 conflict sites in 7 patches resolved keeping both intents; 1 patch (r6 0004) skipped as already applied (the same source hunks as r4 0004); 2 patches
+(r4 0004, r6 0005) needed their blobs fetched from the writer's tree to merge (`evidence/combine/conflicts.md`). While staging one resolution, `git add omega proxima-tensor` swept two
+untracked trees owned by others into one commit; the 16 commits from it upward were rebuilt with `git commit-tree` without those files, and the two trees are byte-identical to their backup (`diff -r` clean).
+
+### before and after, per model (`decode_arms`, release std+metal, 3 processes x (1 warmup + 7 runs), arms interleaved, `evidence/combine/bench/`)
+
+Arms: `base` = the tree at ab69ec03 built release; `tip` = the final tree (`decode_gbps_baseline`); `control` = a byte copy of the tip binary (same sha256, `bench/binaries.sha256`).
+The example forces `batch_size: 0, ubatch_size: 0`, so r7's default ubatch of 512 is not in these timings (its effect is covered by its parity tests only). llama-server and Ollama were not re-run;
+the recording (`evidence/slice0/ac1`) reads E2B prefill 572 ms and decode 9.15 ms/token, granite prefill 151 ms and decode 5.25 ms/token, from a different session. Box: Ollama down, no other cargo job,
+`mds_stores` 70-106% CPU and a background daemon in ~/.local/bin at 50-70% CPU during every run (`box_load_before.txt`), one-minute load average 4.3 to 12.8 across the runs. Medians over all 21 runs per arm; CoV over all 21; where CoV
+exceeds 5% the range and the outlier-removed median (kept) are given.
+
+Three complete matrices exist; they differ in the tip binary and the box state. Run A/B: tip before the arena-extras commit (`bench/runA`, `runB`). Run A2/B2: final tip, started at load average 12.8,
+CoV above 5% in 5 cells, all in B2 (`runA2`, `runB2`). Run A3/B3: final tip, settled box (the tables below).
+
+E2B, 971-token prompt (`runA3`, `gemma4_e2b.*`):
+
+| metric | base | tip | control | tip vs base |
+|---|---|---|---|---|
+| prefill ms (= ttft) | 1411.0 (CoV 0.45%, 1400.0-1427.0) | 594.0 (0.41%, 591.0-604.0) | 595.0 (1.09%, 592.0-619.0) | -817.0 ms, -57.9% |
+| decode ms/token | 11.875 (CoV 6.67%, 11.482-15.175; kept 11.763, n=19) | 11.063 (1.24%, 10.958-11.683) | 11.089 (4.98%, 10.999-13.389; kept 11.077) | -0.812 (-6.8%); kept -0.700 (-6.0%) |
+
+E2B, short chat prompt (`prompt_short_hippo.txt`, 25 tokens; `runB3`):
+
+| metric | base | tip | control | tip vs base |
+|---|---|---|---|---|
+| prefill ms (= ttft) | 124.0 (CoV 8.26%, 123.0-165.1; kept 124.0, n=13) | 88.0 (0.85%, 87.0-91.0) | 88.0 (8.68%, 87.0-113.0) | -36.0 ms, -29.0% |
+| decode ms/token | 11.139 (2.97%, 10.695-12.510) | 10.874 (1.19%, 10.455-10.945) | 10.896 (6.01%, 10.540-13.487; kept 10.879) | -0.265 (-2.4%) |
+
+granite moe 1b, the same prompt file as the 971-token E2B run (`runA3`, `granite_moe.*`):
+
+| metric | base | tip | control | tip vs base |
+|---|---|---|---|---|
+| prefill ms (= ttft) | 866.0 (2.83%, 828.0-925.0) | 374.0 (3.38%, 364.0-414.0) | 385.0 (2.89%, 364.0-404.0) | -492.0 ms, -56.8% |
+| decode ms/token | 14.454 (1.03%, 14.267-14.853) | 9.752 (CoV 10.39%, 9.324-13.914; kept 9.749, n=18) | 9.829 (9.32%, 9.455-12.944; kept 9.740) | -4.702 (-32.5%); kept -4.705 |
+
+Across the three matrices (the tip is the pre-arena-commit binary in A/B):
+
+| cell | base median | tip median | tip vs base |
+|---|---|---|---|
+| E2B 971-token decode ms/token | 11.665 (A), 11.681 (A2), 11.875 (A3) | 11.379 (A), 11.323 (A2), 11.063 (A3) | -2.5%, -3.1%, -6.8% |
+| E2B 971-token prefill ms | 1455.0, 1417.0, 1411.0 | 609.0, 600.0, 594.0 | -58.1%, -57.7%, -57.9% |
+| E2B short decode ms/token | 10.857 (B), 11.065 (B2, CoV 3.36%), 11.139 (B3) | 10.862 (B), 10.602 (B2, CoV 11.52%; kept 10.571), 10.874 (B3) | +0.05%, -4.2%, -2.4% |
+| E2B short prefill ms | 138.0 (CoV 3.83%), 136.1 (8.79%), 124.0 (8.26%) | 90.0, 88.0, 88.0 | -34.8%, -35.3%, -29.0% |
+| granite decode ms/token | 14.813 (A), 14.445 (A2), 14.454 (A3) | 9.427, 9.660, 9.752 | -36.4%, -33.1%, -32.5% |
+| granite prefill ms | 911.0, 879.0, 866.0 | 377.0, 380.0, 374.0 | -58.6%, -56.8%, -56.8% |
+
+Against the recorded llama-server numbers (a different session; ratio = tip / recording): E2B prefill 594.0 / 572 = 1.04, E2B decode 11.063 / 9.15 = 1.21, granite prefill 374.0 / 151 = 2.48, granite decode 9.752 / 5.25 = 1.86.
+
+### memory, with the bound lines (`peak_rss_bytes`, `peak_footprint_bytes`, `peak_gpu_bytes`; median of 3 processes; bound = max(2% of base, |control - tip|))
+
+| cell | metric | base | tip | control | bound | tip - base | against the bound |
+|---|---|---|---|---|---|---|---|
+| E2B 971 | footprint | 713,714,816 | 676,359,296 | 683,453,632 | 14,274,296 | -37,355,520 | inside |
+| E2B 971 | RSS | 3,946,692,608 | 3,960,553,472 | 3,963,142,144 | 78,933,852 | +13,860,864 | inside |
+| E2B 971 | GPU bytes | 5,608,554,496 | 3,838,328,832 | 3,838,328,832 | 112,171,090 | -1,770,225,664 | below base |
+| E2B short | footprint | 218,491,072 | 218,474,816 | 222,177,536 | 4,369,821 | -16,256 | inside |
+| E2B short | RSS | 3,651,534,848 | 3,629,268,992 | 3,649,667,072 | 73,030,697 | -22,265,856 | inside |
+| E2B short | GPU bytes | 3,389,702,144 | 3,391,127,552 | 3,391,324,160 | 67,794,043 | +1,425,408 | inside |
+| granite 1000 | footprint | 634,427,584 | 653,367,488 | 663,705,664 | 12,688,552 | +18,939,904 | OUTSIDE (+3.0%) |
+| granite 1000 | RSS | 2,622,062,592 | 2,761,949,184 | 2,730,508,288 | 52,441,252 | +139,886,592 | OUTSIDE (+5.3%) |
+| granite 1000 | GPU bytes | 3,315,433,472 | 1,697,382,400 | 1,697,382,400 | 66,308,669 | -1,618,051,072 | below base |
+
+The two granite cells outside the bound are not explained. Spread inside the same matrix: granite RSS max over the 3 processes is 2,825,453,568 for base, 2,888,925,184 for the tip and 3,077,783,552 for the control,
+so the base-to-tip step sits inside the control's own process-to-process spread; in run A (tip before the arena commit) the same cell read base 2,727,591,936 and tip 2,631,319,552 (-96 MB), the opposite sign.
+n = 3 processes per cell.
+
+Footprint attribution on E2B 971 (measured, `runD`, tip before the arena-extras commit, 3 processes x 2 runs): default 844,885,056; with `PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION=1` 680,635,328 (-164 MB, decode ms/token
+11.285 -> 11.390); with the pipeline cache off 843,934,976; with the f16 tiled path off 835,546,048. With the r5 resident plan budget at 0 versus the default (`runC`) the E2B footprint was 849,456,064 versus
+843,770,752. Read from `arena_encode_dispatch_finish.rs` before `85f1f23e`: each extra output (the twin's second node, top-k routes and weights, softmax weights) took a dedicated arena slot for the plan's lifetime.
+`85f1f23e` returns them to the free list; the final tip's footprint on the same prompt reads 676,359,296 (`runA3`), against 844.9 MB before that commit (`runD`, a different matrix).
+
+### attribution that the knobs allow (same binary, environment switch, interleaved)
+
+| slice | switch | cell | with / without | effect | source |
+|---|---|---|---|---|---|
+| r6 twin | `PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION=1` | E2B 971 decode | 11.285 / 11.390 ms | -0.105 ms (-0.9%) | `runD` |
+| r6 twin | same | granite 1000 decode | 9.606 / 9.859 ms | -0.253 ms (-2.6%) | `runE` |
+| r3 tiled f16 | `PROXIMA_TILED_GEMM_DISABLE=f16` | E2B 971 prefill | 606.5 / 713.5 ms | -107.0 ms (-15.0%) | `runD` |
+| r3 tiled q8_0 (with the grouped path) | `PROXIMA_TILED_GEMM_DISABLE=q8_0` | granite 1000 prefill | 372.0 / 6133.0 ms | 16.5x | `runE` |
+| r4 8 command buffers | `PROXIMA_COMMAND_BUFFER_CHUNKS=1` | granite 1000 decode | 9.606 / 11.160 ms | -1.554 ms (-13.9%) | `runE` |
+| r5 pipeline archive | fresh cache dir, 3 processes | E2B 25-token prompt, 16 tokens | ttft 599 -> 253 -> 242 ms | see below | `r5cache` |
+| r5 resident plans | `PROXIMA_RESIDENT_PREFILL_PLAN_BYTES=0` | E2B / granite 971 | decode 11.362 / 11.377, 9.425 / 9.415 ms | no decode or prefill change in 9 runs per cell | `runC` |
+
+r9 (matvec tail, one per-layer-input norm), r1 (row-tiled attention), r2's remaining commits, r4's fault-buffer pool and arena extras, r6's epilogue_sources grant, and r7 have no switch in this binary, so their share of
+the totals above is unmeasured. The granite decode step from 14.454 to 9.752 ms is attributed by these knobs for -1.554 (r4) and -0.253 (r6) only; the remaining -2.9 ms is not attributed. The E2B decode step of
+-0.8 ms and the prefill step of -817 ms are attributed only for the r3 f16 share above.
+
+r5 cache check, `evidence/combine/r5cache/` (E2B, 25-token prompt, `PROXIMA_MAX_TOKENS=16`, `OMEGA_PIPELINE_CACHE_DIR` pointing at an empty directory, three consecutive processes of the tip example): process 1: archive
+hits=4 stores=61 (61 backend compiles), ttft 599 ms, 61 files in the directory; process 2: hits=65 stores=0, ttft 253 ms; process 3: hits=65 stores=0, ttft 242 ms. The generated text hash is `4e361803a2e2d8fc` in all three.
+
+### llama parity and digests
+
+At the final tip (`final/nextest_interop.log`): `llama_parity_` 2 passed (gemma4_e2b, granite_moe), `generic_verify_llama_parity_` 2, `prefill_width_parity_with_llama_` 2, r7's `serving_default_ubatch_prefill_parity` 2 (971 tokens
+each). The other checkpoints' parity tests were not run (order).
+
+Digests (`evidence/combine/digests.md`): `gemma4_e2b.digest` recaptured (8 lines: ops 6074 -> 5667, ops_sha256, logits_root 6073 -> 5666, layer_roots sha256, and the same four for the verify program), explained by r9;
+r9's derived estimate was 5632, and measured builder op counts (11 flat + 13 shared + 35 x 1 against 11 + 35 x 13) give -407, so the recapture is 35 ops above r9's arithmetic. `granite_moe.digest` is unchanged at the
+tip (it moved by -792 only while the stacked default was on). The other six fixtures were not run.
+
+### failed, reverted, fixed, open
+
+- REVERTED `9aa0833c` (r2 0013, stacked experts in the interop `metal` set): `external_expert_paging` (2 tests) fails with it and passes at base; the CPU quantized reduce requires one activation row per leading position and a
+  stacked gate/up reads one row for several gathered experts (`run_reduce_scan.rs:436-439`). The strategy stays behind its own feature. The granite numbers above are therefore measured without the stacked default; r2's own
+  benefit from that default is not in them.
+- FIXED `df9e38a1`: `dead_resolved_nodes` dropped a top-k whose consumers read only its stacked outputs (NaN logits under `moe-stacked-experts`; the synthetic parity diff could not see NaN, `6868398c`).
+- FIXED `8eca5477`: r9's layer-axis view made the CPU packed reduce reject `blk.0.proj`; found by `gemma4_e2b_tiled_gemm_defaults_vs_all_off_full_logit_vector_diff`, which passes at base.
+- CHANGED TEST `5cf74898` (r3 tiled f16 arms: error 0.0043 against an f64 dot, bound n x 2^-24 x sum|a w|, with a control that rejects a +10.0 corruption), `b8b036b1` (r4 allocation test on the placements executor),
+  `a2edd376` (E2B census 1661 -> 1559 = 34 x 3 ops).
+- FIXED `85f1f23e`: arena extras took dedicated slots (+164 MB measured on E2B 971 with the twin pass on).
+- OPEN, same on base: `omega --features metal,instrument` 3 failures (`gates.md`); granite RSS and footprint outside the bound in `runA3` (unexplained, above); the six digests and all parity tests of the checkpoints the order excluded.
+
+### reach
+
+Measured: gemma4 E2B and granite moe 1b on Apple Metal. By construction (not measured): r3 reaches every model with a codec that has a `tiled_decode` description; r9's per-layer-input form reaches models with
+`embedding_length_per_layer_input > 0` (gemma4 26B declares 0); r6's twin pass reaches any program with a `fused_rope_pair`; r4's 8-command-buffer setting is in the granite profile only; r5's archive cache reaches every Metal
+pipeline; r2's stacked strategy reaches nothing by default.
+
+### re-prove
+
+```
+cargo nextest run -p omega --features metal --cargo-profile gate --no-fail-fast                      # 763 passed, 16 skipped
+cargo nextest run -p proxima-tensor --cargo-profile gate --no-fail-fast                               # 798 passed, 8 skipped
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate --no-fail-fast -E 'not test(~gemma4_26b) and not (binary(arch_data_baseline) and (test(~openchat) or test(~qwen) or test(~lfm2)))'   # 716 passed, 143 skipped
+decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<ab69ec03 build> --arm tip=<tip build> --arm control=<byte copy of tip> --case gemma4_e2b=<gguf> --case granite_moe=<gguf>
+```

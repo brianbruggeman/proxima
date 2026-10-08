@@ -1,0 +1,4 @@
+decode_gbps_baseline run=start prompt="<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model" prompt_token_count=25 max_tokens=16
+decode_gbps_baseline token_ids run_index=0 ids=[496, 5213, 20619, 4408, 3788, 1018, 563, 7100, 528, 2425, 1082, 496, 50205, 64981, 55569, 236761]
+decode_gbps_baseline run=done run_index=0 wall_ms=929.637 tokens_generated=16 prompt_token_count=25 text_hash=4e361803a2e2d8fc stopped_by_eos=false decode_ms_per_token=22.042 ttft_ms=599 gpu_peak_bytes=3388850176 text=" a **large office building** is smaller in size than a hippopotamus."
+decode_gbps_baseline pipeline_disk_cache run_index=0 hits=4 stores=61

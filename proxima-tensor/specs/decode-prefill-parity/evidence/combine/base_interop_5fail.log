@@ -1,0 +1,43 @@
+   Compiling proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-core)
+   Compiling proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-primitives)
+   Compiling proxima-telemetry v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-telemetry)
+   Compiling sha2-asm v0.6.4
+   Compiling proxima-protocols v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-protocols)
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-tensor)
+   Compiling proxima-listen v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-listen)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/omega)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-process)
+   Compiling proxima-http v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-http)
+   Compiling proxima-patterns v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-patterns)
+   Compiling proxima-runtime v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-runtime)
+   Compiling proxima-config v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-config)
+   Compiling proxima-codec v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-codec)
+   Compiling rusty-fork v0.3.1
+   Compiling memmap2 v0.9.11
+   Compiling proptest v1.11.0
+   Compiling sha2 v0.10.9
+   Compiling proxima-auth v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-auth)
+   Compiling proxima-clock v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-clock)
+   Compiling proxima-gguf v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-gguf)
+   Compiling proxima-tls v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-tls)
+   Compiling prime v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/prime)
+   Compiling proxima-tokenizer v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-tokenizer)
+   Compiling proxima-recording v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-recording)
+   Compiling proxima-net v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-net)
+   Compiling proxima-test v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-test)
+   Compiling proxima-quic v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-quic)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine/src_base/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 1m 00s
+────────────
+ Nextest run ID 650d3ace-ff76-4d91-8219-b1a0a474561f with nextest profile: default
+    Starting 6 tests across 3 binaries (28 binaries skipped)
+        PASS [   0.190s] (1/6) proxima-model-interop::external_expert_paging evicting_every_expert_of_a_layer_fails_the_next_decode
+        PASS [   0.223s] (2/6) proxima-model-interop::external_expert_paging paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues
+        PASS [   0.175s] (3/6) proxima-model-interop::external_expert_paging paging_an_out_of_range_expert_index_is_rejected
+        PASS [   0.286s] (4/6) proxima-model-interop::external_expert_paging q2k_paging_actually_changes_the_decoded_ids
+        PASS [   0.237s] (5/6) proxima-model-interop::gemma4_attention_chain_census gemma4_attention_chain_census
+        PASS [  10.985s] (6/6) proxima-model-interop::gemma4_tiled_gemm_defaults_full_logit_vector_diff gemma4_e2b_tiled_gemm_defaults_vs_all_off_full_logit_vector_diff
+────────────
+     Summary [  12.097s] 6 tests run: 6 passed, 0 skipped
