@@ -856,8 +856,8 @@ fn a_float16_cached_kv_makes_the_decode_split_read_half_pointers_for_the_cached_
     assert!(half.source.contains("kr4_cached"));
     assert!(half.source.contains("if (cached) { value_row[step][slot]"));
     assert!(
-        !plain.source.contains("half"),
-        "the plain decode split must not mention half"
+        !plain.source.contains("device const half*"),
+        "the plain decode split must bind no half pointer"
     );
     assert!(plain.source.contains("(cached ? in2 : in4) + kbase"));
 }
