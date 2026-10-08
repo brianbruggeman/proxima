@@ -318,6 +318,12 @@ pub(super) fn prepare(
     // stride -- see `correct_packed_matmul_layouts`'s own doc (already
     // codec-agnostic: it takes any `packed_operands` node set).
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
+    // after the placed-output promotion, so each RoPE half already sits next to the reads it shares
+    // with its sibling; `fuse_twin_elementwise`'s own doc names the position it keeps.
+    #[cfg(feature = "twin-elementwise-fusion")]
+    if std::env::var_os("PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION").is_none() {
+        resolved = fuse_twin_elementwise(resolved, program);
+    }
     #[cfg(feature = "instrument")]
     counter!(PREPARE_OPTIMIZE_TICKS, elapsed_ticks(optimize_started));
 

@@ -72,6 +72,11 @@ reduce-epilogue-fusion = ["proxima-tensor/reduce-epilogue-fusion"]
 # `moe-topk-fusion`: no renderer change needed, the fold happens entirely in
 # `proxima-tensor::bind` before any kernel is emitted.
 identity-copy-alias = ["proxima-tensor/identity-copy-alias"]
+# Plan-time collapse of sibling elementwise ops (same iteration space, same reads, different body)
+# into one `BoundOpKind::ElementwiseTwin` dispatch that writes both outputs: the two rotated halves
+# of every RoPE pair, 100 dispatches to 50 per gemma4-E2B decode token. `PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION`
+# is the off arm of the A/B. Joins `metal` with the kernel renderer and the extra-output binding.
+twin-elementwise-fusion = []
 # Backends are MIX-AND-MATCH, the same shape `runtime-prime` and
 # `runtime-tokio` take at the workspace root (`Cargo.toml`): both may be
 # compiled in at once and the choice made at runtime, rather than one
@@ -218,6 +223,7 @@ metal = [
     "metal-grouped-gemm",
     "metal-attn-split-decode",
     "metal-attn-split-rows",
+    "twin-elementwise-fusion",
 ]
 # `Vulkan`/`Npu`/`Ane` name-reservation features were deleted with the
 # `Backend` variants they backed (design §B.4, 2026-09-04): no emitter and no
