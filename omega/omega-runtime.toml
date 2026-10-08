@@ -108,6 +108,20 @@ scan_ahead = 4
 # (SIMD_WIDTH) — see sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH.
 max_width = 256
 
+# upper bound on the threadgroup width of a reduce that carries a broadcast
+# epilogue (a row normalization: fold the row, then every lane rewrites its
+# share), `msl::broadcast_cooperative_reduce_width`. Same one-lane-per-four-
+# elements sizing as `max_width` but its own cap, because a normalization row
+# has no tile reuse to trade against occupancy: a hidden-width row of 1536
+# takes 384 lanes (12 simdgroups) instead of 256 with 6 elements per lane.
+# Must stay inside the pipeline's real `maxTotalThreadsPerThreadgroup`
+# (`crate::metal::dispatch` clamps to it, and a clamp below the baked width
+# desynchronizes the lane math), so the default is 512, not llama.cpp's 1024:
+# the register-heavy epilogue tails of the per-layer norms have not been
+# measured at 1024 here. Multiple of 32. 256 reproduces the width every build
+# before this key used.
+broadcast_max_width = 512
+
 [cooperative_reduce]
 # below this many elements in the reduced axis, `msl::reduce_is_cooperative`
 # routes to the one-thread-per-output serial fold (`push_serial_reduce_body`)
@@ -156,6 +170,18 @@ unroll = 8
 # gemma4-E2B hidden-width rmsnorm has 2 such operands (gamma, x) and keeps all
 # `unroll` slots; its 15-operand per-layer tail has 8 and gets 4.
 prefetch_registers = 32
+
+# how a multi-simdgroup cooperative fold with a broadcast epilogue combines
+# the per-simdgroup partials (`msl::push_cooperative_reduce_tail`). 1: every
+# lane of every simdgroup reads one partial (the reduction identity past the
+# last simdgroup) and folds them with one more simd combine, so the scalar is
+# in every lane after ONE barrier -- the structure of llama.cpp's
+# `kernel_rms_norm_fuse_impl` (two `simd_sum` passes around a threadgroup
+# array). 0: lane 0 folds the partials serially, publishes through shared
+# memory, and a second barrier releases the other lanes (the shape before this
+# key). The two orders differ in the low bits of a sum; the maximum and
+# minimum folds are order-free.
+broadcast_simd_fold = 1
 
 [packed_row_split_k]
 # below this many simdgroups (`output_rows / PACKED_ROWS_PER_GROUP`), the
