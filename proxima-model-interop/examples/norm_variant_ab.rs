@@ -14,6 +14,7 @@
 //! simdgroup folds.
 //!
 //! A `<sha16>.<tag>.f16` file lists comma-separated binding indices whose buffers the variant reads as `half` (the replay narrows them from f32). `AB_GEMM_ONLY` times a compacted gemm without its route prepass (the compaction buffer is refilled by the prepass alone, which writes nothing else), `AB_PREPASS_ONLY` the prepass alone.
+//! Each `ab group` line carries the median over `AB_ROUNDS` rounds beside the minimum, maximum and coefficient of variation of those rounds (`round_min_us`, `round_max_us`, `round_cov_pct`).
 //! Every kernel arm also prints an `ab res` line with its resources (static threadgroup bytes, bound buffer bytes, CPU, RSS, footprint, Metal bytes, load; `AB_RESOURCE_ITERS` replays).
 //!
 //! Knobs: `AB_VARIANT_DIR`, `AB_STEP` (5), `AB_ROUNDS` (60), `AB_BATCH` (16), `AB_SKIP_GROUPS`
@@ -285,11 +286,29 @@ mod harness {
             .collect()
     }
 
+    struct RoundSpread {
+        minimum: f64,
+        maximum: f64,
+        cov_percent: f64,
+    }
+
+    fn round_spread(samples: &[f64]) -> RoundSpread {
+        let count = samples.len() as f64;
+        let mean = samples.iter().sum::<f64>() / count;
+        let variance =
+            samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (count - 1.0).max(1.0);
+        RoundSpread {
+            minimum: samples.iter().copied().fold(f64::INFINITY, f64::min),
+            maximum: samples.iter().copied().fold(0.0, f64::max),
+            cov_percent: 100.0 * variance.sqrt() / mean,
+        }
+    }
+
     fn measure(
         arms: &[(String, Vec<&CapturedDispatch>)],
         rounds: usize,
         batch: usize,
-    ) -> Vec<(f64, f64)> {
+    ) -> Vec<(f64, f64, RoundSpread)> {
         let mut single: Vec<Vec<f64>> = vec![Vec::new(); arms.len()];
         let mut batched: Vec<Vec<f64>> = vec![Vec::new(); arms.len()];
         for round in 0..rounds {
@@ -301,10 +320,11 @@ mod harness {
         }
         (0..arms.len())
             .map(|index| {
+                let spread = round_spread(&single[index]);
                 let single_ns = median(&mut single[index]);
                 let batched_ns = median(&mut batched[index]);
                 let marginal = (batched_ns - single_ns) / (batch as f64 - 1.0);
-                (marginal, single_ns)
+                (marginal, single_ns, spread)
             })
             .collect()
     }
@@ -603,14 +623,17 @@ mod harness {
                     continue;
                 }
                 let results = measure(&arms, rounds, batch);
-                for (arm, (marginal, single)) in arms.iter().zip(results) {
+                for (arm, (marginal, single, spread)) in arms.iter().zip(results) {
                     println!(
-                        "ab group sha={} threads={threads} extents={extents:?} tg={width:?} count={} pass={pass} arm={} marginal_us={:.3} single_us={:.3}",
+                        "ab group sha={} threads={threads} extents={extents:?} tg={width:?} count={} pass={pass} arm={} marginal_us={:.3} single_us={:.3} rounds={rounds} round_min_us={:.3} round_max_us={:.3} round_cov_pct={:.3}",
                         &sha[..SHA_PREFIX_CHARS],
                         members.len(),
                         arm.0,
                         marginal / 1e3,
-                        single / 1e3
+                        single / 1e3,
+                        spread.minimum / 1e3,
+                        spread.maximum / 1e3,
+                        spread.cov_percent
                     );
                 }
             }
