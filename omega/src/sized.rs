@@ -172,9 +172,10 @@ pub const SIMD_WIDTH: u64 = 32;
 // noise), and a directional REGRESSION on 4B at N=2 (75.1 vs 63.98 ms/token,
 // n=8 steady steps). Left at the TOML default of 1.
 
-// `LOAD_TIME_FIT_OS_HEADROOM_BYTES`/`LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES`
+// `LOAD_TIME_FIT_OS_HEADROOM_BYTES`/`LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES`/
+// `LOAD_TIME_FIT_ARENA_BYTES_PER_PREFILL_ROW`
 // come in through the `include!` above -- `proxima-model-interop`'s
-// load-time memory-fit gate's own two byte-budget constants (see
+// load-time memory-fit gate's own three byte-budget constants (see
 // `omega-runtime.toml`'s `[load_time_fit]` doc for what each measures and
 // where the default came from). Read from this crate rather than declared
 // in `proxima-model-interop` itself: `omega` is the crate every GPU-backed
