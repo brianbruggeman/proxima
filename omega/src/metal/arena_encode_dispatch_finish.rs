@@ -1105,7 +1105,7 @@ fn capture_dispatch(
     scratch: Option<(&MetalBuffer, usize)>,
     chunk_index: usize,
     uniforms: &MetalBuffer,
-    prepass: Option<(&ResolvedPrepass, &MetalBuffer)>,
+    prepass: Option<(&ResolvedPrepass, &MetalBuffer, Option<NodeId>)>,
 ) {
     let Some(wanted) = std::env::var("PROXIMA_CAPTURE_NODES").ok() else {
         return;
@@ -1268,16 +1268,18 @@ fn capture_dispatch(
                 None => unreplayable = Some(format!("binding {index} ({binding:?}) not resolvable")),
             }
         }
-        let route_prepass_dispatches = ROUTE_PREPASS_DISPATCHES * u64::from(crate::msl::route_prepass_active(bound, packed_operands));
-        let captured_prepass = prepass.map(|(resolved_prepass, compaction)| {
+        let prepass_owner = prepass.and_then(|(_, _, shared_from)| shared_from).map(|owner| owner.0);
+        let route_prepass_dispatches = ROUTE_PREPASS_DISPATCHES
+            * u64::from(crate::msl::route_prepass_active(bound, packed_operands) && prepass_owner.is_none());
+        let captured_prepass = prepass.and_then(|(resolved_prepass, compaction, _)| {
             live_buffers.push((bindings.len(), compaction.clone(), 0));
-            CapturedPrepass {
+            prepass_owner.is_none().then(|| CapturedPrepass {
                 pipeline: resolved_prepass.pipeline.clone(),
                 place: Some(resolved_prepass.place.clone()),
                 grid: resolved_prepass.grid,
-            }
+            })
         });
-        let missing_prepass = (route_prepass_dispatches > 0 && captured_prepass.is_none()).then(|| {
+        let missing_prepass = (crate::msl::route_prepass_active(bound, packed_operands) && prepass.is_none()).then(|| {
             "a compacted grouped gemm needs its route prepass, which this capture call did not receive".to_string()
         });
         let extras_reason = live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers)
@@ -1317,6 +1319,7 @@ fn capture_dispatch(
                 uniforms_index,
                 fault_index,
                 prepass: captured_prepass,
+                prepass_owner,
             });
         });
     }
@@ -1546,6 +1549,10 @@ pub struct CapturedDispatch {
     uniforms_index: Option<usize>,
     fault_index: Option<usize>,
     prepass: Option<CapturedPrepass>,
+    /// `Some(node)` when this compacted gemm read a compaction another op's
+    /// prepass filled earlier in the same step: that op's record carries the
+    /// prepass, this one carries only the shared buffer, bound at `bindings.len()`
+    pub prepass_owner: Option<u32>,
 }
 
 /// The route prepass of a compacted expert-grouped gemm: its count pipeline, its
@@ -1715,6 +1722,7 @@ impl CapturedDispatch {
             uniforms_index: self.uniforms_index,
             fault_index: self.fault_index,
             prepass: self.prepass.clone(),
+            prepass_owner: self.prepass_owner,
         })
     }
 
@@ -1794,6 +1802,7 @@ impl CapturedDispatch {
             uniforms_index: self.uniforms_index,
             fault_index: self.fault_index,
             prepass: self.prepass.clone(),
+            prepass_owner: self.prepass_owner,
         })
     }
 
@@ -1937,6 +1946,7 @@ impl CapturedDispatch {
             uniforms_index: self.uniforms_index,
             fault_index: self.fault_index,
             prepass: self.prepass.clone(),
+            prepass_owner: self.prepass_owner,
         }
     }
 
@@ -2327,6 +2337,9 @@ pub(super) fn encode_op(
     // merge block's tuple match moving this `Option` outright.
     mut hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
     expert_buffers: Option<&ExpertSourceBuffers>,
+    // `Some` from the callers that encode a whole step: compacted grouped ops that read one
+    // route share the first one's compaction instead of each running a prepass.
+    route_compactions: Option<&mut RouteCompactions>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     let expert_source_node = match expert_buffers {
         None => None,
@@ -2759,16 +2772,50 @@ pub(super) fn encode_op(
     }
     let compaction = match prepass {
         Some(prepass) => {
-            let compaction = encode_route_prepass(
-                device,
-                encoder,
-                prepass,
-                bindings.len(),
-                Retained::as_ptr(&output),
-                hazard.as_deref_mut(),
-            )?;
-            encoder.setComputePipelineState(&pipeline);
-            Some(compaction)
+            let output_pointer = Retained::as_ptr(&output);
+            let shared_key = route_compactions
+                .as_ref()
+                .and_then(|_| crate::msl::route_compaction_key(bound, packed_operands));
+            let (compaction, owner, reused) = match (route_compactions, shared_key) {
+                (Some(cache), Some(key)) => {
+                    let ((compaction, owner), reused) = shared_or_encode(cache, key, || {
+                        let compaction = encode_route_prepass(
+                            device,
+                            encoder,
+                            prepass,
+                            bindings.len(),
+                            output_pointer,
+                            hazard.as_deref_mut(),
+                        )?;
+                        encoder.setComputePipelineState(&pipeline);
+                        Ok::<_, MetalError>((compaction, bound.node))
+                    })?;
+                    (compaction, owner, reused)
+                }
+                _ => {
+                    let compaction = encode_route_prepass(
+                        device,
+                        encoder,
+                        prepass,
+                        bindings.len(),
+                        output_pointer,
+                        hazard.as_deref_mut(),
+                    )?;
+                    encoder.setComputePipelineState(&pipeline);
+                    (compaction, bound.node, false)
+                }
+            };
+            if reused {
+                // SAFETY: the shared compaction is a live shared-storage buffer the owner's prepass filled.
+                unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, bindings.len()) };
+            }
+            if let Some(tracker) = hazard.as_deref_mut()
+                && hazard_read_compaction(tracker, Retained::as_ptr(&compaction), output_pointer)
+            {
+                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                counter!(BARRIERS_EMITTED, 1);
+            }
+            Some((compaction, reused.then_some(owner)))
         }
         None => None,
     };
@@ -2784,7 +2831,7 @@ pub(super) fn encode_op(
         scratch,
         capture_chunk_index,
         &uniforms,
-        prepass.zip(compaction.as_ref()),
+        prepass.zip(compaction.as_ref()).map(|(prepass, (buffer, shared_from))| (prepass, buffer, *shared_from)),
     );
     #[cfg(not(feature = "instrument"))]
     drop(compaction);
@@ -2902,17 +2949,59 @@ fn encode_route_prepass(
     }
     encoder.setComputePipelineState(&prepass.place);
     dispatch(encoder, &prepass.place, prepass.grid);
-    if let Some(tracker) = hazard {
-        let compaction_pointer = Retained::as_ptr(&compaction);
-        tracker.record(&[], Some(compaction_pointer));
-        if tracker.needs_barrier(&[compaction_pointer], None) {
-            encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-            counter!(BARRIERS_EMITTED, 1);
-            tracker.reset();
-            tracker.record(&[], Some(output_pointer));
-        }
+    if let Some(tracker) = hazard
+        && hazard_write_compaction(tracker, Retained::as_ptr(&compaction), output_pointer)
+    {
+        encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+        counter!(BARRIERS_EMITTED, 1);
     }
     Ok(compaction)
+}
+
+/// The compaction `key` names, from `cache` when an earlier op of this step
+/// already encoded it, else from `encode` (run once, then remembered). The
+/// flag is `true` for a reuse. `Key` carries the route operand, so two
+/// different routes can never be handed each other's buffer.
+fn shared_or_encode<Key: Ord, Value: Clone, Failure>(
+    cache: &mut BTreeMap<Key, Value>,
+    key: Key,
+    encode: impl FnOnce() -> Result<Value, Failure>,
+) -> Result<(Value, bool), Failure> {
+    if let Some(existing) = cache.get(&key) {
+        return Ok((existing.clone(), true));
+    }
+    let encoded = encode()?;
+    cache.insert(key, encoded.clone());
+    Ok((encoded, false))
+}
+
+/// The prepass wrote `compaction`: record the write, and since the gemm reads
+/// it next, a barrier is due (returned) that resets the tracker, after which
+/// `output` (recorded as written before this op encoded) is restored.
+fn hazard_write_compaction<Id: Eq + core::hash::Hash + Copy>(
+    tracker: &mut HazardTracker<Id>,
+    compaction: Id,
+    output: Id,
+) -> bool {
+    tracker.record(&[], Some(compaction));
+    hazard_read_compaction(tracker, compaction, output)
+}
+
+/// A gemm reads `compaction`: a barrier is due (returned) when a prepass wrote
+/// it since the last barrier, and the read is recorded either way, so each of
+/// a route's consumers is an edge in the tracker, not only the first.
+fn hazard_read_compaction<Id: Eq + core::hash::Hash + Copy>(
+    tracker: &mut HazardTracker<Id>,
+    compaction: Id,
+    output: Id,
+) -> bool {
+    let barrier = tracker.needs_barrier(&[compaction], None);
+    if barrier {
+        tracker.reset();
+        tracker.record(&[], Some(output));
+    }
+    tracker.record(&[compaction], None);
+    barrier
 }
 
 /// Reads back a dispatch's fault buffer and, if any slot recorded a fault,

@@ -11,6 +11,14 @@ pub(super) type MetalBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 /// instead of every binding assuming offset 0.
 pub(super) type DeviceBuffer = (MetalBuffer, usize);
 
+/// The route compactions one step has already encoded, keyed by
+/// [`crate::msl::route_compaction_key`] (route operand node plus the layout
+/// the prepass reads it through), each with the node of the op whose prepass
+/// filled it. A caller creates one per step and passes it to every
+/// [`encode_op`] of that step, so the route is immutable for the key's whole
+/// life; a fresh map is a fresh step.
+pub(super) type RouteCompactions = BTreeMap<(NodeId, i64, i64, u64, u64), (MetalBuffer, NodeId)>;
+
 /// Owns a compute encoder's `endEncoding()` call so an early `?` return from
 /// inside an op-encoding loop cannot leave it un-ended. Every `execute*`
 /// entry point in this file used to open one encoder and call

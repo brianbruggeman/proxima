@@ -279,6 +279,7 @@ pub(super) fn execute_plan_inner(
     // buffer is not CPU-visible until the command buffer it was written in
     // completes. See the module doc's "Gather fault reporting" section.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+    let mut route_compactions = RouteCompactions::new();
     debug!(
         prepared_nodes = ?prepared.resolved.iter().map(|bound| bound.node).collect::<Vec<_>>(),
         "metal_expert_prepared_nodes"
@@ -360,6 +361,7 @@ pub(super) fn execute_plan_inner(
             None,
             None,
             expert_buffers,
+            Some(&mut route_compactions),
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));

@@ -110,6 +110,7 @@ pub(super) fn execute_op_timed(
         None,
         None,
         expert_buffers,
+        None,
     )?;
     encoder.finish();
     // one `BoundOp` encoded, this call's whole reason for existing -- the
@@ -1126,6 +1127,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             None,
             #[cfg(feature = "instrument")]
             1,
+            None,
             None,
             None,
             None,

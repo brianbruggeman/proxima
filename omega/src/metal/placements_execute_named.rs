@@ -963,6 +963,7 @@ pub(super) fn execute_plan_with_placements_inner(
     // needs (this function's own doc, "Within-call aliasing"). Silent unless
     // a caller raises `RUST_LOG` to `trace` for this target.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+    let mut route_compactions = RouteCompactions::new();
     #[cfg(feature = "instrument")]
     let mut capture_chunk_index = 1usize;
     for (position, bound) in prepared.resolved.iter().enumerate() {
@@ -1581,6 +1582,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 attention_scratch,
                 hazard,
                 bound_expert_buffers,
+                Some(&mut route_compactions),
             )?;
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
@@ -2248,6 +2250,7 @@ pub fn execute_plan_timed(
     })?);
 
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+    let mut route_compactions = RouteCompactions::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
         let fault = encode_op(
             &device,
@@ -2266,6 +2269,7 @@ pub fn execute_plan_timed(
             None,
             None,
             None,
+            Some(&mut route_compactions),
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
