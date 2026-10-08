@@ -318,6 +318,8 @@ pub(super) fn build_buffer_arena(
         peak_bytes = peak_bytes as u64,
         "buffer arena laid out"
     );
+    #[cfg(feature = "instrument")]
+    emit_arena_census(resolved, &found);
 
     Ok(BufferArena {
         slots,
@@ -340,6 +342,64 @@ pub(super) fn build_buffer_arena(
         },
         slot_bytes: layout.slot_bytes,
     })
+}
+
+/// Per output size: how many outputs of that size the plan writes, how many
+/// are live at once at most, which op kinds (with extents) write them, and the
+/// size-class mix at the position where the live total peaks -- the itemization
+/// of what a plan's arena holds, independent of how it was laid out.
+#[cfg(all(feature = "metal-plan-stable-buffers", feature = "instrument"))]
+fn emit_arena_census(resolved: &[BoundOp], found: &ArenaAllocations) {
+    let mut writers: BTreeMap<usize, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut live: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut peak_live: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut peak_mix: (usize, usize, BTreeMap<usize, usize>) = (0, 0, BTreeMap::new());
+    let mut cursor = 0usize;
+    for (position, bound) in resolved.iter().enumerate() {
+        let label = format!("{}{:?}", bound.kind.name(), bound.extents);
+        while let Some(allocation) = found
+            .allocations
+            .get(cursor)
+            .filter(|each| each.first == position)
+        {
+            *writers.entry(allocation.bytes).or_default().entry(label.clone()).or_default() += 1;
+            let count = live.entry(allocation.bytes).or_default();
+            *count += 1;
+            let high = peak_live.entry(allocation.bytes).or_default();
+            *high = (*high).max(*count);
+            cursor += 1;
+        }
+        let total: usize = live.iter().map(|(bytes, count)| bytes * count).sum();
+        if total > peak_mix.0 {
+            peak_mix = (total, position, live.clone());
+        }
+        for index in &found.releases[position] {
+            *live.entry(found.allocations[*index].bytes).or_default() -= 1;
+        }
+    }
+    debug!(
+        peak_total_bytes = peak_mix.0 as u64,
+        peak_position = peak_mix.1 as u64,
+        peak_kind = resolved.get(peak_mix.1).map_or("none", |bound| bound.kind.name()),
+        peak_mix = ?peak_mix.2,
+        "buffer arena live peak by size class"
+    );
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for allocation in &found.allocations {
+        *counts.entry(allocation.bytes).or_default() += 1;
+    }
+    for (class_bytes, count) in &counts {
+        if class_bytes.saturating_mul(*count) < (1 << 20) {
+            continue;
+        }
+        debug!(
+            class_bytes = *class_bytes as u64,
+            outputs = *count as u64,
+            peak_live = peak_live.get(class_bytes).copied().unwrap_or(0) as u64,
+            writers = ?writers.get(class_bytes),
+            "buffer arena size class"
+        );
+    }
 }
 
 /// CARD 6.5: one uniform buffer per plan position, allocated once in
