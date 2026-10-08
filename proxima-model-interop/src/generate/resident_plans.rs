@@ -175,6 +175,7 @@ impl PlanIdentity {
             // device memory held for wide plans between calls: trims, never changes a plan
             resident_prefill_plan_bytes: _,
             overlap_transfer_compute: _,
+            warm_model_buffers_at_load: _,
             admission_schedule: _,
             phase_schedule: _,
             expert_residency_schedule: _,
