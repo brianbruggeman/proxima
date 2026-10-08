@@ -464,6 +464,139 @@ fn stacked_gathered_matmul_op(
         .expect("one fused bound emitted")
 }
 
+/// A stacked down projection folded over its selected axis in the same reduce:
+/// iteration axes are `(sequence, selected, reduction, rows)`, the route moves
+/// along `selected` (a reduced axis), the activation is one `[sequence,
+/// selected, reduction]` row per selected expert, and the output is
+/// `[sequence, rows]`.
+fn selection_folded_matmul_op(
+    sequence: u32,
+    selected: u32,
+    experts: u32,
+    rows: u32,
+    k: u32,
+) -> BoundOp {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(experts),
+                Extent::Static(rows),
+                Extent::Static(k),
+            ],
+            name: None,
+        },
+    );
+    let route = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(sequence), Extent::Static(selected)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(sequence),
+                Extent::Static(selected),
+                Extent::Static(k),
+            ],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (
+                    weight,
+                    IndexMap::Computed {
+                        indices: route,
+                        index_map: map::projection(4, &[0, 1]),
+                        base: map::IndexPattern {
+                            iter_rank: 4,
+                            axes: vec![
+                                map::AxisIndex::default(),
+                                map::AxisIndex {
+                                    terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                                    offset: 0,
+                                    len: None,
+                                },
+                                map::AxisIndex {
+                                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                                    offset: 0,
+                                    len: None,
+                                },
+                            ],
+                        },
+                        gathered_dim: 0,
+                    },
+                ),
+                (activation, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 3])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("selection folded matmul infers");
+    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("selection folded matmul lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
+}
+
+/// A route that moves along a reduced axis cannot share one fetched expert
+/// across a simdgroup, so the fold must take the body that fetches the route
+/// per reduction step. At the largest shape the combine fuses (a prefill chunk)
+/// and at a decode step alike, the route-varying reduce is neither cooperative
+/// nor a tiled/packed-row candidate, and the emitted kernel reads its route
+/// inside the reduction loop, once per `(selected, reduction)` coordinate.
+#[proxima::test]
+#[case::prefill_chunk(512)]
+#[case::decode_step(1)]
+async fn a_route_that_moves_along_a_reduced_axis_renders_the_serial_body_fetching_per_step(
+    #[case] sequence: u32,
+) {
+    let bound = selection_folded_matmul_op(sequence, 8, 32, 128, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut packed = BTreeMap::new();
+    packed.insert(weight_node, Codec::Q8_0);
+
+    assert!(!reduce_is_cooperative(&bound), "{sequence} tokens");
+
+    let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("selection fold emits");
+    let loop_start = kernel
+        .source
+        .find("for (long r = 0; r < u.reduction_total; r++)")
+        .expect("the serial body loops over the flattened reduction");
+    let fetch = kernel
+        .source
+        .find("gather_idx0[gather_off0]")
+        .expect("the route is read");
+    assert!(fetch > loop_start, "the route read must sit inside the reduction loop: {}", kernel.source);
+    assert!(!kernel.source.contains("simd_sum"), "{}", kernel.source);
+}
+
 fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
     let mut program = Vec::new();
     let weight = append(
