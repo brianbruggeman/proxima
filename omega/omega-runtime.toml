@@ -124,15 +124,16 @@ max_width = 256
 # epilogue (a row normalization: fold the row, then every lane rewrites its
 # share), `msl::broadcast_cooperative_reduce_width`. Same one-lane-per-four-
 # elements sizing as `max_width` but its own cap, because a normalization row
-# has no tile reuse to trade against occupancy: a hidden-width row of 1536
-# takes 384 lanes (12 simdgroups) instead of 256 with 6 elements per lane.
+# has no tile reuse to trade against occupancy: a cap of 512 lets a
+# hidden-width row of 1536 take 384 lanes (12 simdgroups) instead of 256.
 # Must stay inside the pipeline's real `maxTotalThreadsPerThreadgroup`
 # (`crate::metal::dispatch` clamps to it, and a clamp below the baked width
-# desynchronizes the lane math), so the default is 512, not llama.cpp's 1024:
-# the register-heavy epilogue tails of the per-layer norms have not been
-# measured at 1024 here. Multiple of 32. 256 reproduces the width every build
-# before this key used.
-broadcast_max_width = 512
+# desynchronizes the lane math). Multiple of 32. MEASURED (gemma4 E2B, 971 and
+# 25-token prompts, interleaved release runs): 512 costs 0.18 ms/token of
+# decode and 6 ms of prefill against 256 and changes no granite number, so
+# the default is 256, the width every build before this key used. 1024 has
+# not been measured here.
+broadcast_max_width = 256
 
 [cooperative_reduce]
 # below this many elements in the reduced axis, `msl::reduce_is_cooperative`
