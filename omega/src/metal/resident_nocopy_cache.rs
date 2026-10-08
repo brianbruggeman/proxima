@@ -173,6 +173,8 @@ pub(super) fn upload_block_no_copy(
         return Ok(existing);
     }
     let buffer = create_no_copy_buffer(device, pointer, byte_length)?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("weight_nocopy", "resident", name, byte_length, true);
     NOCOPY_BUFFERS.with(|cache| {
         cache.borrow_mut().insert(
             name.to_string(),
@@ -196,7 +198,10 @@ pub(super) fn upload_block_no_copy_uncached(
     pointer: *const c_void,
     byte_length: usize,
 ) -> Result<MetalBuffer, MetalError> {
-    create_no_copy_buffer(device, pointer, byte_length)
+    let buffer = create_no_copy_buffer(device, pointer, byte_length)?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("block_nocopy", "call", "", byte_length, true);
+    Ok(buffer)
 }
 
 /// The `newBufferWithBytesNoCopy` FFI call itself, shared by
@@ -227,6 +232,17 @@ pub(super) fn create_no_copy_buffer(
 }
 
 pub(super) fn upload_block_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    let buffer = copy_into_new_buffer(device, pointer, byte_length)?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("block_copy", "call", "", byte_length, false);
+    Ok(buffer)
+}
+
+fn copy_into_new_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     pointer: *const c_void,
     byte_length: usize,
@@ -360,7 +376,9 @@ pub(super) fn upload_resident_copy(
     counter!(COPYING_BUFFER_UPLOADS, 1);
     counter!(RESIDENT_BUFFER_UPLOADS, 1);
     counter!(BLOCK_COPIED_BYTES, byte_length as u64);
-    let buffer = upload_block_copy(device, pointer, byte_length)?;
+    let buffer = copy_into_new_buffer(device, pointer, byte_length)?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("weight_copy", "resident", name, byte_length, false);
     RESIDENT_BUFFERS.with(|cache| {
         cache.borrow_mut().insert(
             name.to_string(),
@@ -1005,6 +1023,8 @@ pub(super) fn allocate_fault_buffer(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "device refused to allocate the gather fault buffer".to_string(),
         })?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("fault_buffer", "pool", "", byte_length, false);
     zero_fault_buffer(&buffer, gather_count);
     Ok(buffer)
 }
@@ -1148,7 +1168,34 @@ pub(super) fn evict_least_recently_used(cache: &mut BTreeMap<Vec<u8>, (MetalBuff
     else {
         return;
     };
+    #[cfg(feature = "instrument")]
+    if let Some((buffer, _)) = cache.get(&oldest_key) {
+        record_device_buffer_release("uniform_cache", buffer.length());
+    }
     cache.remove(&oldest_key);
+}
+
+/// One structured event per new device buffer: `owner` names the allocating
+/// site, `lifetime` how long the buffer stays (`resident` weights, `cache`,
+/// `pool`, `plan`, `call`, `session`), `name` the residency name when the
+/// site has one (a `kv_cache.*` block, a weight tensor), `aliased` whether the
+/// buffer wraps memory the caller owns instead of owning its own pages. Sum
+/// `bytes` by `owner` and subtract the `device_buffer_released` events to
+/// account the `device_allocated_bytes` the token events report.
+#[cfg(feature = "instrument")]
+pub(super) fn record_device_buffer(
+    owner: &'static str,
+    lifetime: &'static str,
+    name: &str,
+    bytes: usize,
+    aliased: bool,
+) {
+    debug!(owner, lifetime, name = %name, bytes = bytes as u64, aliased, "device_buffer");
+}
+
+#[cfg(feature = "instrument")]
+pub(super) fn record_device_buffer_release(owner: &'static str, bytes: usize) {
+    debug!(owner, bytes = bytes as u64, "device_buffer_released");
 }
 
 pub(super) fn upload_uniforms(
@@ -1186,6 +1233,8 @@ pub(super) fn upload_uniforms(
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused to allocate the uniforms buffer".to_string(),
     })?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer("uniform_cache", "cache", "", bytes.len(), false);
     UNIFORM_BUFFERS.with(|cache| {
         let mut cache = cache.borrow_mut();
         let capacity = crate::sized::UNIFORM_CACHE_ENTRIES as usize;
