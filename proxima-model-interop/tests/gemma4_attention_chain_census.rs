@@ -115,10 +115,15 @@ fn production_step_outputs(logits_root: NodeId, layer_roots: &[LayerCacheRoots])
 /// identity copies: the census prints 488 elementwise ops without it and 418
 /// with it, and every other op kind's count is the same either way.
 const IDENTITY_COPIES_ALIASED: usize = 70;
+/// The 35 per-layer-input norms are one norm over the layer axis, so 34 norms
+/// leave the program; each is one reduce, one elementwise and one constant op
+/// (reduce 903 -> 869, elementwise 488 -> 454, constant 262 -> 228).
+const FOLDED_PER_LAYER_INPUT_NORMS: usize = 34;
+const OPS_PER_FOLDED_NORM: usize = 3;
 const STORED_PRODUCTION_TOTAL: usize = if cfg!(feature = "identity-copy-alias") {
-    1661 - IDENTITY_COPIES_ALIASED
+    1661 - IDENTITY_COPIES_ALIASED - FOLDED_PER_LAYER_INPUT_NORMS * OPS_PER_FOLDED_NORM
 } else {
-    1661
+    1661 - FOLDED_PER_LAYER_INPUT_NORMS * OPS_PER_FOLDED_NORM
 };
 
 fn truncated_debug(kind: &BoundOpKind) -> String {
