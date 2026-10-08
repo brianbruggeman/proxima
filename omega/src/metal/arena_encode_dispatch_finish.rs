@@ -33,13 +33,16 @@ use std::borrow::Borrow;
 pub(super) struct BufferArena {
     pub(super) slots: Vec<MetalBuffer>,
     pub(super) slot_bytes: Vec<usize>,
-    /// Parallel to `prepared.resolved`.
-    pub(super) position_slot: Vec<usize>,
+    /// Parallel to `prepared.resolved`. `None` for a position whose node the
+    /// caller output-placed when the arena was built: that node is written into
+    /// the caller's buffer, never into a slot, so none is held for it.
+    pub(super) position_slot: Vec<Option<usize>>,
     /// Parallel to `position_slot`: the byte offset of that position's output
-    /// inside its slot.
+    /// inside its slot; `0` where `position_slot` is `None`.
     pub(super) position_offset: Vec<usize>,
     /// Every extra output node an op writes beyond its own (`extra_output_nodes`),
-    /// with the slot and byte offset backing it, grouped by position.
+    /// with the slot and byte offset backing it, grouped by position. A
+    /// caller-placed extra has no entry.
     pub(super) extra_slots: Vec<(NodeId, usize, usize)>,
     /// Parallel to `prepared.resolved`: the range of `extra_slots` one position owns.
     pub(super) position_extras: Vec<core::ops::Range<usize>>,
@@ -58,11 +61,8 @@ pub(super) struct BufferArena {
 impl BufferArena {
     /// The `(buffer, offset)` pair [`encode_op`] binds a position's output
     /// to when the caller has not output-placed that position's node.
-    fn placement_for(&self, position: usize) -> (&MetalBuffer, usize) {
-        (
-            &self.slots[self.position_slot[position]],
-            self.position_offset[position],
-        )
+    fn placement_for(&self, position: usize) -> Option<(&MetalBuffer, usize)> {
+        self.position_slot[position].map(|slot| (&self.slots[slot], self.position_offset[position]))
     }
 
     /// The `(node, buffer, offset)` triples a position's extra outputs bind
@@ -96,7 +96,7 @@ impl BufferArena {
     /// arena-reuse witness for [`record_hazard_class`].
     #[cfg(feature = "instrument")]
     pub(super) fn slot_is_recycled(&self, position: usize) -> bool {
-        self.slot_occupancy[self.position_slot[position]] > 1
+        self.position_slot[position].is_some_and(|slot| self.slot_occupancy[slot] > 1)
     }
 }
 
@@ -165,13 +165,14 @@ pub(super) fn plan_bind_row_count(symbols: &[u64]) -> u64 {
 
 /// The outputs a plan writes, in program order, with the releases the arena
 /// layout needs: `primary[position]` is the allocation holding that position's
-/// own node, `extras` the allocations holding the extra outputs
-/// ([`extra_output_nodes`]) with `position_extras[position]` their range.
+/// own node (`None` when the caller output-places it), `extras` the allocations
+/// holding the extra outputs ([`extra_output_nodes`]) with `position_extras[position]`
+/// their range.
 #[cfg(feature = "metal-plan-stable-buffers")]
 struct ArenaAllocations {
     allocations: Vec<Allocation>,
     releases: Vec<Vec<usize>>,
-    primary: Vec<usize>,
+    primary: Vec<Option<usize>>,
     extras: Vec<(NodeId, usize)>,
     position_extras: Vec<core::ops::Range<usize>>,
 }
@@ -181,13 +182,16 @@ struct ArenaAllocations {
 /// position's outputs come into being first, then whatever `retires[position]`
 /// names is released for positions after this one. `outputs` is passed through
 /// only for the `debug_assert!` -- `node_retirement` itself is what actually
-/// keeps an output out of `retires`.
+/// keeps an output out of `retires`. `is_placed` names the nodes the calling
+/// execute call writes into caller-owned buffers: an output-placed node never
+/// binds an arena range, so none is allocated for it.
 #[cfg(feature = "metal-plan-stable-buffers")]
 fn arena_allocations(
     resolved: &[BoundOp],
     retires: &[Vec<NodeId>],
     outputs: &BTreeSet<NodeId>,
     resident_nodes: &BTreeSet<NodeId>,
+    is_placed: impl Fn(NodeId) -> bool,
 ) -> ArenaAllocations {
     let mut found = ArenaAllocations {
         allocations: Vec::with_capacity(resolved.len()),
@@ -200,16 +204,19 @@ fn arena_allocations(
     for (position, bound) in resolved.iter().enumerate() {
         let resident = resident_nodes.contains(&bound.node);
         let element_bytes = bound.dtype.size_bytes();
-        let own = Allocation {
-            bytes: bound_output_len(bound).max(1) * element_bytes,
-            first: position,
-            resident,
-        };
-        live_index.insert(bound.node, found.allocations.len());
-        found.primary.push(found.allocations.len());
-        found.allocations.push(own);
+        if is_placed(bound.node) {
+            found.primary.push(None);
+        } else {
+            live_index.insert(bound.node, found.allocations.len());
+            found.primary.push(Some(found.allocations.len()));
+            found.allocations.push(Allocation {
+                bytes: bound_output_len(bound).max(1) * element_bytes,
+                first: position,
+                resident,
+            });
+        }
         let extras_start = found.extras.len();
-        for (extra_node, element_count) in extra_output_nodes(bound) {
+        for (extra_node, element_count) in extra_output_nodes(bound).filter(|(node, _)| !is_placed(*node)) {
             live_index.insert(extra_node, found.allocations.len());
             found.extras.push((extra_node, found.allocations.len()));
             found.allocations.push(Allocation {
@@ -252,6 +259,7 @@ pub(super) fn build_buffer_arena(
     device: &ProtocolObject<dyn MTLDevice>,
     plan: &Plan,
     retires: &[Vec<NodeId>],
+    is_placed: impl Fn(NodeId) -> bool,
 ) -> Result<BufferArena, MetalError> {
     let resolved = plan.prepared.resolved.as_slice();
     let query_rows = plan.bind_row_count;
@@ -277,7 +285,7 @@ pub(super) fn build_buffer_arena(
         "buffer arena sized against the naive (no-reuse) transient sum"
     );
 
-    let found = arena_allocations(resolved, retires, &outputs, &plan.resident_nodes);
+    let found = arena_allocations(resolved, retires, &outputs, &plan.resident_nodes, is_placed);
     let peak_bytes = peak_live_bytes(&found.allocations, &found.releases);
     let reuse_factor = naive_transient_bytes as f64 / peak_bytes.max(1) as f64;
     debug!(
@@ -323,8 +331,8 @@ pub(super) fn build_buffer_arena(
 
     Ok(BufferArena {
         slots,
-        position_slot: found.primary.iter().map(|index| layout.places[*index].0).collect(),
-        position_offset: found.primary.iter().map(|index| layout.places[*index].1).collect(),
+        position_slot: found.primary.iter().map(|index| index.map(|each| layout.places[each].0)).collect(),
+        position_offset: found.primary.iter().map(|index| index.map_or(0, |each| layout.places[each].1)).collect(),
         extra_slots: found
             .extras
             .iter()
@@ -485,20 +493,27 @@ pub(super) fn read_back_uniform_bytes(buffer: &ProtocolObject<dyn MTLBuffer>, by
 /// `execute_plan_with_placements`/`execute_plan_with_placements_op_timed`
 /// ever call this, so `execute_plan`/`execute_plan_op_timed` (which never
 /// do) cost this device allocation zero times, not once per miss.
+///
+/// `is_placed` names the nodes the calling execute call writes into
+/// caller-owned buffers: the arena built by the first call holds no range for
+/// them. A later call that leaves such a node unplaced finds `None` here and
+/// allocates its output fresh, as it would with no arena at all.
 #[cfg(feature = "metal-plan-stable-buffers")]
 pub(super) fn arena_placement(
     plan: &Plan,
     position: usize,
+    is_placed: impl Fn(NodeId) -> bool,
 ) -> Result<Option<(&MetalBuffer, usize)>, MetalError> {
     if plan.arena.get().is_none() {
         let (device, _queue) = device_and_queue()?;
         let pinned_retires = resident_pinned_retires(plan);
-        let arena = build_buffer_arena(&device, plan, &pinned_retires)?;        // a fresh, still-empty `OnceCell` can only fail to accept this set
+        let arena = build_buffer_arena(&device, plan, &pinned_retires, is_placed)?;
+        // a fresh, still-empty `OnceCell` can only fail to accept this set
         // if another call already raced it in -- impossible here since
         // `plan` is `&Plan`, never shared across a concurrent write.
         let _ = plan.arena.set(arena);
     }
-    Ok(plan.arena.get().map(|arena| arena.placement_for(position)))
+    Ok(plan.arena.get().and_then(|arena| arena.placement_for(position)))
 }
 /// Registers a position's extra output buffers in `device_buffers` before
 /// `encode_op` runs, so a multi-output op binds plan-owned storage instead
@@ -530,6 +545,7 @@ pub(super) fn bind_arena_extras(
 pub(super) fn arena_placement(
     _plan: &Plan,
     _position: usize,
+    _is_placed: impl Fn(NodeId) -> bool,
 ) -> Result<Option<(&MetalBuffer, usize)>, MetalError> {
     Ok(None)
 }
@@ -3481,7 +3497,7 @@ pub(super) mod arena_tests {
                 .iter()
                 .position(|bound| bound.node == shared)
                 .expect("`shared` is dispatched");
-            assert_eq!(arena.position_slot[position], 0, "{shared:?} lives in the shared buffer");
+            assert_eq!(arena.position_slot[position], Some(0), "{shared:?} lives in the shared buffer");
             assert_eq!(arena.position_offset[position], 0, "no two `shared` nodes are live together");
         }
     }
@@ -3607,7 +3623,7 @@ pub(super) mod arena_tests {
             core::iter::repeat_n(QuantizedBlock::Float32(a.as_slice()), 5).collect();
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the five-diamond program");
-        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
 
         let arena = resolved_plan
             .arena
@@ -3621,7 +3637,8 @@ pub(super) mod arena_tests {
         // must have authorized.
         let mut positions_by_slot: alloc::collections::BTreeMap<usize, Vec<usize>> =
             alloc::collections::BTreeMap::new();
-        for (position, &slot) in arena.position_slot.iter().enumerate() {
+        for (position, slot) in arena.position_slot.iter().enumerate() {
+            let slot = slot.expect("this plan places no output, so every position holds a slot");
             positions_by_slot.entry(slot).or_default().push(position);
         }
 
@@ -3666,7 +3683,7 @@ pub(super) mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the pinned-output chain");
-        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
         let arena = resolved_plan
             .arena
             .get()
@@ -3680,8 +3697,8 @@ pub(super) mod arena_tests {
                 .position(|bound| bound.node == node)
                 .expect("node is dispatched")
         };
-        let stage_zero_slot = arena.position_slot[position_of(stage_zero)];
-        let stage_two_slot = arena.position_slot[position_of(stage_two)];
+        let stage_zero_slot = arena.position_slot[position_of(stage_zero)].expect("no output is placed");
+        let stage_two_slot = arena.position_slot[position_of(stage_two)].expect("no output is placed");
         assert_ne!(
             stage_zero_slot, stage_two_slot,
             "a pinned program output's slot must never be handed to a later same-size op"
@@ -3702,7 +3719,7 @@ pub(super) mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the size-mismatched chain");
-        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
         let arena = resolved_plan
             .arena
             .get()
@@ -3716,8 +3733,8 @@ pub(super) mod arena_tests {
                 .position(|bound| bound.node == node)
                 .expect("node is dispatched")
         };
-        let stage_zero_slot = arena.position_slot[position_of(stage_zero)];
-        let stage_two_slot = arena.position_slot[position_of(stage_two)];
+        let stage_zero_slot = arena.position_slot[position_of(stage_zero)].expect("no output is placed");
+        let stage_two_slot = arena.position_slot[position_of(stage_two)].expect("no output is placed");
         assert_ne!(
             stage_zero_slot, stage_two_slot,
             "a byte-length mismatch must force a genuinely new slot, never a reused one"
@@ -3727,6 +3744,107 @@ pub(super) mod arena_tests {
             8 * size_of::<f32>(),
             "the new slot must be sized to the LARGER extent's own byte length"
         );
+    }
+
+    #[test]
+    fn an_output_the_caller_places_holds_no_arena_range() {
+        let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32; 4];
+        let b = [2.0f32; 4];
+        let outputs = [stage_zero, stage_one, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
+            .expect("plans the three-stage chain");
+        let position_of = |node: NodeId| {
+            resolved_plan
+                .prepared
+                .resolved
+                .iter()
+                .position(|bound| bound.node == node)
+                .expect("node is dispatched")
+        };
+        let unplaced = super::arena_allocations(
+            &resolved_plan.prepared.resolved,
+            &resolved_plan.prepared.retires,
+            &outputs.iter().copied().collect(),
+            &resolved_plan.resident_nodes,
+            |_| false,
+        );
+
+        let placed = super::arena_allocations(
+            &resolved_plan.prepared.resolved,
+            &resolved_plan.prepared.retires,
+            &outputs.iter().copied().collect(),
+            &resolved_plan.resident_nodes,
+            |node| node == stage_one,
+        );
+
+        assert_eq!(
+            placed.primary[position_of(stage_one)],
+            None,
+            "a placed output is written into the caller's buffer, so the arena holds no range for it"
+        );
+        assert_eq!(
+            placed.allocations.len(),
+            unplaced.allocations.len() - 1,
+            "exactly the placed node's allocation is gone"
+        );
+        assert!(
+            placed.primary[position_of(stage_zero)].is_some()
+                && placed.primary[position_of(stage_two)].is_some(),
+            "an unplaced output keeps its allocation"
+        );
+    }
+
+    #[test]
+    fn a_placed_output_lands_at_its_offset_with_no_arena_range_and_its_neighbours_stay_exact() {
+        let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [5.0f32, 6.0, 7.0, 8.0];
+        let outputs = [stage_zero, stage_one, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let host_inputs: [&[f32]; 2] = [&a, &b];
+        let cpu_oracle = cpu::evaluate(&program, &[], &host_inputs, &outputs)
+            .expect("the CPU oracle evaluates the chain");
+        let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
+            .expect("plans the three-stage chain");
+        let cache_rows = crate::allocate_placed_buffer(12 * size_of::<f32>())
+            .expect("allocates a buffer longer than the output it receives");
+        crate::zero_placed_buffer(&cache_rows, 12 * size_of::<f32>());
+
+        let evaluated = execute_plan_with_placements(
+            &resolved_plan,
+            &blocks,
+            &[],
+            &[(stage_one, &cache_rows, 8 * size_of::<f32>())],
+            &mut Vec::new(),
+        )
+        .expect("runs the chain with one output placed into the middle of a longer buffer");
+
+        let position = resolved_plan
+            .prepared
+            .resolved
+            .iter()
+            .position(|bound| bound.node == stage_one)
+            .expect("stage_one is dispatched");
+        let arena = resolved_plan.arena.get().expect("the placed run built the arena");
+        assert_eq!(arena.position_slot[position], None, "the placed node holds no arena range");
+        let (expected_placed, _shape) = cpu_oracle.get(stage_one).expect("oracle has stage_one");
+        assert_eq!(
+            crate::read_placed_buffer_f32(&cache_rows, 8 * size_of::<f32>(), 4),
+            expected_placed,
+            "the placed rows are the oracle's, written at the requested byte offset"
+        );
+        assert_eq!(
+            crate::read_placed_buffer_f32(&cache_rows, 0, 8),
+            vec![0.0f32; 8],
+            "nothing before the offset is touched"
+        );
+        for node in [stage_zero, stage_two] {
+            let (expected, _shape) = cpu_oracle.get(node).expect("oracle has this output");
+            let (actual, _shape) = evaluated.get(node).expect("the run returns the unplaced output");
+            assert_eq!(actual, expected, "unplaced {node:?} is unchanged by its neighbour's placement");
+        }
     }
 
     #[test]
@@ -3768,7 +3886,7 @@ pub(super) mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a)];
         let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
             .expect("plans the ten-stage chain");
-        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
+        arena_placement(&resolved_plan, 0, |_| false).expect("builds the arena on first placement lookup");
 
         let slot_count = resolved_plan
             .arena
