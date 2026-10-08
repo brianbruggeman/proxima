@@ -91,13 +91,18 @@ block_k = 32
 # `feature = "metal-grouped-gemm"`-only; the tile shape itself (64 rows by 32
 # tokens by 32 deep, 4 simdgroups) is ggml-metal's `kernel_mul_mm_id` geometry,
 # fixed in `push_expert_grouped_gemm_body`, not a tunable.
-# Threadgroups that split one (expert, row tile)'s token tiles between them.
-# One threadgroup scans the route once and walks every token tile of its
-# expert; raising this runs the tiles of a heavily routed expert in parallel
-# at the price of one extra route scan per part. Granite moe 1b, 1000-token
-# prompt, whole-prefill wall time at parts 1/2/4/8 (3 runs each, interleaved,
-# CoV 0.7-1.4%): 864 / 828 / 848 / 870 ms.
-col_parts = 2
+# Contiguous segments the flat token range (the route) is cut into; one
+# threadgroup per (expert, row tile, segment) scans only its segment and walks
+# that segment's tokens of its expert tile by tile. Route loads per threadgroup
+# fall as 1/segments and a heavily routed expert is split across more
+# threadgroups, at the price of one partial tail tile per (expert, segment).
+# Output bits do not depend on it. Sweep recorded for the previous meaning of
+# this key (tiles of one expert dealt round robin, every threadgroup scanning
+# the whole route), whole-prefill wall time of a 1000-token prompt on a
+# 32-expert top-8 model at 1/2/4/8 (3 runs each, interleaved, CoV 0.7-1.4%):
+# 864 / 828 / 848 / 870 ms; the value below is that sweep's minimum and has not
+# been re-swept for segments.
+route_segments = 2
 # Adjacent route entries each thread of a threadgroup owns in one scan step.
 # A step covers `block_threads * scan_ahead` entries for one barrier pair: the
 # loads are independent, so one memory round trip serves them all, and the
