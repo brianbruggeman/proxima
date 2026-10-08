@@ -275,6 +275,12 @@ impl RopePairing {
 /// runtime bug. This form still removes the two-op-per-half
 /// `per_head_channel_range` mask-and-reduce this crate used to build
 /// `q_first`/`q_second`/`k_first`/`k_second` before rotating them.
+///
+/// The single dispatch happens one level down, at bind time: the two chains read the same four
+/// (source, layout) operands over the same iteration space, so
+/// [`crate::bind::fuse_twin_elementwise`] collapses them into one
+/// [`crate::bind::BoundOpKind::ElementwiseTwin`] that writes both nodes, for a backend that
+/// renders that kind. The graph stays two ordinary nodes, so each keeps its own placement.
 pub fn fused_rope_pair(
     program: &mut Vec<Op>,
     source: NodeId,

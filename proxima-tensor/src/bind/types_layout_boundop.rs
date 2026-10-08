@@ -339,6 +339,21 @@ pub enum BoundOpKind {
         body: ComposedBody,
         operands: BoundOperands,
     },
+    /// Two [`BoundOpKind::Elementwise`] siblings that read one operand list, collapsed into one op
+    /// by [`fuse_twin_elementwise`]: `body` writes this op's own `node`, `twin_body` writes
+    /// `twin_node`. Both bodies index the shared `operands` and walk the same `extents`, so one
+    /// dispatch reads each operand element once and stores two outputs, as llama.cpp's
+    /// `kernel_rope_*` does for the two rotated halves of a RoPE pair. `twin_node` is the second
+    /// output of the same shape as the first: it never appears as any op's `node`, the way
+    /// [`BoundOpKind::GatedDeltaNet::state_out`] does not, and a backend binds it as an extra
+    /// output. [`BoundOp::twin_halves`] splits it back into the two plain elementwise ops, which is
+    /// the reference the fused form must match.
+    ElementwiseTwin {
+        body: ComposedBody,
+        operands: BoundOperands,
+        twin_node: NodeId,
+        twin_body: ComposedBody,
+    },
     Reduce {
         /// The per-step combine of `operands` before reducing: the fused
         /// elementwise chain's own body when one or more were absorbed, a
@@ -615,6 +630,7 @@ impl BoundOpKind {
             BoundOpKind::MoeTopK { .. } => "moe_topk",
             BoundOpKind::TopFractionSelect { .. } => "top_fraction_select",
             BoundOpKind::Elementwise { .. } => "elementwise",
+            BoundOpKind::ElementwiseTwin { .. } => "elementwise_twin",
             BoundOpKind::Reduce {
                 keep: Keep::Reduce, ..
             } => "keep::reduce fold",
@@ -647,6 +663,7 @@ impl BoundOp {
             | BoundOpKind::MoeTopK { operands, .. }
             | BoundOpKind::TopFractionSelect { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
+            | BoundOpKind::ElementwiseTwin { operands, .. }
             | BoundOpKind::Reduce { operands, .. }
             | BoundOpKind::RoundBatchedReduce { operands, .. } => operands,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
@@ -684,6 +701,7 @@ impl BoundOp {
             | BoundOpKind::MoeTopK { .. }
             | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::Elementwise { .. }
+            | BoundOpKind::ElementwiseTwin { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => &[],
         };
@@ -703,7 +721,9 @@ impl BoundOp {
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
             | BoundOpKind::TopFractionSelect { .. } => &EMPTY_BODY,
-            BoundOpKind::Elementwise { body, .. } => body,
+            BoundOpKind::Elementwise { body, .. } | BoundOpKind::ElementwiseTwin { body, .. } => {
+                body
+            }
             BoundOpKind::Reduce { element_body, .. }
             | BoundOpKind::RoundBatchedReduce { element_body, .. } => element_body,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &EMPTY_BODY,
@@ -799,6 +819,9 @@ impl BoundOp {
             // decode-only) never chunks this op anyway.
             BoundOpKind::RoundBatchedReduce { .. } => None,
             BoundOpKind::Elementwise { .. } => (!self.extents.is_empty()).then_some(0),
+            // the second output is a whole node of its own, so a chunk would need two sub-slices
+            // per worker; only the Metal path renders this kind and it never chunks an op.
+            BoundOpKind::ElementwiseTwin { .. } => None,
             // `out_scatter: Some(_)` is a scatter: conservatively
             // ineligible for splitting. A chunked run would need
             // `out_scatter`'s own `index_layout`/`extent` rebased per chunk
@@ -876,7 +899,8 @@ impl BoundOp {
             kind @ (BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
             | BoundOpKind::TopFractionSelect { .. }
-            | BoundOpKind::CachedSoftmaxWeights { .. }) => kind.clone(),
+            | BoundOpKind::CachedSoftmaxWeights { .. }
+            | BoundOpKind::ElementwiseTwin { .. }) => kind.clone(),
             BoundOpKind::Reduce {
                 element_body,
                 reduce_op,

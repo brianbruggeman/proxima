@@ -26,7 +26,11 @@ pub(super) fn render_elementwise(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(
+    let twin_body = match &resolved.kind {
+        BoundOpKind::ElementwiseTwin { twin_body, .. } => Some(twin_body),
+        _ => None,
+    };
+    kernel_signature_with_extra_outputs(
         &mut source,
         quantized,
         0,
@@ -34,6 +38,7 @@ pub(super) fn render_elementwise(
         entry,
         element_type,
         false,
+        usize::from(twin_body.is_some()),
     );
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
@@ -85,6 +90,12 @@ pub(super) fn render_elementwise(
 
     let result = push_body_steps(&mut source, resolved.element_body(), "    ", element_type);
     source.push_str(&format!("    out[gid] = {result};\n"));
+    if let Some(twin_body) = twin_body {
+        source.push_str("    {\n");
+        let twin_result = push_body_steps(&mut source, twin_body, "        ", element_type);
+        source.push_str(&format!("        extra_out0[gid] = {twin_result};\n"));
+        source.push_str("    }\n");
+    }
     source.push_str("}\n");
     Ok(source)
 }
@@ -163,7 +174,10 @@ pub(super) fn elementwise_coordinate_type(resolved: &BoundOp) -> &'static str {
 /// coordinate integer width, which axes it decodes, and which operands take
 /// the dense `base + gid` path. Concrete stride values remain uniforms.
 pub(super) fn elementwise_addressing_cache_token(resolved: &BoundOp) -> Option<String> {
-    if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
+    if !matches!(
+        resolved.kind,
+        BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. }
+    ) {
         return None;
     }
 

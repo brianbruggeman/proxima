@@ -804,7 +804,7 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPol
                 WORD
             }
         }
-        BoundOpKind::Elementwise { .. } => {
+        BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
             (1 + rank_len + operand_count + operand_count * rank_len) * WORD
                 + gather_uniform_byte_len(gather, rank_len)
         }
@@ -900,7 +900,7 @@ pub(super) fn pack_uniforms_into(
         BoundOpKind::CachedAttention { .. } => {
             pack_cached_attention_uniforms(bound, numeric_policy, scratch)
         }
-        BoundOpKind::Elementwise { .. } => {
+        BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
             pack_elementwise_uniforms(bound, scratch);
             Ok(())
         }

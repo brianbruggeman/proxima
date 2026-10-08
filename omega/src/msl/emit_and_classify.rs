@@ -45,7 +45,9 @@ pub(super) fn emit_inner(
         BoundOpKind::CachedSoftmaxWeights { .. } => {
             render_cached_softmax_weights(resolved, &entry)
         }
-        BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
+        BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
+            render_elementwise(resolved, &entry, &quantized)
+        }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => render_reduce(
