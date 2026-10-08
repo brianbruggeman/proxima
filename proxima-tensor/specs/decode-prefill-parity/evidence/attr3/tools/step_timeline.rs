@@ -64,10 +64,10 @@ fn parse_log(path: &str) -> Vec<StepRecord> {
     let text = fs::read_to_string(path).expect("read telemetry log");
     let mut records: Vec<StepRecord> = Vec::new();
     let mut pending: Vec<Chunk> = Vec::new();
-    let mut pending_phases: Vec<Phase> = Vec::new();
+    let mut phases_by_step: std::collections::BTreeMap<u64, Vec<Phase>> = std::collections::BTreeMap::new();
     for line in text.lines() {
         if line.contains("step_phase step=") || line.contains("chunk_phase step=") {
-            pending_phases.push(Phase {
+            phases_by_step.entry(value(line, "step") as u64).or_default().push(Phase {
                 chunk: value(line, "chunk") as u64,
                 name: word(line, "phase"),
                 start_s: value(line, "start_raw_s"),
@@ -100,10 +100,12 @@ fn parse_log(path: &str) -> Vec<StepRecord> {
                 wall_ms: value(line, "step_wall_ms"),
                 evaluate_ms: value(line, "evaluate_ms"),
                 chunks: std::mem::take(&mut pending),
-                phases: std::mem::take(&mut pending_phases),
                 ..StepRecord::default()
             });
         }
+    }
+    for record in &mut records {
+        record.phases = phases_by_step.remove(&record.step).unwrap_or_default();
     }
     records
 }
