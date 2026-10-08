@@ -26,25 +26,28 @@ pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 /// weight tile, so this kernel groups them instead of tiling the token axis
 /// as given.
 ///
-/// Launch: `row_tiles * GROUPED_GEMM_COL_PARTS` threadgroups per z slice, one
+/// Launch: `row_tiles * GROUPED_GEMM_ROUTE_SEGMENTS` threadgroups per z slice, one
 /// z slice per expert the weight can name (`GridSpec::depth`, see
-/// [`expert_group_depth`]). A threadgroup owns one `(expert, row tile)` and
-/// walks that expert's tokens in rank order, in tiles of
-/// [`GROUPED_TILE_TOKENS`]: it scans the route a step at a time (every thread
-/// owns `GROUPED_GEMM_SCAN_AHEAD` adjacent entries, so one barrier pair
+/// [`expert_group_depth`]). A threadgroup owns one `(expert, row tile, route
+/// segment)`: the flat token range is cut into `GROUPED_GEMM_ROUTE_SEGMENTS`
+/// contiguous segments ([`push_route_segment_bounds`]) and the threadgroup
+/// walks the tokens of its expert inside its segment in rank order, in tiles
+/// of [`GROUPED_TILE_TOKENS`]: it scans its segment a step at a time (every
+/// thread owns `GROUPED_GEMM_SCAN_AHEAD` adjacent entries, so one barrier pair
 /// covers `128 * GROUPED_GEMM_SCAN_AHEAD` entries), ranks the matching tokens
 /// with a simdgroup prefix sum plus the simdgroup totals, appends them to
 /// `tile_token`, and runs one full tile each time a tile's worth is pending
 /// (and once more for the tail). `ggml-metal` instead compacts the route in a
 /// separate pass (`kernel_mul_mm_id_map0`) and gives every token tile its own
 /// threadgroup; this kernel has no second dispatch to carry that list, so each
-/// threadgroup ranks the route itself and the step width is what keeps that
-/// affordable. With
-/// `GROUPED_GEMM_COL_PARTS` above one, the tiles of an expert are dealt out
-/// round robin to that many threadgroups. Every value that steers control flow
-/// (`pending_fill`, `scan_base`, `tile_ordinal`) comes from threadgroup-shared
-/// totals, so the threadgroup leaves each branch and loop together and no
-/// barrier is skipped by a subset.
+/// threadgroup ranks its own segment of the route and the segment count is
+/// what bounds the route loads per threadgroup (`token_extent / segments`
+/// entries) and, with it, how finely a heavily routed expert is split. A
+/// token's accumulator never depends on which tile or segment carries it:
+/// the K loop, the staging and the multiply-accumulate order are per output
+/// element. Every value that steers control flow (`pending_fill`, `scan_base`)
+/// comes from threadgroup-shared totals, so the threadgroup leaves each branch
+/// and loop together and no barrier is skipped by a subset.
 ///
 /// An out-of-range route index is reported into the fault buffer by whichever
 /// thread fetches it, and clamped exactly as the dense gather clamps it, so a
@@ -98,8 +101,7 @@ pub(super) fn push_expert_grouped_gemm_body(
         expert.slot
     ));
     source.push_str("    uint pending_fill = 0u;\n");
-    source.push_str("    long scan_base = 0;\n");
-    source.push_str("    uint tile_ordinal = 0u;\n");
+    push_route_segment_bounds(source, &geometry);
     source.push_str("    for (;;) {\n");
     push_grouped_refill(source, block.weight, expert.slot, &geometry);
     source.push_str("        if (pending_fill == 0u) { break; }\n");
@@ -110,10 +112,7 @@ pub(super) fn push_expert_grouped_gemm_body(
         "        bool has_hi = tile_count > {}u;\n",
         GROUPED_TILE_TOKENS / 2
     ));
-    source.push_str(&format!(
-        "        if ((tile_ordinal % {}u) == (uint)col_part) {{\n",
-        geometry.col_parts
-    ));
+    source.push_str("        {\n");
     push_grouped_tile(
         source,
         block,
@@ -124,7 +123,6 @@ pub(super) fn push_expert_grouped_gemm_body(
         epilogue_operands,
     );
     source.push_str("        }\n");
-    source.push_str("        tile_ordinal += 1u;\n");
     push_grouped_consume(source, &geometry);
     source.push_str("    }\n");
     Ok(())
@@ -135,7 +133,7 @@ const GROUPED_THREADS: u64 = (TILED_GEMM_NSG as u64) * SIMD_WIDTH;
 
 #[cfg(feature = "metal-grouped-gemm")]
 struct GroupedGeometry {
-    col_parts: u64,
+    route_segments: u64,
     scan_ahead: u64,
     rank: usize,
     output_axes: Vec<u16>,
@@ -174,7 +172,7 @@ impl GroupedGeometry {
             .collect::<Result<Vec<usize>, EmitError>>()?;
         let route_flat = block.gathered.is_some_and(|expert| expert.route_flat);
         Ok(Self {
-            col_parts: crate::sized::GROUPED_GEMM_COL_PARTS,
+            route_segments: crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS,
             scan_ahead: crate::sized::GROUPED_GEMM_SCAN_AHEAD,
             rank: resolved.extents.len(),
             output_axes: output_axes.to_vec(),
@@ -246,7 +244,7 @@ fn token_offset_expr(
 /// the expert can ride the grid's z coordinate -- the widening
 /// [`push_dense_batched_gemm_body`] performs for its batch axis -- then names
 /// the threadgroup's coordinates: `gid / GROUPED_THREADS` is the flat group
-/// index within one z slice, split into `(row_tile, col_part)`.
+/// index within one z slice, split into `(row_tile, route_segment)`.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_entry(
     source: &mut String,
@@ -275,16 +273,33 @@ fn push_grouped_entry(
     ));
     source.push_str(&format!(
         "    long row_tile = group_index / {};\n",
-        geometry.col_parts
+        geometry.route_segments
     ));
     source.push_str(&format!(
-        "    long col_part = group_index % {};\n",
-        geometry.col_parts
+        "    long route_segment = group_index % {};\n",
+        geometry.route_segments
     ));
     source.push_str(&format!(
         "    uint grouped_lane = (uint)(tiitg % {SIMD_WIDTH});\n"
     ));
     Ok(())
+}
+
+/// The slice of the route this threadgroup scans: `GROUPED_GEMM_ROUTE_SEGMENTS`
+/// equal contiguous segments of the flat token range, threadgroup `route_segment`
+/// owning `[segment_begin, segment_end)`. Every route entry belongs to exactly
+/// one segment, so a `(expert, row tile)` loads the route once across its
+/// threadgroups instead of once each; a segment past the end of the route is
+/// empty and its threadgroup leaves at the first `pending_fill` test.
+#[cfg(feature = "metal-grouped-gemm")]
+fn push_route_segment_bounds(source: &mut String, geometry: &GroupedGeometry) {
+    let segments = geometry.route_segments;
+    source.push_str(&format!(
+        "    long segment_length = (token_extent + {segments}l - 1l) / {segments}l;\n"
+    ));
+    source.push_str("    long segment_begin = route_segment * segment_length;\n");
+    source.push_str("    long segment_end = min(token_extent, segment_begin + segment_length);\n");
+    source.push_str("    long scan_base = segment_begin;\n");
 }
 
 /// `weight_tile` and `act_tile` are the two staged tiles of the K loop;
@@ -335,7 +350,7 @@ fn push_grouped_refill(
     let innermost_axis = geometry.token_axes.last().copied().unwrap_or(0);
     let entries = geometry.scan_ahead;
     source.push_str(&format!(
-        "        while (pending_fill < {GROUPED_TILE_TOKENS}u && scan_base < token_extent) {{\n"
+        "        while (pending_fill < {GROUPED_TILE_TOKENS}u && scan_base < segment_end) {{\n"
     ));
     source.push_str(&format!(
         "            long own_base = scan_base + tiitg * {entries};\n"
@@ -352,7 +367,7 @@ fn push_grouped_refill(
             source,
             geometry,
             "                ",
-            "(entry_token < token_extent) ? entry_token : 0",
+            "(entry_token < segment_end) ? entry_token : 0",
             "route_c",
         );
         token_offset_expr(geometry, "route_c", |axis| {
@@ -360,7 +375,7 @@ fn push_grouped_refill(
         })
     };
     source.push_str(&format!(
-        "                routed_entry[entry] = (entry_token < token_extent) ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + {route_offset}] : (long)-1;\n"
+        "                routed_entry[entry] = (entry_token < segment_end) ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + {route_offset}] : (long)-1;\n"
     ));
     source.push_str("            }\n");
     source.push_str("            uint own_count = 0u;\n");
@@ -370,7 +385,7 @@ fn push_grouped_refill(
     source.push_str(&format!(
         "                long fetched{weight} = routed_entry[entry];\n"
     ));
-    source.push_str("                if (own_base + entry < token_extent) {\n");
+    source.push_str("                if (own_base + entry < segment_end) {\n");
     push_gather_fault_check(source, weight, slot, "                    ");
     source.push_str(&format!(
         "                    fetched{weight} = max((long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1));\n"
@@ -461,7 +476,7 @@ fn push_grouped_consume(source: &mut String, geometry: &GroupedGeometry) {
 /// per tile and advance by one K step of the weight cursor
 /// ([`push_block_cursor_advance`]) and one K step of activations (32 floats)
 /// per step. Measured on a `Q8_0` gathered 8-of-32-expert (1024 by 512)
-/// gate projection, uniform routing, 1000 tokens, `col_parts` 4
+/// gate projection, uniform routing, 1000 tokens, tiles dealt round robin to four threadgroups
 /// (`expert_grouped_gemm_speed_probe`): 700 us with the staging inside the
 /// barrier pair and the pointers rebuilt every step, 402 us in this order.
 #[cfg(feature = "metal-grouped-gemm")]
@@ -735,11 +750,11 @@ fn push_grouped_writeback(
 
 /// The token extent [`tiled_gemm_threadgroups`] is asked to launch for an
 /// expert-grouped block: not the token count, because the token axis is not
-/// tiled across threadgroups here -- the grid carries `GROUPED_GEMM_COL_PARTS`
-/// threadgroups per row tile and each walks the tokens of its expert itself.
+/// tiled across threadgroups here -- the grid carries `GROUPED_GEMM_ROUTE_SEGMENTS`
+/// threadgroups per row tile and each walks the tokens of its expert in its own segment.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn expert_grouped_launch_tokens(block: &TiledGemmBlock) -> Option<u64> {
-    is_expert_grouped(block).then_some(crate::sized::GROUPED_GEMM_COL_PARTS * GROUPED_TILE_TOKENS)
+    is_expert_grouped(block).then_some(crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS * GROUPED_TILE_TOKENS)
 }
 
 #[cfg(not(feature = "metal-grouped-gemm"))]
