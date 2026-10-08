@@ -40,7 +40,9 @@ pub(super) fn emit_inner(
     let extras = metal_specialization(resolved, packed_operands, numeric_policy, &grid);
     let source = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
-            render_cached_attention(resolved, &entry, numeric_policy)
+            cached_attention_kv_codec(resolved.node, &quantized).and_then(|cached_kv_codec| {
+                render_cached_attention(resolved, &entry, numeric_policy, cached_kv_codec)
+            })
         }
         BoundOpKind::CachedSoftmaxWeights { .. } => {
             render_cached_softmax_weights(resolved, &entry)

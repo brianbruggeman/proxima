@@ -5206,7 +5206,7 @@ fn render_scan_rejects_an_elementwise_bound_op() {
 #[test]
 fn render_cached_attention_rejects_an_elementwise_bound_op() {
     let bound = elementwise_tanh_op(8);
-    let error = render_cached_attention(&bound, "entry", NumericPolicy::default())
+    let error = render_cached_attention(&bound, "entry", NumericPolicy::default(), None)
         .expect_err("an elementwise chain is not a CachedAttention op");
     assert!(matches!(
         error,
@@ -5634,7 +5634,7 @@ fn render_cached_attention_never_declares_past_the_threadgroup_budget() {
     *head_dim = 256;
     *rotary_dim = 256;
 
-    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed(), None)
         .expect("qwen35-shaped single-range dynamic attention renders");
     let cap = effective_context_chunk_cap(8, 256);
     assert!(cap < crate::sized::ATTENTION_CONTEXT_CHUNK_CAP);
@@ -5669,9 +5669,9 @@ fn render_cached_attention_omits_the_merge_block_under_bit_exact_policy() {
     *cached_key_rows = 48;
     *new_key_rows = 16;
 
-    let rejected = render_cached_attention(&bound, "entry", NumericPolicy::bit_exact())
+    let rejected = render_cached_attention(&bound, "entry", NumericPolicy::bit_exact(), None)
         .expect("bit_exact() still renders -- it falls back to the single-pass kernel");
-    let admitted = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+    let admitted = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed(), None)
         .expect("llama_relaxed() renders the cross-simdgroup merge kernel");
 
     assert!(
@@ -5901,7 +5901,7 @@ fn split_kernel_emits_the_slice_formula_and_scratch_index() {
     *head_dim = 8;
     *rotary_dim = 8;
 
-    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed(), None)
         .expect("llama_relaxed renders the split kernel for a 256-key context");
 
     assert!(
@@ -5946,7 +5946,7 @@ fn split_kernel_emits_the_slice_formula_and_scratch_index() {
          threadgroup's own [lo, hi) slice, not the whole live range"
     );
 
-    let sequential_source = render_cached_attention(&bound, "entry", NumericPolicy::default())
+    let sequential_source = render_cached_attention(&bound, "entry", NumericPolicy::default(), None)
         .expect("bit_exact still renders (splits collapse to 1, but the shape is shared)");
     assert!(
         sequential_source.contains("for (long key = lo + chunk; key < hi; key += chunks)"),
@@ -6017,10 +6017,10 @@ fn dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets
     );
 
     let smaller_source =
-        render_cached_attention(&smaller_bucket, "entry", NumericPolicy::default())
+        render_cached_attention(&smaller_bucket, "entry", NumericPolicy::default(), None)
             .expect("smaller bucket renders");
     let larger_source =
-        render_cached_attention(&larger_bucket, "entry", NumericPolicy::default())
+        render_cached_attention(&larger_bucket, "entry", NumericPolicy::default(), None)
             .expect("larger bucket renders");
     assert_eq!(
         smaller_source, larger_source,
@@ -6050,7 +6050,7 @@ fn dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets
 fn block_width_one_renders_the_strictly_sequential_body_never_the_block_staged_one() {
     let bound = cached_attention_op_dynamic(32, 7);
 
-    let source = render_cached_attention(&bound, "entry", NumericPolicy::bit_exact())
+    let source = render_cached_attention(&bound, "entry", NumericPolicy::bit_exact(), None)
         .expect("bit_exact renders");
 
     assert!(
@@ -6081,7 +6081,7 @@ fn block_width_above_one_renders_the_block_staged_body_under_llama_relaxed() {
     *head_dim = 8; // a multiple of 8, so the float4 K/Q loads stay aligned
     *rotary_dim = 8;
 
-    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed(), None)
         .expect("llama_relaxed renders the block-staged body for an aligned head_dim");
 
     assert!(
@@ -6122,7 +6122,7 @@ fn block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned() {
     *head_dim = 32; // a multiple of 32, so the V float4 loads stay aligned
     *rotary_dim = 32;
 
-    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed(), None)
         .expect("llama_relaxed renders the block-staged body for a 32-aligned head_dim");
 
     assert!(
@@ -6164,7 +6164,7 @@ fn block_staged_v_accumulate_falls_back_to_scalar_when_head_dim_not_32_aligned()
     *head_dim = 8; // multiple of 8 (Q/K stays aligned) but not of 32
     *rotary_dim = 8;
 
-    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+    let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed(), None)
         .expect("llama_relaxed renders the block-staged body for an unaligned head_dim");
 
     assert!(
@@ -6268,7 +6268,7 @@ fn block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight() {
     *head_dim = 12; // not a multiple of 8
     *rotary_dim = 12;
 
-    let error = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+    let error = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed(), None)
         .expect_err("a misaligned head_dim must be rejected under the block-staged policy");
 
     assert_eq!(

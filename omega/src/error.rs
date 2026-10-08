@@ -139,6 +139,16 @@ pub enum EmitError {
     )]
     CachedAttentionPartialRotaryNotSupported { node: NodeId },
 
+    /// A cached-attention bind whose operands carry a packed codec the
+    /// renderer does not read: only the decode split form
+    /// (`render_cached_attention_decode_split`) reads its cached K/V
+    /// operands (2, 3 and 6) as `Codec::Float16`, and every other operand of
+    /// every form is a plain buffer. Rejected here rather than bound as
+    /// `float*` over half-width bytes, which would read the cache as garbage
+    /// without any error.
+    #[error("node {node} is a cached attention bind with a packed operand the kernel cannot read: {reason}")]
+    CachedAttentionKvCodecNotSupported { node: NodeId, reason: &'static str },
+
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
     /// in practice, but [`crate::msl::emit`] is a public entry point a
