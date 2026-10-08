@@ -1,0 +1,77 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/gemm_base_emitted.metal	2026-10-08 10:41:57
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_pp/49f88ec486a7766a.pp8.metal	2026-10-08 11:10:28
+@@ -1051,23 +1051,31 @@
+     uint tid [[thread_position_in_threadgroup]])
+ {
+     constexpr uint experts = 32u;
++    constexpr int ahead = 8;
+     long token_extent = u.output_extents[0] * u.output_extents[1];
+     threadgroup uint expert_count_tg[experts];
+     threadgroup uint expert_offset_tg[experts];
+     for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {
+         uint tally = 0u;
+-        for (long scan_base = 0; scan_base < token_extent; scan_base += 32l) {
+-            long entry_token = scan_base + (long)tiisg;
+-            bool live = entry_token < token_extent;
+-            long fetched0 = live ? (long)gather_idx0[u.gather_index_base[0] + entry_token * u.gather_index_strides[0][1]] : (long)-1;
+-            if (scan_expert == 0u && live) {
+-                if (fetched0 < 0 || fetched0 >= u.gather_extent[0]) {
+-                    atomic_fetch_max_explicit(&fault[0], (uint)max(fetched0, (long)0) + 1u, memory_order_relaxed);
++        for (long scan_base = 0; scan_base < token_extent; scan_base += 32l * ahead) {
++            long fetched[ahead];
++            for (int step = 0; step < ahead; ++step) {
++                long entry_token = scan_base + 32l * step + (long)tiisg;
++                bool live = entry_token < token_extent;
++                fetched[step] = live ? (long)gather_idx0[u.gather_index_base[0] + entry_token * u.gather_index_strides[0][1]] : (long)-1;
++            }
++            for (int step = 0; step < ahead; ++step) {
++                long entry_token = scan_base + 32l * step + (long)tiisg;
++                bool live = entry_token < token_extent;
++                long value = fetched[step];
++                if (scan_expert == 0u && live) {
++                    if (value < 0 || value >= u.gather_extent[0]) {
++                        atomic_fetch_max_explicit(&fault[0], (uint)max(value, (long)0) + 1u, memory_order_relaxed);
++                    }
+                 }
++                value = live ? max((long)0, min(value, u.gather_extent[0] - 1)) : (long)-1;
++                tally += (value == (long)scan_expert) ? 1u : 0u;
+             }
+-            fetched0 = live ? max((long)0, min(fetched0, u.gather_extent[0] - 1)) : (long)-1;
+-            uint hit = (fetched0 == (long)scan_expert) ? 1u : 0u;
+-            tally += hit;
+         }
+         tally = simd_sum(tally);
+         if (tiisg == 0u) {
+@@ -1088,16 +1096,22 @@
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+     for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {
+         uint placed = 0u;
+-        for (long scan_base = 0; scan_base < token_extent; scan_base += 32l) {
+-            long entry_token = scan_base + (long)tiisg;
+-            bool live = entry_token < token_extent;
+-            long fetched0 = live ? (long)gather_idx0[u.gather_index_base[0] + entry_token * u.gather_index_strides[0][1]] : (long)-1;
+-            fetched0 = live ? max((long)0, min(fetched0, u.gather_extent[0] - 1)) : (long)-1;
+-            uint hit = (fetched0 == (long)scan_expert) ? 1u : 0u;
+-            uint rank = simd_prefix_exclusive_sum(hit);
+-            if (hit != 0u) { route_compaction[1u + 2u * experts + expert_offset_tg[scan_expert] + placed + rank] = (uint)entry_token; }
+-            placed += simd_sum(hit);
++        for (long scan_base = 0; scan_base < token_extent; scan_base += 32l * ahead) {
++            long fetched[ahead];
++            for (int step = 0; step < ahead; ++step) {
++                long entry_token = scan_base + 32l * step + (long)tiisg;
++                bool live = entry_token < token_extent;
++                fetched[step] = live ? (long)gather_idx0[u.gather_index_base[0] + entry_token * u.gather_index_strides[0][1]] : (long)-1;
++            }
++            for (int step = 0; step < ahead; ++step) {
++                long entry_token = scan_base + 32l * step + (long)tiisg;
++                bool live = entry_token < token_extent;
++                long value = live ? max((long)0, min(fetched[step], u.gather_extent[0] - 1)) : (long)-1;
++                uint hit = (value == (long)scan_expert) ? 1u : 0u;
++                uint rank = simd_prefix_exclusive_sum(hit);
++                if (hit != 0u) { route_compaction[1u + 2u * experts + expert_offset_tg[scan_expert] + placed + rank] = (uint)entry_token; }
++                placed += simd_sum(hit);
++            }
+         }
+     }
+ }
+-

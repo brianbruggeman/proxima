@@ -1,0 +1,150 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/gemm_base_emitted.metal	2026-10-08 10:41:57
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_gemm/49f88ec486a7766a.tile64.metal	2026-10-08 10:49:57
+@@ -896,7 +896,7 @@
+     long tile_index = group_index / row_tiles;
+     long row_tile = group_index % row_tiles;
+     uint grouped_lane = (uint)(tiitg % 32);
+-    threadgroup uchar tg_shared[8192];
++    threadgroup uchar tg_shared[16384];
+     threadgroup half *weight_tile = (threadgroup half *)tg_shared;
+     threadgroup half *act_tile = (threadgroup half *)(tg_shared + 4096);
+     threadgroup float *out_tile = (threadgroup float *)tg_shared;
+@@ -916,7 +916,7 @@
+     long tile_base = 0;
+     for (uint scan_expert = 0u; scan_expert < experts; ++scan_expert) {
+         uint expert_count = route_compaction[1u + scan_expert];
+-        long expert_tiles = (long)((expert_count + 31u) / 32u);
++        long expert_tiles = (long)((expert_count + 63u) / 64u);
+         if (tile_index < tile_base + expert_tiles) {
+             grouped_expert = (long)scan_expert;
+             expert_tile = tile_index - tile_base;
+@@ -926,15 +926,15 @@
+         tile_base += expert_tiles;
+     }
+     if (grouped_expert < 0) { return; }
+-    uint tile_count = min(32u, expert_tokens - (uint)expert_tile * 32u);
+-    bool has_hi = tile_count > 16u;
+-    device const uint *tile_list = route_compaction + 1u + 2u * experts + route_compaction[1u + experts + (uint)grouped_expert] + (uint)expert_tile * 32u;
++    uint tile_count = min(64u, expert_tokens - (uint)expert_tile * 64u);
++    bool has_hi = tile_count > 32u;
++    device const uint *tile_list = route_compaction + 1u + 2u * experts + route_compaction[1u + experts + (uint)grouped_expert] + (uint)expert_tile * 64u;
+     if ((uint)tiitg < tile_count) { tile_token[tiitg] = (int)tile_list[tiitg]; }
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+     long grouped_expert_base = grouped_expert * u.gather_element_stride[0];
+     {
+-            simdgroup_float8x8 acc[8];
+-            for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
++            simdgroup_float8x8 acc[16];
++            for (int i = 0; i < 16; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
+             long w_row = tiitg / 2;
+             long w_half = tiitg % 2;
+             long w_feat = row_tile * 64 + w_row;
+@@ -944,75 +944,72 @@
+             device const uchar *w_blk = weight_bytes + ((w_elem) / 32) * 34;
+             uint w_pos = (uint)((w_elem) % 32);
+             long a_row = tiitg / 4;
++            long a_row2 = a_row + 32;
+             long a_k_block = tiitg % 4;
+-            bool a_staged = a_row < 16 || has_hi;
++            bool a_staged2 = has_hi;
+             long a_tok = (a_row < (long)tile_count) ? (long)tile_token[a_row] : -1;
+-            threadgroup half4 *a_slot = (threadgroup half4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));
++            long a_tok2 = (a_row2 < (long)tile_count) ? (long)tile_token[a_row2] : -1;
++            threadgroup half4 *a_slot = (threadgroup half4 *)(act_tile + 64 * (8 * a_k_block + a_row / 8) + 8 * (a_row % 8));
++            threadgroup half4 *a_slot2 = (threadgroup half4 *)(act_tile + 64 * (8 * a_k_block + a_row2 / 8) + 8 * (a_row2 % 8));
+             uint a_c_rest = (uint)((a_tok < 0 ? 0 : a_tok));
+             long a_c1 = (long)(a_c_rest % (uint)u.output_extents[1]);
+             a_c_rest /= (uint)u.output_extents[1];
+             long a_c0 = (long)a_c_rest;
+             device const float *a_ptr = in1 + u.operand_base[1] + a_c0 * u.operand_strides[1][0] + a_c1 * u.operand_strides[1][1] + a_k_block * 8;
+-            bool a_vector = ((u.operand_base[1] | u.operand_strides[1][0] | u.operand_strides[1][1]) & 3) == 0;
++            uint a_c_rest2 = (uint)((a_tok2 < 0 ? 0 : a_tok2));
++            long a_c1b = (long)(a_c_rest2 % (uint)u.output_extents[1]);
++            a_c_rest2 /= (uint)u.output_extents[1];
++            long a_c0b = (long)a_c_rest2;
++            device const float *a_ptr2 = in1 + u.operand_base[1] + a_c0b * u.operand_strides[1][0] + a_c1b * u.operand_strides[1][1] + a_k_block * 8;
+             for (long k0 = 0; k0 < u.reduction_total; k0 += 32) {
+                 half4 a_regs[2];
++                half4 a_regs2[2];
+                 half w_regs[16];
+                 if (w_valid) {
+                     q8_0_dequant_half16(w_blk, w_pos, w_regs);
+                 } else {
+                     for (int element = 0; element < 16; ++element) { w_regs[element] = 0.0h; }
+                 }
+-                if (a_staged) {
+-                    if (a_tok < 0) {
+-                        a_regs[0] = half4(0.0h); a_regs[1] = half4(0.0h);
+-                    } else if (a_vector) {
+-                        device const float4 *a_src = (device const float4 *)a_ptr;
+-                        a_regs[0] = half4(a_src[0]); a_regs[1] = half4(a_src[1]);
++                if (a_tok < 0) {
++                    a_regs[0] = half4(0.0h); a_regs[1] = half4(0.0h);
++                } else {
++                    device const float4 *a_src = (device const float4 *)a_ptr;
++                    a_regs[0] = half4(a_src[0]); a_regs[1] = half4(a_src[1]);
++                }
++                if (a_staged2) {
++                    if (a_tok2 < 0) {
++                        a_regs2[0] = half4(0.0h); a_regs2[1] = half4(0.0h);
+                     } else {
+-                        for (int lane = 0; lane < 4; ++lane) {
+-                            a_regs[0][lane] = (half)a_ptr[lane]; a_regs[1][lane] = (half)a_ptr[4 + lane];
+-                        }
++                        device const float4 *a_src2 = (device const float4 *)a_ptr2;
++                        a_regs2[0] = half4(a_src2[0]); a_regs2[1] = half4(a_src2[1]);
+                     }
+                 }
+                 threadgroup_barrier(mem_flags::mem_threadgroup);
+-                w_slot[0] = w_regs[0];
+-                w_slot[8] = w_regs[1];
+-                w_slot[16] = w_regs[2];
+-                w_slot[24] = w_regs[3];
+-                w_slot[32] = w_regs[4];
+-                w_slot[40] = w_regs[5];
+-                w_slot[48] = w_regs[6];
+-                w_slot[56] = w_regs[7];
+-                w_slot[512] = w_regs[8];
+-                w_slot[520] = w_regs[9];
+-                w_slot[528] = w_regs[10];
+-                w_slot[536] = w_regs[11];
+-                w_slot[544] = w_regs[12];
+-                w_slot[552] = w_regs[13];
+-                w_slot[560] = w_regs[14];
+-                w_slot[568] = w_regs[15];
+-                if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }
++                for (int i = 0; i < 8; ++i) { w_slot[8 * i] = w_regs[i]; w_slot[512 + 8 * i] = w_regs[8 + i]; }
++                a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1];
++                if (a_staged2) { a_slot2[0] = a_regs2[0]; a_slot2[1] = a_regs2[1]; }
+                 threadgroup_barrier(mem_flags::mem_threadgroup);
+                 if ((sgitg >> 1) == 0 || has_hi) {
+                     threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);
+-                    threadgroup const half *lsmb = act_tile + 2 * 64 * (sgitg / 2);
++                    threadgroup const half *lsmb = act_tile + 4 * 64 * (sgitg / 2);
+                     for (short ik = 0; ik < 4; ++ik) {
+                         simdgroup_half8x8 ma[4];
+-                        simdgroup_half8x8 mb[2];
++                        simdgroup_half8x8 mb[4];
+                         for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }
+-                        for (short i = 0; i < 2; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }
+-                        for (short i = 0; i < 8; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }
++                        for (short i = 0; i < 4; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }
++                        for (short i = 0; i < 16; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }
+                         lsma += 8 * 64;
+-                        lsmb += 4 * 64;
++                        lsmb += 8 * 64;
+                     }
+                 }
+                 w_blk += 1u * 34;
+                 a_ptr += 32;
++                a_ptr2 += 32;
+             }
+             threadgroup_barrier(mem_flags::mem_threadgroup);
+             if ((sgitg >> 1) == 0 || has_hi) {
+-                threadgroup float *temp_str = out_tile + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * 64;
+-                for (short i = 0; i < 8; ++i) {
++                threadgroup float *temp_str = out_tile + 32 * (sgitg & 1) + (32 * (sgitg >> 1)) * 64;
++                for (short i = 0; i < 16; ++i) {
+                     simdgroup_store(acc[i], temp_str + 8 * (i % 4) + 8 * 64 * (i / 4), 64, ulong2(0), false);
+                 }
+             }

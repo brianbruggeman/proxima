@@ -1,0 +1,131 @@
+seb capture step=23 dispatches=398 chunks=8 rounds=21 tokens=24
+seb live round=0 per_token_ms=6.3987
+cell label=live_decode_window wall_ms=140.430 cpu_ms=30.474 cpu_pct=21.7 rss_peak_mb=1742.6 footprint_mb=321.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=0 gpu_span_ms=5.8840
+cell label=replay_one wall_ms=8.160 cpu_ms=1.834 cpu_pct=22.5 rss_peak_mb=1743.6 footprint_mb=321.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=0 chunk_span_sum_ms=5.8126 chunks=8
+cell label=replay_chunks wall_ms=8.815 cpu_ms=1.812 cpu_pct=20.6 rss_peak_mb=1743.6 footprint_mb=321.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=1 gpu_span_ms=5.8120
+cell label=replay_one wall_ms=7.564 cpu_ms=1.575 cpu_pct=20.8 rss_peak_mb=1743.6 footprint_mb=321.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=1 chunk_span_sum_ms=5.8280 chunks=8
+cell label=replay_chunks wall_ms=8.840 cpu_ms=1.804 cpu_pct=20.4 rss_peak_mb=1743.6 footprint_mb=321.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=1 per_token_ms=6.3970
+cell label=live_decode_window wall_ms=139.926 cpu_ms=31.346 cpu_pct=22.4 rss_peak_mb=1848.7 footprint_mb=320.9 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=2 chunk_span_sum_ms=5.9182 chunks=8
+cell label=replay_chunks wall_ms=9.571 cpu_ms=1.941 cpu_pct=20.3 rss_peak_mb=1848.7 footprint_mb=323.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=2 per_token_ms=6.3580
+cell label=live_decode_window wall_ms=139.898 cpu_ms=31.411 cpu_pct=22.5 rss_peak_mb=1850.8 footprint_mb=321.2 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=2 gpu_span_ms=5.8686
+cell label=replay_one wall_ms=8.176 cpu_ms=1.804 cpu_pct=22.1 rss_peak_mb=1850.8 footprint_mb=321.4 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=3 per_token_ms=6.3644
+cell label=live_decode_window wall_ms=140.386 cpu_ms=30.432 cpu_pct=21.7 rss_peak_mb=1851.2 footprint_mb=321.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=3 gpu_span_ms=5.9046
+cell label=replay_one wall_ms=7.897 cpu_ms=1.772 cpu_pct=22.4 rss_peak_mb=1851.2 footprint_mb=321.5 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=3 chunk_span_sum_ms=5.7768 chunks=8
+cell label=replay_chunks wall_ms=8.899 cpu_ms=1.804 cpu_pct=20.3 rss_peak_mb=1851.2 footprint_mb=321.5 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=4 gpu_span_ms=5.8420
+cell label=replay_one wall_ms=7.668 cpu_ms=1.607 cpu_pct=21.0 rss_peak_mb=1851.2 footprint_mb=321.5 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=4 chunk_span_sum_ms=5.8435 chunks=8
+cell label=replay_chunks wall_ms=8.872 cpu_ms=1.762 cpu_pct=19.9 rss_peak_mb=1851.2 footprint_mb=321.5 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=4 per_token_ms=6.3971
+cell label=live_decode_window wall_ms=140.643 cpu_ms=30.556 cpu_pct=21.7 rss_peak_mb=1851.2 footprint_mb=321.4 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=5 chunk_span_sum_ms=5.9598 chunks=8
+cell label=replay_chunks wall_ms=9.562 cpu_ms=1.991 cpu_pct=20.8 rss_peak_mb=1851.2 footprint_mb=381.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=5 per_token_ms=6.7540
+cell label=live_decode_window wall_ms=148.387 cpu_ms=29.976 cpu_pct=20.2 rss_peak_mb=1913.3 footprint_mb=323.1 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=5 gpu_span_ms=5.7627
+cell label=replay_one wall_ms=8.086 cpu_ms=1.883 cpu_pct=23.3 rss_peak_mb=1913.3 footprint_mb=323.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=6 per_token_ms=6.4739
+cell label=live_decode_window wall_ms=142.366 cpu_ms=31.557 cpu_pct=22.2 rss_peak_mb=1913.5 footprint_mb=323.4 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=6 gpu_span_ms=5.8542
+cell label=replay_one wall_ms=8.214 cpu_ms=1.855 cpu_pct=22.6 rss_peak_mb=1913.5 footprint_mb=323.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=6 chunk_span_sum_ms=5.7826 chunks=8
+cell label=replay_chunks wall_ms=8.863 cpu_ms=1.866 cpu_pct=21.1 rss_peak_mb=1913.5 footprint_mb=323.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=7 gpu_span_ms=5.7970
+cell label=replay_one wall_ms=7.612 cpu_ms=1.585 cpu_pct=20.8 rss_peak_mb=1913.5 footprint_mb=323.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=7 chunk_span_sum_ms=5.7967 chunks=8
+cell label=replay_chunks wall_ms=8.872 cpu_ms=1.779 cpu_pct=20.1 rss_peak_mb=1913.5 footprint_mb=323.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=7 per_token_ms=6.3425
+cell label=live_decode_window wall_ms=139.297 cpu_ms=30.610 cpu_pct=22.0 rss_peak_mb=1914.2 footprint_mb=324.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=8 chunk_span_sum_ms=5.8927 chunks=8
+cell label=replay_chunks wall_ms=9.703 cpu_ms=1.986 cpu_pct=20.5 rss_peak_mb=1914.2 footprint_mb=323.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=8 per_token_ms=6.3773
+cell label=live_decode_window wall_ms=139.901 cpu_ms=30.311 cpu_pct=21.7 rss_peak_mb=1914.4 footprint_mb=324.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=8 gpu_span_ms=5.8710
+cell label=replay_one wall_ms=7.866 cpu_ms=1.779 cpu_pct=22.6 rss_peak_mb=1914.4 footprint_mb=324.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=9 per_token_ms=6.4095
+cell label=live_decode_window wall_ms=140.566 cpu_ms=31.093 cpu_pct=22.1 rss_peak_mb=1914.8 footprint_mb=324.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=9 gpu_span_ms=5.9496
+cell label=replay_one wall_ms=8.295 cpu_ms=1.893 cpu_pct=22.8 rss_peak_mb=1914.8 footprint_mb=384.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=9 chunk_span_sum_ms=5.8381 chunks=8
+cell label=replay_chunks wall_ms=9.074 cpu_ms=1.885 cpu_pct=20.8 rss_peak_mb=1914.8 footprint_mb=384.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=10 gpu_span_ms=5.8619
+cell label=replay_one wall_ms=7.659 cpu_ms=1.613 cpu_pct=21.1 rss_peak_mb=1914.8 footprint_mb=384.8 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=10 chunk_span_sum_ms=5.8904 chunks=8
+cell label=replay_chunks wall_ms=8.884 cpu_ms=1.809 cpu_pct=20.4 rss_peak_mb=1914.8 footprint_mb=384.8 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=10 per_token_ms=6.3548
+cell label=live_decode_window wall_ms=139.741 cpu_ms=30.156 cpu_pct=21.6 rss_peak_mb=1977.3 footprint_mb=324.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=11 chunk_span_sum_ms=5.9266 chunks=8
+cell label=replay_chunks wall_ms=9.552 cpu_ms=1.967 cpu_pct=20.6 rss_peak_mb=1977.3 footprint_mb=322.8 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=11 per_token_ms=6.3839
+cell label=live_decode_window wall_ms=139.540 cpu_ms=30.886 cpu_pct=22.1 rss_peak_mb=1977.5 footprint_mb=323.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=11 gpu_span_ms=5.9145
+cell label=replay_one wall_ms=8.181 cpu_ms=1.791 cpu_pct=21.9 rss_peak_mb=1977.5 footprint_mb=323.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=12 per_token_ms=6.3402
+cell label=live_decode_window wall_ms=139.459 cpu_ms=30.338 cpu_pct=21.8 rss_peak_mb=1977.9 footprint_mb=323.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=12 gpu_span_ms=5.8731
+cell label=replay_one wall_ms=8.197 cpu_ms=1.834 cpu_pct=22.4 rss_peak_mb=1977.9 footprint_mb=323.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=12 chunk_span_sum_ms=5.8215 chunks=8
+cell label=replay_chunks wall_ms=8.945 cpu_ms=1.802 cpu_pct=20.1 rss_peak_mb=1977.9 footprint_mb=323.5 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=13 gpu_span_ms=5.7499
+cell label=replay_one wall_ms=7.548 cpu_ms=1.589 cpu_pct=21.1 rss_peak_mb=1977.9 footprint_mb=323.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=13 chunk_span_sum_ms=5.8505 chunks=8
+cell label=replay_chunks wall_ms=8.909 cpu_ms=1.788 cpu_pct=20.1 rss_peak_mb=1977.9 footprint_mb=323.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=13 per_token_ms=6.3620
+cell label=live_decode_window wall_ms=139.689 cpu_ms=30.382 cpu_pct=21.7 rss_peak_mb=1978.2 footprint_mb=323.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=14 chunk_span_sum_ms=5.6875 chunks=8
+cell label=replay_chunks wall_ms=9.531 cpu_ms=2.084 cpu_pct=21.9 rss_peak_mb=1978.2 footprint_mb=323.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=14 per_token_ms=6.3492
+cell label=live_decode_window wall_ms=139.361 cpu_ms=30.544 cpu_pct=21.9 rss_peak_mb=1978.3 footprint_mb=323.9 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=14 gpu_span_ms=5.8753
+cell label=replay_one wall_ms=7.903 cpu_ms=1.811 cpu_pct=22.9 rss_peak_mb=1978.3 footprint_mb=324.1 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=15 per_token_ms=6.3538
+cell label=live_decode_window wall_ms=140.019 cpu_ms=30.025 cpu_pct=21.4 rss_peak_mb=1978.9 footprint_mb=324.2 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=15 gpu_span_ms=5.8995
+cell label=replay_one wall_ms=8.227 cpu_ms=1.893 cpu_pct=23.0 rss_peak_mb=1978.9 footprint_mb=419.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=15 chunk_span_sum_ms=5.8797 chunks=8
+cell label=replay_chunks wall_ms=8.954 cpu_ms=1.862 cpu_pct=20.8 rss_peak_mb=1978.9 footprint_mb=419.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=16 gpu_span_ms=5.7526
+cell label=replay_one wall_ms=7.541 cpu_ms=1.607 cpu_pct=21.3 rss_peak_mb=1978.9 footprint_mb=419.1 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=16 chunk_span_sum_ms=5.8235 chunks=8
+cell label=replay_chunks wall_ms=8.830 cpu_ms=1.785 cpu_pct=20.2 rss_peak_mb=1978.9 footprint_mb=419.1 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=16 per_token_ms=6.5460
+cell label=live_decode_window wall_ms=143.853 cpu_ms=31.635 cpu_pct=22.0 rss_peak_mb=2077.0 footprint_mb=323.1 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=17 chunk_span_sum_ms=5.8341 chunks=8
+cell label=replay_chunks wall_ms=9.167 cpu_ms=2.042 cpu_pct=22.3 rss_peak_mb=2077.0 footprint_mb=323.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=17 per_token_ms=6.3569
+cell label=live_decode_window wall_ms=139.868 cpu_ms=31.027 cpu_pct=22.2 rss_peak_mb=2077.7 footprint_mb=324.0 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=17 gpu_span_ms=5.8364
+cell label=replay_one wall_ms=8.179 cpu_ms=1.878 cpu_pct=23.0 rss_peak_mb=2077.7 footprint_mb=324.2 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=18 per_token_ms=6.3020
+cell label=live_decode_window wall_ms=139.204 cpu_ms=30.948 cpu_pct=22.2 rss_peak_mb=2078.2 footprint_mb=324.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=18 gpu_span_ms=5.8479
+cell label=replay_one wall_ms=8.181 cpu_ms=1.880 cpu_pct=23.0 rss_peak_mb=2078.2 footprint_mb=324.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=18 chunk_span_sum_ms=5.8367 chunks=8
+cell label=replay_chunks wall_ms=8.942 cpu_ms=1.880 cpu_pct=21.0 rss_peak_mb=2078.2 footprint_mb=324.6 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_one round=19 gpu_span_ms=5.8218
+cell label=replay_one wall_ms=7.633 cpu_ms=1.634 cpu_pct=21.4 rss_peak_mb=2078.2 footprint_mb=324.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb replay_chunks round=19 chunk_span_sum_ms=5.7883 chunks=8
+cell label=replay_chunks wall_ms=8.774 cpu_ms=1.797 cpu_pct=20.5 rss_peak_mb=2078.2 footprint_mb=324.7 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.67
+seb live round=19 per_token_ms=6.3968
+cell label=live_decode_window wall_ms=140.308 cpu_ms=30.963 cpu_pct=22.1 rss_peak_mb=2078.7 footprint_mb=324.3 gpu_alloc_mb=1630.0 load_before=4.67 load_after=4.70
+seb replay_chunks round=20 chunk_span_sum_ms=5.9581 chunks=8
+cell label=replay_chunks wall_ms=9.518 cpu_ms=1.958 cpu_pct=20.6 rss_peak_mb=2078.7 footprint_mb=324.2 gpu_alloc_mb=1630.0 load_before=4.70 load_after=4.70
+seb live round=20 per_token_ms=6.3455
+cell label=live_decode_window wall_ms=139.559 cpu_ms=30.299 cpu_pct=21.7 rss_peak_mb=2078.8 footprint_mb=324.5 gpu_alloc_mb=1630.0 load_before=4.70 load_after=4.70
+seb replay_one round=20 gpu_span_ms=5.8981
+cell label=replay_one wall_ms=8.382 cpu_ms=1.817 cpu_pct=21.7 rss_peak_mb=2078.8 footprint_mb=324.8 gpu_alloc_mb=1630.0 load_before=4.70 load_after=4.70
+seb summary arm=live_per_token_ms n=21 median=6.3644 min=6.3020 max=6.7540 cov_pct=1.50
+seb summary arm=replay_one_gpu_span_ms n=21 median=5.8619 min=5.7499 max=5.9496 cov_pct=0.92
+seb summary arm=replay_chunks_span_sum_ms n=21 median=5.8367 min=5.6875 max=5.9598 cov_pct=1.12
+seb bound live_minus_replay_one_ms=0.5025 live_minus_replay_chunks_ms=0.5278

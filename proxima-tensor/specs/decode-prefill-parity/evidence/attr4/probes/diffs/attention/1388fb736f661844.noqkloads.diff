@@ -1,0 +1,24 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/attn_base_emitted.metal	2026-10-08 10:51:06
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_attn/1388fb736f661844.noqkloads.metal	2026-10-08 10:51:39
+@@ -935,8 +935,8 @@
+                         device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+                         device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+-                            simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+-                            simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
++                            key_even_tile[group][step_index] = make_filled_simdgroup_matrix<float, 8, 8>(0.5f);
++                            key_odd_tile[group][step_index] = make_filled_simdgroup_matrix<float, 8, 8>(0.5f);
+                         }
+                     }
+                 }
+@@ -944,8 +944,8 @@
+                     long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
+                     simdgroup_float8x8 query_even[depth_unroll]; simdgroup_float8x8 query_odd[depth_unroll];
+                     FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+-                        simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
+-                        simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
++                        query_even[step_index] = make_filled_simdgroup_matrix<float, 8, 8>(0.5f);
++                        query_odd[step_index] = make_filled_simdgroup_matrix<float, 8, 8>(0.5f);
+                     }
+                     FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                         if ((int)simdgroup_slot + group * (int)simdgroups < fragments) {

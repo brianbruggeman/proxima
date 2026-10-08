@@ -1,0 +1,27 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/gemm_base_emitted.metal	2026-10-08 10:41:57
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_pp/49f88ec486a7766a.ppgrid32.metal	2026-10-08 11:12:32
+@@ -1048,13 +1048,14 @@
+     uint tiisg [[thread_index_in_simdgroup]],
+     uint sgitg [[simdgroup_index_in_threadgroup]],
+     uint sgcount [[simdgroups_per_threadgroup]],
++    uint tgid [[threadgroup_position_in_grid]],
+     uint tid [[thread_position_in_threadgroup]])
+ {
+     constexpr uint experts = 32u;
+     long token_extent = u.output_extents[0] * u.output_extents[1];
+     threadgroup uint expert_count_tg[experts];
+     threadgroup uint expert_offset_tg[experts];
+-    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {
++    for (uint scan_expert = tgid; scan_expert < tgid + 1u; ++scan_expert) {
+         uint tally = 0u;
+         for (long scan_base = 0; scan_base < token_extent; scan_base += 32l) {
+             long entry_token = scan_base + (long)tiisg;
+@@ -1086,7 +1087,7 @@
+         route_compaction[0] = running;
+     }
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+-    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {
++    for (uint scan_expert = tgid; scan_expert < tgid + 1u; ++scan_expert) {
+         uint placed = 0u;
+         for (long scan_base = 0; scan_base < token_extent; scan_base += 32l) {
+             long entry_token = scan_base + (long)tiisg;

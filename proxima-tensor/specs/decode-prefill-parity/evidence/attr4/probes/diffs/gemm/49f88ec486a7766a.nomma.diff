@@ -1,0 +1,22 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/gemm_base_emitted.metal	2026-10-08 10:41:57
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_gemm/49f88ec486a7766a.nomma.metal	2026-10-08 10:42:41
+@@ -993,19 +993,6 @@
+                 w_slot[568] = w_regs[15];
+                 if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }
+                 threadgroup_barrier(mem_flags::mem_threadgroup);
+-                if ((sgitg >> 1) == 0 || has_hi) {
+-                    threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);
+-                    threadgroup const half *lsmb = act_tile + 2 * 64 * (sgitg / 2);
+-                    for (short ik = 0; ik < 4; ++ik) {
+-                        simdgroup_half8x8 ma[4];
+-                        simdgroup_half8x8 mb[2];
+-                        for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }
+-                        for (short i = 0; i < 2; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }
+-                        for (short i = 0; i < 8; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }
+-                        lsma += 8 * 64;
+-                        lsmb += 4 * 64;
+-                    }
+-                }
+                 w_blk += 1u * 34;
+                 a_ptr += 32;
+             }

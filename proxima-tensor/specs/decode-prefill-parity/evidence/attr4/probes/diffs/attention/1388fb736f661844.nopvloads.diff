@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/attn_base_emitted.metal	2026-10-08 10:51:06
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_attn/1388fb736f661844.nopvloads.metal	2026-10-08 10:51:39
+@@ -1046,7 +1046,7 @@
+                 FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+                     int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
+                     simdgroup_float8x8 value;
+-                    simdgroup_load(value, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
++                    value = make_filled_simdgroup_matrix<float, 8, 8>(0.5f);
+                     FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value, accumulated[slot][vector_block]); }
+                 }
+             }

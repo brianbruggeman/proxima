@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/norm_base_179.metal	2026-10-08 10:55:16
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_norm/f41c3c0ebf45e3dc.nosumsq.metal	2026-10-08 10:55:16
+@@ -942,7 +942,7 @@
+     int walk1 = (int)off1;
+     int advance1 = (int)(stride1 * 256);
+     int total_r = (int)u.reduction_total;
+-    for (int r = (int)lane; r < total_r; r += 2048) {
++    for (int r = (int)lane; r < 0; r += 2048) {
+         float batch[8][2];
+         #pragma unroll
+         for (int slot = 0; slot < 8; ++slot) {
