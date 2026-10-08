@@ -7682,10 +7682,42 @@ mod expert_grouped_gemm {
             .source;
 
         assert!(source.contains("uint3 grouped_gid [[thread_position_in_grid]]"), "{source}");
-        assert!(source.contains("simd_prefix_exclusive_sum(scan_match)"), "{source}");
-        assert!(source.contains("tile_token[pending_fill + chunk_before + scan_prefix]"), "{source}");
+        assert!(source.contains("simd_prefix_exclusive_sum(own_count)"), "{source}");
+        assert!(source.contains("tile_token[write_at] = (int)(own_base + entry)"), "{source}");
         assert!(source.contains("atomic_fetch_max_explicit(&fault[0]"), "{source}");
         assert!(source.contains("grouped_expert * u.gather_element_stride[0]"), "{source}");
+    }
+
+    #[test]
+    fn the_pending_token_list_holds_a_tile_plus_one_whole_scan_step() {
+        let (bound, packed) = gathered_q8_0(TOKENS);
+        let step_entries = 128 * crate::sized::GROUPED_GEMM_SCAN_AHEAD;
+
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
+
+        let capacity = format!("threadgroup int tile_token[{}];", 32 + step_entries);
+        assert!(source.contains(&capacity), "{capacity} missing from {source}");
+        assert!(
+            source.contains(&format!("scan_base += 128l * {}l;", crate::sized::GROUPED_GEMM_SCAN_AHEAD)),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn a_scan_step_pays_one_barrier_pair_and_fetches_each_route_entry_once() {
+        let (bound, packed) = gathered_q8_0(TOKENS);
+
+        let source = emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source;
+
+        let scan_start = source.find("long own_base").expect("the scan step is emitted");
+        let scan_end = source.find("uint tile_count").expect("the tile follows the scan");
+        let scan = &source[scan_start..scan_end];
+        assert_eq!(scan.matches("threadgroup_barrier").count(), 2, "{scan}");
+        assert_eq!(scan.matches("gather_idx0[").count(), 1, "{scan}");
     }
 
     #[test]

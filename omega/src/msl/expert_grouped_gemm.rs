@@ -29,10 +29,16 @@ pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 /// z slice per expert the weight can name (`GridSpec::depth`, see
 /// [`expert_group_depth`]). A threadgroup owns one `(expert, row tile)` and
 /// walks that expert's tokens in rank order, in tiles of
-/// [`GROUPED_TILE_TOKENS`]: it scans the route one chunk of 128 tokens at a
-/// time, ranks the matching tokens with a simdgroup prefix sum plus the
-/// simdgroup totals, appends them to `tile_token`, and runs one full tile each
-/// time a tile's worth is pending (and once more for the tail). With
+/// [`GROUPED_TILE_TOKENS`]: it scans the route a step at a time (every thread
+/// owns `GROUPED_GEMM_SCAN_AHEAD` adjacent entries, so one barrier pair
+/// covers `128 * GROUPED_GEMM_SCAN_AHEAD` entries), ranks the matching tokens
+/// with a simdgroup prefix sum plus the simdgroup totals, appends them to
+/// `tile_token`, and runs one full tile each time a tile's worth is pending
+/// (and once more for the tail). `ggml-metal` instead compacts the route in a
+/// separate pass (`kernel_mul_mm_id_map0`) and gives every token tile its own
+/// threadgroup; this kernel has no second dispatch to carry that list, so each
+/// threadgroup ranks the route itself and the step width is what keeps that
+/// affordable. With
 /// `GROUPED_GEMM_COL_PARTS` above one, the tiles of an expert are dealt out
 /// round robin to that many threadgroups. Every value that steers control flow
 /// (`pending_fill`, `scan_base`, `tile_ordinal`) comes from threadgroup-shared
@@ -81,7 +87,7 @@ pub(super) fn push_expert_grouped_gemm_body(
     })?;
     let geometry = GroupedGeometry::new(block, output_axes, resolved)?;
     push_grouped_entry(source, node, &geometry)?;
-    push_grouped_threadgroup_memory(source);
+    push_grouped_threadgroup_memory(source, &geometry);
     source.push_str(&format!(
         "    device const uchar *weight_bytes = (device const uchar *)in{};\n",
         block.weight
@@ -118,7 +124,7 @@ pub(super) fn push_expert_grouped_gemm_body(
     );
     source.push_str("        }\n");
     source.push_str("        tile_ordinal += 1u;\n");
-    push_grouped_consume(source);
+    push_grouped_consume(source, &geometry);
     source.push_str("    }\n");
     Ok(())
 }
@@ -284,9 +290,10 @@ fn push_grouped_entry(
 /// `out_tile` is the token-major accumulator restage after it and aliases
 /// them (the K loop's trailing barrier fences the last tile read before any
 /// thread reaches the aliased write). `tile_token` holds the pending token
-/// ids: one tile plus the largest chunk a scan step can append.
+/// ids: one tile plus the largest number of matches a scan step can append,
+/// which is every route entry the step covers.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_threadgroup_memory(source: &mut String) {
+fn push_grouped_threadgroup_memory(source: &mut String, geometry: &GroupedGeometry) {
     let weight_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_DEPTH * 2;
     let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * 2;
     let out_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_TOKENS * 4;
@@ -299,24 +306,24 @@ fn push_grouped_threadgroup_memory(source: &mut String) {
     source.push_str("    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n");
     source.push_str(&format!(
         "    threadgroup int tile_token[{}];\n",
-        GROUPED_TILE_TOKENS + GROUPED_THREADS
+        GROUPED_TILE_TOKENS + GROUPED_THREADS * geometry.scan_ahead
     ));
     source.push_str(&format!(
         "    threadgroup uint scan_counts[{TILED_GEMM_NSG}];\n"
     ));
 }
 
-/// Scans route chunks until a full tile of this expert's tokens is pending or
-/// the route is exhausted. One thread per token: it fetches the route entry,
-/// reports an out-of-range index, clamps it, and votes; the simdgroup prefix
-/// sum ranks the votes inside a simdgroup and `scan_counts` carries the four
-/// simdgroup totals across the barrier.
-///
-/// The route entries of `GROUPED_GEMM_SCAN_AHEAD` consecutive chunks are
-/// loaded back to back before the first vote, so one memory round trip
-/// serves them all instead of one per chunk; the chunks are then consumed in
-/// order and the batch is abandoned the moment a tile fills (the unconsumed
-/// entries are fetched again by the next refill).
+/// Scans route entries until a full tile of this expert's tokens is pending
+/// or the route is exhausted. One scan step covers
+/// `GROUPED_THREADS * GROUPED_GEMM_SCAN_AHEAD` consecutive route entries:
+/// each thread owns `GROUPED_GEMM_SCAN_AHEAD` adjacent entries, loads all of
+/// them back to back (one memory round trip serves the step), reports an
+/// out-of-range index, clamps it, and counts how many name this expert. The
+/// simdgroup prefix sum ranks the threads inside a simdgroup and
+/// `scan_counts` carries the four simdgroup totals across the one barrier
+/// pair the step pays, so ranks ascend in flat token order. The whole step
+/// is appended -- `tile_token` is sized for a full tile plus one step -- so
+/// no route entry is ever fetched twice.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_refill(
     source: &mut String,
@@ -325,25 +332,26 @@ fn push_grouped_refill(
     geometry: &GroupedGeometry,
 ) {
     let innermost_axis = geometry.token_axes.last().copied().unwrap_or(0);
-    let ahead = geometry.scan_ahead;
+    let entries = geometry.scan_ahead;
     source.push_str(&format!(
         "        while (pending_fill < {GROUPED_TILE_TOKENS}u && scan_base < token_extent) {{\n"
     ));
-    source.push_str(&format!("            long routed_ahead[{ahead}];\n"));
     source.push_str(&format!(
-        "            for (int ahead = 0; ahead < {ahead}; ++ahead) {{\n"
+        "            long own_base = scan_base + tiitg * {entries};\n"
     ));
+    source.push_str(&format!("            long routed_entry[{entries}];\n"));
     source.push_str(&format!(
-        "                long ahead_token = scan_base + (long)ahead * {GROUPED_THREADS} + tiitg;\n"
+        "            for (int entry = 0; entry < {entries}; ++entry) {{\n"
     ));
+    source.push_str("                long entry_token = own_base + entry;\n");
     let route_offset = if geometry.route_flat {
-        format!("ahead_token * u.gather_index_strides[{slot}][{innermost_axis}]")
+        format!("entry_token * u.gather_index_strides[{slot}][{innermost_axis}]")
     } else {
         push_token_coordinates(
             source,
             geometry,
             "                ",
-            "(ahead_token < token_extent) ? ahead_token : 0",
+            "(entry_token < token_extent) ? entry_token : 0",
             "route_c",
         );
         token_offset_expr(geometry, "route_c", |axis| {
@@ -351,69 +359,95 @@ fn push_grouped_refill(
         })
     };
     source.push_str(&format!(
-        "                routed_ahead[ahead] = (ahead_token < token_extent) ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + {route_offset}] : (long)-1;\n"
+        "                routed_entry[entry] = (entry_token < token_extent) ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + {route_offset}] : (long)-1;\n"
     ));
     source.push_str("            }\n");
+    source.push_str("            uint own_count = 0u;\n");
     source.push_str(&format!(
-        "            for (int ahead = 0; ahead < {ahead}; ++ahead) {{\n"
+        "            for (int entry = 0; entry < {entries}; ++entry) {{\n"
     ));
     source.push_str(&format!(
-        "                if (pending_fill >= {GROUPED_TILE_TOKENS}u || scan_base >= token_extent) {{ break; }}\n"
+        "                long fetched{weight} = routed_entry[entry];\n"
     ));
-    source.push_str("                long scan_token = scan_base + tiitg;\n");
-    source.push_str(&format!(
-        "                long fetched{weight} = routed_ahead[ahead];\n"
-    ));
-    source.push_str("                uint scan_match = 0u;\n");
-    source.push_str("                if (scan_token < token_extent) {\n");
+    source.push_str("                if (own_base + entry < token_extent) {\n");
     push_gather_fault_check(source, weight, slot, "                    ");
     source.push_str(&format!(
         "                    fetched{weight} = max((long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1));\n"
     ));
-    source.push_str(&format!(
-        "                    scan_match = (fetched{weight} == grouped_expert) ? 1u : 0u;\n"
-    ));
     source.push_str("                }\n");
-    source.push_str("                uint scan_prefix = simd_prefix_exclusive_sum(scan_match);\n");
-    source.push_str("                uint scan_total = simd_sum(scan_match);\n");
-    source.push_str("                if (grouped_lane == 0u) { scan_counts[sgitg] = scan_total; }\n");
-    source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    source.push_str("                uint chunk_before = 0u;\n");
-    source.push_str("                uint chunk_total = 0u;\n");
+    source.push_str(&format!("                routed_entry[entry] = fetched{weight};\n"));
     source.push_str(&format!(
-        "                for (int group = 0; group < {TILED_GEMM_NSG}; ++group) {{\n"
+        "                own_count += (fetched{weight} == grouped_expert) ? 1u : 0u;\n"
     ));
-    source.push_str("                    uint group_count = scan_counts[group];\n");
-    source.push_str("                    chunk_before += (group < (int)sgitg) ? group_count : 0u;\n");
-    source.push_str("                    chunk_total += group_count;\n");
-    source.push_str("                }\n");
-    source.push_str(
-        "                if (scan_match != 0u) { tile_token[pending_fill + chunk_before + scan_prefix] = (int)scan_token; }\n",
-    );
-    source.push_str("                pending_fill += chunk_total;\n");
-    source.push_str(&format!("                scan_base += {GROUPED_THREADS};\n"));
-    source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("            }\n");
+    source.push_str("            uint scan_prefix = simd_prefix_exclusive_sum(own_count);\n");
+    source.push_str("            uint scan_total = simd_sum(own_count);\n");
+    source.push_str("            if (grouped_lane == 0u) { scan_counts[sgitg] = scan_total; }\n");
+    source.push_str("            threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("            uint chunk_before = 0u;\n");
+    source.push_str("            uint chunk_total = 0u;\n");
+    source.push_str(&format!(
+        "            for (int group = 0; group < {TILED_GEMM_NSG}; ++group) {{\n"
+    ));
+    source.push_str("                uint group_count = scan_counts[group];\n");
+    source.push_str("                chunk_before += (group < (int)sgitg) ? group_count : 0u;\n");
+    source.push_str("                chunk_total += group_count;\n");
+    source.push_str("            }\n");
+    source.push_str("            uint write_at = pending_fill + chunk_before + scan_prefix;\n");
+    source.push_str(&format!(
+        "            for (int entry = 0; entry < {entries}; ++entry) {{\n"
+    ));
+    source.push_str("                if (routed_entry[entry] == grouped_expert) {\n");
+    source.push_str("                    tile_token[write_at] = (int)(own_base + entry);\n");
+    source.push_str("                    write_at += 1u;\n");
+    source.push_str("                }\n");
+    source.push_str("            }\n");
+    source.push_str("            pending_fill += chunk_total;\n");
+    source.push_str(&format!(
+        "            scan_base += {GROUPED_THREADS}l * {entries}l;\n"
+    ));
+    source.push_str("            threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("        }\n");
 }
 
 /// Drops the tokens the tile just consumed: whatever was pending beyond one
-/// tile (never more than `GROUPED_THREADS - 1`, so one element per thread)
-/// moves to the front. Read-barrier-write, because the source and destination
-/// ranges overlap.
+/// tile (fewer than one scan step's worth, so at most `GROUPED_GEMM_SCAN_AHEAD`
+/// elements per thread) moves to the front. Read-barrier-write, because the
+/// source and destination ranges overlap; skipped, barriers included, when
+/// nothing is carried, which the threadgroup decides together from
+/// `pending_fill`.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_consume(source: &mut String) {
+fn push_grouped_consume(source: &mut String, geometry: &GroupedGeometry) {
     let block_n = GROUPED_TILE_TOKENS;
+    let entries = geometry.scan_ahead;
     source.push_str(&format!(
         "        uint carried_count = (pending_fill > {block_n}u) ? (pending_fill - {block_n}u) : 0u;\n"
     ));
-    source.push_str("        int carried_token = 0;\n");
+    source.push_str("        if (carried_count != 0u) {\n");
+    source.push_str(&format!("            int carried_token[{entries}];\n"));
     source.push_str(&format!(
-        "        if ((uint)tiitg < carried_count) {{ carried_token = tile_token[(uint)tiitg + {block_n}u]; }}\n"
+        "            for (int carry = 0; carry < {entries}; ++carry) {{\n"
     ));
-    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    source.push_str("        if ((uint)tiitg < carried_count) { tile_token[tiitg] = carried_token; }\n");
-    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str(&format!(
+        "                uint carry_index = (uint)tiitg + (uint)carry * {GROUPED_THREADS}u;\n"
+    ));
+    source.push_str(&format!(
+        "                carried_token[carry] = (carry_index < carried_count) ? tile_token[carry_index + {block_n}u] : 0;\n"
+    ));
+    source.push_str("            }\n");
+    source.push_str("            threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str(&format!(
+        "            for (int carry = 0; carry < {entries}; ++carry) {{\n"
+    ));
+    source.push_str(&format!(
+        "                uint carry_index = (uint)tiitg + (uint)carry * {GROUPED_THREADS}u;\n"
+    ));
+    source.push_str(
+        "                if (carry_index < carried_count) { tile_token[carry_index] = carried_token[carry]; }\n",
+    );
+    source.push_str("            }\n");
+    source.push_str("            threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("        }\n");
     source.push_str("        pending_fill = carried_count;\n");
 }
 
