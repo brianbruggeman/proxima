@@ -329,7 +329,7 @@ pub(super) fn build_buffer_arena(
         .unwrap_or_else(|| lay_out_whole_slots(&found.allocations, &found.releases));
     let mut slots: Vec<MetalBuffer> = Vec::with_capacity(layout.slot_bytes.len());
     for bytes in &layout.slot_bytes {
-        slots.push(allocate_buffer(device, bytes.div_ceil(4), DType::Float32)?);
+        slots.push(allocate_buffer_for("arena_slot", "plan", device, bytes.div_ceil(4), DType::Float32)?);
     }
     debug!(
         packed = was_packed,
@@ -454,6 +454,8 @@ pub(super) fn build_plan_uniforms(
             .ok_or_else(|| MetalError::CompileFailed {
                 log: "device refused to allocate a plan uniform buffer".to_string(),
             })?;
+        #[cfg(feature = "instrument")]
+        record_device_buffer("plan_uniform", "plan", "", bytes.len().max(1), false);
         #[cfg(feature = "instrument")]
         chunk_audit_record_write(Retained::as_ptr(&buffer) as usize, 0, bytes.len(), position);
         write_plan_uniform_bytes(&buffer, &bytes);
@@ -678,7 +680,7 @@ fn shared_attention_scratch(
     plan: &Plan,
 ) -> Result<Option<MetalBuffer>, MetalError> {
     shared_scratch_elements(&plan.prepared.resolved, plan.numeric_policy)
-        .map(|elements| allocate_buffer(device, elements as usize, DType::Float32))
+        .map(|elements| allocate_buffer_for("attention_scratch", "plan", device, elements as usize, DType::Float32))
         .transpose()
 }
 
@@ -710,7 +712,7 @@ pub(super) fn attention_scratch_buffer(
             let buffer = match cached_attention_scratch_len(bound, plan.numeric_policy) {
                 Some(_) if scratch_is_shared(bound, plan.numeric_policy) => shared.clone(),
                 Some(elements) => {
-                    Some(allocate_buffer(&device, elements as usize, DType::Float32)?)
+                    Some(allocate_buffer_for("attention_scratch", "plan", &device, elements as usize, DType::Float32)?)
                 }
                 None => None,
             };
@@ -939,6 +941,8 @@ fn refit_uniform_buffers(
                 .ok_or_else(|| MetalError::CompileFailed {
                     log: "device refused to allocate a plan uniform buffer".to_string(),
                 })?;
+            #[cfg(feature = "instrument")]
+            record_device_buffer("plan_uniform", "plan", "", bytes.len().max(1), false);
             write_plan_uniform_bytes(&buffer, &bytes);
             Ok((*position, buffer))
         })
@@ -2580,7 +2584,9 @@ pub(super) fn encode_op(
     // reuse is that call site's own optimization, not a requirement this
     // function imposes on every caller.
     let owned_scratch: Option<MetalBuffer> = if scratch.is_none() && merge.is_some() {
-        Some(allocate_buffer(
+        Some(allocate_buffer_for(
+            "attention_scratch",
+            "call",
             device,
             cached_attention_scratch_len(bound, numeric_policy).unwrap_or(0) as usize,
             DType::Float32,
@@ -2937,7 +2943,7 @@ fn encode_route_prepass(
     output_pointer: *const ProtocolObject<dyn MTLBuffer>,
     hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<MetalBuffer, MetalError> {
-    let compaction = allocate_buffer(device, prepass.words, DType::Float32)?;
+    let compaction = allocate_buffer_for("route_compaction", "call", device, prepass.words, DType::Float32)?;
     // SAFETY: shared-storage buffer of at least one 4-byte word, idle until the encoded work runs.
     unsafe { compaction.contents().as_ptr().cast::<u32>().write(0) };
     unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, slot) };

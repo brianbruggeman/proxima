@@ -488,8 +488,18 @@ pub(super) fn pipeline_for_kernel(
     Ok(pipeline)
 }
 
-#[cfg(not(feature = "metal-buffer-pool"))]
 pub(super) fn allocate_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    element_count: usize,
+    dtype: DType,
+) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    allocate_buffer_for("output_buffer", "call", device, element_count, dtype)
+}
+
+#[cfg(not(feature = "metal-buffer-pool"))]
+pub(super) fn allocate_buffer_for(
+    owner: &'static str,
+    lifetime: &'static str,
     device: &ProtocolObject<dyn MTLDevice>,
     element_count: usize,
     dtype: DType,
@@ -497,11 +507,16 @@ pub(super) fn allocate_buffer(
     let byte_length = element_count.max(1) * dtype.size_bytes();
     counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
     counter!(OUTPUT_BUFFER_ALLOCATED_BYTES, byte_length as u64);
-    device
+    let buffer = device
         .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
             log: "device refused to allocate a shared buffer".to_string(),
-        })
+        })?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer(owner, lifetime, "", byte_length, false);
+    #[cfg(not(feature = "instrument"))]
+    let _ = (owner, lifetime);
+    Ok(buffer)
 }
 
 /// Pool-backed counterpart of the `metal-buffer-pool`-off `allocate_buffer`
@@ -512,7 +527,9 @@ pub(super) fn allocate_buffer(
 /// makes a bucketed pop sound, and `OUTPUT_BUFFER_POOL`'s doc for the
 /// invariant this maintains across the pool's whole lifetime.
 #[cfg(feature = "metal-buffer-pool")]
-pub(super) fn allocate_buffer(
+pub(super) fn allocate_buffer_for(
+    owner: &'static str,
+    lifetime: &'static str,
     device: &ProtocolObject<dyn MTLDevice>,
     element_count: usize,
     dtype: DType,
@@ -530,11 +547,16 @@ pub(super) fn allocate_buffer(
     }
     counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
     counter!(OUTPUT_BUFFER_ALLOCATED_BYTES, bucket as u64);
-    device
+    let buffer = device
         .newBufferWithLength_options(bucket, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
             log: "device refused to allocate a shared buffer".to_string(),
-        })
+        })?;
+    #[cfg(feature = "instrument")]
+    record_device_buffer(owner, lifetime, "", bucket, false);
+    #[cfg(not(feature = "instrument"))]
+    let _ = (owner, lifetime);
+    Ok(buffer)
 }
 
 /// Rounds `byte_length` up to the next power of two -- the pool's bucket
