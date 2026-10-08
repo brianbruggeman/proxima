@@ -1,0 +1,45 @@
+m0 decode: generated_tokens=24 text="A **large office building** is smaller in size than a hippopotamus.\n\nHere's why:\n\n*"
+m0 capture: step=23 dispatches_with_threads=653
+m0 groups: 81 kernels-by-identity-and-geometry over 653 dispatches
+m0 replay: group 0/81
+m0 replay: group 50/81
+m0 sequence replay: one command buffer, dispatches=653 of 653 captured, gpu_ms=[9.942875010892749, 10.057999985292554, 9.425166645087302]
+m0 chunk sequence replay: chunks=8, gpu_ms=[[0.25008339434862137, 0.9921666933223605, 0.9473749669268727, 0.991041655652225, 1.22637499589473, 1.3845833018422127, 1.2745833955705166, 2.270083292387426], [0.24700001813471317, 0.9906248888000846, 0.9495416888967156, 1.0471249697729945, 1.2478332500904799, 1.3852500123903155, 1.2838749680668116, 2.2736249957233667], [0.24716672487556934, 0.9897499112412333, 0.946874963119626, 0.9986250661313534, 1.345125027000904, 1.5232083387672901, 1.4147500041872263, 2.40212504286319]]
+m0 family sequence replay excludes 0 unreplayable dispatches of 653
+m0 family sequence replay: family=attention dispatches=70 runs=7 gpu_ms_mean=0.7555 gpu_ms_min=0.7329 cov_pct=1.69
+m0 family sequence replay: family=head dispatches=1 runs=7 gpu_ms_mean=1.0995 gpu_ms_min=1.0965 cov_pct=0.18
+m0 family sequence replay: family=norms dispatches=242 runs=7 gpu_ms_mean=2.4720 gpu_ms_min=2.4517 cov_pct=0.56
+m0 family sequence replay: family=other_matvec dispatches=2 runs=7 gpu_ms_mean=0.1328 gpu_ms_min=0.1323 cov_pct=0.26
+m0 family sequence replay: family=q4_0_matvec dispatches=275 runs=7 gpu_ms_mean=5.2162 gpu_ms_min=5.1889 cov_pct=0.34
+m0 family sequence replay: family=rope_copy_elementwise dispatches=63 runs=7 gpu_ms_mean=0.5911 gpu_ms_min=0.5755 cov_pct=1.59
+
+class                                     disp/step us/disp cold  total us cold   % step | us/disp -flr   total -flr | us/disp marg   total marg
+matvec Q4_0                                     275        18.63         5122.1    51.4% |        10.73       2950.1 |        14.92       4103.4
+RMSNorm sumsq + fused epilogue                  242        11.78         2850.7    28.6% |         3.86        934.9 |         5.91       1429.0
+head                                              1      1143.56         1143.6    11.5% |      1135.65       1135.6 |      1084.74       1084.7
+cached attention partial                         35        17.78          622.1     6.2% |         9.86        345.0 |        11.45        400.9
+UNCLASSIFIED omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1         35        14.07          492.5     4.9% |         6.15        215.4 |        13.83        484.1
+cached attention merge                           35         8.02          280.9     2.8% |         0.34         12.0 |         5.89        206.1
+matvec Float16                                    1       118.73          118.7     1.2% |       110.81        110.8 |       115.67        115.7
+UNCLASSIFIED omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1         15         5.64           84.6     0.8% |         0.00          0.0 |         3.56         53.5
+elementwise fused_identity_o0__multiply_s0_o1_g10          2        16.70           33.4     0.3% |         8.78         17.6 |        12.06         24.1
+UNCLASSIFIED omega_reduce_r3_o2_n5_fused_equal_o0_o1__add_o2_o3__select_s0_s1_o4_minimum_positive_infinity          1        21.25           21.2     0.2% |        13.33         13.3 |        14.93         14.9
+softmax max                                       2         7.38           14.8     0.1% |         0.44          0.9 |         4.26          8.5
+identity copy                                     2         6.99           14.0     0.1% |         0.51          1.0 |         4.45          8.9
+matvec f32                                        1        12.54           12.5     0.1% |         4.62          4.6 |         9.00          9.0
+iota                                              2         4.87            9.7     0.1% |         0.00          0.0 |         1.98          4.0
+softmax sum                                       1         6.38            6.4     0.1% |         0.00          0.0 |         3.03          3.0
+UNCLASSIFIED omega_reduce_r2_o1_n1_identity_minimum_positive_infinity          1         6.31            6.3     0.1% |         0.00          0.0 |         2.51          2.5
+elementwise multiply                              1         6.08            6.1     0.1% |         0.00          0.0 |         4.42          4.4
+elementwise identity_g1                           1         6.04            6.0     0.1% |         0.00          0.0 |         4.29          4.3
+
+m0 floor: empty command buffer GPU span median=7.92 us min=6.75 us max=11.25 us n=200
+m0 step (captured step 23, last evaluation that ran): rows_evaluated=Some(1) tokens_committed=Some(1) gpu_busy_ms=Some(9.960541734471917) gpu_exec_ms=Some(4.750333) physical_dispatch_calls=Some(653)
+m0 step (median over logged evaluations at step >= 2, mixed widths): gpu_busy_ms=10.153 gpu_exec_ms=5.105
+m0 reconcile: sum(median x count) [cold]=10845.7 us; ratio to gpu_busy_ms=1.089; ratio to gpu_exec_ms=2.283
+m0 reconcile: sum(median x count) [cold-minus-floor]=5741.3 us; ratio to gpu_busy_ms=0.576; ratio to gpu_exec_ms=1.209
+m0 reconcile: sum(median x count) [warm]=11061.4 us; ratio to gpu_busy_ms=1.111; ratio to gpu_exec_ms=2.329
+m0 reconcile: sum(median x count) [marginal]=7961.0 us; ratio to gpu_busy_ms=0.799; ratio to gpu_exec_ms=1.676
+m0 invariant 1: sum(group members)=653 captured_dispatches=653 physical_dispatch_calls_logged=Some(653) capture_step_is_last_logged_step=true
+m0 replay failures: 0
+m0 unreplayable by capture: groups=0 dispatches=0

@@ -1,0 +1,12 @@
+    Finished `gate` profile [optimized] target(s) in 0.22s
+────────────
+ Nextest run ID 41cb10ea-a88c-49c9-9a9d-5b2822634a46 with nextest profile: slice-gate
+    Starting 6 tests across 35 binaries (863 tests skipped)
+        PASS [   4.148s] (1/6) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [   4.843s] (2/6) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        PASS [   2.863s] (3/6) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   1.417s] (4/6) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        PASS [   4.207s] (5/6) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_gemma4_e2b
+        PASS [   1.798s] (6/6) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+────────────
+     Summary [  19.280s] 6 tests run: 6 passed, 863 skipped

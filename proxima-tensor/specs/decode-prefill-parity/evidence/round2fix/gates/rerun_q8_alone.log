@@ -1,0 +1,8 @@
+    Finished `gate` profile [optimized] target(s) in 0.21s
+────────────
+ Nextest run ID 1af9ea48-f871-437c-86cb-a865ce82ce71 with nextest profile: default
+    Starting 2 tests across 106 binaries (815 tests skipped)
+        PASS [   1.099s] (1/2) omega::packed_row_multi_row_index32_ab q8_0_tokens600_k12288_rows1536
+        PASS [   0.579s] (2/2) omega::packed_row_multi_row_unroll_ab q8_0_tokens600_k12288_rows1536
+────────────
+     Summary [   1.682s] 2 tests run: 2 passed, 815 skipped
