@@ -9399,4 +9399,194 @@ mod expert_grouped_route_segments {
         let k_loop = format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
         assert_eq!(source.matches(&k_loop).count(), 1, "{source}");
     }
+
+    const SIMD_STEP: usize = 32;
+
+    fn single_threadgroup_compaction(route: &[usize]) -> Vec<u32> {
+        let counts = expert_counts(route);
+        let offsets = exclusive_offsets(&counts);
+        let mut words = vec![route.len() as u32];
+        words.extend(&counts);
+        words.extend(&offsets);
+        words.extend(expert_major_list(route, &offsets));
+        words
+    }
+
+    fn chunk_of(route_length: usize, entries: usize, threadgroup: usize) -> std::ops::Range<usize> {
+        let begin = threadgroup * entries;
+        begin..route_length.min(begin + entries)
+    }
+
+    fn count_pass(route: &[usize], entries: usize) -> Vec<[u32; EXPERTS]> {
+        (0..route.len().div_ceil(entries))
+            .map(|threadgroup| {
+                let mut row = [0u32; EXPERTS];
+                route[chunk_of(route.len(), entries, threadgroup)].iter().for_each(|&expert| row[expert] += 1);
+                row
+            })
+            .collect()
+    }
+
+    fn place_pass(route: &[usize], entries: usize, scratch: &[[u32; EXPERTS]]) -> Vec<u32> {
+        let list_base = 1 + 2 * EXPERTS;
+        let mut words = vec![0u32; list_base + route.len()];
+        let totals: Vec<u32> = (0..EXPERTS).map(|expert| scratch.iter().map(|row| row[expert]).sum()).collect();
+        let offsets = exclusive_offsets(&totals);
+        words[0] = route.len() as u32;
+        words[1..1 + EXPERTS].copy_from_slice(&totals);
+        words[1 + EXPERTS..list_base].copy_from_slice(&offsets);
+        for threadgroup in 0..scratch.len() {
+            let chunk = chunk_of(route.len(), entries, threadgroup);
+            for expert in 0..EXPERTS {
+                let before: u32 = scratch[..threadgroup].iter().map(|row| row[expert]).sum();
+                let mut placed = 0u32;
+                for step in chunk.clone().step_by(SIMD_STEP) {
+                    let mut rank = 0u32;
+                    let lanes = step..chunk.end.min(step + SIMD_STEP);
+                    for (lane, &routed) in route[lanes].iter().enumerate() {
+                        if routed == expert {
+                            words[list_base + (offsets[expert] + before + placed + rank) as usize] = (step + lane) as u32;
+                            rank += 1;
+                        }
+                    }
+                    placed += rank;
+                }
+            }
+        }
+        words
+    }
+
+    fn two_pass_compaction(route: &[usize], entries: usize) -> Vec<u32> {
+        let scratch = count_pass(route, entries);
+        place_pass(route, entries, &scratch)
+    }
+
+    fn kernel_text<'source>(source: &'source str, entry: &str) -> &'source str {
+        let start = source.find(&format!("kernel void {entry}(")).expect("the prepass kernel is in the source");
+        let rest = &source[start + 1..];
+        let end = rest.find("\nkernel void ").map_or(source.len(), |next| start + 1 + next);
+        &source[start..end]
+    }
+
+    #[test]
+    fn the_two_pass_compaction_is_byte_equal_to_the_single_threadgroup_one_for_every_chunking() {
+        let route = top_k_route();
+        let reference = single_threadgroup_compaction(&route);
+        let cases = [
+            (1usize, 8000usize),
+            (2, 4000),
+            (4, 2016),
+            (8, 1024),
+            (16, 512),
+            (32, 256),
+            (36, 224),
+            (84, 96),
+        ];
+
+        for (threadgroups, entries) in cases {
+            let compaction = two_pass_compaction(&route, entries);
+
+            assert_eq!(route.len().div_ceil(entries), threadgroups, "{entries} entries per threadgroup");
+            assert_eq!(compaction, reference, "{threadgroups} threadgroups of {entries} entries");
+        }
+    }
+
+    #[test]
+    fn a_chunking_that_does_not_divide_the_route_still_places_every_assignment_once() {
+        let route = top_k_route();
+        let entries = 224;
+        assert_ne!(route.len() % entries, 0);
+
+        let compaction = two_pass_compaction(&route, entries);
+
+        let mut seen = compaction[1 + 2 * EXPERTS..].to_vec();
+        seen.sort_unstable();
+        assert!(seen.iter().copied().eq(0..route.len() as u32));
+    }
+
+    #[test]
+    fn the_partial_count_rows_sum_to_the_expert_counts_and_each_row_to_its_chunk() {
+        let route = top_k_route();
+        let entries = 256;
+
+        let scratch = count_pass(&route, entries);
+
+        assert_eq!(scratch.len(), 32);
+        for (threadgroup, row) in scratch.iter().enumerate() {
+            assert_eq!(row.iter().sum::<u32>() as usize, chunk_of(route.len(), entries, threadgroup).len());
+        }
+        let totals: Vec<u32> = (0..EXPERTS).map(|expert| scratch.iter().map(|row| row[expert]).sum()).collect();
+        assert_eq!(totals, expert_counts(&route));
+    }
+
+    #[test]
+    fn the_compaction_buffer_grows_by_threadgroups_times_experts_words_after_the_list() {
+        let entries = crate::sized::GROUPED_GEMM_PREPASS_ENTRIES;
+        let threadgroups = 8000u64.div_ceil(entries);
+
+        assert_eq!(grouped_prepass_threadgroups(8000), threadgroups);
+        assert_eq!(grouped_prepass_threadgroups(0), 1);
+        assert_eq!(grouped_prepass_threadgroups(entries), 1);
+        assert_eq!(grouped_prepass_threadgroups(entries + 1), 2);
+        assert_eq!(grouped_compaction_words(8000, 32), 1 + 2 * 32 + 8000 + threadgroups * 32);
+    }
+
+    #[test]
+    fn the_prepass_chunk_default_is_256_entries_and_whole_simd_steps() {
+        let manifest = include_str!("../../omega-runtime.toml");
+
+        assert!(manifest.lines().any(|line| line.trim() == "prepass_entries = 256"), "{manifest}");
+        assert_eq!(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES % SIMD_STEP as u64, 0);
+        if option_env!("OMEGA_GROUPED_GEMM_PREPASS_ENTRIES").is_none() {
+            assert_eq!(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES, 256);
+            assert_eq!(grouped_prepass_threadgroups(8000), 32);
+        }
+    }
+
+    #[test]
+    fn the_count_pass_kernel_tallies_its_chunk_into_its_scratch_row_without_placing() {
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+        let Some(([count, _], _)) = route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
+        else {
+            return;
+        };
+        let entries = crate::sized::GROUPED_GEMM_PREPASS_ENTRIES;
+
+        let text = kernel_text(&count.source, &count.entry);
+
+        assert!(text.contains(&format!("long chunk_begin = (long)tgid * {entries}l;")), "{text}");
+        assert!(text.contains("scan_base < chunk_end"), "{text}");
+        assert!(text.contains("tally = simd_sum(tally);"), "{text}");
+        assert!(text.contains("route_compaction[scratch_base + tgid * experts + scan_expert] = tally;"), "{text}");
+        assert!(text.contains("atomic_fetch_max_explicit(&fault["), "{text}");
+        assert!(!text.contains("simd_prefix_exclusive_sum"), "{text}");
+        assert!(!text.contains("(uint)entry_token; }"), "{text}");
+        assert!(!text.contains("atomic_fetch_add"), "{text}");
+    }
+
+    #[test]
+    fn the_place_pass_kernel_prefixes_the_scratch_and_places_in_ascending_route_order() {
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+        let Some(([_, place], _)) = route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
+        else {
+            return;
+        };
+
+        let text = kernel_text(&place.source, &place.entry);
+
+        assert!(text.contains("uint tgcount [[threadgroups_per_grid]]"), "{text}");
+        assert!(text.contains("for (uint row = tiisg; row < tgcount; row += 32u)"), "{text}");
+        assert!(text.contains("before += (row < tgid) ? partial : 0u;"), "{text}");
+        assert!(text.contains("expert_base_tg[expert] = running + expert_before_tg[expert];"), "{text}");
+        assert!(text.contains("if (tgid == 0u) {\n            route_compaction[0] = running;"), "{text}");
+        assert!(text.contains("uint rank = simd_prefix_exclusive_sum(hit);"), "{text}");
+        assert!(
+            text.contains("route_compaction[list_base + expert_base_tg[scan_expert] + placed + rank] = (uint)entry_token;"),
+            "{text}"
+        );
+        assert!(text.contains("placed += simd_sum(hit);"), "{text}");
+        assert!(!text.contains("atomic_fetch"), "{text}");
+    }
 }
