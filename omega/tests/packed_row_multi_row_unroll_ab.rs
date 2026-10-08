@@ -163,7 +163,10 @@ fn run_bits(
     // case with `tokens >= TILED_GEMM_MIN_TOKENS` still routes through the
     // row-blocked `push_packed_row_multi_row_body` this file's unroll knob
     // lives in, rather than silently diverting to the tiled path.
-    let output = temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
+    // `PROXIMA_TILED_GEMM_DISABLE` does the same for the Q8_0 and Q6_K cases,
+    // whose `tiled_decode` descriptions admit them to the tiled path at that
+    // width too.
+    let output = temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_TILED_GEMM_DISABLE", Some("q8_0,q6k")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
         temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
             let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
                 .expect("metal plans the multi-token packed matmul");
@@ -194,7 +197,7 @@ fn plan_kernel_keys(
         },
         QuantizedBlock::Float32(&activation),
     ];
-    temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
+    temp_env::with_vars([("PROXIMA_TILED_GEMM_Q4_0", Some("0")), ("PROXIMA_TILED_GEMM_DISABLE", Some("q8_0,q6k")), ("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE", Some("0"))], || {
         temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
             let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
                 .expect("metal plans the multi-token packed matmul");
