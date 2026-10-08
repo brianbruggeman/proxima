@@ -467,7 +467,29 @@ impl DeviceKv {
             cache.reserve_ring_rows(positions_needed);
             cache.append_at(first, &even, &odd, &value);
         }
+        #[cfg(feature = "instrument")]
+        debug!(
+            host_mirror_bytes = host_mirror_bytes(layer_caches) as u64,
+            cached_len = cached_len as u64,
+            "kv_host_mirror"
+        );
     }
+}
+
+/// Host bytes the attention layers' K/V row vectors hold by allocated
+/// capacity: the copy [`DeviceKv::flush`] leaves in the host caches.
+#[cfg(feature = "instrument")]
+fn host_mirror_bytes(layer_caches: &[LayerCacheState]) -> usize {
+    layer_caches
+        .iter()
+        .filter_map(|state| match state {
+            LayerCacheState::Attention(cache) => Some(
+                (cache.k_even.capacity() + cache.k_odd.capacity() + cache.v.capacity())
+                    * size_of::<f32>(),
+            ),
+            _ => None,
+        })
+        .sum()
 }
 
 /// The host-cache slot runs that hold positions `first..first + kept`, as
