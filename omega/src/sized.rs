@@ -130,6 +130,15 @@ pub const SIMD_WIDTH: u64 = 32;
 // per-build without editing the TOML -- the mechanism that same discipline
 // row's bake-off used.
 
+// `COOPERATIVE_SERIAL_BELOW_LEN` and `COOPERATIVE_SERIAL_MIN_OUTPUTS` come in
+// through the `include!` above -- `msl::short_fold_prefers_serial`: a fold
+// shorter than the first AND producing at least the second many outputs takes
+// the serial body even though it clears `COOPERATIVE_REDUCE_MIN_LEN`. Shape,
+// not length alone, decides because the 8-long MoE combine is 24 lanes idle
+// across a million prefill outputs but latency-bound across a thousand decode
+// outputs. 0 in either disables it. `OMEGA_COOPERATIVE_REDUCE_SERIAL_BELOW_LEN`
+// and `OMEGA_COOPERATIVE_REDUCE_SERIAL_MIN_OUTPUTS` override per build.
+
 // `COOPERATIVE_REDUCE_UNROLL` comes in through the `include!` above -- how
 // many elements a cooperative fold's lane loads before folding the first of
 // them (`msl::push_cooperative_reduce_body`). Fold order is unchanged, so it

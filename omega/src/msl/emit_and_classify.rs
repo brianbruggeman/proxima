@@ -1677,6 +1677,10 @@ pub(super) fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
             is_cooperative_reduce_op(*reduce_op)
                 && gather_is_reduction_invariant(resolved, output_axes)
                 && meets_cooperative_min_len(reduction_len(resolved, output_axes))
+                && !short_fold_prefers_serial(
+                    reduction_len(resolved, output_axes),
+                    output_count(resolved, output_axes),
+                )
         }
         _ => false,
     }
@@ -1991,6 +1995,32 @@ pub(super) fn gather_is_reduction_invariant(resolved: &BoundOp, output_axes: &[u
 #[allow(clippy::absurd_extreme_comparisons)]
 pub(super) fn meets_cooperative_min_len(length: u64) -> bool {
     length >= crate::sized::COOPERATIVE_REDUCE_MIN_LEN
+}
+
+/// A fold shorter than [`crate::sized::COOPERATIVE_SERIAL_BELOW_LEN`] leaves
+/// lanes of its 32-lane group idle, and that only costs when there are enough
+/// outputs for the idle lanes to be the bottleneck: at
+/// [`crate::sized::COOPERATIVE_SERIAL_MIN_OUTPUTS`] or more outputs the
+/// one-thread-per-output body keeps the machine full, while below it the
+/// cooperative body's extra threads hide load latency. Length and output count
+/// decide together because neither alone separates a prefill-width combine
+/// (8 long, a million outputs) from a decode-width one (8 long, a thousand).
+/// Zero in either key disables the rule.
+// the generated keys can be zero (the disabling sentinel), which makes one comparison vacuous
+#[allow(clippy::absurd_extreme_comparisons)]
+pub(super) fn short_fold_prefers_serial(length: u64, outputs: u64) -> bool {
+    crate::sized::COOPERATIVE_SERIAL_MIN_OUTPUTS != 0
+        && length < crate::sized::COOPERATIVE_SERIAL_BELOW_LEN
+        && outputs >= crate::sized::COOPERATIVE_SERIAL_MIN_OUTPUTS
+}
+
+/// Number of outputs the fold produces: the product of the extents of
+/// `output_axes`.
+pub(super) fn output_count(resolved: &BoundOp, output_axes: &[u16]) -> u64 {
+    output_axes
+        .iter()
+        .map(|&dim| resolved.extents[dim as usize])
+        .product()
 }
 
 /// Total element count one output folds over: the product of the extents of
