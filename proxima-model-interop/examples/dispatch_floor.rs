@@ -470,6 +470,18 @@ mod harness {
         std::fs::write(format!("{directory}/dispatch_instream.csv"), table).expect("write dispatch_instream");
     }
 
+    /// The stream's shapes, independent of any timing: iteration-space extents and the codec of each operand.
+    fn write_shapes_csv(directory: &str, dispatches: &[CapturedDispatch]) {
+        let mut table = String::from("index,node,kernel,extents,operand_codecs\n");
+        for (index, dispatch) in dispatches.iter().enumerate() {
+            let extents: Vec<String> = dispatch.extents.iter().map(u64::to_string).collect();
+            let codecs: Vec<String> =
+                dispatch.operands.iter().map(|(node, codec)| format!("{node}:{codec}")).collect();
+            writeln!(table, "{index},{},{},{},{}", dispatch.node, dispatch.entry, extents.join("x"), codecs.join(";")).unwrap();
+        }
+        std::fs::write(format!("{directory}/dispatch_shapes.csv"), table).expect("write dispatch_shapes");
+    }
+
     fn write_instream_groups(directory: &str, rows: &[InstreamRow]) {
         let mut groups: BTreeMap<&str, Vec<&InstreamRow>> = BTreeMap::new();
         for row in rows {
@@ -754,6 +766,7 @@ mod harness {
         let rows = instream_rows(dispatches, marginals, stamped, empty, &round4_table(), &cold_penalties, &stamped_isolated);
         write_instream_csv(directory, &rows);
         write_instream_groups(directory, &rows);
+        write_shapes_csv(directory, dispatches);
         print_instream_summary(&rows, stamped, empty);
     }
 
