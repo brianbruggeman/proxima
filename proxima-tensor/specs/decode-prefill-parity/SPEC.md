@@ -4214,3 +4214,131 @@ decode_arms --prompt-file prompt1k.txt --processes 3 --runs 5 --new-tokens 128 -
 ```
 
 Missing for CI: no job runs the Metal tests, the stamped replays, the arms bench or the box sampler; every row re-proves on this box only. The per-dispatch records (`dispatch_instream.csv`, `dispatch_shapes.csv`) are the saved baseline of this section; no job diffs a later run against them.
+
+## round five: attention tile height (measured 2026-10-08 on `47593f66` plus `ce7b75f1`; evidence under `evidence/attn5/`, raw logs under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attn5/`)
+
+Provenance tags: MEASURED is a counter, timer or printed value from a run named here; DERIVED is arithmetic on measured values or on the kernel source; HYPOTHESIS is a mechanism no counter has confirmed. Models: gemma4 E2B and granite moe 1b; no Ollama process ran. Host: M1 Max, 32 GPU cores, 64 GB. Every timed process had a box sample first (`raw/cells*/box_before_*.txt`: three `ioreg` device-utilization samples, one `uptime`, a `pgrep` for cargo, rustc, ollama, decode and sccache, and the top CPU consumers); utilization read 0, 0, 0 in every cell but one (`pair_granite_n41`: 80, 0, 0, the 80 is the sampler's own first read and is kept in the file), the only matching process was the idle `sccache` daemon, load averages 2.8 to 5.8 at launch except the first pad cell (10.6, then re-run, below), and a user daemon (listed as `user-daemon` in the saved box files, 35 to 70 % CPU) and `WindowServer` (30 to 42 %) were always running. Timing is GPU time of one dispatch alone in its own command buffer (`CapturedDispatch::time_gpu_ns`, floor of about 4 us included), arms interleaved with rotating order inside one process, 21 rounds, 3 processes per cell. Build profile: release, `--features std,metal,instrument`.
+
+### 0. hypothesis, falsifier
+
+Hypothesis (owner, before the run): the prefill attention kernel handles 8 query rows per threadgroup and streams the K and V tiles once per threadgroup, so each layer reads K and V about 125 times; a 32-row tile shared by 4 simdgroups would read them about 31 times; arithmetic intensity is the 615 us gap to llama's 539 us per layer. Falsifier: raising the tile height on the captured 1000-token granite dispatch (same bits or within tolerance) does not reduce us/op in proportion to the K/V reload count.
+
+### 1. what the kernel does today (read from the emitted source, `evidence/attn5/variants/base/`, and the sizing code)
+
+The tile, printed from the emitted source of each captured group (`constexpr long tile_rows`, `simdgroups`, `block`, `stage_query`; line 857 and 879 of each file):
+
+| shape | group sha | entry suffix | tile rows x query heads = vectors | simdgroups | key block | q staged | threadgroups x threads | static tg bytes (MEASURED, `ab res`) |
+|---|---|---|---|---|---|---|---|---|
+| granite d64, 24 ops, extents [1000, 8, 2, 64] | `e3603c69` | `r8_n2_b64` | 8 x 2 = 16 (2 vector blocks) | 2 | 64 | yes, 5,120 B | 1000 x 64 (8 kv heads x 125 tiles x 1 split) | 9,600 (4,480 score tile plus 5,120 staged) |
+| E2B sliding d256, 28 ops, extents [971, 1, 8, 256] (the E2B tokenizer makes the 1000-token prompt 971 rows), window 511 | `28e53828` | `r2_n4_b128` | 2 x 8 = 16 (2 blocks) | 4 | 128 | no | 486 x 128 | 8,576 |
+| E2B global d512, 7 ops, extents [971, 1, 8, 512] | `96585e0b` | `r2_n8_b128` | 2 x 8 = 16 (2 blocks) | 8 | 128 | no | 486 x 256 | 8,576 |
+
+How the height is chosen: `rows_per_threadgroup` (`omega/src/msl/signature_tokens_prelude.rs:2106`) takes the smallest of `accumulator_fragments / tile_unit_fragments` (registers), `threadgroup_memory_bytes / row_tile_bytes(unit)` (memory) and `vector_blocks_per_tile / unit_blocks` (reuse), then steps down until `kv_heads * tiles * splits` reaches `target_simdgroups / simdgroups`. At the toml values (`vector_blocks_per_tile = 2` at `omega/omega-runtime.toml:526`, `accumulator_fragments = 16` at `:531`, `threadgroup_memory_bytes = 32768` at `:570`, `target_simdgroups = 256` at `:539`) the terms are, DERIVED from the formulas: granite registers 2 units, memory 7, reuse 1, so reuse binds at 8 rows; E2B d256 and d512 registers 2, memory 7, reuse 2, so registers and reuse tie at 2 rows. The tile height is data already: no emitter change was needed to render a taller tile; `vector_blocks_per_tile` (and `accumulator_fragments` where the register term binds) are the keys.
+
+K/V sharing across simdgroups (read from `cached_attention_row_tiled.rs`): the K fragments of a block are partitioned, simdgroup `s` loads key tiles `s + group * simdgroups` (`:201`, `:235`); the V fragments are partitioned by output column block, simdgroup `s` loads dimension blocks `s + slot * simdgroups` (`:321`). Every K and V byte of a block is read by exactly one simdgroup of the threadgroup, which is the once-per-threadgroup arm; there is no per-simdgroup full-K arm in the emitter, so the other arm does not exist to measure. What every simdgroup does read in full per block is the Q fragments (from threadgroup memory when staged, `:215-217`; from device otherwise, `:220`). The nearest measurable lever on how many simdgroups divide a tile is the simdgroup count (`n` arms below).
+
+### 2. derived K/V traffic (`evidence/attn5/tools/kv_traffic.rs`; DERIVED from the kernel's block loop, not a counter)
+
+Formula: per tile, the visited key blocks are `[new_start, mma_end)` in blocks of `block` keys (`new_first = max(0, row0 + cached_lower)`, `new_start = new_first & ~7`, `mma_end = min(new_end, rows & ~7)`, the same arithmetic as lines 180-184 of `cached_attention_row_tiled.rs`); keys loaded = 8 per visited fragment; bytes = keys loaded x kv heads x (K `4 * head_dim` + V `4 * head_dim`). The tool reproduces the round four section's 8,320 tile-block visits at tile 8 (8,320 x 32,768 B = 272.6 MB there; 258.0 MB here because the last block of each tile is counted by fragments). Bound buffer lengths (MEASURED, `raw/describe/*.out`): granite K 1,114,112 B x 2 planes plus V 2,228,224 B = 4,456,448 B unique; E2B d256 540,672 x 2 plus 1,081,344 = 2,162,688 B; d512 1,081,344 x 2 plus 2,162,688 = 4,325,376 B. The derived requested bytes at tile 2 or 8 are therefore 58 (granite), 176 (d256) and 226 (d512) times the unique bytes, served from cache levels; no counter of DRAM or cache traffic was read.
+
+| granite | tiles per kv head (reload bound) | mean tile visits per K/V block | threadgroups | block visits | K/V bytes requested per layer | executed MMA GFLOP | useful causal GFLOP |
+|---|---|---|---|---|---|---|---|
+| tile 8 | 125 | 65.0 | 1000 | 8,320 | 258.05 MB | 2.0644 | 2.0500 |
+| tile 16 | 63 | 33.0 | 504 | 4,224 | 132.09 MB (0.512x) | 2.1134 | 2.0500 |
+| tile 32 | 32 | 17.0 | 256 | 2,176 | 69.11 MB (0.268x) | 2.2114 | 2.0500 |
+| tile 64 | 16 | 8.5 | 128 | 1,088 | 35.55 MB (0.138x) | 2.2754 | 2.0500 |
+
+### 3. granite 1000-token, layer 0 of 24 (`raw/cells/granite{1,2,3}.out`, `summaries/granite_single_us.md`, `summaries/granite_round_cov.md`; 3 processes x 21 rounds; bit compare over all 1,024,000 outputs, `AB_SPAN_FULL=1`)
+
+us/op is the median of the three process medians, with the CoV of those three and their range; the within-process round CoV has per-arm medians of 0.37 to 2.75 % and single-process values of 0.33 to 4.99 % (the largest, `t32n4u`). Executed TFLOP/s is DERIVED from the table above and the time; K/V GB/s is requested bytes over time (DERIVED, not a bandwidth counter). The round four section's 3.6 TFLOP/s counts the square 4.096 GFLOP: here `square` = 4.096 over the time.
+
+| arm | tile rows | simdgroups | block | staged | tgs | static tg B | max threads (pipeline) | us/op median [CoV%] (min-max) | vs production | bits vs production | K/V MB requested | K/V GB/s | exec TFLOP/s | square TFLOP/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| base (production) | 8 | 2 | 64 | yes | 1000 | 9,600 | 384 | 1122.125 [0.15] (1119.792-1123.042) | | 0 of 1,024,000 | 258.05 | 230.0 | 1.840 | 3.650 |
+| ctrl (source recompiled) | 8 | 2 | 64 | yes | 1000 | 9,600 | 384 | 1127.792 [0.66] (1115.375-1128.583) | +0.5 % | 0 | 258.05 | | | |
+| t8u | 8 | 2 | 64 | no | 1000 | 4,480 | 384 | 1149.250 [0.29] (1145.000-1151.667) | +2.4 % | 0 | 258.05 | 224.5 | 1.796 | 3.564 |
+| **t16u** | 16 | 2 | 64 | no | 504 | 8,960 | 384 | **1321.000 [1.80] (1293.750-1340.917)** | **+17.7 %** (+14.9 % vs t8u) | 0 | 132.09 | 100.0 | 1.600 | 3.101 |
+| t16s | 16 | 2 | 64 | yes | 504 | 19,200 | 384 | 1894.625 [0.19] (1891.292-1898.625) | +68.8 % | 0 | 132.09 | 69.7 | 1.115 | 2.162 |
+| **t32u** | 32 | 2 | 64 | no | 256 | 17,920 | 384 | **3337.000 [0.04] (3334.875-3337.250)** | **+197.4 %** (+190.4 % vs t8u) | 0 | 69.11 | 20.7 | 0.663 | 1.227 |
+| t64 | 64 | 2 | 64 | no | 128 | 35,840 | | pipeline does not build: `Threadgroup memory size (35840) exceeds the maximum threadgroup memory allowed (32768)` (`raw/fail/granite_t64.err`) | | | 35.55 | | | |
+| t8n4s | 8 | 4 | 64 | yes | 1000 | 9,600 | 512 | 1040.542 [0.51] (1035.000-1045.542) | -7.3 % | 0 | 258.05 | 248.0 | 1.984 | 3.936 |
+| t8n4u | 8 | 4 | 64 | no | 1000 | 4,480 | 448 | 1228.125 [0.27] (1225.208-1231.750) | +9.4 % | 0 | 258.05 | | | |
+| t8n8s | 8 | 8 | 64 | yes | 1000 | 9,600 | 576 | 1372.833 [0.21] (1370.917-1376.625) | +22.3 % | 0 | 258.05 | | | |
+| t16n4s | 16 | 4 | 64 | yes | 504 | 19,200 | 384 | 1217.250 [0.15] (1216.542-1220.000) | +8.5 % | 0 | 132.09 | | | |
+| t16n4u | 16 | 4 | 64 | no | 504 | 8,960 | 384 | 1226.000 [0.23] (1224.417-1229.833) | +9.3 % | 0 | 132.09 | | | |
+| t32n4u | 32 | 4 | 64 | no | 256 | 17,920 | 384 | 1742.542 [0.20] (1739.750-1746.708) | +55.3 % | 0 | 69.11 | | | |
+| t8hot (K/V pointers pinned to block 0) | 8 | 2 | 64 | yes | 1000 | 9,600 | 384 | 1077.292 [0.42] (1072.292-1081.417) | -4.0 % | 955,805 differ (the keys no longer match the masks, by design) | 258.05 requested, 32 KB distinct per kv head | | | |
+| t16hot | 16 | 2 | 64 | no | 504 | 8,960 | 384 | 1286.250 [0.50] (1279.708-1292.625) | -2.6 % vs t16u | 955,805 differ | | | | |
+
+Per-process resources (MEASURED): all 14 arms read the same bound bytes, 138,235,140 B (131.8 MiB), and the process peak RSS 1615.9 to 1616.8 MB, footprint 181.0 to 185.5 MB, Metal allocation 1516.3 MB, process CPU 9.7 to 9.9 % of 9.25 to 10.04 s wall (`ab cell label=process`); `time -l`: maximum resident 1,694 to 1,695 MB, peak memory footprint 304.6 to 306.0 MB, 3.34 to 3.63 G instructions retired, 2.78 to 2.93 G cycles (CPU side, whole process including model load). CPU per replay 0.059 to 0.090 ms, 2.5 to 4.8 % of wall (the timing is GPU-bound: the CPU is idle waiting). Peak and steady are the same number here: a single-dispatch replay allocates nothing after the first replay (RSS peak identical across the 14 arms).
+
+In-process two-arm and three-arm confirmations (`raw/cells_pair/`; the same kernels with fewer neighbours): production 1124.542 [0.52], t16u 1327.042 [1.62] (+18.0 %); production 1134.333 [0.74], t8n4s 1034.750 [0.59] (-8.8 %, bits 0), t8n4 with the 128-key block `t8n4b128s` 1125.542 [0.38] (-0.8 %, 533,198 of 1,024,000 differ, max 80,089 ulp); block 32 series at one simdgroup count: t8b32u 1136.125 [0.24], t16b32u 1528.917 [0.38], t32b32u 2378.792 [0.25], t64b32u 5641.875 [0.13] (score tile 19,456 B, builds; all four differ from production in 585,118 elements, max 102,351 ulp, because the 32-key block regroups the sums). The emitter built with `vector_blocks_per_tile = 4`, `accumulator_fragments = 32` (own target dir, `raw/describe/granite_keys.out`) renders `..._r16_n2_b64_rt`, and its kernel body is byte-identical to the `t16u` variant but for the entry name (`variants/emitter_vs_variant.diff`); run natively with its real grid it reads 1320.458 [0.99] (3 processes), against 1321.000 for the variant.
+
+### 4. E2B 971-token, layer 0 (`raw/cells/e2b{1,2,3}.out`, `summaries/e2b_single_us.md`, `summaries/e2b_round_cov.md`; same protocol)
+
+Sliding d256 (28 ops; production 2 rows, 4 simdgroups, 128-key block, unstaged):
+
+| arm | rows (vectors) | simdgroups | block | tgs | static tg B | us/op median [CoV%] (min-max) | vs production | bits vs production (of 1,988,608) | K/V MB requested | K/V GB/s | exec TFLOP/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| base | 2 (16) | 4 | 128 | 486 | 8,576 | 963.875 [0.21] (963.125-966.917) | | 0 | 381.22 | 395.5 | 3.164 |
+| ctrl | 2 | 4 | 128 | 486 | 8,576 | 966.333 [0.37] | +0.3 % | 0 | | | |
+| r1u | 1 (8) | 4 | 128 | 971 | 4,288 | 1214.042 [0.30] (1210.583-1217.958) | +26.0 % | 69,844 differ, max 4.77e-6 (3.5e-7 of the largest value) | 760.46 | 626.4 | 2.506 |
+| **r4u** | 4 (32) | 4 | 128 | 243 | 17,152 | **925.417 [0.29] (923.208-928.500)** | **-4.0 %** | 0 | 190.61 | 206.0 | 3.296 |
+| r8 | 8 (64) | 4 | 128 | 122 | 34,304 | pipeline does not build: `Threadgroup memory size (34304) exceeds the maximum threadgroup memory allowed (32768)` (`raw/fail/e2b.err`) | | | 95.8 | | |
+| r2b64u | 2 | 4 | 64 | 486 | 4,480 | 940.542 [0.18] | -2.4 % | 1,045,269 differ, max 4.77e-6 | 381.22 | 405.3 | 3.243 |
+| r8b64u | 8 (64) | 4 | 64 | 122 | 17,920 | 1763.542 [0.28] | +83.0 % | 1,045,269 differ | 95.83 | 54.3 | 1.739 |
+| r2n2u | 2 | 2 | 128 | 486 | 8,576 | 1716.375 [0.68] | +78.1 % | 0 | | | |
+| r2n8u | 2 | 8 | 128 | 486 | 8,576 | 1333.125 [0.71] | +38.3 % | 0 | | | |
+| r2hot | 2 | 4 | 128 | 486 | 8,576 | 907.875 [0.23] | -5.8 % | 1,726,464 differ (by design) | | | |
+| r4hot | 4 | 4 | 128 | 243 | 17,152 | 884.000 [0.24] | -8.3 % vs production, -4.5 % vs r4u | 1,726,464 differ | | | |
+
+Global d512 (7 ops; production 2 rows, 8 simdgroups, 128-key block): base 2634.375 [0.19] (2626.208-2635.292); ctrl 2623.125 [0.39]; r1u 3503.917 [0.13] (+33.0 %, 2 x 975.4 = 1946.8 MB requested); **r4u 3068.417 [0.08] (+16.5 %, bits 0 of 3,977,216, 487.7 MB requested, 17,152 B)**; r2hot 2593.500 [0.48] (-1.6 %). Production K/V requested 975.4 MB, 370.2 GB/s, 2.962 executed TFLOP/s; r4u 158.9 GB/s, 2.543.
+
+E2B in-process three-arm confirmation (`raw/cells_pair/pair_e2b*.out`): d256 production 955.417 [0.18], r4u 904.958 [0.03] (-5.3 %); d512 production 2625.500 [0.09], r4u 3054.875 [0.02] (+16.3 %). The emitter built with `vector_blocks_per_tile = 4`, `accumulator_fragments = 32` renders `r4_n4_b128` (d256) and `r4_n8_b128` (d512) with kernel bodies byte-identical to these variants but for the entry name, and reads 905.375 [0.20] (d256) and 3002.625 [0.29] (d512) with no production arm in its process (`raw/cells_keys/`). The d512 native and variant r4 readings differ by 1.7 % across processes; the cause is not traced.
+
+E2B per-process resources (MEASURED): bound bytes 404,038,148 B (d256) and 372,568,580 B (d512), peak RSS 3425.6 to 3429.1 MB, footprint 256.5 to 262.6 MB, Metal 3375.6 MB, process CPU 16.0 to 17.9 % of 13.1 to 15.6 s wall; `time -l` maximum resident 3.59 GB, footprint 313 to 317 MB, 10.0 to 10.5 G instructions, 7.2 to 7.7 G cycles.
+
+### 5. mechanism rows (what each toggle moved, and what it did not)
+
+- **K/V reads pinned to one cache-resident block** (`t8hot`, `t16hot`, `r2hot`, `r4hot`; same instruction stream but for the pointer arithmetic): granite tile 8 -44.8 us (-4.0 %), tile 16 -34.8 us (-2.6 % against t16u); E2B d256 tile 2 -56.0 us (-5.8 %), tile 4 -41.4 us (-4.5 %); d512 tile 2 -40.9 us (-1.6 %). The K/V bytes that miss in the closer cache levels account for at most that much of the time in these arms. The earlier f16 K/V arm (half the bytes, -56.1 us, -4.9 %, round four section 1) is the same size.
+- **Threadgroup bytes at fixed code** (`raw/cells/granitepad*.out`, `summaries/granitepad_single_us.md`; a dead `threadgroup float` array added, kept alive by a read behind `u.splits > 100000`; box quiet, load 2.8 to 3.1; a first set at load 8 to 10.6, `raw/cells_pad_loaded/`, agrees within 1 %): production tile 8 plus 256 B 9,856 B 1142.042 [0.46]; plus 9,600 B (19,200 B) 1760.750 [0.39] (+54 %); plus 19,200 B (28,800 B) 2488.375 [0.40] (+118 %); the unstaged tile 8 raised from 4,480 to 9,600 B 1150.708 [0.74] against 1149.250 at 4,480 B (no change); the unstaged tile 16 at 19,200 B 1999.667 [0.09] against 1321.000 at 8,960 B and 1894.625 for the staged tile 16 at 19,200 B. The staged tile 16 cliff (1894.6) is reproduced by threadgroup bytes alone (1999.7 with no staging code), and between 9.9 KB and 19.2 KB the time rises with bytes at an unchanged instruction stream. Resident threadgroups per core were not read; the occupancy reading of this curve is a HYPOTHESIS.
+- **Tile 8 to tile 16 at equal staging and block, bytes below 10 KB** (t8u 1149.3 to t16u 1321.0, +14.9 %): K/V bytes requested halve (DERIVED), executed MMA FLOP rises 2.4 % (DERIVED), the pinned-read toggle moves 2.6 %, threadgroup bytes 4,480 to 8,960 do not by themselves move the time (the 9,600 B pad row), the pipeline's `maxTotalThreadsPerThreadgroup` stays 384. None of these explains +172 us. Per-thread fragment state grows with the tile: accumulators `dims_per_group x tile_blocks` = 8 at tile 8, 16 at tile 16, 32 at tile 32, 64 at tile 64 (DERIVED from the kernel), and at the 32-key block the time reads 1136, 1529, 2379, 5642 us for tiles 8, 16, 32, 64; halving the per-thread fragments with four simdgroups takes tile 32 from 3337 to 1743 us. The register-pressure reading of this series is a HYPOTHESIS: no shader-profiler counter or spill count was read.
+- **Simdgroup count at tile 8** (n = 2, 4, 8): 1122.1 (staged), 1040.5 (staged, 64-key block), 1372.8 (staged); unstaged 1149.3 (n2), 1228.1 (n4). E2B d256 at 2 rows: n2 1716.4, n4 963.9, n8 1333.1. Four simdgroups with the 64-key block is the one arm below production on granite (-7.3 % in the 14-arm process, -8.8 % in the three-arm process), bits identical; with the 128-key block that `min_simdgroups = 4` alone would give (`block = min(keys_per_block, 32 * simdgroups)`, `signature_tokens_prelude.rs:2151`) the reading is production's. That arm needs `keys_per_block = 64`, which moves every head dim's block (E2B d256 at a 64-key block: -2.4 %, bits differ).
+- **Bit identity across heights**: granite every height and simdgroup count at the 64-key block is bit-identical to production (0 of 1,024,000), because every query row's key blocks start at 0 (`cached_lower` is the full causal bound) and a masked block leaves the running maximum and sum unchanged. The sliding-window shape is bit-identical at 4 rows and not at 1 row: the first block of a tile starts at `(row0 - 511) & ~7`, which depends on `row0` modulo 8, so rows that start on different block grids sum in a different order (DERIVED by arithmetic; the 4-row tile groups two 2-row tiles whose starts agree, the 1-row tile does not).
+- **Arm count inside one process**: the 4-row d256 arm reads 925.4 in the 10-arm d256 group and 905.0 in the three-arm process (+2.2 %), the 2-row production arm 963.9 and 955.4 (+0.9 %), the granite 16-row arm 1321.0 and 1327.0. The context effect is up to 2 % on arms with 17 KB threadgroup state; the cause is not traced. Percentages that compare arms use the same process.
+
+### 6. what the numbers say against the falsifier
+
+Granite, same staging, same block: the K/V requested bytes fall to 0.512x at tile 16 and 0.268x at tile 32 (DERIVED) while the measured time rises to 1.149x and 2.904x of tile 8 (CoV 1.80 % and 0.04 % across processes). Proportional would have been 0.512x and 0.268x of 1122 us (574 us and 301 us). The pinned-read toggle bounds the share of time that K/V misses account for at 4.0 % at tile 8. The hypothesis is refuted on the captured granite dispatch by the falsifier the task set. The tile 64 height does not build (35,840 B against Metal's 32,768 B, 3,072 B over; moving `threadgroup_memory_bytes` in the toml would only make the sizing rule admit it, the driver limit is the measured error); at a 32-key block (19,456 B) it builds and reads 5641.9 us against 1136.1 at tile 8.
+
+The sliding d256 shape reads 4.0 % (10-arm group) to 5.3 % (three-arm process) lower at 4 rows with bits identical, for half the K/V bytes requested (DERIVED); one row doubles the bytes and costs +26.0 %. The d512 shape reads +16.5 % at 4 rows. Three shapes, three different best heights (granite 8, d256 4, d512 2) under one `vector_blocks_per_tile`: raising it to 4 with `accumulator_fragments = 32` gives 16 / 4 / 4 rows (emitter entry names above), i.e. one winner and two losses. The existing keys cannot express the d256 result without moving the other two shapes; a per-head-dim table fitted to these three points would be a rule for specific instances and was not written.
+
+### 7. landing, gates, bench
+
+Landed: `ce7b75f1` `feat(interop): print the per-round spread of each a/b arm` (`norm_variant_ab` prints `rounds`, `round_min_us`, `round_max_us`, `round_cov_pct` on each `ab group` line; measurement tooling only). No library, sizing or test file changed, so the pinned-tile tests, the 877/931/151 omega suites and the arms bench were not run for this round (unmeasured, not green). Gate run: `cargo clippy -p proxima-model-interop --features std,metal,instrument --example norm_variant_ab -- -D warnings` exit 0 (`logs/clippy_norm_variant_ab.log`); model-name grep of the diff: 0. The base-versus-tip `decode_arms` bench was not run: the tip differs from the base export (`47593f66`) by an example binary, so both arms would run the same library. Tile heights and bytes of the shapes before and after the one key setting measured (`vector_blocks_per_tile = 4`, `accumulator_fragments = 32`, not landed): granite 8 rows 9,600 B (staged) to 16 rows 8,960 B (unstaged, 10,240 B staged exceeds `max_staged_query_bytes = 8192`); E2B d256 2 rows 8,576 B to 4 rows 17,152 B; d512 2 rows 8,576 B to 4 rows 17,152 B.
+
+Designs set aside: raising `vector_blocks_per_tile` globally (granite +17.7 %, d512 +16.5 %); a per-head-dim tile table (three points, specific instances); sed-edited variants taken on trust (replaced by the byte comparison against the emitter's own output); a per-simdgroup full-K arm (no renderer in the emitter).
+
+### 8. unexplained, unmeasured, assumed
+
+- Why tile 16 at equal staging and block is 14.9 % slower and tile 32 190 %: no counter read; register pressure, the serial softmax per simdgroup between barriers (16 vectors per simdgroup per block at tile 16 against 8), and occupancy are candidates (HYPOTHESIS). The pipeline's `maxTotalThreadsPerThreadgroup` is 384 for every arm with 8 to 64 accumulator fragments, so it does not register the change.
+- The threadgroup-byte cliff is measured as a curve; resident threadgroups per core and the M1 Max threadgroup-memory capacity were not read.
+- Why four simdgroups help only with the 64-key block and only staged (n4u +9.4 %); why d256 prefers 4 rows and d512 and d64 do not; the earlier toml comment (`vector_blocks_per_tile`, 2 is the knee on head dims 64, 256 and 512) was measured on an older kernel and is not reconciled with the d256 reading here.
+- The 2 % arm-count context effect and the 1.7 % cross-process d512 difference.
+- Requested K/V bytes are derived from the loop, not counted; the E2B scalar tail (3 rows) is not in them; no DRAM or cache counter was read; GPU clock state was not recorded.
+- Layer 0 only (the first of 24 and 28 and 7 members); the full-step prefill effect of any height was not measured.
+- No CI job runs the Metal A/B, and every row re-proves on this box only.
+
+### re-prove
+
+```
+cargo build --release -p proxima-model-interop --features std,metal,instrument --example norm_variant_ab
+rustc --edition 2024 -O evidence/attn5/tools/ab_summary.rs -o ab_summary ; rustc --edition 2024 -O evidence/attn5/tools/kv_traffic.rs -o kv_traffic
+base source:   PROXIMA_PIPELINE_CAPTURE=<dir> PROXIMA_GEMMA4_E2B_GGUF=<blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_VARIANT_DIR=<empty dir> AB_DESCRIBE=1 AB_STEP=0 norm_variant_ab     # writes pipeline_<sha16>.metal; apply evidence/attn5/variants/diffs/<set>.<tag>.diff to it, name <sha16>.<tag>.metal, with the .scale (threadgroups/base threadgroups) and .width (simdgroups x 32) lines the diff file ends with
+timing:        PROXIMA_GEMMA4_E2B_GGUF=<granite or E2B blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_VARIANT_DIR=<variants> AB_SPAN_FULL=1 AB_STEP=0 AB_ROUNDS=21 AB_FLUSH_MIB=0 AB_RESOURCE_ITERS=50 [AB_SHA=e3603c69] /usr/bin/time -l norm_variant_ab     # 3 processes
+summary:       ab_summary group single_us <process 1 .out> <process 2 .out> <process 3 .out>
+traffic:       kv_traffic <rows> <kv_heads> <groups> <head_dim> <tile_rows> <block> <cached_lower> <new_upper> [time_us]     # granite: 1000 8 2 64 8 64 -9223372036854775807 0 1122.1 ; d256: 971 1 8 256 2 128 -511 0 963.9
+emitter check: OMEGA_ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE=4 OMEGA_ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS=32 cargo build --release ... --example norm_variant_ab ; AB_DESCRIBE=1 prints entries r16 / r4 / r4
+```
+
+Missing for CI: no job runs the Metal A/B, the captures or the box sampler; the saved baseline of this section is `evidence/attn5/raw/` and `summaries/`, and no job diffs a later run against it.

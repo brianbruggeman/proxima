@@ -1,0 +1,23 @@
+--- scratch/capture_e2b/pipeline_96585e0bac7c1105.metal	2026-10-08 17:24:57
++++ scratch/var_e2b512/96585e0bac7c1105.r2hot.metal	2026-10-08 17:26:46
+@@ -945,8 +945,8 @@
+                 FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                     int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
+                     if (key_tile < fragments) {
+-                        device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+-                        device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
++                        device const float* key_even_ptr = key_even + ((long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
++                        device const float* key_odd_ptr = key_odd + ((long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                             simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                             simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+@@ -1057,7 +1057,7 @@
+             }
+         }
+         if (mode != 2L) {
+-            device const float* value_ptr = (mode == 0L ? in6 : in7) + key0 * (kv_heads * head_dim) + kv_head * head_dim;
++            device const float* value_ptr = (mode == 0L ? in6 : in7) + kv_head * head_dim;
+             int fragments = (int)((columns + 7L) / 8L);
+             for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                 simdgroup_float8x8 weights[tile_blocks];
+scale=486/486

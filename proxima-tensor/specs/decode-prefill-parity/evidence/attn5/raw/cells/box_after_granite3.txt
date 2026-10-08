@@ -1,0 +1,11 @@
+"Device Utilization %"=97
+"Device Utilization %"=0
+"Device Utilization %"=0
+17:30  up 8 days,  3:34, 3 users, load averages: 4.24 4.43 4.66
+44315 /Users/brianbruggeman/.cargo/bin/sccache
+PID    COMMAND          %CPU
+17029  user-daemon             69.4
+476    WindowServer     40.8
+53319  top              9.9 
+54533  iTerm2           8.6 
+0      kernel_task      8.1 

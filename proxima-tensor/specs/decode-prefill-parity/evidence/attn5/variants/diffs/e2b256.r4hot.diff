@@ -1,0 +1,32 @@
+--- scratch/capture_e2b/pipeline_28e538282271e635.metal	2026-10-08 17:24:57
++++ scratch/var_e2b256/28e538282271e635.r4hot.metal	2026-10-08 17:26:45
+@@ -854,7 +854,7 @@
+ 
+ kernel void omega_cached_attention_h1_g8_d256_s3f800000_ln511_up0_r2_n4_b128_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], device const float* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const float* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+     constexpr long kv_heads = 1; constexpr long query_groups = 8; constexpr long head_dim = 256; constexpr long half_dim = head_dim / 2; constexpr float scale = 1.0; constexpr long cached_lower = -511L; constexpr long new_upper = 0L;
+-    constexpr long tile_rows = 2; constexpr long simdgroups = 4; constexpr long block = 128; constexpr long split_keys = 64;
++    constexpr long tile_rows = 4; constexpr long simdgroups = 4; constexpr long block = 128; constexpr long split_keys = 64;
+     constexpr bool rows_in_fragment = (query_groups % 8) != 0;
+     constexpr long groups_per_row = rows_in_fragment ? 1 : query_groups / 8;
+     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
+@@ -945,8 +945,8 @@
+                 FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
+                     int key_tile = (int)simdgroup_slot + group * (int)simdgroups;
+                     if (key_tile < fragments) {
+-                        device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+-                        device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
++                        device const float* key_even_ptr = key_even + ((long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
++                        device const float* key_odd_ptr = key_odd + ((long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
+                             simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                             simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+@@ -1057,7 +1057,7 @@
+             }
+         }
+         if (mode != 2L) {
+-            device const float* value_ptr = (mode == 0L ? in6 : in7) + key0 * (kv_heads * head_dim) + kv_head * head_dim;
++            device const float* value_ptr = (mode == 0L ? in6 : in7) + kv_head * head_dim;
+             int fragments = (int)((columns + 7L) / 8L);
+             for (int key_tile = 0; key_tile < fragments; key_tile++) {
+                 simdgroup_float8x8 weights[tile_blocks];
+scale=243/486

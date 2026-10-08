@@ -1,0 +1,12 @@
+--- scratch/capture_e2b/pipeline_96585e0bac7c1105.metal	2026-10-08 17:24:57
++++ scratch/var_fail_e2b512_r8/96585e0bac7c1105.r8u.metal	2026-10-08 17:27:23
+@@ -854,7 +854,7 @@
+ 
+ kernel void omega_cached_attention_h1_g8_d512_s3f800000_ln9223372036854775808_up0_r2_n8_b128_rt(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const float* in2 [[buffer(2)]], device const float* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const float* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+     constexpr long kv_heads = 1; constexpr long query_groups = 8; constexpr long head_dim = 512; constexpr long half_dim = head_dim / 2; constexpr float scale = 1.0; constexpr long cached_lower = -9223372036854775807L; constexpr long new_upper = 0L;
+-    constexpr long tile_rows = 2; constexpr long simdgroups = 8; constexpr long block = 128; constexpr long split_keys = 64;
++    constexpr long tile_rows = 8; constexpr long simdgroups = 8; constexpr long block = 128; constexpr long split_keys = 64;
+     constexpr bool rows_in_fragment = (query_groups % 8) != 0;
+     constexpr long groups_per_row = rows_in_fragment ? 1 : query_groups / 8;
+     constexpr long tile_blocks = rows_in_fragment ? (tile_rows / 8) * query_groups : (tile_rows * query_groups) / 8;
+scale=122/486
