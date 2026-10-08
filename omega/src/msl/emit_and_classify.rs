@@ -1196,7 +1196,7 @@ pub(super) fn coord_index32_active(
     if packed_row_block(resolved, quantized).is_some() {
         return false;
     }
-    if !reduce_is_cooperative_dispatch(
+    let cooperative = reduce_is_cooperative_dispatch(
         resolved,
         quantized,
         numeric_policy,
@@ -1204,13 +1204,31 @@ pub(super) fn coord_index32_active(
         *init,
         output_axes,
         expert_source_mode,
-    ) {
-        return false;
-    }
-    if !coord_index32_extents_fit(resolved, output_axes) {
-        return false;
-    }
-    coord_index32_override()
+    );
+    let fits = if cooperative {
+        coord_index32_extents_fit(resolved, output_axes)
+    } else {
+        serial_reduce_index32_fits(resolved, output_axes)
+    };
+    fits && coord_index32_override()
+}
+
+/// The serial reduce body's bound for 32-bit coordinate arithmetic: its one
+/// thread per output walks `output_total` outputs and `reduction_total`
+/// steps, so both products (the uniforms' own `output_total` /
+/// `reduction_total`, `prepare_uniforms_pack::pack_reduce_uniforms`) must fit
+/// `u32`. Read off `resolved.extents` -- the same extents the uniforms are
+/// packed from -- so the rendered width can never disagree with the data.
+pub(super) fn serial_reduce_index32_fits(resolved: &BoundOp, output_axes: &[u16]) -> bool {
+    let fits = |in_output: bool| {
+        (0..resolved.extents.len() as u16)
+            .filter(|axis| output_axes.contains(axis) == in_output)
+            .try_fold(1u64, |total, axis| {
+                total.checked_mul(resolved.extents[axis as usize])
+            })
+            .is_some_and(|total| (1..=u64::from(u32::MAX)).contains(&total))
+    };
+    fits(true) && fits(false)
 }
 
 /// The shape-only half of [`coord_index32_active`]'s admission, split out so
