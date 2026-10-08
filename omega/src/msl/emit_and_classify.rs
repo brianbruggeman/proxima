@@ -3258,7 +3258,8 @@ fn tiled_gemm_dense_weight_block(
 }
 
 /// The z extent of an expert-grouped tiled dispatch: one slice per expert the
-/// gathered weight can name. `None` for every other op.
+/// gathered weight can name; a single slice when the route is compacted, since
+/// the tiles then carry the expert. `None` for every other op.
 pub(super) fn expert_group_depth(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<u64> {
     #[cfg(not(feature = "metal-tiled-gemm"))]
     {
@@ -3278,6 +3279,9 @@ pub(super) fn expert_group_depth(resolved: &BoundOp, quantized: &[Option<Codec>]
         };
         let block = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)?;
         block.gathered?;
+        if grouped_route_compacted(&block) {
+            return Some(1);
+        }
         resolved.operands()[block.weight]
             .2
             .as_ref()

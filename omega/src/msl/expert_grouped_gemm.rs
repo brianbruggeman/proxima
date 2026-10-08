@@ -90,12 +90,32 @@ pub(super) fn push_expert_grouped_gemm_body(
         found: "other packed codec",
     })?;
     let geometry = GroupedGeometry::new(block, output_axes, resolved)?;
-    push_grouped_entry(source, node, &geometry)?;
+    let compaction_buffer = grouped_route_compacted(block).then(|| bindings(resolved).len());
+    push_grouped_entry(source, node, &geometry, compaction_buffer)?;
     push_grouped_threadgroup_memory(source, &geometry);
     source.push_str(&format!(
         "    device const uchar *weight_bytes = (device const uchar *)in{};\n",
         block.weight
     ));
+    if compaction_buffer.is_some() {
+        push_grouped_locate(source, resolved, block)?;
+        source.push_str(&format!(
+            "    long grouped_expert_base = grouped_expert * u.gather_element_stride[{}];\n",
+            expert.slot
+        ));
+        source.push_str("    {\n");
+        push_grouped_tile(
+            source,
+            block,
+            &geometry,
+            &decode,
+            element_type,
+            epilogue_body,
+            epilogue_operands,
+        );
+        source.push_str("    }\n");
+        return Ok(());
+    }
     source.push_str(&format!(
         "    long grouped_expert_base = grouped_expert * u.gather_element_stride[{}];\n",
         expert.slot
@@ -250,17 +270,25 @@ fn push_grouped_entry(
     source: &mut String,
     node: NodeId,
     geometry: &GroupedGeometry,
+    compaction_buffer: Option<usize>,
 ) -> Result<(), EmitError> {
     let scalar_gid = "uint gid [[thread_position_in_grid]]";
-    let vector_gid = "uint3 grouped_gid [[thread_position_in_grid]]";
+    let vector_gid = match compaction_buffer {
+        Some(slot) => format!(
+            "device const uint *route_compaction [[buffer({slot})]],\n    uint3 grouped_gid [[thread_position_in_grid]]"
+        ),
+        None => "uint3 grouped_gid [[thread_position_in_grid]]".to_string(),
+    };
     let gid_offset = source.find(scalar_gid).ok_or(EmitError::RenderKindMismatch {
         node,
         expected: "scalar thread_position_in_grid parameter",
         found: "missing",
     })?;
-    source.replace_range(gid_offset..gid_offset + scalar_gid.len(), vector_gid);
+    source.replace_range(gid_offset..gid_offset + scalar_gid.len(), &vector_gid);
     source.push_str("    long gid = (long)grouped_gid.x;\n");
-    source.push_str("    long grouped_expert = (long)grouped_gid.z;\n");
+    if compaction_buffer.is_none() {
+        source.push_str("    long grouped_expert = (long)grouped_gid.z;\n");
+    }
     source.push_str(&format!(
         "    long feature_extent = {};\n",
         geometry.feature_extent_expr
@@ -271,17 +299,94 @@ fn push_grouped_entry(
     source.push_str(&format!(
         "    long group_index = (long)gid / {GROUPED_THREADS};\n"
     ));
-    source.push_str(&format!(
-        "    long row_tile = group_index / {};\n",
-        geometry.route_segments
-    ));
-    source.push_str(&format!(
-        "    long route_segment = group_index % {};\n",
-        geometry.route_segments
-    ));
+    if compaction_buffer.is_some() {
+        source.push_str(&format!(
+            "    long row_tiles = (feature_extent + {}l) / {GROUPED_TILE_ROWS}l;\n",
+            GROUPED_TILE_ROWS - 1
+        ));
+        source.push_str("    long tile_index = group_index / row_tiles;\n");
+        source.push_str("    long row_tile = group_index % row_tiles;\n");
+    } else {
+        source.push_str(&format!(
+            "    long row_tile = group_index / {};\n",
+            geometry.route_segments
+        ));
+        source.push_str(&format!(
+            "    long route_segment = group_index % {};\n",
+            geometry.route_segments
+        ));
+    }
     source.push_str(&format!(
         "    uint grouped_lane = (uint)(tiitg % {SIMD_WIDTH});\n"
     ));
+    Ok(())
+}
+
+/// The compacted route's replacement for the scan: finds this threadgroup's
+/// `(expert, tile)` in the prepass tables and stages that tile's token ids.
+/// The launch covers [`grouped_tile_upper_bound`] token tiles per row tile, so
+/// a threadgroup walks the per-expert tile counts until its `tile_index` falls
+/// inside one expert's tiles; a `tile_index` past the realized total finds no
+/// expert and leaves, before any barrier, together with the rest of its
+/// threadgroup (every thread read the same words). The prepass total is
+/// checked against the route length first: a buffer the prepass did not write
+/// (its header word is zeroed on the host) raises the route fault, reported as
+/// a route index equal to the expert extent, and the threadgroup leaves
+/// without computing.
+#[cfg(feature = "metal-grouped-gemm")]
+fn push_grouped_locate(
+    source: &mut String,
+    resolved: &BoundOp,
+    block: &TiledGemmBlock,
+) -> Result<(), EmitError> {
+    let Some(expert) = block.gathered else {
+        return Ok(());
+    };
+    let slot = expert.slot;
+    let experts = grouped_expert_count(resolved, block);
+    let tile_tokens = GROUPED_TILE_TOKENS;
+    source.push_str(&format!("    constexpr uint experts = {experts}u;\n"));
+    source.push_str("    if (route_compaction[0] != (uint)token_extent) {\n");
+    source.push_str("        if (tiitg == 0) {\n");
+    source.push_str(&format!(
+        "            atomic_fetch_max_explicit(&fault[{slot}], (uint)u.gather_extent[{slot}] + 1u, memory_order_relaxed);\n"
+    ));
+    source.push_str("        }\n");
+    source.push_str("        return;\n");
+    source.push_str("    }\n");
+    source.push_str("    long grouped_expert = -1;\n");
+    source.push_str("    long expert_tile = 0;\n");
+    source.push_str("    uint expert_tokens = 0u;\n");
+    source.push_str("    long tile_base = 0;\n");
+    source.push_str("    for (uint scan_expert = 0u; scan_expert < experts; ++scan_expert) {\n");
+    source.push_str(&format!(
+        "        uint expert_count = route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + scan_expert];\n"
+    ));
+    source.push_str(&format!(
+        "        long expert_tiles = (long)((expert_count + {}u) / {tile_tokens}u);\n",
+        tile_tokens - 1
+    ));
+    source.push_str("        if (tile_index < tile_base + expert_tiles) {\n");
+    source.push_str("            grouped_expert = (long)scan_expert;\n");
+    source.push_str("            expert_tile = tile_index - tile_base;\n");
+    source.push_str("            expert_tokens = expert_count;\n");
+    source.push_str("            break;\n");
+    source.push_str("        }\n");
+    source.push_str("        tile_base += expert_tiles;\n");
+    source.push_str("    }\n");
+    source.push_str("    if (grouped_expert < 0) { return; }\n");
+    source.push_str(&format!(
+        "    uint tile_count = min({tile_tokens}u, expert_tokens - (uint)expert_tile * {tile_tokens}u);\n"
+    ));
+    source.push_str(&format!(
+        "    bool has_hi = tile_count > {}u;\n",
+        tile_tokens / 2
+    ));
+    source.push_str(&format!(
+        "    device const uint *tile_list = route_compaction + {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + experts + (uint)grouped_expert] + (uint)expert_tile * {tile_tokens}u;\n"
+    ));
+    source.push_str("    if ((uint)tiitg < tile_count) { tile_token[tiitg] = (int)tile_list[tiitg]; }\n");
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     Ok(())
 }
 
@@ -749,19 +854,31 @@ fn push_grouped_writeback(
 }
 
 /// The token extent [`tiled_gemm_threadgroups`] is asked to launch for an
-/// expert-grouped block: not the token count, because the token axis is not
-/// tiled across threadgroups here -- the grid carries `GROUPED_GEMM_ROUTE_SEGMENTS`
-/// threadgroups per row tile and each walks the tokens of its expert in its own segment.
+/// expert-grouped block, which is not the token count: the segment scan
+/// launches `GROUPED_GEMM_ROUTE_SEGMENTS` threadgroups per row tile, each
+/// walking its slice of the route; the compacted route launches the upper
+/// bound of token tiles ([`grouped_tile_upper_bound`]) per row tile, one
+/// threadgroup each, and the tiles past the realized total exit at once.
 #[cfg(feature = "metal-grouped-gemm")]
-pub(super) fn expert_grouped_launch_tokens(block: &TiledGemmBlock) -> Option<u64> {
-    is_expert_grouped(block).then_some(crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS * GROUPED_TILE_TOKENS)
+pub(super) fn expert_grouped_launch_tokens(resolved: &BoundOp, block: &TiledGemmBlock) -> Option<u64> {
+    if !is_expert_grouped(block) {
+        return None;
+    }
+    let tiles = if grouped_route_compacted(block) {
+        grouped_tile_upper_bound(
+            grouped_token_total(resolved, block),
+            grouped_expert_count(resolved, block),
+        )
+    } else {
+        crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS
+    };
+    Some(tiles * GROUPED_TILE_TOKENS)
 }
 
 #[cfg(not(feature = "metal-grouped-gemm"))]
-pub(super) fn expert_grouped_launch_tokens(_block: &TiledGemmBlock) -> Option<u64> {
+pub(super) fn expert_grouped_launch_tokens(_resolved: &BoundOp, _block: &TiledGemmBlock) -> Option<u64> {
     None
 }
-
 /// Never invoked: without `metal-grouped-gemm`, [`classify_tiled_gemm`] never
 /// returns an expert-grouped block, so [`push_cooperative_reduce_body`]'s
 /// `is_expert_grouped` arm is unreachable -- this exists so that arm
@@ -827,6 +944,13 @@ pub(super) fn grouped_token_total(resolved: &BoundOp, block: &TiledGemmBlock) ->
         .iter()
         .map(|&axis| resolved.extents[axis as usize])
         .product()
+}
+
+/// Token tiles a launch must cover whatever the realized route is: every full
+/// tile of the whole route, plus one partial tile per expert.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn grouped_tile_upper_bound(tokens: u64, experts: u64) -> u64 {
+    tokens.div_ceil(GROUPED_TILE_TOKENS) + experts
 }
 
 /// Words of the compaction buffer: header, per-expert counts, per-expert
