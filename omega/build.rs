@@ -644,6 +644,13 @@ fn emit_sizing_consts() {
     out.push_str(&format!(
         "pub const ATTENTION_ROWS_KEYS_PER_SPLIT: u64 = {attention_rows_keys_per_split};\n"
     ));
+    let attention_rows_max_staged_query_bytes = require_nonneg(
+        "attention_rows.max_staged_query_bytes",
+        resolve_int(&root, "attention_rows", "max_staged_query_bytes"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES: u64 = {attention_rows_max_staged_query_bytes};\n"
+    ));
     let attention_rows_min_simdgroups = require_nonzero(
         "attention_rows.min_simdgroups",
         resolve_int(&root, "attention_rows", "min_simdgroups"),

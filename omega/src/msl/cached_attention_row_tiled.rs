@@ -1,4 +1,4 @@
-use super::signature_tokens_prelude::{QUERY_STAGE_PAD, query_stage_bytes, row_tile_bytes};
+use super::signature_tokens_prelude::{QUERY_STAGE_PAD, query_tile_staged};
 use super::*;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeRowTiled`]: one
@@ -67,9 +67,14 @@ pub(super) fn render_cached_attention_row_tiled(
     } else {
         format!("{cached_lower_inclusive}L")
     };
-    let stages_query = row_tile_bytes(rows_per_threadgroup, *query_groups, row_tiled_block(*head_dim))
-        + query_stage_bytes(rows_per_threadgroup, *query_groups, *head_dim)
-        <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES;
+    let stages_query = query_tile_staged(
+        rows_per_threadgroup,
+        *query_groups,
+        *head_dim,
+        row_tiled_block(*head_dim),
+        crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
+        crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
+    );
     let substitutions = [
         ("@ENTRY@", entry.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
