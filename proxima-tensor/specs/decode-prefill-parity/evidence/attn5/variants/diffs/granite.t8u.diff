@@ -1,0 +1,12 @@
+--- scratch/capture_granite/pipeline_e3603c6942491f2f.metal	2026-10-08 17:24:29
++++ scratch/var_granite/e3603c6942491f2f.t8u.metal	2026-10-08 17:25:23
+@@ -876,7 +876,7 @@
+     short quad = (short)(lane / 4); short fragment_row = (short)((quad & 4) + ((lane / 2) % 4)); short fragment_column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+     threadgroup float score_tile[tile_vectors * block]; threadgroup float row_maximum[tile_vectors]; threadgroup float row_sum[tile_vectors]; threadgroup float rescale_tile[tile_vectors];
+     threadgroup int vector_row[tile_vectors]; threadgroup int vector_head[tile_vectors]; threadgroup int vector_live[tile_vectors];
+-    constexpr bool stage_query = true; constexpr long query_stage_stride = half_dim + 8L;
++    constexpr bool stage_query = false; constexpr long query_stage_stride = half_dim + 8L;
+     threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
+     for (long index = thread_id; index < tile_vectors; index += threads) {
+         long block_index = index / 8L; long within = index % 8L;
+scale=1000/1000

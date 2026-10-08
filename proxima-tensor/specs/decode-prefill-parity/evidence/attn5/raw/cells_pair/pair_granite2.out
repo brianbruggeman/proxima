@@ -1,0 +1,12 @@
+ab capture excludes 0 unreplayable dispatches of 369
+ab capture: step=0 dispatches=369 groups=21
+ab res sha=e3603c6942491f2f arm=base tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=e3603c6942491f2f:base wall_ms=66.511 cpu_ms=3.189 cpu_pct=4.8 rss_peak_mb=1614.0 footprint_mb=180.4 gpu_alloc_mb=1515.3 load_before=3.42 load_after=3.39
+ab res sha=e3603c6942491f2f arm=e3603c6942491f2f.ctrl tg_static_bytes=9600 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=e3603c6942491f2f:e3603c6942491f2f.ctrl wall_ms=66.546 cpu_ms=3.006 cpu_pct=4.5 rss_peak_mb=1614.0 footprint_mb=180.4 gpu_alloc_mb=1515.3 load_before=3.39 load_after=3.39
+ab res sha=e3603c6942491f2f arm=e3603c6942491f2f.t16u tg_static_bytes=8960 max_threads=384 exec_width=32 bound_buffer_bytes=138235140 iters=50 cell label=e3603c6942491f2f:e3603c6942491f2f.t16u wall_ms=76.791 cpu_ms=3.132 cpu_pct=4.1 rss_peak_mb=1614.0 footprint_mb=180.4 gpu_alloc_mb=1515.3 load_before=3.39 load_after=3.39
+ab bits sha=e3603c6942491f2f threads=64000 extents=[1000, 8, 2, 64] arm=base elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=e3603c6942491f2f threads=64000 extents=[1000, 8, 2, 64] arm=e3603c6942491f2f.ctrl elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=e3603c6942491f2f threads=64000 extents=[1000, 8, 2, 64] arm=e3603c6942491f2f.t16u elements=1024000 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab group sha=e3603c6942491f2f threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=base marginal_us=1110.250 single_us=1127.500 rounds=21 round_min_us=1059.042 round_max_us=1157.875 round_cov_pct=2.716
+ab group sha=e3603c6942491f2f threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=e3603c6942491f2f.ctrl marginal_us=1110.222 single_us=1122.375 rounds=21 round_min_us=1075.583 round_max_us=1157.625 round_cov_pct=1.801
+ab group sha=e3603c6942491f2f threads=64000 extents=[1000, 8, 2, 64] tg=Some(64) count=24 pass=0 arm=e3603c6942491f2f.t16u marginal_us=1281.800 single_us=1331.750 rounds=21 round_min_us=1265.333 round_max_us=1457.583 round_cov_pct=3.392
+ab cell label=process wall_ms=2211.083 cpu_ms=814.104 cpu_pct=36.8 rss_peak_mb=1614.0 footprint_mb=180.1 gpu_alloc_mb=1515.3 load_before=3.42 load_after=3.39

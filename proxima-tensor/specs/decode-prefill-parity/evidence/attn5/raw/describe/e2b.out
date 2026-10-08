@@ -1,0 +1,167 @@
+ab capture excludes 0 unreplayable dispatches of 828
+ab capture: step=0 dispatches=828 groups=48
+ab describe sha=1076ed68ee13c234 extents=[] count=1 entry=omega_constant_r0_v3cd105eb
+ab describe   binding=0 buffer=0x104acb000 offset=0 length=4 head=[0.025515517]
+ab describe sha=17b21f30b4c6bf95 extents=[971, 8, 128] count=28 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1
+ab describe   binding=0 buffer=0x109e48000 offset=0 length=497152 head=[1.0, 1.0, 1.0, 1.0]
+ab describe   binding=1 buffer=0x150000000 offset=7954688 length=145169664 head=[0.047784332, 1.2745656, 0.5837743, 0.41170573]
+ab describe   binding=2 buffer=0x109ec4000 offset=0 length=497152 head=[0.0, 0.0, 0.0, 0.0]
+ab describe   binding=3 buffer=0x150000000 offset=7954688 length=145169664 head=[0.047784332, 1.2745656, 0.5837743, 0.41170573]
+ab describe   binding=4 buffer=0x150000000 offset=15909376 length=145169664 head=[-0.12474117, 0.0058185444, -0.16059466, 0.030820454]
+ab describe   binding=6 buffer=0x150000000 offset=19886848 length=145169664 head=[0.19691394, -0.15943807, 0.1330569, -0.16129631]
+ab describe sha=17b21f30b4c6bf95 extents=[971, 8, 256] count=7 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__subtract_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__add_s0_s1
+ab describe   binding=0 buffer=0x109f40000 offset=0 length=994304 head=[1.0, 1.0, 1.0, 1.0]
+ab describe   binding=1 buffer=0x150000000 offset=15909120 length=145169664 head=[0.27518386, -0.043556117, -0.036189187, -0.0120741455]
+ab describe   binding=2 buffer=0x10a034000 offset=0 length=994304 head=[0.0, 0.0, 0.0, 0.0]
+ab describe   binding=3 buffer=0x150000000 offset=15909120 length=145169664 head=[0.27518386, -0.043556117, -0.036189187, -0.0120741455]
+ab describe   binding=4 buffer=0x150000000 offset=31818240 length=145169664 head=[-0.4583245, 0.29040438, -0.7610446, 0.016154164]
+ab describe   binding=6 buffer=0x150000000 offset=39772928 length=145169664 head=[0.008467498, -0.9571304, -0.5363247, 0.15949917]
+ab describe sha=19d66c805d7f52e4 extents=[] count=70 entry=omega_constant_r0_v3f000000
+ab describe   binding=0 buffer=0x104acb500 offset=0 length=4 head=[0.5]
+ab describe sha=23d555d56f27caa0 extents=[971, 1536] count=71 entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x150000000 offset=139203584 length=145169664 head=[0.018900117, 0.11488755, -0.074304156, 0.14588164]
+ab describe   binding=1 buffer=0x150000000 offset=139203584 length=145169664 head=[0.018900117, 0.11488755, -0.074304156, 0.14588164]
+ab describe   binding=2 buffer=0x300000000 offset=2300628768 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x150000000 offset=139203584 length=145169664 head=[0.018900117, 0.11488755, -0.074304156, 0.14588164]
+ab describe   binding=4 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=5 buffer=0x104acad00 offset=0 length=4 head=[0.0006510417]
+ab describe   binding=6 buffer=0x150000000 offset=7954688 length=145169664 head=[0.047784332, 1.2745656, 0.5837743, 0.41170573]
+ab describe sha=2417697c78307ab2 extents=[971, 1, 512] count=3 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x150000000 offset=21875200 length=145169664 head=[-0.23483633, 0.27138948, -0.87573236, -0.1425382]
+ab describe   binding=1 buffer=0x150000000 offset=21875200 length=145169664 head=[-0.23483633, 0.27138948, -0.87573236, -0.1425382]
+ab describe   binding=2 buffer=0x300000000 offset=2382375840 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x150000000 offset=21875200 length=145169664 head=[-0.23483633, 0.27138948, -0.87573236, -0.1425382]
+ab describe   binding=4 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=5 buffer=0x104acb400 offset=0 length=4 head=[0.001953125]
+ab describe   binding=6 buffer=0x150000000 offset=23864064 length=145169664 head=[-0.57654154, -0.3282499, -0.2879538, 0.17679407]
+ab describe sha=2417697c78307ab2 extents=[971, 8, 512] count=7 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=1 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=2 buffer=0x300000000 offset=2389461920 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=4 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=5 buffer=0x104acb400 offset=0 length=4 head=[0.001953125]
+ab describe   binding=6 buffer=0x150000000 offset=15909120 length=145169664 head=[0.27518386, -0.043556117, -0.036189187, -0.0120741455]
+ab describe sha=28e538282271e635 extents=[971, 1, 8, 256] count=28 entry=omega_cached_attention_h1_g8_d256_s3f800000_ln511_up0_r2_n4_b128_rt
+ab describe   binding=0 buffer=0x150000000 offset=15909376 length=145169664 head=[-0.12474117, 0.0058185444, -0.16059466, 0.030820454]
+ab describe   binding=1 buffer=0x150000000 offset=19886848 length=145169664 head=[0.19691394, -0.15943807, 0.1330569, -0.16129631]
+ab describe   binding=2 buffer=0x104e00000 offset=0 length=540672 head=[0.019494276, 0.0005385822, 0.009421167, 0.007731262]
+ab describe   binding=3 buffer=0x104e84000 offset=0 length=540672 head=[-0.014338352, 0.00043472226, 0.0044328007, -0.00158411]
+ab describe   binding=4 buffer=0x104e00000 offset=0 length=540672 head=[0.019494276, 0.0005385822, 0.009421167, 0.007731262]
+ab describe   binding=5 buffer=0x104e84000 offset=0 length=540672 head=[-0.014338352, 0.00043472226, 0.0044328007, -0.00158411]
+ab describe   binding=6 buffer=0x104f08000 offset=0 length=1081344 head=[0.01543662, 0.15678109, 0.039725088, -0.27364752]
+ab describe   binding=7 buffer=0x104f08000 offset=0 length=1081344 head=[0.01543662, 0.15678109, 0.039725088, -0.27364752]
+ab describe   binding=8 buffer=0x104acaa00 offset=0 length=4 head=[0.0]
+ab describe   binding=9 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe sha=39762ac6e43cb534 extents=[] count=70 entry=omega_constant_r0_v3d372713
+ab describe   binding=0 buffer=0x104acb600 offset=0 length=4 head=[0.044715]
+ab describe sha=3d3a72948b2448db extents=[971, 1, 512] count=3 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi3_fused_identity_o3__multiply_s0_o2__add_s1_o1__square_root_s2__reciprocal_s3__multiply_s4_o0
+ab describe   binding=0 buffer=0x150000000 offset=21875200 length=145169664 head=[-0.23483633, 0.27138948, -0.87573236, -0.1425382]
+ab describe   binding=1 buffer=0x150000000 offset=21875200 length=145169664 head=[-0.23483633, 0.27138948, -0.87573236, -0.1425382]
+ab describe   binding=2 buffer=0x150000000 offset=21875200 length=145169664 head=[-0.23483633, 0.27138948, -0.87573236, -0.1425382]
+ab describe   binding=3 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=4 buffer=0x104acb400 offset=0 length=4 head=[0.001953125]
+ab describe   binding=5 buffer=0x105850000 offset=0 length=2162688 head=[-0.15292768, 0.23411489, 0.653154, -0.32652783]
+ab describe sha=442bdb21f87c1bb9 extents=[] count=2 entry=omega_constant_r0_v3b800000
+ab describe   binding=0 buffer=0x104acb100 offset=0 length=4 head=[0.00390625]
+ab describe sha=47b795bd5ef40e36 extents=[] count=1 entry=omega_constant_r0_v3a2aaaab
+ab describe   binding=0 buffer=0x104acad00 offset=0 length=4 head=[0.0006510417]
+ab describe sha=525cde488ce6af7c extents=[] count=1 entry=omega_constant_r0_v41f00000
+ab describe   binding=0 buffer=0x104ad8700 offset=0 length=4 head=[30.0]
+ab describe sha=6ea595c3ebd844f9 extents=[1, 1536] count=1 entry=omega_elementwise_r2_n1_identity_g1
+ab describe   binding=0 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=1 buffer=0x104acab00 offset=0 length=4 head=[970.0]
+ab describe   binding=2 buffer=0x150000000 offset=5966080 length=145169664 head=[-1.614944, 5.553275, -5.96278, 2.4621003]
+ab describe sha=71eeadbae5589c8a extents=[] count=1 entry=omega_constant_r0_v3f3504f3
+ab describe   binding=0 buffer=0x104acb200 offset=0 length=4 head=[0.70710677]
+ab describe sha=7310c707cd786018 extents=[971, 35, 256] count=1 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi6_fused_identity_o6__identity_o0__multiply_s0_o4__add_s2_o3__square_root_s3__reciprocal_s4__multiply_s5_o2__multiply_s6_o1__add_s1_s7__multiply_s8_o5
+ab describe   binding=0 buffer=0x150000000 offset=69601792 length=145169664 head=[0.009305724, -0.02514026, -0.00438884, 0.014370472]
+ab describe   binding=1 buffer=0x150000000 offset=69601792 length=145169664 head=[0.009305724, -0.02514026, -0.00438884, 0.014370472]
+ab describe   binding=2 buffer=0x150000000 offset=34800896 length=145169664 head=[-0.38220158, -0.1351207, 0.38172805, -0.6558293]
+ab describe   binding=3 buffer=0x300000000 offset=43344672 length=3349528576 head=[]
+ab describe   binding=4 buffer=0x150000000 offset=69601792 length=145169664 head=[0.009305724, -0.02514026, -0.00438884, 0.014370472]
+ab describe   binding=5 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=6 buffer=0x104acb100 offset=0 length=4 head=[0.00390625]
+ab describe   binding=7 buffer=0x104acb200 offset=0 length=4 head=[0.70710677]
+ab describe   binding=8 buffer=0x150000000 offset=104402688 length=145169664 head=[0.5196205, -0.6496124, 0.009421247, 0.18831222]
+ab describe sha=75da58c7f9de82af extents=[971, 1, 128] count=12 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1
+ab describe   binding=0 buffer=0x109e48000 offset=0 length=497152 head=[1.0, 1.0, 1.0, 1.0]
+ab describe   binding=1 buffer=0x150000000 offset=14915328 length=145169664 head=[-0.18947391, 0.15191942, -0.15675698, -0.19108967]
+ab describe   binding=2 buffer=0x109ec4000 offset=0 length=497152 head=[0.0, 0.0, 0.0, 0.0]
+ab describe   binding=3 buffer=0x150000000 offset=14915328 length=145169664 head=[-0.18947391, 0.15191942, -0.15675698, -0.19108967]
+ab describe   binding=4 buffer=0x104e84000 offset=0 length=540672 head=[-0.014338352, 0.00043472226, 0.0044328007, -0.00158411]
+ab describe   binding=6 buffer=0x104e00000 offset=0 length=540672 head=[0.019494276, 0.0005385822, 0.009421167, 0.007731262]
+ab describe sha=75da58c7f9de82af extents=[971, 1, 256] count=3 entry=omega_elementwise_twin_r3_n4_fused_multiply_o0_o1__multiply_o2_o3__add_s0_s1_fused_multiply_o0_o3__multiply_o2_o1__subtract_s0_s1
+ab describe   binding=0 buffer=0x109f40000 offset=0 length=994304 head=[1.0, 1.0, 1.0, 1.0]
+ab describe   binding=1 buffer=0x150000000 offset=23864064 length=145169664 head=[-0.57654154, -0.3282499, -0.2879538, 0.17679407]
+ab describe   binding=2 buffer=0x10a034000 offset=0 length=994304 head=[0.0, 0.0, 0.0, 0.0]
+ab describe   binding=3 buffer=0x150000000 offset=23864064 length=145169664 head=[-0.57654154, -0.3282499, -0.2879538, 0.17679407]
+ab describe   binding=4 buffer=0x105748000 offset=0 length=1081344 head=[0.013711618, -0.0041130693, -0.0031569193, 0.002695211]
+ab describe   binding=6 buffer=0x105640000 offset=0 length=1081344 head=[-0.0042592166, -6.4318556e-5, 0.0007715364, 0.00499618]
+ab describe sha=95fa1f1b4ecd1f77 extents=[] count=70 entry=omega_constant_r0_v3f4c422a
+ab describe   binding=0 buffer=0x104acb700 offset=0 length=4 head=[0.7978846]
+ab describe sha=96585e0bac7c1105 extents=[971, 1, 8, 512] count=7 entry=omega_cached_attention_h1_g8_d512_s3f800000_ln9223372036854775808_up0_r2_n8_b128_rt
+ab describe   binding=0 buffer=0x150000000 offset=31818240 length=145169664 head=[-0.4583245, 0.29040438, -0.7610446, 0.016154164]
+ab describe   binding=1 buffer=0x150000000 offset=39772928 length=145169664 head=[0.008467498, -0.9571304, -0.5363247, 0.15949917]
+ab describe   binding=2 buffer=0x105640000 offset=0 length=1081344 head=[-0.0042592166, -6.4318556e-5, 0.0007715364, 0.00499618]
+ab describe   binding=3 buffer=0x105748000 offset=0 length=1081344 head=[0.013711618, -0.0041130693, -0.0031569193, 0.002695211]
+ab describe   binding=4 buffer=0x105640000 offset=0 length=1081344 head=[-0.0042592166, -6.4318556e-5, 0.0007715364, 0.00499618]
+ab describe   binding=5 buffer=0x105748000 offset=0 length=1081344 head=[0.013711618, -0.0041130693, -0.0031569193, 0.002695211]
+ab describe   binding=6 buffer=0x105850000 offset=0 length=2162688 head=[-0.15292768, 0.23411489, 0.653154, -0.32652783]
+ab describe   binding=7 buffer=0x105850000 offset=0 length=2162688 head=[-0.15292768, 0.23411489, 0.653154, -0.32652783]
+ab describe   binding=8 buffer=0x104aca900 offset=0 length=4 head=[0.0]
+ab describe   binding=9 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe sha=9b87f6638ee11e4b extents=[971, 1, 256] count=12 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi3_fused_identity_o3__multiply_s0_o2__add_s1_o1__square_root_s2__reciprocal_s3__multiply_s4_o0
+ab describe   binding=0 buffer=0x150000000 offset=13920768 length=145169664 head=[-0.0034949086, 0.22423413, 0.12153576, 0.07531115]
+ab describe   binding=1 buffer=0x150000000 offset=13920768 length=145169664 head=[-0.0034949086, 0.22423413, 0.12153576, 0.07531115]
+ab describe   binding=2 buffer=0x150000000 offset=13920768 length=145169664 head=[-0.0034949086, 0.22423413, 0.12153576, 0.07531115]
+ab describe   binding=3 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=4 buffer=0x104acb300 offset=0 length=4 head=[0.00390625]
+ab describe   binding=5 buffer=0x104f08000 offset=0 length=1081344 head=[0.01543662, 0.15678109, 0.039725088, -0.27364752]
+ab describe sha=9cf606e4f31138db extents=[] count=1 entry=omega_constant_r0_v41800000
+ab describe   binding=0 buffer=0x104acaf00 offset=0 length=4 head=[16.0]
+ab describe sha=a638c75f896670e1 extents=[971, 1, 256] count=12 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x150000000 offset=13920768 length=145169664 head=[-0.0034949086, 0.22423413, 0.12153576, 0.07531115]
+ab describe   binding=1 buffer=0x150000000 offset=13920768 length=145169664 head=[-0.0034949086, 0.22423413, 0.12153576, 0.07531115]
+ab describe   binding=2 buffer=0x300000000 offset=2300627744 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x150000000 offset=13920768 length=145169664 head=[-0.0034949086, 0.22423413, 0.12153576, 0.07531115]
+ab describe   binding=4 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=5 buffer=0x104acb300 offset=0 length=4 head=[0.00390625]
+ab describe   binding=6 buffer=0x150000000 offset=14915328 length=145169664 head=[-0.18947391, 0.15191942, -0.15675698, -0.19108967]
+ab describe sha=a638c75f896670e1 extents=[971, 8, 256] count=28 entry=omega_reduce_r3_o2_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o3__add_s1_o2__square_root_s2__reciprocal_s3__multiply_s4_o1__multiply_s5_o0
+ab describe   binding=0 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=1 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=2 buffer=0x300000000 offset=2304173856 length=3349528576 head=[]
+ab describe   binding=3 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=4 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=5 buffer=0x104acb300 offset=0 length=4 head=[0.00390625]
+ab describe   binding=6 buffer=0x150000000 offset=7954688 length=145169664 head=[0.047784332, 1.2745656, 0.5837743, 0.41170573]
+ab describe sha=d1b89edd4efbcda5 extents=[] count=1 entry=omega_constant_r0_v421cc471
+ab describe   binding=0 buffer=0x104acac00 offset=0 length=4 head=[39.191837]
+ab describe sha=d8ad59bfed0ed43d extents=[971, 1536] count=35 entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi6_fused_identity_o6__multiply_s0_o4__add_s1_o3__square_root_s2__reciprocal_s3__multiply_s4_o2__multiply_s5_o1__add_s6_o0__multiply_s7_o5
+ab describe   binding=0 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=1 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=2 buffer=0x150000000 offset=5966080 length=145169664 head=[-1.614944, 5.553275, -5.96278, 2.4621003]
+ab describe   binding=3 buffer=0x300000000 offset=2320560960 length=3349528576 head=[]
+ab describe   binding=4 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=5 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=6 buffer=0x104acad00 offset=0 length=4 head=[0.0006510417]
+ab describe   binding=7 buffer=0x300000000 offset=2320548640 length=3349528576 head=[]
+ab describe   binding=8 buffer=0x150000000 offset=15909376 length=145169664 head=[-0.12474117, 0.0058185444, -0.16059466, 0.030820454]
+ab describe sha=efb05eff38c1debf extents=[971, 35, 256] count=1 entry=omega_elementwise_r3_n1_identity
+ab describe   binding=0 buffer=0x150000000 offset=0 length=145169664 head=[-1.8363189, -2.0633337, 0.1297886, -0.63982797]
+ab describe   binding=1 buffer=0x150000000 offset=69601792 length=145169664 head=[0.009305724, -0.02514026, -0.00438884, 0.014370472]
+ab describe sha=f41c3c0ebf45e3dc extents=[971, 1536] count=70 entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__multiply_s0_o4__add_s1_o3__square_root_s2__reciprocal_s3__multiply_s4_o2__multiply_s5_o1__add_s6_o0
+ab describe   binding=0 buffer=0x150000000 offset=7954688 length=145169664 head=[0.047784332, 1.2745656, 0.5837743, 0.41170573]
+ab describe   binding=1 buffer=0x150000000 offset=7954688 length=145169664 head=[0.047784332, 1.2745656, 0.5837743, 0.41170573]
+ab describe   binding=2 buffer=0x150000000 offset=139203584 length=145169664 head=[0.018900117, 0.11488755, -0.074304156, 0.14588164]
+ab describe   binding=3 buffer=0x300000000 offset=2320548672 length=3349528576 head=[]
+ab describe   binding=4 buffer=0x150000000 offset=7954688 length=145169664 head=[0.047784332, 1.2745656, 0.5837743, 0.41170573]
+ab describe   binding=5 buffer=0x104ac9900 offset=0 length=3884 head=[1e-6, 1e-6, 1e-6, 1e-6]
+ab describe   binding=6 buffer=0x104acad00 offset=0 length=4 head=[0.0006510417]
+ab describe   binding=7 buffer=0x150000000 offset=47727104 length=145169664 head=[0.010600519, -0.00736722, 0.019360803, -0.26980972]
+ab describe sha=faeac71b60707733 extents=[] count=1 entry=omega_constant_r0_v3b000000
+ab describe   binding=0 buffer=0x104acb400 offset=0 length=4 head=[0.001953125]
+ab describe sha=ff543d11d58b05fc extents=[] count=1 entry=omega_constant_r0_v3f800000
+ab describe   binding=0 buffer=0x104acae00 offset=0 length=4 head=[1.0]
+ab cell label=process wall_ms=2053.462 cpu_ms=2122.258 cpu_pct=103.4 rss_peak_mb=3433.9 footprint_mb=225.6 gpu_alloc_mb=3374.6 load_before=4.44 load_after=4.33

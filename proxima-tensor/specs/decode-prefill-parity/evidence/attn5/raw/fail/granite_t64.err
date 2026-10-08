@@ -1,0 +1,4 @@
+
+thread 'main' (81024451) panicked at proxima-model-interop/examples/norm_variant_ab.rs:169:41:
+variant e3603c6942491f2f.t64u.metal does not compile: metal driver error: Threadgroup memory size (35840) exceeds the maximum threadgroup memory allowed (32768)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

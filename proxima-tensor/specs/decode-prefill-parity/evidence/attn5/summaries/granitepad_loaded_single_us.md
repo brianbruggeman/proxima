@@ -1,0 +1,9 @@
+3 files; value `single_us` from `group` lines; median [CoV%] (min-max) over runs
+| group | extents | arm | n | single_us median [CoV%] (min-max) | bit compare vs base (first file) | cpu ms per replay | cpu % of wall | wall ms per replay | static tg bytes, bound buffer MB, rss peak MB, footprint MB, Metal MB, load |
+|---|---|---|---|---|---|---|---|---|---|
+| e3603c69 | [1000, 8, 2, 64] | base | 3 | 1123.375 [0.46] (1115.250-1124.917) | differing=0/1024000 max_ulp=0 | 0.063 | 4.7 | 1.352 | tg_static=9600 bound_buffer_mb=131.8 rss_peak_mb=1622.0 footprint_mb=182.4 gpu_alloc_mb=1515.3 load=10.26 |
+| e3603c69 | [1000, 8, 2, 64] | ctrl | 3 | 1134.042 [0.54] (1131.042-1142.875) | differing=0/1024000 max_ulp=0 | 0.061 | 4.5 | 1.351 | tg_static=9856 bound_buffer_mb=131.8 rss_peak_mb=1622.0 footprint_mb=182.4 gpu_alloc_mb=1515.3 load=10.26 |
+| e3603c69 | [1000, 8, 2, 64] | t16u_pad2560 | 3 | 1998.167 [0.72] (1973.458-1998.208) | differing=0/1024000 max_ulp=0 | 0.079 | 3.5 | 2.223 | tg_static=19200 bound_buffer_mb=131.8 rss_peak_mb=1622.0 footprint_mb=182.4 gpu_alloc_mb=1515.3 load=10.26 |
+| e3603c69 | [1000, 8, 2, 64] | t8s_pad2400 | 3 | 1758.667 [0.46] (1745.917-1760.792) | differing=0/1024000 max_ulp=0 | 0.071 | 3.5 | 2.013 | tg_static=19200 bound_buffer_mb=131.8 rss_peak_mb=1622.0 footprint_mb=182.4 gpu_alloc_mb=1515.3 load=10.26 |
+| e3603c69 | [1000, 8, 2, 64] | t8s_pad4800 | 3 | 2503.958 [0.41] (2487.000-2505.708) | differing=0/1024000 max_ulp=0 | 0.069 | 2.5 | 2.736 | tg_static=28800 bound_buffer_mb=131.8 rss_peak_mb=1622.0 footprint_mb=182.4 gpu_alloc_mb=1515.3 load=10.26 |
+| e3603c69 | [1000, 8, 2, 64] | t8u_pad1280 | 3 | 1151.375 [0.63] (1140.625-1154.458) | differing=0/1024000 max_ulp=0 | 0.062 | 4.6 | 1.346 | tg_static=9600 bound_buffer_mb=131.8 rss_peak_mb=1622.0 footprint_mb=182.4 gpu_alloc_mb=1515.3 load=10.26 |
