@@ -1266,6 +1266,7 @@ pub(super) fn push_q4_0_native_body(
         "    long blk_step = (long)ib_step * {Q4_0_BLOCK_BYTES};\n"
     ));
     source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    push_full_unroll(source);
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
         "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4_0_BLOCK_ELEMENTS}) + (long)ib_first) * {Q4_0_BLOCK_BYTES};\n"
@@ -1289,6 +1290,7 @@ pub(super) fn push_q4_0_native_body(
     source.push_str("    for (int ib = ib_first; ib < nb; ib += ib_step) {\n");
     source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f;\n");
     if other_stride_is_one {
+    push_full_unroll(source);
         source.push_str("        for (uint i = 0u; i < 8u; i += 2u) {\n");
         source.push_str("            sumy0 += y4[i + 0u] + y4[i + 1u];\n");
         source.push_str("            yl[i + 0u] = y4[i + 0u];\n");
@@ -1298,6 +1300,7 @@ pub(super) fn push_q4_0_native_body(
         source.push_str("            yl[i + 9u] = y4[i + 17u] * (1.0f / 4096.0f);\n");
         source.push_str("        }\n");
     } else {
+    push_full_unroll(source);
         source.push_str("        for (uint i = 0u; i < 8u; i += 2u) {\n");
         source.push_str("            float y0 = y4[(long)(i + 0u) * other_stride];\n");
         source.push_str("            float y1 = y4[(long)(i + 1u) * other_stride];\n");
@@ -1312,6 +1315,7 @@ pub(super) fn push_q4_0_native_body(
         source.push_str("        }\n");
     }
     source.push_str("        float sumy = sumy0 + sumy1;\n");
+    push_full_unroll(source);
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("            device const uchar *blk = blk_ptr[q];\n");
     source.push_str("            device const half *dh = (device const half *)blk;\n");
@@ -1322,6 +1326,7 @@ pub(super) fn push_q4_0_native_body(
     source.push_str(
         "            float acc0 = 0.0f; float acc1 = 0.0f; float acc2 = 0.0f; float acc3 = 0.0f;\n",
     );
+    push_full_unroll(source);
     source.push_str("            for (uint i = 0u; i < 8u; i += 2u) {\n");
     source.push_str("                ushort word = qs[i / 2u];\n");
     source.push_str("                acc0 += yl[i + 0u] * (float)(word & (ushort)0x000Fu);\n");
@@ -1333,6 +1338,7 @@ pub(super) fn push_q4_0_native_body(
         "            sumf[q] = sumf[q] + d * (sumy * -8.0f + acc0 + acc1 + acc2 + acc3);\n",
     );
     source.push_str("        }\n");
+    push_full_unroll(source);
     source.push_str(&format!(
         "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
     ));
@@ -1607,6 +1613,7 @@ pub(super) fn push_q6k_ggml_port_body(
         "    long blk_step = (long)ib_step * {block_bytes};\n"
     ));
     source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    push_full_unroll(source);
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
         "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
@@ -1615,10 +1622,13 @@ pub(super) fn push_q6k_ggml_port_body(
     push_packed_row_plain_product_y4_address(source, other, other_stride_is_one, "128u * ip + l0");
     source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
     if other_stride_is_one {
+    push_full_unroll(source);
         source.push_str("        for (uint l = 0u; l < 4u; ++l) {\n            yl[4u * l + 0u] = y4[l]; yl[4u * l + 1u] = y4[l + 32u]; yl[4u * l + 2u] = y4[l + 64u]; yl[4u * l + 3u] = y4[l + 96u];\n        }\n");
     } else {
+    push_full_unroll(source);
         source.push_str("        for (uint l = 0u; l < 4u; ++l) {\n            yl[4u * l + 0u] = y4[(long)l * other_stride]; yl[4u * l + 1u] = y4[(long)(l + 32u) * other_stride]; yl[4u * l + 2u] = y4[(long)(l + 64u) * other_stride]; yl[4u * l + 3u] = y4[(long)(l + 96u) * other_stride];\n        }\n");
     }
+    push_full_unroll(source);
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("            device const uchar *blk = blk_ptr[q];\n");
     source.push_str("            device const uchar *ql = blk;\n");
@@ -1629,6 +1639,7 @@ pub(super) fn push_q6k_ggml_port_body(
     source.push_str(
         "            float sums0 = 0.0f; float sums1 = 0.0f; float sums2 = 0.0f; float sums3 = 0.0f;\n",
     );
+    push_full_unroll(source);
     source.push_str("            for (uint l = 0u; l < 4u; ++l) {\n");
     source.push_str("                uchar q1l = ql[q_offset_l + l];\n");
     source.push_str("                uchar q2l = ql[q_offset_l + 32u + l];\n");
@@ -1652,6 +1663,7 @@ pub(super) fn push_q6k_ggml_port_body(
         "            sumf[q] = sumf[q] + dall * (sums0 * (float)(char)sc[0] + sums1 * (float)(char)sc[2] + sums2 * (float)(char)sc[4] + sums3 * (float)(char)sc[6]);\n",
     );
     source.push_str("        }\n");
+    push_full_unroll(source);
     source.push_str(&format!(
         "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
     ));
@@ -1659,3 +1671,13 @@ pub(super) fn push_q6k_ggml_port_body(
     source.push_str("    }\n");
 }
 
+
+/// Emits the pragma that makes the next `for` unroll completely. ggml spells
+/// this `FOR_UNROLL` on every row, lane and nibble loop of its matvec bodies:
+/// a loop that stays rolled indexes `sumf`, `yl` and `blk_ptr` with a runtime
+/// value, and a private array indexed that way is placed in memory instead of
+/// registers. Unrolling reorders no floating-point operation.
+fn push_full_unroll(source: &mut String) {
+    source.push_str(FULL_UNROLL);
+    source.push('\n');
+}

@@ -2852,7 +2852,7 @@ pub(super) fn push_broadcast_epilogue_write(
 
 // the slot loops index per-thread arrays, which only stay in registers when
 // every trip is unrolled; the trip count is a literal, so full unroll is legal
-const FULL_UNROLL: &str = "#pragma unroll";
+pub(super) const FULL_UNROLL: &str = "#pragma unroll";
 
 /// The cooperative fold's accumulate loop with its loads issued ahead of its
 /// folds: each trip loads `unroll` strided elements of every operand into

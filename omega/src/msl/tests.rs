@@ -8763,6 +8763,15 @@ mod expert_grouped_decode_description {
     }
 }
 
+fn trimmed_line_above(source: &str, needle: &str, lines_up: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let index = lines
+        .iter()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("`{needle}` not found:\n{source}"));
+    lines[index - lines_up].trim().to_string()
+}
+
 /// One decode token against a `Q6_K` weight takes the single-activation
 /// row-blocked body, whose row count is the codec's own build-time axis
 /// (`[packed_row_block] q6k_rows`): the accumulator array, the group base and
@@ -8782,4 +8791,41 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
     assert!(source.contains(&format!("long group_first = output_index * {rows};")), "{source}");
     let (groups, split) = packed_row_dispatch(8, 1, Codec::Q6K);
     assert_eq!((groups, split), (8u64.div_ceil(rows as u64), 1));
+}
+
+/// ggml marks every row, lane and nibble loop of its matvec bodies
+/// `FOR_UNROLL`; a loop left rolled makes `sumf`, `yl` and `blk_ptr` runtime
+/// indexed private arrays. The same loops in the ported bodies carry the full
+/// unroll pragma on the line above, for both codecs the decode graph's
+/// 12288-wide and head matvecs use.
+#[cfg(all(feature = "metal-q4k-ggml-port", feature = "metal-q4_0-native"))]
+#[test]
+fn ported_matvec_bodies_unroll_their_row_and_lane_loops_fully() {
+    for codec in [Codec::Q4_0, Codec::Q6K] {
+        let bound = matmul_op(1, 512, 8);
+        let weight_node = bound.operands()[0].0;
+        let source = emit(&bound, &BTreeMap::from([(weight_node, codec)]), NumericPolicy::default())
+            .expect("emits")
+            .source;
+        let rows_loop = "device const uchar *blk = blk_ptr[q];";
+        assert!(
+            trimmed_line_above(&source, rows_loop, 1).starts_with("for (int q = 0; q <"),
+            "{codec:?}: the row loop opens one line above its first statement\n{source}"
+        );
+        assert_eq!(
+            trimmed_line_above(&source, rows_loop, 2),
+            "#pragma unroll",
+            "{codec:?}: the row loop is unrolled\n{source}"
+        );
+        assert_eq!(
+            trimmed_line_above(&source, "blk_ptr[q] = in", 2),
+            "#pragma unroll",
+            "{codec:?}: the block pointer setup is unrolled\n{source}"
+        );
+        assert_eq!(
+            trimmed_line_above(&source, "blk_ptr[q] += blk_step; }", 1),
+            "#pragma unroll",
+            "{codec:?}: the block pointer advance is unrolled\n{source}"
+        );
+    }
 }
