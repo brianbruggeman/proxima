@@ -2322,6 +2322,26 @@ pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
     true
 }
 
+/// `PROXIMA_TILED_GEMM_DISABLE`: a comma-separated list of codec names
+/// ([`codec_cache_token`] spellings: `q8_0`, `q5_0`, `q5_1`, `f16`, `q3k`,
+/// `q4k`, `q5k`, `q6k`, ...) kept off the tiled and expert-grouped GEMM, so
+/// their ops render on the row-blocked or generic kernel instead
+/// (`TiledGemmRejection::CodecSwitchedOff`). The same-binary A/B control
+/// `PROXIMA_TILED_GEMM_Q4_0` is for `Q4_0`, for every codec with a
+/// [`tiled_decode`] description: a codec's tiled path is measured and
+/// regression-tested against the kernel it replaced without a second build.
+/// Unset or empty disables nothing (the default).
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_codec_disabled(codec: Codec) -> bool {
+    std::env::var("PROXIMA_TILED_GEMM_DISABLE")
+        .is_ok_and(|list| list.split(',').any(|name| name.trim() == codec_cache_token(codec)))
+}
+
+#[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
+pub(super) const fn tiled_gemm_codec_disabled(_codec: Codec) -> bool {
+    false
+}
+
 /// `PROXIMA_TILED_GEMM_Q4_0` A/B switch: admits `Codec::Q4_0` into
 /// [`crate::msl::classify_tiled_gemm`], the same `simdgroup_matrix`-tiled
 /// GEMM ([`crate::msl::push_tiled_gemm_body`]) every codec with a
@@ -2334,8 +2354,8 @@ pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
 /// oracle at every admitted shape) -- unset keeps the tiled Q4_0 admission;
 /// only explicit `"0"` keeps `Q4_0` on the row-blocked kernel
 /// (`TiledGemmRejection::CodecSwitchedOff`). The A/B control stays reachable
-/// in the same binary via that explicit override; it is the one codec with a
-/// switch.
+/// in the same binary via that explicit override; [`tiled_gemm_codec_disabled`]
+/// is the same control for any codec.
 // gated on `metal-tiled-gemm`, not just `std`: this switch has no meaning
 // outside the tiled-GEMM admission path, and every caller (`emit_and_
 // classify.rs`'s `classify_tiled_gemm`/`tiled_gemm_q4_0_active`) already

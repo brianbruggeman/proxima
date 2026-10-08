@@ -7998,25 +7998,76 @@ mod tiled_decode_description {
     }
 
     #[test]
-    fn the_q4_0_switch_is_the_one_codec_switch_and_names_the_codec_it_turned_off() {
+    fn the_q4_0_switch_is_q4_0s_alone_and_names_the_codec_it_turned_off() {
         let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
         let q4_0 = BTreeMap::from([(bound.operands()[0].0, Codec::Q4_0)]);
         let q8_0 = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
         let classify = |packed: &BTreeMap<NodeId, Codec>| {
-            temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
-                classify_tiled_gemm(
-                    &bound,
-                    &operand_codecs(&bound, packed),
-                    ScalarOp::Add,
-                    ReduceInit::Zero,
-                    &[1, 0],
-                )
-                .err()
-            })
+            temp_env::with_vars(
+                [
+                    ("PROXIMA_TILED_GEMM_Q4_0", Some("0")),
+                    ("PROXIMA_TILED_GEMM_DISABLE", None),
+                ],
+                || {
+                    classify_tiled_gemm(
+                        &bound,
+                        &operand_codecs(&bound, packed),
+                        ScalarOp::Add,
+                        ReduceInit::Zero,
+                        &[1, 0],
+                    )
+                    .err()
+                },
+            )
         };
 
         assert_eq!(classify(&q4_0), Some(TiledGemmRejection::CodecSwitchedOff { codec: Codec::Q4_0 }));
-        assert_eq!(classify(&q8_0), None, "the switch is Q4_0's alone");
+        assert_eq!(classify(&q8_0), None, "the Q4_0 switch is Q4_0's alone");
+    }
+
+    #[proxima::test]
+    #[case::q8_0(Codec::Q8_0, "q8_0")]
+    #[case::q5_0(Codec::Q5_0, "q5_0")]
+    #[case::q5_1(Codec::Q5_1, "q5_1")]
+    #[case::float16(Codec::Float16, "f16")]
+    #[case::q3k(Codec::Q3K, "q3k")]
+    #[case::q5k(Codec::Q5K, "q5k")]
+    #[case::q6k(Codec::Q6K, "q6k")]
+    async fn the_disable_list_keeps_exactly_the_named_codecs_on_the_row_blocked_or_generic_kernel(
+        #[case] codec: Codec,
+        #[case] name: &str,
+    ) {
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+        let classify = |disable: Option<&str>| {
+            temp_env::with_vars(
+                [
+                    ("PROXIMA_TILED_GEMM_DISABLE", disable),
+                    ("PROXIMA_TILED_GEMM_Q4_0", None),
+                ],
+                || {
+                    classify_tiled_gemm(
+                        &bound,
+                        &operand_codecs(&bound, &packed),
+                        ScalarOp::Add,
+                        ReduceInit::Zero,
+                        &[1, 0],
+                    )
+                    .err()
+                },
+            )
+        };
+        let listed = format!("q4_0, {name} ,q4k");
+        let others = "q4_0,q4k,not_a_codec";
+
+        assert_eq!(classify(None), None, "{codec:?}: nothing is disabled by default");
+        assert_eq!(classify(Some("")), None, "{codec:?}: an empty list disables nothing");
+        assert_eq!(
+            classify(Some(&listed)),
+            Some(TiledGemmRejection::CodecSwitchedOff { codec }),
+            "{codec:?}: a listed codec is kept off, spaces around a name are ignored"
+        );
+        assert_eq!(classify(Some(others)), None, "{codec:?}: a list naming other codecs leaves it on");
     }
 
     #[test]
