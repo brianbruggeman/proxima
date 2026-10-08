@@ -15,6 +15,7 @@
 //!
 //! A `<sha16>.<tag>.f16` file lists comma-separated binding indices whose buffers the variant reads as `half` (the replay narrows them from f32). `AB_GEMM_ONLY` times a compacted gemm without its route prepass (the compaction buffer is refilled by the prepass alone, which writes nothing else), `AB_PREPASS_ONLY` the prepass alone.
 //! Each `ab group` line carries the median over `AB_ROUNDS` rounds beside the minimum, maximum and coefficient of variation of those rounds (`round_min_us`, `round_max_us`, `round_cov_pct`).
+//! Each arm also prints an `ab agree` line (max-abs, cosine and relative L2 error against the base arm over every compared output). With `AB_ATTENTION_REFERENCE` set, a cached-attention group also prints an `ab ref` line per arm against an f64 CPU attention computed from the group's own bound buffers (query planes, in-graph keys and values; the cached range must be empty).
 //! Every kernel arm also prints an `ab res` line with its resources (static threadgroup bytes, bound buffer bytes, CPU, RSS, footprint, Metal bytes, load; `AB_RESOURCE_ITERS` replays).
 //!
 //! Knobs: `AB_VARIANT_DIR`, `AB_STEP` (5), `AB_ROUNDS` (60), `AB_BATCH` (16), `AB_SKIP_GROUPS`
@@ -43,6 +44,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
+#[path = "cell_resources/attention_reference.rs"]
+mod attention_reference;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 #[path = "cell_resources/cell.rs"]
 mod cell;
 
@@ -60,6 +64,7 @@ mod harness {
     use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig, TokenEvent};
     use proxima_tensor::NumericPolicy;
 
+    use super::attention_reference;
     use super::cell::Cell;
 
     const MODEL_ENV: &str = "PROXIMA_GEMMA4_E2B_GGUF";
@@ -519,6 +524,9 @@ mod harness {
             for arm in &arms {
                 print_arm_resources(&sha[..SHA_PREFIX_CHARS], arm, resource_iterations);
             }
+            let attention_reference = std::env::var_os("AB_ATTENTION_REFERENCE")
+                .and_then(|_| attention_reference::AttentionShape::from_entry(&base.entry))
+                .map(|shape| attention_reference::reference_output(base, &shape));
             for arm in &arms {
                 let output = arm.1[0].replay_output_elements(span).expect("arm output");
                 println!(
@@ -527,6 +535,26 @@ mod harness {
                     arm.0,
                     compare_outputs(&base_output, &output)
                 );
+                println!(
+                    "ab agree sha={} extents={extents:?} arm={} against=base {}",
+                    &sha[..SHA_PREFIX_CHARS],
+                    arm.0,
+                    attention_reference::agreement(
+                        &attention_reference::floats_from_bytes(&base_output),
+                        &attention_reference::floats_from_bytes(&output)
+                    )
+                );
+                if let Some(reference) = &attention_reference {
+                    println!(
+                        "ab ref sha={} extents={extents:?} arm={} against=cpu_f64 {}",
+                        &sha[..SHA_PREFIX_CHARS],
+                        arm.0,
+                        attention_reference::agreement(
+                            reference,
+                            &attention_reference::floats_from_bytes(&output)
+                        )
+                    );
+                }
             }
             if std::env::var_os("AB_PREPASS_ONLY").is_some() {
                 let slot = base.bindings.len();
