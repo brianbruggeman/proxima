@@ -141,3 +141,84 @@ real design decision about the erasure boundary.
 ## Also pending
 - Review pre-public cleanup branches and cherry-pick only still-relevant changes.
 - Keep scratch worktrees and private assistant state out of public commits.
+
+
+## NPU lanes for omega (2026-10-08)
+
+Status: **owner's ask, researched, not spec'd.** omega lowers to Metal today;
+NPUs are the next placement lanes. Placement is data (the WHERE-pipe), never a
+model branch. Sources for every number: `docs/research/npu-lanes-census-2026-10-08.md`.
+
+### Lane census (sourced; "unsourced" where no primary source was found)
+| lane | entry | kind | quant | measured floors |
+| --- | --- | --- | --- | --- |
+| ANE via CoreML | `MLComputeUnits.cpuAndNeuralEngine`, coremltools | compiled model, placement fixed at compile | fp16 native; palettization 1-8 bit; W8A8 on A17 Pro / M4; GGUF blocks direct: no source | dispatch floor: no CoreML number found; IOSurface `MLMultiArray` zero-copy: unsourced |
+| ANE via private API | `_ANEClient` / MIL to E5 microcode (private, not shippable) | compiled kernel | fp16; int8 contested between sources | 0.095 ms dispatch, 2.3 ms IOSurface round trip per dispatch, 5.76 ms/tok decode (Orion); fixed `[1,C,1,S]`, ~119 compiles per process then silent failure |
+| Hexagon, raw FastRPC | IDL + QAIC stub/skel, `rpcmem` (ION/dma-heap), Hexagon SDK | raw kernel (ggml-hexagon works this way) | Q4_0/Q8_0/MXFP4 repacked into DSP buffers; HMX detail unsourced | ~100 us per call, 82-92 us tuned, 0.2 ms per forward in ggml-hexagon (community numbers); ~3.5-4 GiB address space per session |
+| Hexagon, QNN / AI Engine Direct | QNN C API, context binary, ONNX Runtime QNN EP | compiled graph, HTP-specific | u8/u16 matmul, fp16; 16a4w block in ExecuTorch; GGUF direct: unsourced | INT8 graph execute 3.4-3.5 ms (V79, community); GPU-NPU sync ~400 us (HeteroLLM) |
+| Hexagon, TVM | `tvm.target.hexagon`, launcher over FastRPC | compiled kernel | HVX via LLVM intrinsics; HMX/block-quant unsourced | launcher runs one layer at a time, no number |
+| Hexagon, `qualcomm/hexagon-mlir` ("hexagonmlir") | Triton and torch-mlir front ends; v73-v81 | compiled kernel, TCM mega-kernels with DMA | fp16/fp32 in the paper; no int4/int8, no end-to-end LLM result | none reported |
+| Intel NPU | OpenVINO NPU plugin on Level Zero | compiled model | INT4-FP16 group-wise; INT8 weight-only unsupported | static shapes only; prefill chunk 1024 |
+| AMD XDNA | MLIR-AIE / IRON, `xclbin` + insts | raw kernel | int8/int16/bf16; bfp16 on XDNA2 | 54.8 ms/tok Qwen3-0.6B after cutting configures 366 to 170 (community) |
+
+"exagonrpc": no project of that name; nearest is Hexagon FastRPC. "raw-fastrpc":
+FastRPC with a hand-written IDL and skel, no QNN, which is how llama.cpp's
+ggml-hexagon backend runs (one RPC per forward pass).
+
+### The first use: shunt an expert
+CoreML (and Hexagon) as a lane an MoE expert, or a set of experts, is shunted
+to, so the GPU and the NPU run experts concurrently. Routing is on the GPU, so
+the shunt is per layer or static per expert, not per token. The floors above
+say the granule must be whole-expert or whole-layer: every lane's dispatch is
+0.1-3.5 ms, against a 10-40 us Metal dispatch.
+
+### Shape 1: split by stage (front on the NPU, expert FFNs on the GPU)
+No paper found that puts attention and router on an NPU and expert FFNs on a GPU
+with a per-token handoff number. Nearest measured:
+- NPUMoE (Apple silicon, CoreML, arXiv 2604.18788): attention and hot experts
+  on the ANE, routing/top-k/norms/cold experts on the CPU, GPU unused; latency
+  1.32-5.55x lower than the baselines; CPU-NPU sync is over 60% of runtime in
+  the worst case; naive CoreML spends 4.4-5.7x more energy on data movement.
+- HeteroLLM (Snapdragon 8 Gen 3, arXiv 2501.14794): GPU-NPU sync ~400 us fixed;
+  concurrent bandwidth 43.3 to 59.5 GB/s; W4A16 unsupported on the NPU at decode.
+- llm.npu (ASPLOS'25): QNN lacks KV cache, SiLU, RMSNorm, RoPE; prefill 22x.
+First measurement on this box: the handoff cost per token between a Metal
+buffer and a CoreML input, both directions, before any graph is split.
+
+### Shape 2: the NPU predicts the route (pre-gating / expert prefetch)
+None of these run the predictor on an NPU; the signal and the hit rate are the
+transferable parts.
+- Pre-gated MoE (ISCA'24): a learned pre-gate in block N picks block N+1's
+  experts from block N's activations; 1.7x latency vs on-demand, 42x vs prefetch;
+  hit rate not reported, accuracy "comparable".
+- SiDA-MoE (MLSys'24): offline LSTM over token embeddings predicts all active
+  experts; top-3 hit 91.7-99.0%; up to 3.93x throughput, 80% GPU memory saved.
+- EdgeMoE: offline table keyed on the two previous layers' activations; one
+  example at 87.1% hit; top 20% of activation paths cover 99% of activations;
+  1.19-2.77x.
+- MoE-Infinity: request-level expert activation traces matched by cosine;
+  2.7-16.7x per-token latency vs offloading baselines; no hit rate.
+First measurement on this box: hit rate of a SiDA-style or EdgeMoE-style
+predictor against the real top-k on the granite route captures already in
+`proxima-tensor/specs/decode-prefill-parity/evidence/attr3/`, before any NPU
+work; the prefetch pays only if hit rate times expert time exceeds the lane's
+dispatch floor.
+
+### Measure before any slice
+- [ ] CoreML prediction dispatch floor on this box (no published number exists)
+- [ ] Metal buffer to CoreML input and back, per token, zero-copy or not
+- [ ] what a Q4_0 expert becomes on each lane (palettized / W8A8 / repacked blocks)
+- [ ] route-prediction hit rate on the captured granite routes
+
+### Tiered MoE, what exists (sourced, `docs/research/tiered-moe-2026-10-08.md`)
+- Gating with 3+ levels in an LLM: none found. DeepSeek-V3 is a 2-stage select
+  (node set, then top-8 of 256) plus one shared expert; PEER is 2 sub-key sets.
+- Expert classes, 3+: MoE++ has 4 (FFN, zero, copy, constant); NPUMoE has 3
+  static capacity tiers from offline popularity.
+- Placement tiers, 3: HOBBIT (GPU hi/lo precision, DRAM, SSD; next-layer
+  predictor top-1 ~96%), PowerInfer-2 (NPU hot, CPU cold, flash; 95% cache hit),
+  NPUMoE (ANE hot experts + attention, CPU router/top-k/cold experts, GPU idle).
+- Router on a different device than the experts: NPUMoE (CPU router, ANE
+  experts) and ProMoE (CPU predictor ~200 us, GPU experts). An NPU router with
+  GPU experts: none found. That is the open cell the ANE cards measure.
+- Cards: `docs/bench-campaigns/2026-10-08-ane-lane/plan.md`.
