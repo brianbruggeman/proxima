@@ -708,8 +708,9 @@ pub(super) const MAX_TIMESTAMP_SAMPLES: usize = 32 * 1024 / 16;
 /// GPU tick counts are converted to nanoseconds by calibrating against this
 /// SAME call's own CPU/GPU timestamp pair (`sampleTimestamps:gpuTimestamp:`
 /// taken once before `commit` and once after `waitUntilCompleted`): the
-/// CPU side of that pair is in the same `mach_absolute_time` domain
-/// [`ticks_to_nanos`] already converts, so `cpu_ns_delta / gpu_tick_delta`
+/// CPU side of that pair is already in nanoseconds on Apple silicon (its
+/// delta equals the GPU tick delta, and the GPU ticks sum to `GPUEndTime - GPUStartTime`
+/// at one nanosecond per tick), so `cpu_ns_delta / gpu_tick_delta`
 /// is this call's own nanoseconds-per-GPU-tick, applied uniformly to every
 /// per-position delta. No new type is introduced: the per-position record
 /// is [`OpGpuTiming`], the same type [`execute_plan_with_placements_op_timed`]
@@ -1207,7 +1208,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
 
     check_pending_faults(pending_faults)?;
 
-    let cpu_ns_delta = ticks_to_nanos(cpu_gpu_end.0.wrapping_sub(cpu_gpu_start.0));
+    let cpu_ns_delta = cpu_gpu_end.0.wrapping_sub(cpu_gpu_start.0);
     let gpu_tick_delta = cpu_gpu_end.1.saturating_sub(cpu_gpu_start.1).max(1);
     let ns_per_gpu_tick = cpu_ns_delta as f64 / gpu_tick_delta as f64;
 
@@ -1306,8 +1307,9 @@ pub fn execute_plan_with_placements_dispatch_timed(
 }
 
 /// One `(cpuTimestamp, gpuTimestamp)` reading via
-/// `MTLDevice::sampleTimestamps:gpuTimestamp:` -- the CPU side is in the
-/// same `mach_absolute_time` domain [`ticks_to_nanos`] converts, which is
+/// `MTLDevice::sampleTimestamps:gpuTimestamp:` -- the CPU side is
+/// already in nanoseconds (see the `dispatch_stamp_calibration` event of
+/// `CapturedDispatch::time_gpu_sequence_split_ns`), which is
 /// what lets [`execute_plan_with_placements_dispatch_timed`] calibrate GPU
 /// ticks to nanoseconds without a second, unrelated conversion table.
 #[cfg(feature = "instrument")]
