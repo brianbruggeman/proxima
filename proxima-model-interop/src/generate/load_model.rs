@@ -1423,6 +1423,17 @@ pub(super) const fn ubatch_prefill_chunks(ubatch: u32, len: usize) -> usize {
     }
 }
 
+/// Whether `ubatch` is what keeps a prompt of `len` rows off a kernel that
+/// needs `min_rows` activation rows per dispatch (`omega::sized::TILED_GEMM_MIN_TOKENS`):
+/// a chunked step (`ubatch != 0`) evaluates at most `ubatch` rows, so a
+/// `ubatch` under `min_rows` lowers every chunk to the matvec path even when
+/// the whole prompt would have cleared it. A prompt shorter than `min_rows`
+/// misses the kernel on its own and is not the configuration's doing.
+#[cfg(any(feature = "metal", test))]
+pub(super) const fn ubatch_forgoes_row_kernel(ubatch: u32, len: usize, min_rows: usize) -> bool {
+    ubatch != 0 && (ubatch as usize) < min_rows && len >= min_rows
+}
+
 pub(super) const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) -> bool {
     !split_prefill || is_last_step_batch
 }

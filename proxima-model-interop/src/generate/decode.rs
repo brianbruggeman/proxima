@@ -3828,6 +3828,22 @@ impl<'file> LoadedModel<'file> {
                     ubatch_prefill_chunks(serving_config.ubatch_size, next_ids.len())
                 };
                 let chunked_prefill = ubatch_chunks > 1;
+                #[cfg(feature = "metal")]
+                if chunked_prefill
+                    && ubatch_forgoes_row_kernel(
+                        serving_config.ubatch_size,
+                        next_ids.len(),
+                        omega::sized::TILED_GEMM_MIN_TOKENS as usize,
+                    )
+                {
+                    debug!(
+                        step = step as u64,
+                        prompt_rows = next_ids.len() as u64,
+                        ubatch_size = serving_config.ubatch_size,
+                        tiled_gemm_min_tokens = omega::sized::TILED_GEMM_MIN_TOKENS,
+                        "ubatch_below_tiled_threshold: every prefill chunk lowers to the matvec path"
+                    );
+                }
                 let split_prefill = (self.single_position_step
                     && next_ids.len() > 1
                     && !one_evaluation_prefill)
