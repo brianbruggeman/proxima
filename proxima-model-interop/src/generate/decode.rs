@@ -5340,6 +5340,11 @@ impl<'file> LoadedModel<'file> {
                             step = step as u64,
                             cached_len = cached_len as u64,
                             evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
+                            evaluate_start_raw_s = ticks_to_nanos(evaluate_started.as_raw()) as f64 / 1e9,
+                            evaluate_end_raw_s = ticks_to_nanos(
+                                evaluate_started.as_raw().wrapping_add(evaluate_ticks)
+                            ) as f64
+                                / 1e9,
                             gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
                             prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
                             pipeline_misses = metal_stage.pipeline_misses,
@@ -6913,6 +6918,9 @@ impl<'file> LoadedModel<'file> {
                     step = _step as u64,
                     cached_len = cached_len as u64,
                     evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
+                    evaluate_start_raw_s = ticks_to_nanos(evaluate_started.as_raw()) as f64 / 1e9,
+                    evaluate_end_raw_s =
+                        ticks_to_nanos(evaluate_started.as_raw().wrapping_add(evaluate_ticks)) as f64 / 1e9,
                     gpu_exec_ms = ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
                     prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
                     pipeline_misses = metal_stage.pipeline_misses,
