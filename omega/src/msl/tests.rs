@@ -2,9 +2,13 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use proxima_tensor::spec::{
+    Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+    input_leaf, scalar_constant,
+};
 use proxima_tensor::{
     AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind,
-    infer, map,
+    correct_packed_matmul_layouts, infer, map,
 };
 
 use super::*;
@@ -814,6 +818,62 @@ fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
         .into_iter()
         .next()
         .expect("one fused bound emitted")
+}
+
+pub(crate) fn stacked_moe_layers(
+    layers: u32,
+    sequence: u32,
+    experts: u32,
+    selected: u32,
+    embedding: u32,
+    hidden: u32,
+) -> (Vec<BoundOp>, PackedOperands) {
+    let mut program = Vec::new();
+    let mut leaf = |shape: Vec<u32>, name: &str| {
+        input_leaf(
+            &mut program,
+            DType::Float32,
+            shape.into_iter().map(Extent::Static).collect(),
+            name,
+        )
+    };
+    let mut hidden_states = leaf(vec![sequence, embedding], "x");
+    let mut weights = Vec::new();
+    let mut layer_inputs = Vec::new();
+    for layer in 0..layers {
+        let logits = leaf(vec![sequence, experts], &format!("logits_{layer}"));
+        let expert_w_gate = leaf(vec![experts, embedding, hidden], &format!("expert_w_gate_{layer}"));
+        let expert_w_up = leaf(vec![experts, embedding, hidden], &format!("expert_w_up_{layer}"));
+        let expert_w_down = leaf(vec![experts, hidden, embedding], &format!("expert_w_down_{layer}"));
+        weights.extend([expert_w_gate, expert_w_up, expert_w_down]);
+        layer_inputs.push((logits, expert_w_gate, expert_w_up, expert_w_down));
+    }
+    let ones = scalar_constant(&mut program, 1.0);
+    for (layer, (logits, expert_w_gate, expert_w_up, expert_w_down)) in layer_inputs.into_iter().enumerate() {
+        let moe_spec = MoeFfnSpec {
+            router: MoeRouter::Logits(logits),
+            expert_w_gate,
+            expert_w_up,
+            expert_w_down,
+            expert_count: experts,
+            expert_used_count: selected,
+            ones,
+            gating: ExpertGatingFunc::Softmax,
+            expert_bias: None,
+            expert_scale: None,
+            activation: Activation::Silu,
+            strategy: MoeProjectionStrategy::Stacked,
+        };
+        let (output, _site) = append_moe_ffn(&mut program, layer as u32, hidden_states, &moe_spec)
+            .expect("stacked routed ffn lowers");
+        hidden_states = output;
+    }
+    let shapes = infer(&program, &[]).expect("stacked routed ffn infers");
+    let mut bound = bind(&program, &shapes, &[hidden_states], NumericPolicy::default())
+        .expect("stacked routed ffn binds");
+    correct_packed_matmul_layouts(&mut bound, &weights.iter().copied().collect());
+    let packed = weights.into_iter().map(|weight| (weight, Codec::Q8_0)).collect();
+    (bound, packed)
 }
 
 #[expect(
@@ -9136,6 +9196,66 @@ mod expert_grouped_route_segments {
         counts
     }
 
+    const EMBEDDING: u32 = 128;
+    const EXPERT_HIDDEN: u32 = 64;
+
+    type CompactionKey = (NodeId, i64, i64, u64, u64);
+
+    fn compaction_keys(layers: u32) -> Vec<CompactionKey> {
+        let (bound, packed) = stacked_moe_layers(
+            layers,
+            SEQUENCE as u32,
+            EXPERTS as u32,
+            SELECTED as u32,
+            EMBEDDING,
+            EXPERT_HIDDEN,
+        );
+        bound
+            .iter()
+            .filter_map(|op| route_compaction_key(op, &packed))
+            .collect()
+    }
+
+    #[test]
+    fn shared_route_gate_up_and_down_of_one_layer_have_the_same_compaction_key() {
+        let keys = compaction_keys(1);
+
+        assert_eq!(keys.len(), 3, "gate, up and down each take the compacted route: {keys:?}");
+        assert_eq!(keys.iter().collect::<BTreeSet<_>>().len(), 1, "{keys:?}");
+    }
+
+    #[test]
+    fn shared_route_key_names_the_flat_route_length_and_the_expert_count() {
+        let keys = compaction_keys(1);
+
+        let (_, base, stride, tokens, experts) = keys[0];
+
+        assert_eq!(tokens, (SEQUENCE * SELECTED) as u64);
+        assert_eq!(experts, EXPERTS as u64);
+        assert_eq!((base, stride), (0, 1));
+    }
+
+    #[test]
+    fn shared_route_two_layers_route_through_two_distinct_keys_three_ops_each() {
+        let keys = compaction_keys(2);
+
+        let distinct: BTreeSet<_> = keys.iter().collect();
+
+        assert_eq!(keys.len(), 6, "{keys:?}");
+        assert_eq!(distinct.len(), 2, "{keys:?}");
+        assert!(distinct.iter().all(|key| keys.iter().filter(|candidate| candidate == key).count() == 3));
+    }
+
+    #[test]
+    fn shared_route_a_key_exists_exactly_where_a_prepass_does() {
+        let (bound, packed) = stacked_moe_layers(1, SEQUENCE as u32, EXPERTS as u32, SELECTED as u32, EMBEDDING, EXPERT_HIDDEN);
+
+        let with_prepass = bound.iter().filter(|op| route_prepass_active(op, &packed)).count();
+        let with_key = bound.iter().filter(|op| route_compaction_key(op, &packed).is_some()).count();
+
+        assert_eq!(with_prepass, 3);
+        assert_eq!(with_key, with_prepass);
+    }
     #[test]
     fn the_top_k_fixture_is_a_skewed_32_expert_8_selected_route_over_1000_tokens() {
         let route = top_k_route();

@@ -6274,3 +6274,124 @@ mod route_fault_decode_tests {
         assert!(matches!(error, MetalError::ExpertSourceMiss { expert: 2, .. }), "{error:?}");
     }
 }
+
+/// The per-step compaction cache and the hazard edges of its consumers, driven
+/// with the gate, up and down [`BoundOp`]s a stacked routed layer lowers to
+/// (`msl::tests::stacked_moe_layers`, the `[1000, 8]` route over 32 experts the
+/// grouped-gemm route fixtures use) and plain identities, so no device is
+/// needed.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod shared_route_compaction_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{
+        HazardTracker, NodeId, hazard_read_compaction, hazard_write_compaction, shared_or_encode,
+    };
+    use crate::msl::route_compaction_key;
+    use crate::msl::tests::stacked_moe_layers;
+
+    type Key = (NodeId, i64, i64, u64, u64);
+
+    fn layer_keys(layers: u32) -> Vec<Key> {
+        let (bound, packed) = stacked_moe_layers(layers, 1000, 32, 8, 128, 64);
+        bound
+            .iter()
+            .filter_map(|op| route_compaction_key(op, &packed))
+            .collect()
+    }
+
+    fn prepasses_encoded(keys: &[Key], cache: &mut BTreeMap<Key, u32>) -> (u32, Vec<(u32, bool)>) {
+        let mut encodes = 0u32;
+        let served = keys
+            .iter()
+            .map(|key| {
+                shared_or_encode(cache, *key, || {
+                    encodes += 1;
+                    Ok::<u32, ()>(encodes)
+                })
+                .expect("encode succeeds")
+            })
+            .collect();
+        (encodes, served)
+    }
+
+    #[test]
+    fn shared_route_three_projections_of_one_layer_encode_one_prepass_and_reuse_it_twice() {
+        let keys = layer_keys(1);
+        let mut cache = BTreeMap::new();
+
+        let (encodes, served) = prepasses_encoded(&keys, &mut cache);
+
+        assert_eq!(keys.len(), 3);
+        assert_eq!(encodes, 1);
+        assert_eq!(served, vec![(1, false), (1, true), (1, true)]);
+    }
+
+    #[test]
+    fn shared_route_two_layers_encode_two_prepasses_with_distinct_buffers() {
+        let keys = layer_keys(2);
+        let mut cache = BTreeMap::new();
+
+        let (encodes, served) = prepasses_encoded(&keys, &mut cache);
+
+        let buffers: BTreeSet<u32> = served.iter().map(|(buffer, _)| *buffer).collect();
+        assert_eq!(keys.len(), 6);
+        assert_eq!(encodes, 2);
+        assert_eq!(buffers.len(), 2, "two route operands must never share a buffer: {served:?}");
+        assert_eq!(served.iter().filter(|(_, reused)| *reused).count(), 4);
+    }
+
+    #[test]
+    fn shared_route_a_new_step_with_a_fresh_cache_encodes_the_prepass_again() {
+        let keys = layer_keys(1);
+
+        let (first_step, _) = prepasses_encoded(&keys, &mut BTreeMap::new());
+        let (second_step, _) = prepasses_encoded(&keys, &mut BTreeMap::new());
+
+        assert_eq!((first_step, second_step), (1, 1));
+    }
+
+    #[test]
+    fn shared_route_a_failed_encode_is_not_remembered_so_the_next_consumer_retries() {
+        let key = layer_keys(1)[0];
+        let mut cache: BTreeMap<Key, u32> = BTreeMap::new();
+
+        let failed = shared_or_encode(&mut cache, key, || Err::<u32, &str>("allocation refused"));
+        let retried = shared_or_encode(&mut cache, key, || Ok::<u32, &str>(7));
+
+        assert_eq!(failed, Err("allocation refused"));
+        assert_eq!(retried, Ok((7, false)));
+    }
+
+    #[test]
+    fn shared_route_every_consumer_is_a_recorded_read_after_the_one_prepass_write() {
+        let mut tracker: HazardTracker<&str> = HazardTracker::new();
+        tracker.record(&[], Some("gate_out"));
+
+        let barrier_after_prepass = hazard_write_compaction(&mut tracker, "compaction", "gate_out");
+        let owner_read_needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "gate_out");
+        tracker.record(&[], Some("up_out"));
+        let up_read_needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "up_out");
+        tracker.record(&[], Some("down_out"));
+        let down_read_needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "down_out");
+
+        assert!(barrier_after_prepass, "the gemm that follows the prepass must wait for it");
+        assert!(!owner_read_needs_barrier && !up_read_needs_barrier && !down_read_needs_barrier);
+        assert!(tracker.read.contains("compaction"));
+        assert!(!tracker.written.contains("compaction"), "the barrier published the write");
+        assert!(tracker.written.contains("up_out") && tracker.written.contains("down_out"));
+    }
+
+    #[test]
+    fn shared_route_a_consumer_encoded_before_the_prepass_write_is_published_needs_a_barrier() {
+        let mut tracker: HazardTracker<&str> = HazardTracker::new();
+        tracker.record(&[], Some("compaction"));
+
+        let needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "down_out");
+
+        assert!(needs_barrier);
+        assert!(tracker.written.contains("down_out") && !tracker.written.contains("compaction"));
+        assert!(tracker.read.contains("compaction"));
+    }
+}

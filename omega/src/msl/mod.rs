@@ -202,7 +202,7 @@ mod cooperative_fold_tests;
 mod serial_fold_index32_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod twin_elementwise_tests;
