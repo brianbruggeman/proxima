@@ -72,7 +72,11 @@ mod tests {
 
     #[test]
     fn warm_up_is_skipped_on_the_cpu_engine() {
-        assert!(!should_warm(&ServingConfig::default(), false));
+        let config = ServingConfig {
+            gpu_layers: 0,
+            ..ServingConfig::default()
+        };
+        assert!(!should_warm(&config, false));
     }
 
     #[test]
