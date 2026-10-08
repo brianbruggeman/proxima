@@ -930,7 +930,7 @@ pub(super) fn grouped_route_compacted(block: &TiledGemmBlock) -> bool {
         && block.gathered.is_some_and(|expert| expert.route_flat)
 }
 
-#[cfg(not(feature = "metal-grouped-gemm"))]
+#[cfg(all(feature = "metal-tiled-gemm", not(feature = "metal-grouped-gemm")))]
 pub(super) fn grouped_route_compacted(_block: &TiledGemmBlock) -> bool {
     false
 }
@@ -1170,7 +1170,7 @@ pub(crate) fn route_prepass_active(resolved: &BoundOp, packed_operands: &PackedO
     grouped_block(resolved, &quantized).is_some()
 }
 
-#[cfg(all(not(feature = "metal-grouped-gemm"), any(test, all(feature = "metal", target_os = "macos"))))]
+#[cfg(all(not(feature = "metal-grouped-gemm"), feature = "metal", target_os = "macos"))]
 pub(crate) fn route_prepass(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,
@@ -1179,7 +1179,7 @@ pub(crate) fn route_prepass(
     Ok(None)
 }
 
-#[cfg(all(not(feature = "metal-grouped-gemm"), any(test, all(feature = "metal", target_os = "macos"))))]
+#[cfg(all(not(feature = "metal-grouped-gemm"), feature = "metal", target_os = "macos"))]
 pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &PackedOperands) -> bool {
     false
 }
