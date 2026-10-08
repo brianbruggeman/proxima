@@ -155,6 +155,19 @@ pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "metal") {
 /// one E2B prefill plan at a 970-token prompt (402 MB of output slots).
 pub const DEFAULT_RESIDENT_PREFILL_PLAN_BYTES: usize = 512 * 1024 * 1024;
 
+/// [`ServingConfig::default`]'s `batch_size`: llama.cpp's own `-b` default
+/// (`common/common.h` `n_batch`), the logical batch an `-ub` micro-batch is
+/// clamped to.
+pub const DEFAULT_BATCH_SIZE: u32 = 2048;
+
+/// [`ServingConfig::default`]'s `ubatch_size`: llama.cpp's own `-ub` default
+/// (`common/common.h` `n_ubatch`). It sits above `omega`'s
+/// `TILED_GEMM_MIN_TOKENS` (`omega-runtime.toml` `[tiled_gemm].min_tokens`),
+/// so a prefill chunk reaches the tiled GEMM and row-tiled attention kernels;
+/// a smaller `-ub` lowers every chunk to the matvec path, which
+/// `LoadedModel::generate` logs at debug level.
+pub const DEFAULT_UBATCH_SIZE: u32 = 512;
+
 /// `--reasoning-budget -1` (upstream's own sentinel for "unbounded").
 pub const REASONING_BUDGET_UNBOUNDED: i32 = -1;
 
@@ -1172,7 +1185,7 @@ impl Default for ServingConfig<'static> {
     /// checkpoint's own limit, [`resolve_context_length`]): F32 KV (`-ctk`/`-ctv`), `-fa off`,
     /// `--reasoning-budget 0`, and `-ngl` `DEFAULT_GPU_LAYERS`. A default
     /// the admission check rejects is a defect, so the deviations are the
-    /// ones admission forces. `gpu_memory_fit` (`-fit`) also defaults `true`
+    /// ones admission forces. `-b`/`-ub` are llama.cpp's own defaults ([`DEFAULT_BATCH_SIZE`], [`DEFAULT_UBATCH_SIZE`]), not the invocation's 32, so real prefill chunks reach the tiled kernels. `gpu_memory_fit` (`-fit`) also defaults `true`
     /// here, not the invocation's own `off` -- see that field's own doc for
     /// why the safe default won this argument over exact invocation
     /// fidelity. Every
@@ -1190,8 +1203,8 @@ impl Default for ServingConfig<'static> {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
-            batch_size: 32,
-            ubatch_size: 32,
+            batch_size: DEFAULT_BATCH_SIZE,
+            ubatch_size: DEFAULT_UBATCH_SIZE,
             gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
@@ -1547,8 +1560,8 @@ mod tests {
         assert_eq!(config.kv_cache_key_quant, GgmlType::F32, "-ctk f32");
         assert_eq!(config.kv_cache_value_quant, GgmlType::F32, "-ctv f32");
         assert!(!config.flash_attention, "-fa off");
-        assert_eq!(config.batch_size, 32, "-b 32");
-        assert_eq!(config.ubatch_size, 32, "-ub 32");
+        assert_eq!(config.batch_size, 2048, "-b 2048");
+        assert_eq!(config.ubatch_size, 512, "-ub 512");
         assert_eq!(config.gpu_layers, DEFAULT_GPU_LAYERS, "-ngl all with metal");
         assert!(
             config.gpu_memory_fit,
@@ -1559,6 +1572,26 @@ mod tests {
         assert_eq!(config.reasoning_budget, 0, "--reasoning-budget 0");
         assert_eq!(config.min_p, 0.0, "--min-p 0");
         assert_eq!(config.model_path, DEFAULT_MODEL_PATH);
+    }
+
+    /// The kernel threshold is data (`omega-runtime.toml`
+    /// `[tiled_gemm].min_tokens`); the serving default chunk must clear it, or
+    /// real prefill lowers to the matvec path the benches never measured.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn default_ubatch_reaches_the_tiled_gemm_threshold() {
+        let config = ServingConfig::default();
+
+        assert!(
+            u64::from(config.ubatch_size) >= omega::sized::TILED_GEMM_MIN_TOKENS,
+            "default ubatch {} is below TILED_GEMM_MIN_TOKENS {}",
+            config.ubatch_size,
+            omega::sized::TILED_GEMM_MIN_TOKENS
+        );
+        assert!(
+            config.ubatch_size <= config.batch_size,
+            "llama.cpp clamps -ub to -b"
+        );
     }
 
     /// Every sampling field defaults to its own disabled value -- the
@@ -1813,8 +1846,8 @@ mod tests {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
-            batch_size: 32,
-            ubatch_size: 32,
+            batch_size: DEFAULT_BATCH_SIZE,
+            ubatch_size: DEFAULT_UBATCH_SIZE,
             gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
@@ -1935,8 +1968,8 @@ mod tests {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
-            batch_size: 32,
-            ubatch_size: 32,
+            batch_size: DEFAULT_BATCH_SIZE,
+            ubatch_size: DEFAULT_UBATCH_SIZE,
             gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
@@ -2030,8 +2063,8 @@ mod tests {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
-            batch_size: 32,
-            ubatch_size: 32,
+            batch_size: DEFAULT_BATCH_SIZE,
+            ubatch_size: DEFAULT_UBATCH_SIZE,
             gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,
@@ -2115,8 +2148,8 @@ mod tests {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
-            batch_size: 32,
-            ubatch_size: 32,
+            batch_size: DEFAULT_BATCH_SIZE,
+            ubatch_size: DEFAULT_UBATCH_SIZE,
             gpu_layers: DEFAULT_GPU_LAYERS,
             gpu_memory_fit: true,
             gpu_memory_limit_bytes: None,

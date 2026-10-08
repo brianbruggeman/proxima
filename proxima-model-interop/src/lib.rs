@@ -153,7 +153,7 @@ pub use serving_grammar::{AssembleStep, ReadSpec};
 #[cfg(feature = "std")]
 pub use serving::GdnPrefillBackend;
 pub use serving::{
-    ContextLength, DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, NgramMapParams, NgramModParams,
+    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_MODEL_PATH, DEFAULT_UBATCH_SIZE, GPU_LAYERS_ALL, NamePattern, NgramMapParams, NgramModParams,
     AttentionConfig, PrefillConfig, PromptCacheConfig, REASONING_BUDGET_UNBOUNDED, ServingConfig, SpeculativeConfig, SpeculativeType,
     SpeculativeTypeSet, WeightPrecisionRule, apply_serving_config, resolve_context_length,
 };
