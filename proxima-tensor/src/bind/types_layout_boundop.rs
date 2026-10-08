@@ -562,28 +562,42 @@ impl BoundOpKind {
     /// layout itself.
     #[must_use]
     pub fn moe_topk_extra_outputs(&self, token_count: usize) -> Vec<(NodeId, usize)> {
-        let BoundOpKind::MoeTopK {
-            top_k,
-            routes,
-            weights,
-            weight_total,
-            stacked,
-            ..
-        } = self
-        else {
-            return Vec::new();
+        self.moe_topk_extra_outputs_iter(token_count).collect()
+    }
+
+    /// [`BoundOpKind::moe_topk_extra_outputs`] without collecting: the same
+    /// nodes, counts and order as a borrowing iterator, for a dispatch path
+    /// that must not allocate per step.
+    pub fn moe_topk_extra_outputs_iter(
+        &self,
+        token_count: usize,
+    ) -> impl Iterator<Item = (NodeId, usize)> + '_ {
+        let fields = match self {
+            BoundOpKind::MoeTopK {
+                top_k,
+                routes,
+                weights,
+                weight_total,
+                stacked,
+                ..
+            } => Some((*top_k, routes, weights, weight_total, stacked)),
+            _ => None,
         };
-        let per_token = routes
-            .iter()
-            .skip(1)
-            .chain(weights.iter())
-            .chain(core::iter::once(weight_total))
-            .map(|node| (*node, token_count));
-        let per_slot = stacked
-            .iter()
-            .flat_map(|(stacked_routes, stacked_weights)| [*stacked_routes, *stacked_weights])
-            .map(|node| (node, token_count * *top_k as usize));
-        per_token.chain(per_slot).collect()
+        fields
+            .into_iter()
+            .flat_map(move |(top_k, routes, weights, weight_total, stacked)| {
+                let per_token = routes
+                    .iter()
+                    .skip(1)
+                    .chain(weights.iter())
+                    .chain(core::iter::once(weight_total))
+                    .map(move |node| (*node, token_count));
+                let per_slot = stacked
+                    .iter()
+                    .flat_map(|(stacked_routes, stacked_weights)| [*stacked_routes, *stacked_weights])
+                    .map(move |node| (node, token_count * top_k as usize));
+                per_token.chain(per_slot)
+            })
     }
 
     /// This variant's own discriminant name, used by every backend renderer
