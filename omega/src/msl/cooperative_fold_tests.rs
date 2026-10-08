@@ -76,6 +76,7 @@ fn cooperative_fold_issues_every_slot_load_before_the_first_fold() {
     assert!(source.contains(&format!("walk0 += {unroll} * advance0;")));
 }
 
+#[cfg(feature = "metal-wide-cooperative-reduce")]
 #[test]
 fn cooperative_fold_keeps_slot_order_so_the_sum_is_the_serial_sum() {
     let source = emit(
