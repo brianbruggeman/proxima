@@ -2092,3 +2092,59 @@ cargo nextest run -p omega --features metal -E 'binary(packed_row_attn_output_sh
 cargo nextest run -p omega --features metal -E 'test(a_plain_matvec_finishes_each_row) or test(a_fused_epilogue_finishes_each_row)'
 cargo nextest run -p proxima-model-interop --features std,metal --run-ignored all -E 'test(gemma4_decode_holds_one_per_layer_input_norm)'
 ```
+
+## r9 follow-up: the per-layer-input norm as one reduce (written 2026-10-07, nothing below was run)
+
+Supersedes the "Fusion route, not written" paragraph and the `#[ignore]`d census test described above.
+
+### what changed
+
+- Grammar: a multi-term operand axis `tile*outer + inner@tile` now sizes `outer` as the operand extent divided by `tile`
+  (`AxisIndex::split_outer_axis`, `proxima-tensor/src/map.rs`; `split_outer_extent`, `shape.rs`). It is a fallback
+  applied after every other operand has had its say, so a program that already resolved `outer` from an anchor resolves
+  the same value; only programs that previously failed with `UnconstrainedDim` are newly accepted. A tile that is not
+  the stride, or an extent that is not a whole number of tiles, still fails `UnconstrainedDim`. The symbol-mask twin
+  (`fold_split_into_iteration_masks`) follows the same rule.
+- Notation: an axis of constants alone (`"s,3,d->sd"`) is a fixed index with no iteration term
+  (`parse_axis_expr`, `spec/primitives.rs`).
+- Program: `append_ple_shared_projections` views the flat `[s, 35*256]` projection and embedding gather as
+  `[s, 35, 256]` through `"s,256*l+d@256->sld"`, applies `rmsnorm_per_head(.., "l")` (one `sumsq` reduce over
+  `[s, 35, 256]`), adds, scales, and `ple_layer_input` reads layer `n` as `"s,n,d->sd"`. The 2D
+  `per_layer_model_proj.weight` leaf, the GGUF binder and `declared_leaves_match_bound_leaves_tests` are untouched; leaf
+  declaration order is unchanged (`eps` was already declared before the preamble in both callers).
+- Everything downstream of `ple_layer_input` (gate matmul, GeLU, `gated`, `proj`, post norm) still consumes a `[s, 256]` node.
+
+### digests expected to change (derived, to be confirmed by the recapture)
+
+Only `proxima-model-interop/tests/fixtures/llama-parity/gemma4_e2b.digest` hashes a program that contains the preamble
+(`describe_program` hashes the raw `Op` list, `tests/arch_data_baseline.rs:166`):
+
+- `bind.ops` 6074 -> 5632 and `verify.ops` 6072 -> 5630: old form 14 ops per layer x 35 = 490, new form 13 shared + 35
+  slices = 48, delta -442 (derived from reading the two builders, not measured).
+- `bind.ops_sha256`, `verify.ops_sha256`: every op after the preamble moves and the preamble ops differ.
+- `bind.logits_root`, `verify.logits_root`: NodeId = op index, shifted by the op-count change.
+- `bind.layer_roots` / `verify.layer_roots` sha256: NodeIds of every layer root shift (the 35 per-layer preamble blocks
+  used to interleave with the layers and now all precede layer 0).
+
+Unchanged by construction: `residual_roots`, `router_roots`, `hidden_root`, `single_position_step`, every `.bound` file
+(same leaves), and the other seven `.digest` files (`gemma4_26b` declares `embedding_length_per_layer_input = 0`,
+`fixtures/llama-parity/gemma4_26b/gguf_kv.txt:37`; the rest are non-gemma4 architectures).
+
+### tests written (not run)
+
+- `proxima-tensor/src/spec/attention_forward.rs` `ple_single_reduce_parity_tests`: 5 layers, ple_dim 8, embedding 12,
+  3 tokens, CPU evaluator, one-reduce form against the per-layer windowed form over the same flat nodes, 1e-6; a control
+  that layer 0 of one form differs from layer 1 of the other by more than 1e-3; a count of `Keep::Reduce` ops
+  (matmul 1 + shared norm 1 + windowed 5).
+- `proxima-tensor/src/shape.rs`: tiled split sizes its outer axis; partial tile and tile != stride stay `UnconstrainedDim`.
+- `proxima-tensor/src/spec/tests.rs`: a constant axis parses with no terms; a constant with `@len` is malformed.
+- `proxima-model-interop/tests/gemma4_norm_family_census.rs`: not ignored, fails when the checkpoint is missing,
+  asserts 1 reduce over `[1, 35, 256]` and 0 over `[1, 256]`.
+
+### run after
+
+```
+cargo nextest run -p proxima-tensor -E 'test(ple_) or test(tiled_split) or test(split_over) or test(split_whose) or test(constant_axis)'
+cargo nextest run -p proxima-model-interop --features std,metal -E 'test(gemma4_decode_holds_one_per_layer_input_norm_reduce)'
+# then recapture the gemma4_e2b digest with the arch_data_baseline capture path and diff it against the list above
+```
