@@ -152,7 +152,7 @@ pub const DEFAULT_GPU_LAYERS: i32 = if cfg!(feature = "metal") {
 };
 
 /// [`ServingConfig::default`]'s `resident_prefill_plan_bytes`: 512 MiB holds
-/// one E2B prefill plan at a 970-token prompt (402 MB of output slots).
+/// one prefill plan of a 970-token prompt on a 35-layer decoder (402 MB of output slots).
 pub const DEFAULT_RESIDENT_PREFILL_PLAN_BYTES: usize = 512 * 1024 * 1024;
 
 /// [`ServingConfig::default`]'s `batch_size`: llama.cpp's own `-b` default
@@ -1099,7 +1099,7 @@ pub struct ServingConfig<'model> {
     /// A plan is a function of `(new_count, kv bucket, PlanIdentity)`, so a
     /// request that repeats a shape skips the plan build, the arena build and
     /// the plan-time constant dispatch (23-27 ms at a 970-token prompt). The
-    /// plans cost device memory for as long as they are held: a 970-token E2B
+    /// plans cost device memory for as long as they are held: a 970-token
     /// prefill plan is 402 MB. `0` keeps nothing past the call that built it
     /// and frees a prompt-width plan when the shape changes, which is the
     /// behaviour before this field existed. Decode-width (`new_count == 1`)
@@ -1937,7 +1937,7 @@ mod tests {
     /// reduce operand of an RMSNorm apply instead of only the first (the
     /// first is the two-reader projection output, which the single-reader
     /// gate rejects), so the serving default is the switch that takes the
-    /// 170 per-token norm applies of a gemma4-E2B decode step to zero.
+    /// 170 per-token norm applies of a dense decode step to zero.
     #[test]
     fn default_numeric_policy_admits_the_widened_reduce_epilogue_fusion() {
         let widened = proxima_tensor::NumericRewrite::WidenedReduceEpilogueFusion;

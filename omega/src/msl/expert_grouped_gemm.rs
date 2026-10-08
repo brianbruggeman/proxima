@@ -425,7 +425,7 @@ fn push_grouped_consume(source: &mut String) {
 /// tiles after the barrier. Per-thread row and token pointers are formed once
 /// per tile and advance by one K step of the weight cursor
 /// ([`push_block_cursor_advance`]) and one K step of activations (32 floats)
-/// per step. Measured on a granite-shaped `Q8_0` gathered
+/// per step. Measured on a `Q8_0` gathered 8-of-32-expert (1024 by 512)
 /// gate projection, uniform routing, 1000 tokens, `col_parts` 4
 /// (`expert_grouped_gemm_speed_probe`): 700 us with the staging inside the
 /// barrier pair and the pointers rebuilt every step, 402 us in this order.

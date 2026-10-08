@@ -4877,7 +4877,7 @@ mod reduce_epilogue_fusion_tests {
         }
     }
 
-    /// [`projection_rmsnorm_program`] followed by the post-norm tail gemma4
+    /// [`projection_rmsnorm_program`] followed by the post-norm tail a decoder
     /// runs on its hidden-width norms: `* gamma`, then `+ residual`. Returns
     /// `(program, [act, weight, inv_dim, eps, gamma, residual], output)`.
     fn projection_rmsnorm_residual_program(

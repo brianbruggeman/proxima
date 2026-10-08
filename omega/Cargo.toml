@@ -74,7 +74,7 @@ reduce-epilogue-fusion = ["proxima-tensor/reduce-epilogue-fusion"]
 identity-copy-alias = ["proxima-tensor/identity-copy-alias"]
 # Plan-time collapse of sibling elementwise ops (same iteration space, same reads, different body)
 # into one `BoundOpKind::ElementwiseTwin` dispatch that writes both outputs: the two rotated halves
-# of every RoPE pair, 100 dispatches to 50 per gemma4-E2B decode token. `PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION`
+# of every RoPE pair, 100 dispatches to 50 per decode token of a 35-layer decoder. `PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION`
 # is the off arm of the A/B. Joins `metal` with the kernel renderer and the extra-output binding.
 twin-elementwise-fusion = []
 # Backends are MIX-AND-MATCH, the same shape `runtime-prime` and

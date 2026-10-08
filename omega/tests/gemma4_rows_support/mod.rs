@@ -1,7 +1,7 @@
 //! The gemma4-shaped two-layer two-range cached program the row-tiled
 //! attention gates share: a sliding layer (head_dim 256, window 512) and a
 //! global layer (head_dim 512, unwindowed), eight query heads on one kv head
-//! each, the attention geometry of gemma4-E2B at the dimensions the row-tiled
+//! each, the attention geometry of an eight-head decoder with one kv head at the dimensions the row-tiled
 //! kernel is sized for. Every named input is generated from the program's own
 //! inferred shapes, RoPE tables are real rotary angles at the absolute
 //! positions of the new rows, and the cache holds `cached_len` live rows
@@ -52,9 +52,9 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    /// gemma4-E2B: eight query heads on one kv head, head dims 256 and 512,
+    /// Eight query heads on one kv head, head dims 256 and 512,
     /// a 512-key window.
-    pub const GEMMA4_E2B: Self = Self {
+    pub const ONE_KV_HEAD: Self = Self {
         query_heads: QUERY_HEADS,
         kv_heads: KV_HEADS,
         sliding_head_dim: SLIDING_HEAD_DIM,
@@ -62,9 +62,9 @@ impl Geometry {
         window: SLIDING_WINDOW,
     };
 
-    /// granite-3.1 MoE 1B: sixteen query heads on eight kv heads, two query
+    /// Sixteen query heads on eight kv heads, two query
     /// groups of head dim 64 in both layers.
-    pub const GRANITE_MOE: Self = Self {
+    pub const TWO_QUERY_GROUPS: Self = Self {
         query_heads: 16,
         kv_heads: 8,
         sliding_head_dim: 64,
@@ -205,7 +205,7 @@ fn named_block(
 /// at the capacity bucket `bucket_for(cached_len)`.
 #[must_use]
 pub fn fixture(rows: usize, cached_len: usize) -> Fixture {
-    fixture_with(rows, cached_len, Geometry::GEMMA4_E2B)
+    fixture_with(rows, cached_len, Geometry::ONE_KV_HEAD)
 }
 
 /// [`fixture`] at another attention geometry: a window under `rows` is one the
