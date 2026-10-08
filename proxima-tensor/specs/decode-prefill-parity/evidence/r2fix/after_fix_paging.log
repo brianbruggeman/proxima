@@ -1,0 +1,14 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+    Finished `gate` profile [optimized] target(s) in 15.14s
+────────────
+ Nextest run ID 7f0768cc-a917-4614-af89-7260a698d079 with nextest profile: default
+    Starting 4 tests across 1 binary (33 binaries skipped)
+        PASS [   0.187s] (1/4) proxima-model-interop::external_expert_paging evicting_every_expert_of_a_layer_fails_the_next_decode
+        PASS [   0.231s] (2/4) proxima-model-interop::external_expert_paging paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues
+        PASS [   0.180s] (3/4) proxima-model-interop::external_expert_paging paging_an_out_of_range_expert_index_is_rejected
+        PASS [   0.283s] (4/4) proxima-model-interop::external_expert_paging q2k_paging_actually_changes_the_decoded_ids
+────────────
+     Summary [   0.881s] 4 tests run: 4 passed, 0 skipped

@@ -1,0 +1,95 @@
+diff --git a/proxima-model-interop/tests/arch_data_baseline.rs b/proxima-model-interop/tests/arch_data_baseline.rs
+index 720bdc6f..6edeef60 100644
+--- a/proxima-model-interop/tests/arch_data_baseline.rs
++++ b/proxima-model-interop/tests/arch_data_baseline.rs
+@@ -424,9 +424,9 @@ fn assert_bound(checkpoint: &Checkpoint) {
+ fn arch_data_digest_gemma4_26b() {
+     let record = digest_record(&GEMMA4_26B);
+     assert!(
+-        record.contains("\nbind.ops=13314\n")
+-            && record.contains("\nbind.logits_root=NodeId(13313)\n"),
+-        "gemma4 26B must lower to 13314 ops ending at NodeId(13313), got:\n{record}"
++        record.contains("\nbind.ops=10434\n")
++            && record.contains("\nbind.logits_root=NodeId(10433)\n"),
++        "gemma4 26B must lower to 10434 ops ending at NodeId(10433), got:\n{record}"
+     );
+     assert_matches_fixture(&GEMMA4_26B, "digest", &record);
+ }
+diff --git a/proxima-model-interop/tests/fixtures/llama-parity/gemma4_26b.digest b/proxima-model-interop/tests/fixtures/llama-parity/gemma4_26b.digest
+index 7eb5a28f..ec1d548d 100644
+--- a/proxima-model-interop/tests/fixtures/llama-parity/gemma4_26b.digest
++++ b/proxima-model-interop/tests/fixtures/llama-parity/gemma4_26b.digest
+@@ -1,19 +1,19 @@
+ checkpoint=gemma4_26b
+ architecture=gemma4
+ kv_layout=SlidingRing
+-bind.ops=13314
+-bind.ops_sha256=16df0e6e9e7dca0a66dbe85da03a0d923078eeae673a26989d1fb4179d9be1ee
+-bind.logits_root=NodeId(13313)
++bind.ops=10434
++bind.ops_sha256=0ab51d50bb1060f761198acf68def4c538640d6e619b4506b4fd498577cae094
++bind.logits_root=NodeId(10433)
+ bind.hidden_root=None
+ bind.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+-bind.layer_roots=30 sha256=492a314fa6fd291fd868318d8946f81603f488882a74a9b36ed1da5f70288c6f
++bind.layer_roots=30 sha256=8c83ebbbab7b43f5338e8bc5a1e3619e317c441029707af880a499e508138d14
+ bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+ bind.single_position_step=false
+-verify.ops=13312
+-verify.ops_sha256=42b30229bd27d6b7e9a98309f80293f83b9b8c47e6a6937218ab62876f7ec903
+-verify.logits_root=NodeId(13311)
++verify.ops=10432
++verify.ops_sha256=a28a3586c8d0f16cb0334703389e500db20f376b7247f0732c8c133cc3796390
++verify.logits_root=NodeId(10431)
+ verify.hidden_root=None
+ verify.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+-verify.layer_roots=30 sha256=492a314fa6fd291fd868318d8946f81603f488882a74a9b36ed1da5f70288c6f
++verify.layer_roots=30 sha256=8c83ebbbab7b43f5338e8bc5a1e3619e317c441029707af880a499e508138d14
+ verify.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+ verify.single_position_step=false
+diff --git a/proxima-model-interop/tests/fixtures/llama-parity/granite_moe.digest b/proxima-model-interop/tests/fixtures/llama-parity/granite_moe.digest
+index d1ef8e14..f232be9c 100644
+--- a/proxima-model-interop/tests/fixtures/llama-parity/granite_moe.digest
++++ b/proxima-model-interop/tests/fixtures/llama-parity/granite_moe.digest
+@@ -1,12 +1,12 @@
+ checkpoint=granite_moe
+ architecture=granitemoe
+ kv_layout=SlidingRing
+-bind.ops=6394
+-bind.ops_sha256=3b38dc043ff3e81bbe22549c07371db0a89254bee4655e1856678f7bba1a4f96
+-bind.logits_root=NodeId(6393)
+-bind.hidden_root=Some(NodeId(6388))
+-bind.residual_roots=24 sha256=b5e40c1091c63a784b2b67dd86d2f9838ec2ea1fec975348096b3405294ff6f5
+-bind.layer_roots=24 sha256=3c8cf19feec1297d7b4b4fdadf26db150ccde6ac2daf96ebfcdb943124ae56eb
++bind.ops=5602
++bind.ops_sha256=7240c7067a8b46d76e4328071e885c8631347f83d7fc3e2ef8c2a5c32bb104b3
++bind.logits_root=NodeId(5601)
++bind.hidden_root=Some(NodeId(5596))
++bind.residual_roots=24 sha256=b1d7c9ba0647d158ea13d24eabba9ff283b5f8339aecb77067e6dd943c1864b4
++bind.layer_roots=24 sha256=aa2a05ac7b82885ca6bac2a714ccf4c64b2d07ef908d9383065cc80e882d8427
+ bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+ bind.single_position_step=false
+ verify=absent
+diff --git a/proxima-model-interop/tests/fixtures/llama-parity/qwen35moe.digest b/proxima-model-interop/tests/fixtures/llama-parity/qwen35moe.digest
+index 83338427..c66beef3 100644
+--- a/proxima-model-interop/tests/fixtures/llama-parity/qwen35moe.digest
++++ b/proxima-model-interop/tests/fixtures/llama-parity/qwen35moe.digest
+@@ -1,12 +1,12 @@
+ checkpoint=qwen35moe
+ architecture=qwen35moe
+ kv_layout=SlidingRing
+-bind.ops=14982
+-bind.ops_sha256=673ac8ff40188127fafd1cf7c8a99ad278d4aee1d5d01c4f8b70a1c940e0ee87
+-bind.logits_root=NodeId(14981)
+-bind.hidden_root=Some(NodeId(14976))
++bind.ops=13662
++bind.ops_sha256=8ed557b6d57ff56871053d0b873fc8b247449b86b284455fb523562ef6e3f729
++bind.logits_root=NodeId(13661)
++bind.hidden_root=Some(NodeId(13656))
+ bind.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+-bind.layer_roots=40 sha256=c3c70db45e2ef3f8a5247e3677cb9a30ff8ff22636a5c5981918370594543f1a
+-bind.router_roots=40 sha256=6c9e57c40d26838335e4e882e2fd2cd8e2973431ecbc8f97b42e2cdd44f68927
++bind.layer_roots=40 sha256=537adb59e8936dddd5529f44b573af32d8e998be51da0b9b778d0d58bd0752eb
++bind.router_roots=40 sha256=d3c7967309bc03fc09f6bc2a13cc82666ccac35fd71cf2815709c931ee067c4a
+ bind.single_position_step=true
+ verify=absent
