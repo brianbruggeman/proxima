@@ -284,6 +284,8 @@ pub enum MetalError {
     ExpertSourceUnsupported { node: NodeId, reason: &'static str },
     #[error("metal expert source for node {node} is not resident for routed expert {expert}")]
     ExpertSourceMiss { node: NodeId, expert: u32 },
+    #[error("metal expert-grouped op {node} located tiles from a route compaction whose header does not match the route length (the prepass did not run or ran on another route)")]
+    RouteCompactionMismatch { node: NodeId },
     #[error("checkpoint mmap page discard failed with errno {errno}")]
     CheckpointMmapDiscardFailed { errno: i32 },
     #[error("hazard tracking: operand {node} has no resolved device buffer")]

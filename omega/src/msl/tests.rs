@@ -9387,7 +9387,7 @@ mod expert_grouped_route_segments {
 
         assert!(source.contains("if (route_compaction[0] != (uint)token_extent) {"), "{source}");
         assert!(
-            source.contains("atomic_fetch_max_explicit(&fault[0], (uint)u.gather_extent[0] + 1u, memory_order_relaxed);"),
+            source.contains(&format!("atomic_fetch_max_explicit(&fault[0], {ROUTE_COMPACTION_MISMATCH_FAULT}u, memory_order_relaxed);")),
             "{source}"
         );
         assert!(source.contains("if (grouped_expert < 0) { return; }"), "{source}");
