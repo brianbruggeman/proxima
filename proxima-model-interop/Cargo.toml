@@ -631,6 +631,12 @@ required-features = ["std", "metal", "instrument"]
 name = "step_encode_bound"
 required-features = ["std", "metal", "instrument"]
 
+# One captured decode step replayed with every kernel body replaced by an empty
+# one, under three binding and grid shapes: the cost of the dispatch stream.
+[[example]]
+name = "dispatch_floor"
+required-features = ["std", "metal", "instrument"]
+
 # Where the commit-to-scheduled milliseconds of a first prefill command buffer
 # go: cold, warm, pre-touched and small-prefill-first stages in one process.
 [[example]]
