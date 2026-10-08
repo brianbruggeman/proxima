@@ -10,8 +10,8 @@ use crate::RopeScaling;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::speculative_settings::SpeculativeSettings;
 use crate::serving::{
-    ContextLength, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, GdnPrefillBackend, NamePattern,
-    ServingConfig, WeightPrecisionRule,
+    ContextLength, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH, DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
+    GdnPrefillBackend, NamePattern, ServingConfig, WeightPrecisionRule,
 };
 
 mod levels;
@@ -304,6 +304,10 @@ pub struct ServingSettings {
     #[setting(default = 0)]
     #[builder(default = 0)]
     pub max_command_buffers_per_token: usize,
+    /// `ServingConfig::resident_prefill_plan_bytes`: bytes of output slots prompt-width plans may keep resident between requests; `0` frees them as soon as the shape changes.
+    #[setting(default = 536870912)]
+    #[builder(default = DEFAULT_RESIDENT_PREFILL_PLAN_BYTES)]
+    pub resident_prefill_plan_bytes: usize,
     /// `ServingConfig::overlap_transfer_compute`: overlap weight transfer with compute.
     #[setting(default = false)]
     #[builder(default = false)]
@@ -402,6 +406,7 @@ impl ServingSettings {
             plan_refit: self.plan_refit,
             command_buffer_chunks: self.command_buffer_chunks,
             max_command_buffers_per_token: self.max_command_buffers_per_token,
+            resident_prefill_plan_bytes: self.resident_prefill_plan_bytes,
             overlap_transfer_compute: self.overlap_transfer_compute,
             admission_schedule: self.admission_schedule.as_admission_schedule(),
             phase_schedule: self.phase_schedule.as_phase_schedule(),
@@ -844,6 +849,7 @@ plan_time_constants = false
 plan_refit = false
 command_buffer_chunks = 8
 max_command_buffers_per_token = 12
+resident_prefill_plan_bytes = 805306368
 overlap_transfer_compute = true
 "#;
 
@@ -859,6 +865,7 @@ overlap_transfer_compute = true
             .plan_refit(false)
             .command_buffer_chunks(8)
             .max_command_buffers_per_token(12)
+            .resident_prefill_plan_bytes(805_306_368)
             .overlap_transfer_compute(true)
             .build();
         let from_env = temp_env::with_vars(
@@ -872,6 +879,7 @@ overlap_transfer_compute = true
                 ("PROXIMA_SERVING_PLAN_REFIT", Some("false")),
                 ("PROXIMA_SERVING_COMMAND_BUFFER_CHUNKS", Some("8")),
                 ("PROXIMA_SERVING_MAX_COMMAND_BUFFERS_PER_TOKEN", Some("12")),
+                ("PROXIMA_SERVING_RESIDENT_PREFILL_PLAN_BYTES", Some("805306368")),
                 ("PROXIMA_SERVING_OVERLAP_TRANSFER_COMPUTE", Some("true")),
             ],
             || ServingSettings::from_env().expect("the switches env parses"),
@@ -890,6 +898,7 @@ overlap_transfer_compute = true
         assert!(!config.plan_refit);
         assert_eq!(config.command_buffer_chunks, 8);
         assert_eq!(config.max_command_buffers_per_token, 12);
+        assert_eq!(config.resident_prefill_plan_bytes, 805_306_368);
         assert!(config.overlap_transfer_compute);
 
         let defaults = ServingSettings::default();
@@ -904,6 +913,7 @@ overlap_transfer_compute = true
         assert_eq!(lowered.plan_refit, today.plan_refit);
         assert_eq!(lowered.command_buffer_chunks, today.command_buffer_chunks);
         assert_eq!(lowered.max_command_buffers_per_token, today.max_command_buffers_per_token);
+        assert_eq!(lowered.resident_prefill_plan_bytes, today.resident_prefill_plan_bytes);
         assert_eq!(lowered.overlap_transfer_compute, today.overlap_transfer_compute);
     }
 

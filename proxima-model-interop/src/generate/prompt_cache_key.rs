@@ -171,6 +171,8 @@ impl CacheKey {
             // how one step's dispatches split across command buffers
             command_buffer_chunks: _,
             max_command_buffers_per_token: _,
+            // device memory held for plans between calls: never changes rows
+            resident_prefill_plan_bytes: _,
             overlap_transfer_compute: _,
             // request ordering and residency scheduling levels
             admission_schedule: _,

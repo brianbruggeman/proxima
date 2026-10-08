@@ -3652,6 +3652,7 @@ mod tests {
     #[case::ubatch_and_batch_widths(|config| ServingConfig { ubatch_size: 8, batch_size: 64, ..config })]
     #[case::kv_bucket_tokens(|config| ServingConfig { kv_bucket_tokens: 64, ..config })]
     #[case::command_buffer_chunks(|config| ServingConfig { command_buffer_chunks: 4, ..config })]
+    #[case::resident_prefill_plan_bytes(|config| ServingConfig { resident_prefill_plan_bytes: 0, ..config })]
     #[case::context_length_resolution(|config| ServingConfig { context_length: ContextLength::Within(4096), ..config })]
     #[case::prompt_cache_policy(|config| ServingConfig { prompt_cache: PromptCacheConfig { max_entries: 9, ..config.prompt_cache }, ..config })]
     async fn a_request_differing_only_in_a_row_independent_field_shares_the_entry(
