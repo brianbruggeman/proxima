@@ -313,6 +313,10 @@ pub struct ServingSettings {
     #[setting(default = false)]
     #[builder(default = false)]
     pub overlap_transfer_compute: bool,
+    /// `ServingConfig::warm_model_buffers_at_load`: declare the loaded model's buffers to the driver at load instead of in the first prefill.
+    #[setting(default = true)]
+    #[builder(default = true)]
+    pub warm_model_buffers_at_load: bool,
     #[setting(nested)]
     #[builder(default)]
     pub admission_schedule: AdmissionScheduleSettings,
@@ -409,6 +413,7 @@ impl ServingSettings {
             max_command_buffers_per_token: self.max_command_buffers_per_token,
             resident_prefill_plan_bytes: self.resident_prefill_plan_bytes,
             overlap_transfer_compute: self.overlap_transfer_compute,
+            warm_model_buffers_at_load: self.warm_model_buffers_at_load,
             admission_schedule: self.admission_schedule.as_admission_schedule(),
             phase_schedule: self.phase_schedule.as_phase_schedule(),
             expert_residency_schedule: self.expert_residency_schedule.as_expert_residency_schedule(),
@@ -866,6 +871,7 @@ command_buffer_chunks = 8
 max_command_buffers_per_token = 12
 resident_prefill_plan_bytes = 805306368
 overlap_transfer_compute = true
+warm_model_buffers_at_load = false
 "#;
 
         let from_toml: ServingSettings =
@@ -882,6 +888,7 @@ overlap_transfer_compute = true
             .max_command_buffers_per_token(12)
             .resident_prefill_plan_bytes(805_306_368)
             .overlap_transfer_compute(true)
+            .warm_model_buffers_at_load(false)
             .build();
         let from_env = temp_env::with_vars(
             [
@@ -896,6 +903,7 @@ overlap_transfer_compute = true
                 ("PROXIMA_SERVING_MAX_COMMAND_BUFFERS_PER_TOKEN", Some("12")),
                 ("PROXIMA_SERVING_RESIDENT_PREFILL_PLAN_BYTES", Some("805306368")),
                 ("PROXIMA_SERVING_OVERLAP_TRANSFER_COMPUTE", Some("true")),
+                ("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD", Some("false")),
             ],
             || ServingSettings::from_env().expect("the switches env parses"),
         );
@@ -915,6 +923,7 @@ overlap_transfer_compute = true
         assert_eq!(config.max_command_buffers_per_token, 12);
         assert_eq!(config.resident_prefill_plan_bytes, 805_306_368);
         assert!(config.overlap_transfer_compute);
+        assert!(!config.warm_model_buffers_at_load);
 
         let defaults = ServingSettings::default();
         let lowered = defaults.as_serving_config(&[]);
@@ -930,6 +939,8 @@ overlap_transfer_compute = true
         assert_eq!(lowered.max_command_buffers_per_token, today.max_command_buffers_per_token);
         assert_eq!(lowered.resident_prefill_plan_bytes, today.resident_prefill_plan_bytes);
         assert_eq!(lowered.overlap_transfer_compute, today.overlap_transfer_compute);
+        assert_eq!(lowered.warm_model_buffers_at_load, today.warm_model_buffers_at_load);
+        assert!(today.warm_model_buffers_at_load, "the warm-up is on by default");
     }
 
     #[test]

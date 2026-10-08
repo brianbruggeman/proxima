@@ -230,6 +230,7 @@ mod prewarm_gate;
 mod prewarm_queue;
 mod ring_checkpoint;
 mod serving_backend;
+mod warm_buffers;
 mod tests_all;
 #[cfg(test)]
 mod chunked_prefill_tests;
