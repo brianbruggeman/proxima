@@ -106,12 +106,17 @@ impl BoundOpBuilder {
                     .iter()
                     .any(|(_, map)| map.affine().axes.iter().any(|axis| axis.terms.len() > 1));
                 let descendants = self.packed_mapping_subtree.borrow();
+                let held = self.held.borrow();
                 direct
-                    || operands.iter().any(|(operand, _)| {
-                        descendants
-                            .get(operand.0 as usize)
-                            .copied()
-                            .unwrap_or(false)
+                    || operands.iter().any(|(operand, map)| {
+                        let fuses_into_this_node = retires.contains(operand)
+                            && is_identity_projection(map)
+                            && held.contains_key(operand);
+                        fuses_into_this_node
+                            && descendants
+                                .get(operand.0 as usize)
+                                .copied()
+                                .unwrap_or(false)
                     })
             }
             _ => false,
