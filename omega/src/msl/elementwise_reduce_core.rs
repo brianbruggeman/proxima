@@ -894,19 +894,20 @@ pub(super) fn push_packed_row_combine_and_write(
     rows: usize,
     rank: usize,
     output_axes: &[u16],
+    direct_axis: Option<u16>,
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
     let combine_fn = simd_combine_fn(node, reduce_op)?;
-    if rows <= SIMD_WIDTH as usize && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
-    {
+    if rows <= SIMD_WIDTH as usize {
         push_packed_row_lane_parallel_tail(
             source,
             combine_fn,
             rows,
             rank,
             output_axes,
+            direct_axis,
             element_type,
             epilogue_body,
             epilogue_operands,
@@ -968,6 +969,7 @@ pub(super) fn push_packed_row_combine_and_write(
     rows: usize,
     rank: usize,
     output_axes: &[u16],
+    _direct_axis: Option<u16>,
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
@@ -2322,11 +2324,14 @@ fn push_packed_row_lane_parallel_tail(
     rows: usize,
     rank: usize,
     output_axes: &[u16],
+    direct_axis: Option<u16>,
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     let rank_len = rank.max(1);
+    let plain_direct_axis =
+        direct_axis.filter(|_| reduce_epilogue_is_identity(epilogue_body, epilogue_operands));
     for row in 0..rows {
         source.push_str(&format!(
             "    {element_type} reduced_row{row} = {combine_fn}(sumf[{row}]);\n"
@@ -2340,6 +2345,15 @@ fn push_packed_row_lane_parallel_tail(
     ));
     source.push_str("        long flat = group_first + (long)lane;\n");
     source.push_str("        if (flat < u.output_total) {\n");
+    if let Some(axis) = plain_direct_axis {
+        source.push_str(&format!(
+            "            long out_offset = u.out_base + flat * u.out_strides[{axis}];\n"
+        ));
+        source.push_str("            out[out_offset] = reduced;\n");
+        source.push_str("        }\n");
+        source.push_str("    }\n");
+        return;
+    }
     source.push_str(&format!("            long lane_coord[{rank_len}];\n"));
     for dim in 0..rank {
         let coords: Vec<String> = (0..rows)
