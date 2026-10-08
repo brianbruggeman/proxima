@@ -1112,6 +1112,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             &mut program,
             ids,
             x,
+            eps,
             vocab,
             embedding,
             ple_dim,
@@ -1221,9 +1222,9 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
         } else {
             None
         };
-        if let (Some(shared), Some(ple_dim)) = (&ple_shared, ple_dim) {
+        if let Some(shared) = &ple_shared {
             ple_layer_inputs[layer as usize] =
-                Some(ple_layer_input(&mut program, shared, eps, layer, ple_dim)?);
+                Some(ple_layer_input(&mut program, shared, layer)?);
         }
 
 
