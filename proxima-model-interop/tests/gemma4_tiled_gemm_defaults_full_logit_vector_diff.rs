@@ -51,6 +51,12 @@ use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel};
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 
+/// `PROXIMA_TILED_GEMM_DISABLE` names codecs rather than taking `0`, so the
+/// all-off arm lists every codec with a tiled decode description: unlike the
+/// four `"0"` switches above, this one keeps `Q5_0`, `Q8_0`, `F16`, `Q3_K`,
+/// `Q5_K` and `Q6_K` off the tiled GEMM too.
+const TILED_GEMM_DISABLE_ALL_CODECS: &str = "q4_0,q4k,q5_0,q5_1,q8_0,q3k,q5k,q6k,f16";
+
 fn results_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("proxima-gemma4-tiled-gemm-logits")
 }
@@ -280,20 +286,22 @@ fn gemma4_e2b_tiled_gemm_defaults_vs_all_off_full_logit_vector_diff() {
             None
         };
 
-        let unset_pairs: Vec<(&str, Option<&str>)> = TILED_GEMM_SWITCH_NAMES
+        let mut unset_pairs: Vec<(&str, Option<&str>)> = TILED_GEMM_SWITCH_NAMES
             .iter()
             .map(|switch| (*switch, None))
             .collect();
+        unset_pairs.push(("PROXIMA_TILED_GEMM_DISABLE", None));
         let defaults = temp_env::with_vars(unset_pairs, || {
             model
                 .forward_logits_on_backend(prompt, GPU_LAYERS_ALL)
                 .unwrap_or_else(|error| panic!("{name}: defaults-arm Metal forward failed: {error}"))
         });
 
-        let off_pairs: Vec<(&str, Option<&str>)> = TILED_GEMM_SWITCH_NAMES
+        let mut off_pairs: Vec<(&str, Option<&str>)> = TILED_GEMM_SWITCH_NAMES
             .iter()
             .map(|switch| (*switch, Some("0")))
             .collect();
+        off_pairs.push(("PROXIMA_TILED_GEMM_DISABLE", Some(TILED_GEMM_DISABLE_ALL_CODECS)));
         let all_off = temp_env::with_vars(off_pairs, || {
             model
                 .forward_logits_on_backend(prompt, GPU_LAYERS_ALL)

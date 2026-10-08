@@ -2578,6 +2578,7 @@ fn print_lever_config_and_refuse_if_unsafe() {
         LeverVar::read("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD"),
         LeverVar::read("PROXIMA_TILED_GEMM_SLIM_TGMEM"),
         LeverVar::read("PROXIMA_TILED_GEMM_DENSE"),
+        LeverVar::read("PROXIMA_TILED_GEMM_DISABLE"),
     ];
     println!(
         "lever_config {} {} git_commit={}",
