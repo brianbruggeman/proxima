@@ -1122,7 +1122,7 @@ mod harness {
         assert_eq!(
             Some(launched.len() as u64 + prepass_dispatches),
             capture_stats.physical_dispatch_calls,
-            "invariant 1: captured dispatches plus the route prepasses the capture does not record must equal the step's physical_dispatch_calls"
+            "invariant 1: captured dispatches plus the route prepasses replayed inside their gemm records must equal the step's physical_dispatch_calls"
         );
         let unexplained: Vec<&&Group> = failed
             .iter()

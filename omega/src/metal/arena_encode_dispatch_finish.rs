@@ -1104,6 +1104,7 @@ fn capture_dispatch(
     scratch: Option<(&MetalBuffer, usize)>,
     chunk_index: usize,
     uniforms: &MetalBuffer,
+    prepass: Option<(&ResolvedPrepass, &MetalBuffer)>,
 ) {
     let Some(wanted) = std::env::var("PROXIMA_CAPTURE_NODES").ok() else {
         return;
@@ -1267,12 +1268,18 @@ fn capture_dispatch(
             }
         }
         let route_prepass_dispatches = u64::from(crate::msl::route_prepass_active(bound, packed_operands));
+        let captured_prepass = prepass.map(|(resolved_prepass, compaction)| {
+            live_buffers.push((bindings.len(), compaction.clone(), 0));
+            CapturedPrepass {
+                pipeline: resolved_prepass.pipeline.clone(),
+                grid: resolved_prepass.grid,
+            }
+        });
+        let missing_prepass = (route_prepass_dispatches > 0 && captured_prepass.is_none()).then(|| {
+            "a compacted grouped gemm needs its route prepass, which this capture call did not receive".to_string()
+        });
         let extras_reason = live_extra_buffers(bound, bindings.len(), device_buffers, &mut live_buffers)
-            .or_else(|| {
-                (route_prepass_dispatches > 0).then(|| {
-                    "a compacted grouped gemm needs its route prepass, which the capture does not record".to_string()
-                })
-            });
+            .or(missing_prepass);
         // SAFETY: `uniforms` is a live shared buffer of `length()` bytes.
         let uniform_bytes = unsafe {
             core::slice::from_raw_parts(uniforms.contents().as_ptr().cast::<u8>(), uniforms.length())
@@ -1307,6 +1314,7 @@ fn capture_dispatch(
                 buffers: live_buffers,
                 uniforms_index,
                 fault_index,
+                prepass: captured_prepass,
             });
         });
     }
@@ -1525,8 +1533,9 @@ pub struct CapturedDispatch {
     /// `Some(reason)` when a buffer this kernel needs was not recoverable
     /// at the dispatch site, so [`Self::time_gpu_ns`] refuses it
     pub unreplayable: Option<String>,
-    /// route-prepass dispatches the encoder issued for this op that are not
-    /// themselves captured: 1 for a compacted grouped gemm, else 0
+    /// route-prepass dispatches the encoder issued for this op, replayed
+    /// inside this record ahead of the gemm: 1 for a compacted grouped gemm,
+    /// else 0
     pub route_prepass_dispatches: u64,
     /// raw bytes of the bound `Uniforms` struct at encode time
     pub uniform_bytes: Vec<u8>,
@@ -1534,6 +1543,17 @@ pub struct CapturedDispatch {
     buffers: Vec<(usize, MetalBuffer, usize)>,
     uniforms_index: Option<usize>,
     fault_index: Option<usize>,
+    prepass: Option<CapturedPrepass>,
+}
+
+/// The route prepass of a compacted expert-grouped gemm: its pipeline and
+/// launch shape. The compaction buffer it fills is one of the record's own
+/// `buffers`, bound at `bindings.len()` for the prepass and the gemm alike.
+#[cfg(feature = "instrument")]
+#[derive(Clone)]
+struct CapturedPrepass {
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    grid: GridSpec,
 }
 
 #[cfg(feature = "instrument")]
@@ -1671,7 +1691,34 @@ impl CapturedDispatch {
             buffers: self.buffers.clone(),
             uniforms_index: self.uniforms_index,
             fault_index: self.fault_index,
+            prepass: self.prepass.clone(),
         })
+    }
+
+    /// The route prepass of this record as a dispatch of its own (its pipeline,
+    /// launch shape and the shared buffers), `None` for a record with no
+    /// prepass, so the prepass is timed apart from the gemm that follows it.
+    #[must_use]
+    pub fn prepass_only(&self) -> Option<Self> {
+        let prepass = self.prepass.as_ref()?;
+        let mut alone = self.with_pipeline_of(self);
+        alone.msl_sha256.clone_from(&self.msl_sha256);
+        alone.entry = format!("{}_route_prepass", self.entry);
+        alone.pipeline = prepass.pipeline.clone();
+        alone.grid = prepass.grid;
+        alone.prepass = None;
+        Some(alone)
+    }
+
+    /// This record without its route prepass, for timing a compacted gemm
+    /// alone against the compaction buffer the prepass of an earlier replay
+    /// left in place (replay the whole record once first).
+    #[must_use]
+    pub fn without_prepass(&self) -> Self {
+        let mut stripped = self.with_pipeline_of(self);
+        stripped.msl_sha256.clone_from(&self.msl_sha256);
+        stripped.prepass = None;
+        stripped
     }
 
     /// One line per bound buffer: binding index, buffer address, byte offset,
@@ -1732,6 +1779,7 @@ impl CapturedDispatch {
             buffers: self.buffers.clone(),
             uniforms_index: self.uniforms_index,
             fault_index: self.fault_index,
+            prepass: self.prepass.clone(),
         }
     }
 
@@ -1833,6 +1881,11 @@ impl CapturedDispatch {
             if let Some(index) = self.fault_index {
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
             }
+            if let Some(prepass) = &self.prepass {
+                encoder.setComputePipelineState(&prepass.pipeline);
+                dispatch(&encoder, &prepass.pipeline, prepass.grid);
+                encoder.setComputePipelineState(&self.pipeline);
+            }
             dispatch(&encoder, &self.pipeline, self.grid);
         }
         encoder.endEncoding();
@@ -1885,6 +1938,11 @@ impl CapturedDispatch {
             }
             if let Some(index) = dispatch_record.fault_index {
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
+            }
+            if let Some(prepass) = &dispatch_record.prepass {
+                encoder.setComputePipelineState(&prepass.pipeline);
+                dispatch(&encoder, &prepass.pipeline, prepass.grid);
+                encoder.setComputePipelineState(&dispatch_record.pipeline);
             }
             dispatch(&encoder, &dispatch_record.pipeline, dispatch_record.grid);
         }
@@ -2544,6 +2602,21 @@ pub(super) fn encode_op(
             );
         }
     }
+    let compaction = match prepass {
+        Some(prepass) => {
+            let compaction = encode_route_prepass(
+                device,
+                encoder,
+                prepass,
+                bindings.len(),
+                Retained::as_ptr(&output),
+                hazard.as_deref_mut(),
+            )?;
+            encoder.setComputePipelineState(&pipeline);
+            Some(compaction)
+        }
+        None => None,
+    };
     #[cfg(feature = "instrument")]
     capture_dispatch(
         bound,
@@ -2556,18 +2629,10 @@ pub(super) fn encode_op(
         scratch,
         capture_chunk_index,
         &uniforms,
+        prepass.zip(compaction.as_ref()),
     );
-    if let Some(prepass) = prepass {
-        encode_route_prepass(
-            device,
-            encoder,
-            prepass,
-            bindings.len(),
-            Retained::as_ptr(&output),
-            hazard.as_deref_mut(),
-        )?;
-        encoder.setComputePipelineState(&pipeline);
-    }
+    #[cfg(not(feature = "instrument"))]
+    drop(compaction);
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
     // (its own `Binding::Scratch` slot, never `output`); this second
@@ -2636,6 +2701,7 @@ pub(super) fn encode_op(
             scratch,
             capture_chunk_index,
             &merge_uniforms,
+            None,
         );
         dispatch(encoder, &merge.pipeline, merge.grid);
     }
@@ -2666,7 +2732,7 @@ fn encode_route_prepass(
     slot: usize,
     output_pointer: *const ProtocolObject<dyn MTLBuffer>,
     hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
-) -> Result<(), MetalError> {
+) -> Result<MetalBuffer, MetalError> {
     let compaction = allocate_buffer(device, prepass.words, DType::Float32)?;
     // SAFETY: shared-storage buffer of at least one 4-byte word, idle until the encoded work runs.
     unsafe { compaction.contents().as_ptr().cast::<u32>().write(0) };
@@ -2683,7 +2749,7 @@ fn encode_route_prepass(
             tracker.record(&[], Some(output_pointer));
         }
     }
-    Ok(())
+    Ok(compaction)
 }
 
 /// Reads back a dispatch's fault buffer and, if any slot recorded a fault,
