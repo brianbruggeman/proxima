@@ -4094,6 +4094,9 @@ only the single-row decode kernel reads the half-width device cache",
                         )?;
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
+                            if device.cache_codec().is_some() {
+                                runtime.drop_decode_plans();
+                            }
                             debug!(
                                 step = step as u64,
                                 cached_len = cached_len as u64,
