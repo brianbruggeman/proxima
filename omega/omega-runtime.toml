@@ -113,9 +113,11 @@ route_segments = 2
 # so an expert with many tokens gets proportionally many threadgroups and tiles
 # past the realized total exit at once. Two dispatches per op; ops with a
 # prepass are kept out of horizontal merging and their live capture is marked
-# unreplayable. The default stays "segments" until a bench with text-hash
-# parity shows the compacted mode wins; flip it only on that evidence.
-route_mode = "segments"
+# unreplayable. "compacted" is the default: granite prefill (3 processes x 7
+# runs, interleaved, text hash equal to the other mode) read 39.994 ms against
+# 46.988 ms for "segments" on a 25 token prompt and 246.016 against 246.943 ms
+# on a 1000 token prompt.
+route_mode = "compacted"
 # Adjacent route entries each thread of a threadgroup owns in one scan step.
 # A step covers `block_threads * scan_ahead` entries for one barrier pair: the
 # loads are independent, so one memory round trip serves them all, and the
