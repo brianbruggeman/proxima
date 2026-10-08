@@ -227,11 +227,16 @@ fn main() {
         }),
         Err(_) => ServingConfig::default().resident_prefill_plan_bytes,
     };
+    let kv_cache_type = match std::env::var("PROXIMA_KV_CACHE_TYPE").as_deref() {
+        Ok("f16") => GgmlType::F16,
+        Ok("f32") | Err(_) => GgmlType::F32,
+        Ok(other) => panic!("PROXIMA_KV_CACHE_TYPE={other}: expected `f32` or `f16`"),
+    };
     let serving_config = ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
         numeric_policy,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: kv_cache_type,
+        kv_cache_value_quant: kv_cache_type,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,
