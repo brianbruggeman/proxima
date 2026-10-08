@@ -330,9 +330,9 @@ fn push_grouped_entry(
 /// expert and leaves, before any barrier, together with the rest of its
 /// threadgroup (every thread read the same words). The prepass total is
 /// checked against the route length first: a buffer the prepass did not write
-/// (its header word is zeroed on the host) raises the route fault, reported as
-/// a route index equal to the expert extent, and the threadgroup leaves
-/// without computing.
+/// (its header word is zeroed on the host) records
+/// [`ROUTE_COMPACTION_MISMATCH_FAULT`], which the host reports as a
+/// compaction mismatch, and the threadgroup leaves without computing.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_locate(
     source: &mut String,
@@ -349,7 +349,7 @@ fn push_grouped_locate(
     source.push_str("    if (route_compaction[0] != (uint)token_extent) {\n");
     source.push_str("        if (tiitg == 0) {\n");
     source.push_str(&format!(
-        "            atomic_fetch_max_explicit(&fault[{slot}], (uint)u.gather_extent[{slot}] + 1u, memory_order_relaxed);\n"
+        "            atomic_fetch_max_explicit(&fault[{slot}], {ROUTE_COMPACTION_MISMATCH_FAULT}u, memory_order_relaxed);\n"
     ));
     source.push_str("        }\n");
     source.push_str("        return;\n");
@@ -899,6 +899,14 @@ pub(super) fn push_expert_grouped_gemm_body(
         found: "build without metal-grouped-gemm",
     })
 }
+
+/// The fault word the locating GEMM records when the compaction header does
+/// not match the route length. Ordinary route faults record `index + 1` and
+/// expert-source misses set the top bit with `expert + 1`; the all-ones word
+/// is neither, so the host names the stale prepass instead of reporting a
+/// route index equal to the expert extent.
+#[cfg(any(feature = "metal-grouped-gemm", all(feature = "metal", target_os = "macos")))]
+pub(crate) const ROUTE_COMPACTION_MISMATCH_FAULT: u32 = u32::MAX;
 
 /// Words of the route-compaction buffer ahead of the per-expert tables: word 0
 /// is the total entry count the prepass wrote, the check the GEMM makes before
