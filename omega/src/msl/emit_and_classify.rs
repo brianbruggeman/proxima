@@ -828,6 +828,8 @@ fn expert_group_shape_token(block: &TiledGemmBlock) -> char {
             (_, false) => 'h',
         };
     }
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    let _ = block;
     'G'
 }
 
