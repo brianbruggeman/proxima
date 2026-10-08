@@ -1,0 +1,14 @@
+buffer arena sized against the naive (no-reuse) transient sum naive_transient_bytes=2245929608 uniform_bytes=173344 op_count=863 query_rows=999 arena_transient_cap=172812125 cap_bytes=172639312875 device_limit=51539607552
+buffer arena live peak by size class peak_total_bytes=137214664 peak_position=842 peak_kind=keep::reduce fold peak_mix={4: 4, 3996: 34, 127872: 0, 1022976: 48, 2045952: 27, 4091904: 8}
+buffer arena size class class_bytes=1022976 slots=48 peak_live=48 held_bytes=49102848 peak_live_bytes=49102848 writers=Some({"elementwise_twin[999, 8, 32]": 48})
+buffer arena size class class_bytes=2045952 slots=27 peak_live=27 held_bytes=55240704 peak_live_bytes=55240704 writers=Some({"elementwise_twin[999, 16, 32]": 48, "keep::reduce fold[999, 1024, 512]": 384, "keep::reduce fold[999, 8, 64, 1024]": 48})
+buffer arena size class class_bytes=4091904 slots=9 peak_live=9 held_bytes=36827136 peak_live_bytes=36827136 writers=Some({"cached_attention[999, 8, 2, 64]": 24, "elementwise[999, 1024]": 1, "keep::reduce fold[999, 1024]": 49, "keep::reduce fold[999, 16, 64, 1024]": 24, "keep::reduce fold[999, 512, 1024]": 192, "keep::reduce fold[999, 8, 2, 64, 1024]": 24})
+buffer arena reached its steady-state peak peak_bytes=137214664 reuse_factor=16.367999909980465
+buffer arena sized against the naive (no-reuse) transient sum naive_transient_bytes=2649160 uniform_bytes=173536 op_count=863 query_rows=1 arena_transient_cap=172812125 cap_bytes=172812125 device_limit=51539607552
+buffer arena live peak by size class peak_total_bytes=494316 peak_position=856 peak_kind=elementwise peak_mix={4: 32, 128: 0, 452: 2, 1024: 48, 1740: 1, 2048: 24, 4096: 0, 196620: 2}
+buffer arena reached its steady-state peak peak_bytes=494316 reuse_factor=5.359243884478754
+step=0 phys_footprint_bytes=1978245056 device_allocated_bytes=1573273600 output_buffer_allocations=721 output_buffer_allocated_bytes=146080512 placed_arena_allocated_bytes=141858424 
+step=1 phys_footprint_bytes=1906581632 device_allocated_bytes=1684586496 output_buffer_allocations=163 output_buffer_allocated_bytes=3781552 placed_arena_allocated_bytes=142395944 
+step=2 phys_footprint_bytes=1906696320 device_allocated_bytes=1684586496 output_buffer_allocations=0 output_buffer_allocated_bytes=0 placed_arena_allocated_bytes=142395944 
+step=3 phys_footprint_bytes=1906876544 device_allocated_bytes=1684586496 output_buffer_allocations=0 output_buffer_allocated_bytes=0 placed_arena_allocated_bytes=142395944 
+text_hash=fbe77b83cee157bf

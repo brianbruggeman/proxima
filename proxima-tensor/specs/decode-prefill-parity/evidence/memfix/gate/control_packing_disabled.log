@@ -1,0 +1,31 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 9.01s
+────────────
+ Nextest run ID f7630df5-0169-4a99-a3be-2a94f53dda67 with nextest profile: default
+    Starting 1 test across 105 binaries (788 tests skipped)
+        FAIL [   0.101s] (1/1) omega metal::arena_encode_dispatch_finish::arena_tests::a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer
+  stdout ───
+
+    running 1 test
+    test metal::arena_encode_dispatch_finish::arena_tests::a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer ... FAILED
+
+    failures:
+
+    failures:
+        metal::arena_encode_dispatch_finish::arena_tests::a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 392 filtered out; finished in 0.09s
+
+  stderr ───
+
+    thread 'metal::arena_encode_dispatch_finish::arena_tests::a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer' (73781411) panicked at omega/src/metal/arena_encode_dispatch_finish.rs:3472:9:
+    assertion `left == right` failed: one shared buffer for the four released `shared` nodes plus one per program output
+      left: 12
+     right: 9
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.106s] 1 test run: 0 passed, 1 failed, 788 skipped
+        FAIL [   0.101s] (1/1) omega metal::arena_encode_dispatch_finish::arena_tests::a_serial_plan_packs_released_outputs_of_different_lengths_into_one_buffer
+error: test run failed

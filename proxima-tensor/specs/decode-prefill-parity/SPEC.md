@@ -2521,3 +2521,141 @@ cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile 
 cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate                   # 736 passed, 124 skipped
 decode_arms --prompt-file evidence/r2fix/bench/prompt1k.txt --processes 3 --runs 7 --arm base=<c63d839d build> --arm tip=<tip build> --arm control=<byte copy of tip> --arm ref=<ab69ec03 build> --case granite_moe=<gguf>
 ```
+
+## stacked experts memory (measured 2026-10-08, e9375ac2 to the commit that adds this section)
+
+Evidence root: `evidence/memfix/` (`census/` per-plan arena itemization, `bench/` the interleaved matrix, `gate/` the gate logs, `rejected/` the three attempts that were rolled back, with their patches).
+Raw per-process stderr, the binaries and the 80k-line census logs are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/next/`. Test models: gemma4 E2B and granite moe 1b only.
+The status of a sentence is the status of its weakest cell; no verdict is stated.
+
+### allocation budget (stated before the change)
+
+Hot path (a warm step after the plan's arena exists): zero device buffers. Setup (the first placed call of a plan): one device buffer per output that is never released, plus one shared buffer
+for every released output. Cold or error path: none beyond setup. Measured: `output_buffer_allocations` is 0 at steps 2 and 3 for granite and for E2B in `evidence/memfix/census/*_after_packed.txt`, and the new
+`omega/tests/step_buffer_allocations.rs` test `a_warm_serial_routed_moe_step_allocates_no_device_buffers_and_matches_the_concurrent_step` asserts it (3 of 3 tests in the binary pass).
+
+### which buffers grew (granite moe 1b, 999-token prefill plan, whole-slot arena, `census/granite_before_*.txt`)
+
+`placed_arena_allocated_bytes` at step 0: 181,530,712 at e9375ac2 (stacked) against 141,858,424 at c63d839d (per route): +39,672,288. The per-size-class event (`buffer arena size class`, emitted by `emit_arena_census`,
+`omega/src/metal/arena_encode_dispatch_finish.rs:352`) lists, for every output size, how many outputs of that size the plan writes, how many are live at once, and which op writes them:
+
+| output size (bytes) | writer | e9375ac2 slots | c63d839d slots | held bytes, e9375ac2 - c63d839d |
+|---|---|---|---|---|
+| 16,367,616 (`[999, 8, 512]` f32) | `keep::reduce fold [999, 8, 1024, 512]` x48 (gate, and up with the activation epilogue, 24 layers) | 2 | 0 | +32,735,232 |
+| 32,735,232 (`[999, 8, 1024]` f32) | `keep::reduce fold [999, 8, 512, 1024]` x24 (down) | 1 | 0 | +32,735,232 |
+| 4,091,904 (`[999, 1024]` f32) | residual-width outputs | 3 | 9 | -24,551,424 |
+| 2,045,952 (`[999, 512]` f32) | | 26 | 27 | -2,045,952 |
+| 1,022,976 (`[999, 8, 32]` f32) | rope halves, pinned outputs | 48 | 48 | 0 |
+| every class under 1 MiB | includes the top-k extras | | | +799,200 |
+
+The classes sum to the +39,672,288. The top-k extra outputs the brief named are `moe_topk[999]` x408 of 3,996 bytes and x48 of 31,968 bytes: 3,164,832 bytes if every one were held for the plan's lifetime, and the
+census shows `peak_live` 224 and 2, so they are recycled. They are not the growth. The growth is the three `[tokens, selected, width]` outputs of the stacked projections, which are live: at the position where the
+live total peaks (`live peak by size class`: position 363, a down fold, 152,359,504 bytes) one 16,367,616-byte hidden buffer and the 32,735,232-byte down output are live together with 98,205,696 bytes of pinned
+K/V rows. The per-route plan's peak (137,214,664 bytes, position 842) holds eight 4,091,904-byte buffers instead. Source of the shape: `proxima-tensor/src/spec/gqa_layer_routed.rs:1205-1271` (gate and up over `skio`, down at `:1235`,
+the weighted reduce over the selected axis at `:1257-1271`).
+
+Allocation against liveness: e9375ac2's arena held 181,530,712 bytes for a live peak of 152,359,504 (29,171,208 held beyond the peak, 16.0%); c63d839d's held 141,858,424 for 137,214,664 (4,643,760). The excess is
+size-class fragmentation: gate/up and down are different lengths, so the whole-slot free list could not hand one to the other.
+
+### what landed
+
+| commit | change |
+|---|---|
+| `838d4962` | `omega/src/metal/arena_layout.rs` (new, device-free, 8 unit tests): `lay_out_packed` gives every output that some later op retires a byte range in one shared buffer, largest first at the lowest aligned offset no simultaneously live output occupies; outputs never retired keep a buffer of their own at offset 0 (the readback invariant); `lay_out_whole_slots` is the previous free-list policy unchanged. `build_buffer_arena` (`arena_encode_dispatch_finish.rs:251`) packs when the plan is `DispatchType::Serial` (`:303`) and falls back to whole slots otherwise or when a slot exceeds `maxBufferLength`; it now refuses an over-cap plan before allocating. `BufferArena` carries a byte offset per position and per extra output; `encode_op` already bound `(buffer, offset)`. Two `arena_tests`: packed arena equals the CPU oracle with one shared buffer for four released outputs of four lengths, and serial-packed equals concurrent-whole-slot bit for bit. |
+| `11edadd1` | the size-class itemization above as a `debug!` event under `instrument` |
+| `f48386a0` | warm serial routed step allocates no device buffers and matches the concurrent result |
+
+Why Serial only: `HazardTracker` (`execute_and_hazards.rs:1217`) names a buffer by pointer, so a shared buffer would read as one resource and every concurrent dispatch would get a barrier. `DispatchType::default()` is
+`Concurrent`; `ServingConfig::default()` sets `Serial`. Constants: `RANGE_ALIGNMENT` 256 (offset alignment) and `RANGE_GUARD` 256 (a whole-slot buffer is page-rounded and absorbed a kernel store past its last element;
+a range with a live neighbour has no such slack) are hardware and safety values, not per-system caps; no sizing-TOML axis.
+
+### before and after (instrumented release build, one process, 999-token prompt, `census/`)
+
+| model | metric | e9375ac2 | this tree | delta |
+|---|---|---|---|---|
+| granite | prefill arena bytes | 181,530,712 | 152,560,344 | -28,970,368 (-16.0%) |
+| granite | `device_allocated_bytes` at step 1 and later | 1,723,957,248 | 1,694,793,728 | -29,163,520 |
+| granite | `phys_footprint_bytes` at step 1 and later (n=1) | 1,934,827,840 | 1,898,438,912 | -36,388,928 |
+| granite | live peak / arena after | 152,359,504 | 152,359,504 / 152,560,344 | arena 200,840 above the peak |
+| E2B | prefill arena bytes | 361,677,704 | 181,827,720 | -179,849,984 (-49.7%) |
+| E2B | `device_allocated_bytes` at step 1 and later | 3,782,934,528 | 3,602,726,912 | -180,207,616 |
+| E2B | `phys_footprint_bytes` at step 1 and later (n=1) | 2,060,481,600 | 1,886,614,400 | -173,867,200 |
+| E2B | live peak / arena after | 177,797,984 | 177,797,984 / 181,827,720 | arena 4,029,736 above the peak |
+
+Generated text hash is identical before and after: granite `fbe77b83cee157bf`, E2B `a032fc72c57a69e4` (4 tokens, `PROXIMA_SPECULATIVE_TYPES=none`).
+
+### bench (`decode_arms`, release std+metal, granite moe 1b, `prompt1k.txt`, 3 processes x (1 warmup + 7 runs), arms interleaved; `evidence/memfix/bench/`)
+
+Arms: base = e9375ac2 build (sha256 `b160c44e...`, byte-identical to the r2fix `tip` binary), tip = this tree, control = byte copy of tip (`3c600c45...`), ref = c63d839d per-route build (the r2fix binary), refpacked = c63d839d
+with this commit's arena files copied in (the per-route program under the same layout). The example forces `batch_size: 0, ubatch_size: 0`. Box: Ollama down (curl :11434 refused), no cargo job during the run, load average 10.59 / 15.72 / 13.20 before and 8.76 / 11.73 / 12.01 after,
+`mds_stores` 111%, `mediaanalysisd` 64%, a background daemon 40% CPU (`box_load_before.txt`, `box_load_after.txt`).
+
+| metric | base | tip | control | ref (c63d839d) | refpacked |
+|---|---|---|---|---|---|
+| decode ms/token, 21 runs | 6.7210 (CoV 3.34%, 6.585-7.709; kept 6.7155, n=20, 1.42%) | 6.8300 (1.91%, 6.638-7.276; kept 6.8165, n=20, 1.35%) | 6.7450 (3.56%; kept 6.7450, n=20, 1.18%) | 9.6910 (1.15%) | 9.7660 (2.02%) |
+| prefill ms | 378.978 (3.11%) | 381.047 (2.39%) | 385.012 (3.74%) | 382.022 (3.64%) | 376.001 (3.52%) |
+| `peak_gpu_bytes`, 3 of 3 processes identical | 1,736,818,688 | 1,707,655,168 | 1,707,655,168 | 1,697,382,400 | 1,694,908,416 |
+| `peak_footprint_bytes` per process | 691.9 / 709.0 / 638.3 MB | 635.7 / 673.3 / 600.8 MB | 706.2 / 601.0 / 603.2 MB | 637.2 / 653.9 / 660.1 MB | 648.1 / 650.0 / 627.0 MB |
+| `peak_rss_bytes` per process | 2.744 / 2.601 / 2.476 GB | 2.560 / 2.492 / 2.729 GB | 2.880 / 2.490 / 2.522 GB | 2.541 / 2.658 / 2.729 GB | 2.748 / 2.768 / 2.762 GB |
+
+Bound lines (`limit` as printed by `decode_arms` in its `bound` rows, 2% of the reference arm for memory and its outlier-aware spread for time; `control - tip` is the same-binary difference, the noise indicator):
+
+| comparison | metric | delta | bound | against the bound |
+|---|---|---|---|---|
+| tip - base | decode ms/token (kept medians) | +0.1010 (+1.5%) | 0.1343 | inside |
+| tip - base | prefill ms | +2.069 | 8.940 | inside |
+| tip - base | `peak_gpu_bytes` | -29,163,520 (-1.68%) | 34,736,374 | inside, lower |
+| tip - ref | `peak_gpu_bytes` | +10,272,768 (+0.605%) | 34,153,103 | inside (was +39,436,288, outside, at e9375ac2) |
+| tip - refpacked | `peak_gpu_bytes` | +12,746,752 (+0.752%) | 34,153,103 | inside |
+| tip - base | `peak_footprint_bytes` (medians) | -56,213,696 | 13,838,710 | outside, lower; control - tip is -32,522,176, per-arm spread 72-105 MB, ranges overlap, n=3: plausible, not proven |
+| tip - ref | `peak_footprint_bytes` (medians) | -18,153,856 | 12,714,436 | outside, lower; smaller than the same-binary control - tip difference of 32,522,176 |
+| control - tip | decode ms/token | -0.0715 | 0.1363 | inside |
+
+Decode ms/token is 6.83 (tip, all 21 runs); the same binary under the control label reads 6.745, which is the noise floor of this matrix on this box. The 9.69 of the per-route build against 6.82 is the r2 effect, unchanged.
+RSS does not separate from its 250 MB per-arm spread.
+
+### rejected, with the numbers (each patch is in `evidence/memfix/rejected/`)
+
+- ROLLED BACK, reuse a retired slot for a smaller output across size classes (smallest retired slot at least as long, outputs read back kept exact). Arena at step 0, granite: 185,750,784 whole-slot, 183,704,832 (ratio cap 2),
+  183,703,092 (ratio 3 and 4), 182,939,756 (ratio 8): at most -2,811,028. With no cap the arena grew to 1,307,571,980 and the prefill plan fell out of the resident budget. The gap is not idle slots of the wrong size.
+- ROLLED BACK, allocate no arena slot for a node the caller output-places. Granite prefill arena 181,530,712 -> 181,334,092 (-196,620); E2B 361,677,704 -> 360,629,128 (-1,048,576); decode plan arena 577,232 -> 282,308 bytes (peak 495,084 -> 200,160). The prefill
+  K/V rows are not output-placed on this path (they are read back), so there is nothing to skip; the 98 MB of pinned K/V in the arena is untouched.
+- ROLLED BACK, drop the `[tokens, selected, 1024]` down output by reducing the selected and hidden axes in one gathered fold (`probe_multiaxis_combine.patch`, `gqa_layer_routed.rs` stacked branch). Metal run:
+  `Metal(Tensor(GatherIndexOutOfRange { node: NodeId(2536), index: 0, extent: 32 }))`; CPU: `NotLowerable { node: NodeId(66), reason: "quantized matmul batch shape does not evenly divide by its packed weight rows" }` in
+  `stacked_projection_over_packed_q4k_experts_matches_the_per_route_graph_at_every_token_count` and a drift of 4.73e-7 over the f32 stacked test's bound. The gathered quantized fold does not accept a second reduced axis on either executor.
+
+### gates (`evidence/memfix/gate/`)
+
+| gate | result |
+|---|---|
+| clippy `-p proxima-tensor -p proxima-model-interop --features .../std,.../metal --all-targets -D warnings`; `-p omega --features metal` and `metal,instrument` | exit 0 (4 invocations) |
+| `cargo check -p proxima-tensor --no-default-features --features alloc`; `-p proxima-model-interop --no-default-features`; `-p omega --no-default-features` | exit 0 (the arena modules are `metal` and macOS only, so no restricted-tier module was built) |
+| nextest `-p proxima-tensor --cargo-profile gate` | 800 passed, 8 skipped |
+| nextest `-p omega --features metal --cargo-profile gate` | 773 passed, 16 skipped (763 + the 10 new tests) |
+| omega `--features metal,instrument` | 826 run, 823 passed, 3 failed: `q4_0_two_token_index32_dispatch_classifies_as_packed_row_blocked`, `rmsnorm_fused_epilogue_air_division_count_decode_shape`, `..._prefill_shape` (the same three as `evidence/combine/gates.md`) |
+| omega gated features (`binary(step_buffer_allocations)` and 6 other alloc and parity binaries) | 20 passed |
+| interop `slice-gate` | 736 passed, 124 skipped |
+| `external_expert_paging`, `llama_parity_`, `generic_verify_llama_parity_`, `prefill_width_parity_with_llama_` (gemma4_e2b, granite_moe), r7 `serving_default_ubatch_prefill_parity` (971 tokens), `moe_stacked_default` | 13 run, 13 passed |
+| control: packing test with the plan left `Concurrent` | fails, `left: 12 right: 9` (`gate/control_packing_disabled.log`) |
+
+`ServingConfig::default()` is `Serial`, so the interop parity tests ran the packed arena; the omega unit and integration tests default to `Concurrent` and run the whole-slot layout except the three tests that set `Serial`.
+
+### what this does not establish
+
+- Stacked experts still cost more than per-route at the same layout: +12,746,752 `peak_gpu_bytes` (refpacked to tip), which is the 32,735,232-byte down output held with the 16,367,616-byte hidden buffer. It is inside the 2% bound; it is not zero.
+- Footprint: n=3 per arm with a 72-105 MB spread; the -56 MB and -18 MB medians are not separated from it.
+- `DispatchType::Concurrent` plans keep the previous layout; no Concurrent timing or memory was taken.
+- Only granite moe 1b and gemma4 E2B were executed. Every other checkpoint under `Serial` now gets a packed arena and was not run. The digests do not change (the arena is not part of the op graph).
+- The example forces `ubatch_size: 0`; memory at the r7 default ubatch of 512 was not benched.
+- Ollama and llama-server were not run.
+
+### re-prove
+
+```
+cargo nextest run -p omega --features metal --cargo-profile gate -E 'test(arena_layout) or test(arena_tests)'      # 18 passed
+cargo nextest run -p omega --features metal,instrument,moe-topk-fusion --cargo-profile gate -E 'binary(step_buffer_allocations)'   # 3 passed
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate           # 736 passed, 124 skipped
+cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal,instrument
+RUST_LOG=debug PROXIMA_DECODE_MODEL_GGUF=<granite> PROXIMA_PROMPT="$(cat evidence/memfix/bench/prompt1k.txt)" PROXIMA_MAX_TOKENS=4 PROXIMA_RUNS=1 decode_gbps_baseline   # grep 'buffer arena'
+decode_arms --prompt-file evidence/memfix/bench/prompt1k.txt --processes 3 --runs 7 --arm base=<e9375ac2 build> --arm tip=<tip build> --arm control=<byte copy of tip> --arm ref=<c63d839d build> --arm refpacked=<c63d839d with the arena files> --case granite_moe=<gguf>
+```

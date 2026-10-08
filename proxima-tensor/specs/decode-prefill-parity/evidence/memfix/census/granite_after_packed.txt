@@ -1,0 +1,21 @@
+buffer arena sized against the naive (no-reuse) transient sum naive_transient_bytes=2344135304 uniform_bytes=66592 op_count=383 query_rows=999 arena_transient_cap=172812125 cap_bytes=172639312875 device_limit=51539607552
+buffer arena reached its steady-state peak peak_bytes=152359504 reuse_factor=15.385553526086564
+buffer arena laid out packed=true slots=301 allocations=863 allocated_bytes=152560344 peak_bytes=152359504
+buffer arena live peak by size class peak_total_bytes=152359504 peak_position=363 peak_kind=keep::reduce fold peak_mix={4: 4, 3996: 224, 31968: 2, 127872: 0, 1022976: 48, 2045952: 24, 4091904: 1, 16367616: 1, 32735232: 1}
+buffer arena size class class_bytes=3996 outputs=408 peak_live=224 writers=Some({"moe_topk[999]": 408})
+buffer arena size class class_bytes=31968 outputs=48 peak_live=2 writers=Some({"moe_topk[999]": 48})
+buffer arena size class class_bytes=127872 outputs=24 peak_live=1 writers=Some({"keep::reduce fold[999, 1024, 32]": 24})
+buffer arena size class class_bytes=1022976 outputs=48 peak_live=48 writers=Some({"elementwise_twin[999, 8, 32]": 48})
+buffer arena size class class_bytes=2045952 outputs=96 peak_live=26 writers=Some({"elementwise_twin[999, 16, 32]": 48, "keep::reduce fold[999, 8, 64, 1024]": 48})
+buffer arena size class class_bytes=4091904 outputs=146 peak_live=3 writers=Some({"cached_attention[999, 8, 2, 64]": 24, "elementwise[999, 1024]": 1, "keep::reduce fold[999, 1024]": 49, "keep::reduce fold[999, 16, 64, 1024]": 24, "keep::reduce fold[999, 8, 1024]": 24, "keep::reduce fold[999, 8, 2, 64, 1024]": 24})
+buffer arena size class class_bytes=16367616 outputs=48 peak_live=2 writers=Some({"keep::reduce fold[999, 8, 1024, 512]": 48})
+buffer arena size class class_bytes=32735232 outputs=24 peak_live=1 writers=Some({"keep::reduce fold[999, 8, 512, 1024]": 24})
+buffer arena sized against the naive (no-reuse) transient sum naive_transient_bytes=2747464 uniform_bytes=66784 op_count=383 query_rows=1 arena_transient_cap=172812125 cap_bytes=172812125 device_limit=51539607552
+buffer arena reached its steady-state peak peak_bytes=495084 reuse_factor=5.5494905914955845
+buffer arena laid out packed=true slots=301 allocations=863 allocated_bytes=497048 peak_bytes=495084
+buffer arena live peak by size class peak_total_bytes=495084 peak_position=376 peak_kind=elementwise peak_mix={4: 224, 32: 0, 128: 0, 452: 2, 1024: 48, 1740: 1, 2048: 24, 4096: 0, 16384: 0, 32768: 0, 196620: 2}
+step=0 phys_footprint_bytes=1964236928 device_allocated_bytes=1583611904 output_buffer_allocations=376 output_buffer_allocated_bytes=156780416 placed_arena_allocated_bytes=152560344 
+step=1 phys_footprint_bytes=1898307840 device_allocated_bytes=1694793728 output_buffer_allocations=325 output_buffer_allocated_bytes=3741080 placed_arena_allocated_bytes=153057392 
+step=2 phys_footprint_bytes=1898438912 device_allocated_bytes=1694793728 output_buffer_allocations=0 output_buffer_allocated_bytes=0 placed_arena_allocated_bytes=153057392 
+step=3 phys_footprint_bytes=1898438912 device_allocated_bytes=1694793728 output_buffer_allocations=0 output_buffer_allocated_bytes=0 placed_arena_allocated_bytes=153057392 
+text_hash=fbe77b83cee157bf
