@@ -258,11 +258,27 @@ pub(super) fn build_buffer_arena(
 
         let extras_start = extra_slots.len();
         for (extra_node, element_count) in extra_output_nodes(bound) {
-            let index = slots.len();
-            slots.push(allocate_buffer(device, element_count, bound.dtype)?);
-            slot_bytes.push(element_count.max(1) * bound.dtype.size_bytes());
+            let extra_bytes = element_count.max(1) * bound.dtype.size_bytes();
+            let index = match (!is_resident)
+                .then(|| free_by_size.get_mut(&extra_bytes).and_then(Vec::pop))
+                .flatten()
+            {
+                Some(reused) => reused,
+                None => {
+                    slots.push(allocate_buffer(device, element_count, bound.dtype)?);
+                    slot_bytes.push(extra_bytes);
+                    #[cfg(feature = "instrument")]
+                    slot_occupancy.push(0);
+                    slots.len() - 1
+                }
+            };
             #[cfg(feature = "instrument")]
-            slot_occupancy.push(1);
+            {
+                slot_occupancy[index] += 1;
+            }
+            live_bytes += extra_bytes;
+            peak_bytes = peak_bytes.max(live_bytes);
+            node_slot.insert(extra_node, index);
             extra_slots.push((extra_node, index));
         }
         position_extras.push(extras_start..extra_slots.len());
