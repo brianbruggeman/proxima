@@ -782,3 +782,305 @@ pub(super) fn push_expert_grouped_gemm_body(
         found: "build without metal-grouped-gemm",
     })
 }
+
+/// Words of the route-compaction buffer ahead of the per-expert tables: word 0
+/// is the total entry count the prepass wrote, the check the GEMM makes before
+/// it trusts the tables.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 = 1;
+
+/// Threads of the one threadgroup the prepass runs in: a simdgroup per expert,
+/// `GROUPED_PREPASS_THREADS / SIMD_WIDTH` experts at a time.
+#[cfg(feature = "metal-grouped-gemm")]
+const GROUPED_PREPASS_THREADS: u64 = 1024;
+
+/// Whether this expert-grouped block takes the compacted route: a prepass
+/// dispatch ranks the route into per-expert token lists and the GEMM locates
+/// its tile in them. The prepass reads the route as the flat stride the
+/// segment scan already requires, so a route that needs the per-axis
+/// decomposition stays on the segment scan.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn grouped_route_compacted(block: &TiledGemmBlock) -> bool {
+    crate::sized::GROUPED_GEMM_ROUTE_COMPACTED
+        && block.gathered.is_some_and(|expert| expert.route_flat)
+}
+
+#[cfg(not(feature = "metal-grouped-gemm"))]
+pub(super) fn grouped_route_compacted(_block: &TiledGemmBlock) -> bool {
+    false
+}
+
+/// Experts the weight slab can name: the extent of its gathered dimension.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn grouped_expert_count(resolved: &BoundOp, block: &TiledGemmBlock) -> u64 {
+    resolved.operands()[block.weight]
+        .2
+        .as_ref()
+        .map_or(1, |lookup| lookup.extent.max(1))
+}
+
+/// Route entries: the flat token count the route names an expert for.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn grouped_token_total(resolved: &BoundOp, block: &TiledGemmBlock) -> u64 {
+    block
+        .token_axes
+        .iter()
+        .map(|&axis| resolved.extents[axis as usize])
+        .product()
+}
+
+/// Words of the compaction buffer: header, per-expert counts, per-expert
+/// exclusive entry offsets, then the expert-major list of flat token ids.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn grouped_compaction_words(tokens: u64, experts: u64) -> u64 {
+    GROUPED_ROUTE_HEADER_WORDS + 2 * experts + tokens
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+fn grouped_prepass_entry(entry: &str) -> String {
+    format!("{entry}_route_prepass")
+}
+
+/// The prepass kernel, appended to the GEMM's source so it shares the
+/// `Uniforms` struct, and the route fetch (stride, base, clamp, fault check)
+/// of the main kernel. It declares only the buffers it touches, at the slots
+/// the GEMM binds them at, so the host encodes it between the GEMM's binds and
+/// the GEMM's dispatch without rebinding: the gathered route, the uniforms,
+/// the fault flags and the compaction buffer at `bindings.len()`.
+///
+/// One threadgroup. Pass one: simdgroup `s` counts the entries naming expert
+/// `s`, `s + simdgroups`, ... a simdgroup width of route entries at a time,
+/// and simdgroup zero reports out-of-range route indices (every entry is
+/// fetched by it once). Thread zero prefix-sums the counts. Pass two: the same
+/// simdgroup places each matching token id at its expert's offset plus its
+/// rank, ranks coming from a simdgroup prefix sum in route order, so each
+/// expert's list ascends in flat token order. No atomics, so the result is the
+/// same on every run.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn push_grouped_route_prepass(
+    source: &mut String,
+    resolved: &BoundOp,
+    block: &TiledGemmBlock,
+    output_axes: &[u16],
+    entry: &str,
+) -> Result<(), EmitError> {
+    let Some(expert) = block.gathered else {
+        return Ok(());
+    };
+    let geometry = GroupedGeometry::new(block, output_axes, resolved)?;
+    let layout = bindings(resolved);
+    let slot_index = |wanted: fn(&Binding) -> bool| layout.iter().position(wanted).unwrap_or(0);
+    let route_buffer = layout
+        .iter()
+        .enumerate()
+        .filter(|(_, binding)| matches!(binding, Binding::Indices(_)))
+        .nth(expert.slot)
+        .map_or(0, |(index, _)| index);
+    let uniforms_buffer = slot_index(|binding| matches!(binding, Binding::Uniforms));
+    let fault_buffer = slot_index(|binding| matches!(binding, Binding::Fault));
+    let compaction_buffer = layout.len();
+    let experts = grouped_expert_count(resolved, block);
+    let slot = expert.slot;
+    let innermost_axis = geometry.token_axes.last().copied().unwrap_or(0);
+    let prepass = grouped_prepass_entry(entry);
+    let weight = block.weight;
+    source.push('\n');
+    source.push_str(&format!(
+        "kernel void {prepass}(\n    device const float* gather_idx{slot} [[buffer({route_buffer})]],\n    constant Uniforms& u [[buffer({uniforms_buffer})]],\n    device atomic_uint* fault [[buffer({fault_buffer})]],\n    device uint* route_compaction [[buffer({compaction_buffer})]],\n    uint tiisg [[thread_index_in_simdgroup]],\n    uint sgitg [[simdgroup_index_in_threadgroup]],\n    uint sgcount [[simdgroups_per_threadgroup]],\n    uint tid [[thread_position_in_threadgroup]])\n{{\n"
+    ));
+    source.push_str(&format!("    constexpr uint experts = {experts}u;\n"));
+    source.push_str(&format!("    long token_extent = {};\n", geometry.token_extent_expr));
+    source.push_str("    threadgroup uint expert_count_tg[experts];\n");
+    source.push_str("    threadgroup uint expert_offset_tg[experts];\n");
+    for pass in [GroupedPrepassPass::Count, GroupedPrepassPass::Place] {
+        if pass == GroupedPrepassPass::Place {
+            push_prepass_offsets(source);
+        }
+        source.push_str(
+            "    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {\n",
+        );
+        source.push_str(match pass {
+            GroupedPrepassPass::Count => "        uint tally = 0u;\n",
+            GroupedPrepassPass::Place => "        uint placed = 0u;\n",
+        });
+        source.push_str("        for (long scan_base = 0; scan_base < token_extent; scan_base += 32l) {\n");
+        source.push_str("            long entry_token = scan_base + (long)tiisg;\n");
+        source.push_str("            bool live = entry_token < token_extent;\n");
+        source.push_str(&format!(
+            "            long fetched{weight} = live ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + entry_token * u.gather_index_strides[{slot}][{innermost_axis}]] : (long)-1;\n"
+        ));
+        if pass == GroupedPrepassPass::Count {
+            source.push_str("            if (scan_expert == 0u && live) {\n");
+            push_gather_fault_check(source, weight, slot, "                ");
+            source.push_str("            }\n");
+        }
+        source.push_str(&format!(
+            "            fetched{weight} = live ? max((long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1)) : (long)-1;\n"
+        ));
+        source.push_str(&format!(
+            "            uint hit = (fetched{weight} == (long)scan_expert) ? 1u : 0u;\n"
+        ));
+        match pass {
+            GroupedPrepassPass::Count => source.push_str("            tally += hit;\n"),
+            GroupedPrepassPass::Place => {
+                source.push_str("            uint rank = simd_prefix_exclusive_sum(hit);\n");
+                source.push_str(&format!(
+                    "            if (hit != 0u) {{ route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + expert_offset_tg[scan_expert] + placed + rank] = (uint)entry_token; }}\n"
+                ));
+                source.push_str("            placed += simd_sum(hit);\n");
+            }
+        }
+        source.push_str("        }\n");
+        if pass == GroupedPrepassPass::Count {
+            source.push_str("        tally = simd_sum(tally);\n");
+            source.push_str("        if (tiisg == 0u) {\n");
+            source.push_str("            expert_count_tg[scan_expert] = tally;\n");
+            source.push_str(&format!(
+                "            route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + scan_expert] = tally;\n"
+            ));
+            source.push_str("        }\n");
+        }
+        source.push_str("    }\n");
+    }
+    source.push_str("}\n");
+    Ok(())
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupedPrepassPass {
+    Count,
+    Place,
+}
+
+/// Between the passes: thread zero turns the counts into exclusive offsets,
+/// publishes them and the total, and the barriers order that against the
+/// counting before it and the placing after it.
+#[cfg(feature = "metal-grouped-gemm")]
+fn push_prepass_offsets(source: &mut String) {
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("    if (tid == 0u) {\n");
+    source.push_str("        uint running = 0u;\n");
+    source.push_str("        for (uint expert = 0u; expert < experts; ++expert) {\n");
+    source.push_str("            expert_offset_tg[expert] = running;\n");
+    source.push_str(&format!(
+        "            route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + experts + expert] = running;\n"
+    ));
+    source.push_str("            running += expert_count_tg[expert];\n");
+    source.push_str("        }\n");
+    source.push_str("        route_compaction[0] = running;\n");
+    source.push_str("    }\n");
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+}
+
+/// The prepass dispatch for a compacted expert-grouped op: its kernel (the
+/// GEMM's source, prepass entry), the GEMM's binding layout it shares, one
+/// threadgroup of [`GROUPED_PREPASS_THREADS`], and the words of the compaction
+/// buffer the host binds at `bindings.len()`. `None` for every other op and
+/// for the segment-scan mode. Lowering it as a sibling dispatch of the same op
+/// follows [`emit_cached_attention_merge`]'s precedent.
+#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+pub(crate) fn route_prepass(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<Option<(Kernel, usize)>, EmitError> {
+    if !route_prepass_active(resolved, packed_operands) {
+        return Ok(None);
+    }
+    let kernel = emit(resolved, packed_operands, numeric_policy)?;
+    let quantized = operand_codecs(resolved, packed_operands);
+    let Some(block) = grouped_block(resolved, &quantized) else {
+        return Ok(None);
+    };
+    let words = grouped_compaction_words(
+        grouped_token_total(resolved, &block),
+        grouped_expert_count(resolved, &block),
+    );
+    let grid = GridSpec {
+        threads: GROUPED_PREPASS_THREADS,
+        threadgroup_width: Some(GROUPED_PREPASS_THREADS),
+        depth: 1,
+        grid2d: None,
+    };
+    let entry = grouped_prepass_entry(&kernel.entry);
+    Ok(Some((
+        Kernel {
+            source: kernel.source,
+            entry,
+            bindings: kernel.bindings,
+            grid,
+        },
+        words as usize,
+    )))
+}
+
+#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<TiledGemmBlock> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return None;
+    };
+    tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
+        .filter(|block| is_expert_grouped(block) && grouped_route_compacted(block))
+}
+
+/// Cheap form of [`route_prepass`]'s decision: classification only, no source
+/// rendered.
+#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
+pub(crate) fn route_prepass_active(resolved: &BoundOp, packed_operands: &PackedOperands) -> bool {
+    let quantized = operand_codecs(resolved, packed_operands);
+    grouped_block(resolved, &quantized).is_some()
+}
+
+#[cfg(all(not(feature = "metal-grouped-gemm"), any(test, all(feature = "metal", target_os = "macos"))))]
+pub(crate) fn route_prepass(
+    _resolved: &BoundOp,
+    _packed_operands: &PackedOperands,
+    _numeric_policy: NumericPolicy,
+) -> Result<Option<(Kernel, usize)>, EmitError> {
+    Ok(None)
+}
+
+#[cfg(all(not(feature = "metal-grouped-gemm"), any(test, all(feature = "metal", target_os = "macos"))))]
+pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &PackedOperands) -> bool {
+    false
+}
+
+/// [`render_reduce`]'s hook: appends the prepass kernel after the GEMM's own
+/// when the op is a compacted expert-grouped block, nothing otherwise.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn push_grouped_route_prepass_if_compacted(
+    source: &mut String,
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+    entry: &str,
+) -> Result<(), EmitError> {
+    let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes)
+        .filter(|block| is_expert_grouped(block) && grouped_route_compacted(block))
+    else {
+        return Ok(());
+    };
+    push_grouped_route_prepass(source, resolved, &block, output_axes, entry)
+}
+
+#[cfg(not(feature = "metal-grouped-gemm"))]
+pub(super) fn push_grouped_route_prepass_if_compacted(
+    _source: &mut String,
+    _resolved: &BoundOp,
+    _quantized: &[Option<Codec>],
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _output_axes: &[u16],
+    _entry: &str,
+) -> Result<(), EmitError> {
+    Ok(())
+}

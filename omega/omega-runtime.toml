@@ -103,6 +103,19 @@ block_k = 32
 # 864 / 828 / 848 / 870 ms; the value below is that sweep's minimum and has not
 # been re-swept for segments.
 route_segments = 2
+# How the route reaches the grouped GEMM's threadgroups.
+# "segments": every threadgroup scans its own `route_segments` slice of the
+# route (`route_segments` above), one dispatch per op.
+# "compacted": a prepass dispatch before the GEMM counts the tokens per
+# expert, prefix-sums the counts and writes the assignment list expert-major
+# into one buffer; the GEMM launches `ceil(tokens / 32) + experts` token tiles
+# per row tile and each threadgroup locates its (expert, tile) from the counts,
+# so an expert with many tokens gets proportionally many threadgroups and tiles
+# past the realized total exit at once. Two dispatches per op; ops with a
+# prepass are kept out of horizontal merging and their live capture is marked
+# unreplayable. The default stays "segments" until a bench with text-hash
+# parity shows the compacted mode wins; flip it only on that evidence.
+route_mode = "segments"
 # Adjacent route entries each thread of a threadgroup owns in one scan step.
 # A step covers `block_threads * scan_ahead` entries for one barrier pair: the
 # loads are independent, so one memory round trip serves them all, and the

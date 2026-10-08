@@ -201,6 +201,12 @@ fn resolve_int(source: &SizingSource, section: &str, key: &str) -> i64 {
         .unwrap_or_else(|err| panic!("{err}"))
 }
 
+fn resolve_str(source: &SizingSource, section: &str, key: &str) -> String {
+    source
+        .resolve_str(section, key)
+        .unwrap_or_else(|err| panic!("{err}"))
+}
+
 /// Reads `omega-runtime.toml`, emits `OUT_DIR/omega_sized.rs`. A new
 /// execution-policy key follows the same `resolve_int` + `require_nonzero` +
 /// generated-`pub const` shape `packed_row_block.simdgroups` and
@@ -369,6 +375,13 @@ fn emit_sizing_consts() {
             "grouped_gemm.scan_ahead",
             resolve_int(&root, "grouped_gemm", "scan_ahead"),
         );
+        let route_mode = resolve_str(&root, "grouped_gemm", "route_mode");
+        let route_compacted = match route_mode.as_str() {
+            "segments" => false,
+            "compacted" => true,
+            other => panic!("grouped_gemm.route_mode must be \"segments\" or \"compacted\", got {other:?}"),
+        };
+        out.push_str(&format!("pub const GROUPED_GEMM_ROUTE_COMPACTED: bool = {route_compacted};\n"));
         out.push_str(&format!("pub const GROUPED_GEMM_ROUTE_SEGMENTS: u64 = {route_segments};\n"));
         out.push_str(&format!("pub const GROUPED_GEMM_SCAN_AHEAD: u64 = {scan_ahead};\n"));
     }
