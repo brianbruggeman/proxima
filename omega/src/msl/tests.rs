@@ -7522,14 +7522,16 @@ fn packed_row_activation_cap_is_the_smallest_power_of_two_holding_the_tokens_up_
 #[cfg(all(feature = "metal-q4k-ggml-port", not(feature = "metal-q4k-split-k")))]
 #[test]
 fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
-    let cases: [(u32, &str, &str); 4] = [
-        (2, "_ac2", "float sumf[2][1];"),
-        (3, "_ac4", "float sumf[4][1];"),
-        (4, "_ac4", "float sumf[4][1];"),
-        (5, "", "float sumf[8][1];"),
+    let rows = crate::sized::PACKED_ROWS_PER_GROUP_Q6K;
+    let cases: [(u32, &str, usize); 4] = [
+        (2, "_ac2", 2),
+        (3, "_ac4", 4),
+        (4, "_ac4", 4),
+        (5, "", 8),
     ];
 
-    for (tokens, cap_suffix, accumulator_decl) in cases {
+    for (tokens, cap_suffix, accumulator_cap) in cases {
+        let accumulator_decl = format!("float sumf[{accumulator_cap}][{rows}];");
         let bound = packed_row_multi_token_op(tokens, 1536, 1024);
         let weight_node = bound.operands()[0].0;
         let mut q6k = BTreeMap::new();
@@ -7553,7 +7555,7 @@ fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
             "{tokens} tokens must not read the weight through the per-element decode"
         );
         assert!(
-            source.contains(accumulator_decl),
+            source.contains(&accumulator_decl),
             "{tokens} tokens must declare {accumulator_decl}"
         );
         assert!(
