@@ -2690,10 +2690,11 @@ pub enum TiledGemmRejection {
     /// can only narrow that gate's `Ok`, never rescue its `Err`.
     NotPackedRowBlock(PackedRowBlockRejection),
     /// The codec's tiled admission is switched off at runtime:
-    /// `PROXIMA_TILED_GEMM_Q4_0=0` keeps `Q4_0` on the row-blocked kernel, the
-    /// same-binary A/B control `tiled_gemm_q4_0_override` documents. A codec with
-    /// no [`tiled_decode`] description is rejected earlier, as
-    /// `NotPackedRowBlock(NotKQuantCodec)`.
+    /// `PROXIMA_TILED_GEMM_Q4_0=0` keeps `Q4_0` on the row-blocked kernel, and
+    /// `PROXIMA_TILED_GEMM_DISABLE` names any codec to keep off, the same-binary
+    /// A/B controls `tiled_gemm_q4_0_override` and `tiled_gemm_codec_disabled`
+    /// document. A codec with no [`tiled_decode`] description is rejected
+    /// earlier, as `NotPackedRowBlock(NotKQuantCodec)`.
     CodecSwitchedOff { codec: Codec },
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
     /// `simdgroup_matrix` accumulation requires.
@@ -2856,11 +2857,12 @@ pub(super) fn classify_tiled_gemm(
         .map_err(TiledGemmRejection::NotPackedRowBlock)?;
         let gathered = classify_expert_gather(resolved, weight)?;
         // Every codec with a `tiled_decode` description is admitted by the
-        // gate above (that table is the whitelist); the one runtime switch is
-        // `Q4_0`'s, `PROXIMA_TILED_GEMM_Q4_0` (default ON: unset admits, only
-        // explicit `"0"` falls back), kept as the same-binary A/B control the
-        // row-blocked `Q4_0` tests rely on.
-        if codec == Codec::Q4_0 && !tiled_gemm_q4_0_override() {
+        // gate above (that table is the whitelist). The runtime switches are
+        // same-binary A/B controls: `PROXIMA_TILED_GEMM_Q4_0` (default ON:
+        // unset admits, only explicit `"0"` falls back) which the row-blocked
+        // `Q4_0` tests rely on, and `PROXIMA_TILED_GEMM_DISABLE`, the same
+        // control for any codec.
+        if (codec == Codec::Q4_0 && !tiled_gemm_q4_0_override()) || tiled_gemm_codec_disabled(codec) {
             return Err(TiledGemmRejection::CodecSwitchedOff { codec });
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
