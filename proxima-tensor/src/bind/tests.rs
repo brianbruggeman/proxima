@@ -4875,6 +4875,149 @@ mod reduce_epilogue_fusion_tests {
             );
         }
     }
+
+    /// [`projection_rmsnorm_program`] followed by the post-norm tail gemma4
+    /// runs on its hidden-width norms: `* gamma`, then `+ residual`. Returns
+    /// `(program, [act, weight, inv_dim, eps, gamma, residual], output)`.
+    fn projection_rmsnorm_residual_program(
+        seq: u32,
+        k: u32,
+        dim: u32,
+    ) -> (Vec<Op>, [NodeId; 6], NodeId) {
+        let (mut program, [act, weight, inv_dim, eps, _projected], normed) =
+            projection_rmsnorm_program(seq, k, dim);
+        let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
+        let gamma = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(dim)],
+                name: None,
+            },
+        );
+        let residual = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(seq), Extent::Static(dim)],
+                name: None,
+            },
+        );
+        let scaled = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (normed, full()),
+                    (gamma, IndexMap::Affine(map::projection(2, &[1]))),
+                ],
+                name: None,
+            },
+        );
+        let output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(scaled, full()), (residual, full())],
+                name: None,
+            },
+        );
+        (program, [act, weight, inv_dim, eps, gamma, residual], output)
+    }
+
+    /// The hidden-width post-norm of a decode step: a projection output read
+    /// by its own sum of squares and by the apply, then `* gamma + residual`.
+    /// The narrow rule leaves the apply, the gamma multiply and the residual
+    /// add as separate ops; the widened rule folds all three into the
+    /// sum-of-squares reduce as one broadcast epilogue that reads `gamma` and
+    /// `residual` itself, so one dispatch per row writes the final hidden
+    /// state.
+    #[test]
+    fn projection_output_rmsnorm_gamma_residual_tail_folds_into_one_broadcast_reduce_with_the_switch()
+     {
+        const SEQ: u32 = 3;
+        const HIDDEN: u32 = 64;
+        const DIM: u32 = 32;
+        let (program, [act, weight, inv_dim, eps, gamma, residual], output) =
+            projection_rmsnorm_residual_program(SEQ, HIDDEN, DIM);
+        let shapes = shape::infer(&program, &[]).expect("post-norm program infers");
+        let switch_off = NumericPolicy::bit_exact();
+        let switch_on = NumericPolicy::bit_exact().with_epilogue_sources(true);
+        let plain = bind_plain(&program, &shapes, &[output], switch_off).expect("unfused binds");
+        let off = bind(&program, &shapes, &[output], switch_off).expect("switch-off binds");
+        let on = bind(&program, &shapes, &[output], switch_on).expect("switch-on binds");
+
+        let broadcast_epilogues = |resolved: &[BoundOp]| -> Vec<Vec<NodeId>> {
+            resolved
+                .iter()
+                .filter_map(|bound| match &bound.kind {
+                    BoundOpKind::Reduce {
+                        epilogue_operands,
+                        epilogue_broadcast_axes,
+                        ..
+                    } if !epilogue_broadcast_axes.is_empty() => Some(
+                        epilogue_operands
+                            .iter()
+                            .map(|(source, _, _)| *source)
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            broadcast_epilogues(&off).is_empty(),
+            "the narrow rule stops at the two-reader projection output, got {off:?}"
+        );
+        let on_epilogues = broadcast_epilogues(&on);
+        assert_eq!(
+            on_epilogues.len(),
+            1,
+            "the widened rule folds the whole tail into one broadcast reduce, got {on:?}"
+        );
+        assert!(
+            on_epilogues[0].contains(&gamma) && on_epilogues[0].contains(&residual),
+            "the fused epilogue reads gamma and the residual itself, got {:?}",
+            on_epilogues[0]
+        );
+        assert!(
+            on.len() < off.len(),
+            "the folded tail removes ops, off={} on={}",
+            off.len(),
+            on.len()
+        );
+        assert_no_dangling_operand_references(&program, &on);
+
+        let mut lcg = Lcg(4049);
+        let mut draw = |count: u32| -> Vec<f32> { (0..count).map(|_| lcg.next_unit()).collect() };
+        let inputs = alloc::vec![
+            (act, draw(SEQ * HIDDEN)),
+            (weight, draw(HIDDEN * DIM)),
+            (inv_dim, alloc::vec![1.0f32 / DIM as f32]),
+            (eps, alloc::vec![1e-5f32]),
+            (gamma, draw(DIM)),
+            (residual, draw(SEQ * DIM)),
+        ];
+        let plain_buffers = run_resolved(program.len(), &plain, inputs.clone());
+        let on_buffers = run_resolved(program.len(), &on, inputs);
+        let expected = plain_buffers[output.0 as usize]
+            .as_ref()
+            .expect("unfused output present");
+        let actual = on_buffers[output.0 as usize]
+            .as_ref()
+            .expect("fused output present");
+        assert_eq!(expected.len(), (SEQ * DIM) as usize);
+        assert_eq!(expected.len(), actual.len());
+        for (index, (fused_value, plain_value)) in actual.iter().zip(expected).enumerate() {
+            let error = (fused_value - plain_value).abs();
+            assert!(
+                error <= 1e-6 * plain_value.abs().max(1.0),
+                "element {index}: fused {fused_value} vs unfused {plain_value}"
+            );
+        }
+    }
 }
 
 /// `n_tokens == 1`, single physical head axis (`kv_heads == num_v_heads`,
