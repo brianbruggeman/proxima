@@ -9050,3 +9050,173 @@ fn ported_matvec_bodies_unroll_their_row_and_lane_loops_fully() {
         );
     }
 }
+
+#[cfg(feature = "metal-grouped-gemm")]
+mod expert_grouped_route_segments {
+    use super::*;
+
+    const EXPERTS: usize = 32;
+    const SELECTED: usize = 8;
+    const SEQUENCE: usize = 1000;
+    const HIDDEN: usize = 64;
+    const TILE_TOKENS: usize = GROUPED_TILE_TOKENS as usize;
+
+    type ThreadgroupWork = Vec<(usize, usize, Vec<usize>)>;
+
+    fn next_unit(state: &mut u64) -> f32 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut mixed = *state;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        mixed ^= mixed >> 31;
+        (mixed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+    }
+
+    fn top_k_route() -> Vec<usize> {
+        let mut state = 0x5EED_0FC0_DEAD_BEEFu64;
+        let router: Vec<f32> = (0..EXPERTS * HIDDEN).map(|_| next_unit(&mut state)).collect();
+        let bias: Vec<f32> = (0..EXPERTS).map(|expert| 1.5 / ((expert + 1) as f32).powf(0.8)).collect();
+        let mut route = Vec::with_capacity(SEQUENCE * SELECTED);
+        for _ in 0..SEQUENCE {
+            let activation: Vec<f32> = (0..HIDDEN).map(|_| next_unit(&mut state)).collect();
+            let mut logits: Vec<(usize, f32)> = (0..EXPERTS)
+                .map(|expert| {
+                    let weights = &router[expert * HIDDEN..(expert + 1) * HIDDEN];
+                    let dot: f32 = weights.iter().zip(&activation).map(|(weight, value)| weight * value).sum();
+                    (expert, dot + bias[expert])
+                })
+                .collect();
+            logits.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+            route.extend(logits.iter().take(SELECTED).map(|&(expert, _)| expert));
+        }
+        route
+    }
+
+    fn segment_bounds(route_length: usize, segments: usize, segment: usize) -> (usize, usize) {
+        let length = route_length.div_ceil(segments);
+        let begin = segment * length;
+        (begin, route_length.min(begin + length))
+    }
+
+    fn threadgroup_work(route: &[usize], segments: usize) -> ThreadgroupWork {
+        let mut work = Vec::new();
+        for expert in 0..EXPERTS {
+            for segment in 0..segments {
+                let (begin, end) = segment_bounds(route.len(), segments, segment);
+                let matched: Vec<usize> = (begin..end).filter(|&token| route[token] == expert).collect();
+                work.extend(matched.chunks(TILE_TOKENS).map(|tile| (expert, segment, tile.to_vec())));
+            }
+        }
+        work
+    }
+
+    fn assignments(route: &[usize]) -> Vec<(usize, usize)> {
+        let mut pairs: Vec<(usize, usize)> =
+            route.iter().enumerate().map(|(token, &expert)| (expert, token)).collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    fn counts(route: &[usize]) -> Vec<usize> {
+        let mut counts = vec![0usize; EXPERTS];
+        route.iter().for_each(|&expert| counts[expert] += 1);
+        counts
+    }
+
+    #[test]
+    fn the_top_k_fixture_is_a_skewed_32_expert_8_selected_route_over_1000_tokens() {
+        let route = top_k_route();
+
+        let counts = counts(&route);
+
+        assert_eq!(route.len(), SEQUENCE * SELECTED);
+        assert_eq!(counts.iter().sum::<usize>(), SEQUENCE * SELECTED);
+        let mean = SEQUENCE * SELECTED / EXPERTS;
+        assert!(counts.iter().copied().max().unwrap_or(0) >= 2 * mean, "{counts:?}");
+        assert!(counts.iter().copied().max().unwrap_or(0) >= 5 * counts.iter().copied().min().unwrap_or(0), "{counts:?}");
+    }
+
+    #[proxima::test]
+    #[case::one_segment(1)]
+    #[case::two_segments(2)]
+    #[case::four_segments(4)]
+    #[case::eight_segments(8)]
+    #[case::sixteen_segments(16)]
+    #[case::the_sized_default(crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS as usize)]
+    async fn the_segment_work_lists_cover_every_assigned_token_exactly_once(#[case] segments: usize) {
+        let route = top_k_route();
+
+        let work = threadgroup_work(&route, segments);
+
+        let mut covered: Vec<(usize, usize)> = work
+            .iter()
+            .flat_map(|(expert, _, tokens)| tokens.iter().map(move |&token| (*expert, token)))
+            .collect();
+        covered.sort_unstable();
+        assert_eq!(covered, assignments(&route));
+    }
+
+    #[proxima::test]
+    #[case::two_segments(2)]
+    #[case::eight_segments(8)]
+    async fn a_tile_is_at_most_one_tile_of_ascending_tokens_inside_its_segment(#[case] segments: usize) {
+        let route = top_k_route();
+
+        let work = threadgroup_work(&route, segments);
+
+        for (expert, segment, tokens) in &work {
+            let (begin, end) = segment_bounds(route.len(), segments, *segment);
+            assert!(tokens.len() <= TILE_TOKENS && !tokens.is_empty());
+            assert!(tokens.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(tokens.iter().all(|&token| (begin..end).contains(&token) && route[token] == *expert));
+        }
+    }
+
+    #[proxima::test]
+    #[case::two_segments(2)]
+    #[case::eight_segments(8)]
+    async fn the_segments_of_one_expert_load_the_route_once_between_them(#[case] segments: usize) {
+        let route_length = SEQUENCE * SELECTED;
+
+        let loaded: usize = (0..segments)
+            .map(|segment| {
+                let (begin, end) = segment_bounds(route_length, segments, segment);
+                end - begin
+            })
+            .sum();
+
+        assert_eq!(loaded, route_length);
+        assert!(segment_bounds(route_length, segments, 0).1 <= route_length.div_ceil(segments));
+    }
+
+    #[test]
+    fn the_rendered_kernel_scans_only_its_route_segment_and_runs_every_tile_of_it() {
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+        let segments = crate::sized::GROUPED_GEMM_ROUTE_SEGMENTS;
+
+        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+
+        let length = format!("long segment_length = (token_extent + {segments}l - 1l) / {segments}l;");
+        assert!(source.contains(&length), "{length} missing from {source}");
+        assert!(source.contains("long segment_begin = route_segment * segment_length;"), "{source}");
+        assert!(source.contains("long segment_end = min(token_extent, segment_begin + segment_length);"), "{source}");
+        assert!(source.contains("long scan_base = segment_begin;"), "{source}");
+        assert!(source.contains("scan_base < segment_end"), "{source}");
+        assert!(!source.contains("scan_base < token_extent"), "{source}");
+        assert!(!source.contains("tile_ordinal"), "{source}");
+    }
+
+    #[test]
+    fn the_per_token_accumulation_order_is_the_unchanged_k_loop_and_multiply_accumulate() {
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+
+        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+
+        let k_loop = format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
+        assert_eq!(source.matches(&k_loop).count(), 1, "{source}");
+        let accumulate = "simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i])";
+        assert_eq!(source.matches(accumulate).count(), 1, "{source}");
+    }
+}
