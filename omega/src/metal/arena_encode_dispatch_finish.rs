@@ -133,6 +133,19 @@ fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeId, usize)> 
         .chain(twin)
 }
 
+/// The buffer slot, node and element count of every extra output `encode_op`
+/// binds past `bindings`, in bind order: [`extra_output_nodes`] numbered from
+/// `bindings_len`. The live encoder and the replay capture both read this one
+/// list, so a replayed dispatch binds its extras exactly where the live one did.
+fn extra_output_slots(
+    bound: &BoundOp,
+    bindings_len: usize,
+) -> impl Iterator<Item = (usize, NodeId, usize)> + '_ {
+    extra_output_nodes(bound)
+        .enumerate()
+        .map(move |(offset, (node, element_count))| (bindings_len + offset, node, element_count))
+}
+
 /// This plan's own row count, straight from the caller's bind-time
 /// `symbols[0]` (`new_count` in `residency_caches.rs`'s own vocabulary,
 /// stored once on [`Plan::bind_row_count`] at [`plan`]/[`plan_named`] time)
@@ -1515,23 +1528,16 @@ fn live_extra_buffers(
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     buffers: &mut Vec<(usize, MetalBuffer, usize)>,
 ) -> Option<String> {
-    let extra_nodes: Vec<NodeId> = match &bound.kind {
-        BoundOpKind::CachedSoftmaxWeights {
-            cached_weight_sum,
-            new_weight_sum,
-            new_attended,
-            ..
-        } => vec![*cached_weight_sum, *new_weight_sum, *new_attended],
-        BoundOpKind::GatedDeltaNet { .. } | BoundOpKind::MoeTopK { .. } => {
-            return Some(format!("{} binds extra outputs outside `bindings`", bound.kind.name()));
-        }
-        _ => return None,
-    };
-    for (offset, node) in extra_nodes.iter().enumerate() {
-        let Some((buffer, buffer_offset)) = device_buffers.get(node).cloned() else {
+    if matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. }) {
+        return Some(String::from(
+            "gated_delta_net binds its state_out through a caller placement, outside the extra-output slot plan",
+        ));
+    }
+    for (slot, node, _) in extra_output_slots(bound, slot_base) {
+        let Some((buffer, buffer_offset)) = device_buffers.get(&node).cloned() else {
             return Some(format!("extra output node {} has no device buffer", node.0));
         };
-        buffers.push((slot_base + offset, buffer, buffer_offset));
+        buffers.push((slot, buffer, buffer_offset));
     }
     None
 }
@@ -2448,8 +2454,7 @@ pub(super) fn encode_op(
     // `bindings` -- `bind_buffers`' single `output` cannot carry them, so they
     // bind here, resolved from `device_buffers` (the plan arena pre-resolves
     // them on the placements path) or allocated fresh on the cold paths.
-    for (offset, (extra_node, element_count)) in extra_output_nodes(bound).enumerate() {
-        let buffer_index = bindings.len() + offset;
+    for (buffer_index, extra_node, element_count) in extra_output_slots(bound, bindings.len()) {
         let (extra_buffer, extra_offset) = match device_buffers.get(&extra_node).cloned() {
             Some(buffer) => buffer,
             None => (allocate_buffer(device, element_count, bound.dtype)?, 0),
