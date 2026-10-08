@@ -222,3 +222,15 @@ dispatch floor.
   experts) and ProMoE (CPU predictor ~200 us, GPU experts). An NPU router with
   GPU experts: none found. That is the open cell the ANE cards measure.
 - Cards: `docs/bench-campaigns/2026-10-08-ane-lane/plan.md`.
+
+### LiteRT (owner, 2026-10-08; from memory, unverified)
+Google's on-device runtime (the TensorFlow Lite rebrand; LiteRT Next API;
+LiteRT-LM for LLMs). A compiled-model lane like CoreML and QNN: flatbuffer
+models, acceleration by delegate (GPU, CoreML, vendor NPU paths compiled
+ahead of time per SoC). Not a kernel lane, so not something omega runs on.
+Three possible relations, none started: (1) a backend lane on Android, the
+public route to Qualcomm and MediaTek NPUs without the vendor SDKs; (2) a
+`.tflite` codec in the any-to-any format goal, after GGUF and safetensors;
+(3) an incumbent (LiteRT-LM phone decode numbers) for an Android build. On a
+Mac it adds nothing CoreML does not. Verify the current API surface and the
+NPU delegate list before any card.
