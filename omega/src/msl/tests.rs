@@ -2206,6 +2206,36 @@ fn dense_batched_restage_msl_dump_for_the_real_weather_score_shape() {
     }
 }
 
+/// The dense weight-staging loop at the router's shape (`[1000 tokens, 32
+/// features]` over a 1024 reduction): every guarded global load lands in a
+/// register array first, then the array is stored to the tile in the same k
+/// order, so the accumulation order the `simdgroup` multiply sees is the one
+/// the serial staging loop fed it. The partial-tile guard is kept per load.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
+    let bound = dense_batched_score_shaped_op(1000, 32, 1, 1024);
+
+    let source = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
+        emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect("emits")
+            .source
+    });
+
+    let block_k = crate::sized::TILED_GEMM_BLOCK_K;
+    assert!(source.contains("simdgroup_float8x8"), "the dense GEMM body must render\n{source}");
+    assert!(source.contains(&format!("float w_regs[{block_k}];")), "{source}");
+    assert!(source.contains(
+        "w_regs[w_k] = (k0 + w_k < u.reduction_total) ? in0[row_base + (long)w_k * w_stride] : 0.0f;"
+    ), "the partial-k guard stays per load\n{source}");
+    assert!(source.contains(&format!("weight_tile[w_row * {block_k} + w_k] = w_regs[w_k];")));
+    assert!(!source.contains("long w_off = row_base"), "the serial per-element staging is gone");
+    let loads = source.find("w_regs[w_k] = (k0").expect("register loads render");
+    let stores = source.find("= w_regs[w_k];").expect("tile stores render");
+    assert!(loads < stores, "all loads are issued before the first tile store");
+    assert!(source.matches("#pragma unroll").count() >= 2, "both staging loops unroll");
+}
+
 /// Coordinator-required proof (2026-09-27 mid-task addition, updated when
 /// `PROXIMA_TILED_GEMM_DENSE` flipped to default-on): a small
 /// assertion-bearing test, run against THIS tree's own `classify_dense_
