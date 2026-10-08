@@ -155,6 +155,11 @@ pub const SIMD_WIDTH: u64 = 32;
 // `OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=256` and
 // `OMEGA_COOPERATIVE_REDUCE_BROADCAST_SIMD_FOLD=0` rebuild the shape before
 // these keys, which is the A/B control.
+//
+// `HIDDEN_NORM_REDUCE_WIDTH` (same feature) is the width of the hidden-width
+// norm class, a one-row broadcast-epilogue reduce; a value at or below
+// `BROADCAST_REDUCE_MAX_WIDTH` turns the class off.
+// `OMEGA_WIDE_COOPERATIVE_REDUCE_HIDDEN_NORM_WIDTH=256` is the A/B control.
 
 // `GRID_LINEAR_THREAD_LIMIT`/`GRID_MAX_THREADGROUPS_X` come in through the
 // `include!` above -- `msl::grid2d_for`'s two grid-shape facts: the widest 1D
