@@ -2561,12 +2561,17 @@ impl<'file> LoadedModel<'file> {
         let draft_slack = speculative_draft_limit(&serving_config.speculative, None)
             .map_or(0, |limit| limit as u32)
             .max(serving_config.prompt_cache.rewind_slack_rows() as u32);
+        let arena_allowance_bytes = crate::memory_fit::prefill_arena_allowance_bytes(
+            omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
+            omega::sized::LOAD_TIME_FIT_ARENA_BYTES_PER_PREFILL_ROW,
+            serving_config.ubatch_size,
+        );
         let (context_length, outcome) = crate::memory_fit::fit_context_length(
             weights,
             &self.kv_layers,
             requested_context_length,
             draft_slack,
-            omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
+            arena_allowance_bytes,
             limit,
         )?;
         // does the caller's live memory state (e.g. another process holding
@@ -2585,7 +2590,7 @@ impl<'file> LoadedModel<'file> {
             &self.kv_layers,
             context_length,
             draft_slack,
-            omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
+            arena_allowance_bytes,
         );
         serving_config.prompt_cache.byte_budget = serving_config
             .prompt_cache
