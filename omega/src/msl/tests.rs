@@ -406,6 +406,66 @@ fn packed_row_multi_token_op(tokens: u32, k: u32, rows: u32) -> BoundOp {
         .expect("one fused bound emitted")
 }
 
+/// Whether the single-activation Q4_0 plain-product body is ggml's inline
+/// nibble dot (`push_q4_0_native_body`). That body owns its whole `ib` loop and
+/// has no `sgitg`/`split` stride, so `use_q4_0_native` also requires
+/// `metal-q4k-split-k` off: with split-k compiled in the same op takes the
+/// split-aware batched `q4_0_pair_dot` body instead.
+fn q4_0_native_body_selected() -> bool {
+    cfg!(feature = "metal-q4_0-native") && !cfg!(feature = "metal-q4k-split-k")
+}
+
+/// The cross-simdgroup tail of a single-activation row-blocked body. With
+/// `metal-q4k-split-k` the simdgroups of one threadgroup each fold a strided
+/// slice of the super-blocks, park a `simd_sum` partial per row in threadgroup
+/// memory, and simdgroup 0 lane 0 adds them after a barrier
+/// (`push_packed_row_combine_and_write`, split-k arm). Without it there is no
+/// second simdgroup, so no partials, no `sgitg` and no `split` in the kernel.
+fn assert_split_k_combine_rendered(source: &str) {
+    if cfg!(feature = "metal-q4k-split-k") {
+        for fragment in [
+            "threadgroup float partial_sums[",
+            "partial_sums[q][sgitg] = reduced;",
+            "threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "if (sgitg == 0u && lane == 0u) {",
+            "for (uint s = 1u; s < split; ++s) {",
+        ] {
+            assert!(
+                source.contains(fragment),
+                "split-k route must render `{fragment}` in its combine tail:\n{source}"
+            );
+        }
+    } else {
+        for fragment in ["partial_sums[", "sgitg", "split"] {
+            assert!(
+                !source.contains(fragment),
+                "the single-simdgroup route must not render `{fragment}`:\n{source}"
+            );
+        }
+    }
+}
+
+/// The split-k factor `packed_row_split_factor` must pick, restated from the
+/// build-time keys it reads (`[packed_row_split_k] target_simdgroups` and
+/// `max_split`, `[packed_row_block] split_k_max_rows`): `1` when split-k is
+/// not compiled in, when the op has no simdgroups, or when its row count is
+/// past the ceiling; otherwise the simdgroups the target asks for divided by
+/// the op's own, held to `max_split`.
+#[cfg(feature = "metal-q4k-split-k")]
+fn expected_split_k_factor(base_simdgroups: u64, rows: u64) -> u64 {
+    let ceiling = crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS;
+    if base_simdgroups == 0 || (ceiling != 0 && rows > ceiling) {
+        return 1;
+    }
+    (crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS / base_simdgroups)
+        .clamp(1, crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT)
+}
+
+#[cfg(not(feature = "metal-q4k-split-k"))]
+fn expected_split_k_factor(_base_simdgroups: u64, _rows: u64) -> u64 {
+    1
+}
+
 /// Every multi-row-experiment test in this module reads a `PROXIMA_MULTI_
 /// ROW_*` env var, and `cargo test` (unlike `cargo nextest run`, which gives
 /// each test its own process) runs this module's tests as multiple THREADS
@@ -1732,8 +1792,10 @@ fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
     // `push_q4_0_native_body`'s own doc. Under that feature this same
     // matmul renders ggml's own inline dot (`sumy * -8.0f`), not a call to
     // the named accessor, so the assertion below is feature-conditional
-    // rather than a second copy of this whole test.
-    if cfg!(feature = "metal-q4_0-native") {
+    // rather than a second copy of this whole test. `metal-q4k-split-k`
+    // owns the row-blocked geometry when compiled in (the native body has no
+    // `sgitg`/`split` stride), so the native arm is the route only without it.
+    if q4_0_native_body_selected() {
         assert!(
             source.contains("sumy * -8.0f"),
             "metal-q4_0-native must render ggml's inline nibble dot for a plain-product Q4_0 matmul:\n{source}"
@@ -1751,7 +1813,12 @@ fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
             !source.contains("q4_0_super_element(blk"),
             "the batched arm must fully replace the per-element accessor for a plain product:\n{source}"
         );
+        assert!(
+            !source.contains("sumy * -8.0f"),
+            "the native inline dot must not render when another body owns the geometry:\n{source}"
+        );
     }
+    assert_split_k_combine_rendered(&source);
     assert!(
         !source.contains("q4k_run8(blk")
             && !source.contains("q5k_value(blk")
@@ -5363,8 +5430,8 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
     )
     .expect("Q4_0 now reaches the row-blocked path and renders a kernel body");
     // See the sibling assertion in `q4_0_codec_takes_the_row_blocked_path_
-    // at_a_256_extent` for why this branches on `metal-q4_0-native`.
-    if cfg!(feature = "metal-q4_0-native") {
+    // at_a_256_extent` for why this branches on the native body being selected.
+    if q4_0_native_body_selected() {
         assert!(
             source.contains("sumy * -8.0f"),
             "metal-q4_0-native must render ggml's inline nibble dot: {source}"
@@ -5374,7 +5441,12 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
             source.contains("q4_0_pair_dot(blk"),
             "row-blocked Q4_0 body for a plain-product reduce must call the batched pair-dot accessor: {source}"
         );
+        assert!(
+            !source.contains("sumy * -8.0f"),
+            "the native inline dot must not render when another body owns the geometry: {source}"
+        );
     }
+    assert_split_k_combine_rendered(&source);
 }
 
 /// Reachability proof for [`packed_row_split_factor`]'s row-count gate
@@ -7590,7 +7662,7 @@ fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
         let mut q4_0 = BTreeMap::new();
         q4_0.insert(weight_node, Codec::Q4_0);
 
-        let (key, source, threads) = with_every_multi_row_env_unset(|| {
+        let (key, source, threads, threadgroup_width) = with_every_multi_row_env_unset(|| {
             let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
                 .expect("multi-row cache key");
             let source = emit(&bound, &q4_0, NumericPolicy::default())
@@ -7598,7 +7670,7 @@ fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
                 .source;
             let (_, grid) = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
                 .expect("multi-row dispatch shape");
-            (key, source, grid.threads)
+            (key, source, grid.threads, grid.threadgroup_width)
         });
 
         match cap_suffix {
@@ -7610,11 +7682,21 @@ fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
             "{tokens} tokens must declare {accumulator_decl}"
         );
         let feature_simdgroups = 256 / 4;
+        let split = expected_split_k_factor(feature_simdgroups, 256);
         assert_eq!(
             threads,
-            feature_simdgroups * token_groups * 32,
-            "{tokens} tokens must dispatch {token_groups} token group(s) of {feature_simdgroups} simdgroups"
+            feature_simdgroups * token_groups * 32 * split,
+            "{tokens} tokens must dispatch {token_groups} token group(s) of {feature_simdgroups} \
+             simdgroups, each {split} simdgroup(s) wide"
         );
+        if cfg!(feature = "metal-q4k-split-k") {
+            assert!(split > 1, "a 256-row op sits under split-k's row ceiling and simdgroup target");
+            assert_eq!(
+                threadgroup_width,
+                Some(32 * split),
+                "{tokens} tokens: split-k dispatches one threadgroup per simdgroup group, {split} simdgroups wide"
+            );
+        }
     }
 }
 
@@ -8246,6 +8328,10 @@ mod epilogue_operand_reuse {
             .expect("emits")
             .source;
 
+        if cfg!(feature = "metal-q4k-split-k") {
+            assert_split_k_tail_runs_the_epilogue_once_per_row(&source);
+            return;
+        }
         assert!(
             source.contains("if (lane < 4u) {"),
             "four rows per simdgroup, one lane each:\n{source}"
@@ -8260,6 +8346,40 @@ mod epilogue_operand_reuse {
         );
     }
 
+    /// With `metal-q4k-split-k` the rows of a group cannot finish on their own
+    /// lanes: each row's `simd_sum` is one partial of `split`, parked per
+    /// simdgroup in threadgroup memory, and only after the barrier can any lane
+    /// hold a finished row. Simdgroup 0 lane 0 then adds the partials of each of
+    /// the four rows in turn and runs the fused epilogue on the total, once per
+    /// row, behind the output bound.
+    fn assert_split_k_tail_runs_the_epilogue_once_per_row(source: &str) {
+        assert!(
+            source.contains("float reduced = simd_sum(sumf[q]);")
+                && source.contains("partial_sums[q][sgitg] = reduced;"),
+            "every row's simdgroup sum is parked as one partial before the combine:\n{source}"
+        );
+        assert!(
+            source.contains("threadgroup float partial_sums[4]["),
+            "four rows per group, one partial slot per simdgroup:\n{source}"
+        );
+        assert!(
+            source.contains("threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (sgitg == 0u && lane == 0u) {"),
+            "the partials are only read by simdgroup 0 lane 0, after the barrier:\n{source}"
+        );
+        assert!(
+            source.contains("total = (total + partial_sums[q][s]);"),
+            "the other simdgroups' partials are added into the row's total:\n{source}"
+        );
+        assert!(
+            source.contains("epi_scratch[3] = total;") && source.contains("out[out_offset] = "),
+            "the fused epilogue consumes the combined total and stores it:\n{source}"
+        );
+        assert!(
+            !source.contains("if (lane < 4u) {"),
+            "no row finishes on its own lane before the combine:\n{source}"
+        );
+    }
+
     #[test]
     fn a_plain_matvec_finishes_each_row_of_the_simdgroup_on_its_own_lane() {
         let bound = packed_row_multi_token_op(1, REDUCTION, ROWS);
@@ -8271,6 +8391,20 @@ mod epilogue_operand_reuse {
             .expect("emits")
             .source;
 
+        if cfg!(feature = "metal-q4k-split-k") {
+            assert_split_k_combine_rendered(&source);
+            assert!(
+                source.contains("long out_offset = u.out_base;")
+                    && source.contains("out_offset += coord_q_cache[q][1] * u.out_strides[1];")
+                    && source.contains("out[out_offset] = total;"),
+                "the combined total is stored at the row's cached coordinate:\n{source}"
+            );
+            assert!(
+                !source.contains("if (lane < 4u) {") && !source.contains("if (lane == 0u && flat < u.output_total)"),
+                "no row finishes on its own lane, and none waits behind a per-row lane-0 test:\n{source}"
+            );
+            return;
+        }
         assert!(
             source.contains("if (lane < 4u) {"),
             "four rows per simdgroup, one lane each:\n{source}"
@@ -8792,7 +8926,12 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
     assert!(source.contains(&format!("float sumf[{rows}];")), "{source}");
     assert!(source.contains(&format!("long group_first = output_index * {rows};")), "{source}");
     let (groups, split) = packed_row_dispatch(8, 1, Codec::Q6K);
-    assert_eq!((groups, split), (8u64.div_ceil(rows as u64), 1));
+    let base_simdgroups = 8u64.div_ceil(rows as u64);
+    assert_eq!(
+        (groups, split),
+        (base_simdgroups, expected_split_k_factor(base_simdgroups, 8))
+    );
+    assert_split_k_combine_rendered(&source);
 }
 
 /// ggml marks every row, lane and nibble loop of its matvec bodies
@@ -8800,6 +8939,12 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
 /// indexed private arrays. The same loops in the ported bodies carry the full
 /// unroll pragma on the line above, for both codecs the decode graph's
 /// 12288-wide and head matvecs use.
+///
+/// The ported bodies own their whole `ib` loop with no `sgitg`/`split` stride,
+/// so `metal-q4k-split-k` replaces them with the split-aware body: there the
+/// route to prove is that neither ported body renders, that the `ib` walk is
+/// strided by the simdgroup index and `split`, and that the row loop and the
+/// block pointer setup and advance are still the blk_ptr form the combine reads.
 #[cfg(all(feature = "metal-q4k-ggml-port", feature = "metal-q4_0-native"))]
 #[test]
 fn ported_matvec_bodies_unroll_their_row_and_lane_loops_fully() {
@@ -8814,6 +8959,23 @@ fn ported_matvec_bodies_unroll_their_row_and_lane_loops_fully() {
             trimmed_line_above(&source, rows_loop, 1).starts_with("for (int q = 0; q <"),
             "{codec:?}: the row loop opens one line above its first statement\n{source}"
         );
+        if cfg!(feature = "metal-q4k-split-k") {
+            assert!(
+                source.contains("int ib_first = (int)(ix + sgitg * ")
+                    && source.contains("int ib_step = (int)("),
+                "{codec:?}: split-k strides the block walk by simdgroup index and split\n{source}"
+            );
+            assert!(
+                !source.contains("sumy * -8.0f") && !source.contains("int ib_step = 2;"),
+                "{codec:?}: neither ported body has a split-k stride, so neither may render\n{source}"
+            );
+            assert!(
+                source.contains("blk_ptr[q] = in") && source.contains("blk_ptr[q] += blk_step; }"),
+                "{codec:?}: the block pointers are set up and advanced per row\n{source}"
+            );
+            assert_split_k_combine_rendered(&source);
+            continue;
+        }
         assert_eq!(
             trimmed_line_above(&source, rows_loop, 2),
             "#pragma unroll",
