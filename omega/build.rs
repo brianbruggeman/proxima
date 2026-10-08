@@ -631,6 +631,14 @@ fn emit_sizing_consts() {
         "pub const LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES: u64 = {arena_allowance_bytes};\n"
     ));
 
+    let arena_bytes_per_prefill_row = require_nonneg(
+        "load_time_fit.arena_bytes_per_prefill_row",
+        resolve_int(&root, "load_time_fit", "arena_bytes_per_prefill_row"),
+    );
+    out.push_str(&format!(
+        "pub const LOAD_TIME_FIT_ARENA_BYTES_PER_PREFILL_ROW: u64 = {arena_bytes_per_prefill_row};\n"
+    ));
+
     let selection_top_fraction_min_rows = require_nonzero(
         "selection.top_fraction_min_rows",
         resolve_int(&root, "selection", "top_fraction_min_rows"),
