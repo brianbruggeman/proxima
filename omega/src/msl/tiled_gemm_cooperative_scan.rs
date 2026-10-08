@@ -2629,7 +2629,7 @@ pub(super) fn push_cooperative_reduce_tail(
         // simdgroup reads simdgroup `i`'s partial and one more simd combine
         // leaves the scalar in every lane, so there is no serial fold on lane
         // 0 and no second barrier. A lane past the last simdgroup reads the
-        // reduction identity, which keeps llama's separate zero-fill pass (and
+        // reduction identity, which keeps llama.cpp's separate zero-fill pass (and
         // the barrier that would order it) out of the kernel.
         let identity = cooperative_identity_token(node, reduce_op)?;
         source.push_str(&format!(
