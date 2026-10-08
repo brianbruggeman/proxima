@@ -1,0 +1,13 @@
+cell e2b_long
+telemetry_ring_install_footprint before=2425728 after=1457819520 delta=1455393792 (excluded from every footprint figure below as footprint_minus_ring)
+steps_recorded=24 steady_window=10..=23 steady_steps=14
+phys_footprint_bytes step0=1989931904 peak=2011870080 steady_median=2010182528 peak_minus_steady=1687552
+phys_footprint_minus_ring_bytes step0=534538112 peak=556476288 steady_median=554788736 peak_minus_steady=1687552
+device_allocated_bytes step0=3736469504 peak=3748839424 steady_median=3748839424 peak_minus_steady=0
+unattributed_device_bytes step=0 device_allocated=3736469504 live_event_bytes=0 unattributed=3736469504
+unattributed_device_bytes step=10 device_allocated=3748839424 live_event_bytes=0 unattributed=3748839424
+unattributed_device_bytes step=23 device_allocated=3748839424 live_event_bytes=0 unattributed=3748839424
+steady_rss_bytes(median of per-token samples after token 10)=Some(5113561088) steady_footprint_bytes(same samples, run line)=Some(2009756544)
+owner | events | bytes created | of which aliased | released
+arena plans=0 allocated_bytes_sum=0 live_peak_bytes_sum=0 fragmentation_bytes=0
+device_memory_by_class load-time device allocation broken out by class step=0 weights_nocopy_bytes=0 weights_copied_bytes=2987612 weights_offset_bytes=0 kv_cache_device_bytes=0 kv_cache_device_bytes_known=false device_allocated_bytes=3735470080 phys_footprint_bytes=1989931904

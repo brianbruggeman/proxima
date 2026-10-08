@@ -1,0 +1,4 @@
+samples=1260 first_footprint=98496 peak_footprint=350557248 at_ms=1539 last_nonzero_ms=1610
+665	step_time run_index=0 step=0 step_ms=336 phase=prefill
+665	step_time run_index=0 step=0 step_ms=0 phase=decode
+1524	step_time run_index=0 step=127 step_ms=7 phase=decode

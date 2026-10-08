@@ -1,0 +1,6 @@
+Thu Oct  8 14:51:25 CDT 2026
+14:51  up 8 days, 55 mins, 3 users, load averages: 3.86 5.67 6.53
+"Device Utilization %"=78
+"Device Utilization %"=0
+"Device Utilization %"=0
+84341 /Users/brianbruggeman/.cargo/bin/sccache

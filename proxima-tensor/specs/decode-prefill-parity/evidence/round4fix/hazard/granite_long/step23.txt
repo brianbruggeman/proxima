@@ -1,0 +1,7 @@
+cell granite_long steps_recorded=24
+step | hazard_ops | op_barriers | internal_barriers | counter barriers | counter raw/waw/war | physical_dispatch_calls | encode_dispatch_calls | longest_run_ops | runs>=8
+23 | 374 | 324 | 24 | 348 | 298/0/26 | 398 | 374 | 3 | 0
+  op_barrier reason=arena_slot_reuse count=26
+  op_barrier reason=pointer_alias_without_node_dependency count=24
+  op_barrier reason=true_node_dependency count=274
+  internal_barrier site=attention_split_to_merge count=24
