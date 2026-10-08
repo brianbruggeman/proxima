@@ -1,0 +1,15 @@
+Thu Oct  8 00:22:02 CDT 2026
+ 0:22  up 7 days, 10:26, 7 users, load averages: 10.59 15.72 13.20
+  587 111.1 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 1418  63.9 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  716  42.0 /Applications/iTerm.app/Contents/MacOS/iTerm2
+17029  40.1 /Users/brianbruggeman/.local/bin/<background daemon>
+29286  37.8 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access.xpc/Contents/MacOS/mediaanalysisd-access
+72506   4.2 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+65955   2.1 /System/Library/PrivateFrameworks/IntelligencePlatformCompute.framework/Versions/A/XPCServices/IntelligencePlatformComputeService.xpc/Contents/MacOS/IntelligencePlatformComputeService
+  431   2.1 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mds
+"Device Utilization %"=92
+ollama curl exit=7
+38098 /Users/brianbruggeman/.cargo/bin/sccache
+note: the "Device Utilization %"=92 above is residue of the preceding nextest run; six samples 5 s apart right after read 0,0,0,0,0,0 and the bench started then
+note: the "Device Utilization %"=92 above is residue of the preceding nextest run; six samples 5 s apart right after read 0,0,0,0,0,0 and the bench started then

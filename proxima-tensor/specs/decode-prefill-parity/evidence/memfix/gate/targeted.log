@@ -1,0 +1,19 @@
+    Finished `gate` profile [optimized] target(s) in 0.34s
+────────────
+ Nextest run ID 30e7bb95-fbb7-4159-a894-098066b0d505 with nextest profile: default
+    Starting 13 tests across 4 binaries (59 tests and 31 binaries skipped)
+        PASS [   4.170s] ( 1/13) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_gemma4_e2b
+        PASS [   4.864s] ( 2/13) proxima-model-interop::arch_data_baseline generic_verify_llama_parity_granite_moe
+        PASS [   2.865s] ( 3/13) proxima-model-interop::arch_data_baseline llama_parity_gemma4_e2b
+        PASS [   1.417s] ( 4/13) proxima-model-interop::arch_data_baseline llama_parity_granite_moe
+        PASS [   4.156s] ( 5/13) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_gemma4_e2b
+        PASS [   1.885s] ( 6/13) proxima-model-interop::arch_data_baseline prefill_width_parity_with_llama_granite_moe
+        PASS [   0.176s] ( 7/13) proxima-model-interop::external_expert_paging evicting_every_expert_of_a_layer_fails_the_next_decode
+        PASS [   0.243s] ( 8/13) proxima-model-interop::external_expert_paging paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues
+        PASS [   0.183s] ( 9/13) proxima-model-interop::external_expert_paging paging_an_out_of_range_expert_index_is_rejected
+        PASS [   0.297s] (10/13) proxima-model-interop::external_expert_paging q2k_paging_actually_changes_the_decoded_ids
+        PASS [   0.008s] (11/13) proxima-model-interop::moe_stacked_default the_metal_feature_set_builds_routed_experts_as_stacked_projections
+        PASS [   4.280s] (12/13) proxima-model-interop::serving_default_ubatch_prefill_parity gemma4_e2b_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens
+        PASS [   1.980s] (13/13) proxima-model-interop::serving_default_ubatch_prefill_parity granite_moe_default_ubatch_prefill_ids_equal_the_single_pass_on_971_tokens
+────────────
+     Summary [  26.526s] 13 tests run: 13 passed, 59 skipped

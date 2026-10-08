@@ -1,0 +1,168 @@
+diff --git a/omega/src/metal/arena_encode_dispatch_finish.rs b/omega/src/metal/arena_encode_dispatch_finish.rs
+index 408c8cd2..7be2ca98 100644
+--- a/omega/src/metal/arena_encode_dispatch_finish.rs
++++ b/omega/src/metal/arena_encode_dispatch_finish.rs
+@@ -164,6 +164,27 @@ pub(super) fn plan_bind_row_count(symbols: &[u64]) -> u64 {
+     symbols.first().copied().unwrap_or(1).max(1)
+ }
+ 
++/// Pops the smallest retired slot whose byte length is at least `request_bytes`,
++/// so a buffer retired by one size class serves a later, smaller request
++/// instead of staying idle while that request allocates. The consumer binds
++/// the slot at offset 0 and reads only its own element count, so a longer
++/// slot is a whole-buffer reuse like an exact fit. A node the caller reads
++/// back (`exact_only`) keeps the exact-length rule, since `finish` hands its
++/// buffer out as the node's value.
++#[cfg(feature = "metal-plan-stable-buffers")]
++fn take_free_slot(
++    free_by_size: &mut BTreeMap<usize, Vec<usize>>,
++    request_bytes: usize,
++    exact_only: bool,
++) -> Option<usize> {
++    let ratio: usize = std::env::var("EXPERIMENT_FIT_RATIO").ok().and_then(|value| value.parse().ok()).unwrap_or(1);
++    let longest = if exact_only { request_bytes } else { request_bytes.saturating_mul(ratio) };
++    let size = free_by_size
++        .range(request_bytes..=longest)
++        .find_map(|(size, slots)| (!slots.is_empty()).then_some(*size))?;
++    free_by_size.get_mut(&size).and_then(Vec::pop)
++}
++
+ /// Prints the naive (no-reuse) transient sum against this plan's own
+ /// `query_rows`-scaled cap before allocating anything, per this card's
+ /// memory gate. `query_rows` is the caller's own [`Plan::bind_row_count`] --
+@@ -207,7 +228,7 @@ pub(super) fn build_buffer_arena(
+     let mut position_slot: Vec<usize> = Vec::with_capacity(resolved.len());
+     let mut extra_slots: Vec<(NodeId, usize)> = Vec::new();
+     let mut position_extras: Vec<core::ops::Range<usize>> = Vec::with_capacity(resolved.len());
+-    let mut node_slot: BTreeMap<NodeId, usize> = BTreeMap::new();
++    let mut node_slot: BTreeMap<NodeId, (usize, usize)> = BTreeMap::new();
+     let mut live_bytes: usize = 0;
+     let mut peak_bytes: usize = 0;
+     #[cfg(feature = "instrument")]
+@@ -225,7 +246,7 @@ pub(super) fn build_buffer_arena(
+         // free list on its own allocation.
+         let is_resident = resident_nodes.contains(&bound.node);
+         let slot = match (!is_resident)
+-            .then(|| free_by_size.get_mut(&byte_length).and_then(Vec::pop))
++            .then(|| take_free_slot(&mut free_by_size, byte_length, outputs.contains(&bound.node)))
+             .flatten()
+         {
+             Some(reused) => reused,
+@@ -254,13 +275,13 @@ pub(super) fn build_buffer_arena(
+         live_bytes += byte_length;
+         peak_bytes = peak_bytes.max(live_bytes);
+         position_slot.push(slot);
+-        node_slot.insert(bound.node, slot);
++        node_slot.insert(bound.node, (slot, byte_length));
+ 
+         let extras_start = extra_slots.len();
+         for (extra_node, element_count) in extra_output_nodes(bound) {
+             let extra_bytes = element_count.max(1) * bound.dtype.size_bytes();
+             let index = match (!is_resident)
+-                .then(|| free_by_size.get_mut(&extra_bytes).and_then(Vec::pop))
++                .then(|| take_free_slot(&mut free_by_size, extra_bytes, outputs.contains(&extra_node)))
+                 .flatten()
+             {
+                 Some(reused) => reused,
+@@ -278,7 +299,7 @@ pub(super) fn build_buffer_arena(
+             }
+             live_bytes += extra_bytes;
+             peak_bytes = peak_bytes.max(live_bytes);
+-            node_slot.insert(extra_node, index);
++            node_slot.insert(extra_node, (index, extra_bytes));
+             extra_slots.push((extra_node, index));
+         }
+         position_extras.push(extras_start..extra_slots.len());
+@@ -288,8 +309,8 @@ pub(super) fn build_buffer_arena(
+                 !outputs.contains(retired),
+                 "node_retirement must never retire an effective output"
+             );
+-            if let Some(retired_slot) = node_slot.remove(retired) {
+-                live_bytes -= slot_bytes[retired_slot];
++            if let Some((retired_slot, occupied_bytes)) = node_slot.remove(retired) {
++                live_bytes -= occupied_bytes;
+                 free_by_size
+                     .entry(slot_bytes[retired_slot])
+                     .or_default()
+@@ -298,6 +319,16 @@ pub(super) fn build_buffer_arena(
+         }
+     }
+ 
++    #[cfg(feature = "instrument")]
++    emit_arena_class_census(
++        resolved,
++        retires,
++        &position_slot,
++        &position_extras,
++        &extra_slots,
++        &slot_bytes,
++    );
++
+     let reuse_factor = naive_transient_bytes as f64 / peak_bytes.max(1) as f64;
+     debug!(
+         peak_bytes = peak_bytes as u64,
+@@ -331,6 +362,64 @@ pub(super) fn build_buffer_arena(
+     })
+ }
+ 
++/// Replays the arena's own slot assignment and retirement to report, per slot
++/// byte length: how many physical slots the plan holds, the most of them live
++/// at once, and which op kinds (with extents) wrote into the class. A class
++/// whose `held_bytes` exceeds `peak_live_bytes` is slots kept past their use.
++#[cfg(all(feature = "metal-plan-stable-buffers", feature = "instrument"))]
++fn emit_arena_class_census(
++    resolved: &[BoundOp],
++    retires: &[Vec<NodeId>],
++    position_slot: &[usize],
++    position_extras: &[core::ops::Range<usize>],
++    extra_slots: &[(NodeId, usize)],
++    slot_bytes: &[usize],
++) {
++    let mut slots_in_class: BTreeMap<usize, usize> = BTreeMap::new();
++    for bytes in slot_bytes {
++        *slots_in_class.entry(*bytes).or_default() += 1;
++    }
++    let mut live_nodes: BTreeMap<NodeId, usize> = BTreeMap::new();
++    let mut live: BTreeMap<usize, usize> = BTreeMap::new();
++    let mut peak_live: BTreeMap<usize, usize> = BTreeMap::new();
++    let mut writers: BTreeMap<usize, BTreeMap<String, usize>> = BTreeMap::new();
++    for (position, bound) in resolved.iter().enumerate() {
++        let primary = (bound.node, slot_bytes[position_slot[position]]);
++        let extras = extra_slots[position_extras[position].clone()]
++            .iter()
++            .map(|(node, slot)| (*node, slot_bytes[*slot]));
++        for (node, class) in core::iter::once(primary).chain(extras) {
++            live_nodes.insert(node, class);
++            let count = live.entry(class).or_default();
++            *count += 1;
++            let high = peak_live.entry(class).or_default();
++            *high = (*high).max(*count);
++            let label = format!("{}{:?}", bound.kind.name(), bound.extents);
++            *writers.entry(class).or_default().entry(label).or_default() += 1;
++        }
++        for retired in &retires[position] {
++            if let Some(class) = live_nodes.remove(retired) {
++                *live.entry(class).or_default() -= 1;
++            }
++        }
++    }
++    for (class_bytes, slots) in &slots_in_class {
++        let peak = peak_live.get(class_bytes).copied().unwrap_or(0);
++        if class_bytes.saturating_mul(*slots) < (1 << 20) {
++            continue;
++        }
++        debug!(
++            class_bytes = *class_bytes as u64,
++            slots = *slots as u64,
++            peak_live = peak as u64,
++            held_bytes = (class_bytes * slots) as u64,
++            peak_live_bytes = (class_bytes * peak) as u64,
++            writers = ?writers.get(class_bytes),
++            "buffer arena size class"
++        );
++    }
++}
++
+ /// CARD 6.5: one uniform buffer per plan position, allocated once in
+ /// [`plan`] and written IN PLACE by [`encode_op`] on every call thereafter --
+ /// never through the content-keyed `UNIFORM_BUFFERS` cache. That cache is a
