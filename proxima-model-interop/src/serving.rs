@@ -881,8 +881,11 @@ pub struct ServingConfig<'model> {
     /// for a plan's whole life (`omega::metal::Plan::numeric_policy`'s own
     /// doc: there is no post-hoc setter), so this field, not the narrower
     /// `math_mode` above, is the one that actually governs which bind-time
-    /// rewrites fire. [`NumericPolicy::llama_relaxed`] (this field's
-    /// default) is today's measured, already-shipping behavior:
+    /// rewrites fire. [`NumericPolicy::llama_relaxed`] with
+    /// `epilogue_sources` granted (this field's default; the grant is what
+    /// lets the reduce-epilogue pass reach an RMSNorm whose first reduce
+    /// operand is a multi-reader projection output, `NumericPolicy::
+    /// epilogue_sources`'s own doc) is today's measured behavior:
     /// `proxima-tensor/docs/discipline.md` ROW 362 measured the
     /// context-chunk merge it admits (keys_per_chunk 16, generated text
     /// identical, -4.9% gpu_exec) under exactly this value -- this field
@@ -1194,7 +1197,7 @@ impl Default for ServingConfig<'static> {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed(),
+            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             // Correctness-first default: CPU uses the scalar/dequantized
@@ -1812,7 +1815,7 @@ mod tests {
             kv_bucket_tokens: 64,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed(),
+            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             exact_activations: true,
@@ -1863,17 +1866,34 @@ mod tests {
         assert_eq!(ServingConfig::default().kv_bucket_tokens, 32);
     }
 
-    /// The declared default is [`NumericPolicy::llama_relaxed`] -- today's
-    /// own already-shipping behavior made visible and overridable at this
-    /// app edge, per this field's own doc. A silent default change here
+    /// The declared default is [`NumericPolicy::llama_relaxed`] with
+    /// `epilogue_sources` granted, so the RMSNorm apply folds into its
+    /// sum-of-squares reduce (one dispatch per norm row, llama.cpp's
+    /// `kernel_rms_norm_fuse_impl` shape). A silent default change here
     /// would be exactly the regression this branch's own defect report
     /// named: the serving path narrowing back to a stricter policy nobody
     /// asked for.
     #[test]
-    fn default_numeric_policy_is_llama_relaxed() {
+    fn default_numeric_policy_is_llama_relaxed_with_epilogue_sources() {
         assert_eq!(
             ServingConfig::default().numeric_policy,
-            NumericPolicy::llama_relaxed()
+            NumericPolicy::llama_relaxed().with_epilogue_sources(true)
+        );
+    }
+
+    /// The grant is what the reduce-epilogue pass reads to consider every
+    /// reduce operand of an RMSNorm apply instead of only the first (the
+    /// first is the two-reader projection output, which the single-reader
+    /// gate rejects), so the serving default is the switch that takes the
+    /// 170 per-token norm applies of a gemma4-E2B decode step to zero.
+    #[test]
+    fn default_numeric_policy_admits_the_widened_reduce_epilogue_fusion() {
+        let widened = proxima_tensor::NumericRewrite::WidenedReduceEpilogueFusion;
+
+        assert!(
+            ServingConfig::default()
+                .numeric_policy
+                .grants(widened.required_permissions())
         );
     }
 
@@ -2010,7 +2030,7 @@ mod tests {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed(),
+            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             exact_activations: true,
@@ -2094,7 +2114,7 @@ mod tests {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed(),
+            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             exact_activations: true,

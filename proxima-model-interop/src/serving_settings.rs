@@ -243,9 +243,9 @@ pub struct ServingSettings {
     /// `ServingConfig::numeric_policy`: the rewrites the plan may apply, one permission per field.
     #[setting(
         resolve_with = "from_json",
-        default_str = "{\"contraction\":true,\"reassociation\":true,\"nan_assumptions\":false,\"signed_zero\":false,\"approx_functions\":false,\"epilogue_sources\":false}"
+        default_str = "{\"contraction\":true,\"reassociation\":true,\"nan_assumptions\":false,\"signed_zero\":false,\"approx_functions\":false,\"epilogue_sources\":true}"
     )]
-    #[builder(default = NumericPolicy::llama_relaxed())]
+    #[builder(default = NumericPolicy::llama_relaxed().with_epilogue_sources(true))]
     pub numeric_policy: NumericPolicy,
     /// `ServingConfig::exact_activations`: keep activations at full precision.
     #[setting(default = true)]
@@ -723,7 +723,10 @@ epilogue_sources = true
             SAMPLING_ENV_KEYS.map(|key| (key, None::<&str>)),
             || ServingSettings::from_env().expect("the unset env resolves to defaults"),
         );
-        assert_eq!(defaults.numeric_policy, NumericPolicy::llama_relaxed());
+        assert_eq!(
+            defaults.numeric_policy,
+            NumericPolicy::llama_relaxed().with_epilogue_sources(true)
+        );
         assert_eq!(defaults.kv_bucket_tokens, 32);
         assert_eq!(defaults, ServingSettings::default());
     }
