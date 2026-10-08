@@ -40,6 +40,7 @@ pub(super) fn plan_with_placed_inputs(
     {
         counter!(PREPARE_CALLS, 1);
         counter!(PREPARE_TICKS, elapsed_ticks(prepare_started));
+        emit_step_phase("prepare", prepare_started.as_raw(), read_ticks().as_raw());
     }
     // `prepare` already built this attribution once, off the same `blocks`
     // argument, checked count- and shape-consistent against `block_nodes`
