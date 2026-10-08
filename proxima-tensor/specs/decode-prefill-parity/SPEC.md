@@ -2200,29 +2200,39 @@ on) was taken before the operand preload (`c3d924e3`, 2026-10-04 08:55 -0500, ag
 decides. The same doc records logits differing in about 85% of their bits with row-norm-relative error at most 6.7e-8 and
 the same argmax at every step on E2B; no other model was measured.
 
-### rope: not written, and why
+### rope: one dispatch per rotated tensor (written, nothing below was run)
 
-Rope stays two elementwise nodes per tensor (100 dispatches). Three things were read that stop a single-op form:
+The single-op form over a parity axis stays blocked for the three reasons read in the first pass of this section
+(`unify_iteration_space` cannot size a split-half parity axis, a sign operand costs shared iota dispatches, and the
+zero-copy window alias is a default-off switch of its own). The twin-output elementwise the first pass proposed is
+written instead, as a bind-level fusion that leaves the graph at two ordinary nodes:
 
-1. K's two halves are placed outputs. They are the layer cache roots (`LayerCacheRoots`, `spec/attention_forward.rs:3006`;
-   `rope_leaves_of` reads `rotated_even` from them, `generate/chunk_shift.rs:357`) and are written into the KV buffers by
-   output placement. One node cannot hand two placed buffers, so 30 of the 100 dispatches need a kernel with two outputs.
-2. As one `Op::Elementwise` over a parity axis `p` the form needs `p` sized by an operand. `unify_iteration_space`
-   (`shape.rs:236`) sizes an axis from a pure `coeff == 1` projection or a declared `@len` on the one unit-coefficient term
-   (`map.rs:107`). Interleaved `2*i+p@2` qualifies. Split-half, which E2B uses, addresses `i+pairs*p`, whose unit term is
-   `i`, so `p` stays unconstrained. The sign of the `sin` term also needs a +-1 operand that depends on `p`; an `Op::Iota`
-   is its own dispatch (two `iota` rows in the census) and a derived node read through a broadcast map is materialized
-   (`is_identity_projection`, `bind/builder_compose_window.rs:946`), so each variant of the sign adds shared dispatches
-   that eat into the 35 saved on Q.
-3. Reading the two halves back out of one node as zero-copy windows is what `apply_identity_copy_alias` does for base-0
-   copies; it is default-off in interop (`proxima-model-interop/Cargo.toml:240-249`), does not fold a window with a
-   non-zero base, and folds copies of `Op::Input` leaves, which can be caller-placed buffers a later op overwrites
-   (`omega/src/metal/execute_and_hazards.rs` placement notes). Turning it on is an unmeasured switch of its own.
+- `BoundOpKind::ElementwiseTwin { body, operands, twin_node, twin_body }` (`bind/types_layout_boundop.rs`): one shared
+  operand list, two bodies, two output nodes. A separate variant rather than an `Option` on `Elementwise`, the convention
+  `RoundBatchedReduce` documents, so every exhaustive backend match decides for itself.
+- `fuse_twin_elementwise(built, program)` (`bind/twin_elementwise.rs`): groups `Elementwise` ops by iteration space plus
+  the multiset of (source, layout) reads and merges each pair, remapping the second body's operand indices onto the first
+  op's list. It keys on data (extents, layouts), names no model and no RoPE: `fused_rope_pair` emits `x_same*cos -
+  x_partner*sin` and `x_partner*cos + x_same*sin` over the same four reads, for split-half (`i@pairs`, `i+pairs`) and
+  adjacent (`2*i`, `2*i+1`) alike. It runs after `prune_dead` and `promote_output_placed_nodes`, in
+  `prepare_uniforms_pack.rs`, so both siblings are live, and `bind_with_fusion` never runs it: the CPU, wgpu and cuda
+  paths keep two plain ops (they reject the kind by name if handed one). `BoundOp::twin_halves` is the inverse.
+- Metal: `render_elementwise` emits the second store (`extra_out0[gid]`) from `kernel_signature_with_extra_outputs`,
+  declared at buffer index `Kernel::bindings.len()`, where `encode_op` already binds an op's extra outputs. The arena side
+  is the r4 commit "bind a multi-output op's extra outputs from the plan arena": `extra_output_nodes` gives the twin node a
+  plan-owned slot. A placed twin node (the K cache roots, `LayerCacheRoots`) is seeded into `device_buffers` from
+  `output_placed` ahead of the arena's slot (`placements_execute_named.rs`), so the kernel writes the caller's KV buffer
+  at the caller's offset, exactly as it does for the primary node.
+- Switch: cargo feature `twin-elementwise-fusion` (in omega's `metal` list, so interop gets it), and the env var
+  `PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION` is the off arm of the A/B, the shape the other `PROXIMA_DISABLE_*` switches take.
 
-The form that removes all 100 -> 50 without those constraints is a twin-output elementwise: one kernel reads the pair once
-and writes both halves, as llama's `kernel_rope_*` does, with each output keeping its own node, placement and hazard
-entry. That is a BoundOp and arena change (a second output per op), not an edit to `fused_rope_pair`, and it was not
-written in this pass.
+Expected dispatch change, derived from the layer schedule and not measured: 35 Q rotations + 15 own-KV K rotations = 50
+tensors, 100 RoPE dispatches before, 50 after (`gemma4_rope_twin_census`).
+
+Unmeasured and unverified by anything in this pass: that Metal's compiler contracts `a*b - c*d` identically in the
+two-store kernel and in the two single-store kernels (the Metal bit-identity test below is the check); what 50 fewer
+dispatches do to decode ms; any other sibling pair the pass merges beyond the 50 (the census asserts exactly 50 twins and
+prints the kind histogram).
 
 ### bench and test to run after r2 to r6 are written
 
@@ -2233,4 +2243,9 @@ cargo nextest run -p omega --features metal -E 'binary(rmsnorm_epilogue_bit_iden
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(llama_parity_) or test(generic_verify_llama_parity_)'          # 12
 cargo nextest run -p proxima-model-interop --features std,metal -E 'test(epilogue_sources_drift)' --run-ignored all                      # needs the E2B gguf
 PROXIMA_EPILOGUE_SOURCES=0|1 decode_gbps_baseline / gemma4_decode_kernel_census   # off and on arms; the census reads the norm family 446 -> ?
+cargo nextest run -p proxima-tensor -E 'test(twin_elementwise_tests)'                                                                   # 8: CPU parity per pairing, swapped-body control, no-merge cases
+cargo nextest run -p omega --features metal -E 'test(twin_elementwise_tests)'                                                           # 6: kernel source, extra-output buffer index
+cargo nextest run -p omega --features metal -E 'binary(elementwise_twin_dispatch)'                                                      # 9: Metal vs CPU, twin vs two-dispatch bits, placed KV outputs
+cargo nextest run -p proxima-model-interop --features std,metal -E 'test(gemma4_rope_twin_census)' --run-ignored all                   # needs the E2B gguf: 50 twins, 100 -> 50
+PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION=1|unset decode_gbps_baseline / gemma4_decode_kernel_census   # off and on arms for the rope fold
 ```
