@@ -1,0 +1,21 @@
+    Finished `gate` profile [optimized] target(s) in 0.18s
+────────────
+ Nextest run ID 015ca346-046a-41a9-b915-e5666b3b894c with nextest profile: default
+    Starting 1 test across 1 binary (419 tests skipped)
+       START [         ] (1/1) omega msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+
+running 1 test
+encode_allocations label=q4k_matvec_decode measured=231
+encode_allocations label=q6k_matvec_decode measured=231
+encode_allocations label=tiled_gemm_prefill measured=234
+encode_allocations label=f32_matmul measured=82
+encode_allocations label=elementwise_tanh measured=11
+encode_allocations label=cached_attention measured=12
+encode_allocations label=cached_softmax_weights measured=8
+test msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 419 filtered out; finished in 0.00s
+
+        PASS [   0.009s] (1/1) omega msl::tests::encode_allocation_budget::encoding_a_decode_op_allocates_no_more_than_it_did_before_the_grid_decision
+────────────
+     Summary [   0.010s] 1 test run: 1 passed, 419 skipped

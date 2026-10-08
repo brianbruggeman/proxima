@@ -1,0 +1,3 @@
+<|turn>user
+Which of these is smaller in size: a hippopotamus or a large office building?<turn|>
+<|turn>model

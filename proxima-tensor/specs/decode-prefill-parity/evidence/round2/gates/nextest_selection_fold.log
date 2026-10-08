@@ -1,0 +1,17 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling proxima-autograd v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-autograd)
+   Compiling proxima-onnx v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-onnx)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 16.33s
+────────────
+ Nextest run ID 15788251-cd31-4a56-885a-ac811c971523 with nextest profile: default
+    Starting 6 tests across 1 binary (105 binaries skipped)
+        PASS [   0.193s] (1/6) omega::selection_fold_parity an_expert_index_past_the_slab_raises_the_same_error_as_cpu
+        PASS [   0.248s] (2/6) omega::selection_fold_parity a_verify_width_batch_folds_each_token_over_its_own_experts
+        PASS [   0.266s] (3/6) omega::selection_fold_parity ragged_rows_and_tokens_fold_correctly
+        PASS [   0.347s] (4/6) omega::selection_fold_parity a_decode_step_folds_its_selected_experts_into_one_row
+        PASS [   0.347s] (5/6) omega::selection_fold_parity a_prefill_chunk_folds_every_token_over_its_own_experts
+        PASS [   0.367s] (6/6) omega::selection_fold_parity control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor
+────────────
+     Summary [   0.367s] 6 tests run: 6 passed, 0 skipped

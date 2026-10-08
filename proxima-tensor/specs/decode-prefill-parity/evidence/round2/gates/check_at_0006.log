@@ -1,0 +1,37 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-tensor)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Checking proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-safetensors)
+    Checking proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/proxima-model-interop)
+error[E0061]: this function takes 8 arguments but 7 arguments were supplied
+   --> proxima-model-interop/src/generate/device_kv.rs:738:22
+    |
+738 |           let device = DeviceKv::adopt(
+    |  ______________________^^^^^^^^^^^^^^^-
+739 | |             &mut caches,
+740 | |             &widths,
+741 | |             0,
+...   |
+745 | |             allocate_placed_buffer,
+746 | |         )
+    | |_________- argument #8 of type `proxima_gguf::GgmlType` is missing
+    |
+note: associated function defined here
+   --> proxima-model-interop/src/generate/device_kv.rs:301:19
+    |
+301 |     pub(super) fn adopt(
+    |                   ^^^^^
+...
+309 |         element: GgmlType,
+    |         -----------------
+help: provide the argument
+    |
+738 |         let device = DeviceKv::adopt(
+...
+745 |             allocate_placed_buffer,
+746 ~             /* GgmlType */,
+747 ~         )
+    |
+
+For more information about this error, try `rustc --explain E0061`.
+error: could not compile `proxima-model-interop` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

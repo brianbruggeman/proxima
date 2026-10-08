@@ -1,0 +1,23 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 4.75s
+────────────
+ Nextest run ID 0f00ee9b-78d1-45c5-893a-9dbbb9eeb28b with nextest profile: default
+    Starting 1 test across 1 binary (6 tests and 105 binaries skipped)
+       START [         ] (1/1) omega::selection_fold_parity zz_probe_shapes
+
+running 1 test
+PROBE seq=1 sel=1 rows=4 k=32 experts=1 err=0e0 def=[1.0015864, 1.7158811, 1.8285272] metal=[1.0015864, 1.7158811, 1.8285272]
+PROBE seq=1 sel=1 rows=4 k=64 experts=1 err=0e0 def=[-1.2750146, 3.0858848, 1.2226691] metal=[-1.2750146, 3.0858848, 1.2226691]
+PROBE seq=1 sel=1 rows=4 k=32 experts=2 err=0e0 def=[1.0015864, 1.7158811, 1.8285272] metal=[1.0015864, 1.7158811, 1.8285272]
+PROBE seq=1 sel=2 rows=4 k=32 experts=2 err=6.310026e-1 def=[-2.160503, 2.0895824, 1.6475271] metal=[-2.1605027, 1.6475267, -0.53968877]
+PROBE seq=2 sel=1 rows=4 k=32 experts=1 err=0e0 def=[1.0015864, 1.7158811, 1.8285272] metal=[1.0015864, 1.7158811, 1.8285272]
+PROBE seq=1 sel=1 rows=192 k=512 experts=1 err=0e0 def=[1.8513606, 1.1699526, 1.7520782] metal=[1.8513606, 1.1699526, 1.7520782]
+PROBE seq=1 sel=1 rows=192 k=512 experts=32 err=0e0 def=[5.164433, -22.989086, 2.6470447] metal=[5.164433, -22.989086, 2.6470447]
+PROBE seq=1 sel=8 rows=192 k=512 experts=32 err=3.533148e-1 def=[19.730278, -92.51607, -50.36441] metal=[19.730228, 86.3691, -110.5388]
+test zz_probe_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.23s
+
+        PASS [   0.239s] (1/1) omega::selection_fold_parity zz_probe_shapes
+────────────
+     Summary [   0.240s] 1 test run: 1 passed, 6 skipped

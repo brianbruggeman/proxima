@@ -1,0 +1,12 @@
+    Finished `gate` profile [optimized] target(s) in 0.21s
+────────────
+ Nextest run ID 938ec5ca-7d70-4380-b7bf-dd29a8a53fe9 with nextest profile: default
+    Starting 6 tests across 1 binary (105 binaries skipped)
+        PASS [   0.138s] (1/6) omega::selection_fold_parity an_expert_index_past_the_slab_raises_the_same_error_as_cpu
+        PASS [   0.154s] (2/6) omega::selection_fold_parity ragged_rows_and_tokens_fold_correctly
+        PASS [   0.157s] (3/6) omega::selection_fold_parity a_decode_step_folds_its_selected_experts_into_one_row
+        PASS [   0.265s] (4/6) omega::selection_fold_parity control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor
+        PASS [   0.276s] (5/6) omega::selection_fold_parity a_verify_width_batch_folds_each_token_over_its_own_experts
+        PASS [   0.324s] (6/6) omega::selection_fold_parity a_prefill_chunk_folds_every_token_over_its_own_experts
+────────────
+     Summary [   0.325s] 6 tests run: 6 passed, 0 skipped

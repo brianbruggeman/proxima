@@ -1,0 +1,27 @@
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima-windows/omega)
+    Finished `gate` profile [optimized] target(s) in 4.79s
+────────────
+ Nextest run ID 9bc3b72c-aca3-4824-84d1-9f6b74f92617 with nextest profile: default
+    Starting 1 test across 1 binary (6 tests and 105 binaries skipped)
+       START [         ] (1/1) omega::selection_fold_parity zz_probe_all
+
+running 1 test
+PROBE packed=false seq=1 sel=2 route=[0.0, 1.0]
+  def  =[-2.160503, 2.0895824, 1.6475271, 0.5161854]
+  metal=[-2.1605027, 2.0895824, 1.6475267, 0.5161854]
+PROBE packed=false seq=1 sel=2 route=[2.0, 1.0]
+  def  =[-2.5205598, -1.1345494, -0.7047863, -2.435607]
+  metal=[-2.5205595, -1.1345494, -0.7047862, -2.4356072]
+PROBE packed=true seq=1 sel=2 route=[0.0, 1.0]
+  def  =[-2.160503, 2.0895824, 1.6475271, 0.5161854]
+  metal=[-2.1605027, 1.6475267, -4.66156, 97.23781]
+PROBE packed=true seq=1 sel=2 route=[2.0, 1.0]
+  def  =[-2.5205598, -1.1345494, -0.7047863, -2.435607]
+  metal=[-2.5205595, -0.7047862, 0.64193904, 0.22457376]
+test zz_probe_all ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.10s
+
+        PASS [   0.111s] (1/1) omega::selection_fold_parity zz_probe_all
+────────────
+     Summary [   0.111s] 1 test run: 1 passed, 6 skipped

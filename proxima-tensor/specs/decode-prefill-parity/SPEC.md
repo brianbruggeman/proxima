@@ -2821,3 +2821,124 @@ Written without a GPU, a model load, a test run or a bench; the numbers below ar
 1. Short folds by shape. `omega-runtime.toml` `[cooperative_reduce]` gains `serial_below_len` (32) and `serial_min_outputs` (65536); `msl::short_fold_prefers_serial` (`omega/src/msl/emit_and_classify.rs`) sends a fold shorter than the first with at least the second many outputs to the serial body, read through `reduce_is_cooperative` so dispatch geometry and emitted body agree. Prefill combine (8 long, 1,024,000 outputs) goes serial; decode combine (8 long, 1,024 outputs) and the 34/64-long attention folds keep the cooperative body. Both keys take 0 to disable and accept `OMEGA_COOPERATIVE_REDUCE_SERIAL_BELOW_LEN` / `OMEGA_COOPERATIVE_REDUCE_SERIAL_MIN_OUTPUTS`. Target: combine 4134 -> at most 600 us/op, granite prefill 381 -> at most 300 ms. Re-prove: the three censuses of the attribution section, `llama_parity_`, `generic_verify_llama_parity_`, a `decode_arms` run with a control arm.
 2. Combine folded into the down projection. `MoeProjectionStrategy::StackedCombined` (feature `moe-stacked-combine`, default off, implies `moe-stacked-experts`) applies the routing weights to the hidden activation and reduces the selected and hidden axes of the slotwise down product together, so the `[tokens, selected, width]` output is not materialized. CPU: `run_reduce_quantized` (`proxima-tensor/src/cpu/run_reduce_scan.rs`) now separates reduced axes the route index moves along (selection axes) from the contraction one expert slab holds, runs one matvec per (position, selection) and adds the partial rows. Metal: such a fold is not cooperative (`gather_is_reduction_invariant`), is rejected by `classify_packed_row_block_with` and so renders `push_serial_reduce_body`, which fetches the route per reduction step.
    Not established: the Metal serial body for this fold is one thread per output walking `selected x width` elements (4096 per output at granite shapes); no kernel competing with the expert-grouped GEMM exists for it, so the default stays `Stacked` until a bench says otherwise. The earlier `GatherIndexOutOfRange` was not reproduced (no GPU run); `omega/tests/selection_fold_parity.rs` is the test that decides it.
+
+## round two result (measured 2026-10-08, main 9015ad1a to the commit that adds this section)
+
+Six written slices (combine, gemm, rope, kvplace, e2bdecode, granitehost; the "moe combine (written, not yet run)" section above is the first) applied to main in that order, tested once at the integrated tip, and benched once. Every number below names its source under `evidence/round2/` (`conflicts.md`, `gates/`, `bench/`). Test models: gemma4 E2B and granite moe 1b. gemma4 26B was not loaded. llama.cpp and Ollama were not run: the incumbent side is `evidence/slice0/ac1/decode_arms.out` (E2B 9.018 ms/token, prefill 573.3 ms; granite 5.210, 151.4; recorded 2026-10-07 on a different box state).
+Nothing in this section is a verdict; the rows are measurements with the mechanism where one was traced, and the unexplained ones are listed last.
+
+### commits (30 on top of 9015ad1a, no force, no trailer)
+
+Slices as applied (`git am --3way`, 22 commits): combine `0cd6c7ef 29ef2def 6fd4a8c6`; gemm `f920c82d`; rope `7c042379 a14413c0 d946f343`; kvplace `748e3fa8 629ff850`; e2bdecode `51d6543b 230f755c efe85bdc`; granitehost `a38c17a9 59a59b84 a41b48e3 aef3dae3 3a24001c 746b1288 14f4dbab 73f0bc6a 3f536b1f 0db7f484`.
+Integration fixes, one change each (`conflicts.md` items 5-11, 13): `7906a909` a comment named a model family (AC4 count 1 to 0); `94adb2da` the packed weight row width counted a broadcast axis (below); `3cf7e4ea` the q6k accumulator test follows the configured row count; `2b6370e3` the plain decode-split test asserts no half pointer instead of no substring "half"; `e38cc8c6` nextest exclusive override for the selection fold binary; `242cfe09` `OUTPUT_BUFFER_POOL` visibility (feature `metal-buffer-pool` did not compile at 9015ad1a); `256c9d23` the fold-route decision without a heap vector; `a4ceb193` the decode baseline example can turn speculation off.
+Conflicts: 1 textual in `omega/build.rs` (rope and e2bdecode each append a sizing constant at the same place; both kept), 1 textual in `device_kv.rs` (`DeviceKv::adopt` doc and `#[allow]`; both kept), 1 compile interaction (a kvplace test calls `adopt` with 7 arguments, granitehost's takes 8) and 1 semantic interaction in `decode.rs` (kvplace adopts the device KV before prefill; granitehost's half-width cache is read only by the decode-split kernel; resolved as: an f32 cache adopts before the first evaluation, an f16 cache keeps `cached_len > 0 && is_last_step_batch`). No slice was aborted or reverted.
+
+### gates at the integrated tip (`gates/`; N is the count the run printed)
+
+| gate | command (tests: `--cargo-profile gate`) | N | source |
+|---|---|---|---|
+| tensor tests | `nextest run -p proxima-tensor` | 803 passed, 8 skipped | `final_nextest_tensor.log` |
+| tensor, combine feature | `... --features moe-stacked-combine` (before the test added by `94adb2da`) | 803 passed, 8 skipped | `nextest_tensor_combine.log` |
+| omega | `nextest run -p omega --features metal` | 809 passed, 16 skipped | `final_nextest_omega_metal.log` |
+| omega instrument | `... --features metal,instrument` | 862 passed, 22 skipped | `final_nextest_omega_instrument.log` |
+| omega feature-gated binaries | `... --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count` | 830 passed, 16 skipped | `final_nextest_omega_gated_a.log` |
+| omega split-k | `... --features metal,metal-q4k-split-k` | tip: 801 run, 793 passed, **8 failed**; 9015ad1a: 765 run, 758 passed, **7 failed** | `nextest_omega_gated_b.log`, `base_omega_gated_b.log` |
+| interop slice-gate, 26B excluded | `nextest run -p proxima-model-interop --features std,metal --profile slice-gate -E 'not test(/gemma4_26b/)'` | 741 passed, 128 skipped | `final_nextest_interop_slice.log` |
+| interop descriptor tests | `... --features std,metal,conflaguration` on `model_config_roundtrip_`, `serving_fsm_drives_`, `zero_rust_variant_`, `window_ring_layers_`, `swa_rope_from_metadata`, `generic_binder_`, E2B and granite only | 10 passed | `nextest_interop_conflaguration.log` |
+| clippy `-D warnings --all-targets` | tensor+interop (std,metal), omega metal, omega metal+instrument, omega metal+buffer-pool+alloc-count, interop std,metal,instrument, the example; earlier also interop and tensor with `moe-stacked-combine` | exit 0 each | `clippy_final_*.log`, `clippy_*combine.log` |
+| tiers | `check -p proxima-tensor --no-default-features --features alloc` (it builds none of the changed code: the CPU fold and the graph builder are std-side and omega is metal-gated), `-p proxima-model-interop --no-default-features`, `-p omega --no-default-features`, `--workspace --all-targets` | exit 0 each | `check_final_*.log`, `check_omega_nodefault.log` |
+| AC4 | the `git grep ... \| wc -l` of the architecture-as-data table | 0 (1 before `7906a909`) | session |
+| AC5 first command, AC11 grep | `git grep` counts | 0, 0 | session |
+
+AC mapping inside the 741 and the 10: AC0 `arch_data_digest_` 7 passed (gemma4 E2B, openchat, qwen2, qwen3, qwen35, qwen35moe, granite moe; **the 26B row is not run**); AC2 `generic_verify_llama_parity_` E2B and granite, 2 passed; AC3 `generic_binder_` E2B and granite, 2 passed; AC6 `llama_parity_` E2B and granite, 2 passed; AC7 `window_ring_layers_`, 2 passed; `prefill_width_parity_with_llama_` E2B and granite, 2 passed; `serving_default_ubatch_prefill_parity`, 2 passed; `external_expert_paging`, 4 passed; AC5 second command 4 of 10 (E2B and granite round trips, the 2 FSM tests); AC9 2 of 6; AC10 (b) passed, (a) needs qwen2.
+**Not run, 16 tests** (`gates/interop_complement_list.txt`: generic_binder, generic_verify and llama_parity for openchat/qwen2/qwen3, generic_binder for qwen35 and qwen35moe, llama_parity_lfm2, three lfm2 descriptor tests): the task names E2B and granite as the only test models, so the large-checkpoint end-of-run gate (727 passed in 607 s at the previous measurement) was not repeated; every 26B test was excluded.
+Digests: the 7 digests above equal the vendored fixtures; none moved. Under the default-off feature `moe-stacked-combine` the granite digest moves from `bind.ops=5602` to `5578` (one slotwise-sum op per layer, 24, no longer materialized) and `model_config_roundtrip_granite_moe` fails with it (`nextest_interop_combine_feature.log`); that is the feature's graph, not the default's.
+
+### failures the gate found, mechanism, fix (`conflicts.md` 5-11)
+
+1. `selection_fold_parity`: 4 of 6 failed on the first run. Metal error 2.08e4, 4.96e4 and 4.77e5 relative to the row norm against CPU 2.7e-7, 5.3e-7 and 4.2e-7; the 120-token chunk raised `CommandBufferFailed`. Probes (`gates/probe_*.log`): the same bound op over f32 weights matched (2.74e-7); packed Q8_0 matched at selected=1 and at selected=2 returned `metal[1] = definition[2]`. The two emitted kernels differ by one line (`gates/fold_f32.metal`, `fold_q8_0.metal`), so the cause was in the uniforms. `native_packed_layout` (`proxima-tensor/src/bind/dead_code_cached_attention.rs`) sized a packed weight row as the product of every non-output axis, including `selected`, which the weight does not vary along, so rows were read `selected` rows apart. `94adb2da` leaves out axes on which the operand has stride 0. After: 6 of 6 (`nextest_selection_fold.log`), and a tensor unit test pins the layout. Mechanism evidence: the result goes from garbage to 2.7e-7 with that change alone, and the value pattern fits the stride.
+2. Encode allocation budget (`alloc-count`): at 9015ad1a q4k/q6k/tiled/f32 = 287/287/290/154 against pins 297/258/254/179 (q6k and tiled already over); at `0cd6c7ef` 315/315/318/190, because `reduce_is_cooperative` called the heap-allocating `reduction_len` twice per query. After `256c9d23`: 231/231/234/82, all under the pins (`alloc_budget_after_fix2.log`; `bisect_alloc_*.log` give each step).
+3. The text-expectation failures and the buffer-pool compile error are `conflicts.md` 7-9.
+4. Not closed: 8 omega tests fail under `--features metal-q4k-split-k` (7 at 9015ad1a): `epilogue_operand_reuse::*` (2), `multi_row_kernel_folds_only_the_activation_rows_the_op_has`, `ported_matvec_bodies_unroll_their_row_and_lane_loops_fully`, `push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel`, `q4_0_codec_takes_the_row_blocked_path_at_a_256_extent`, `q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup`, `packed_row_rows_per_simdgroup_ab::default_env_emits_node_94_shape_for_diffing_against_the_capture`. They assert the unsplit single-token route, which split-k replaces (`(groups, split)` is `(4, 8)`, expected `(4, 1)`). The fix I tried, a `cfg(not(feature = "metal-q4k-split-k"))` on each, was refused by the permission system as a CI bypass and is not applied. `packed_row_q4_0_multi_row_hoist_ab::tokens27_k1536_rows12288_bit_exact_across_hoist` failed at 9015ad1a under split-k and passed at the tip; not explained.
+
+### bench (release `decode_gbps_baseline`, `decode_arms`, 3 processes x (1 warm-up + 7 timed) = 21 timed runs per arm, arms interleaved per process)
+
+Binaries (`bench/binaries.sha256`): `base` = 9015ad1a (sha256 `53baf7de...`), `tip` = 256c9d23 (`f23a1819...`), `control` = a byte copy of `tip` (same sha256). Prompts: `prompt1k.txt` (971 tokens E2B, 1000 granite, 128 new tokens), `prompt_short_hippo.txt` (25 tokens). Speculation is at the example's default (ngram-simple) in every arm; the `PROXIMA_SPECULATIVE_TYPES=none` that `decode_arms` exports is not read by the example. Ollama refused on :11434; no cargo or GPU peer during a timed run (`peers_present_at_exit=[]` on every process, `launches.log`). Box (`bench/run*/box_load_before.txt`): a private background daemon at 67-80% CPU, `mds_stores` 58-68%, `mediaanalysisd` 53-61% in every run; load average 4.8 at the launch of run A (the saved probe is 10.06 at 08:35, just after the builds; a recheck at 08:37 read 4.78 and is in the session only). GPU "Device Utilization %": two single probes read 98 and 95 (other processes); 18 repeated samples around them read 0. Medians are the driver's kept-run medians (outlier rule 3 x 1.4826 x MAD, fixed before the run); CoV is over all 21 runs, the kept CoV is in the file. Generated-text hashes are equal across `base`, `tip` and `control` on all 72 generations per model (`launches.raw.*.err`, `text_hash`).
+
+Run A, `bench/runA_long/decode_arms.out` (144 raw lines = 6 arms x 24):
+
+| arm | decode ms/token (kept median; CoV all, range all) | prefill ms (kept median; CoV all, range) | TTFT ms | peak RSS median of 3 | peak footprint | peak GPU bytes |
+|---|---|---|---|---|---|---|
+| E2B base | 11.029 (6.71%, 10.948-14.266; kept n=17) | 590.04 (1.56%, 587.95-625.95) | 590.0 | 3.958 GB | 505.1 MB | 3,657,105,408 |
+| E2B tip | 11.1025 (4.34%, 11.061-13.359; kept n=18) | 592.02 (1.87%, 591.02-635.96) | 592.0 | 3.815 GB | 422.6 MB | 3,622,256,640 |
+| E2B control | 11.094 (7.11%, 11.025-14.240) | 591.99 (0.94%) | 592.0 | 3.758 GB | 424.4 MB | 3,622,256,640 |
+| granite base | 6.728 (1.11%, 6.616-6.898) | 372.54 (2.90%, 363.0-411.0; kept n=18) | 372.5 | 2.530 GB | 619.9 MB | 1,707,655,168 |
+| granite tip | 6.521 (1.14%, 6.463-6.746) | 264.99 (0.37%, 263.96-267.98) | 265.0 | 2.100 GB | 367.5 MB | 1,728,069,632 |
+| granite control | 6.576 (4.47%, 6.450-7.862) | 265.01 (0.88%) | 265.0 | 2.110 GB | 367.8 MB | 1,728,069,632 |
+
+Bound lines (`bound metric=... arm=tip vs=base`; limit = max(MAD, 2% of base) for time, max(2% of base, |control - tip|) for memory): E2B decode +0.0735 (limit 0.2206, within); prefill +1.974 (limit 11.80, within); granite decode -0.207 (limit 0.1346); prefill -107.549 (limit 7.45); RSS -429.5 MB (limit 50.6); footprint -252.4 MB (limit 12.4); **GPU bytes +20.4 MB (limit 34.2, within; the sign is against the kvplace target of a smaller arena)**. control against tip: every metric within its limit (granite decode +0.055, limit 0.1304).
+
+Run B, `bench/runB_short/decode_arms.out`, E2B, 25-token prompt: decode base 10.583 (CoV 10.76% all, 10.515-14.656; kept n=16), tip **10.833 (+0.250, limit 0.2117, within=false)**, control 10.844 (+0.261 against base, +0.011 against tip). Prefill 86.01 to 87.50 (+1.49, limit 1.72, within); control 87.97 (+1.96, limit 1.72, within=false against base). RSS 3.641 to 3.635 GB, footprint 208.8 to 204.8 MB, GPU bytes 3,384,639,488 to 3,389,947,904.
+The E2B decode figures differ between runs by more than the within-run differences: `base` reads 11.029 (run A) and 11.277 (run C3) on the same binary; `tip` 11.1025 and 11.432; the short prompt's `base` 10.583 (B), 10.5775 (C1), 10.8805 (C2). Cause of the box drift not isolated; only within-run differences are used below.
+
+### per-slice attribution
+
+Boundary builds: `s1`..`s6` are the six slice tips (`6fd4a8c6 f920c82d d946f343 629ff850 efe85bdc 0db7f484`), `tip` the final tree; `off_*` are the tip rebuilt with the slice's build-time override (`OMEGA_*`, principle 12). Kept medians, ms; one interleaved run each.
+
+| arm | E2B 971-token decode | E2B 971-token prefill | granite decode | granite prefill | source |
+|---|---|---|---|---|---|
+| base | 11.277 | 588.98 | 6.897 | 373.96 | `runC3_long_attr` |
+| s1 combine | 11.3185 | 588.49 | 6.849 | 292.98 | |
+| s2 gemm | 11.336 | 589.49 | 6.926 | 293.96 | |
+| s3 rope | 11.312 | 587.97 | 6.858 | 291.97 | |
+| s4 kvplace | 11.266 | 582.02 | 6.6695 | 265.98 | |
+| s5 e2bdecode | 11.443 | 592.03 | 6.662 | 265.06 | |
+| s6 granitehost | 11.411 | 592.00 | 6.6815 | 265.04 | |
+| tip | 11.432 | 592.02 | 6.663 | 265.98 | |
+| tip, `OMEGA_COOPERATIVE_REDUCE_SERIAL_MIN_OUTPUTS=0` | 11.410 | 591.97 | 6.6925 | **350.995** | |
+| tip, `OMEGA_ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS=4294967296` | 11.438 | 593.00 | 6.684 | 266.01 | |
+| tip, `OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=256` | **11.250** | **586.00** | 6.675 | 265.98 | |
+| tip, `OMEGA_COOPERATIVE_REDUCE_BROADCAST_SIMD_FOLD=0` | 11.462 | 591.98 | 6.723 | 266.02 | |
+| tip, `OMEGA_PACKED_ROW_BLOCK_Q6K_ROWS=1` | 11.451 | 592.01 | 6.699 | 265.03 | |
+
+E2B 25-token prompt, decode ms/token (`runC_short_attr`; then `runC2_short_e2b_switches`, whose box read 0.3 ms slower). C1: base 10.5775, s1 10.575, s2 10.563, s3 10.581, s4 10.589, **s5 10.816**, s6 10.8385, tip 10.8485, off combine 10.8685, off rope 10.856, off the three e2bdecode keys 10.623. C2: base 10.8805, s4 10.896, s5 11.158, tip 11.1085, off the three keys 10.904, off simd fold 11.143, **off broadcast width 10.926**, off q6k rows 11.123.
+
+Rows, each a measurement with what moved it:
+
+- combine, key `serial_min_outputs`: granite prefill 373.96 to 292.98 at `s1` (-81.0), and +85.0 when the key is 0 on the tip (350.995 against 265.98); decode -0.05 (inside CoV 1.0%). Mechanism: the toggle moves the number in both directions; the 1,024,000-output length-8 fold takes the serial body (attribution record: 4134 us/op cooperative, 567.7 us/op serial). Second part, default-off feature `moe-stacked-combine`: granite `llama_parity_granite_moe` ids equal llama in 159.9 s against 1.4 s on the default, `generic_verify` 319.5 s against 5.2 s, `prefill_width_parity` 255.2 s against 1.9 s (61x to 137x), and `serving_default_ubatch_prefill_parity` (971 tokens) stopped at the 60 s test body limit (`nextest_interop_combine_feature.log`). After `94adb2da` the Metal fold matches the definition and the CPU evaluator within 1e-4 (6 of 6); its cost is the serial body walking `selected x width` per output (the writer's prediction); the default stays `Stacked`.
+- gemm (`scan_ahead`, no switch; the key's meaning changed): granite prefill 292.98 to 293.96 (+0.98; CoV 2.3% and 2.2%). The 203 to 115 ms target is a grouped-GEMM time; no census was taken in this pass, so the target is measured neither way. The wall effect is not distinguishable from zero.
+- rope (key `reciprocal_min_elements`): `s3` against `s2`: granite prefill -1.98, E2B -1.53; the switch-off arm differs from the tip by +0.03 (granite) and +0.98 (E2B). The 35.2 to 3 ms per-op target is not measured here.
+- kvplace (no switch): granite prefill 291.97 to 265.98 (-26.0), decode -0.19; E2B prefill 587.97 to 582.02 (-5.9), decode -0.05. Memory: granite footprint 611.6 to 367.2 MB (-244.4), RSS 2.484 to 1.878 GB; E2B footprint 498.3 to 423.1 MB (-75.2), RSS 3.871 to 3.765 GB; GPU bytes E2B -36 MB, **granite +20.4 MB**. The targets "no K/V readback during prefill, -98 MB arena, wall minus gpu_busy at most 15 ms": the footprint moved by -244 MB and -75 MB; the arena size, the readback and the wall-minus-gpu_busy figure were not instrumented.
+- e2bdecode: E2B decode **+0.227 (short) and +0.177 (long) at `s5` against `s4`, long prefill +10.0**; granite decode -0.008, prefill -0.93. Inside the slice, `OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=256` returns the E2B numbers: short decode 11.1085 to 10.926 (-0.18, C2), long decode 11.432 to 11.250 (-0.18), long prefill 592.02 to 586.00 (-6.0), and with all three keys the short decode goes 10.8485 to 10.623 (C1); granite is unchanged (6.663 to 6.675). The simd-fold key and the q6k row key move no E2B or granite number by more than 0.04 ms. The unroll commit has no switch and stays in every `off_*` arm. Target (11.06 to 9.9 ms, -1.16): not reached; the slice moved E2B decode the other way, and the cause of the width cap's cost is not traced.
+- granitehost (default f32, no change expected): `s6` against `s5`: E2B decode -0.03, granite +0.02 (inside noise). Switch `PROXIMA_KV_CACHE_TYPE=f16` (needs speculation off, `a4ceb193`; `runD3_f16`, speculation off in both arms, equal text hashes): E2B decode 11.4305 to **11.970 (+0.54)**, prefill 591.99 to 598.98 (+7.0), footprint 416.2 to 482.3 MB (+66), RSS +113 MB; granite decode 6.687 to **7.5905 (+0.90)**, prefill 265.03 to 288.00 (+23.0), footprint 360.0 to 594.7 MB (+235), RSS +272 MB; GPU bytes +6.6 MB and +22.8 MB. The target 6.83 to 6.0 ms has the opposite sign. Mechanism, instrumented run (`runE_f16_mechanism`, one process, debug events on): host narrowing 0.027 ms per step (`device_kv_narrow` steps 2-3; 0.110 at step 1); decode `gpu_exec_ms` at step 20 is 5.207 (f32) against 5.517 (f16), +0.31; host-unhidden time per decode step is equal (median 0.379 and 0.382). That accounts for about 0.3 of the 0.9 ms; the rest is unexplained. The first f16 attempt (`runD_f16`) used an unqualified `--arm-env` label, applied no environment, and is two same-binary arms (granite 6.725 against 6.674, E2B 11.4575 against 11.443).
+
+### frequency-weighted read
+
+Granite decode and prefill: tip is below base on both (-0.207 ms/token, -107.5 ms prefill), with RSS down 429 MB and footprint down 252 MB. E2B decode is the 100%-frequency path of the owner's target and it is above base by 0.07 (long, run A), 0.155 (long, run C3) and 0.250 (short, run B) ms/token; the width cap accounts for 0.18 of that at both prompt lengths.
+
+### unexplained, unmeasured, assumed
+
+- Why a 512-lane broadcast-epilogue threadgroup costs E2B 0.18 ms/token and 6 ms of prefill and changes nothing on granite: not traced (no census or AIR read in this pass). The toggle is the evidence.
+- The f16 path's remaining ~0.6 ms/token on granite, and its +23 ms prefill and +235 MB footprint (host-side seeding and the staging buffers are the candidates; unmeasured).
+- Run-to-run drift of the E2B decode figures (0.25-0.33 ms between runs on the same binary).
+- Per-op targets of gemm (203 to 115 ms), rope (35.2 to 3 ms) and kvplace (arena -98 MB, readback, 15 ms): not instrumented here.
+- The `StackedCombined` slowdown is a wall figure over whole tests, not a per-dispatch census.
+- CUDA and WGSL `reduce_is_cooperative` do not read the new serial-fold keys (the writer's note); not touched. 16 large-checkpoint tests and every 26B test were not run.
+- GPU contention can fail a command buffer (`0000000e`) in the long selection-fold dispatch (1 of 3 full-suite omega runs before `e38cc8c6`); not seen alone in 6 of 6 runs.
+- Decisions that belong to the owner and are not taken here: the default of `broadcast_max_width` (512 against the previous 256), whether the f16 cache stays in tree with these numbers, and the `moe-stacked-combine` feature.
+
+### re-prove
+
+```
+cargo nextest run -p proxima-tensor --cargo-profile gate                                                     # 803
+cargo nextest run -p omega --features metal --cargo-profile gate                                              # 809
+cargo nextest run -p omega --features metal,instrument --cargo-profile gate                                   # 862
+cargo nextest run -p omega --features metal,metal-buffer-pool,metal-moe-mul-mat-id,moe-topk-fusion,top-fraction-fusion,alloc-count --cargo-profile gate   # 830
+cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile gate --profile slice-gate -E 'not test(/gemma4_26b/)'   # 741
+decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<9015ad1a binary> --arm tip=<256c9d23 binary> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
+decode_arms --prompt-file prompt_short_hippo.txt ... --case gemma4_e2b=<E2B blob>
+OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=256 cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal   # the width-cap toggle
+decode_arms ... --arm nospec=<tipx> --arm nospec_f16=<tipx> --arm-env gemma4_e2b.nospec:PROXIMA_DECODE_SPECULATIVE=none --arm-env gemma4_e2b.nospec_f16:PROXIMA_DECODE_SPECULATIVE=none --arm-env gemma4_e2b.nospec_f16:PROXIMA_KV_CACHE_TYPE=f16   # arm-env labels are case-qualified
+```
+
+Missing for CI: no job runs the Metal tests, a GPU bench or `decode_arms`; the nextest runs and the bench numbers re-prove only on this box. The bench binaries are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine2/bin/` (sha256 in `bench/binaries.sha256`), not in the tree.

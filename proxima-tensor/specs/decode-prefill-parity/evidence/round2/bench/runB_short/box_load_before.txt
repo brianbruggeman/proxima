@@ -1,0 +1,11 @@
+Thu Oct  8 08:42:48 UTC 2026
+ 3:42  up 7 days, 13:47, 7 users, load averages: 5.48 6.86 7.80
+17029  80.0 a background daemon in ~/.local/bin
+  587  67.8 /System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+ 1418  53.4 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+29286  42.9 /System/Library/PrivateFrameworks/MediaAnalysisAccess.framework/Versions/A/XPCServices/mediaanalysisd-access.xpc/Contents/MacOS/mediaanalysisd-access
+31461   6.3 claude
+  716   3.8 /Applications/iTerm.app/Contents/MacOS/iTerm2
+"Device Utilization %"=95
+37991 /Users/brianbruggeman/.cargo/bin/sccache
+ollama_api_exit=7
