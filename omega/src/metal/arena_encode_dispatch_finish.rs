@@ -1324,6 +1324,7 @@ fn capture_dispatch(
                 fault_index,
                 prepass: captured_prepass,
                 prepass_owner,
+                barrier_before: take_barrier_pending(),
             });
         });
     }
@@ -1557,6 +1558,10 @@ pub struct CapturedDispatch {
     /// prepass filled earlier in the same step: that op's record carries the
     /// prepass, this one carries only the shared buffer, bound at `bindings.len()`
     pub prepass_owner: Option<u32>,
+    /// A hazard barrier fired between the previous captured dispatch and this
+    /// one when the step was encoded under concurrent dispatch; always `false`
+    /// under serial dispatch.
+    pub barrier_before: bool,
 }
 
 /// The route prepass of a compacted expert-grouped gemm: its count pipeline, its
@@ -1581,13 +1586,179 @@ struct CapturedPrepass {
 #[cfg(feature = "instrument")]
 impl CapturedPrepass {
     fn dispatch_passes(&self, encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>) {
+        self.dispatch_passes_barriered(encoder, false);
+    }
+
+    fn dispatch_passes_barriered(
+        &self,
+        encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        barrier_between: bool,
+    ) {
         encoder.setComputePipelineState(&self.pipeline);
         dispatch(encoder, &self.pipeline, self.grid);
         if let Some(place) = &self.place {
+            if barrier_between {
+                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+            }
             encoder.setComputePipelineState(place);
             dispatch(encoder, place, self.grid);
         }
     }
+}
+
+/// How [`dispatch`] launches `grid` on `pipeline`: by threadgroup counts or by
+/// thread counts, the extent, the threads per threadgroup and the dynamic
+/// threadgroup length.
+#[cfg(feature = "instrument")]
+struct DispatchShape {
+    by_threadgroups: bool,
+    extent: MTLSize,
+    threads: MTLSize,
+    dynamic_bytes: usize,
+}
+
+/// The launch shape [`dispatch`] picks, without launching; `None` for an empty grid.
+#[cfg(feature = "instrument")]
+fn dispatch_shape(pipeline: &ProtocolObject<dyn MTLComputePipelineState>, grid: GridSpec) -> Option<DispatchShape> {
+    if grid.threads == 0 {
+        return None;
+    }
+    let max_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
+    if let Some(grid2d) = grid.grid2d {
+        let grid2d = crate::msl::fit_flat_width(grid2d, max_threadgroup as u64);
+        return Some(DispatchShape {
+            by_threadgroups: true,
+            extent: MTLSize {
+                width: grid2d.threadgroups_x as usize,
+                height: grid2d.threadgroups_y as usize,
+                depth: grid.depth as usize,
+            },
+            threads: MTLSize {
+                width: grid2d.threads_per_threadgroup_x as usize,
+                height: grid2d.threads_per_threadgroup_y as usize,
+                depth: 1,
+            },
+            dynamic_bytes: grid2d.threadgroup_bytes as usize,
+        });
+    }
+    let width = match grid.threadgroup_width {
+        Some(width) => (width as usize).min(max_threadgroup).max(1),
+        None => (grid.threads as usize).min(max_threadgroup).max(1),
+    };
+    Some(DispatchShape {
+        by_threadgroups: false,
+        extent: MTLSize { width: grid.threads as usize, height: 1, depth: grid.depth as usize },
+        threads: MTLSize { width, height: 1, depth: 1 },
+        dynamic_bytes: 0,
+    })
+}
+
+/// [`dispatch`] with the shape taken from `shape_pipeline` but launched on
+/// whatever pipeline the encoder holds. `dynamic_memory` sets the dynamic
+/// threadgroup length the original sets; `one_threadgroup` cuts the grid to a
+/// single threadgroup of the same shape.
+#[cfg(feature = "instrument")]
+fn dispatch_floor(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    shape_pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    grid: GridSpec,
+    dynamic_memory: bool,
+    one_threadgroup: bool,
+) {
+    let Some(shape) = dispatch_shape(shape_pipeline, grid) else {
+        return;
+    };
+    if shape.by_threadgroups {
+        let groups = if one_threadgroup { MTLSize { width: 1, height: 1, depth: 1 } } else { shape.extent };
+        if dynamic_memory && shape.dynamic_bytes > 0 {
+            // SAFETY: index 0 is the `[[threadgroup(0)]]` argument the empty kernel declares when this length is set.
+            unsafe { encoder.setThreadgroupMemoryLength_atIndex(shape.dynamic_bytes, 0) };
+        }
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, shape.threads);
+    } else {
+        let extent = if one_threadgroup {
+            MTLSize { width: shape.threads.width, height: 1, depth: 1 }
+        } else {
+            shape.extent
+        };
+        encoder.dispatchThreads_threadsPerThreadgroup(extent, shape.threads);
+    }
+}
+
+/// An empty kernel's pipeline state and the static threadgroup bytes it kept.
+#[cfg(feature = "instrument")]
+struct FloorPipeline {
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+}
+
+#[cfg(feature = "instrument")]
+thread_local! {
+    static FLOOR_PIPELINES: RefCell<BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+/// The empty kernel for `record`: its buffer indices, its static threadgroup
+/// bytes and its dynamic threadgroup argument declared, nothing executed. The
+/// branch that touches them tests a thread id no grid reaches, so the
+/// compiler keeps every declaration.
+#[cfg(feature = "instrument")]
+fn floor_pipeline_for(
+    device: &ProtocolObject<dyn MTLDevice>,
+    record: &CapturedDispatch,
+    minimal_bindings: bool,
+) -> Result<FloorPipeline, MetalError> {
+    let mut indices: Vec<usize> = if minimal_bindings {
+        vec![0]
+    } else {
+        record
+            .buffers
+            .iter()
+            .map(|(index, _, _)| *index)
+            .chain(record.uniforms_index)
+            .chain(record.fault_index)
+            .collect()
+    };
+    indices.sort_unstable();
+    indices.dedup();
+    let static_bytes = if minimal_bindings { 0 } else { record.pipeline.staticThreadgroupMemoryLength() };
+    let dynamic = !minimal_bindings
+        && dispatch_shape(&record.pipeline, record.grid).is_some_and(|shape| shape.dynamic_bytes > 0);
+    let parameters: String = indices
+        .iter()
+        .map(|index| format!("device uchar* b{index} [[buffer({index})]], "))
+        .collect();
+    let touches: String = indices.iter().map(|index| format!("b{index}[0] = 0; ")).collect();
+    let dynamic_parameter = if dynamic { "threadgroup uchar* dynamic_memory [[threadgroup(0)]], " } else { "" };
+    let static_declaration = if static_bytes > 0 {
+        format!("threadgroup uchar static_memory[{static_bytes}]; ")
+    } else {
+        String::new()
+    };
+    let static_touch = if static_bytes > 0 { format!("static_memory[tid % {static_bytes}u] = 1; ") } else { String::new() };
+    let dynamic_touch = if dynamic { "dynamic_memory[0] = 1; " } else { "" };
+    let readback = match (static_bytes > 0, dynamic, indices.first()) {
+        (true, true, Some(first)) => format!("b{first}[1] = static_memory[(tid + 1u) % {static_bytes}u] + dynamic_memory[0]; "),
+        (true, false, Some(first)) => format!("b{first}[1] = static_memory[(tid + 1u) % {static_bytes}u]; "),
+        (false, true, Some(first)) => format!("b{first}[1] = dynamic_memory[0]; "),
+        _ => String::new(),
+    };
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\nkernel void floor_noop({parameters}{dynamic_parameter}uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {{ {static_declaration}if (gid == 0xFFFFFFFFu) {{ {touches}{static_touch}{dynamic_touch}threadgroup_barrier(mem_flags::mem_threadgroup); {readback}}} }}\n"
+    );
+    let cached = FLOOR_PIPELINES.with(|cache| cache.borrow().get(&source).cloned());
+    if let Some(pipeline) = cached {
+        return Ok(FloorPipeline { pipeline });
+    }
+    let options = MTLCompileOptions::new();
+    let library = device
+        .newLibraryWithSource_options_error(&NSString::from_str(&source), Some(&options))
+        .map_err(|error| MetalError::CompileFailed { log: nserror_description(&error) })?;
+    let function = library
+        .newFunctionWithName(&NSString::from_str("floor_noop"))
+        .ok_or_else(|| MetalError::CompileFailed { log: "empty kernel entry missing".to_string() })?;
+    let pipeline = pipeline_from_function(device, &function)?;
+    FLOOR_PIPELINES.with(|cache| cache.borrow_mut().insert(source, pipeline.clone()));
+    Ok(FloorPipeline { pipeline })
 }
 
 #[cfg(feature = "instrument")]
@@ -1727,6 +1898,7 @@ impl CapturedDispatch {
             fault_index: self.fault_index,
             prepass: self.prepass.clone(),
             prepass_owner: self.prepass_owner,
+            barrier_before: self.barrier_before,
         })
     }
 
@@ -1807,6 +1979,7 @@ impl CapturedDispatch {
             fault_index: self.fault_index,
             prepass: self.prepass.clone(),
             prepass_owner: self.prepass_owner,
+            barrier_before: self.barrier_before,
         })
     }
 
@@ -1951,6 +2124,7 @@ impl CapturedDispatch {
             fault_index: self.fault_index,
             prepass: self.prepass.clone(),
             prepass_owner: self.prepass_owner,
+            barrier_before: self.barrier_before,
         }
     }
 
@@ -2073,6 +2247,285 @@ impl CapturedDispatch {
     /// Returns the first captured unreplayable reason, or a Metal error when
     /// buffer allocation or command execution fails.
     pub fn time_gpu_sequence_ns<Item: Borrow<Self>>(items: &[Item]) -> Result<f64, MetalError> {
+        Self::replay_sequence(items, None)
+    }
+
+    /// [`Self::time_gpu_sequence_ns`] on a concurrent encoder with a buffer
+    /// barrier ahead of every dispatch `barrier_before` marks, and, when
+    /// `prepass_barrier` is set, between a compacted gemm's count and place
+    /// passes. `barrier_before` pairs with `items` one to one. The flags come
+    /// from [`Self::recorded_barriers`], [`Self::node_keyed_barriers`] or are
+    /// all `false`; with none the dispatches may overlap and the output is not
+    /// valid, the ceiling the ordered replays are measured against.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::time_gpu_sequence_ns`], and [`MetalError::CompileFailed`]
+    /// when `barrier_before` and `items` differ in length.
+    pub fn time_gpu_sequence_barriered_ns<Item: Borrow<Self>>(
+        items: &[Item],
+        barrier_before: &[bool],
+        prepass_barrier: bool,
+    ) -> Result<f64, MetalError> {
+        if barrier_before.len() != items.len() {
+            return Err(MetalError::CompileFailed {
+                log: format!(
+                    "barrier flags ({}) and dispatches ({}) differ in length",
+                    barrier_before.len(),
+                    items.len()
+                ),
+            });
+        }
+        Self::replay_sequence(items, Some((barrier_before, prepass_barrier)))
+    }
+
+    /// The barrier flags the live concurrent encoder fired, one per dispatch.
+    #[must_use]
+    pub fn recorded_barriers<Item: Borrow<Self>>(items: &[Item]) -> Vec<bool> {
+        items.iter().map(|item| item.borrow().barrier_before).collect()
+    }
+
+    /// One flag per dispatch, `true` where it reads a node an earlier dispatch
+    /// wrote with no barrier between them, computed from each record's
+    /// bindings (read nodes, written node) and nothing about buffer identity.
+    /// The attention split writes a scratch no node names and the merge that
+    /// follows reads it, so the pair is keyed on the op's own node.
+    #[must_use]
+    pub fn node_keyed_barriers<Item: Borrow<Self>>(items: &[Item]) -> Vec<bool> {
+        let mut written: std::collections::HashSet<(u32, bool)> = std::collections::HashSet::new();
+        items
+            .iter()
+            .map(|item| {
+                let record = item.borrow();
+                let has_scratch = record.bindings.iter().any(|binding| matches!(binding, Binding::Scratch));
+                let has_output = record.bindings.iter().any(|binding| matches!(binding, Binding::Output(_)));
+                let reads_scratch = has_scratch && has_output;
+                let writes_scratch = has_scratch && !has_output;
+                let hazard = crate::msl::hazard_read_nodes(&record.bindings)
+                    .any(|node| written.contains(&(node.0, false)))
+                    || (reads_scratch && written.contains(&(record.node, true)));
+                if hazard {
+                    written.clear();
+                }
+                if let Some(node) = crate::msl::hazard_write_node(&record.bindings) {
+                    written.insert((node.0, false));
+                }
+                if writes_scratch {
+                    written.insert((record.node, true));
+                }
+                hazard
+            })
+            .collect()
+    }
+
+    /// [`Self::node_keyed_barriers`] plus a barrier wherever a dispatch writes
+    /// a buffer an earlier dispatch wrote or read since the last barrier: the
+    /// write-after-write and write-after-read edges arena slot reuse makes,
+    /// keyed on buffer identity. A read-after-write needs a node dependency.
+    #[must_use]
+    pub fn node_and_slot_keyed_barriers<Item: Borrow<Self>>(items: &[Item]) -> Vec<bool> {
+        let mut written: std::collections::HashSet<(u32, bool)> = std::collections::HashSet::new();
+        let mut written_buffers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut read_buffers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        items
+            .iter()
+            .map(|item| {
+                let record = item.borrow();
+                let has_scratch = record.bindings.iter().any(|binding| matches!(binding, Binding::Scratch));
+                let has_output = record.bindings.iter().any(|binding| matches!(binding, Binding::Output(_)));
+                let reads_scratch = has_scratch && has_output;
+                let writes_scratch = has_scratch && !has_output;
+                let buffer_at = |index: usize| {
+                    record
+                        .buffers
+                        .iter()
+                        .find(|(bound, _, _)| *bound == index)
+                        .map(|(_, buffer, _)| Retained::as_ptr(buffer) as usize)
+                };
+                let mut read_pointers = Vec::new();
+                let mut write_pointer = None;
+                for (index, binding) in record.bindings.iter().enumerate() {
+                    match binding {
+                        Binding::Input(_) | Binding::Indices(_) => read_pointers.extend(buffer_at(index)),
+                        Binding::Output(_) => write_pointer = buffer_at(index),
+                        Binding::Scratch if writes_scratch => write_pointer = buffer_at(index),
+                        Binding::Scratch => read_pointers.extend(buffer_at(index)),
+                        _ => {}
+                    }
+                }
+                let read_after_write = crate::msl::hazard_read_nodes(&record.bindings)
+                    .any(|node| written.contains(&(node.0, false)))
+                    || (reads_scratch && written.contains(&(record.node, true)));
+                let slot_reuse = write_pointer
+                    .is_some_and(|pointer| written_buffers.contains(&pointer) || read_buffers.contains(&pointer));
+                let hazard = read_after_write || slot_reuse;
+                if hazard {
+                    written.clear();
+                    written_buffers.clear();
+                    read_buffers.clear();
+                }
+                if let Some(node) = crate::msl::hazard_write_node(&record.bindings) {
+                    written.insert((node.0, false));
+                }
+                if writes_scratch {
+                    written.insert((record.node, true));
+                }
+                written_buffers.extend(write_pointer);
+                read_buffers.extend(read_pointers);
+                hazard
+            })
+            .collect()
+    }
+
+    /// Bytes of the buffer this dispatch writes as its output, from its offset
+    /// to its end, as they stand after the last replay.
+    #[must_use]
+    pub fn output_bytes(&self) -> Option<Vec<u8>> {
+        let output_index = self
+            .bindings
+            .iter()
+            .position(|binding| matches!(binding, Binding::Output(_)))?;
+        self.bound_buffer_bytes_at(output_index)
+    }
+
+    /// Buffers bound per dispatch: every captured buffer plus the uniforms and
+    /// fault slots, the `setBuffer` calls one replayed dispatch makes.
+    #[must_use]
+    pub fn buffer_binding_count(&self) -> usize {
+        self.buffers.len()
+            + usize::from(self.uniforms_index.is_some())
+            + usize::from(self.fault_index.is_some())
+    }
+
+    /// Bytes from each bound buffer's offset to its end, summed over every
+    /// buffer including a whole checkpoint mapping at its full length.
+    #[must_use]
+    pub fn bound_buffer_bytes_full(&self) -> u64 {
+        self.buffers
+            .iter()
+            .map(|(_, buffer, offset)| buffer.length().saturating_sub(*offset) as u64)
+            .sum()
+    }
+
+    /// Threadgroups this dispatch launches, the route prepass passes not
+    /// counted.
+    #[must_use]
+    pub fn threadgroup_count(&self) -> u64 {
+        let Some(shape) = dispatch_shape(&self.pipeline, self.grid) else {
+            return 0;
+        };
+        if shape.by_threadgroups {
+            (shape.extent.width * shape.extent.height * shape.extent.depth) as u64
+        } else {
+            (shape.extent.width.div_ceil(shape.threads.width) * shape.extent.depth) as u64
+        }
+    }
+
+    /// Dynamic threadgroup memory length the launch sets, `0` when it sets none.
+    #[must_use]
+    pub fn dynamic_threadgroup_bytes(&self) -> usize {
+        dispatch_shape(&self.pipeline, self.grid).map_or(0, |shape| shape.dynamic_bytes)
+    }
+
+    /// Address of this dispatch's pipeline state, the identity two dispatches
+    /// share when they switch no state between them.
+    #[must_use]
+    pub fn pipeline_identity(&self) -> usize {
+        Retained::as_ptr(&self.pipeline) as usize
+    }
+
+    /// The captured step with every kernel body replaced by an empty kernel
+    /// that declares the same buffer bindings and the same static threadgroup
+    /// memory, dispatched with the same grid and threadgroup shape, the
+    /// dynamic threadgroup length set where the original sets it. With
+    /// `minimal_bindings`, one shared empty kernel with one small buffer and
+    /// no threadgroup memory instead. With `one_threadgroup`, each grid is
+    /// cut to a single threadgroup of the same shape. The encoder is serial,
+    /// like [`Self::time_gpu_sequence_ns`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::time_gpu_sequence_ns`], and the compile error of an empty
+    /// kernel.
+    pub fn time_gpu_noop_sequence_ns<Item: Borrow<Self>>(
+        items: &[Item],
+        minimal_bindings: bool,
+        one_threadgroup: bool,
+    ) -> Result<f64, MetalError> {
+        let dispatches: Vec<&Self> = items.iter().map(Borrow::borrow).collect();
+        if dispatches.is_empty() {
+            return Ok(0.0);
+        }
+        let (device, queue) = device_and_queue()?;
+        let pipelines: Vec<FloorPipeline> = dispatches
+            .iter()
+            .map(|dispatch| floor_pipeline_for(&device, dispatch, minimal_bindings))
+            .collect::<Result<_, _>>()?;
+        let small = shared_buffer_from(&device, &[0u8; FAULT_REPLAY_BYTES])?;
+        let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
+            log: "queue refused a floor replay command buffer".to_string(),
+        })?;
+        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+            MetalError::CompileFailed {
+                log: "command buffer refused a floor replay encoder".to_string(),
+            }
+        })?;
+        for (record, floor) in dispatches.iter().zip(&pipelines) {
+            encoder.setComputePipelineState(&floor.pipeline);
+            if minimal_bindings {
+                // SAFETY: the shared small buffer outlives the command buffer.
+                unsafe { encoder.setBuffer_offset_atIndex(Some(&small), 0, 0) };
+            } else {
+                for (index, buffer, offset) in &record.buffers {
+                    // SAFETY: each captured buffer and offset is the pair `encode_op` bound.
+                    unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), *offset, *index) };
+                }
+                for index in [record.uniforms_index, record.fault_index].into_iter().flatten() {
+                    // SAFETY: the shared small buffer outlives the command buffer.
+                    unsafe { encoder.setBuffer_offset_atIndex(Some(&small), 0, index) };
+                }
+            }
+            if let Some(prepass) = &record.prepass {
+                dispatch_floor(&encoder, &prepass.pipeline, prepass.grid, !minimal_bindings, one_threadgroup);
+                if prepass.place.is_some() {
+                    dispatch_floor(&encoder, &prepass.pipeline, prepass.grid, !minimal_bindings, one_threadgroup);
+                }
+            }
+            dispatch_floor(&encoder, &record.pipeline, record.grid, !minimal_bindings, one_threadgroup);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        gpu_span_ns(&command_buffer)
+    }
+
+    /// `(distinct pipeline states, their static threadgroup bytes summed, the
+    /// empty kernels' static threadgroup bytes summed)` for the captured step,
+    /// so the empty kernels' on-chip footprint is read beside the originals'.
+    ///
+    /// # Errors
+    ///
+    /// The compile error of an empty kernel.
+    pub fn floor_pipeline_resources<Item: Borrow<Self>>(items: &[Item]) -> Result<(usize, usize, usize), MetalError> {
+        let (device, _queue) = device_and_queue()?;
+        let mut seen: std::collections::BTreeMap<usize, (usize, usize)> = std::collections::BTreeMap::new();
+        for item in items {
+            let record = item.borrow();
+            let original = record.pipeline.staticThreadgroupMemoryLength();
+            let floor = floor_pipeline_for(&device, record, false)?.pipeline.staticThreadgroupMemoryLength();
+            seen.entry(record.pipeline_identity()).or_insert((original, floor));
+        }
+        Ok((
+            seen.len(),
+            seen.values().map(|pair| pair.0).sum(),
+            seen.values().map(|pair| pair.1).sum(),
+        ))
+    }
+
+    fn replay_sequence<Item: Borrow<Self>>(
+        items: &[Item],
+        barriers: Option<(&[bool], bool)>,
+    ) -> Result<f64, MetalError> {
         let dispatches: Vec<&Self> = items.iter().map(Borrow::borrow).collect();
         if dispatches.is_empty() {
             return Ok(0.0);
@@ -2092,12 +2545,21 @@ impl CapturedDispatch {
         let command_buffer = queue.commandBuffer().ok_or_else(|| MetalError::CompileFailed {
             log: "queue refused a sequence replay command buffer".to_string(),
         })?;
-        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
-            MetalError::CompileFailed {
-                log: "command buffer refused a sequence replay encoder".to_string(),
-            }
+        let encoder = if barriers.is_some() {
+            command_buffer.computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
+        } else {
+            command_buffer.computeCommandEncoder()
+        }
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command buffer refused a sequence replay encoder".to_string(),
         })?;
-        for (dispatch_record, uniforms_buffer) in dispatches.iter().zip(&uniforms) {
+        let prepass_barrier = barriers.is_some_and(|(_, between)| between);
+        for (position, (dispatch_record, uniforms_buffer)) in
+            dispatches.iter().zip(&uniforms).enumerate()
+        {
+            if barriers.is_some_and(|(flags, _)| flags[position]) {
+                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+            }
             encoder.setComputePipelineState(&dispatch_record.pipeline);
             for (index, buffer, offset) in &dispatch_record.buffers {
                 // SAFETY: each captured buffer and offset is the pair `encode_op` bound.
@@ -2110,7 +2572,7 @@ impl CapturedDispatch {
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&fault), 0, index) };
             }
             if let Some(prepass) = &dispatch_record.prepass {
-                prepass.dispatch_passes(&encoder);
+                prepass.dispatch_passes_barriered(&encoder, prepass_barrier);
                 encoder.setComputePipelineState(&dispatch_record.pipeline);
             }
             dispatch(&encoder, &dispatch_record.pipeline, dispatch_record.grid);
