@@ -7666,7 +7666,7 @@ mod epilogue_operand_reuse {
     }
 
     #[test]
-    fn a_plain_matvec_keeps_the_single_lane_write() {
+    fn a_plain_matvec_finishes_each_row_of_the_simdgroup_on_its_own_lane() {
         let bound = packed_row_multi_token_op(1, REDUCTION, ROWS);
         let weight_node = bound.operands()[0].0;
         let mut packed = BTreeMap::new();
@@ -7677,9 +7677,16 @@ mod epilogue_operand_reuse {
             .source;
 
         assert!(
-            source.contains("if (lane == 0u && flat < u.output_total)"),
-            "a matvec with no fused epilogue writes exactly what it always wrote:\n{source}"
+            source.contains("if (lane < 4u) {"),
+            "four rows per simdgroup, one lane each:\n{source}"
         );
-        assert!(!source.contains("reduced_row0"), "{source}");
+        assert!(
+            source.contains("long out_offset = u.out_base + flat * u.out_strides["),
+            "a single non-unit output axis addresses the store with one term:\n{source}"
+        );
+        assert!(
+            !source.contains("if (lane == 0u && flat < u.output_total)"),
+            "no row waits behind lane 0:\n{source}"
+        );
     }
 }
