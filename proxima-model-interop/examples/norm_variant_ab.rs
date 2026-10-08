@@ -508,6 +508,24 @@ mod harness {
                     compare_outputs(&base_output, &output)
                 );
             }
+            if std::env::var_os("AB_PREPASS_ONLY").is_some() {
+                let slot = base.bindings.len();
+                base.poison_bound_buffer(slot);
+                base.time_gpu_ns(1).expect("prepass replay");
+                let reference_bytes = base.bound_buffer_bytes_at(slot).expect("compaction buffer");
+                for arm in &arms {
+                    arm.1[0].poison_bound_buffer(slot);
+                    arm.1[0].time_gpu_ns(1).expect("prepass arm replay");
+                    let bytes = arm.1[0].bound_buffer_bytes_at(slot).expect("compaction buffer");
+                    let differing = reference_bytes.iter().zip(&bytes).filter(|(left, right)| left != right).count();
+                    println!(
+                        "ab compaction sha={} extents={extents:?} arm={} bytes={} differing={differing}",
+                        &sha[..SHA_PREFIX_CHARS],
+                        arm.0,
+                        bytes.len()
+                    );
+                }
+            }
             for pass in 0..passes {
                 if let Some(radius) = window_radius {
                     let ordinals: Vec<usize> = match std::env::var("AB_MEMBER").as_deref() {
