@@ -2055,6 +2055,23 @@ pub(crate) fn row_tile_bytes(rows: u64, query_groups: u64, block: u64) -> u64 {
     4 * rows * query_groups * (block + 6)
 }
 
+/// Floats of padding after each staged query row, so the row stride is not a
+/// multiple of the 32 threadgroup memory banks.
+#[cfg(feature = "metal-attn-split-rows")]
+pub(crate) const QUERY_STAGE_PAD: u64 = 8;
+
+/// Threadgroup bytes of the staged query tile of a row-tiled tile of `rows`
+/// query rows: per query vector the even and odd rotary plane of `head_dim / 2`
+/// f32 each plus [`QUERY_STAGE_PAD`] padding floats per plane row. The kernel
+/// stages the tile only while this plus [`row_tile_bytes`] fits
+/// `[cached_attention].threadgroup_memory_bytes`, so the tile-height rule in
+/// [`rows_per_threadgroup`] is unchanged.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn query_stage_bytes(rows: u64, query_groups: u64, head_dim: u64) -> u64 {
+    4 * 2 * rows * query_groups * (head_dim / 2 + QUERY_STAGE_PAD)
+}
+
 /// Query rows one row-tiled threadgroup carries: a whole number of
 /// [`tile_unit`]s, at most `[attention_rows].vector_blocks_per_tile` vector
 /// blocks (the K and V fragment loads one tile shares), within the
