@@ -836,7 +836,12 @@ pub enum MoeProjectionStrategy {
 
 impl MoeProjectionStrategy {
     /// The strategy the model builders use: [`Self::Stacked`] when the
-    /// `moe-stacked-experts` feature is on, [`Self::PerRoute`] otherwise.
+    /// `moe-stacked-experts` feature is on (`proxima-model-interop`'s `metal`
+    /// set turns it on, with the `moe-topk-fusion` it implies), so a routed
+    /// feed-forward block is one gate, one up and one down operation at any
+    /// token count from a decode step up. [`Self::PerRoute`] otherwise: a
+    /// build with no fusion and no grouped kernel has nothing that runs a
+    /// route stack faster than one operation per selected expert.
     #[must_use]
     pub const fn production() -> Self {
         if cfg!(feature = "moe-stacked-experts") {

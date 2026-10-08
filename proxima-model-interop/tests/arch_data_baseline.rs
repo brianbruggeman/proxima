@@ -424,9 +424,9 @@ fn assert_bound(checkpoint: &Checkpoint) {
 fn arch_data_digest_gemma4_26b() {
     let record = digest_record(&GEMMA4_26B);
     assert!(
-        record.contains("\nbind.ops=13314\n")
-            && record.contains("\nbind.logits_root=NodeId(13313)\n"),
-        "gemma4 26B must lower to 13314 ops ending at NodeId(13313), got:\n{record}"
+        record.contains("\nbind.ops=10434\n")
+            && record.contains("\nbind.logits_root=NodeId(10433)\n"),
+        "gemma4 26B must lower to 10434 ops ending at NodeId(10433), got:\n{record}"
     );
     assert_matches_fixture(&GEMMA4_26B, "digest", &record);
 }
