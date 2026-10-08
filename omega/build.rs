@@ -415,6 +415,16 @@ fn emit_sizing_consts() {
         out.push_str(&format!(
             "pub const BROADCAST_REDUCE_MAX_WIDTH: u64 = {broadcast_max_width};\n"
         ));
+        let hidden_norm_width = require_multiple_of_thirty_two(
+            "wide_cooperative_reduce.hidden_norm_width",
+            require_nonzero(
+                "wide_cooperative_reduce.hidden_norm_width",
+                resolve_int(&root, "wide_cooperative_reduce", "hidden_norm_width"),
+            ),
+        );
+        out.push_str(&format!(
+            "pub const HIDDEN_NORM_REDUCE_WIDTH: u64 = {hidden_norm_width};\n"
+        ));
     }
 
     if env::var_os("CARGO_FEATURE_METAL_Q4K_SPLIT_K").is_some() {
