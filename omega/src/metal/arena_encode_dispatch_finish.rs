@@ -98,12 +98,9 @@ impl BufferArena {
 /// `bindings` does not name, so the arena gives each a dedicated slot and
 /// `encode_op` falls back to a fresh allocation only when the caller did not
 /// resolve them.
-fn extra_output_nodes(bound: &BoundOp) -> Vec<(NodeId, usize)> {
-    match &bound.kind {
-        BoundOpKind::MoeTopK { .. } => {
-            let token_count = bound.extents.iter().product::<u64>() as usize;
-            bound.kind.moe_topk_extra_outputs(token_count)
-        }
+fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeId, usize)> + '_ {
+    let token_count = bound.extents.iter().product::<u64>() as usize;
+    let softmax = match &bound.kind {
         BoundOpKind::CachedSoftmaxWeights {
             cached_weight_sum,
             new_weight_sum,
@@ -111,13 +108,17 @@ fn extra_output_nodes(bound: &BoundOp) -> Vec<(NodeId, usize)> {
             attention_rows,
             head_dim,
             ..
-        } => vec![
+        } => Some([
             (*cached_weight_sum, *attention_rows as usize),
             (*new_weight_sum, *attention_rows as usize),
             (*new_attended, (*attention_rows * *head_dim) as usize),
-        ],
-        _ => Vec::new(),
-    }
+        ]),
+        _ => None,
+    };
+    bound
+        .kind
+        .moe_topk_extra_outputs_iter(token_count)
+        .chain(softmax.into_iter().flatten())
 }
 
 /// Builds [`BufferArena`] in one pass over `resolved`, in program order,
@@ -684,11 +685,19 @@ pub(super) fn resolve_step(
         }
         None => None,
     };
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let round_group = match &bound.kind {
+        BoundOpKind::RoundBatchedReduce { .. } => Some(ensure_round_group_resolved(device, bound)?),
+        _ => None,
+    };
     Ok(ResolvedStep {
         pipeline,
         bindings,
         grid,
         merge,
+        #[cfg(feature = "metal-moe-mul-mat-id")]
+        round_group,
+        state_out_fallback: core::cell::OnceCell::new(),
     })
 }
 
@@ -1898,6 +1907,26 @@ fn record_chunk_audit_dispatch(
     }
 }
 
+/// `state_out` for a `GatedDeltaNet` whose caller placed none: the plan
+/// step's own once-allocated buffer when there is a [`ResolvedStep`], a fresh
+/// one on the cold paths that have none.
+fn state_out_fallback_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    resolved: Option<&ResolvedStep>,
+    elements: usize,
+    dtype: DType,
+) -> Result<MetalBuffer, MetalError> {
+    let Some(step) = resolved else {
+        return allocate_buffer(device, elements, dtype);
+    };
+    if let Some(buffer) = step.state_out_fallback.get() {
+        return Ok(buffer.clone());
+    }
+    let buffer = allocate_buffer(device, elements, dtype)?;
+    let _ = step.state_out_fallback.set(buffer.clone());
+    Ok(buffer)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
@@ -2136,12 +2165,19 @@ pub(super) fn encode_op(
     // own route buffer is bound through its own trailing `Binding::Indices`
     // (`bindings`'s doc), so `bind_buffers` and the hazard walk see them.
     #[cfg(feature = "metal-moe-mul-mat-id")]
-    let round_group: Option<ResolvedRoundGroup> =
-        if matches!(bound.kind, BoundOpKind::RoundBatchedReduce { .. }) {
+    let fresh_round_group: Option<ResolvedRoundGroup> = match (
+        &bound.kind,
+        resolved.and_then(|step| step.round_group.as_ref()),
+    ) {
+        (BoundOpKind::RoundBatchedReduce { .. }, None) => {
             Some(ensure_round_group_resolved(device, bound)?)
-        } else {
-            None
-        };
+        }
+        _ => None,
+    };
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let round_group: Option<&ResolvedRoundGroup> = resolved
+        .and_then(|step| step.round_group.as_ref())
+        .or(fresh_round_group.as_ref());
     #[cfg(not(feature = "metal-moe-mul-mat-id"))]
     let round_group: Option<()> = None;
     let (output, output_offset) = match &round_group {
@@ -2261,7 +2297,10 @@ pub(super) fn encode_op(
             Some((buffer, offset)) => (buffer.clone(), offset),
             None => match existing {
                 Some(buffer) => buffer,
-                None => (allocate_buffer(device, state_elements, bound.dtype)?, 0),
+                None => (
+                    state_out_fallback_buffer(device, resolved, state_elements, bound.dtype)?,
+                    0,
+                ),
             },
         };
         // decision point: whether this node's recurrent state carried
@@ -2310,7 +2349,7 @@ pub(super) fn encode_op(
     // `bindings` -- `bind_buffers`' single `output` cannot carry them, so they
     // bind here, resolved from `device_buffers` (the plan arena pre-resolves
     // them on the placements path) or allocated fresh on the cold paths.
-    for (offset, (extra_node, element_count)) in extra_output_nodes(bound).into_iter().enumerate() {
+    for (offset, (extra_node, element_count)) in extra_output_nodes(bound).enumerate() {
         let buffer_index = bindings.len() + offset;
         let (extra_buffer, extra_offset) = match device_buffers.get(&extra_node).cloned() {
             Some(buffer) => buffer,

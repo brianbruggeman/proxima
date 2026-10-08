@@ -1454,12 +1454,10 @@ pub(super) fn upload_base_table(
 /// buffer is written on the GPU earlier in the same command buffer and so
 /// holds nothing a CPU copy at encode time could read. Unlike
 /// [`ResolvedMergedGroup`], this is resolved FRESH on every
-/// [`ensure_round_group_resolved`] call rather than cached on a `Plan`:
-/// `encode_op` (this struct's one caller) has no `&Plan` to key a cache on
-/// -- correctness first, the same "no plan-owned reuse required" stance
-/// [`ensure_merged_group_resolved`]'s own doc already takes for its
-/// non-`Plan`-aware callers. A follow-up can add `Plan`-keyed reuse without
-/// changing this struct's shape.
+/// [`ensure_round_group_resolved`] call on a path with no [`ResolvedStep`]
+/// (`execute_plan`, the `*_op_timed` diagnostics). The plan-resolved path
+/// builds it once per position in `resolve_step` and `encode_op` binds that
+/// one, so a warm decode step allocates nothing for the fold.
 #[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) struct ResolvedRoundGroup {
     pub(super) output_buffer: MetalBuffer,
@@ -1653,6 +1651,16 @@ pub(super) struct ResolvedStep {
     /// back out of the scratch buffer `bindings`' own trailing
     /// `Binding::Scratch` slot wrote.
     pub(super) merge: Option<ResolvedMergeStep>,
+    /// `Some` exactly for a `RoundBatchedReduce` position: its contiguous
+    /// output buffer and `RoundBase` table, allocated once when the step is
+    /// resolved so a warm step binds them instead of allocating two device
+    /// buffers per fold per token.
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    pub(super) round_group: Option<ResolvedRoundGroup>,
+    /// A `GatedDeltaNet` position's `state_out` buffer for a caller that
+    /// places none, allocated on first use and reused after, so an unplaced
+    /// recurrent state costs one device buffer per plan, not one per step.
+    pub(super) state_out_fallback: core::cell::OnceCell<MetalBuffer>,
 }
 
 /// [`ResolvedStep::merge`]'s payload -- the SAME triple `ResolvedStep`
