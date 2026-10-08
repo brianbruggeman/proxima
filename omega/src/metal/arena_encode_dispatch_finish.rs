@@ -1695,6 +1695,85 @@ impl CapturedDispatch {
         })
     }
 
+    /// `(static threadgroup bytes, max threads per threadgroup, thread
+    /// execution width)` of this record's pipeline, so a variant kernel's
+    /// on-chip footprint is read beside its time.
+    #[must_use]
+    pub fn pipeline_resources(&self) -> (usize, usize, usize) {
+        (
+            self.pipeline.staticThreadgroupMemoryLength(),
+            self.pipeline.maxTotalThreadsPerThreadgroup(),
+            self.pipeline.threadExecutionWidth(),
+        )
+    }
+
+    /// Bytes from each bound buffer's offset to its end, summed over the
+    /// buffers smaller than a resident checkpoint mapping (those are weights
+    /// whose touched bytes the caller derives from the extents).
+    #[must_use]
+    pub fn bound_buffer_bytes(&self) -> u64 {
+        self.buffers
+            .iter()
+            .filter(|(_, buffer, _)| buffer.length() <= RESIDENT_WEIGHT_BUFFER_BYTES)
+            .map(|(_, buffer, offset)| buffer.length().saturating_sub(*offset) as u64)
+            .sum()
+    }
+
+    /// A copy of this record whose buffers at the given binding indices hold the
+    /// same values narrowed to `f16`, half the bytes, for a variant kernel that
+    /// declares `device const half*` there (an f16 K/V cache against the f32 one).
+    ///
+    /// # Errors
+    ///
+    /// [`MetalError::CompileFailed`] when a binding is not bound or the device
+    /// refuses an allocation.
+    pub fn with_f16_buffers(&self, indices: &[usize]) -> Result<Self, MetalError> {
+        let (device, _queue) = device_and_queue()?;
+        let mut buffers = self.buffers.clone();
+        for index in indices {
+            let slot = buffers
+                .iter_mut()
+                .find(|(bound_index, _, _)| bound_index == index)
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: format!("binding {index} is not bound in this record"),
+                })?;
+            let (_, source, offset) = slot.clone();
+            let count = source.length().saturating_sub(offset) / core::mem::size_of::<f32>();
+            // SAFETY: shared-storage buffer idle between replays; `offset + count * 4 <= length`.
+            let floats = unsafe {
+                core::slice::from_raw_parts(
+                    source.contents().as_ptr().cast::<u8>().add(offset).cast::<f32>(),
+                    count,
+                )
+            };
+            let halves: Vec<u8> = floats
+                .iter()
+                .flat_map(|value| f16::from_f32(*value).to_le_bytes())
+                .collect();
+            *slot = (*index, shared_buffer_from(&device, &halves)?, 0);
+        }
+        Ok(Self {
+            step: self.step,
+            node: self.node,
+            kind_name: self.kind_name,
+            entry: self.entry.clone(),
+            msl_sha256: String::new(),
+            operands: self.operands.clone(),
+            chunk_index: self.chunk_index,
+            extents: self.extents.clone(),
+            grid: self.grid,
+            bindings: self.bindings.clone(),
+            unreplayable: self.unreplayable.clone(),
+            route_prepass_dispatches: self.route_prepass_dispatches,
+            uniform_bytes: self.uniform_bytes.clone(),
+            pipeline: self.pipeline.clone(),
+            buffers,
+            uniforms_index: self.uniforms_index,
+            fault_index: self.fault_index,
+            prepass: self.prepass.clone(),
+        })
+    }
+
     /// The route prepass of this record as a dispatch of its own (its pipeline,
     /// launch shape and the shared buffers), `None` for a record with no
     /// prepass, so the prepass is timed apart from the gemm that follows it.
