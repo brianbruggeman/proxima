@@ -530,6 +530,11 @@ fn main() {
                  steady_samples={steady_samples} text={text:?}"
             );
         }
+        eprintln!(
+            "decode_gbps_baseline held_bytes run_index={run_index} prompt_cache_bytes={} resident_prefill_plan_budget_bytes={resident_prefill_plan_bytes} speculative_types={:?}",
+            model.prompt_cache_bytes(),
+            speculative.speculative_types,
+        );
         #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             let (archive_hits, archive_stores) = omega::metal::pipeline_disk_cache_counts();

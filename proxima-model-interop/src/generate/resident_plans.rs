@@ -250,6 +250,14 @@ pub(super) fn put(owner: &Arc<()>, identity: PlanIdentity, plans: ResidentPlans)
     if plans.is_empty() {
         return;
     }
+    #[cfg(feature = "instrument")]
+    proxima_telemetry::debug!(
+        decode_plans = plans.decode.len() as u64,
+        wide_plans = plans.wide.len() as u64,
+        decode_bytes = plans.decode.values().map(plan_bytes).sum::<usize>() as u64,
+        wide_bytes = plans.wide.values().map(plan_bytes).sum::<usize>() as u64,
+        "resident_plans_held"
+    );
     RESIDENT.with(|cell| {
         let mut entries = cell.borrow_mut();
         sweep_orphans(&mut entries);
