@@ -9,6 +9,12 @@
 //! asks for: `rows * 8960 * 256` threads, which crosses `2^32` at 1873 rows
 //! (1872 rows is 4_294_082_560 threads and still fits).
 //!
+//! The F16 weight has a tiled decode description, so at these row counts it
+//! takes the tiled GEMM by default, whose grid (tiles, not lanes) never nears
+//! `2^32` threads. `PROXIMA_TILED_GEMM_DISABLE=f16` keeps the projection on the
+//! cooperative kernel whose wide grid this regression guards; each row count
+//! also runs on the tiled GEMM, where the same three checks must hold.
+//!
 //! Three internal-consistency checks per row count (none of them the oracle --
 //! that is llama.cpp on the same token ids, `speculative_bench --llama-parity`):
 //! no output reads back as zero unless its own f64 dot product is (a truncated
@@ -92,7 +98,10 @@ fn projection_program(rows: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     (program, sum)
 }
 
-fn run_on_metal(rows: u32, activations: &[f32], weight_bytes: &[u8]) -> Vec<f32> {
+const COOPERATIVE_KERNEL: Option<&str> = Some("f16");
+const TILED_KERNEL: Option<&str> = None;
+
+fn run_on_metal(rows: u32, activations: &[f32], weight_bytes: &[u8], disabled_tiled: Option<&str>) -> Vec<f32> {
     let (program, sum) = projection_program(rows, DType::Float16);
     let blocks = [
         QuantizedBlock::Packed {
@@ -101,10 +110,12 @@ fn run_on_metal(rows: u32, activations: &[f32], weight_bytes: &[u8]) -> Vec<f32>
         },
         QuantizedBlock::Float32(activations),
     ];
-    omega::execute(&program, &[], &blocks, &[sum], NumericPolicy::llama_relaxed())
-        .expect("metal executes the per-layer projection")
-        .root()
-        .to_vec()
+    temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", disabled_tiled, || {
+        omega::execute(&program, &[], &blocks, &[sum], NumericPolicy::llama_relaxed())
+            .expect("metal executes the per-layer projection")
+            .root()
+            .to_vec()
+    })
 }
 
 fn run_on_cpu(rows: u32, activations: &[f32], dequantized_weights: &[f32]) -> Vec<f32> {
@@ -129,14 +140,14 @@ fn synthetic_f16_weight_bytes() -> Vec<u8> {
     weight_bytes
 }
 
-fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u8]) {
+fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u8], disabled_tiled: Option<&str>) {
     let features = FEATURES as usize;
     let row_len = REDUCTION_LEN as usize;
     let mut dequantized = vec![0.0f32; row_len * features];
     f16::dequantize(weight_bytes, &mut dequantized).expect("weights decode from f16");
     let activations = random_vec(0x51A7_0001, rows as usize * row_len);
 
-    let metal = run_on_metal(rows, &activations, weight_bytes);
+    let metal = run_on_metal(rows, &activations, weight_bytes, disabled_tiled);
     assert_eq!(metal.len(), rows as usize * features, "rows={rows}: output element count");
 
     let zero_positions: Vec<usize> = metal
@@ -146,11 +157,10 @@ fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u
         .collect();
     assert!(
         zero_positions.len() <= MAX_COINCIDENTAL_ZERO_OUTPUTS,
-        "rows={rows}: {} of {} outputs read back as exactly zero -- the dispatch grid of {} threads \
-         was truncated to its low 32 bits",
+        "rows={rows} (tiled kernel disabled for: {disabled_tiled:?}): {} of {} outputs read back as exactly \
+         zero -- the dispatch grid was truncated to its low 32 bits",
         zero_positions.len(),
         metal.len(),
-        u64::from(rows) * u64::from(FEATURES) * 256
     );
     for position in zero_positions {
         let (row, feature) = (position / features, position % features);
@@ -172,6 +182,7 @@ fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u
         reference_rows,
         &activations[..reference_rows as usize * row_len],
         weight_bytes,
+        disabled_tiled,
     );
     let shared = reference_rows as usize * features;
     assert_eq!(
@@ -199,12 +210,12 @@ fn assert_projection_is_fully_populated_and_correct(rows: u32, weight_bytes: &[u
 
 #[test]
 fn per_layer_projection_at_1873_rows_is_fully_populated_and_matches_the_cpu_oracle() {
-    assert_projection_is_fully_populated_and_correct(1873, &synthetic_f16_weight_bytes());
+    assert_projection_is_fully_populated_and_correct(1873, &synthetic_f16_weight_bytes(), COOPERATIVE_KERNEL);
 }
 
 #[test]
 fn per_layer_projection_at_1880_rows_is_fully_populated_and_matches_the_cpu_oracle() {
-    assert_projection_is_fully_populated_and_correct(1880, &synthetic_f16_weight_bytes());
+    assert_projection_is_fully_populated_and_correct(1880, &synthetic_f16_weight_bytes(), COOPERATIVE_KERNEL);
 }
 
 #[test]
@@ -212,7 +223,18 @@ fn per_layer_projection_at_the_last_linear_row_count_is_fully_populated() {
     assert_projection_is_fully_populated_and_correct(
         LAST_ROW_COUNT_AT_FULL_LANE_WIDTH,
         &synthetic_f16_weight_bytes(),
+        COOPERATIVE_KERNEL,
     );
+}
+
+#[test]
+fn tiled_per_layer_projection_at_1873_rows_is_fully_populated_and_matches_the_cpu_oracle() {
+    assert_projection_is_fully_populated_and_correct(1873, &synthetic_f16_weight_bytes(), TILED_KERNEL);
+}
+
+#[test]
+fn tiled_per_layer_projection_at_1880_rows_is_fully_populated_and_matches_the_cpu_oracle() {
+    assert_projection_is_fully_populated_and_correct(1880, &synthetic_f16_weight_bytes(), TILED_KERNEL);
 }
 
 /// `PROXIMA_GEMMA4_E2B_GGUF` names the host-local checkpoint. There is no
@@ -297,6 +319,8 @@ fn real_per_layer_model_proj_weight_bytes() -> Vec<u8> {
 fn real_per_layer_model_proj_weight_is_fully_populated_at_the_overflow_row_counts() {
     let weight_bytes = real_per_layer_model_proj_weight_bytes();
 
-    assert_projection_is_fully_populated_and_correct(1873, &weight_bytes);
-    assert_projection_is_fully_populated_and_correct(1880, &weight_bytes);
+    for disabled_tiled in [COOPERATIVE_KERNEL, TILED_KERNEL] {
+        assert_projection_is_fully_populated_and_correct(1873, &weight_bytes, disabled_tiled);
+        assert_projection_is_fully_populated_and_correct(1880, &weight_bytes, disabled_tiled);
+    }
 }
