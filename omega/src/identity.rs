@@ -294,9 +294,9 @@ pub(crate) struct MetalOnlyExtras {
     /// nibble half, matching ggml's own `kernel_mul_mm` staging split)
     /// instead of one thread decoding the whole row serially while the other
     /// half of the threadgroup's 128 threads sit idle (`block_m`(64) < the
-    /// threadgroup's own thread count), reads `Q4_0`'s packed nibbles via
-    /// `q4_0_run8_wide`'s `ushort` loads instead of `q4_0_run8`'s per-byte
-    /// `uchar` loads, and carries a per-thread block pointer/slot across the
+    /// threadgroup's own thread count), decodes every codec through its
+    /// `tiled_decode` description (`Q4_0` reads its packed nibbles as `ushort`
+    /// words), and carries a per-thread block pointer/slot across the
     /// `k0` reduction loop instead of re-deriving it from a division every
     /// step. Default ON (unset admits; only explicit `"0"` keeps the
     /// one-thread-per-row staging) -- this changes who computes which

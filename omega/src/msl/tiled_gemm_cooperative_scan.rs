@@ -78,6 +78,15 @@ use super::*;
 /// without this flag measured `relative=0.497` against the CPU oracle --
 /// dimensionally valid MSL, semantically wrong matrix product -- caught by
 /// `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`.)
+///
+/// The weight decode is data, not a per-codec arm: [`tiled_decode`] names the
+/// staged block and the `dequantize_*`-form MSL function of each codec, and
+/// [`push_weight_cursor`], [`push_weight_decode`] and [`push_block_cursor_advance`]
+/// are the one stager all three weight-staging schedules below (and
+/// [`push_expert_grouped_gemm_body`]) share -- llama.cpp's `kernel_mul_mm` has
+/// the same shape, one template and one `dequantize_*` per codec. The `Q4_K`
+/// header and `q4k_run8` batching ROW 113 describes live in that codec's
+/// description (`q4k_dequant_half16`).
 #[cfg(feature = "metal-tiled-gemm")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_tiled_gemm_body(
@@ -114,6 +123,11 @@ pub(super) fn push_tiled_gemm_body(
             group: "feature",
         });
     };
+    let decode = tiled_decode(codec).ok_or(EmitError::RenderKindMismatch {
+        node,
+        expected: "packed codec with a tiled decode description",
+        found: "other codec",
+    })?;
 
     let block_m = crate::sized::TILED_GEMM_BLOCK_M;
     let block_n = crate::sized::TILED_GEMM_BLOCK_N;
@@ -241,44 +255,40 @@ pub(super) fn push_tiled_gemm_body(
     source.push_str(&format!(
         "    for (int i = 0; i < {mc_count}; ++i) {{ acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }}\n"
     ));
-    // ROW 113: weight staging amortizes the Q4_K sub-block header the same
-    // way `push_packed_row_blocked_body` and ggml's own `dequantize_q4_K`
-    // (ggml-metal.metal:336-352) both do -- one `q4k_header_for` per
-    // 32-element sub-block, `q4k_run8` batching the nibble extract 8 at a
-    // time -- instead of `operand_read`'s generic `q4k_element`, which
-    // rederives the header (two `device` header reads plus the 6-bit
-    // scale/min unpack) from scratch on every one of the tile's individual
-    // elements.
-    // `tiled_gemm_codec_chunk_width` is the SAME definition `classify_
-    // tiled_gemm` checks against `tiled_gemm_block_k_chunk_aligned` before
-    // admitting an op onto this path (`emit_and_classify.rs`'s own doc on
-    // that check) -- an admitted op's `block_k` is always either <= this
-    // chunk width or a whole multiple of it, so `num_chunks` below covers
-    // `block_k` exactly with no ragged remainder, never a `weight_tile`
-    // overrun. The SAME chunking loop serves both codecs; only the
-    // per-chunk decode differs (`classify_tiled_gemm` only ever admits
-    // `Q4_0`/`Q4_K`).
-    let block_elements = u64::try_from(codec_block_elements(codec)).unwrap_or(u64::MAX);
-    let block_bytes = u64::try_from(codec_block_bytes(codec)).unwrap_or(u64::MAX);
+    // one decode description (`tiled_decode`) serves every weight-staging
+    // schedule below: the stager keeps a (block pointer, slot) cursor per
+    // weight row and asks the codec's `dequantize_*` for sixteen `half` at it,
+    // the shape llama.cpp's `kernel_mul_mm` has for every codec
+    // (`kernels/mul_mm.metal`, `kernels/dequantize.h`). `tiled_gemm_codec_
+    // chunk_width` is the SAME definition `classify_tiled_gemm` checks against
+    // `tiled_gemm_block_k_chunk_aligned` before admitting an op onto this path,
+    // so an admitted op's `block_k` is always either <= this chunk width or a
+    // whole multiple of it and `num_chunks` below covers `block_k` exactly
+    // with no ragged remainder.
+    let block_elements = decode.block_elements;
     let chunk_width = tiled_gemm_codec_chunk_width(codec).min(block_k);
     let num_chunks = block_k.div_ceil(chunk_width);
+    // a no-op cast for the byte-bound codecs; it is what views the half-bound
+    // Float16 buffer as the bytes every cursor below counts in
+    source.push_str(&format!(
+        "    device const uchar *weight_bytes = (device const uchar *)in{weight};\n"
+    ));
 
     // `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` (see `docs/model-interop/
     // discipline.md` ROW C4.12, `MetalOnlyExtras::tiled_gemm_wide_weight_stage`'s own doc): admitted
-    // only when a codec's own decode contract (8-element runs) still divides
-    // evenly into a HALF of one chunk (so a thread's half-chunk assignment
-    // never splits a run) AND the block/K-step ratio is a clean whole number
-    // in EITHER direction -- `chunk_width == block_elements` (Q4_0 with
-    // today's sizing, or any config where the codec's own block is no wider
-    // than one K-step: `block_k` a whole multiple of it) or `chunk_width ==
-    // block_k` (Q4_K with today's sizing: the K-step is narrower than the
-    // codec's super-block, so one super-block spans a whole multiple of
-    // K-steps). Both are checked, not assumed, so a future non-default
-    // `block_k` that breaks either ratio silently falls back to the
-    // existing per-K-step division instead of emitting a wrong pointer
+    // only when a thread's half-chunk is exactly one decode run (the chunk is
+    // one K step of 32) AND the block/K-step ratio is a clean whole number
+    // in EITHER direction -- `chunk_width == block_elements` (the 32-element
+    // legacy blocks and the staged `Float16` block, or any config where the
+    // codec's own block is no wider than one K-step: `block_k` a whole
+    // multiple of it) or `chunk_width == block_k` (the K-quants: the K-step
+    // is narrower than the 256-element super-block, so one super-block spans
+    // a whole multiple of K-steps). Both are checked, not assumed, so a future
+    // non-default `block_k` that breaks either ratio silently falls back to
+    // the existing per-K-step division instead of emitting a wrong pointer
     // advance.
     let wide_weight_stage_eligible = metal.tiled_gemm_wide_weight_stage
-        && chunk_width.is_multiple_of(16)
+        && chunk_width == STAGED_K_STEP_ELEMENTS
         && if chunk_width == block_elements {
             block_k.is_multiple_of(chunk_width)
         } else {
@@ -291,10 +301,10 @@ pub(super) fn push_tiled_gemm_body(
     let mm_layout_schedule = metal.tiled_gemm_mm_layout
         && wide_weight_stage_eligible
         && mm_layout_geometry_supported()
-        && half_width == 16;
+        && half_width == DECODE_RUN_ELEMENTS;
 
     if mm_layout_schedule {
-        push_mm_layout_k_loop(source, block, token_axis, feature_axis, metal, grid2d_active);
+        push_mm_layout_k_loop(source, block, &decode, token_axis, feature_axis, metal, grid2d_active);
     } else {
         if wide_weight_stage_eligible {
             push_wide_weight_stage_setup(
@@ -307,8 +317,7 @@ pub(super) fn push_tiled_gemm_body(
                 half_width,
                 total_halves,
                 half_units,
-                block_elements,
-                block_bytes,
+                &decode,
             );
         }
 
@@ -317,17 +326,7 @@ pub(super) fn push_tiled_gemm_body(
             "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
         ));
         if wide_weight_stage_eligible {
-            push_wide_weight_stage_body(
-                source,
-                codec,
-                block_k,
-                num_chunks,
-                half_width,
-                half_units,
-                chunk_width,
-                block_elements,
-                block_bytes,
-            );
+            push_wide_weight_stage_body(source, &decode, block_k, half_units);
         } else {
             // Staged by ROW rather than by flat index: `block_threads` (128)
             // exceeds `block_m` (64) with the default sizing, so the first
@@ -351,53 +350,23 @@ pub(super) fn push_tiled_gemm_body(
                 source.push_str(&format!(
                     "                    long slot_off = row_base + {chunk_offset};\n"
                 ));
-                source.push_str(&format!(
-                    "                    device const uchar *blk = in{weight} + (slot_off / {block_elements}) * {block_bytes};\n"
-                ));
-                source.push_str(&format!(
-                    "                    uint slot = (uint)(slot_off % {block_elements});\n"
-                ));
-                match codec {
-                    Codec::Q4_0 => {
-                        // ROW 113's discipline (read the block's scale ONCE, not
-                        // once per element) now applies here too, via `Q4_0`'s own
-                        // batched sibling to `q4k_run8` (`Q4_0_RUN8_MSL`, see its
-                        // own doc): `q4_0_block_scale` reads `d` once per
-                        // 32-element block, `q4_0_run8` batches the raw-nibble
-                        // extract 8 at a time, same shape as the Q4_K arm below.
-                        source.push_str("                    float q4_0_d = q4_0_block_scale(blk);\n");
-                        let runs = chunk_width / 8;
-                        for run_index in 0..runs {
-                            let run_offset = run_index * 8;
-                            source.push_str("                    {\n");
-                            source.push_str("                        float levels[8];\n");
-                            source.push_str(&format!(
-                                "                        q4_0_run8(blk, slot + {run_offset}u, levels);\n"
-                            ));
-                            let weight_index = format!("w_row * {block_k} + {chunk_offset} + {run_offset} + j");
-                            source.push_str(&format!(
-                                "                        for (int j = 0; j < 8; ++j) {{ weight_tile[{weight_index}] = (half)((levels[j] - 8.0f) * q4_0_d); }}\n"
-                            ));
-                            source.push_str("                    }\n");
-                        }
-                    }
-                    _ => {
-                        source.push_str("                    q4k_header hdr = q4k_header_for(blk, slot);\n");
-                        let runs = chunk_width / 8;
-                        for run_index in 0..runs {
-                            let run_offset = run_index * 8;
-                            source.push_str("                    {\n");
-                            source.push_str("                        float levels[8];\n");
-                            source.push_str(&format!(
-                                "                        q4k_run8(blk, slot + {run_offset}u, levels);\n"
-                            ));
-                            let weight_index = format!("w_row * {block_k} + {chunk_offset} + {run_offset} + j");
-                            source.push_str(&format!(
-                                "                        for (int j = 0; j < 8; ++j) {{ weight_tile[{weight_index}] = (half)(hdr.scale * levels[j] - hdr.minimum); }}\n"
-                            ));
-                            source.push_str("                    }\n");
-                        }
-                    }
+                push_weight_cursor(source, "                    ", &decode, "blk", "slot", "slot_off");
+                for run_index in 0..chunk_width / DECODE_RUN_ELEMENTS {
+                    let run_offset = run_index * DECODE_RUN_ELEMENTS;
+                    source.push_str("                    {\n");
+                    push_weight_decode(
+                        source,
+                        "                        ",
+                        &decode,
+                        "blk",
+                        &format!("slot + {run_offset}u"),
+                        "decoded",
+                    );
+                    let weight_index = format!("w_row * {block_k} + {chunk_offset} + {run_offset} + j");
+                    source.push_str(&format!(
+                        "                        for (int j = 0; j < {DECODE_RUN_ELEMENTS}; ++j) {{ weight_tile[{weight_index}] = decoded[j]; }}\n"
+                    ));
+                    source.push_str("                    }\n");
                 }
                 source.push_str("                }\n");
             }
@@ -619,16 +588,17 @@ pub(super) const fn tiled_gemm_shared_bytes() -> u64 {
 /// - rows and tokens past the extents are clamped to the last valid one
 ///   instead of zero-filled; their results are masked at the write.
 ///
-/// A Q4_0 half-block decodes through `q4_0_dequant_half16` (ggml's
-/// `dequantize_q4_0` form: one fused multiply-add per element), which rounds
-/// to the same `half` as the `(level - 8) * d` expression of the row-major
-/// path -- the product is exact in `float`, so the output is bit-identical.
-/// With a unit-stride activation the K offset is `k0` itself, not `k0 *
-/// stride`.
+/// The weight half-block is whatever the codec's [`tiled_decode`] description
+/// decodes (`q4_0_dequant_half16` is ggml's `dequantize_q4_0` form, one fused
+/// multiply-add per element, which rounds to the same `half` as the `(level - 8)
+/// * d` expression of the row-major path -- the product is exact in `float`, so
+/// the output is bit-identical). With a unit-stride activation the K offset is
+/// `k0` itself, not `k0 * stride`.
 #[cfg(feature = "metal-tiled-gemm")]
 fn push_mm_layout_k_loop(
     source: &mut String,
     block: &TiledGemmBlock,
+    decode: &TiledDecode,
     token_axis: u16,
     feature_axis: u16,
     metal: &crate::identity::MetalOnlyExtras,
@@ -637,12 +607,7 @@ fn push_mm_layout_k_loop(
     let weight = block.weight;
     let other = block.other;
     let reduce_dim = block.reduce_dim;
-    let codec = block.codec;
     let block_k = crate::sized::TILED_GEMM_BLOCK_K;
-    let block_elements = u64::try_from(codec_block_elements(codec)).unwrap_or(u64::MAX);
-    let block_bytes = u64::try_from(codec_block_bytes(codec)).unwrap_or(u64::MAX);
-    let chunk_width = tiled_gemm_codec_chunk_width(codec).min(block_k);
-    let half_width = chunk_width / 2;
     let unit_stride = metal.tiled_gemm_wide_act_load;
     let k0_counter_type = if grid2d_active { "int" } else { "long" };
 
@@ -650,14 +615,9 @@ fn push_mm_layout_k_loop(
     source.push_str("    long mm_half = tiitg % 2;\n");
     source.push_str("    long mm_feat = min(row_tile * 64 + mm_row, feature_extent - 1);\n");
     source.push_str(&format!(
-        "    long mm_wbase = u.operand_base[{weight}] + mm_feat * u.operand_strides[{weight}][{feature_axis}] + mm_half * {half_width};\n"
+        "    long mm_wbase = u.operand_base[{weight}] + mm_feat * u.operand_strides[{weight}][{feature_axis}] + mm_half * {DECODE_RUN_ELEMENTS};\n"
     ));
-    source.push_str(&format!(
-        "    device const uchar *wws_blk0 = in{weight} + (mm_wbase / {block_elements}) * {block_bytes};\n"
-    ));
-    source.push_str(&format!(
-        "    uint wws_slot0 = (uint)(mm_wbase % {block_elements});\n"
-    ));
+    push_weight_cursor(source, "    ", decode, "wws_blk0", "wws_slot0", "mm_wbase");
     source.push_str("    long mm_weight_store = 64 * (16 * mm_half + mm_row / 8) + mm_row % 8;\n");
     source.push_str("    long mm_token = min(col_tile * 32 + tiitg / 4, token_extent - 1);\n");
     source.push_str(&format!(
@@ -676,18 +636,10 @@ fn push_mm_layout_k_loop(
     source.push_str(&format!(
         "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
-    push_mm_layout_weight_decode(source, codec, half_width);
-    push_wide_weight_stage_advance(
-        source,
-        0,
-        block_k,
-        1,
-        chunk_width,
-        block_elements,
-        block_bytes,
-    );
+    push_weight_decode(source, "        ", decode, "wws_blk0", "wws_slot0", "decoded");
+    push_block_cursor_advance(source, "        ", "wws_blk0", "wws_slot0", block_k, decode);
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    for run in 0..half_width / 8 {
+    for run in 0..DECODE_RUN_ELEMENTS / 8 {
         source.push_str(&format!(
             "        for (int j = 0; j < 8; ++j) {{ weight_tile[mm_weight_store + {} + 8 * j] = decoded[{} + j]; }}\n",
             512 * run,
@@ -701,33 +653,115 @@ fn push_mm_layout_k_loop(
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
 }
 
-/// Decodes this thread's half-block of the current K-step into `decoded[16]`,
-/// ahead of the barrier that fences the previous step's multiplies (ggml's own
-/// order: `kernel_mul_mm` dequantizes, then waits, then stores), so the
-/// device reads of one simdgroup overlap the multiplies of its slower peers.
+/// The cursor of one weight row's current block, split off one absolute
+/// element offset (`element_expr`, an `operand_base` plus the row's and K
+/// position's strides) the way `operand_read` splits it: the block's first byte
+/// and the element offset inside it. The stager shared by the tiled GEMM's
+/// three weight-staging schedules and the expert-grouped GEMM (the cursor,
+/// [`push_weight_decode`] and [`push_block_cursor_advance`] are all it is): they
+/// differ in which thread owns which row and where the decoded run is stored,
+/// never in how a codec is read.
 #[cfg(feature = "metal-tiled-gemm")]
-fn push_mm_layout_weight_decode(source: &mut String, codec: Codec, half_width: u64) {
-    source.push_str("        half decoded[16];\n");
-    match codec {
-        Codec::Q4_0 => {
-            source.push_str("        q4_0_dequant_half16(wws_blk0, (uint)mm_half, decoded);\n");
-        }
-        _ => {
-            source.push_str("        q4k_header mm_header = q4k_header_for(wws_blk0, wws_slot0);\n");
-            for run in 0..half_width / 8 {
-                source.push_str("        {\n");
-                source.push_str("            float levels[8];\n");
-                source.push_str(&format!(
-                    "            q4k_run8(wws_blk0, wws_slot0 + {}u, levels);\n",
-                    run * 8
-                ));
-                source.push_str(&format!(
-                    "            for (int j = 0; j < 8; ++j) {{ decoded[{} + j] = (half)(mm_header.scale * levels[j] - mm_header.minimum); }}\n",
-                    run * 8
-                ));
-                source.push_str("        }\n");
-            }
-        }
+fn weight_cursor_exprs(decode: &TiledDecode, element_expr: &str) -> (String, String) {
+    let TiledDecode {
+        block_elements,
+        block_bytes,
+        ..
+    } = decode;
+    (
+        format!("weight_bytes + (({element_expr}) / {block_elements}) * {block_bytes}"),
+        format!("(uint)(({element_expr}) % {block_elements})"),
+    )
+}
+
+/// Declares the cursor [`weight_cursor_exprs`] describes as `block_var` and
+/// `slot_var`.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn push_weight_cursor(
+    source: &mut String,
+    indent: &str,
+    decode: &TiledDecode,
+    block_var: &str,
+    slot_var: &str,
+    element_expr: &str,
+) {
+    let (block_expr, slot_expr) = weight_cursor_exprs(decode, element_expr);
+    source.push_str(&format!(
+        "{indent}device const uchar *{block_var} = {block_expr};\n"
+    ));
+    source.push_str(&format!("{indent}uint {slot_var} = {slot_expr};\n"));
+}
+
+/// Moves an already declared cursor to the position [`weight_cursor_exprs`]
+/// describes for `element_expr`.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_weight_cursor_assign(
+    source: &mut String,
+    indent: &str,
+    decode: &TiledDecode,
+    block_var: &str,
+    slot_var: &str,
+    element_expr: &str,
+) {
+    let (block_expr, slot_expr) = weight_cursor_exprs(decode, element_expr);
+    source.push_str(&format!("{indent}{block_var} = {block_expr};\n"));
+    source.push_str(&format!("{indent}{slot_var} = {slot_expr};\n"));
+}
+
+/// Decodes the [`DECODE_RUN_ELEMENTS`] elements at the cursor `(block_expr,
+/// slot_expr)` into a fresh `half out_var[16]`, ahead of whatever barrier
+/// fences the previous step's multiplies (ggml's own order: `kernel_mul_mm`
+/// dequantizes, then waits, then stores), so the device reads of one
+/// simdgroup overlap the multiplies of its slower peers.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn push_weight_decode(
+    source: &mut String,
+    indent: &str,
+    decode: &TiledDecode,
+    block_expr: &str,
+    slot_expr: &str,
+    out_var: &str,
+) {
+    source.push_str(&format!("{indent}half {out_var}[{DECODE_RUN_ELEMENTS}];\n"));
+    source.push_str(&format!(
+        "{indent}{};\n",
+        decode.call(block_expr, slot_expr, out_var)
+    ));
+}
+
+/// Advances a weight cursor by one K step of `k_step` elements: whole blocks
+/// by one addition when the block divides the step (the 32-element codecs,
+/// and `Float16` staged as one), the slot by the step with a wrap into the
+/// next block otherwise (the K-quants, whose 256-element block is a whole
+/// number of steps). Never a division. The wrap compares `>=` and subtracts the
+/// block rather than resetting to zero: a cursor's slot is not necessarily
+/// zero at the block origin (the high half of a row starts at
+/// [`DECODE_RUN_ELEMENTS`]), `slot < block_elements` is a loop invariant, and
+/// the step is at most the block in this branch, so one subtraction suffices.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn push_block_cursor_advance(
+    source: &mut String,
+    indent: &str,
+    block_var: &str,
+    slot_var: &str,
+    k_step: u64,
+    decode: &TiledDecode,
+) {
+    let TiledDecode {
+        block_elements,
+        block_bytes,
+        ..
+    } = decode;
+    if k_step.is_multiple_of(*block_elements) {
+        source.push_str(&format!(
+            "{indent}{block_var} += {}u * {block_bytes};\n",
+            k_step / block_elements
+        ));
+    } else {
+        source.push_str(&format!("{indent}{slot_var} += {k_step}u;\n"));
+        source.push_str(&format!(
+            "{indent}if ({slot_var} >= {block_elements}u) {{ {slot_var} -= {block_elements}u; {block_var} += {block_bytes}u; }}\n"
+        ));
     }
 }
 
@@ -821,8 +855,7 @@ fn push_wide_weight_stage_setup(
     half_width: u64,
     total_halves: u64,
     half_units: u64,
-    block_elements: u64,
-    block_bytes: u64,
+    decode: &TiledDecode,
 ) {
     let chunks_times_two = num_chunks * 2;
     for unit in 0..half_units {
@@ -831,7 +864,7 @@ fn push_wide_weight_stage_setup(
             "    long wws_h{unit} = tiitg + {h_offset};\n"
         ));
         source.push_str(&format!(
-            "    device const uchar *wws_blk{unit} = in{weight};\n"
+            "    device const uchar *wws_blk{unit} = weight_bytes;\n"
         ));
         source.push_str(&format!("    uint wws_slot{unit} = 0u;\n"));
         source.push_str(&format!("    long wws_row{unit} = 0;\n"));
@@ -866,12 +899,14 @@ fn push_wide_weight_stage_setup(
         source.push_str(&format!(
             "            long wws_base{unit} = u.operand_base[{weight}] + wws_feat{unit} * u.operand_strides[{weight}][{feature_axis}] + wws_koff{unit};\n"
         ));
-        source.push_str(&format!(
-            "            wws_blk{unit} = in{weight} + (wws_base{unit} / {block_elements}) * {block_bytes};\n"
-        ));
-        source.push_str(&format!(
-            "            wws_slot{unit} = (uint)(wws_base{unit} % {block_elements});\n"
-        ));
+        push_weight_cursor_assign(
+            source,
+            "            ",
+            decode,
+            &format!("wws_blk{unit}"),
+            &format!("wws_slot{unit}"),
+            &format!("wws_base{unit}"),
+        );
         source.push_str("        } else {\n");
         let zero_fill_index = format!("wws_row{unit} * {block_k} + wws_koff{unit} + z");
         source.push_str(&format!(
@@ -910,161 +945,62 @@ fn fragment_load_offset_stride(
 }
 
 /// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s decode half, emitted inside the
-/// `k0` reduction loop: reads `half_width` elements at each unit's current
-/// `(wws_blk, wws_slot)`, writes them into `weight_tile` via `half4` vector
-/// stores (`half_width` is a multiple of 8, per `wide_weight_stage_eligible`'s
-/// own admission -- `koff`'s two summands are each a multiple of `half_width`,
-/// so every store offset this function computes is a multiple of 4, the
-/// `half4` alignment `simdgroup_load`'s own downstream read needs unchanged),
-/// then advances the pointer/slot by exactly ONE addition and, in the case
-/// where the codec's block is narrower than a K-step, one compile-time-
-/// constant-vs-runtime-counter compare -- never a division, unlike the
-/// non-wide path's `slot_off / block_elements` recomputed fresh every `k0`
+/// `k0` reduction loop: decodes one run at each unit's current
+/// `(wws_blk, wws_slot)` cursor, writes it into `weight_tile` via `half4`
+/// vector stores (a run is [`DECODE_RUN_ELEMENTS`] wide and `koff`'s two
+/// summands are each a multiple of it, so every store offset this function
+/// computes is a multiple of 4, the `half4` alignment `simdgroup_load`'s own
+/// downstream read needs), then advances the cursor by
+/// [`push_block_cursor_advance`] -- one addition, and in the case where the
+/// codec's block is wider than a K-step one compare, never a division, unlike
+/// the non-wide path's `slot_off / block_elements` recomputed fresh every `k0`
 /// step (see [`crate::identity::MetalOnlyExtras::tiled_gemm_wide_weight_
 /// stage`]'s own doc for the two cases this splits on).
 #[cfg(feature = "metal-tiled-gemm")]
-#[allow(clippy::too_many_arguments)]
 fn push_wide_weight_stage_body(
     source: &mut String,
-    codec: Codec,
+    decode: &TiledDecode,
     block_k: u64,
-    num_chunks: u64,
-    half_width: u64,
     half_units: u64,
-    chunk_width: u64,
-    block_elements: u64,
-    block_bytes: u64,
 ) {
-    let runs = half_width / 8;
     for unit in 0..half_units {
         source.push_str(&format!("        if (wws_active{unit}) {{\n"));
-        match codec {
-            Codec::Q4_0 => {
-                source.push_str(&format!(
-                    "            float q4_0_d = q4_0_block_scale(wws_blk{unit});\n"
-                ));
-                for run_index in 0..runs {
-                    let run_offset = run_index * 8;
-                    source.push_str("            {\n");
-                    source.push_str("                float levels[8];\n");
-                    source.push_str(&format!(
-                        "                q4_0_run8_wide(wws_blk{unit}, wws_slot{unit} + {run_offset}u, levels);\n"
-                    ));
-                    push_wide_weight_stage_half4_store(
-                        source, unit, run_offset, block_k, "q4_0_d", None,
-                    );
-                    source.push_str("            }\n");
-                }
-            }
-            _ => {
-                source.push_str(&format!(
-                    "            q4k_header wws_hdr{unit} = q4k_header_for(wws_blk{unit}, wws_slot{unit});\n"
-                ));
-                for run_index in 0..runs {
-                    let run_offset = run_index * 8;
-                    source.push_str("            {\n");
-                    source.push_str("                float levels[8];\n");
-                    source.push_str(&format!(
-                        "                q4k_run8(wws_blk{unit}, wws_slot{unit} + {run_offset}u, levels);\n"
-                    ));
-                    push_wide_weight_stage_half4_store(
-                        source,
-                        unit,
-                        run_offset,
-                        block_k,
-                        &format!("wws_hdr{unit}.scale"),
-                        Some(&format!("wws_hdr{unit}.minimum")),
-                    );
-                    source.push_str("            }\n");
-                }
-            }
-        }
-        push_wide_weight_stage_advance(
+        push_weight_decode(
             source,
-            unit,
+            "            ",
+            decode,
+            &format!("wws_blk{unit}"),
+            &format!("wws_slot{unit}"),
+            "wws_decoded",
+        );
+        push_wide_weight_stage_half4_store(source, unit, block_k);
+        push_block_cursor_advance(
+            source,
+            "            ",
+            &format!("wws_blk{unit}"),
+            &format!("wws_slot{unit}"),
             block_k,
-            num_chunks,
-            chunk_width,
-            block_elements,
-            block_bytes,
+            decode,
         );
         source.push_str("        }\n");
     }
 }
 
-/// The pointer/slot advance every schedule of the wide weight stage shares:
-/// exactly one addition per K-step (plus one compare in the narrow-block
-/// case), never a division.
-///
-/// Case A: this unit's chunk is exactly one codec block wide
-/// (`chunk_width == block_elements`) -- the whole `block_k`-wide K-step
-/// advances the row window by `num_chunks` whole blocks, and a unit's own
-/// slot-within-its-block (`0` for the low half, `half_width` for the high half)
-/// never changes across `k0` steps: the window shift always lands this unit
-/// back at the SAME relative position in a new block, never a fraction of one.
-/// Case B: the codec's block is wider than one K-step (`chunk_width ==
-/// block_k`, `num_chunks == 1`) -- `wws_slot` accumulates by `block_k` each
-/// step. A unit's own starting slot is NOT necessarily `0` (the `half == 1`
-/// unit of a chunk starts at `half_width`, not the block origin), so wrapping
-/// compares `>=` and SUBTRACTS `block_elements` rather than resetting to `0` --
-/// `wws_slot < block_elements` is a loop invariant and `block_k <=
-/// block_elements` in this branch, so `wws_slot + block_k` never exceeds
-/// `2 * block_elements` and one subtraction always suffices.
+/// Writes the 16 decoded values of `wws_decoded` as four `half4` vector stores
+/// into `weight_tile`, the same value expressions
+/// [`push_tiled_gemm_body`]'s non-wide arm writes per element, grouped
+/// 4-at-a-time into one vector store instead of 16 separate scalar `half`
+/// writes.
 #[cfg(feature = "metal-tiled-gemm")]
-fn push_wide_weight_stage_advance(
-    source: &mut String,
-    unit: u64,
-    block_k: u64,
-    num_chunks: u64,
-    chunk_width: u64,
-    block_elements: u64,
-    block_bytes: u64,
-) {
-    if chunk_width == block_elements {
-        source.push_str(&format!(
-            "            wws_blk{unit} += {num_chunks}u * {block_bytes};\n"
-        ));
-    } else {
-        source.push_str(&format!("            wws_slot{unit} += {block_k}u;\n"));
-        source.push_str(&format!(
-            "            if (wws_slot{unit} >= {block_elements}u) {{ wws_slot{unit} -= {block_elements}u; wws_blk{unit} += {block_bytes}u; }}\n"
-        ));
-    }
-}
-
-/// Writes 8 already-decoded levels as two `half4` vector stores into
-/// `weight_tile` -- `minimum_expr` is `None` for `Q4_0` (fixed midpoint 8.0,
-/// no separate minimum term) and `Some(..)` for the K-quant header shape
-/// (`scale * level - minimum`), the same two value expressions
-/// [`push_tiled_gemm_body`]'s non-wide arms already compute per element,
-/// just grouped 4-at-a-time into one vector store instead of 8 separate
-/// scalar `half` writes.
-#[cfg(feature = "metal-tiled-gemm")]
-fn push_wide_weight_stage_half4_store(
-    source: &mut String,
-    unit: u64,
-    run_offset: u64,
-    block_k: u64,
-    scale_expr: &str,
-    minimum_expr: Option<&str>,
-) {
-    for half in 0..2 {
-        let base = run_offset + half * 4;
-        let mut components = Vec::with_capacity(4);
-        for lane in 0..4 {
-            let index = half * 4 + lane;
-            let value = match minimum_expr {
-                Some(minimum) => {
-                    format!("(half)({scale_expr} * levels[{index}] - {minimum})")
-                }
-                None => format!("(half)((levels[{index}] - 8.0f) * {scale_expr})"),
-            };
-            components.push(value);
-        }
+fn push_wide_weight_stage_half4_store(source: &mut String, unit: u64, block_k: u64) {
+    for quad in 0..DECODE_RUN_ELEMENTS / 4 {
+        let base = quad * 4;
         let target = format!("wws_row{unit} * {block_k} + wws_koff{unit} + {base}");
         source.push_str(&format!(
-            "                *(threadgroup half4 *)&weight_tile[{target}] = half4({}, {}, {}, {});\n",
-            components[0], components[1], components[2], components[3],
+            "            *(threadgroup half4 *)&weight_tile[{target}] = half4(wws_decoded[{base}], wws_decoded[{}], wws_decoded[{}], wws_decoded[{}]);\n",
+            base + 1,
+            base + 2,
+            base + 3,
         ));
     }
 }
@@ -3175,7 +3111,7 @@ pub(super) fn render_scan(
     let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
-    preamble(&mut source, false);
+    preamble(&mut source, None);
 
     source.push_str("struct Uniforms {\n");
     source.push_str("    long outer_total;\n");

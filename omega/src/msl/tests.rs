@@ -2853,41 +2853,43 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
-#[test]
-fn non_q4k_codec_never_takes_the_tiled_gemm_path() {
-    // Q5_K/Q6_K are explicitly out of scope (ROW 107) -- unmeasured on
-    // this path, and their unpack has no batched form to reuse.
+#[proxima::test]
+#[case::q2k(Codec::Q2K)]
+#[case::bfloat16(Codec::BFloat16)]
+#[case::q4_1(Codec::Q4_1)]
+#[case::iq4_nl(Codec::Iq4Nl)]
+async fn codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path(#[case] codec: Codec) {
     let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
-    let mut q6k = BTreeMap::new();
-    q6k.insert(weight_node, Codec::Q6K);
+    let packed = BTreeMap::from([(weight_node, codec)]);
 
-    assert!(
-        tiled_gemm_block(
+    assert_eq!(tiled_decode(codec), None, "{codec:?} must have no description for this test to mean anything");
+    assert_eq!(
+        classify_tiled_gemm(
             &bound,
-            &operand_codecs(&bound, &q6k),
+            &operand_codecs(&bound, &packed),
             ScalarOp::Add,
             ReduceInit::Zero,
             &[1, 0]
         )
-        .is_none(),
-        "a Q6_K weight must never take the tiled GEMM path"
+        .err(),
+        Some(TiledGemmRejection::NotPackedRowBlock(PackedRowBlockRejection::NotKQuantCodec)),
+        "a {codec:?} weight has no decode description and must be rejected by codec"
     );
-    let source = emit(&bound, &q6k, NumericPolicy::default())
+    let source = emit(&bound, &packed, NumericPolicy::default())
         .expect("emits")
         .source;
     assert!(
         !source.contains("simdgroup_multiply_accumulate"),
-        "a Q6_K weight must not emit the tiled GEMM kernel:\n{source}"
+        "a {codec:?} weight must not emit the tiled GEMM kernel:\n{source}"
     );
 }
 
 /// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` default ON: explicit `"0"` emits the
 /// one-thread-per-row staging loop (no `wws_`-prefixed locals at all);
 /// unset or `"1"` emits the per-thread block-pointer setup and `half4`
-/// vector stores this switch adds, and a `Q4_K` weight decodes through
-/// `q4k_header_for`/`q4k_run8` unchanged -- never `Q4_0`'s own
-/// `q4_0_run8_wide`.
+/// vector stores this switch adds, and a `Q4_K` weight decodes through its
+/// own description (`q4k_dequant_half16`) -- never `Q4_0`'s.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
@@ -2917,18 +2919,19 @@ fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
          vector stores:\n{on_source}"
     );
     assert!(
-        !on_source.contains("q4_0_run8_wide"),
-        "a Q4_K weight must decode through q4k_run8, never CALL Q4_0's own q4_0_run8_wide -- \
-         and since that function is only Q4_0-eligible, its OWN definition text must not even \
-         be spliced into a Q4_K kernel's preamble either:\n{on_source}"
+        on_source.contains("q4k_dequant_half16(wws_blk0, wws_slot0, wws_decoded)")
+            && !on_source.contains("q4_0_dequant_half16"),
+        "a Q4_K weight must decode through its own description, and no other codec's description \
+         text may be spliced into its preamble:\n{on_source}"
     );
 }
 
-/// `Q4_0`'s own arm of the same switch -- decodes through `q4_0_run8_wide`'s
-/// `ushort` loads, not `q4_0_run8`'s per-byte `uchar` loads.
+/// `Q4_0`'s own arm of the same switch -- decodes through the description's
+/// `q4_0_dequant_half16` (`ushort` word loads), the same function every other
+/// schedule stages it with.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
-fn wide_weight_stage_emits_ushort_wide_q4_0_decode_when_switch_on() {
+fn wide_weight_stage_emits_the_described_q4_0_decode_when_switch_on() {
     let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
@@ -2942,24 +2945,25 @@ fn wide_weight_stage_emits_ushort_wide_q4_0_decode_when_switch_on() {
         || emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source,
     );
     assert!(
-        on_source.contains("q4_0_run8_wide(wws_blk0") && on_source.contains("wws_blk0"),
-        "a Q4_0 weight with the switch on must decode through q4_0_run8_wide's ushort loads:\n{on_source}"
+        on_source.contains("q4_0_dequant_half16(wws_blk0, wws_slot0, wws_decoded)"),
+        "a Q4_0 weight with the switch on must decode through its description at the per-thread cursor:\n{on_source}"
     );
 }
 
-/// [`preamble`]'s own doc: `Q4_0_RUN8_WIDE_MSL` is spliced only into a kernel
+/// [`preamble`]'s own doc: a description's `msl` is spliced only into a kernel
 /// that calls it. With `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` unset (default
 /// ON) a Q4_0 shape that admits the tiled-GEMM path renders byte-identically
-/// to explicit `"1"` and carries the wide decoder; explicit `"0"` renders
-/// without it. A Q4_0 shape below `TILED_GEMM_MIN_TOKENS` takes the
+/// to explicit `"1"` and stages through the per-thread cursor; explicit `"0"`
+/// stages through the per-row cursor instead -- the same description either
+/// way. A Q4_0 shape below `TILED_GEMM_MIN_TOKENS` takes the
 /// packed-row-blocked path, where the switch does not apply: unset and
-/// explicit `"0"` render identically and never carry the wide decoder's text
+/// explicit `"0"` render identically and never carry the description's text
 /// -- the shape `packed_row_blocked_s1_byte_identity.rs`'s own fixture pins,
 /// and the one the unconditional-prelude splice bloated before this gate
 /// existed.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
-fn wide_weight_stage_unset_renders_the_wide_decoder_for_tiled_q4_0_and_never_for_packed_row_q4_0() {
+fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_packed_row_q4_0_never_carries_it() {
     let tiled_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let tiled_weight = tiled_bound.operands()[0].0;
     let mut tiled_q4_0 = BTreeMap::new();
@@ -2986,13 +2990,15 @@ fn wide_weight_stage_unset_renders_the_wide_decoder_for_tiled_q4_0_and_never_for
              explicitly enabled"
         );
         assert!(
-            unset_source.contains("q4_0_run8_wide(wws_blk0"),
-            "the default must decode Q4_0 through the wide decoder:\n{unset_source}"
+            unset_source.contains("q4_0_dequant_half16(wws_blk0, wws_slot0, wws_decoded)"),
+            "the default must decode Q4_0 at the per-thread cursor:\n{unset_source}"
         );
         let disabled_source = render(Some("0"));
         assert!(
-            !disabled_source.contains("q4_0_run8_wide"),
-            "the wide Q4_0 decoder must not appear while the switch is explicitly off:\n{disabled_source}"
+            !disabled_source.contains("wws_blk0")
+                && disabled_source.contains("q4_0_dequant_half16(blk, slot + 0u, decoded)"),
+            "the per-thread cursor must not appear while the switch is explicitly off, and the \
+             per-row schedule decodes through the same description:\n{disabled_source}"
         );
     });
 
@@ -3016,8 +3022,8 @@ fn wide_weight_stage_unset_renders_the_wide_decoder_for_tiled_q4_0_and_never_for
          unset or explicitly disabled"
     );
     assert!(
-        !unset_source.contains("q4_0_run8_wide"),
-        "a packed-row (non-tiled) Q4_0 kernel must never carry the wide decoder's text at all:\n{unset_source}"
+        !unset_source.contains("q4_0_dequant_half16"),
+        "a packed-row (non-tiled) Q4_0 kernel must never carry the tiled decode description's text at all:\n{unset_source}"
     );
 }
 
@@ -3136,7 +3142,10 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
     let unit_stride = render(&unit_bound, &unit_codecs, "1");
     assert!(unit_stride.contains("device const float *mm_act_ptr = in"), "{unit_stride}");
     assert!(unit_stride.contains("mm_act_ptr += 32;"), "{unit_stride}");
-    assert!(unit_stride.contains("q4k_run8(wws_blk0"), "{unit_stride}");
+    assert!(
+        unit_stride.contains("q4k_dequant_half16(wws_blk0, wws_slot0, decoded)"),
+        "{unit_stride}"
+    );
 
     for (label, source) in [
         ("wide activation load off", render(&unit_bound, &unit_codecs, "0")),
@@ -3454,15 +3463,15 @@ fn q4_0_takes_the_tiled_gemm_path_with_the_switch_on() {
                 "a Q4_0 weight with the switch on must take the tiled GEMM path:\n{source}"
             );
             assert!(
-                source.contains("q4_0_block_scale(blk)") && source.contains("q4_0_run8(blk"),
-                "the Q4_0 tiled-GEMM arm must decode through the batched q4_0_run8 arm:\n{source}"
+                source.contains("q4_0_dequant_half16(blk, slot + 0u, decoded)"),
+                "the Q4_0 tiled-GEMM arm must decode through its description's function:\n{source}"
             );
             // the prelude declares `q4k_header_for`/`q4k_run8` unconditionally
             // (every decode helper is always emitted, see `signature_tokens_
             // prelude.rs`'s own comment), so this checks the BODY invocation
             // pattern, not mere textual presence of the declaration.
             assert!(
-                !source.contains("q4k_header_for(blk") && !source.contains("q4k_run8(blk"),
+                !source.contains("q4k_dequant_half16(blk") && !source.contains("q4k_run8(blk"),
                 "a Q4_0 weight must never call the Q4_K decode helpers:\n{source}"
             );
         },
@@ -6255,10 +6264,11 @@ mod flat_grid_form {
             .expect("one bound emitted")
     }
 
-    /// gemma4-E2B's `per_layer_model_proj`: an F16 `[features, k]` weight
-    /// against `[rows, k]` f32 activations. F16 keeps it off the tiled-GEMM
-    /// path (dense x dense and Q4_0/Q4_K take that), so it is a cooperative
-    /// reduce at `wide_cooperative_reduce_width(k)` lanes.
+    /// gemma4-E2B's `per_layer_model_proj` shape: a `[features, k]` half-width
+    /// weight against `[rows, k]` f32 activations. The F16 weight itself takes
+    /// the tiled GEMM now (it has a `tiled_decode` description), so this fixture
+    /// stands the shape with a BF16 weight, which has none and stays a
+    /// cooperative reduce at `wide_cooperative_reduce_width(k)` lanes.
     fn per_layer_projection_op(
         rows: u32,
         reduction: u32,
@@ -6313,7 +6323,7 @@ mod flat_grid_form {
             .next()
             .expect("one fused bound emitted");
         let weight_node = bound.operands()[0].0;
-        (bound, BTreeMap::from([(weight_node, Codec::Float16)]))
+        (bound, BTreeMap::from([(weight_node, Codec::BFloat16)]))
     }
 
     fn unpacked(
@@ -7371,20 +7381,23 @@ mod expert_grouped_gemm {
         assert!(identity.contains("E_w128"), "{identity}");
     }
 
-    #[test]
-    fn a_codec_without_a_measured_grouped_path_is_rejected_by_name() {
+    #[proxima::test]
+    #[case::q2k(Codec::Q2K)]
+    #[case::bfloat16(Codec::BFloat16)]
+    #[case::iq4_nl(Codec::Iq4Nl)]
+    async fn a_codec_without_a_decode_description_is_rejected_by_name(#[case] codec: Codec) {
         let bound = gathered_matmul_op(TOKENS, EXPERTS, ROWS, REDUCTION);
         let weight_node = bound.operands()[0].0;
         let mut packed = BTreeMap::new();
-        packed.insert(weight_node, Codec::Q4K);
+        packed.insert(weight_node, codec);
 
         let rejection = classify(&bound, &packed)
             .err()
-            .expect("q4_k experts have no grouped path");
+            .expect("an undescribed codec has no grouped path");
 
         assert_eq!(
             rejection,
-            TiledGemmRejection::GatheredCodecNotAdmitted { codec: Codec::Q4K }
+            TiledGemmRejection::NotPackedRowBlock(PackedRowBlockRejection::NotKQuantCodec)
         );
     }
 
@@ -7687,6 +7700,434 @@ mod epilogue_operand_reuse {
         assert!(
             !source.contains("if (lane == 0u && flat < u.output_total)"),
             "no row waits behind lane 0:\n{source}"
+        );
+    }
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+mod tiled_decode_description {
+    use super::*;
+
+    const DESCRIBED_CODECS: [Codec; 9] = [
+        Codec::Q4_0,
+        Codec::Q5_0,
+        Codec::Q5_1,
+        Codec::Q8_0,
+        Codec::Float16,
+        Codec::Q3K,
+        Codec::Q4K,
+        Codec::Q5K,
+        Codec::Q6K,
+    ];
+    const DEFAULT_SCHEDULE: [(&str, Option<&str>); 4] = [
+        ("PROXIMA_TILED_GEMM_MM_LAYOUT", None),
+        ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None),
+        ("PROXIMA_TILED_GEMM_Q4_0", None),
+        ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None),
+    ];
+    const WIDE_SCHEDULE: [(&str, Option<&str>); 4] = [
+        ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
+        ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None),
+        ("PROXIMA_TILED_GEMM_Q4_0", None),
+        ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None),
+    ];
+    const PER_ROW_SCHEDULE: [(&str, Option<&str>); 4] = [
+        ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
+        ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0")),
+        ("PROXIMA_TILED_GEMM_Q4_0", None),
+        ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None),
+    ];
+
+    fn dense_source(codec: Codec, schedule: [(&str, Option<&str>); 4]) -> String {
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+        temp_env::with_vars(schedule, || {
+            emit(&bound, &packed, NumericPolicy::default())
+                .unwrap_or_else(|error| panic!("{codec:?} emits a tiled kernel: {error}"))
+                .source
+        })
+    }
+
+    fn described(codec: Codec) -> TiledDecode {
+        tiled_decode(codec).unwrap_or_else(|| panic!("{codec:?} has a tiled decode description"))
+    }
+
+    #[test]
+    fn every_description_agrees_with_the_codec_geometry_and_defines_exactly_its_function() {
+        let mut functions = BTreeSet::new();
+        for codec in DESCRIBED_CODECS {
+            let decode = described(codec);
+
+            assert!(
+                decode.block_elements.is_multiple_of(DECODE_RUN_ELEMENTS),
+                "{codec:?}: a block holds a whole number of decode runs"
+            );
+            assert!(
+                STAGED_K_STEP_ELEMENTS.is_multiple_of(decode.block_elements)
+                    || decode.block_elements.is_multiple_of(STAGED_K_STEP_ELEMENTS),
+                "{codec:?}: a K step never straddles a block, so one of the two must divide the other"
+            );
+            if codec == Codec::Float16 {
+                assert_eq!(decode.block_bytes, decode.block_elements * 2, "a flat half array");
+            } else {
+                assert_eq!(decode.block_elements, codec_block_elements(codec) as u64, "{codec:?}");
+                assert_eq!(decode.block_bytes, codec_block_bytes(codec) as u64, "{codec:?}");
+            }
+            let signature = format!(
+                "static inline void {}(device const uchar *block, uint slot, thread half *out)",
+                decode.function
+            );
+            assert!(decode.msl.contains(&signature), "{codec:?}: `{signature}` missing from its msl");
+            assert_eq!(
+                decode.msl.matches("static inline void").count(),
+                1,
+                "{codec:?}: a description's msl defines only its own function"
+            );
+            assert_eq!(decode.call("blk", "slot", "out"), format!("{}(blk, slot, out)", decode.function));
+            assert!(functions.insert(decode.function), "{codec:?}: function names are unique");
+        }
+        assert_eq!(functions.len(), DESCRIBED_CODECS.len());
+    }
+
+    #[proxima::test]
+    #[case::q2k(Codec::Q2K)]
+    #[case::bfloat16(Codec::BFloat16)]
+    #[case::q4_1(Codec::Q4_1)]
+    #[case::q8_k(Codec::Q8K)]
+    #[case::iq4_nl(Codec::Iq4Nl)]
+    #[case::mxfp4(Codec::Mxfp4)]
+    async fn codecs_without_a_description_have_no_chunk_width(#[case] codec: Codec) {
+        assert_eq!(tiled_decode(codec), None);
+        assert_eq!(tiled_gemm_codec_chunk_width(codec), 0);
+        assert!(!tiled_gemm_block_k_chunk_aligned(32, tiled_gemm_codec_chunk_width(codec)));
+    }
+
+    #[test]
+    fn every_described_codec_stages_one_k_step_per_chunk_and_block_k_must_be_whole_decode_runs() {
+        for codec in DESCRIBED_CODECS {
+            assert_eq!(tiled_gemm_codec_chunk_width(codec), STAGED_K_STEP_ELEMENTS, "{codec:?}");
+        }
+        let cases: [(u64, u64, bool); 7] = [
+            (32, 32, true),
+            (64, 32, true),
+            (16, 32, true),
+            (8, 32, false),
+            (48, 32, false),
+            (24, 32, false),
+            (32, 0, false),
+        ];
+        for (block_k, chunk_width, aligned) in cases {
+            assert_eq!(
+                tiled_gemm_block_k_chunk_aligned(block_k, chunk_width),
+                aligned,
+                "block_k {block_k} against chunk_width {chunk_width}"
+            );
+        }
+    }
+
+    #[proxima::test]
+    #[case::q4_0(Codec::Q4_0)]
+    #[case::q5_0(Codec::Q5_0)]
+    #[case::q5_1(Codec::Q5_1)]
+    #[case::q8_0(Codec::Q8_0)]
+    #[case::float16(Codec::Float16)]
+    #[case::q3k(Codec::Q3K)]
+    #[case::q4k(Codec::Q4K)]
+    #[case::q5k(Codec::Q5K)]
+    #[case::q6k(Codec::Q6K)]
+    async fn a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description(
+        #[case] codec: Codec,
+    ) {
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+        let block = temp_env::with_vars(DEFAULT_SCHEDULE, || {
+            tiled_gemm_block(
+                &bound,
+                &operand_codecs(&bound, &packed),
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                &[1, 0],
+            )
+        })
+        .unwrap_or_else(|| panic!("{codec:?} must take the tiled GEMM at prefill width"));
+        assert_eq!(block.codec, codec);
+        assert_eq!(block.gathered, None);
+
+        let source = dense_source(codec, DEFAULT_SCHEDULE);
+        let decode = described(codec);
+        assert!(source.contains("simdgroup_multiply_accumulate"), "{source}");
+        assert!(
+            source.contains(&decode.call("wws_blk0", "wws_slot0", "decoded")),
+            "{codec:?} must decode at the per-thread cursor:\n{source}"
+        );
+        assert!(source.contains(decode.msl), "{codec:?}: its description's msl is spliced:\n{source}");
+        for other in DESCRIBED_CODECS.into_iter().filter(|other| *other != codec) {
+            assert!(
+                !source.contains(described(other).msl),
+                "{codec:?}: {other:?}'s description must not be spliced into this kernel"
+            );
+        }
+        assert!(
+            source.contains("device const uchar *weight_bytes = (device const uchar *)in0;"),
+            "every cursor counts bytes off one byte view of the weight binding:\n{source}"
+        );
+    }
+
+    #[proxima::test]
+    #[case::q4_0(Codec::Q4_0)]
+    #[case::q5_0(Codec::Q5_0)]
+    #[case::q5_1(Codec::Q5_1)]
+    #[case::q8_0(Codec::Q8_0)]
+    #[case::float16(Codec::Float16)]
+    #[case::q3k(Codec::Q3K)]
+    #[case::q4k(Codec::Q4K)]
+    #[case::q5k(Codec::Q5K)]
+    #[case::q6k(Codec::Q6K)]
+    async fn the_wide_and_per_row_schedules_decode_through_the_same_description(#[case] codec: Codec) {
+        let decode = described(codec);
+
+        let wide = dense_source(codec, WIDE_SCHEDULE);
+        assert!(
+            wide.contains(&decode.call("wws_blk0", "wws_slot0", "wws_decoded")),
+            "{codec:?} wide schedule:\n{wide}"
+        );
+        assert!(!wide.contains("mm_weight_store"), "{codec:?}: the wide schedule keeps the row-major tile");
+
+        let per_row = dense_source(codec, PER_ROW_SCHEDULE);
+        assert!(
+            per_row.contains(&decode.call("blk", "slot + 0u", "decoded")),
+            "{codec:?} per-row schedule:\n{per_row}"
+        );
+        assert!(!per_row.contains("wws_blk0"), "{codec:?}: the per-row schedule has no per-thread cursor");
+        assert!(per_row.contains(decode.msl), "{codec:?}: its description's msl is spliced");
+    }
+
+    #[test]
+    fn the_cursor_advances_a_whole_block_when_the_block_divides_the_k_step_and_wraps_the_slot_otherwise() {
+        let whole_block = [
+            (Codec::Q4_0, Q4_0_BLOCK_BYTES),
+            (Codec::Q5_0, Q5_0_BLOCK_BYTES),
+            (Codec::Q5_1, Q5_1_BLOCK_BYTES),
+            (Codec::Q8_0, Q8_0_BLOCK_BYTES),
+            (Codec::Float16, 2 * STAGED_K_STEP_ELEMENTS as usize),
+        ];
+        for (codec, block_bytes) in whole_block {
+            let source = dense_source(codec, DEFAULT_SCHEDULE);
+            assert!(
+                source.contains(&format!("wws_blk0 += 1u * {block_bytes};")),
+                "{codec:?}: one block per K step:\n{source}"
+            );
+            assert!(!source.contains("wws_slot0 +="), "{codec:?}: the slot never moves");
+        }
+
+        let wrapping = [
+            (Codec::Q3K, Q3K_BLOCK_BYTES),
+            (Codec::Q4K, Q4K_BLOCK_BYTES),
+            (Codec::Q5K, Q5K_BLOCK_BYTES),
+            (Codec::Q6K, Q6K_BLOCK_BYTES),
+        ];
+        for (codec, block_bytes) in wrapping {
+            let source = dense_source(codec, DEFAULT_SCHEDULE);
+            assert!(source.contains("wws_slot0 += 32u;"), "{codec:?}:\n{source}");
+            assert!(
+                source.contains(&format!(
+                    "if (wws_slot0 >= 256u) {{ wws_slot0 -= 256u; wws_blk0 += {block_bytes}u; }}"
+                )),
+                "{codec:?}: wrap into the next super-block:\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_float16_weight_binds_as_half_and_is_viewed_as_bytes_for_the_cursor() {
+        let source = dense_source(Codec::Float16, DEFAULT_SCHEDULE);
+
+        assert!(source.contains("device const half* in0 [[buffer(0)]]"), "{source}");
+        assert!(
+            source.contains("device const uchar *weight_bytes = (device const uchar *)in0;"),
+            "{source}"
+        );
+    }
+
+    #[proxima::test]
+    #[case::q8_0(Codec::Q8_0, 160)]
+    #[case::q5_0(Codec::Q5_0, 288)]
+    #[case::q5_1(Codec::Q5_1, 96)]
+    #[case::float16(Codec::Float16, 224)]
+    async fn a_flat_codec_is_admitted_at_any_whole_block_extent_the_row_blocked_kernel_refuses(
+        #[case] codec: Codec,
+        #[case] reduction: u32,
+    ) {
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, reduction, 4);
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+        let codecs = operand_codecs(&bound, &packed);
+
+        let tiled = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
+        let row_blocked = classify_packed_row_block(&bound, &codecs);
+
+        assert!(tiled.is_ok(), "{codec:?} at K={reduction}: {:?}", tiled.err());
+        assert!(
+            row_blocked.is_err(),
+            "{codec:?} at K={reduction} is not a multiple of the 256-element row-blocked span"
+        );
+    }
+
+    #[proxima::test]
+    #[case::q3k(Codec::Q3K)]
+    #[case::q5k(Codec::Q5K)]
+    #[case::q6k(Codec::Q6K)]
+    async fn a_k_quant_extent_that_is_not_a_whole_super_block_is_refused_by_extent(#[case] codec: Codec) {
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 288, 4);
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+
+        let rejection = classify_tiled_gemm(
+            &bound,
+            &operand_codecs(&bound, &packed),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[1, 0],
+        )
+        .err();
+
+        assert_eq!(
+            rejection,
+            Some(TiledGemmRejection::NotPackedRowBlock(
+                PackedRowBlockRejection::ExtentNotBlockMultiple { extent: 288 }
+            ))
+        );
+    }
+
+    #[test]
+    fn the_q4_0_switch_is_the_one_codec_switch_and_names_the_codec_it_turned_off() {
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let q4_0 = BTreeMap::from([(bound.operands()[0].0, Codec::Q4_0)]);
+        let q8_0 = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+        let classify = |packed: &BTreeMap<NodeId, Codec>| {
+            temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
+                classify_tiled_gemm(
+                    &bound,
+                    &operand_codecs(&bound, packed),
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    &[1, 0],
+                )
+                .err()
+            })
+        };
+
+        assert_eq!(classify(&q4_0), Some(TiledGemmRejection::CodecSwitchedOff { codec: Codec::Q4_0 }));
+        assert_eq!(classify(&q8_0), None, "the switch is Q4_0's alone");
+    }
+
+    #[test]
+    fn a_kernel_off_the_tiled_path_carries_no_description() {
+        let bound = matmul_op(4, 256, 5);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q5_0)]);
+
+        let source = emit(&bound, &packed, NumericPolicy::default()).expect("emits").source;
+
+        assert!(!source.contains("dequant_half16"), "{source}");
+    }
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+mod expert_grouped_decode_description {
+    use super::*;
+
+    const TOKENS: u32 = 300;
+    const EXPERTS: u32 = 8;
+    const ROWS: u32 = 192;
+    const REDUCTION: u32 = 512;
+
+    const DESCRIBED_CODECS: [Codec; 9] = [
+        Codec::Q4_0,
+        Codec::Q5_0,
+        Codec::Q5_1,
+        Codec::Q8_0,
+        Codec::Float16,
+        Codec::Q3K,
+        Codec::Q4K,
+        Codec::Q5K,
+        Codec::Q6K,
+    ];
+
+    fn gathered(codec: Codec) -> (BoundOp, BTreeMap<NodeId, Codec>) {
+        let bound = gathered_matmul_op(TOKENS, EXPERTS, ROWS, REDUCTION);
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+        (bound, packed)
+    }
+
+    #[test]
+    fn the_grouped_k_step_is_the_staged_k_step_every_description_divides_into_or_out_of() {
+        assert_eq!(GROUPED_TILE_DEPTH, STAGED_K_STEP_ELEMENTS);
+        for codec in DESCRIBED_CODECS {
+            let decode = tiled_decode(codec).expect("described");
+            assert!(
+                GROUPED_TILE_DEPTH.is_multiple_of(decode.block_elements)
+                    || decode.block_elements.is_multiple_of(GROUPED_TILE_DEPTH),
+                "{codec:?}"
+            );
+        }
+    }
+
+    #[proxima::test]
+    #[case::q4_0(Codec::Q4_0)]
+    #[case::q5_0(Codec::Q5_0)]
+    #[case::q5_1(Codec::Q5_1)]
+    #[case::q8_0(Codec::Q8_0)]
+    #[case::float16(Codec::Float16)]
+    #[case::q3k(Codec::Q3K)]
+    #[case::q4k(Codec::Q4K)]
+    #[case::q5k(Codec::Q5K)]
+    #[case::q6k(Codec::Q6K)]
+    async fn a_described_expert_codec_is_admitted_and_stages_through_the_shared_cursor(#[case] codec: Codec) {
+        let (bound, packed) = gathered(codec);
+        let decode = tiled_decode(codec).expect("described");
+
+        let (block, source) = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", None::<&str>, || {
+            let block = classify_tiled_gemm(
+                &bound,
+                &operand_codecs(&bound, &packed),
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                &[0, 1],
+            )
+            .unwrap_or_else(|rejection| panic!("{codec:?} experts at prefill width: {rejection:?}"));
+            let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+            (block, source)
+        });
+        assert_eq!(block.gathered, Some(ExpertGather { slot: 0 }));
+        assert_eq!(block.codec, codec);
+        assert!(
+            source.contains(&format!("{};", decode.call("w_blk", "w_pos", "w_regs"))),
+            "{codec:?}:\n{source}"
+        );
+        assert!(source.contains(decode.msl), "{codec:?}: its description's msl is spliced");
+        assert!(
+            source.contains("device const uchar *weight_bytes = (device const uchar *)in0;"),
+            "{codec:?}:\n{source}"
+        );
+        assert!(source.contains("long w_elem = u.operand_base[0] + grouped_expert_base"), "{codec:?}:\n{source}");
+        assert!(source.contains("half w_regs[16];"), "{codec:?}:\n{source}");
+        let advance_is_block = GROUPED_TILE_DEPTH.is_multiple_of(decode.block_elements);
+        assert_eq!(
+            source.contains("w_pos += 32u;"),
+            !advance_is_block,
+            "{codec:?}: the slot moves exactly when the block is wider than the K step:\n{source}"
+        );
+    }
+
+    #[test]
+    fn the_grouped_kernel_no_longer_hard_codes_a_q8_0_block() {
+        let (bound, packed) = gathered(Codec::Q6K);
+
+        let source = emit(&bound, &packed, NumericPolicy::default()).expect("grouped kernel emits").source;
+
+        assert!(!source.contains("packed_char4 *levels"), "{source}");
+        assert!(!source.contains("w_blk += 34"), "{source}");
+        assert!(
+            source.contains("if (w_pos >= 256u) { w_pos -= 256u; w_blk += 210u; }"),
+            "{source}"
         );
     }
 }
