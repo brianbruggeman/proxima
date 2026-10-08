@@ -914,7 +914,7 @@ pub(crate) const ROUTE_COMPACTION_MISMATCH_FAULT: u32 = u32::MAX;
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 = 1;
 
-/// Threads of the one threadgroup the prepass runs in: a simdgroup per expert,
+/// Threads of each prepass threadgroup: a simdgroup per expert,
 /// `GROUPED_PREPASS_THREADS / SIMD_WIDTH` experts at a time.
 #[cfg(feature = "metal-grouped-gemm")]
 const GROUPED_PREPASS_THREADS: u64 = 1024;
@@ -961,11 +961,20 @@ pub(super) fn grouped_tile_upper_bound(tokens: u64, experts: u64) -> u64 {
     tokens.div_ceil(GROUPED_TILE_TOKENS) + experts
 }
 
+/// Threadgroups of each prepass dispatch: the route cut into chunks of
+/// `GROUPED_GEMM_PREPASS_ENTRIES` entries, one threadgroup per chunk, at least one.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn grouped_prepass_threadgroups(tokens: u64) -> u64 {
+    tokens.div_ceil(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES).max(1)
+}
+
 /// Words of the compaction buffer: header, per-expert counts, per-expert
-/// exclusive entry offsets, then the expert-major list of flat token ids.
+/// exclusive entry offsets, the expert-major list of flat token ids, then the
+/// count pass's partial counts (`threadgroups x experts`, row per threadgroup)
+/// that the place pass reduces. The GEMM reads only the first four regions.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn grouped_compaction_words(tokens: u64, experts: u64) -> u64 {
-    GROUPED_ROUTE_HEADER_WORDS + 2 * experts + tokens
+    GROUPED_ROUTE_HEADER_WORDS + 2 * experts + tokens + grouped_prepass_threadgroups(tokens) * experts
 }
 
 #[cfg(feature = "metal-grouped-gemm")]
@@ -973,21 +982,34 @@ fn grouped_prepass_entry(entry: &str) -> String {
     format!("{entry}_route_prepass")
 }
 
-/// The prepass kernel, appended to the GEMM's source so it shares the
+#[cfg(feature = "metal-grouped-gemm")]
+fn grouped_prepass_place_entry(entry: &str) -> String {
+    format!("{entry}_route_prepass_place")
+}
+
+/// The prepass kernels, appended to the GEMM's source so they share the
 /// `Uniforms` struct, and the route fetch (stride, base, clamp, fault check)
-/// of the main kernel. It declares only the buffers it touches, at the slots
-/// the GEMM binds them at, so the host encodes it between the GEMM's binds and
-/// the GEMM's dispatch without rebinding: the gathered route, the uniforms,
-/// the fault flags and the compaction buffer at `bindings.len()`.
+/// of the main kernel. They declare only the buffers they touch, at the slots
+/// the GEMM binds them at, so the host encodes them between the GEMM's binds
+/// and the GEMM's dispatch without rebinding: the gathered route, the
+/// uniforms, the fault flags and the compaction buffer at `bindings.len()`.
 ///
-/// One threadgroup. Pass one: simdgroup `s` counts the entries naming expert
-/// `s`, `s + simdgroups`, ... a simdgroup width of route entries at a time,
-/// and simdgroup zero reports out-of-range route indices (every entry is
-/// fetched by it once). Thread zero prefix-sums the counts. Pass two: the same
-/// simdgroup places each matching token id at its expert's offset plus its
-/// rank, ranks coming from a simdgroup prefix sum in route order, so each
-/// expert's list ascends in flat token order. No atomics, so the result is the
-/// same on every run.
+/// Two dispatches of `ceil(tokens / GROUPED_GEMM_PREPASS_ENTRIES)`
+/// threadgroups, threadgroup `t` owning the route entries
+/// `[t * entries, (t + 1) * entries)`. The count pass: simdgroup `s` counts
+/// the entries of its chunk naming expert `s`, `s + simdgroups`, ... a
+/// simdgroup width at a time and writes the counts to the threadgroup's row of
+/// the partial-count scratch after the list; simdgroup zero reports
+/// out-of-range route indices. The place pass: every threadgroup sums the
+/// scratch column of each expert over all threadgroups (the expert's count)
+/// and over the threadgroups before it (what the earlier chunks place), thread
+/// zero prefix-sums the counts into the offsets, and each simdgroup places the
+/// matching token ids of its chunk at the expert's offset plus the earlier
+/// chunks' count plus a simdgroup prefix-sum rank, so each expert's list
+/// ascends in flat token order exactly as one threadgroup scanning the whole
+/// route would write it. Threadgroup zero publishes the header, counts and
+/// offsets. No device atomics: the only ordering across threadgroups is the
+/// dispatch boundary between the two passes.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn push_grouped_route_prepass(
     source: &mut String,
@@ -1012,111 +1034,166 @@ pub(super) fn push_grouped_route_prepass(
     let fault_buffer = slot_index(|binding| matches!(binding, Binding::Fault));
     let compaction_buffer = layout.len();
     let experts = grouped_expert_count(resolved, block);
+    let tokens = grouped_token_total(resolved, block);
     let slot = expert.slot;
     let innermost_axis = geometry.token_axes.last().copied().unwrap_or(0);
-    let prepass = grouped_prepass_entry(entry);
     let weight = block.weight;
-    source.push('\n');
-    source.push_str(&format!(
-        "kernel void {prepass}(\n    device const float* gather_idx{slot} [[buffer({route_buffer})]],\n    constant Uniforms& u [[buffer({uniforms_buffer})]],\n    device atomic_uint* fault [[buffer({fault_buffer})]],\n    device uint* route_compaction [[buffer({compaction_buffer})]],\n    uint tiisg [[thread_index_in_simdgroup]],\n    uint sgitg [[simdgroup_index_in_threadgroup]],\n    uint sgcount [[simdgroups_per_threadgroup]],\n    uint tid [[thread_position_in_threadgroup]])\n{{\n"
-    ));
-    source.push_str(&format!("    constexpr uint experts = {experts}u;\n"));
-    source.push_str(&format!("    long token_extent = {};\n", geometry.token_extent_expr));
-    source.push_str("    threadgroup uint expert_count_tg[experts];\n");
-    source.push_str("    threadgroup uint expert_offset_tg[experts];\n");
-    for pass in [GroupedPrepassPass::Count, GroupedPrepassPass::Place] {
-        if pass == GroupedPrepassPass::Place {
-            push_prepass_offsets(source);
-        }
-        source.push_str(
-            "    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {\n",
-        );
-        source.push_str(match pass {
-            GroupedPrepassPass::Count => "        uint tally = 0u;\n",
-            GroupedPrepassPass::Place => "        uint placed = 0u;\n",
-        });
-        source.push_str("        for (long scan_base = 0; scan_base < token_extent; scan_base += 32l) {\n");
-        source.push_str("            long entry_token = scan_base + (long)tiisg;\n");
-        source.push_str("            bool live = entry_token < token_extent;\n");
-        source.push_str(&format!(
+    let signature = |name: &str, extra: &str| {
+        format!(
+            "kernel void {name}(\n    device const float* gather_idx{slot} [[buffer({route_buffer})]],\n    constant Uniforms& u [[buffer({uniforms_buffer})]],\n    device atomic_uint* fault [[buffer({fault_buffer})]],\n    device uint* route_compaction [[buffer({compaction_buffer})]],\n    uint tiisg [[thread_index_in_simdgroup]],\n    uint sgitg [[simdgroup_index_in_threadgroup]],\n    uint sgcount [[simdgroups_per_threadgroup]],\n    uint tgid [[threadgroup_position_in_grid]],{extra}\n    uint tid [[thread_position_in_threadgroup]])\n{{\n"
+        )
+    };
+    let chunk = crate::sized::GROUPED_GEMM_PREPASS_ENTRIES;
+    let constants = format!(
+        "    constexpr uint experts = {experts}u;\n    constexpr uint list_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts;\n    constexpr uint scratch_base = list_base + {tokens}u;\n    long chunk_begin = (long)tgid * {chunk}l;\n    long chunk_end = min({token_extent}, chunk_begin + {chunk}l);\n",
+        token_extent = geometry.token_extent_expr
+    );
+    let fetch = |with_fault: bool| {
+        let mut fetch = String::new();
+        fetch.push_str("            long entry_token = scan_base + (long)tiisg;\n");
+        fetch.push_str("            bool live = entry_token < chunk_end;\n");
+        fetch.push_str(&format!(
             "            long fetched{weight} = live ? (long)gather_idx{slot}[u.gather_index_base[{slot}] + entry_token * u.gather_index_strides[{slot}][{innermost_axis}]] : (long)-1;\n"
         ));
-        if pass == GroupedPrepassPass::Count {
-            source.push_str("            if (scan_expert == 0u && live) {\n");
-            push_gather_fault_check(source, weight, slot, "                ");
-            source.push_str("            }\n");
+        if with_fault {
+            fetch.push_str("            if (scan_expert == 0u && live) {\n");
+            push_gather_fault_check(&mut fetch, weight, slot, "                ");
+            fetch.push_str("            }\n");
         }
-        source.push_str(&format!(
+        fetch.push_str(&format!(
             "            fetched{weight} = live ? max((long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1)) : (long)-1;\n"
         ));
-        source.push_str(&format!(
+        fetch.push_str(&format!(
             "            uint hit = (fetched{weight} == (long)scan_expert) ? 1u : 0u;\n"
         ));
-        match pass {
-            GroupedPrepassPass::Count => source.push_str("            tally += hit;\n"),
-            GroupedPrepassPass::Place => {
-                source.push_str("            uint rank = simd_prefix_exclusive_sum(hit);\n");
-                source.push_str(&format!(
-                    "            if (hit != 0u) {{ route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + expert_offset_tg[scan_expert] + placed + rank] = (uint)entry_token; }}\n"
-                ));
-                source.push_str("            placed += simd_sum(hit);\n");
-            }
-        }
-        source.push_str("        }\n");
-        if pass == GroupedPrepassPass::Count {
-            source.push_str("        tally = simd_sum(tally);\n");
-            source.push_str("        if (tiisg == 0u) {\n");
-            source.push_str("            expert_count_tg[scan_expert] = tally;\n");
-            source.push_str(&format!(
-                "            route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + scan_expert] = tally;\n"
-            ));
-            source.push_str("        }\n");
-        }
-        source.push_str("    }\n");
-    }
+        fetch
+    };
+    let prepass = grouped_prepass_entry(entry);
+    let place = grouped_prepass_place_entry(entry);
+    source.push('\n');
+    source.push_str(&signature(&prepass, ""));
+    source.push_str(&constants);
+    push_prepass_count_body(source, &fetch(true));
+    source.push_str("}\n\n");
+    source.push_str(&signature(
+        &place,
+        "\n    uint tgcount [[threadgroups_per_grid]],",
+    ));
+    source.push_str(&constants);
+    push_prepass_place_body(source, &fetch(false));
     source.push_str("}\n");
     Ok(())
 }
 
+/// The count pass: this threadgroup's per-expert tallies over its chunk of the
+/// route, one row of the partial-count scratch.
 #[cfg(feature = "metal-grouped-gemm")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GroupedPrepassPass {
-    Count,
-    Place,
+fn push_prepass_count_body(source: &mut String, fetch: &str) {
+    source.push_str(
+        "    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {\n",
+    );
+    source.push_str("        uint tally = 0u;\n");
+    source.push_str("        for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {\n");
+    source.push_str(fetch);
+    source.push_str("            tally += hit;\n");
+    source.push_str("        }\n");
+    source.push_str("        tally = simd_sum(tally);\n");
+    source.push_str("        if (tiisg == 0u) {\n");
+    source.push_str("            route_compaction[scratch_base + tgid * experts + scan_expert] = tally;\n");
+    source.push_str("        }\n");
+    source.push_str("    }\n");
 }
 
-/// Between the passes: thread zero turns the counts into exclusive offsets,
-/// publishes them and the total, and the barriers order that against the
-/// counting before it and the placing after it.
+/// The place pass: reduce the scratch to this threadgroup's per-expert bases,
+/// then place the chunk's token ids in route order.
+#[cfg(feature = "metal-grouped-gemm")]
+fn push_prepass_place_body(source: &mut String, fetch: &str) {
+    source.push_str("    threadgroup uint expert_count_tg[experts];\n");
+    source.push_str("    threadgroup uint expert_before_tg[experts];\n");
+    source.push_str("    threadgroup uint expert_base_tg[experts];\n");
+    push_prepass_scratch_sums(source);
+    push_prepass_offsets(source);
+    source.push_str(
+        "    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {\n",
+    );
+    source.push_str("        uint placed = 0u;\n");
+    source.push_str("        for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {\n");
+    source.push_str(fetch);
+    source.push_str("            uint rank = simd_prefix_exclusive_sum(hit);\n");
+    source.push_str(
+        "            if (hit != 0u) { route_compaction[list_base + expert_base_tg[scan_expert] + placed + rank] = (uint)entry_token; }\n",
+    );
+    source.push_str("            placed += simd_sum(hit);\n");
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
+/// Per expert, across the scratch rows: the count over every threadgroup and
+/// the count over the threadgroups before this one.
+#[cfg(feature = "metal-grouped-gemm")]
+fn push_prepass_scratch_sums(source: &mut String) {
+    source.push_str(
+        "    for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {\n",
+    );
+    source.push_str("        uint total = 0u;\n");
+    source.push_str("        uint before = 0u;\n");
+    source.push_str("        for (uint row = tiisg; row < tgcount; row += 32u) {\n");
+    source.push_str("            uint partial = route_compaction[scratch_base + row * experts + scan_expert];\n");
+    source.push_str("            total += partial;\n");
+    source.push_str("            before += (row < tgid) ? partial : 0u;\n");
+    source.push_str("        }\n");
+    source.push_str("        total = simd_sum(total);\n");
+    source.push_str("        before = simd_sum(before);\n");
+    source.push_str("        if (tiisg == 0u) {\n");
+    source.push_str("            expert_count_tg[scan_expert] = total;\n");
+    source.push_str("            expert_before_tg[scan_expert] = before;\n");
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
+/// Between the sums and the placing: thread zero turns the counts into
+/// exclusive offsets, keeps this threadgroup's base per expert (offset plus the
+/// earlier chunks' count) and, in threadgroup zero, publishes the counts, the
+/// offsets and the total; the barriers order that against the sums before it
+/// and the placing after it.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_prepass_offsets(source: &mut String) {
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("    if (tid == 0u) {\n");
     source.push_str("        uint running = 0u;\n");
     source.push_str("        for (uint expert = 0u; expert < experts; ++expert) {\n");
-    source.push_str("            expert_offset_tg[expert] = running;\n");
+    source.push_str("            expert_base_tg[expert] = running + expert_before_tg[expert];\n");
+    source.push_str("            if (tgid == 0u) {\n");
     source.push_str(&format!(
-        "            route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + experts + expert] = running;\n"
+        "                route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + expert] = expert_count_tg[expert];\n"
     ));
+    source.push_str(&format!(
+        "                route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + experts + expert] = running;\n"
+    ));
+    source.push_str("            }\n");
     source.push_str("            running += expert_count_tg[expert];\n");
     source.push_str("        }\n");
-    source.push_str("        route_compaction[0] = running;\n");
+    source.push_str("        if (tgid == 0u) {\n");
+    source.push_str("            route_compaction[0] = running;\n");
+    source.push_str("        }\n");
     source.push_str("    }\n");
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
 }
 
-/// The prepass dispatch for a compacted expert-grouped op: its kernel (the
-/// GEMM's source, prepass entry), the GEMM's binding layout it shares, one
-/// threadgroup of [`GROUPED_PREPASS_THREADS`], and the words of the compaction
-/// buffer the host binds at `bindings.len()`. `None` for every other op and
-/// for the segment-scan mode. Lowering it as a sibling dispatch of the same op
-/// follows [`emit_cached_attention_merge`]'s precedent.
+/// The prepass dispatches for a compacted expert-grouped op: the count pass
+/// and the place pass (the GEMM's source, one entry each), the GEMM's binding
+/// layout they share, [`grouped_prepass_threadgroups`] threadgroups of
+/// [`GROUPED_PREPASS_THREADS`] each, and the words of the compaction buffer the
+/// host binds at `bindings.len()`. `None` for every other op and for the
+/// segment-scan mode. Lowering it as sibling dispatches of the same op follows
+/// [`emit_cached_attention_merge`]'s precedent: the place pass reads what the
+/// count pass wrote, as the merge reads the split's scratch.
 #[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
 pub(crate) fn route_prepass(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
-) -> Result<Option<(Kernel, usize)>, EmitError> {
+) -> Result<Option<([Kernel; 2], usize)>, EmitError> {
     if !route_prepass_active(resolved, packed_operands) {
         return Ok(None);
     }
@@ -1125,24 +1202,25 @@ pub(crate) fn route_prepass(
     let Some(block) = grouped_block(resolved, &quantized) else {
         return Ok(None);
     };
-    let words = grouped_compaction_words(
-        grouped_token_total(resolved, &block),
-        grouped_expert_count(resolved, &block),
-    );
+    let tokens = grouped_token_total(resolved, &block);
+    let words = grouped_compaction_words(tokens, grouped_expert_count(resolved, &block));
     let grid = GridSpec {
-        threads: GROUPED_PREPASS_THREADS,
+        threads: GROUPED_PREPASS_THREADS * grouped_prepass_threadgroups(tokens),
         threadgroup_width: Some(GROUPED_PREPASS_THREADS),
         depth: 1,
         grid2d: None,
     };
-    let entry = grouped_prepass_entry(&kernel.entry);
+    let pass = |entry: String| Kernel {
+        source: kernel.source.clone(),
+        entry,
+        bindings: kernel.bindings.clone(),
+        grid,
+    };
     Ok(Some((
-        Kernel {
-            source: kernel.source,
-            entry,
-            bindings: kernel.bindings,
-            grid,
-        },
+        [
+            pass(grouped_prepass_entry(&kernel.entry)),
+            pass(grouped_prepass_place_entry(&kernel.entry)),
+        ],
         words as usize,
     )))
 }
@@ -1175,7 +1253,7 @@ pub(crate) fn route_prepass(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,
     _numeric_policy: NumericPolicy,
-) -> Result<Option<(Kernel, usize)>, EmitError> {
+) -> Result<Option<([Kernel; 2], usize)>, EmitError> {
     Ok(None)
 }
 
