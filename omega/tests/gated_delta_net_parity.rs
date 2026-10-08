@@ -280,3 +280,50 @@ fn metal_matches_cpu_at_real_qwen35moe_gqa_shape() {
     let synthetic = synthetic_gated_delta_net_gqa_program(16, 2, 128, 128);
     assert_fused_bind_matches(&synthetic, "real_qwen35moe", 1.0e-5);
 }
+
+/// A caller that places no `state_out` buffer used to cost one device buffer
+/// per step; the plan step now allocates it once and reuses it.
+#[cfg(feature = "instrument")]
+#[test]
+fn a_warm_unplaced_state_out_step_allocates_no_device_buffers() {
+    let synthetic = synthetic_gated_delta_net_gqa_program(2, 3, 2, 2);
+    let blocks: Vec<proxima_tensor::QuantizedBlock<'_>> = synthetic
+        .inputs
+        .iter()
+        .map(|(_, values)| proxima_tensor::QuantizedBlock::Float32(values.as_slice()))
+        .collect();
+    let requested_outputs = [synthetic.out, synthetic.state_out];
+    let plan = omega::plan(
+        &synthetic.program,
+        &[],
+        &blocks,
+        &requested_outputs,
+        NumericPolicy::bit_exact(),
+    )
+    .expect("plans the fused gated delta net step");
+
+    let _ = omega::metal::metal_stage_totals();
+    let cold = omega::execute_plan_with_placements(&plan, &blocks, &[], &[], &mut Vec::new())
+        .expect("cold step resolves the plan and runs");
+    let cold_totals = omega::metal::metal_stage_totals();
+    let warm = omega::execute_plan_with_placements(&plan, &blocks, &[], &[], &mut Vec::new())
+        .expect("warm step runs");
+    let warm_totals = omega::metal::metal_stage_totals();
+
+    assert!(
+        cold_totals.output_buffer_allocations > 0,
+        "the cold step must allocate the unplaced state_out, or the warm count proves nothing"
+    );
+    assert_eq!(
+        warm_totals.output_buffer_allocations, 0,
+        "a warm step allocated {} device buffers ({} bytes) for an unplaced state_out",
+        warm_totals.output_buffer_allocations, warm_totals.output_buffer_allocated_bytes
+    );
+    for node in requested_outputs {
+        assert_eq!(
+            cold.get(node).expect("cold output present").0,
+            warm.get(node).expect("warm output present").0,
+            "reusing the plan-owned state_out buffer must not change node {node:?}"
+        );
+    }
+}

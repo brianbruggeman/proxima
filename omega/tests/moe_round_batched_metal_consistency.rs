@@ -463,3 +463,48 @@ fn round_batched_launch_forms(fixture: &RoutesFirstProgram) -> Vec<&'static str>
         })
         .collect()
 }
+
+#[cfg(feature = "instrument")]
+#[test]
+fn a_warm_round_batched_step_allocates_no_device_buffers() {
+    let fixture = routes_first_program(32, 8);
+    let (batched_ops, _) = round_batched_and_topk_counts(&fixture);
+    assert_eq!(
+        batched_ops, 2,
+        "the fixture must collapse to one gate and one up round-batched fold, or the warm count proves nothing"
+    );
+    let named: Vec<(&str, QuantizedBlock)> = fixture
+        .named
+        .iter()
+        .map(|(name, data)| (*name, QuantizedBlock::Float32(data.as_slice())))
+        .collect();
+    let plan = omega::plan_named(
+        &fixture.program,
+        &[],
+        &named,
+        &fixture.outputs,
+        NumericPolicy::default(),
+    )
+    .expect("metal plans the routes-first moe projections");
+
+    let _ = omega::metal::metal_stage_totals();
+    let cold = omega::execute_plan_named(&plan, &named).expect("cold step resolves the folds and runs");
+    let cold_totals = omega::metal::metal_stage_totals();
+    let warm = omega::execute_plan_named(&plan, &named).expect("warm step runs");
+    let warm_totals = omega::metal::metal_stage_totals();
+
+    assert!(
+        cold_totals.output_buffer_allocations > 0,
+        "the cold step must build the fold buffers, or the warm count proves nothing"
+    );
+    assert_eq!(
+        warm_totals.output_buffer_allocations, 0,
+        "a warm step with {batched_ops} round-batched folds allocated {} device buffers ({} bytes)",
+        warm_totals.output_buffer_allocations, warm_totals.output_buffer_allocated_bytes
+    );
+    assert_eq!(
+        output_digest(&cold, &fixture.outputs),
+        output_digest(&warm, &fixture.outputs),
+        "reusing the plan-owned fold buffers must not change any output bit"
+    );
+}
