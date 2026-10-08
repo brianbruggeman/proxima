@@ -1,3 +1,4 @@
+use super::signature_tokens_prelude::{QUERY_STAGE_PAD, query_stage_bytes, row_tile_bytes};
 use super::*;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeRowTiled`]: one
@@ -66,6 +67,9 @@ pub(super) fn render_cached_attention_row_tiled(
     } else {
         format!("{cached_lower_inclusive}L")
     };
+    let stages_query = row_tile_bytes(rows_per_threadgroup, *query_groups, row_tiled_block(*head_dim))
+        + query_stage_bytes(rows_per_threadgroup, *query_groups, *head_dim)
+        <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES;
     let substitutions = [
         ("@ENTRY@", entry.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
@@ -75,6 +79,8 @@ pub(super) fn render_cached_attention_row_tiled(
         ("@CACHED_LOWER@", cached_lower),
         ("@NEW_UPPER@", format!("{new_upper_inclusive}L")),
         ("@TILE_ROWS@", rows_per_threadgroup.to_string()),
+        ("@STAGE_QUERY@", stages_query.to_string()),
+        ("@QUERY_STAGE_PAD@", QUERY_STAGE_PAD.to_string()),
         ("@SIMDGROUPS@", simdgroups.to_string()),
         ("@BLOCK@", row_tiled_block(*head_dim).to_string()),
         (
@@ -121,6 +127,8 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     short quad = (short)(lane / 4); short fragment_row = (short)((quad & 4) + ((lane / 2) % 4)); short fragment_column = (short)((quad & 2) * 2 + (lane % 2) * 2);
     threadgroup float score_tile[tile_vectors * block]; threadgroup float row_maximum[tile_vectors]; threadgroup float row_sum[tile_vectors]; threadgroup float rescale_tile[tile_vectors];
     threadgroup int vector_row[tile_vectors]; threadgroup int vector_head[tile_vectors]; threadgroup int vector_live[tile_vectors];
+    constexpr bool stage_query = @STAGE_QUERY@; constexpr long query_stage_stride = half_dim + @QUERY_STAGE_PAD@L;
+    threadgroup float query_stage[stage_query ? tile_blocks * 2L * 8L * query_stage_stride : 1L];
     for (long index = thread_id; index < tile_vectors; index += threads) {
         long block_index = index / 8L; long within = index % 8L;
         long row; long head; long owned;
@@ -146,6 +154,17 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     }
     simdgroup_float8x8 accumulated[dims_per_group][tile_blocks];
     FOR_UNROLL for (long slot = 0L; slot < dims_per_group; slot++) { FOR_UNROLL for (long vector_block = 0L; vector_block < tile_blocks; vector_block++) { accumulated[slot][vector_block] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
+    if (stage_query) {
+        FOR_UNROLL for (long vector_block = 0L; vector_block < tile_blocks; vector_block++) {
+            long query_base = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim;
+            for (long index = thread_id; index < 8L * half_dim; index += threads) {
+                long stage_row = index / half_dim; long stage_column = index % half_dim;
+                long source = query_base + stage_row * query_stride + stage_column;
+                query_stage[(vector_block * 16L + stage_row) * query_stage_stride + stage_column] = in0[source];
+                query_stage[(vector_block * 16L + 8L + stage_row) * query_stage_stride + stage_column] = in1[source];
+            }
+        }
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     long last_row = row0 + rows_here - 1L;
     long first_key = max(0L, live + cached_lower + row0) & ~7L;
@@ -189,8 +208,14 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     long query_offset = (block_row[vector_block] * (kv_heads * query_groups) + kv_head * query_groups + block_head[vector_block]) * half_dim + depth;
                     simdgroup_float8x8 query_even[depth_unroll]; simdgroup_float8x8 query_odd[depth_unroll];
                     FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
-                        simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
-                        simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                        if (stage_query) {
+                            threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
+                            simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
+                            simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
+                        } else {
+                            simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
+                            simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                        }
                     }
                     FOR_UNROLL for (int group = 0; group < (int)key_tiles_per_group; group++) {
                         if ((int)simdgroup_slot + group * (int)simdgroups < fragments) {
