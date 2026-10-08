@@ -2,21 +2,17 @@
 //! program, bound the way `gemma4_epilogue_sources_census.rs` binds it
 //! (serving numeric policy, `fuse_cached_attention: false`, dead nodes
 //! pruned). It classifies every `Keep::Reduce` by the extent of the axis it
-//! folds and by whether it carries a broadcast epilogue, and pins the one
-//! class llama does not have: the per-layer-input RMSNorm over `[1, 256]`.
+//! folds and pins the per-layer-input RMSNorm class.
 //!
 //! llama.cpp computes that norm once over `[256, 35]` (`norm`, `fuse=3`,
-//! `evidence/slice0/llama_ops/e2b_ops.tsv`); `ple_layer_input`
-//! (`proxima-tensor/src/spec/attention_forward.rs`) builds it once per layer
-//! over a `d + layer * 256` window of a flat `[s, 35 * 256]` tensor, so the
-//! program holds `LAYERS` reduces where llama has 1. That difference is the
-//! `LAYERS - 1 = 34` norm-family dispatches the r8 census left untraced
-//! (276 against 242). Every other norm class matches llama one for one:
-//! hidden-width 176, Q 35, K 15, V 15 (`census_groups.csv`).
+//! `evidence/slice0/llama_ops/e2b_ops.tsv`). `append_ple_shared_projections`
+//! (`proxima-tensor/src/spec/attention_forward.rs`) views the flat
+//! `[s, 35 * 256]` projection as `[s, 35, 256]` and norms it with one
+//! reduce, so the bound program holds one reduce over `[1, 35, 256]` and
+//! none over a per-layer `[1, 256]` window.
 //!
-//! `#[ignore]`d: needs the host-local gemma4-E2B checkpoint, and fails loudly
-//! naming the env var and path when it is absent so an explicit run never
-//! passes having executed nothing.
+//! Fails, rather than skips, when the checkpoint is absent: the assertion in
+//! `require_fixture` names the env var and path.
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -107,22 +103,24 @@ fn folded_reduces_by_extents(bound_ops: &[BoundOp]) -> BTreeMap<Vec<u64>, usize>
 }
 
 #[test]
-#[ignore = "needs host-local gemma4-E2B gguf"]
-fn gemma4_decode_holds_one_per_layer_input_norm_per_layer_where_llama_holds_one() {
+fn gemma4_decode_holds_one_per_layer_input_norm_reduce() {
     let bound_ops = bind_decode(NumericPolicy::llama_relaxed());
     let histogram = folded_reduces_by_extents(&bound_ops);
     for (extents, count) in &histogram {
         println!("norm family census reduce extents={extents:?} count={count}");
     }
 
-    let per_layer_input_norms = histogram.get(&vec![1, PLE_DIM]).copied().unwrap_or(0);
+    let layered = histogram
+        .get(&vec![1, LAYERS as u64, PLE_DIM])
+        .copied()
+        .unwrap_or(0);
+    let windowed = histogram.get(&vec![1, PLE_DIM]).copied().unwrap_or(0);
     assert_eq!(
-        per_layer_input_norms, LAYERS,
-        "reduces over a [1, {PLE_DIM}] row: one per layer-input window, llama has {LLAMA_PLE_NORMS}"
+        layered, LLAMA_PLE_NORMS,
+        "reduces over the [1, {LAYERS}, {PLE_DIM}] per-layer-input tensor: llama has {LLAMA_PLE_NORMS}"
     );
     assert_eq!(
-        per_layer_input_norms - LLAMA_PLE_NORMS,
-        34,
-        "the norm-family dispatches with no llama counterpart"
+        windowed, 0,
+        "reduces over a per-layer [1, {PLE_DIM}] window: the per-layer-input norm is no longer built per layer"
     );
 }
