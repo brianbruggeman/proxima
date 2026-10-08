@@ -205,6 +205,25 @@ mod harness {
         sample(true) - sample(false)
     }
 
+    /// The dispatch repeated `ISOLATED_BATCH` times alone, one stamped encoder each: the median duration of
+    /// the repeats after the first, median over `ISOLATED_REPEATS` replays. Same instrument as the stream, so
+    /// the per-encoder cost cancels against the in-stream stamp. `DF_STAMPED_ISOLATED=0` skips it (zeros).
+    fn stamped_isolated_ns(dispatch: &CapturedDispatch) -> f64 {
+        if env_usize("DF_STAMPED_ISOLATED", 1) == 0 {
+            return 0.0;
+        }
+        let batch: Vec<&CapturedDispatch> = vec![dispatch; ISOLATED_BATCH];
+        let per_replay: Vec<f64> = (0..ISOLATED_REPEATS)
+            .map(|_| {
+                let (_, stamps) = CapturedDispatch::time_gpu_sequence_split_ns(&batch, true, false)
+                    .expect("stamped isolated replay");
+                let durations: Vec<f64> = stamps.iter().skip(1).map(|stamp| (stamp[1] - stamp[0]) as f64).collect();
+                median(&durations)
+            })
+            .collect();
+        median(&per_replay)
+    }
+
     fn longest_run(flags: &[bool]) -> usize {
         let mut longest = 0;
         let mut run = 0;
@@ -309,6 +328,7 @@ mod harness {
         isolated_ns: f64,
         round4_isolated_ns: f64,
         cold_penalty_ns: f64,
+        stamped_isolated_ns: f64,
         instream_ns: f64,
         instream_min_ns: f64,
         instream_max_ns: f64,
@@ -334,6 +354,11 @@ mod harness {
 
         fn work_excess_ns(&self) -> f64 {
             self.work_ns() - self.isolated_ns
+        }
+
+        /// In-stream time less the same dispatch repeated alone under the same instrument.
+        fn stamped_excess_ns(&self) -> f64 {
+            self.instream_ns - self.stamped_isolated_ns
         }
     }
 
@@ -364,6 +389,7 @@ mod harness {
         empty: &[Vec<[u64; 2]>],
         round4: &BTreeMap<usize, (u32, String, f64)>,
         cold_penalties: &[f64],
+        stamped_isolated: &[f64],
     ) -> Vec<InstreamRow> {
         let (durations, gaps) = duration_and_gap(stamped, dispatches.len());
         let (empty_durations, empty_gaps) = duration_and_gap(empty, dispatches.len());
@@ -387,6 +413,7 @@ mod harness {
                     pipeline_switch: switch,
                     isolated_ns: marginals[&group_key(dispatch)],
                     cold_penalty_ns: cold_penalties[index],
+                    stamped_isolated_ns: stamped_isolated[index],
                     round4_isolated_ns: round4
                         .get(&index)
                         .filter(|(node, kernel, _)| *node == dispatch.node && *kernel == dispatch.entry)
@@ -405,12 +432,12 @@ mod harness {
 
     fn write_instream_csv(directory: &str, rows: &[InstreamRow]) {
         let mut table = String::from(
-            "index,node,kernel,grid_threads,threadgroups,buffer_bindings,bytes_bound_full,static_threadgroup_bytes,dynamic_threadgroup_bytes,pipeline_switch,isolated_marginal_ns,round4_isolated_marginal_ns,cold_penalty_ns,instream_ns_median,instream_ns_min,instream_ns_max,instream_cov_pct,gap_ns_median,empty_instream_ns_median,empty_gap_ns_median,instream_minus_isolated_ns,instream_over_isolated,work_ns,work_minus_isolated_ns\n",
+            "index,node,kernel,grid_threads,threadgroups,buffer_bindings,bytes_bound_full,static_threadgroup_bytes,dynamic_threadgroup_bytes,pipeline_switch,isolated_marginal_ns,round4_isolated_marginal_ns,cold_penalty_ns,stamped_isolated_ns,instream_ns_median,instream_ns_min,instream_ns_max,instream_cov_pct,gap_ns_median,empty_instream_ns_median,empty_gap_ns_median,instream_minus_isolated_ns,instream_over_isolated,work_ns,work_minus_isolated_ns,stamped_excess_ns\n",
         );
         for row in rows {
             writeln!(
                 table,
-                "{},{},{},{},{},{},{},{},{},{},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{:.2},{:.0},{:.0},{:.0},{:.0},{:.3},{:.0},{:.0}",
+                "{},{},{},{},{},{},{},{},{},{},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{:.2},{:.0},{:.0},{:.0},{:.0},{:.3},{:.0},{:.0},{:.0}",
                 row.index,
                 row.node,
                 row.kernel,
@@ -424,6 +451,7 @@ mod harness {
                 row.isolated_ns,
                 row.round4_isolated_ns,
                 row.cold_penalty_ns,
+                row.stamped_isolated_ns,
                 row.instream_ns,
                 row.instream_min_ns,
                 row.instream_max_ns,
@@ -434,7 +462,8 @@ mod harness {
                 row.excess_ns(),
                 row.ratio(),
                 row.work_ns(),
-                row.work_excess_ns()
+                row.work_excess_ns(),
+                row.stamped_excess_ns()
             )
             .unwrap();
         }
@@ -447,14 +476,14 @@ mod harness {
             groups.entry(row.kernel.as_str()).or_default().push(row);
         }
         let mut table = String::from(
-            "kernel,dispatches,threadgroups_mean,single_threadgroup_dispatches,isolated_ms,instream_ms,gap_ms,empty_instream_ms,empty_gap_ms,instream_minus_isolated_ms,instream_over_isolated,work_ms,work_minus_isolated_ms,cold_penalty_ms\n",
+            "kernel,dispatches,threadgroups_mean,single_threadgroup_dispatches,isolated_ms,instream_ms,gap_ms,empty_instream_ms,empty_gap_ms,instream_minus_isolated_ms,instream_over_isolated,work_ms,work_minus_isolated_ms,cold_penalty_ms,stamped_isolated_ms,stamped_excess_ms\n",
         );
         for (kernel, members) in &groups {
             let sum = |field: fn(&InstreamRow) -> f64| members.iter().map(|row| field(row)).sum::<f64>() / 1e6;
             let (isolated, instream) = (sum(|row| row.isolated_ns), sum(|row| row.instream_ns));
             writeln!(
                 table,
-                "{kernel},{},{:.1},{},{isolated:.4},{instream:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.4},{:.4},{:.4}",
+                "{kernel},{},{:.1},{},{isolated:.4},{instream:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4}",
                 members.len(),
                 members.iter().map(|row| row.threadgroups as f64).sum::<f64>() / members.len() as f64,
                 members.iter().filter(|row| row.threadgroups <= 1).count(),
@@ -465,7 +494,9 @@ mod harness {
                 instream / isolated.max(f64::MIN_POSITIVE),
                 sum(InstreamRow::work_ns),
                 sum(InstreamRow::work_excess_ns),
-                sum(|row| row.cold_penalty_ns)
+                sum(|row| row.cold_penalty_ns),
+                sum(|row| row.stamped_isolated_ns),
+                sum(InstreamRow::stamped_excess_ns)
             )
             .unwrap();
         }
@@ -477,7 +508,7 @@ mod harness {
         ranked.sort_by(|left, right| key(right).partial_cmp(&key(left)).expect("finite"));
         for row in ranked.into_iter().take(count) {
             println!(
-                "df top {label} index={} node={} kernel={} threadgroups={} bindings={} bytes_bound_full={} isolated_ns={:.0} instream_ns={:.0} excess_ns={:.0} ratio={:.2} gap_ns={:.0} empty_instream_ns={:.0} work_ns={:.0} work_excess_ns={:.0}",
+                "df top {label} index={} node={} kernel={} threadgroups={} bindings={} bytes_bound_full={} isolated_ns={:.0} instream_ns={:.0} excess_ns={:.0} ratio={:.2} gap_ns={:.0} empty_instream_ns={:.0} work_ns={:.0} work_excess_ns={:.0} stamped_isolated_ns={:.0} stamped_excess_ns={:.0} cold_penalty_ns={:.0}",
                 row.index,
                 row.node,
                 row.kernel,
@@ -491,7 +522,10 @@ mod harness {
                 row.gap_ns,
                 row.empty_instream_ns,
                 row.work_ns(),
-                row.work_excess_ns()
+                row.work_excess_ns(),
+                row.stamped_isolated_ns,
+                row.stamped_excess_ns(),
+                row.cold_penalty_ns
             );
         }
     }
@@ -506,7 +540,7 @@ mod harness {
     fn print_group_sums(label: &str, members: &[&InstreamRow]) {
         let sum_ms = |field: fn(&InstreamRow) -> f64| members.iter().map(|row| field(row)).sum::<f64>() / 1e6;
         println!(
-            "df instream {label} dispatches={} isolated_ms={:.4} round4_isolated_ms={:.4} instream_ms={:.4} gap_ms={:.4} empty_instream_ms={:.4} empty_gap_ms={:.4} excess_ms={:.4} work_ms={:.4} work_excess_ms={:.4} cold_penalty_ms={:.4}",
+            "df instream {label} dispatches={} isolated_ms={:.4} round4_isolated_ms={:.4} instream_ms={:.4} gap_ms={:.4} empty_instream_ms={:.4} empty_gap_ms={:.4} excess_ms={:.4} work_ms={:.4} work_excess_ms={:.4} cold_penalty_ms={:.4} stamped_isolated_ms={:.4} stamped_excess_ms={:.4}",
             members.len(),
             sum_ms(|row| row.isolated_ns),
             sum_ms(|row| row.round4_isolated_ns),
@@ -518,6 +552,8 @@ mod harness {
             sum_ms(InstreamRow::work_ns),
             sum_ms(InstreamRow::work_excess_ns),
             sum_ms(|row| row.cold_penalty_ns),
+            sum_ms(|row| row.stamped_isolated_ns),
+            sum_ms(InstreamRow::stamped_excess_ns),
         );
     }
 
@@ -540,6 +576,7 @@ mod harness {
         print_top("excess_absolute", rows, 0.0, InstreamRow::excess_ns, 40);
         print_top("excess_ratio_isolated_at_least_2us", rows, 2000.0, InstreamRow::ratio, 40);
         print_top("work_excess_absolute", rows, 0.0, InstreamRow::work_excess_ns, 40);
+        print_top("stamped_excess_absolute", rows, 0.0, InstreamRow::stamped_excess_ns, 40);
     }
 
     fn barrier_arms(live: Vec<bool>, node: Vec<bool>, slot: Vec<bool>) -> Vec<Arm> {
@@ -713,7 +750,8 @@ mod harness {
         };
         let (stamped, empty) = (rounds_of("split_stamped"), rounds_of("empty_split_stamped"));
         let cold_penalties: Vec<f64> = dispatches.iter().map(cold_penalty_ns).collect();
-        let rows = instream_rows(dispatches, marginals, stamped, empty, &round4_table(), &cold_penalties);
+        let stamped_isolated: Vec<f64> = dispatches.iter().map(stamped_isolated_ns).collect();
+        let rows = instream_rows(dispatches, marginals, stamped, empty, &round4_table(), &cold_penalties, &stamped_isolated);
         write_instream_csv(directory, &rows);
         write_instream_groups(directory, &rows);
         print_instream_summary(&rows, stamped, empty);
