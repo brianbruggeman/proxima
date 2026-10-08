@@ -528,7 +528,7 @@ mod decode_split {
     fn the_single_range_writer_stores_the_same_interleaved_layout() {
         let policy = NumericPolicy::llama_relaxed();
         let op = attention_op(9, 1, 8, 0, 256, i64::MIN);
-        let source = render_cached_attention(&op, "entry", policy).expect("renders");
+        let source = render_cached_attention(&op, "entry", policy, None).expect("renders");
 
         assert!(source.contains("constexpr long total_rows = 1 * kv_heads * query_groups;"));
         assert!(source.contains("long stats_index = total_rows * head_dim * splits + (query_index * splits + split) * 2L;"));

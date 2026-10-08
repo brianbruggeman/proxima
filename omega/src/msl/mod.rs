@@ -150,7 +150,7 @@ pub use signature_tokens_prelude::context_chunks_for;
 use cached_attention_decode_split::render_cached_attention_decode_split;
 #[cfg(feature = "metal-attn-split-rows")]
 use cached_attention_row_tiled::render_cached_attention_row_tiled;
-use cached_attention_render::render_cached_attention;
+use cached_attention_render::{cached_attention_kv_codec, render_cached_attention};
 // Same "plain reexport for descendant modules" shape as
 // `render_cached_attention` immediately above -- `render_cached_softmax_
 // weights` is `pub(super)` on its own definition (`cached_softmax_weights_
