@@ -1176,6 +1176,91 @@ pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values
     }
 }
 
+/// [`write_placed_buffer_f32`] for a half-width buffer: each value is rounded
+/// to IEEE binary16 (round to nearest even) on the way in, so `byte_offset`
+/// addresses 2-byte elements. Seeds a `Codec::Float16` cache from f32 host
+/// rows; the kernel side reads the same bytes as `half`
+/// (`crate::msl::render_cached_attention_decode_split`).
+#[cfg(feature = "metal-output-placement")]
+pub fn write_placed_buffer_f32_as_f16(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
+    let pointer = buffer.contents();
+    // SAFETY: same shared-memory, no-command-buffer-in-flight, in-bounds
+    // contract as `write_placed_buffer_f32`; `byte_offset` is a multiple of
+    // two by the caller's row-width arithmetic, so the `f16` destination is
+    // aligned.
+    let destination = unsafe {
+        core::slice::from_raw_parts_mut(
+            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f16>(),
+            values.len(),
+        )
+    };
+    for (slot, value) in destination.iter_mut().zip(values) {
+        *slot = f16::from_f32(*value);
+    }
+}
+
+/// [`read_placed_buffer_f32`] for a half-width buffer: `element_count`
+/// binary16 elements starting at `byte_offset`, widened to `f32` exactly.
+#[cfg(feature = "metal-output-placement")]
+#[must_use]
+pub fn read_placed_buffer_f16_as_f32(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    element_count: usize,
+) -> Vec<f32> {
+    let pointer = buffer.contents();
+    // SAFETY: same contract as `read_placed_buffer_f32`; the source is
+    // `element_count` aligned `f16`s inside the caller's allocation.
+    let source = unsafe {
+        core::slice::from_raw_parts(
+            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f16>(),
+            element_count,
+        )
+    };
+    source.iter().map(|value| value.to_f32()).collect()
+}
+
+/// Rounds `element_count` f32s of `source` (read at `source_byte_offset`) to
+/// binary16 and stores them in `destination` at `destination_byte_offset`,
+/// with no host allocation: the step-end narrowing of a half-width KV cache,
+/// where the graph wrote this step's rows as f32 into a staging buffer
+/// ([`write_placed_buffer_f32_as_f16`] is the seeding counterpart). The two
+/// buffers must be distinct allocations; both ranges stay inside their
+/// buffers (caller contract) and no command buffer may be in flight.
+#[cfg(feature = "metal-output-placement")]
+pub fn narrow_placed_buffer_f32_to_f16(
+    source: &PlacedBuffer,
+    source_byte_offset: usize,
+    destination: &PlacedBuffer,
+    destination_byte_offset: usize,
+    element_count: usize,
+) {
+    // SAFETY: both buffers are `storageModeShared` and idle (every
+    // `execute_plan_with_placements` call `waitUntilCompleted`s before it
+    // returns); the ranges are in bounds and in different allocations, so the
+    // shared and mutable slices cannot alias.
+    let (rows, narrowed) = unsafe {
+        (
+            core::slice::from_raw_parts(
+                source.contents().as_ptr().cast::<u8>().add(source_byte_offset).cast::<f32>(),
+                element_count,
+            ),
+            core::slice::from_raw_parts_mut(
+                destination
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(destination_byte_offset)
+                    .cast::<f16>(),
+                element_count,
+            ),
+        )
+    };
+    for (slot, value) in narrowed.iter_mut().zip(rows) {
+        *slot = f16::from_f32(*value);
+    }
+}
+
 /// Moves `byte_len` bytes from `from_byte` to `to_byte` inside one
 /// [`PlacedBuffer`], overlap allowed -- how a sliding-window KV buffer
 /// compacts its live rows back to the front without leaving the device's
