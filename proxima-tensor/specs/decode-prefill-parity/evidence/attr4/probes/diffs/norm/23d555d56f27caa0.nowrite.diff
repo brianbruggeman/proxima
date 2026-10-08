@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/norm_base_94.metal	2026-10-08 10:55:16
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_norm/23d555d56f27caa0.nowrite.metal	2026-10-08 10:55:16
+@@ -997,7 +997,7 @@
+                 epi_scratch[1] = epi_pre1[slot];
+         float epi_step5 = (epi_step4 * epi_scratch[1]);
+         float epi_step6 = (epi_step5 * epi_scratch[0]);
+-                out[out_offset] = epi_step6;
++                if (epi_step6 == 1.5e38f) { out[out_offset] = 0.0f; }
+             }
+         }
+     }

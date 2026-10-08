@@ -1,0 +1,10 @@
+seb/granite/stdout.log:seb capture step=23 dispatches=398 chunks=8 rounds=21 tokens=24
+seb/granite/stdout.log:seb summary arm=live_per_token_ms n=21 median=6.3644 min=6.3020 max=6.7540 cov_pct=1.50
+seb/granite/stdout.log:seb summary arm=replay_one_gpu_span_ms n=21 median=5.8619 min=5.7499 max=5.9496 cov_pct=0.92
+seb/granite/stdout.log:seb summary arm=replay_chunks_span_sum_ms n=21 median=5.8367 min=5.6875 max=5.9598 cov_pct=1.12
+seb/granite/stdout.log:seb bound live_minus_replay_one_ms=0.5025 live_minus_replay_chunks_ms=0.5278
+seb/e2b/stdout.log:seb capture step=23 dispatches=653 chunks=8 rounds=21 tokens=24
+seb/e2b/stdout.log:seb summary arm=live_per_token_ms n=21 median=11.0719 min=10.4085 max=11.1304 cov_pct=1.48
+seb/e2b/stdout.log:seb summary arm=replay_one_gpu_span_ms n=21 median=10.5252 min=10.2583 max=10.6088 cov_pct=0.92
+seb/e2b/stdout.log:seb summary arm=replay_chunks_span_sum_ms n=21 median=10.4936 min=9.9740 max=10.6353 cov_pct=1.56
+seb/e2b/stdout.log:seb bound live_minus_replay_one_ms=0.5467 live_minus_replay_chunks_ms=0.5783

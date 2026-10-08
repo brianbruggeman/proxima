@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/gemm_base_emitted.metal	2026-10-08 10:41:57
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_gemm/49f88ec486a7766a.nowrite.metal	2026-10-08 10:42:41
+@@ -1032,7 +1032,7 @@
+                         coord[0] = o_c0;
+                         coord[1] = o_c1;
+                         long out_offset = u.out_base + o_feat * u.out_strides[3] + o_c0 * u.out_strides[0] + o_c1 * u.out_strides[1];
+-                        out[out_offset] = (float)out_tile[j * 64 + o_col];
++                        if (out_tile[j * 64 + o_col] == 1.5e38f) { out[out_offset] = 0.0f; }
+                     }
+                 }
+             }

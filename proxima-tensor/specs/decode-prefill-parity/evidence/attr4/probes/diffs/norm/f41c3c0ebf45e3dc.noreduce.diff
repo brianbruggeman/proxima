@@ -1,0 +1,16 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/norm_base_179.metal	2026-10-08 10:55:16
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_norm/f41c3c0ebf45e3dc.noreduce.metal	2026-10-08 10:55:16
+@@ -965,12 +965,7 @@
+         walk0 += 8 * advance0;
+         walk1 += 8 * advance1;
+     }
+-    float partial = simd_sum(accumulator);
+-    threadgroup float partials[8];
+-    if (lane % 32u == 0u) { partials[lane / 32u] = partial; }
+-    threadgroup_barrier(mem_flags::mem_threadgroup);
+-    float reduced = simd_sum((lane % 32u) < 8u ? partials[lane % 32u] : (float)0.0f);
+-    epi_scratch[5] = reduced;
++    float reduced = accumulator;    epi_scratch[5] = reduced;
+     float epi_step0 = epi_scratch[5];
+     float epi_step1 = (epi_step0 * epi_scratch[4]);
+     float epi_step2 = (epi_step1 + epi_scratch[3]);

@@ -1,0 +1,11 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/gemm_base_emitted.metal	2026-10-08 10:41:57
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_gemm/49f88ec486a7766a.noact.metal	2026-10-08 10:42:41
+@@ -967,7 +967,7 @@
+                         a_regs[0] = half4(0.0h); a_regs[1] = half4(0.0h);
+                     } else if (a_vector) {
+                         device const float4 *a_src = (device const float4 *)a_ptr;
+-                        a_regs[0] = half4(a_src[0]); a_regs[1] = half4(a_src[1]);
++                        a_regs[0] = half4(0.5h); a_regs[1] = half4(0.5h);
+                     } else {
+                         for (int lane = 0; lane < 4; ++lane) {
+                             a_regs[0][lane] = (half)a_ptr[lane]; a_regs[1][lane] = (half)a_ptr[4 + lane];

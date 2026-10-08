@@ -1,0 +1,96 @@
+ab capture excludes 0 unreplayable dispatches of 653
+ab capture: step=5 dispatches=653 groups=47
+ab res sha=23d555d56f27caa0 arm=base tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:base wall_ms=12.673 cpu_ms=2.927 cpu_pct=23.1 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.ctrl tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.ctrl wall_ms=11.921 cpu_ms=2.771 cpu_pct=23.2 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.noreduce tg_static_bytes=0 max_threads=832 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.noreduce wall_ms=11.359 cpu_ms=2.770 cpu_pct=24.4 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.nosumsq tg_static_bytes=32 max_threads=1024 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.nosumsq wall_ms=11.450 cpu_ms=2.723 cpu_pct=23.8 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.noweights tg_static_bytes=32 max_threads=1024 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.noweights wall_ms=11.295 cpu_ms=2.795 cpu_pct=24.7 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.nowrite tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.nowrite wall_ms=11.620 cpu_ms=2.878 cpu_pct=24.8 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.w128 tg_static_bytes=16 max_threads=512 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.w128 wall_ms=12.922 cpu_ms=2.862 cpu_pct=22.1 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.w192 tg_static_bytes=32 max_threads=768 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.w192 wall_ms=12.076 cpu_ms=2.879 cpu_pct=23.8 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.w384 tg_static_bytes=48 max_threads=1024 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.w384 wall_ms=11.384 cpu_ms=2.835 cpu_pct=24.9 rss_peak_mb=3447.6 footprint_mb=101.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab res sha=23d555d56f27caa0 arm=23d555d56f27caa0.w512 tg_static_bytes=64 max_threads=1024 exec_width=32 bound_buffer_bytes=3783432 iters=50 cell label=23d555d56f27caa0:23d555d56f27caa0.w512 wall_ms=11.854 cpu_ms=3.011 cpu_pct=25.4 rss_peak_mb=3447.6 footprint_mb=102.2 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.55
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.ctrl elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.noreduce elements=1536 differing=1536 max_ulp=47332110 max_abs=1.6701812e3 max_abs_over_largest=1.6203085e1
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.nosumsq elements=1536 differing=1536 max_ulp=102946670 max_abs=4.886257e5 max_abs_over_largest=4.74035e3
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.noweights elements=1536 differing=1536 max_ulp=2166759632 max_abs=1.0328888e2 max_abs_over_largest=1.0020461e0
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.nowrite elements=1536 differing=1536 max_ulp=2552462657 max_abs=1.4660155e13 max_abs_over_largest=1.4222393e11
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.w128 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.w192 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.w384 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=23d555d56f27caa0 threads=256 extents=[1, 1536] arm=23d555d56f27caa0.w512 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=base step_ms=10.5325
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=omit_group step_ms=9.8262
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.ctrl step_ms=10.5463
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.noreduce step_ms=10.5382
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.nosumsq step_ms=10.4311
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.noweights step_ms=10.3738
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.nowrite step_ms=10.5453
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.w128 step_ms=11.0672
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.w192 step_ms=10.6645
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.w384 step_ms=10.3959
+ab step sha=23d555d56f27caa0 threads=256 extents=[1, 1536] count=71 pass=0 arm=23d555d56f27caa0.w512 step_ms=10.3474
+ab res sha=d8ad59bfed0ed43d arm=base tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:base wall_ms=10.997 cpu_ms=2.675 cpu_pct=24.3 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.ctrl tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.ctrl wall_ms=10.905 cpu_ms=2.488 cpu_pct=22.8 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.noreduce tg_static_bytes=0 max_threads=832 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.noreduce wall_ms=10.796 cpu_ms=2.521 cpu_pct=23.4 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.nosumsq tg_static_bytes=32 max_threads=1024 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.nosumsq wall_ms=10.579 cpu_ms=2.495 cpu_pct=23.6 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.noweights tg_static_bytes=32 max_threads=1024 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.noweights wall_ms=10.029 cpu_ms=2.553 cpu_pct=25.5 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.nowrite tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.nowrite wall_ms=11.420 cpu_ms=2.668 cpu_pct=23.4 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.w128 tg_static_bytes=16 max_threads=576 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.w128 wall_ms=11.442 cpu_ms=2.672 cpu_pct=23.4 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.w192 tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.w192 wall_ms=11.295 cpu_ms=2.635 cpu_pct=23.3 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.w384 tg_static_bytes=48 max_threads=1024 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.w384 wall_ms=11.106 cpu_ms=2.674 cpu_pct=24.1 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab res sha=d8ad59bfed0ed43d arm=d8ad59bfed0ed43d.w512 tg_static_bytes=64 max_threads=1024 exec_width=32 bound_buffer_bytes=5257992 iters=50 cell label=d8ad59bfed0ed43d:d8ad59bfed0ed43d.w512 wall_ms=10.690 cpu_ms=2.662 cpu_pct=24.9 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.42 load_after=4.42
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.ctrl elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.noreduce elements=1536 differing=1536 max_ulp=2101225195 max_abs=3.2863984e0 max_abs_over_largest=1.1242236e1
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.nosumsq elements=1536 differing=1536 max_ulp=2169216576 max_abs=1.1223081e3 max_abs_over_largest=3.8392341e3
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.noweights elements=1536 differing=1536 max_ulp=2066188503 max_abs=2.669136e-1 max_abs_over_largest=9.130682e-1
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.nowrite elements=1536 differing=1536 max_ulp=2477568106 max_abs=1.4660155e13 max_abs_over_largest=5.0150014e13
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.w128 elements=1536 differing=512 max_ulp=2465238884 max_abs=1.4660155e13 max_abs_over_largest=5.0150014e13
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.w192 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.w384 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] arm=d8ad59bfed0ed43d.w512 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=base step_ms=10.5418
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=omit_group step_ms=10.1676
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.ctrl step_ms=10.5291
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.noreduce step_ms=10.5185
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.nosumsq step_ms=10.5146
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.noweights step_ms=10.3703
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.nowrite step_ms=10.5634
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.w128 step_ms=10.5897
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.w192 step_ms=10.5688
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.w384 step_ms=10.4248
+ab step sha=d8ad59bfed0ed43d threads=256 extents=[1, 1536] count=35 pass=0 arm=d8ad59bfed0ed43d.w512 step_ms=10.3429
+ab res sha=f41c3c0ebf45e3dc arm=base tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:base wall_ms=11.027 cpu_ms=2.571 cpu_pct=23.3 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.ctrl tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.ctrl wall_ms=10.894 cpu_ms=2.548 cpu_pct=23.4 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.noreduce tg_static_bytes=0 max_threads=832 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.noreduce wall_ms=10.808 cpu_ms=2.555 cpu_pct=23.6 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.nosumsq tg_static_bytes=32 max_threads=1024 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.nosumsq wall_ms=10.794 cpu_ms=2.498 cpu_pct=23.1 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.noweights tg_static_bytes=32 max_threads=1024 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.noweights wall_ms=10.219 cpu_ms=2.547 cpu_pct=24.9 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.nowrite tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.nowrite wall_ms=11.462 cpu_ms=2.706 cpu_pct=23.6 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.w128 tg_static_bytes=16 max_threads=576 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.w128 wall_ms=11.430 cpu_ms=2.664 cpu_pct=23.3 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.w192 tg_static_bytes=32 max_threads=832 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.w192 wall_ms=11.397 cpu_ms=2.641 cpu_pct=23.2 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.w384 tg_static_bytes=48 max_threads=1024 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.w384 wall_ms=11.259 cpu_ms=2.668 cpu_pct=23.7 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab res sha=f41c3c0ebf45e3dc arm=f41c3c0ebf45e3dc.w512 tg_static_bytes=64 max_threads=1024 exec_width=32 bound_buffer_bytes=5061896 iters=50 cell label=f41c3c0ebf45e3dc:f41c3c0ebf45e3dc.w512 wall_ms=11.351 cpu_ms=2.689 cpu_pct=23.7 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.39 load_after=4.39
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=base elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.ctrl elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.noreduce elements=1536 differing=1536 max_ulp=2223453031 max_abs=2.5733386e3 max_abs_over_largest=1.1994044e1
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.nosumsq elements=1536 differing=1536 max_ulp=2301017904 max_abs=2.3061118e6 max_abs_over_largest=1.0748529e4
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.noweights elements=1536 differing=1536 max_ulp=2192056857 max_abs=2.1346338e2 max_abs_over_largest=9.9492896e-1
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.nowrite elements=1536 differing=1536 max_ulp=2557621261 max_abs=1.4660155e13 max_abs_over_largest=6.8329345e10
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.w128 elements=1536 differing=512 max_ulp=2557621261 max_abs=1.4660155e13 max_abs_over_largest=6.8329345e10
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.w192 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.w384 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab bits sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] arm=f41c3c0ebf45e3dc.w512 elements=1536 differing=0 max_ulp=0 max_abs=0e0 max_abs_over_largest=0e0
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=base step_ms=10.5716
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=omit_group step_ms=9.7340
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.ctrl step_ms=10.5677
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.noreduce step_ms=10.5303
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.nosumsq step_ms=10.4165
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.noweights step_ms=10.2839
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.nowrite step_ms=10.6115
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.w128 step_ms=10.6943
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.w192 step_ms=10.6833
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.w384 step_ms=10.3405
+ab step sha=f41c3c0ebf45e3dc threads=256 extents=[1, 1536] count=70 pass=0 arm=f41c3c0ebf45e3dc.w512 step_ms=10.2854
+ab cell label=process wall_ms=15762.605 cpu_ms=4811.227 cpu_pct=30.5 rss_peak_mb=3447.6 footprint_mb=100.6 gpu_alloc_mb=3247.5 load_before=4.55 load_after=4.28

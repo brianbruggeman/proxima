@@ -1,0 +1,3 @@
+        3.57 real         0.98 user         1.79 sys
+          9425108992  maximum resident set size
+          6283219264  peak memory footprint

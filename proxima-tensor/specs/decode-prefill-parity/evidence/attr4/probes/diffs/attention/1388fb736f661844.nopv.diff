@@ -1,0 +1,19 @@
+--- /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/attn_base_emitted.metal	2026-10-08 10:51:06
++++ /Users/brianbruggeman/repos/slot-0/.long_ctx_backups/attr4/probes/variants_attn/1388fb736f661844.nopv.metal	2026-10-08 10:51:39
+@@ -1040,16 +1040,6 @@
+         if (mode != 2L) {
+             device const float* value_ptr = (mode == 0L ? in6 : in7) + key0 * (kv_heads * head_dim) + kv_head * head_dim;
+             int fragments = (int)((columns + 7L) / 8L);
+-            for (int key_tile = 0; key_tile < fragments; key_tile++) {
+-                simdgroup_float8x8 weights[tile_blocks];
+-                FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_load(weights[vector_block], score_tile + vector_block * 8 * (int)block + key_tile * 8, (ulong)block); }
+-                FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+-                    int dimension_block = (int)simdgroup_slot + slot * (int)simdgroups;
+-                    simdgroup_float8x8 value;
+-                    simdgroup_load(value, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
+-                    FOR_UNROLL for (int vector_block = 0; vector_block < (int)tile_blocks; vector_block++) { simdgroup_multiply_accumulate(accumulated[slot][vector_block], weights[vector_block], value, accumulated[slot][vector_block]); }
+-                }
+-            }
+         } else {
+             FOR_UNROLL for (int slot = 0; slot < (int)dims_per_group; slot++) {
+                 long dimension = ((long)simdgroup_slot + (long)slot * simdgroups) * 8L + (long)fragment_column;
