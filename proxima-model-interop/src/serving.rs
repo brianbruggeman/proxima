@@ -774,9 +774,14 @@ pub struct ServingConfig<'model> {
     pub rope_scaling: Option<RopeScaling>,
     /// `-np`: number of parallel sequence slots served at once.
     pub parallel_sequences: u32,
-    /// `-ctk`: KV cache key-tensor storage type.
+    /// `-ctk`: KV cache key-tensor storage type. `F32`, or `F16` for the
+    /// device-resident KV of the two-range decode loop on Metal (llama.cpp's
+    /// own default, `common/common.h` `cache_type_k`); the prompt is still
+    /// prefilled into the f32 host cache and rounded to f16 when decode
+    /// adopts it. Must equal `kv_cache_value_quant`.
     pub kv_cache_key_quant: GgmlType,
-    /// `-ctv`: KV cache value-tensor storage type.
+    /// `-ctv`: KV cache value-tensor storage type; same admitted set as
+    /// `kv_cache_key_quant`.
     pub kv_cache_value_quant: GgmlType,
     /// `-fa`: fused flash-attention kernel instead of the naive
     /// multiply-then-reduce attention graph.
@@ -1331,23 +1336,20 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
-    let key_quant_supported = config.kv_cache_key_quant == GgmlType::F32;
-    let value_quant_supported = config.kv_cache_value_quant == GgmlType::F32;
-    if !key_quant_supported || !value_quant_supported {
+    let kv_cache_pair_supported = matches!(
+        (config.kv_cache_key_quant, config.kv_cache_value_quant),
+        (GgmlType::F32, GgmlType::F32) | (GgmlType::F16, GgmlType::F16)
+    );
+    if !kv_cache_pair_supported {
         return Err(InteropError::UnsupportedServingConfig(format!(
-            "kv_cache_key_quant={:?} kv_cache_value_quant={:?} (-ctk/-ctv): the per-layer \
-             key/value context cache (`proxima-model-interop`'s cached decode loop, \
-             `proxima_tensor::spec::gqa_cached_forward_program`) stores F32 unquantized \
-             today; Q8_0 storage and its `matmul_q8_0_f32` kernel exist \
-             (`proxima_tensor::cpu::QuantizedBlock::Packed` with `Codec::Q8_0`) but the read path does not work \
-             end to end -- the quantized matmul dispatch only handles a flat \
-             `weight[rows, k] x activation[batch, k]` matmul, while the cached-attention \
-             reduces are batched reduces over a shared kv-head axis (the K-cache reduce \
-             keeps the cached-length axis as an output axis, the V-cache reduce contracts \
-             it), which the blocking check in \
-             `proxima_tensor::cpu::run_reduce_quantized` (`proxima-tensor/src/cpu.rs:2485`) \
-             rejects; F16/Q4_0/every other GgmlType has no packing or matmul kernel wired \
-             in at all",
+            "kv_cache_key_quant={:?} kv_cache_value_quant={:?} (-ctk/-ctv): the cached \
+             attention kernels read an f32 cache everywhere, and the single-row decode kernel \
+             also reads an f16 cache held in the device-resident KV, with key and value in the \
+             same type; a quantized cache (Q8_0, Q4_0, ...) has no read path -- the quantized \
+             matmul dispatch only handles a flat `weight[rows, k] x activation[batch, k]` \
+             matmul, while the cached-attention reduces are batched reduces over a shared \
+             kv-head axis, which the blocking check in `proxima_tensor::cpu::run_reduce_quantized` \
+             rejects",
             config.kv_cache_key_quant, config.kv_cache_value_quant
         )));
     }
@@ -1644,6 +1646,29 @@ mod tests {
 
         assert!(sequences_error.to_string().contains("parallel_sequences"));
         assert!(quant_error.to_string().contains("kv_cache_key_quant"));
+    }
+
+    /// llama-server's `-ctk f16 -ctv f16` (its default) is admitted as a pair;
+    /// a mixed pair is refused because the decode kernel reads K and V
+    /// through one codec.
+    #[test]
+    fn serving_admits_an_f16_cache_for_both_keys_and_values_and_refuses_a_mixed_pair() {
+        let f16_pair = ServingConfig {
+            kv_cache_key_quant: GgmlType::F16,
+            kv_cache_value_quant: GgmlType::F16,
+            ..ServingConfig::default()
+        };
+        let mixed_pair = ServingConfig {
+            kv_cache_key_quant: GgmlType::F16,
+            kv_cache_value_quant: GgmlType::F32,
+            ..ServingConfig::default()
+        };
+
+        apply_serving_config(&f16_pair, 1).expect("an f16 key and value cache is admitted");
+        let mixed_error = apply_serving_config(&mixed_pair, 1)
+            .expect_err("an f16 key with an f32 value cache must be refused");
+
+        assert!(mixed_error.to_string().contains("kv_cache_value_quant"));
     }
 
     /// A config with every unimplemented knob switched to its
