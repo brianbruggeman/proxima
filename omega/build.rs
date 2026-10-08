@@ -274,6 +274,14 @@ fn emit_sizing_consts() {
         "pub const COOPERATIVE_REDUCE_PREFETCH_REGISTERS: u64 = {cooperative_reduce_prefetch_registers};\n"
     ));
 
+    let reciprocal_min_elements = require_nonneg(
+        "elementwise.reciprocal_min_elements",
+        resolve_int(&root, "elementwise", "reciprocal_min_elements"),
+    );
+    out.push_str(&format!(
+        "pub const ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS: u64 = {reciprocal_min_elements};\n"
+    ));
+
     let first_chunk_ops = require_nonneg(
         "command_buffer.first_chunk_ops",
         resolve_int(&root, "command_buffer", "first_chunk_ops"),

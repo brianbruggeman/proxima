@@ -26,6 +26,10 @@ pub(super) fn render_elementwise(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
+    let reciprocal = elementwise_reciprocal_decomposition(resolved, &coordinate_dims);
+    if reciprocal {
+        source.push_str(RECIPROCAL_DIVMOD_FUNCTION);
+    }
     let twin_body = match &resolved.kind {
         BoundOpKind::ElementwiseTwin { twin_body, .. } => Some(twin_body),
         _ => None,
@@ -48,7 +52,11 @@ pub(super) fn render_elementwise(
         source.push_str(&format!(
             "    {coordinate_type} remaining = ({coordinate_type})gid;\n"
         ));
-        push_coordinate_decomposition(&mut source, resolved, &coordinate_dims, coordinate_type);
+        if reciprocal {
+            push_reciprocal_decomposition(&mut source, resolved, &coordinate_dims);
+        } else {
+            push_coordinate_decomposition(&mut source, resolved, &coordinate_dims, coordinate_type);
+        }
     }
 
     for (index, gather_slot) in gather_slots.iter().enumerate() {
@@ -138,6 +146,41 @@ fn push_coordinate_decomposition(
     }
 }
 
+/// The [`push_coordinate_decomposition`] walk with every runtime `%` and `/` replaced by one
+/// [`RECIPROCAL_DIVMOD_FUNCTION`] call that yields both the coordinate and the quotient the
+/// next axis consumes. Same axes decoded, same outermost-axis elision, same values.
+fn push_reciprocal_decomposition(
+    source: &mut String,
+    resolved: &BoundOp,
+    coordinate_dims: &[usize],
+) {
+    let lowest_needed = coordinate_dims.iter().copied().min().unwrap_or(0);
+    source.push_str("    uint discarded;\n");
+    for dim in (lowest_needed..resolved.extents.len()).rev() {
+        let extent = format!("(uint)u.extents[{dim}]");
+        let wanted = coordinate_dims.contains(&dim);
+        let more_below = dim > lowest_needed;
+        if wanted && dimension_is_outermost(resolved, dim) {
+            source.push_str(&format!("    coord[{dim}] = remaining;\n"));
+            if more_below {
+                source.push_str(&format!("    remaining /= {extent};\n"));
+            }
+        } else if wanted && more_below {
+            source.push_str(&format!(
+                "    remaining = divmod_reciprocal(remaining, {extent}, coord[{dim}]);\n"
+            ));
+        } else if wanted {
+            source.push_str(&format!(
+                "    (void)divmod_reciprocal(remaining, {extent}, coord[{dim}]);\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "    remaining = divmod_reciprocal(remaining, {extent}, discarded);\n"
+            ));
+        }
+    }
+}
+
 pub(super) fn elementwise_coordinate_dims(resolved: &BoundOp, gather_count: usize) -> Vec<usize> {
     let rank = resolved.extents.len();
     let mut coordinate_dims: Vec<usize> = if gather_count > 0 {
@@ -162,6 +205,40 @@ pub(super) fn elementwise_coordinate_dims(resolved: &BoundOp, gather_count: usiz
     coordinate_dims
 }
 
+/// Largest element count the float-reciprocal decode is exact for. A float32 holds every
+/// integer up to 2^24; the quotient estimate `n * (1/e)` carries at most one half unit of
+/// error per rounding while `n` stays under 2^22, so one signed correction step always
+/// lands on the true quotient. A hardware fact, not a policy knob.
+pub(super) const RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS: u64 = 1 << 22;
+
+/// True when `resolved`'s kernel decodes its thread index with [`RECIPROCAL_DIVMOD_FUNCTION`]
+/// instead of a runtime `%` and `/` per axis: there is something to decode and the grid sits
+/// in `[ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS, RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS]`.
+/// Decided from the op's structure so [`elementwise_addressing_cache_token`] can key on it.
+pub(super) fn elementwise_reciprocal_decomposition(
+    resolved: &BoundOp,
+    coordinate_dims: &[usize],
+) -> bool {
+    let total: u64 = resolved.extents.iter().product();
+    !coordinate_dims.is_empty()
+        && (crate::sized::ELEMENTWISE_RECIPROCAL_MIN_ELEMENTS..=RECIPROCAL_DECOMPOSITION_MAX_ELEMENTS)
+            .contains(&total)
+}
+
+/// `n / e` and `n % e` for the grids [`elementwise_reciprocal_decomposition`] admits, without
+/// an integer divide: a precise float reciprocal, a truncating multiply, and one signed
+/// correction for the estimate landing a unit high or low. Bit-identical to `/` and `%`.
+const RECIPROCAL_DIVMOD_FUNCTION: &str = "inline uint divmod_reciprocal(uint numerator, uint divisor, thread uint& remainder) {
+    float reciprocal = metal::precise::divide(1.0f, (float)divisor);
+    int quotient = (int)((float)numerator * reciprocal);
+    int residue = (int)numerator - quotient * (int)divisor;
+    quotient += int(residue >= (int)divisor) - int(residue < 0);
+    remainder = numerator - (uint)quotient * divisor;
+    return (uint)quotient;
+}
+
+";
+
 pub(super) fn elementwise_coordinate_type(resolved: &BoundOp) -> &'static str {
     if resolved.extents.iter().product::<u64>() <= u32::MAX as u64 {
         "uint"
@@ -185,6 +262,8 @@ pub(super) fn elementwise_addressing_cache_token(resolved: &BoundOp) -> Option<S
     let mut token = String::from("_ea");
     token.push(if coordinate_dims.is_empty() {
         'n'
+    } else if elementwise_reciprocal_decomposition(resolved, &coordinate_dims) {
+        'r'
     } else if elementwise_coordinate_type(resolved) == "uint" {
         '4'
     } else {
